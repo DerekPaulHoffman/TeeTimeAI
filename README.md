@@ -15,9 +15,13 @@ This app lets you:
 
 1. Create and activate a virtual environment:
    ```bash
+   # Windows Command Prompt
    python -m venv .venv
-   .venv\Scripts\activate  # On Windows
-   # source .venv/bin/activate  # On Unix/macOS
+   .venv\Scripts\activate
+
+   # Git Bash
+   python -m venv .venv
+   source .venv/Scripts/activate
    ```
 
 2. Install the package in development mode:
@@ -28,6 +32,7 @@ This app lets you:
 
 3. Run the crawler to update golf course booking URLs:
    ```bash
+   # From /c/dev/TeeTimeAI/backend
    python -m tee_time_ai.crawler
    ```
 
