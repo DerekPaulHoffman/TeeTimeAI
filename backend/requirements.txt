@@ -1,0 +1,4 @@
+crawl4ai>=0.6.0
+python-dotenv
+requests
+beautifulsoup4 
