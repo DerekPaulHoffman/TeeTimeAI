@@ -1,11 +1,79 @@
 [
   {
     "url": "https://www.tashuaknolls.com",
-    "booking_url": "https://foreupsoftware.com/index.php/booking/21017#/login",
-    "last_updated": "2025-06-09T11:24:15.293241",
+    "booking_url": "https://foreupsoftware.com/index.php/api/booking/users/login",
+    "last_updated": "2025-06-09T12:03:32.524501",
     "name": "Tashuaknolls.Com",
     "requires_login": false,
     "login_url": "https://foreupsoftware.com/index.php/booking/21017#/login",
-    "tee_times": []
+    "tee_times": [
+      {
+        "time": "2025-06-09 13:20",
+        "available_spots": 3,
+        "green_fee": 54,
+        "holes": 18,
+        "course_name": "Tashua Knolls Golf Course",
+        "rate_type": "walking",
+        "cart_fee": 0,
+        "booking_class_id": 14910,
+        "schedule_id": 6654
+      },
+      {
+        "time": "2025-06-09 13:40",
+        "available_spots": 2,
+        "green_fee": 54,
+        "holes": 18,
+        "course_name": "Tashua Knolls Golf Course",
+        "rate_type": "walking",
+        "cart_fee": 0,
+        "booking_class_id": 14910,
+        "schedule_id": 6654
+      },
+      {
+        "time": "2025-06-09 13:50",
+        "available_spots": 2,
+        "green_fee": 54,
+        "holes": 18,
+        "course_name": "Tashua Knolls Golf Course",
+        "rate_type": "walking",
+        "cart_fee": 0,
+        "booking_class_id": 14910,
+        "schedule_id": 6654
+      },
+      {
+        "time": "2025-06-09 15:10",
+        "available_spots": 1,
+        "green_fee": 54,
+        "holes": 18,
+        "course_name": "Tashua Knolls Golf Course",
+        "rate_type": "walking",
+        "cart_fee": 0,
+        "booking_class_id": 14910,
+        "schedule_id": 6654
+      },
+      {
+        "time": "2025-06-09 15:20",
+        "available_spots": 2,
+        "green_fee": 54,
+        "holes": 18,
+        "course_name": "Tashua Knolls Golf Course",
+        "rate_type": "walking",
+        "cart_fee": 0,
+        "booking_class_id": 14910,
+        "schedule_id": 6654
+      }
+    ],
+    "tee_time_summary": {
+      "total_slots": 5,
+      "total_available_spots": 10,
+      "price_range": {
+        "min_green_fee": 54,
+        "max_green_fee": 54
+      },
+      "date_range": {
+        "earliest_time": "2025-06-09 13:20",
+        "latest_time": "2025-06-09 15:20"
+      }
+    }
   }
 ]

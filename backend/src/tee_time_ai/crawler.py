@@ -704,14 +704,199 @@ class GolfCourseCrawler:
                 return
             print(f"[STEP 3] Found booking URL: {booking_url}")
             # Step 3/4/5: Recursively try to find tee times, login, or click more links
-            found = await self._recursive_tee_time_search_arun(crawler, booking_url, username, password, depth=0, max_depth=5)
+            found, tee_time_data = await self._recursive_tee_time_search_arun(crawler, booking_url, username, password, depth=0, max_depth=5)
             if found:
                 print("[SUCCESS] Tee times found!")
+                # Update the course data with tee time information
+                self._update_course_with_tee_times(course, tee_time_data)
+                # Save the updated courses
+                self._save_courses(courses)
+                print(f"[SUCCESS] Updated golf_courses.json with tee time data for {course.get('name', 'course')}")
             else:
                 print("[FAILURE] Could not find tee times after 5 link hops.")
         finally:
             await crawler.close()
             print("[DEBUG] Browser closed")
+
+    def _update_course_with_tee_times(self, course, tee_time_data):
+        """Update course data with tee time information from API responses."""
+        if not tee_time_data:
+            print("[DEBUG] No tee time data to update")
+            return
+        
+        # Extract tee time information from API data
+        tee_times = []
+        for api_response in tee_time_data:
+            if isinstance(api_response['data'], list):
+                for slot in api_response['data']:
+                    if isinstance(slot, dict) and 'time' in slot:
+                        tee_time_info = {
+                            'time': slot.get('time'),
+                            'available_spots': slot.get('available_spots', 0),
+                            'green_fee': slot.get('green_fee', 0),
+                            'holes': slot.get('holes', 18),
+                            'course_name': slot.get('course_name'),
+                            'rate_type': slot.get('rate_type', 'walking'),
+                            'cart_fee': slot.get('cart_fee', 0),
+                            'booking_class_id': slot.get('booking_class_id'),
+                            'schedule_id': slot.get('schedule_id')
+                        }
+                        tee_times.append(tee_time_info)
+        
+        # Update course data
+        course['tee_times'] = tee_times
+        course['last_updated'] = datetime.now().isoformat()
+        course['booking_url'] = tee_time_data[0].get('url', course.get('booking_url', ''))
+        
+        # Add summary information
+        if tee_times:
+            course['tee_time_summary'] = {
+                'total_slots': len(tee_times),
+                'total_available_spots': sum(slot.get('available_spots', 0) for slot in tee_times),
+                'price_range': {
+                    'min_green_fee': min(slot.get('green_fee', 0) for slot in tee_times),
+                    'max_green_fee': max(slot.get('green_fee', 0) for slot in tee_times)
+                },
+                'date_range': {
+                    'earliest_time': min(slot.get('time', '') for slot in tee_times),
+                    'latest_time': max(slot.get('time', '') for slot in tee_times)
+                }
+            }
+        
+        print(f"[DEBUG] Updated course with {len(tee_times)} tee time slots")
+
+    async def _recursive_tee_time_search_arun(self, crawler, url, username, password, depth=0, max_depth=5):
+        if depth > max_depth:
+            print(f"[DEBUG] Max depth {max_depth} reached.")
+            return False, []
+        print(f"[RECURSE] Depth {depth}: Navigating to {url}")
+        result = {'tee_times_found': False, 'login_needed': False, 'next_url': None, 'api_data': []}
+        
+        async def after_goto(page, context, url, response, **kwargs):
+            # Set up API call interception
+            api_responses = []
+            
+            async def handle_route(route):
+                if 'api' in route.request.url and ('booking' in route.request.url or 'times' in route.request.url):
+                    print(f"[API] Intercepted API call: {route.request.url}")
+                    try:
+                        response = await route.fetch()
+                        if response.status == 200:
+                            content_type = response.headers.get('content-type', '')
+                            if 'json' in content_type or 'application/json' in content_type:
+                                json_data = await response.json()
+                                api_responses.append({
+                                    'url': route.request.url,
+                                    'data': json_data
+                                })
+                                print(f"[API] Captured JSON response with {len(json_data) if isinstance(json_data, list) else 1} items")
+                    except Exception as e:
+                        print(f"[API] Error capturing response: {e}")
+                await route.continue_()
+            
+            # Start intercepting API calls
+            await page.route("**/*", handle_route)
+            
+            # Step 3: Check for tee times using API data first, then fallback to page content
+            if api_responses:
+                result['api_data'] = api_responses
+                # Check if API responses contain tee time data
+                for api_response in api_responses:
+                    if self._check_api_for_tee_times(api_response['data']):
+                        print(f"[RECURSE] Tee times found via API at {url}")
+                        result['tee_times_found'] = True
+                        return page
+            
+            # Fallback to page content detection
+            if await self._detect_tee_times(page):
+                print(f"[RECURSE] Tee times found via page content at {url}")
+                result['tee_times_found'] = True
+                return page
+            
+            # Step 4: Check for login
+            if await self._check_for_login_fields(page):
+                print(f"[RECURSE] Login required at {url}, attempting login...")
+                result['login_needed'] = True
+                if username and password:
+                    await self._perform_login(page, username, password, self._get_login_selectors(), self._get_password_selectors())
+                    await asyncio.sleep(2)
+                    
+                    # After login, check for API calls again
+                    await asyncio.sleep(3)  # Wait for any post-login API calls
+                    if api_responses:
+                        result['api_data'] = api_responses
+                        for api_response in api_responses:
+                            if self._check_api_for_tee_times(api_response['data']):
+                                print(f"[RECURSE] Tee times found via API after login at {url}")
+                                result['tee_times_found'] = True
+                                return page
+                    
+                    # Fallback to page content after login
+                    if await self._detect_tee_times(page):
+                        print(f"[RECURSE] Tee times found via page content after login at {url}")
+                        result['tee_times_found'] = True
+                        return page
+                else:
+                    print("[RECURSE] No credentials, cannot login.")
+            
+            # Step 5: Try another link recursively
+            if not result['tee_times_found']:
+                print(f"[RECURSE] Looking for another candidate link at {url}")
+                next_url = await self._find_next_candidate_link(page)
+                if next_url and next_url != url:
+                    result['next_url'] = next_url
+            return page
+        
+        crawler.crawler_strategy.set_hook("after_goto", after_goto)
+        await crawler.arun(url, config=CrawlerRunConfig(cache_mode=CacheMode.BYPASS, wait_for="body"))
+        
+        # Print captured API data if found
+        if result['api_data']:
+            print(f"[API] Captured {len(result['api_data'])} API responses")
+            for i, api_response in enumerate(result['api_data']):
+                print(f"[API] Response {i+1}: {api_response['url']}")
+                if isinstance(api_response['data'], list):
+                    print(f"[API] Contains {len(api_response['data'])} tee time slots")
+                elif isinstance(api_response['data'], dict):
+                    print(f"[API] Contains tee time data: {list(api_response['data'].keys())}")
+        
+        if result['tee_times_found']:
+            return True, result['api_data']
+        if result['next_url']:
+            return await self._recursive_tee_time_search_arun(crawler, result['next_url'], username, password, depth+1, max_depth)
+        print(f"[RECURSE] No more candidate links at {url}")
+        return False, []
+
+    def _check_api_for_tee_times(self, api_data):
+        """Check if API response contains actual tee time data."""
+        try:
+            if isinstance(api_data, list):
+                # Check if it's a list of tee time objects
+                if len(api_data) > 0:
+                    first_item = api_data[0]
+                    # Look for tee time indicators in the first item
+                    tee_time_indicators = ['time', 'available_spots', 'green_fee', 'course_name', 'holes']
+                    if any(indicator in first_item for indicator in tee_time_indicators):
+                        print(f"[API] Found {len(api_data)} tee time slots in API response")
+                        return True
+            
+            elif isinstance(api_data, dict):
+                # Check if it's a single tee time object or contains tee time data
+                tee_time_indicators = ['time', 'available_spots', 'green_fee', 'course_name', 'holes']
+                if any(indicator in api_data for indicator in tee_time_indicators):
+                    print(f"[API] Found tee time data in API response")
+                    return True
+                
+                # Check if it contains a list of tee times
+                for key, value in api_data.items():
+                    if isinstance(value, list) and len(value) > 0:
+                        if self._check_api_for_tee_times(value):
+                            return True
+            
+            return False
+        except Exception as e:
+            print(f"[API] Error checking API data: {e}")
+            return False
 
     async def _find_booking_url_via_arun(self, crawler, url):
         """Use arun to load the page and find the booking URL."""
@@ -723,46 +908,6 @@ class GolfCourseCrawler:
         crawler.crawler_strategy.set_hook("after_goto", after_goto)
         await crawler.arun(url, config=CrawlerRunConfig(cache_mode=CacheMode.BYPASS, wait_for="body"))
         return found_url
-
-    async def _recursive_tee_time_search_arun(self, crawler, url, username, password, depth=0, max_depth=5):
-        if depth > max_depth:
-            print(f"[DEBUG] Max depth {max_depth} reached.")
-            return False
-        print(f"[RECURSE] Depth {depth}: Navigating to {url}")
-        result = {'tee_times_found': False, 'login_needed': False, 'next_url': None}
-        async def after_goto(page, context, url, response, **kwargs):
-            # Step 3: Check for tee times
-            if await self._detect_tee_times(page):
-                print(f"[RECURSE] Tee times found at {url}")
-                result['tee_times_found'] = True
-                return page
-            # Step 4: Check for login
-            if await self._check_for_login_fields(page):
-                print(f"[RECURSE] Login required at {url}, attempting login...")
-                result['login_needed'] = True
-                if username and password:
-                    await self._perform_login(page, username, password, self._get_login_selectors(), self._get_password_selectors())
-                    await asyncio.sleep(2)
-                    if await self._detect_tee_times(page):
-                        print(f"[RECURSE] Tee times found after login at {url}")
-                        result['tee_times_found'] = True
-                else:
-                    print("[RECURSE] No credentials, cannot login.")
-            # Step 5: Try another link recursively
-            if not result['tee_times_found']:
-                print(f"[RECURSE] Looking for another candidate link at {url}")
-                next_url = await self._find_next_candidate_link(page)
-                if next_url and next_url != url:
-                    result['next_url'] = next_url
-            return page
-        crawler.crawler_strategy.set_hook("after_goto", after_goto)
-        await crawler.arun(url, config=CrawlerRunConfig(cache_mode=CacheMode.BYPASS, wait_for="body"))
-        if result['tee_times_found']:
-            return True
-        if result['next_url']:
-            return await self._recursive_tee_time_search_arun(crawler, result['next_url'], username, password, depth+1, max_depth)
-        print(f"[RECURSE] No more candidate links at {url}")
-        return False
 
     async def _find_booking_url_on_page(self, page):
         """Scan the page for a booking URL (known patterns)."""
@@ -819,57 +964,78 @@ class GolfCourseCrawler:
         return None
 
     async def _detect_tee_times(self, page):
-        """Detect if tee times are present on the page."""
-        # Look for specific golf booking indicators
-        golf_booking_patterns = [
-            'select a tee time', 'choose a tee time', 'available tee times', 'book your tee time',
-            'tee time booking', 'golf tee times', 'reserve tee time', 'book tee time',
-            'foreup', 'teeitup', 'golfnow', 'tee time calendar', 'golf booking calendar',
-            'time slot', 'booking slot', 'golf reservation', 'tee time reservation'
-        ]
-        
-        # Look for specific booking widgets or forms
-        booking_widget_patterns = [
-            'booking widget', 'tee time widget', 'golf booking', 'reservation system',
-            'select date', 'select time', 'choose date', 'choose time', 'date picker',
-            'time picker', 'calendar widget', 'booking calendar'
-        ]
-        
-        # Look for actual booking buttons or forms
-        booking_action_patterns = [
-            'book now', 'reserve now', 'book tee time', 'reserve tee time', 'select time',
-            'choose time', 'book golf', 'reserve golf', 'book online', 'reserve online'
-        ]
-        
-        content = (await page.content()).lower()
-        
-        # Check for golf-specific booking patterns first
-        for p in golf_booking_patterns:
-            if p in content:
-                print(f"[DEBUG] Detected golf booking pattern: {p}")
+        """Detect if actual tee times are present on the page (multiple time slots on a date)."""
+        try:
+            # Look for time slot patterns (actual available times)
+            time_slot_patterns = [
+                r'\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)',  # Time formats like 9:00 AM, 2:30 PM
+                r'\d{1,2}:\d{2}',  # Time formats like 9:00, 14:30
+                r'\d{1,2}:\d{2}\s*[AaPp][Mm]',  # Time with AM/PM
+            ]
+            
+            # Look for availability indicators
+            availability_patterns = [
+                'available', 'book now', 'reserve now', 'select this time', 'choose this time',
+                'open', 'green', 'available slot', 'time slot', 'tee time slot'
+            ]
+            
+            # Look for multiple time slots in a grid or list
+            multiple_slots_patterns = [
+                'time slots', 'available times', 'tee times', 'booking slots', 'time options',
+                'select time', 'choose time', 'pick time'
+            ]
+            
+            content = await page.content()
+            content_lower = content.lower()
+            
+            # Check if we're on a login page (if so, we haven't found tee times yet)
+            login_indicators = ['login', 'sign in', 'username', 'password', 'email', 'member login']
+            if any(indicator in content_lower for indicator in login_indicators):
+                print("[DEBUG] Page appears to be a login page - no tee times found yet")
+                return False
+            
+            # Look for actual time slots using regex
+            import re
+            time_slots_found = []
+            for pattern in time_slot_patterns:
+                matches = re.findall(pattern, content)
+                time_slots_found.extend(matches)
+            
+            # Remove duplicates and filter out obvious non-tee times
+            unique_times = list(set(time_slots_found))
+            # Filter out times that are likely not tee times (like page load times, etc.)
+            filtered_times = [time for time in unique_times if len(time) >= 4]  # At least 4 chars like "9:00"
+            
+            print(f"[DEBUG] Found {len(filtered_times)} potential time slots: {filtered_times[:10]}...")  # Show first 10
+            
+            # Need at least 3 time slots to consider it a tee time page
+            if len(filtered_times) >= 3:
+                print(f"[DEBUG] Found {len(filtered_times)} time slots - likely tee times available")
                 return True
-        
-        # Check for booking widgets
-        for p in booking_widget_patterns:
-            if p in content:
-                print(f"[DEBUG] Detected booking widget pattern: {p}")
+            
+            # Also check for availability indicators combined with time-related content
+            has_availability = any(pattern in content_lower for pattern in availability_patterns)
+            has_multiple_slots = any(pattern in content_lower for pattern in multiple_slots_patterns)
+            
+            if has_availability and has_multiple_slots and len(filtered_times) >= 1:
+                print(f"[DEBUG] Found availability indicators with {len(filtered_times)} time slots")
                 return True
-        
-        # Check for booking actions
-        for p in booking_action_patterns:
-            if p in content:
-                print(f"[DEBUG] Detected booking action pattern: {p}")
-                return True
-        
-        # Also check for specific booking system URLs in the page
-        booking_systems = ['foreup.com', 'teeitup.golf', 'golfnow.com', 'chronogolf.com']
-        for system in booking_systems:
-            if system in content:
-                print(f"[DEBUG] Detected booking system: {system}")
-                return True
-        
-        print("[DEBUG] No tee time booking indicators found")
-        return False
+            
+            # Check for specific booking system content that indicates tee time availability
+            booking_systems = ['foreup.com', 'teeitup.golf', 'golfnow.com', 'chronogolf.com']
+            for system in booking_systems:
+                if system in content_lower:
+                    # Only consider it a tee time page if we also have time slots or availability
+                    if len(filtered_times) >= 1 or has_availability:
+                        print(f"[DEBUG] Found booking system {system} with time/availability indicators")
+                        return True
+            
+            print(f"[DEBUG] No sufficient tee time indicators found. Time slots: {len(filtered_times)}, Availability: {has_availability}")
+            return False
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in tee time detection: {e}")
+            return False
 
     async def _find_next_candidate_link(self, page):
         """Find another candidate link to try for tee times."""
