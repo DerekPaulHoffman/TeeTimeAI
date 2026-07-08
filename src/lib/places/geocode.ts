@@ -1,5 +1,7 @@
+import { getGooglePlacesApiKey } from "@/lib/places/google";
+
 export async function geocodeLocation(query: string) {
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
     return {
       latitude: 41.242,
@@ -8,31 +10,41 @@ export async function geocodeLocation(query: string) {
     };
   }
 
-  const params = new URLSearchParams({
-    address: query,
-    key: apiKey
+  const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location"
+    },
+    body: JSON.stringify({
+      textQuery: query,
+      maxResultCount: 1,
+      regionCode: "US"
+    })
   });
-  const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params}`);
 
   if (!response.ok) {
-    throw new Error(`Google geocoding failed with ${response.status}`);
+    throw new Error(`Google Places text search failed with ${response.status}`);
   }
 
   const json = (await response.json()) as {
-    status: string;
-    results?: Array<{
-      geometry?: { location?: { lat?: number; lng?: number } };
+    places?: Array<{
+      location?: {
+        latitude?: number;
+        longitude?: number;
+      };
     }>;
   };
 
-  const location = json.results?.[0]?.geometry?.location;
-  if (json.status !== "OK" || location?.lat === undefined || location.lng === undefined) {
+  const location = json.places?.[0]?.location;
+  if (location?.latitude === undefined || location.longitude === undefined) {
     throw new Error("No matching location found.");
   }
 
   return {
-    latitude: location.lat,
-    longitude: location.lng,
+    latitude: location.latitude,
+    longitude: location.longitude,
     demo: false
   };
 }

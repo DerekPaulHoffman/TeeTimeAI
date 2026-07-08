@@ -72,7 +72,7 @@ export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandi
 }
 
 export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
     throw new Error("GOOGLE_PLACES_API_KEY is not configured");
   }
@@ -110,4 +110,8 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
 
 function normalizePlaceId(id: string) {
   return id.replace(/^places\//, "");
+}
+
+export function getGooglePlacesApiKey() {
+  return process.env.GOOGLE_PLACES_API_KEY?.replace(/^\uFEFF/, "").trim();
 }

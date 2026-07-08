@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { mapGooglePlaceToCourseCandidate } from "./google";
+import { getGooglePlacesApiKey, mapGooglePlaceToCourseCandidate } from "./google";
 
 describe("Google Places mapping", () => {
   it("maps only the fields needed for course discovery", () => {
@@ -42,5 +42,13 @@ describe("Google Places mapping", () => {
         }
       ]
     });
+  });
+
+  it("normalizes copied Google Places API keys before use in headers", () => {
+    process.env.GOOGLE_PLACES_API_KEY = "\uFEFF copied-key \n";
+
+    expect(getGooglePlacesApiKey()).toBe("copied-key");
+
+    delete process.env.GOOGLE_PLACES_API_KEY;
   });
 });

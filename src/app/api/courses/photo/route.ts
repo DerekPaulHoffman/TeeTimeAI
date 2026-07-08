@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { getGooglePlacesApiKey } from "@/lib/places/google";
+
 const photoNamePattern = /^places\/[^/]+\/photos\/[^/]+$/;
 
 export async function GET(request: NextRequest) {
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  const apiKey = getGooglePlacesApiKey();
   const name = request.nextUrl.searchParams.get("name");
 
   if (!apiKey) {

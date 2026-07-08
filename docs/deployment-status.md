@@ -34,6 +34,7 @@ Last updated: 2026-07-08
 - Playwright browser smoke verified desktop course discovery, ranking, email-alert save, dashboard rendering, mobile layout, and zero browser console errors.
 - Vercel runtime log scan found no errors after the final deployment; latest entries were 200/201 info logs for `/`, `/api/automation/active-searches`, and `/api/searches`.
 - 2026-07-08 hourly product loop: repaired 3 active preferences that pointed at an unsupported duplicate Tashua Knolls row, then reran `npm run automation:poll`; latest run processed 8 active searches with 10 `NO_MATCH` probes and 0 `NEEDS_ADAPTER` probes.
+- 2026-07-08 live smoke found Google Places returning 502 because the production API key value included a leading BOM character; Google Places clients now normalize copied env key values before sending headers or photo requests.
 
 ## Current Runtime Mode
 
@@ -41,6 +42,7 @@ The public site is live as an email-alert proof of concept:
 
 - Nearby discovery falls back to demo course data until `GOOGLE_PLACES_API_KEY` is configured.
 - Google Places course thumbnails are implemented through `/api/courses/photo` and activate when live Places data returns `photos`.
+- Google Places nearby search, text geocoding, and photo requests all use the same normalized API key value.
 - Saved searches can still be stored in Neon by alert email for signed-out visitors.
 - Search creation now reuses an existing supported nearby course row before creating a new course, so alternate demo/place IDs do not drop ForeUP adapter metadata.
 - Clerk production keys are set in Vercel, but the app keeps Clerk disabled until `CLERK_AUTH_READY=true` because Google OAuth production credentials are still missing.
