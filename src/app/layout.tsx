@@ -1,0 +1,38 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { Flag } from "lucide-react";
+
+import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
+import { AuthNav } from "@/components/auth-nav";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "TeeTimeAI",
+  description: "Find better public golf tee times from your ranked course preferences."
+};
+
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>
+        <OptionalClerkProvider>
+          <div className="site-shell">
+            <header className="topbar">
+              <Link className="brand" href="/">
+                <span className="brand-mark" aria-hidden="true">
+                  <Flag size={18} />
+                </span>
+                TeeTimeAI
+              </Link>
+              <AuthNav />
+            </header>
+            {children}
+            <footer className="footer">
+              TeeTimeAI alerts only. Bookings stay on the official course site.
+            </footer>
+          </div>
+        </OptionalClerkProvider>
+      </body>
+    </html>
+  );
+}

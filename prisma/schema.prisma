@@ -1,0 +1,170 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SearchStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum AutomationEligibility {
+  UNKNOWN
+  ALLOWED
+  BLOCKED
+  NEEDS_REVIEW
+}
+
+enum DetectedPlatform {
+  UNKNOWN
+  FOREUP
+  GOLFNOW
+  TEEITUP
+  CHRONOGOLF
+  CLUB_CADDIE
+  CUSTOM
+}
+
+enum ProbeOutcome {
+  MATCH_FOUND
+  NO_MATCH
+  BLOCKED_POLICY
+  BLOCKED_AUTH
+  BLOCKED_TOOLING
+  FETCH_FAILED
+  NEEDS_ADAPTER
+}
+
+enum AlertStatus {
+  PENDING
+  SENT
+  SUPPRESSED
+}
+
+model User {
+  id          String      @id @default(cuid())
+  clerkUserId String      @unique
+  email       String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  teeSearches TeeSearch[]
+}
+
+model Course {
+  id                    String                @id @default(cuid())
+  googlePlaceId         String?               @unique
+  name                  String
+  address               String?
+  latitude              Float
+  longitude             Float
+  rating                Float?
+  website               String?
+  phone                 String?
+  photoName             String?
+  isPublic              Boolean               @default(true)
+  isManual              Boolean               @default(false)
+  detectedBookingUrl    String?
+  detectedPlatform      DetectedPlatform      @default(UNKNOWN)
+  automationEligibility AutomationEligibility @default(UNKNOWN)
+  policyNotes           String?
+  bookingMetadata       Json?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  preferences           CoursePreference[]
+  probes                CourseProbe[]
+  matches               TeeTimeMatch[]
+
+  @@index([latitude, longitude])
+  @@index([detectedPlatform, automationEligibility])
+}
+
+model TeeSearch {
+  id             String             @id @default(cuid())
+  userId         String
+  date           DateTime
+  startTime      String
+  endTime        String
+  players        Int
+  cadenceMinutes Int                @default(15)
+  status         SearchStatus       @default(ACTIVE)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences    CoursePreference[]
+  probes         CourseProbe[]
+  matches        TeeTimeMatch[]
+
+  @@index([status, date])
+  @@index([userId, status])
+}
+
+model CoursePreference {
+  id          String    @id @default(cuid())
+  teeSearchId String
+  courseId    String
+  rank        Int
+  createdAt   DateTime  @default(now())
+  teeSearch   TeeSearch @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course      Course    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([teeSearchId, courseId])
+  @@unique([teeSearchId, rank])
+  @@index([courseId])
+}
+
+model CourseProbe {
+  id              String         @id @default(cuid())
+  teeSearchId     String
+  courseId        String
+  automationRunId String?
+  outcome         ProbeOutcome
+  observedAt      DateTime       @default(now())
+  message         String?
+  evidenceUrl     String?
+  rawSummary      Json?
+  teeSearch       TeeSearch      @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course          Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  automationRun   AutomationRun? @relation(fields: [automationRunId], references: [id], onDelete: SetNull)
+
+  @@index([teeSearchId, observedAt])
+  @@index([courseId, observedAt])
+}
+
+model TeeTimeMatch {
+  id             String      @id @default(cuid())
+  teeSearchId    String
+  courseId       String
+  sourceId       String
+  startsAt       DateTime
+  availableSpots Int
+  priceCents     Int?
+  holes          Int?
+  bookingUrl     String
+  evidenceUrl    String?
+  alertStatus    AlertStatus @default(PENDING)
+  firstSeenAt    DateTime    @default(now())
+  lastSeenAt     DateTime    @default(now())
+  sentAt         DateTime?
+  teeSearch      TeeSearch   @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course         Course      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([teeSearchId, courseId, sourceId, startsAt])
+  @@index([alertStatus, firstSeenAt])
+}
+
+model AutomationRun {
+  id            String        @id @default(cuid())
+  promptVersion String
+  startedAt     DateTime      @default(now())
+  completedAt   DateTime?
+  outcome       String?
+  errors        Json?
+  changedFiles  Json?
+  notes         String?
+  probes        CourseProbe[]
+}

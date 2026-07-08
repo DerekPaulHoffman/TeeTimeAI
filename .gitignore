@@ -8,6 +8,14 @@ build/
 # Virtual Environment
 .venv/
 .env
+.env.local
+.env*.local
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+coverage/
 
 # IDE
 .vscode/

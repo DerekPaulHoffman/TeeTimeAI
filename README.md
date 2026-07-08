@@ -1,53 +1,55 @@
-# Golf Tee Times AI
+# TeeTimeAI
 
-Golf Tee Times AI is a personal MVP project that finds available tee times at golf courses based on your scheduling preferences and location. It uses AI-powered scraping and automation to pull tee time availability from course websites.
+TeeTimeAI is a JS/Postgres proof of concept for finding better public golf tee times from user preferences.
 
-## 🏌️ Project Overview (WIP)
+Users sign in, discover nearby public courses, rank 1 to 5 favorites, choose a future date/time window and player count, then receive email alerts when the local Codex automation finds a new matching tee time. The POC is alert-only: users finish booking on the official course site.
 
-This app lets you:
-- Enter a date, time range, and location (zip code + radius)
-- Automatically discover nearby golf courses
-- Scrape their websites for available tee times
-- Return structured results showing options that match your preferences
+## Stack
 
+- Next.js 16 + React 19
+- Prisma 7 + Neon Postgres
+- Clerk full accounts
+- Resend transactional email
+- Google Places nearby course discovery
+- Vitest unit/integration tests
 
-## Setup & Running
+## Local Setup
 
-1. Create and activate a virtual environment:
-   ```bash
-   # Windows Command Prompt
-   python -m venv .venv
-   .venv\Scripts\activate
+```powershell
+npm install
+Copy-Item .env.example .env.local
+npm run prisma:generate
+npm run dev
+```
 
-   # Git Bash
-   python -m venv .venv
-   source .venv/Scripts/activate
-   ```
+The homepage can preview with demo course data before API keys are configured. Saving searches and dashboard data require `DATABASE_URL`, Clerk keys, and a migrated database.
 
-2. Install the package in development mode:
-   ```bash
-   cd backend
-   pip install -e .
-   ```
+## Database
 
-3. Run the crawler to update golf course booking URLs:
-   ```bash
-   # From /c/dev/TeeTimeAI/backend
-   python -m tee_time_ai.crawler
-   ```
+```powershell
+npm run prisma:migrate
+npm run seed:foreup
+```
 
-The crawler will:
-- Read golf course data from `golf_courses.json`
-- Visit each course's website
-- Find and update their booking URLs
-- Save the updated information back to the JSON file
+The seed script adds the first known ForeUP adapter data for Tashua Knolls and H. Smith Richardson.
 
-## Development
+## Automation
 
-- The backend is organized as a Python package for better maintainability
-- Golf course data is stored in `golf_courses.json`
-- Future frontend will be built with Vite
+```powershell
+npm run automation:poll
+npm run automation:improve
+```
 
-## License
+`automation:poll` reads active searches, checks supported course adapters, records per-course probes, upserts new matches, and sends Resend alerts. `automation:improve` writes the Codex loop prompt into an `AutomationRun` row so a scheduled Codex session can inspect failures and improve adapters/UI.
 
-MIT 
+See `docs/codex-automation-loop.md` for boundaries and run contract.
+
+## Validation
+
+```powershell
+npm run test:run
+npm run lint
+npm run build
+```
+
+The legacy Python crawler prototype is preserved under `legacy/python-crawler`.

@@ -1,0 +1,156 @@
+import {
+  finishAutomationRun,
+  listActiveSearchesForAutomation,
+  recordCourseProbe,
+  recordTeeTimeMatch,
+  startAutomationRun,
+  markMatchAlertSent
+} from "@/lib/automation/db-service";
+import { evaluateAutomationPolicy } from "@/lib/automation/policy";
+import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
+import { sendTeeTimeAlert } from "@/lib/email/alerts";
+import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-times/matching";
+
+const PROMPT_VERSION = "tee-time-ai-local-codex-loop-v1";
+
+async function main() {
+  const run = await startAutomationRun(PROMPT_VERSION);
+  const notes: string[] = [];
+
+  try {
+    const searches = await listActiveSearchesForAutomation();
+    for (const search of searches) {
+      const searchWindow = {
+        date: search.date.toISOString().slice(0, 10),
+        startTime: search.startTime,
+        endTime: search.endTime,
+        players: search.players,
+        preferredCourses: search.preferences.map((preference) => ({
+          courseId: preference.course.id,
+          rank: preference.rank
+        }))
+      };
+
+      for (const preference of search.preferences) {
+        const course = preference.course;
+        const policy = evaluateAutomationPolicy({
+          automationEligibility: course.automationEligibility,
+          termsText: course.policyNotes,
+          intendedAction: "ALERT_ONLY"
+        });
+
+        if (!policy.allowed) {
+          await recordCourseProbe({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId: run.id,
+            outcome: "BLOCKED_POLICY",
+            message: policy.reason
+          });
+          continue;
+        }
+
+        if (course.detectedPlatform !== "FOREUP" || !isForeupMetadata(course.bookingMetadata)) {
+          await recordCourseProbe({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId: run.id,
+            outcome: "NEEDS_ADAPTER",
+            message: `No supported adapter yet for ${course.detectedPlatform}`
+          });
+          continue;
+        }
+
+        try {
+          const rawSlots = await fetchForeupSlots({
+            courseId: course.id,
+            date: search.date,
+            players: search.players,
+            metadata: course.bookingMetadata
+          });
+          const matches = rankMatches(
+            searchWindow,
+            dedupeMatches(
+              filterSlotsForSearch(searchWindow, rawSlots),
+              search.matches.map((match) => ({
+                sourceId: match.sourceId,
+                courseId: match.courseId,
+                startsAt: match.startsAt.toISOString()
+              }))
+            )
+          );
+
+          if (matches.length === 0) {
+            await recordCourseProbe({
+              searchId: search.id,
+              courseId: course.id,
+              automationRunId: run.id,
+              outcome: "NO_MATCH",
+              message: "No new qualifying tee times in the requested window"
+            });
+            continue;
+          }
+
+          for (const match of matches) {
+            const record = await recordTeeTimeMatch({
+              searchId: search.id,
+              courseId: course.id,
+              sourceId: match.sourceId,
+              startsAt: new Date(match.startsAt),
+              availableSpots: match.availableSpots,
+              bookingUrl: match.bookingUrl,
+              priceCents: match.priceCents,
+              holes: match.holes,
+              evidenceUrl: match.evidenceUrl
+            });
+
+            await recordCourseProbe({
+              searchId: search.id,
+              courseId: course.id,
+              automationRunId: run.id,
+              outcome: "MATCH_FOUND",
+              message: `Found ${match.startsAt}`,
+              evidenceUrl: match.evidenceUrl
+            });
+
+            await sendTeeTimeAlert({
+              to: search.user.email,
+              courseName: course.name,
+              startsAt: record.startsAt,
+              availableSpots: record.availableSpots,
+              bookingUrl: record.bookingUrl
+            });
+            await markMatchAlertSent(record.id);
+          }
+        } catch (error) {
+          await recordCourseProbe({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId: run.id,
+            outcome: "FETCH_FAILED",
+            message: error instanceof Error ? error.message : "Unknown adapter error"
+          });
+        }
+      }
+    }
+
+    notes.push(`Processed ${searches.length} active searches.`);
+    await finishAutomationRun(run.id, { outcome: "success", notes: notes.join("\n") });
+  } catch (error) {
+    await finishAutomationRun(run.id, {
+      outcome: "failed",
+      errors:
+        error instanceof Error
+          ? { name: error.name, message: error.message }
+          : { message: "Unknown polling failure" },
+      notes: error instanceof Error ? error.stack ?? error.message : "Unknown polling failure"
+    });
+    throw error;
+  }
+}
+
+main()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
