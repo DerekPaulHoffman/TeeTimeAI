@@ -153,6 +153,10 @@ async function main() {
               evidenceUrl: match.evidenceUrl
             });
 
+            if (record.alertStatus !== "PENDING") {
+              continue;
+            }
+
             await sendTeeTimeAlert({
               to: search.user.email,
               courseName: course.name,

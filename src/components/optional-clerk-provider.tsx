@@ -2,8 +2,14 @@
 
 import { ClerkProvider } from "@clerk/nextjs";
 
-export function OptionalClerkProvider({ children }: { children: React.ReactNode }) {
-  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+export function OptionalClerkProvider({
+  children,
+  enabled
+}: {
+  children: React.ReactNode;
+  enabled: boolean;
+}) {
+  if (!enabled) {
     return <>{children}</>;
   }
 

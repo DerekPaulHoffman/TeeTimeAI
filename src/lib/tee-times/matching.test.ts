@@ -42,7 +42,7 @@ describe("tee time matching", () => {
     expect(matches.map((match) => match.sourceId)).toEqual(["a-1340"]);
   });
 
-  it("dedupes previously alerted slots by course, source id, and start time", () => {
+  it("dedupes previously alerted slots by course and source id", () => {
     const matches = dedupeMatches(
       [
         {
@@ -70,6 +70,29 @@ describe("tee time matching", () => {
     );
 
     expect(matches.map((match) => match.sourceId)).toEqual(["a-1350"]);
+  });
+
+  it("dedupes when stored UTC start time differs from source local time", () => {
+    const matches = dedupeMatches(
+      [
+        {
+          sourceId: "foreup-6654-2026-08-10 13:40",
+          courseId: "course-a",
+          startsAt: "2026-08-10T13:40",
+          availableSpots: 3,
+          bookingUrl: "https://example.com/a"
+        }
+      ],
+      [
+        {
+          sourceId: "foreup-6654-2026-08-10 13:40",
+          courseId: "course-a",
+          startsAt: "2026-08-10T17:40:00.000Z"
+        }
+      ]
+    );
+
+    expect(matches).toEqual([]);
   });
 
   it("orders matches by course priority and then tee time", () => {

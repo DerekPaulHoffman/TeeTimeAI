@@ -1,6 +1,6 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 
-import { prisma } from "@/lib/prisma";
+import { upsertClerkUser } from "@/lib/users/service";
 
 export async function getRequiredAppUser() {
   const { userId } = await auth();
@@ -14,12 +14,5 @@ export async function getRequiredAppUser() {
     throw new Error("Current Clerk user does not have a primary email");
   }
 
-  return prisma.user.upsert({
-    where: { clerkUserId: userId },
-    update: { email },
-    create: {
-      clerkUserId: userId,
-      email
-    }
-  });
+  return upsertClerkUser({ clerkUserId: userId, email });
 }

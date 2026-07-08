@@ -479,6 +479,10 @@ button {
   grid-template-columns: minmax(0, 1fr) minmax(280px, 390px);
 }
 
+.dashboard-alert {
+  margin-bottom: 24px;
+}
+
 .dashboard-panel {
   background: var(--surface);
   border: 1px solid var(--line);

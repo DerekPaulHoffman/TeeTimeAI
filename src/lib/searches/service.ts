@@ -52,6 +52,14 @@ export async function listTeeSearchesForUser(userId: string) {
   });
 }
 
+export async function listRecentTeeSearches(limit = 20) {
+  return prisma.teeSearch.findMany({
+    orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
+    take: limit,
+    include: searchInclude
+  });
+}
+
 export async function updateTeeSearchStatusForUser(
   userId: string,
   searchId: string,

@@ -2,13 +2,13 @@
 
 TeeTimeAI is a JS/Postgres proof of concept for finding better public golf tee times from user preferences.
 
-Users sign in, discover nearby public courses, rank 1 to 5 favorites, choose a future date/time window and player count, then receive email alerts when the local Codex automation finds a new matching tee time. The POC is alert-only: users finish booking on the official course site.
+Users discover nearby public courses, rank 1 to 5 favorites, choose a future date/time window and player count, then receive email alerts when the local Codex automation finds a new matching tee time. The POC is alert-only: users finish booking on the official course site.
 
 ## Stack
 
 - Next.js 16 + React 19
 - Prisma 7 + Neon Postgres
-- Clerk full accounts
+- Clerk full accounts, with email-alert guest mode until production auth is connected
 - Resend transactional email
 - Google Places nearby course discovery
 - Vitest unit/integration tests
@@ -22,7 +22,7 @@ npm run prisma:generate
 npm run dev
 ```
 
-The homepage can preview with demo course data before API keys are configured. Saving searches and dashboard data require `DATABASE_URL`, Clerk keys, and a migrated database.
+The homepage can preview with demo course data before API keys are configured. Saving searches and the dashboard require `DATABASE_URL` and a migrated database. Clerk keys enable account management; without production Clerk, searches are saved by alert email for the POC.
 
 ## Database
 

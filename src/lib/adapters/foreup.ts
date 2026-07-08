@@ -10,7 +10,7 @@ type ForeupApiSlot = {
   time?: string;
   available_spots?: number;
   green_fee?: number;
-  holes?: number;
+  holes?: number | string;
   schedule_id?: number;
   booking_class_id?: number;
 };
@@ -63,7 +63,7 @@ export async function fetchForeupSlots(input: {
       bookingUrl: input.metadata.bookingBaseUrl,
       priceCents:
         typeof slot.green_fee === "number" ? Math.round(slot.green_fee * 100) : undefined,
-      holes: slot.holes,
+      holes: normalizeForeupHoles(slot.holes),
       evidenceUrl: url.toString()
     }));
 }
@@ -80,4 +80,16 @@ function normalizeForeupTime(time: string) {
   }
 
   return time;
+}
+
+function normalizeForeupHoles(holes: ForeupApiSlot["holes"]) {
+  if (Number.isInteger(holes)) {
+    return holes as number;
+  }
+
+  if (typeof holes === "string" && /^\d+$/.test(holes)) {
+    return Number(holes);
+  }
+
+  return undefined;
 }

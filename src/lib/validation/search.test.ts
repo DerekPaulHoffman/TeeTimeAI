@@ -19,6 +19,7 @@ describe("teeSearchInputSchema", () => {
       startTime: "13:40",
       endTime: "16:00",
       players: 3,
+      alertEmail: "golfer@example.com",
       courses: [
         {
           googlePlaceId: "place-1",
@@ -33,6 +34,7 @@ describe("teeSearchInputSchema", () => {
 
     expect(result.courses).toHaveLength(MIN_COURSE_PREFERENCES);
     expect(result.courses[0]?.rank).toBe(1);
+    expect(result.alertEmail).toBe("golfer@example.com");
   });
 
   it("rejects same-day or past searches", () => {
@@ -93,5 +95,26 @@ describe("teeSearchInputSchema", () => {
         ]
       })
     ).toThrow(/after/i);
+  });
+
+  it("rejects invalid alert emails", () => {
+    expect(() =>
+      teeSearchInputSchema.parse({
+        date: tomorrow(),
+        startTime: "13:40",
+        endTime: "16:00",
+        players: 3,
+        alertEmail: "not-an-email",
+        courses: [
+          {
+            googlePlaceId: "place-1",
+            name: "Tashua Knolls",
+            rank: 1,
+            latitude: 41.242,
+            longitude: -73.209
+          }
+        ]
+      })
+    ).toThrow(/email/i);
   });
 });

@@ -26,6 +26,7 @@ export const teeSearchInputSchema = z
     endTime: timeSchema,
     players: z.number().int().min(1).max(8),
     cadenceMinutes: z.number().int().min(15).max(120).default(15),
+    alertEmail: z.string().email("Use a valid alert email").optional(),
     courses: z
       .array(selectedCourseSchema)
       .min(MIN_COURSE_PREFERENCES, "Select at least 1 course")

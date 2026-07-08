@@ -4,6 +4,7 @@ import { Flag } from "lucide-react";
 
 import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
 import { AuthNav } from "@/components/auth-nav";
+import { hasClerkConfig } from "@/lib/env";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -12,10 +13,12 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const clerkEnabled = hasClerkConfig();
+
   return (
     <html lang="en">
       <body>
-        <OptionalClerkProvider>
+        <OptionalClerkProvider enabled={clerkEnabled}>
           <div className="site-shell">
             <header className="topbar">
               <Link className="brand" href="/">
@@ -24,7 +27,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 </span>
                 TeeTimeAI
               </Link>
-              <AuthNav />
+              <AuthNav clerkEnabled={clerkEnabled} />
             </header>
             {children}
             <footer className="footer">

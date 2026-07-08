@@ -2,14 +2,29 @@ import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { Bell, CalendarClock, CirclePause, ExternalLink, Play, ShieldAlert } from "lucide-react";
 
+import { SearchStatusActions } from "@/components/search-status-actions";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
-import { listTeeSearchesForUser } from "@/lib/searches/service";
-import { SearchStatusActions } from "@/components/search-status-actions";
+import { listRecentTeeSearches, listTeeSearchesForUser } from "@/lib/searches/service";
+
+type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
+
+export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  if (!hasClerkConfig() || !hasDatabaseConfig()) {
+  if (!hasDatabaseConfig()) {
     return <SetupState />;
+  }
+
+  if (!hasClerkConfig()) {
+    const searches = await listRecentTeeSearches();
+    return (
+      <DashboardView
+        searches={searches}
+        canManage={false}
+        notice="Email-alert POC mode is active until Clerk production is connected to an owned domain."
+      />
+    );
   }
 
   const { userId } = await auth();
@@ -19,6 +34,19 @@ export default async function DashboardPage() {
 
   const user = await getRequiredAppUser();
   const searches = await listTeeSearchesForUser(user.id);
+
+  return <DashboardView searches={searches} canManage />;
+}
+
+function DashboardView({
+  searches,
+  canManage,
+  notice
+}: {
+  searches: DashboardSearches;
+  canManage: boolean;
+  notice?: string;
+}) {
   const activeCount = searches.filter((search) => search.status === "ACTIVE").length;
   const pendingMatches = searches.flatMap((search) =>
     search.matches.filter((match) => match.alertStatus === "PENDING")
@@ -38,6 +66,8 @@ export default async function DashboardPage() {
           New search
         </Link>
       </div>
+
+      {notice ? <div className="alert alert-info dashboard-alert">{notice}</div> : null}
 
       <div className="dashboard-grid">
         <section className="dashboard-panel">
@@ -65,10 +95,10 @@ export default async function DashboardPage() {
                         month: "short",
                         day: "numeric"
                       })}{" "}
-                      · {search.startTime}-{search.endTime}
+                      - {search.startTime}-{search.endTime}
                     </h3>
                     <p className="meta">
-                      {search.players} players · checks every {search.cadenceMinutes} minutes ·{" "}
+                      {search.players} players - checks every {search.cadenceMinutes} minutes -{" "}
                       {search.preferences.length} ranked courses
                     </p>
                     <ol className="meta">
@@ -79,7 +109,11 @@ export default async function DashboardPage() {
                       ))}
                     </ol>
                   </div>
-                  <SearchStatusActions searchId={search.id} status={search.status} />
+                  {canManage ? (
+                    <SearchStatusActions searchId={search.id} status={search.status} />
+                  ) : (
+                    <span className="meta">Account management unlocks after Clerk production setup.</span>
+                  )}
                 </article>
               ))}
             </div>
@@ -97,7 +131,7 @@ export default async function DashboardPage() {
                 <div>
                   <h3>{match.course.name}</h3>
                   <p className="meta">
-                    {match.startsAt.toLocaleString()} · {match.availableSpots} spots
+                    {match.startsAt.toLocaleString()} - {match.availableSpots} spots
                   </p>
                 </div>
                 <a className="button button-ghost" href={match.bookingUrl} target="_blank">
@@ -122,10 +156,9 @@ function SetupState() {
     <main className="dashboard-page">
       <div className="empty-state">
         <ShieldAlert size={30} />
-        <h1>Connect Clerk and Neon</h1>
+        <h1>Connect Neon</h1>
         <p className="meta">
-          The dashboard is ready, but full accounts and saved searches need Clerk keys,
-          DATABASE_URL, and a Prisma migration.
+          The dashboard is ready, but saved searches need DATABASE_URL and a Prisma migration.
         </p>
         <Link className="button button-dark" href="/#start">
           Preview intake

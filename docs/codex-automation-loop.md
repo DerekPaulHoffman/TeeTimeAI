@@ -46,7 +46,7 @@ The hourly improvement loop has broad authority to get TeeTimeAI working end to 
 - Alert only. Do not book, hold, pay, enter checkout, bypass controls, solve verification flows, or use account-specific course sessions.
 - Respect policy blockers. If a course prohibits automated retrieval, mark it `BLOCKED` and record a `BLOCKED_POLICY` probe.
 - Keep observations per course. A failed course probe must not hide successful probes for other ranked courses.
-- Only email newly seen matching slots. Existing `TeeTimeMatch` rows dedupe by search, course, source id, and start time.
+- Only email newly seen matching slots. Alert suppression dedupes by search, course, and source id so source-local times and stored UTC times cannot trigger duplicate emails.
 
 ## Run Contract
 

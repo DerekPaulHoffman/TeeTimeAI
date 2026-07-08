@@ -22,7 +22,9 @@ export type TeeTimeSlot = {
   evidenceUrl?: string;
 };
 
-export type ExistingMatchKey = Pick<TeeTimeSlot, "sourceId" | "courseId" | "startsAt">;
+export type ExistingMatchKey = Pick<TeeTimeSlot, "sourceId" | "courseId"> & {
+  startsAt?: string;
+};
 
 export function filterSlotsForSearch(search: SearchWindow, slots: TeeTimeSlot[]) {
   const preferredCourseIds = new Set(search.preferredCourses.map((preference) => preference.courseId));
@@ -67,5 +69,5 @@ export function rankMatches(search: SearchWindow, slots: TeeTimeSlot[]) {
 }
 
 function matchKey(match: ExistingMatchKey) {
-  return `${match.courseId}:${match.sourceId}:${match.startsAt}`;
+  return `${match.courseId}:${match.sourceId}`;
 }

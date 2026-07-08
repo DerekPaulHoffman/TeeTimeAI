@@ -4,16 +4,16 @@ import Link from "next/link";
 import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
 import { LayoutDashboard, LogIn } from "lucide-react";
 
-export function AuthNav() {
-  const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
-
-  if (!clerkConfigured) {
+export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
+  if (!clerkEnabled) {
     return (
       <nav className="nav-actions">
         <Link className="text-link" href="/dashboard">
           Dashboard
         </Link>
-        <span className="button button-secondary">Configure Clerk</span>
+        <Link className="button button-secondary" href="/#start">
+          Email alerts
+        </Link>
       </nav>
     );
   }

@@ -18,6 +18,7 @@ const tomorrow = () => {
 
 export function TeeTimeIntake() {
   const [locationText, setLocationText] = useState("Trumbull, CT");
+  const [alertEmail, setAlertEmail] = useState("");
   const [date, setDate] = useState(tomorrow());
   const [startTime, setStartTime] = useState("13:40");
   const [endTime, setEndTime] = useState("16:00");
@@ -127,6 +128,11 @@ export function TeeTimeIntake() {
   }
 
   async function saveSearch() {
+    if (!alertEmail.trim()) {
+      setNotice({ type: "error", message: "Enter the email that should receive tee time alerts." });
+      return;
+    }
+
     setSaving(true);
     try {
       const response = await fetch("/api/searches", {
@@ -138,6 +144,7 @@ export function TeeTimeIntake() {
           endTime,
           players,
           cadenceMinutes: 15,
+          alertEmail: alertEmail.trim(),
           courses: selected.map((course, index) => ({
             ...course,
             rank: index + 1
@@ -159,7 +166,7 @@ export function TeeTimeIntake() {
         message:
           error instanceof Error
             ? error.message
-            : "Could not save this search. Confirm Clerk and Neon are configured."
+            : "Could not save this search. Confirm Neon is configured."
       });
     } finally {
       setSaving(false);
@@ -177,6 +184,16 @@ export function TeeTimeIntake() {
               value={locationText}
               onChange={(event) => setLocationText(event.target.value)}
               placeholder="City, state, or ZIP"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="alertEmail">Alert email</label>
+            <input
+              id="alertEmail"
+              type="email"
+              value={alertEmail}
+              onChange={(event) => setAlertEmail(event.target.value)}
+              placeholder="you@example.com"
             />
           </div>
           <div className="field">
@@ -239,7 +256,7 @@ export function TeeTimeIntake() {
                 <h3>{course.name}</h3>
                 <p className="meta">
                   {course.address ?? "Address unavailable"}
-                  {course.rating ? ` · ${course.rating.toFixed(1)} rating` : ""}
+                  {course.rating ? ` - ${course.rating.toFixed(1)} rating` : ""}
                 </p>
               </div>
               <button
@@ -284,15 +301,15 @@ export function TeeTimeIntake() {
           className="button button-primary"
           type="button"
           onClick={saveSearch}
-          disabled={saving || selected.length === 0}
+          disabled={saving || selected.length === 0 || !alertEmail.trim()}
           style={{ marginTop: 18, width: "100%" }}
         >
           {saving ? <Bell size={17} /> : <Save size={17} />}
           {saving ? "Saving search" : "Save alert search"}
         </button>
         <p className="helper">
-          Full saving requires Clerk, Neon Postgres, and Prisma migrations. Demo discovery
-          still works locally before setup.
+          Alerts use the email above. Accounts unlock pause and resume controls after Clerk
+          production is connected.
         </p>
       </aside>
     </div>
