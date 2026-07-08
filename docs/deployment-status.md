@@ -8,8 +8,8 @@ Last updated: 2026-07-08
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-8qqw9we59-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_8MEkzqZZtCtTMazgUpPKMbGXFMim`
+- Latest verified deployment: `teetimeai-b67kiczcr-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_AGjhKBkqSAaxBaRK5eabKDRsAzkt`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -35,6 +35,7 @@ Last updated: 2026-07-08
 - Vercel runtime log scan found no errors after the final deployment; latest entries were 200/201 info logs for `/`, `/api/automation/active-searches`, and `/api/searches`.
 - 2026-07-08 hourly product loop: repaired 3 active preferences that pointed at an unsupported duplicate Tashua Knolls row, then reran `npm run automation:poll`; latest run processed 8 active searches with 10 `NO_MATCH` probes and 0 `NEEDS_ADAPTER` probes.
 - 2026-07-08 live smoke found Google Places returning 502 because the production API key value included a leading BOM character; Google Places clients now normalize copied env key values before sending headers or photo requests.
+- 2026-07-08 production deploy `dpl_AGjhKBkqSAaxBaRK5eabKDRsAzkt` verified `/` 200, live Google Places geocode/discovery, and `POST /api/searches` with stale Tashua place ID resolving to the seeded `FOREUP`/`ALLOWED` course.
 
 ## Current Runtime Mode
 
