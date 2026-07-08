@@ -34,9 +34,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const input = teeSearchInputSchema.parse(await request.json());
-    const user = hasClerkConfig()
-      ? await getRequiredAppUser()
-      : await getGuestUserForSearch(input.alertEmail);
+    const user = await getSearchOwner(input.alertEmail);
     const search = await createTeeSearchForUser(user.id, input);
     return NextResponse.json({ search }, { status: 201 });
   } catch (error) {
@@ -53,10 +51,26 @@ function databaseSetupError() {
 
 function getGuestUserForSearch(alertEmail?: string) {
   if (!alertEmail) {
-    throw new Error("Alert email is required until Clerk production accounts are connected.");
+    throw new Error("Alert email is required.");
   }
 
   return upsertGuestUser(alertEmail);
+}
+
+async function getSearchOwner(alertEmail?: string) {
+  if (!hasClerkConfig()) {
+    return getGuestUserForSearch(alertEmail);
+  }
+
+  try {
+    return await getRequiredAppUser();
+  } catch (error) {
+    if (error instanceof Error && error.message === "Unauthorized") {
+      return getGuestUserForSearch(alertEmail);
+    }
+
+    throw error;
+  }
 }
 
 function handleAppError(error: unknown) {

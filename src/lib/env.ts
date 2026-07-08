@@ -7,7 +7,11 @@ export function hasClerkConfig() {
   }
 
   if (process.env.VERCEL_ENV === "production") {
-    return publishableKey.startsWith("pk_live_") && secretKey.startsWith("sk_live_");
+    return (
+      publishableKey.startsWith("pk_live_") &&
+      secretKey.startsWith("sk_live_") &&
+      process.env.CLERK_AUTH_READY === "true"
+    );
   }
 
   return true;

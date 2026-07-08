@@ -22,7 +22,7 @@ export default async function DashboardPage() {
       <DashboardView
         searches={searches}
         canManage={false}
-        notice="Email-alert POC mode is active until Clerk production is connected to an owned domain."
+        notice="Email-alert POC mode is active until Clerk production sign-in is fully enabled."
       />
     );
   }
@@ -112,7 +112,7 @@ function DashboardView({
                   {canManage ? (
                     <SearchStatusActions searchId={search.id} status={search.status} />
                   ) : (
-                    <span className="meta">Account management unlocks after Clerk production setup.</span>
+                    <span className="meta">Account management unlocks after Clerk sign-in is enabled.</span>
                   )}
                 </article>
               ))}

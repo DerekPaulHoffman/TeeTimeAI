@@ -309,7 +309,7 @@ export function TeeTimeIntake() {
         </button>
         <p className="helper">
           Alerts use the email above. Accounts unlock pause and resume controls after Clerk
-          production is connected.
+          sign-in is enabled.
         </p>
       </aside>
     </div>
