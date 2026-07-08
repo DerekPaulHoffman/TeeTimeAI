@@ -33,6 +33,7 @@ Last updated: 2026-07-08
 - Live `/api/automation/active-searches` returns 200 with the configured `AUTOMATION_API_KEY`; latest smoke saw 7 active searches in the queue.
 - Playwright browser smoke verified desktop course discovery, ranking, email-alert save, dashboard rendering, mobile layout, and zero browser console errors.
 - Vercel runtime log scan found no errors after the final deployment; latest entries were 200/201 info logs for `/`, `/api/automation/active-searches`, and `/api/searches`.
+- 2026-07-08 hourly product loop: repaired 3 active preferences that pointed at an unsupported duplicate Tashua Knolls row, then reran `npm run automation:poll`; latest run processed 8 active searches with 10 `NO_MATCH` probes and 0 `NEEDS_ADAPTER` probes.
 
 ## Current Runtime Mode
 
@@ -41,6 +42,7 @@ The public site is live as an email-alert proof of concept:
 - Nearby discovery falls back to demo course data until `GOOGLE_PLACES_API_KEY` is configured.
 - Google Places course thumbnails are implemented through `/api/courses/photo` and activate when live Places data returns `photos`.
 - Saved searches can still be stored in Neon by alert email for signed-out visitors.
+- Search creation now reuses an existing supported nearby course row before creating a new course, so alternate demo/place IDs do not drop ForeUP adapter metadata.
 - Clerk production keys are set in Vercel, but the app keeps Clerk disabled until `CLERK_AUTH_READY=true` because Google OAuth production credentials are still missing.
 - Dashboard management actions require a signed-in Clerk account after Clerk auth is marked ready.
 - Email sending is live through Resend when `RESEND_API_KEY` and `ALERT_EMAIL_FROM` are present. Local/automation runs still dry-run if those vars are absent.
