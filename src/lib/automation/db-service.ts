@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 
 import { withPostgresAdvisoryLease } from "./lease";
 
-const AUTOMATION_POLL_LEASE_KEY = 917300120260708n;
+const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 
 const activeSearchInclude = {
   user: true,

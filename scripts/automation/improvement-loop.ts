@@ -1,3 +1,5 @@
+import "./load-local-env";
+
 import { finishAutomationRun, startAutomationRun } from "@/lib/automation/db-service";
 
 const PROMPT_VERSION = "tee-time-spot-improvement-loop-v3";

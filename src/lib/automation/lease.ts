@@ -1,5 +1,10 @@
 type AdvisoryLeaseClient = {
   $queryRawUnsafe<T = unknown>(sql: string, ...values: unknown[]): Promise<T>;
+  $transaction<T>(worker: (tx: AdvisoryLeaseTransaction) => Promise<T>): Promise<T>;
+};
+
+type AdvisoryLeaseTransaction = {
+  $queryRawUnsafe<T = unknown>(sql: string, ...values: unknown[]): Promise<T>;
 };
 
 type AdvisoryLeaseResult<T> =
@@ -16,24 +21,19 @@ export async function withPostgresAdvisoryLease<T>(
   lockKey: bigint,
   worker: () => Promise<T>
 ): Promise<AdvisoryLeaseResult<T>> {
-  const [lockResult] = await client.$queryRawUnsafe<Array<{ locked: boolean }>>(
-    "SELECT pg_try_advisory_lock($1::bigint) AS locked",
-    lockKey
-  );
+  return client.$transaction(async (tx) => {
+    const [lockResult] = await tx.$queryRawUnsafe<Array<{ locked: boolean }>>(
+      "SELECT pg_try_advisory_xact_lock($1::bigint) AS locked",
+      lockKey
+    );
 
-  if (!lockResult?.locked) {
-    return { acquired: false };
-  }
+    if (!lockResult?.locked) {
+      return { acquired: false };
+    }
 
-  try {
     return {
       acquired: true,
       value: await worker()
     };
-  } finally {
-    await client.$queryRawUnsafe(
-      "SELECT pg_advisory_unlock($1::bigint) AS unlocked",
-      lockKey
-    );
-  }
+  });
 }

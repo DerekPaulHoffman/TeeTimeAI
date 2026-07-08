@@ -14,8 +14,9 @@ describe("withPostgresAdvisoryLease", () => {
 
     expect(result).toEqual({ acquired: false });
     expect(calls).toBe(0);
+    expect(client.transactionCalls).toBe(1);
     expect(client.calls).toEqual([
-      { sql: "SELECT pg_try_advisory_lock($1::bigint) AS locked", values: [123n] }
+      { sql: "SELECT pg_try_advisory_xact_lock($1::bigint) AS locked", values: [123n] }
     ]);
   });
 
@@ -25,13 +26,13 @@ describe("withPostgresAdvisoryLease", () => {
     const result = await withPostgresAdvisoryLease(client, 456n, async () => "worked");
 
     expect(result).toEqual({ acquired: true, value: "worked" });
+    expect(client.transactionCalls).toBe(1);
     expect(client.calls).toEqual([
-      { sql: "SELECT pg_try_advisory_lock($1::bigint) AS locked", values: [456n] },
-      { sql: "SELECT pg_advisory_unlock($1::bigint) AS unlocked", values: [456n] }
+      { sql: "SELECT pg_try_advisory_xact_lock($1::bigint) AS locked", values: [456n] }
     ]);
   });
 
-  it("releases the lease when the worker throws", async () => {
+  it("lets the transaction release the lease when the worker throws", async () => {
     const client = createLeaseClient(true);
 
     await expect(
@@ -40,22 +41,30 @@ describe("withPostgresAdvisoryLease", () => {
       })
     ).rejects.toThrow("worker failed");
 
+    expect(client.transactionCalls).toBe(1);
     expect(client.calls).toEqual([
-      { sql: "SELECT pg_try_advisory_lock($1::bigint) AS locked", values: [789n] },
-      { sql: "SELECT pg_advisory_unlock($1::bigint) AS unlocked", values: [789n] }
+      { sql: "SELECT pg_try_advisory_xact_lock($1::bigint) AS locked", values: [789n] }
     ]);
   });
 });
 
 function createLeaseClient(locked: boolean) {
   const calls: Array<{ sql: string; values: unknown[] }> = [];
+  let transactionCalls = 0;
 
   return {
     calls,
+    get transactionCalls() {
+      return transactionCalls;
+    },
+    async $transaction<T>(worker: (tx: { $queryRawUnsafe: typeof this.$queryRawUnsafe }) => Promise<T>) {
+      transactionCalls += 1;
+      return worker(this);
+    },
     async $queryRawUnsafe(sql: string, ...values: unknown[]) {
       calls.push({ sql, values });
 
-      if (sql.includes("pg_try_advisory_lock")) {
+      if (sql.includes("pg_try_advisory_xact_lock")) {
         return [{ locked }];
       }
 

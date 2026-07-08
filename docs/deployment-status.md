@@ -40,6 +40,7 @@ Last updated: 2026-07-08
 - 2026-07-08 production deploy `dpl_AGjhKBkqSAaxBaRK5eabKDRsAzkt` verified `/` 200, live Google Places geocode/discovery, and `POST /api/searches` with stale Tashua place ID resolving to the seeded `FOREUP`/`ALLOWED` course.
 - 2026-07-08 production deploy `dpl_5jp4DbpdFWSAVizS21aFxxyBbdjZ` verified `/` 200, `/dashboard` 200, live Places text geocoding, live Places course discovery, photo proxy redirect, automation auth, and clean Vercel error logs.
 - 2026-07-08 hourly product loop added a Postgres advisory lease around `npm run automation:poll` to prevent overlapping pollers from racing pending match alerts. Verification run `cmrco7fz30000iw15h1er63hn` processed 9 active searches and wrote 11 `NO_MATCH` probes with no adapter or fetch failures.
+- 2026-07-08 hourly product loop found the local automation shell did not export `DATABASE_URL` or `AUTOMATION_API_KEY`, and found the session-level advisory lock could be orphaned through the pooled Neon/Prisma client. Automation scripts now load ignored local env files without overwriting existing process env, `npm run automation:inspect` prints redacted queue/probe/match health, and the poll lease uses `pg_try_advisory_xact_lock` with a rotated key. Verification run `cmrcqcj8z0000nw15dc3vxboz` processed 9 active searches and wrote 11 `NO_MATCH` probes; no pending alerts remained.
 
 ## Current Runtime Mode
 
@@ -60,6 +61,7 @@ The public site is live as an email-alert proof of concept:
 - Google Maps key hygiene: Places API (New) is enabled and `GOOGLE_PLACES_API_KEY` is configured in Vercel. The current key was shared in chat during setup, so restrict it to the needed Google APIs and rotate it after confirming production remains healthy.
 - Resend: core sending is configured. The original marketplace-managed API key cannot be deleted through the Resend API; manage/remove it from the Vercel Marketplace dashboard if a full cleanup is needed.
 - Automation auth: `AUTOMATION_API_KEY` is set in production and local `.env.local`; keep it secret and rotate if exposed.
+- Automation worker: local scripts load ignored env files automatically for operator runs, but hosted/scheduled workers should still provide env vars through the runtime rather than relying on checked-in files.
 
 ## Notes
 

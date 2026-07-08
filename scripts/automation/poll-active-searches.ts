@@ -1,3 +1,5 @@
+import "./load-local-env";
+
 import {
   finishAutomationRun,
   listActiveSearchesForAutomation,
