@@ -16,7 +16,10 @@ node_modules/
 .next/
 out/
 coverage/
+tsconfig.tsbuildinfo
 
 # IDE
 .vscode/
 .idea/
+
+.vercel

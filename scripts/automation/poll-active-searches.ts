@@ -13,19 +13,59 @@ import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-time
 
 const PROMPT_VERSION = "tee-time-ai-local-codex-loop-v1";
 
+type AutomationCourse = {
+  id: string;
+  name: string;
+  automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
+  policyNotes: string | null;
+  detectedPlatform:
+    | "UNKNOWN"
+    | "FOREUP"
+    | "GOLFNOW"
+    | "TEEITUP"
+    | "CHRONOGOLF"
+    | "CLUB_CADDIE"
+    | "CUSTOM";
+  bookingMetadata: unknown;
+};
+
+type AutomationPreference = {
+  rank: number;
+  course: AutomationCourse;
+};
+
+type AutomationMatch = {
+  sourceId: string;
+  courseId: string;
+  startsAt: Date;
+};
+
+type AutomationSearch = {
+  id: string;
+  date: Date;
+  startTime: string;
+  endTime: string;
+  players: number;
+  user: {
+    email: string;
+  };
+  preferences: AutomationPreference[];
+  matches: AutomationMatch[];
+};
+
 async function main() {
   const run = await startAutomationRun(PROMPT_VERSION);
   const notes: string[] = [];
 
   try {
-    const searches = await listActiveSearchesForAutomation();
+    const searches = (await listActiveSearchesForAutomation()) as AutomationSearch[];
     for (const search of searches) {
       const searchWindow = {
         date: search.date.toISOString().slice(0, 10),
         startTime: search.startTime,
         endTime: search.endTime,
         players: search.players,
-        preferredCourses: search.preferences.map((preference) => ({
+        preferredCourses: search.preferences.map((preference: AutomationPreference) => ({
           courseId: preference.course.id,
           rank: preference.rank
         }))
@@ -72,7 +112,7 @@ async function main() {
             searchWindow,
             dedupeMatches(
               filterSlotsForSearch(searchWindow, rawSlots),
-              search.matches.map((match) => ({
+              search.matches.map((match: AutomationMatch) => ({
                 sourceId: match.sourceId,
                 courseId: match.courseId,
                 startsAt: match.startsAt.toISOString()

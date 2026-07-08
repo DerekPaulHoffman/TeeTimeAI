@@ -1,7 +1,20 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
-export async function listActiveSearchesForAutomation() {
+const activeSearchInclude = {
+  user: true,
+  preferences: {
+    orderBy: { rank: "asc" },
+    include: { course: true }
+  },
+  matches: true
+} satisfies Prisma.TeeSearchInclude;
+
+export type ActiveAutomationSearch = Prisma.TeeSearchGetPayload<{
+  include: typeof activeSearchInclude;
+}>;
+
+export async function listActiveSearchesForAutomation(): Promise<ActiveAutomationSearch[]> {
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
@@ -10,14 +23,7 @@ export async function listActiveSearchesForAutomation() {
       }
     },
     orderBy: [{ date: "asc" }, { createdAt: "asc" }],
-    include: {
-      user: true,
-      preferences: {
-        orderBy: { rank: "asc" },
-        include: { course: true }
-      },
-      matches: true
-    }
+    include: activeSearchInclude
   });
 }
 

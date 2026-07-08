@@ -52,6 +52,8 @@ button {
 
 .topbar {
   align-items: center;
+  background: rgba(17, 26, 34, 0.72);
+  backdrop-filter: blur(12px);
   display: flex;
   justify-content: space-between;
   left: 0;
@@ -406,6 +408,15 @@ button {
 .summary-panel li {
   color: rgba(255, 255, 255, 0.78);
   line-height: 1.55;
+}
+
+.summary-panel .selected-row {
+  background: #fbfcf8;
+  color: var(--ink);
+}
+
+.summary-panel .selected-row .meta {
+  color: var(--muted);
 }
 
 .summary-panel ol {

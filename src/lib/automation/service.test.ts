@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createAutomationService } from "./service";
+import type { AutomationStore } from "./service";
 
 describe("automation service", () => {
   it("records no-match probes without creating tee time alerts", async () => {
@@ -60,18 +61,9 @@ describe("automation service", () => {
   });
 });
 
-function createInMemoryStore() {
+function createInMemoryStore(): AutomationStore {
   return {
-    probes: [] as Array<unknown>,
-    matches: [] as Array<{
-      searchId: string;
-      courseId: string;
-      sourceId: string;
-      startsAt: string;
-      availableSpots: number;
-      bookingUrl: string;
-      alertStatus: "PENDING" | "SENT";
-      sentCount: number;
-    }>
+    probes: [],
+    matches: []
   };
 }
