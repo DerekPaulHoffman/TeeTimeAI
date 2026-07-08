@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useMemo, useState } from "react";
 import { Bell, LocateFixed, MapPinned, Plus, Save, Search, X } from "lucide-react";
 
@@ -252,12 +253,14 @@ export function TeeTimeIntake() {
         <div className="course-list" aria-label="Nearby courses">
           {courses.map((course) => (
             <div className="course-row" key={course.googlePlaceId}>
-              <div>
+              <CourseThumbnail course={course} />
+              <div className="course-copy">
                 <h3>{course.name}</h3>
                 <p className="meta">
                   {course.address ?? "Address unavailable"}
                   {course.rating ? ` - ${course.rating.toFixed(1)} rating` : ""}
                 </p>
+                <PhotoCredit course={course} />
               </div>
               <button
                 className="button button-ghost"
@@ -316,6 +319,58 @@ export function TeeTimeIntake() {
   );
 }
 
+function CourseThumbnail({ course }: { course: CourseCandidate }) {
+  if (!course.photoName) {
+    return (
+      <div className="course-thumbnail course-thumbnail-empty" aria-hidden="true">
+        <MapPinned size={22} />
+      </div>
+    );
+  }
+
+  return (
+    <Image
+      alt={`${course.name} course photo`}
+      className="course-thumbnail"
+      height={90}
+      loading="lazy"
+      src={`/api/courses/photo?name=${encodeURIComponent(course.photoName)}`}
+      unoptimized
+      width={120}
+    />
+  );
+}
+
+function PhotoCredit({ course }: { course: CourseCandidate }) {
+  const attribution = course.photoAttributions?.find((credit) => credit.displayName);
+  if (!attribution?.displayName) {
+    return null;
+  }
+
+  const href = normalizeAttributionUri(attribution.uri);
+
+  return (
+    <p className="photo-credit">
+      Photo:{" "}
+      {href ? (
+        <a href={href} rel="noreferrer" target="_blank">
+          {attribution.displayName}
+        </a>
+      ) : (
+        attribution.displayName
+      )}
+    </p>
+  );
+}
+
 function Notice({ notice }: { notice: Notice }) {
   return <div className={`alert alert-${notice.type}`}>{notice.message}</div>;
+}
+
+function normalizeAttributionUri(uri?: string) {
+  if (!uri) {
+    return undefined;
+  }
+
+  return uri.startsWith("//") ? `https:${uri}` : uri;
 }

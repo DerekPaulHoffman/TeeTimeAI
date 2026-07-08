@@ -1,6 +1,6 @@
-# TeeTimeAI
+# Tee Time Spot
 
-TeeTimeAI is a JS/Postgres proof of concept for finding better public golf tee times from user preferences.
+Tee Time Spot is a JS/Postgres proof of concept for finding better public golf tee times from user preferences.
 
 Users discover nearby public courses, rank 1 to 5 favorites, choose a future date/time window and player count, then receive email alerts when the local Codex automation finds a new matching tee time. The POC is alert-only: users finish booking on the official course site.
 
@@ -17,12 +17,12 @@ Users discover nearby public courses, rank 1 to 5 favorites, choose a future dat
 
 ```powershell
 npm install
-Copy-Item .env.example .env.local
+npx vercel env pull .env.local --yes
 npm run prisma:generate
 npm run dev
 ```
 
-The homepage can preview with demo course data before API keys are configured. Saving searches and the dashboard require `DATABASE_URL` and a migrated database. Clerk keys enable account management; without production Clerk, searches are saved by alert email for the POC.
+The homepage can preview with demo course data before Google Places is configured. Saving searches requires `DATABASE_URL` and a migrated database. Resend sends alerts when `RESEND_API_KEY` and `ALERT_EMAIL_FROM` are present. Clerk keys enable account management; without production Clerk, searches are saved by alert email for the POC.
 
 ## Database
 

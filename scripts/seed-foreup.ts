@@ -3,10 +3,10 @@ import { prisma } from "@/lib/prisma";
 async function main() {
   const user = await prisma.user.upsert({
     where: { clerkUserId: "local-demo-user" },
-    update: { email: "demo@teetimeai.local" },
+    update: { email: "demo@teetimespot.local" },
     create: {
       clerkUserId: "local-demo-user",
-      email: "demo@teetimeai.local"
+      email: "demo@teetimespot.local"
     }
   });
 

@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="tee_time_ai",
+    name="tee_time_spot",
     version="0.1.0",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
@@ -9,7 +9,7 @@ setup(
         "crawl4ai",
     ],
     python_requires=">=3.8",
-    author="TeeTimeAI Team",
+    author="Tee Time Spot Team",
     description="A golf course booking automation tool",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

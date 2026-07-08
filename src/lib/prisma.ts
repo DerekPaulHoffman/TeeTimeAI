@@ -7,7 +7,7 @@ const globalForPrisma = globalThis as unknown as {
 
 const databaseUrl =
   process.env.DATABASE_URL ??
-  "postgresql://teetimeai:teetimeai@localhost:5432/teetimeai?schema=public";
+  "postgresql://teetimespot:teetimespot@localhost:5432/teetimespot?schema=public";
 
 function createPrismaClient() {
   const adapter = new PrismaNeon({ connectionString: databaseUrl });

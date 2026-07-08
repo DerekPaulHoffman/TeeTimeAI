@@ -311,6 +311,31 @@ button {
   padding: 14px;
 }
 
+.course-row {
+  grid-template-columns: 96px 1fr auto;
+}
+
+.course-thumbnail {
+  aspect-ratio: 4 / 3;
+  background: #e7eee8;
+  border-radius: 8px;
+  color: var(--fairway-dark);
+  display: block;
+  height: auto;
+  object-fit: cover;
+  width: 96px;
+}
+
+.course-thumbnail-empty {
+  align-items: center;
+  display: grid;
+  place-items: center;
+}
+
+.course-copy {
+  min-width: 0;
+}
+
 .course-row h3,
 .selected-row h3,
 .dashboard-row h3,
@@ -324,6 +349,18 @@ button {
   font-size: 0.9rem;
   line-height: 1.45;
   margin: 0;
+}
+
+.photo-credit {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin: 5px 0 0;
+}
+
+.photo-credit a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .rank-badge,
@@ -560,5 +597,9 @@ button {
   .match-row {
     align-items: start;
     grid-template-columns: 1fr;
+  }
+
+  .course-thumbnail {
+    width: 100%;
   }
 }

@@ -1,6 +1,6 @@
 # Codex Automation Loop
 
-TeeTimeAI uses Postgres as the queue of user demand and a local Codex automation as the adaptive worker.
+Tee Time Spot uses Postgres as the queue of user demand and a local Codex automation as the adaptive worker.
 
 ## Cadence
 
@@ -30,9 +30,9 @@ Every improvement run must actively look for better tools when the current appro
 
 ## Operational Authority
 
-The hourly improvement loop has broad authority to get TeeTimeAI working end to end.
+The hourly improvement loop has broad authority to get Tee Time Spot working end to end.
 
-- It may create and configure project accounts, apps, projects, API keys, deploy targets, OAuth settings, webhooks, DNS records, and integrations needed for TeeTimeAI.
+- It may create and configure project accounts, apps, projects, API keys, deploy targets, OAuth settings, webhooks, DNS records, and integrations needed for Tee Time Spot.
 - This includes, when useful, Vercel, Neon, Clerk, Google Cloud/Places, Resend, Figma/Figma Make, v0, GitHub repo settings, monitoring tools, and replacement tools discovered during the research pass.
 - It may update repo code, environment examples, setup docs, GitHub branches, deployment configuration, database schema, seed data, and automation scripts.
 - It may use already-authenticated browser sessions and CLI auth for project setup work.

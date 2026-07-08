@@ -12,7 +12,17 @@ describe("Google Places mapping", () => {
       rating: 4.4,
       nationalPhoneNumber: "(203) 452-5171",
       websiteUri: "https://www.tashuaknolls.com",
-      photos: [{ name: "places/abc123/photos/photo1" }]
+      photos: [
+        {
+          name: "places/abc123/photos/photo1",
+          authorAttributions: [
+            {
+              displayName: "Google contributor",
+              uri: "//maps.google.com/maps/contrib/123"
+            }
+          ]
+        }
+      ]
     });
 
     expect(course).toEqual({
@@ -24,7 +34,13 @@ describe("Google Places mapping", () => {
       rating: 4.4,
       phone: "(203) 452-5171",
       website: "https://www.tashuaknolls.com",
-      photoName: "places/abc123/photos/photo1"
+      photoName: "places/abc123/photos/photo1",
+      photoAttributions: [
+        {
+          displayName: "Google contributor",
+          uri: "//maps.google.com/maps/contrib/123"
+        }
+      ]
     });
   });
 });

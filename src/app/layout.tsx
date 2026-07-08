@@ -8,7 +8,7 @@ import { hasClerkConfig } from "@/lib/env";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TeeTimeAI",
+  title: "Tee Time Spot",
   description: "Find better public golf tee times from your ranked course preferences."
 };
 
@@ -25,13 +25,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 <span className="brand-mark" aria-hidden="true">
                   <Flag size={18} />
                 </span>
-                TeeTimeAI
+                Tee Time Spot
               </Link>
               <AuthNav clerkEnabled={clerkEnabled} />
             </header>
             {children}
             <footer className="footer">
-              TeeTimeAI alerts only. Bookings stay on the official course site.
+              Tee Time Spot alerts only. Bookings stay on the official course site.
             </footer>
           </div>
         </OptionalClerkProvider>

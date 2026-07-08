@@ -1,5 +1,5 @@
 """
-Crawler module for TeeTimeAI.
+Crawler module for Tee Time Spot.
 Handles web crawling to find booking URLs for golf courses and extract tee time data.
 """
 

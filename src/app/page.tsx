@@ -8,7 +8,7 @@ export default function HomePage() {
       <section className="hero">
         <div className="hero-content">
           <p className="eyebrow">Public-course tee time alerts</p>
-          <h1>TeeTimeAI</h1>
+          <h1>Tee Time Spot</h1>
           <p className="hero-copy">
             Rank the courses you actually want, set a date and time window, and get alerted
             when a matching tee time appears.
@@ -24,7 +24,7 @@ export default function HomePage() {
             </a>
           </div>
         </div>
-        <div className="hero-strip" aria-label="How TeeTimeAI works">
+        <div className="hero-strip" aria-label="How Tee Time Spot works">
           <div className="hero-strip-item">
             <strong>1-5 courses</strong>
             <span>Rank nearby public courses by preference.</span>
@@ -47,7 +47,7 @@ export default function HomePage() {
           </p>
           <h2>Tell us where and when you want to play.</h2>
           <p>
-            TeeTimeAI stores your preferences as a searchable queue. The Codex loop checks
+            Tee Time Spot stores your preferences as a searchable queue. The Codex loop checks
             supported courses, records what happened, and only emails when a new qualifying
             slot appears.
           </p>

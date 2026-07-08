@@ -11,7 +11,7 @@ import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
 import { sendTeeTimeAlert } from "@/lib/email/alerts";
 import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-times/matching";
 
-const PROMPT_VERSION = "tee-time-ai-local-codex-loop-v1";
+const PROMPT_VERSION = "tee-time-spot-local-codex-loop-v1";
 
 type AutomationCourse = {
   id: string;
@@ -162,7 +162,8 @@ async function main() {
               courseName: course.name,
               startsAt: record.startsAt,
               availableSpots: record.availableSpots,
-              bookingUrl: record.bookingUrl
+              bookingUrl: record.bookingUrl,
+              idempotencyKey: `tee-time-match-${record.id}`
             });
             await markMatchAlertSent(record.id);
           }

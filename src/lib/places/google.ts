@@ -12,7 +12,20 @@ export type GooglePlace = {
   rating?: number;
   nationalPhoneNumber?: string;
   websiteUri?: string;
-  photos?: Array<{ name?: string }>;
+  photos?: Array<{
+    name?: string;
+    authorAttributions?: Array<{
+      displayName?: string;
+      uri?: string;
+      photoUri?: string;
+    }>;
+  }>;
+};
+
+export type CoursePhotoAttribution = {
+  displayName?: string;
+  uri?: string;
+  photoUri?: string;
 };
 
 export type CourseCandidate = {
@@ -25,6 +38,7 @@ export type CourseCandidate = {
   phone?: string;
   website?: string;
   photoName?: string;
+  photoAttributions?: CoursePhotoAttribution[];
 };
 
 export type NearbyCourseSearchInput = {
@@ -52,7 +66,8 @@ export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandi
     rating: place.rating,
     phone: place.nationalPhoneNumber,
     website: place.websiteUri,
-    photoName: place.photos?.[0]?.name
+    photoName: place.photos?.[0]?.name,
+    photoAttributions: place.photos?.[0]?.authorAttributions
   };
 }
 

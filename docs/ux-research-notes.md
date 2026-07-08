@@ -2,12 +2,13 @@
 
 ## Product Shape
 
-TeeTimeAI should behave like a waitlist assistant rather than a booking marketplace. GolfNow/TeeOff-style products emphasize inventory search, deals, and broad marketplace browsing. Noteefy-style flows emphasize preference capture, waitlist matching, and alerts.
+Tee Time Spot should behave like a waitlist assistant rather than a booking marketplace. GolfNow/TeeOff-style products emphasize inventory search, deals, and broad marketplace browsing. Noteefy-style flows emphasize preference capture, waitlist matching, and alerts.
 
 ## UX Principles For Automation Cycles
 
-- First screen: make TeeTimeAI, nearby discovery, and alert-only booking clear immediately.
+- First screen: make Tee Time Spot, nearby discovery, and alert-only booking clear immediately.
 - Course selection: keep the 1 to 5 ranking interaction visible and low-friction.
+- Course list: use Google Places photos as a scanning aid when available, keep stable placeholders when not, and show required photo attribution.
 - Dashboard: show active searches, ranked courses, probe state, pending matches, and pause/cancel controls.
 - Trust: state that users finish booking on the official course site.
 - Improvement loop: every automation cycle should inspect onboarding, course ranking, dashboard state, and email copy for friction.
