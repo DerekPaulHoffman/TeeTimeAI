@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
+import { withPostgresAdvisoryLease } from "./lease";
+
+const AUTOMATION_POLL_LEASE_KEY = 917300120260708n;
+
 const activeSearchInclude = {
   user: true,
   preferences: {
@@ -13,6 +17,10 @@ const activeSearchInclude = {
 export type ActiveAutomationSearch = Prisma.TeeSearchGetPayload<{
   include: typeof activeSearchInclude;
 }>;
+
+export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
+  return withPostgresAdvisoryLease(prisma, AUTOMATION_POLL_LEASE_KEY, worker);
+}
 
 export async function listActiveSearchesForAutomation(): Promise<ActiveAutomationSearch[]> {
   return prisma.teeSearch.findMany({

@@ -39,6 +39,7 @@ Last updated: 2026-07-08
 - 2026-07-08 live smoke found Google Places returning 502 because the production API key value included a leading BOM character; Google Places clients now normalize copied env key values before sending headers or photo requests.
 - 2026-07-08 production deploy `dpl_AGjhKBkqSAaxBaRK5eabKDRsAzkt` verified `/` 200, live Google Places geocode/discovery, and `POST /api/searches` with stale Tashua place ID resolving to the seeded `FOREUP`/`ALLOWED` course.
 - 2026-07-08 production deploy `dpl_5jp4DbpdFWSAVizS21aFxxyBbdjZ` verified `/` 200, `/dashboard` 200, live Places text geocoding, live Places course discovery, photo proxy redirect, automation auth, and clean Vercel error logs.
+- 2026-07-08 hourly product loop added a Postgres advisory lease around `npm run automation:poll` to prevent overlapping pollers from racing pending match alerts. Verification run `cmrco7fz30000iw15h1er63hn` processed 9 active searches and wrote 11 `NO_MATCH` probes with no adapter or fetch failures.
 
 ## Current Runtime Mode
 
