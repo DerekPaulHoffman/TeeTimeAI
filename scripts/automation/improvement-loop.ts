@@ -1,6 +1,6 @@
 import { finishAutomationRun, startAutomationRun } from "@/lib/automation/db-service";
 
-const PROMPT_VERSION = "tee-time-ai-improvement-loop-v2";
+const PROMPT_VERSION = "tee-time-ai-improvement-loop-v3";
 
 const loopPrompt = `
 You are improving TeeTimeAI, a Next.js + Postgres tee-time alert POC.
@@ -13,8 +13,19 @@ Every run:
 5. If the issue is UI-related, use the browser to test onboarding, course ranking, dashboard state, and email preview on desktop and mobile.
 6. If the UI does not look good, do not settle. Run current research for better design tooling and try a stronger workflow such as Figma/Figma Make, v0, a generated design direction, or another current tool discovered during research.
 7. Use generated design output as input, not truth. Implement the best parts in the Next.js app and preserve the product boundaries.
-8. Run unit tests, lint, build/type checks, and a browser smoke.
-9. Record outcome, checkpoints, changed files, research links, and blockers in AutomationRun.
+8. If setup/configuration is the blocker, create or update the project accounts, apps, API keys, deploy targets, callback URLs, webhooks, DNS records, and integrations needed to get TeeTimeAI working.
+9. Run unit tests, lint, build/type checks, and a browser smoke.
+10. Record outcome, checkpoints, changed files, research links, setup changes, and blockers in AutomationRun.
+
+Operational authority:
+- You have broad access to make TeeTimeAI work end to end.
+- You may create and configure project resources in Vercel, Neon, Clerk, Google Cloud/Places, Resend, Figma/Figma Make, v0, GitHub repo settings, monitoring tools, and replacement tools discovered during research.
+- You may use already-authenticated browser sessions and CLI auth for TeeTimeAI project setup.
+- You may update code, env examples, docs, database schema, seed data, deployment config, GitHub branches, and automation scripts.
+- Never commit secrets. Store credentials only in local env files, provider dashboards, GitHub/Vercel env vars, or the appropriate secret manager.
+- Record created/updated accounts, projects, callback URLs, webhooks, deploy targets, and key names with secret values redacted.
+- Prefer free tiers or already-approved plans. Paid upgrades, payment methods, legal commitments, production data deletion, ownership transfer, or domain purchases require fresh explicit user approval.
+- If a service requires identity, billing, phone verification, captcha, or unavailable credentials, stop with blocked_auth, blocked_env, or needs_human and record the exact unblock step.
 
 Tool research requirements:
 - Look up current official docs or product pages before adopting a new design/automation tool.

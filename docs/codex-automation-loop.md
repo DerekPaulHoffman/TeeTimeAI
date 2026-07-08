@@ -28,6 +28,19 @@ Every improvement run must actively look for better tools when the current appro
 - If the implemented UI still looks weak after a browser smoke, escalate to a stronger design workflow: Figma/Figma Make, v0, a generated design direction, or another current tool discovered during the research pass.
 - Do not blindly adopt generated output. Treat design tools as idea generators, then implement the best parts in the repo's Next.js app with tests and build verification.
 
+## Operational Authority
+
+The hourly improvement loop has broad authority to get TeeTimeAI working end to end.
+
+- It may create and configure project accounts, apps, projects, API keys, deploy targets, OAuth settings, webhooks, DNS records, and integrations needed for TeeTimeAI.
+- This includes, when useful, Vercel, Neon, Clerk, Google Cloud/Places, Resend, Figma/Figma Make, v0, GitHub repo settings, monitoring tools, and replacement tools discovered during the research pass.
+- It may update repo code, environment examples, setup docs, GitHub branches, deployment configuration, database schema, seed data, and automation scripts.
+- It may use already-authenticated browser sessions and CLI auth for project setup work.
+- It must keep secrets out of git. Store credentials only in approved local env files, provider dashboards, GitHub/Vercel environment variables, or the appropriate secret manager.
+- It must record created/updated accounts, projects, keys, callback URLs, webhooks, and deploy targets in `AutomationRun.notes` or docs with secret values redacted.
+- It must prefer free tiers or already-approved plans. Paid upgrades, payment methods, legal commitments, production data deletion, ownership transfer, or domain purchases require a fresh explicit user approval.
+- If a service blocks setup with identity, billing, phone verification, captcha, or unavailable credentials, stop with `blocked_auth`, `blocked_env`, or `needs_human` and record the exact unblock step.
+
 ## Boundaries
 
 - Alert only. Do not book, hold, pay, enter checkout, bypass controls, solve verification flows, or use account-specific course sessions.
@@ -44,11 +57,12 @@ Each automation run should:
 3. Evaluate `Course.automationEligibility` and `policyNotes` before fetching.
 4. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
 5. Run a current-tool/design research pass when the selected candidate is UI quality, unsupported automation, or weak tooling.
-6. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers.
-7. Upsert `TeeTimeMatch` rows for qualifying slots.
-8. Send Resend email alerts only for new pending matches, then mark them sent.
-9. Run tests, lint, build, and a browser smoke for any code or UI change.
-10. Finish the `AutomationRun` with outcome, checkpoints, notes, errors, and changed files when applicable.
+6. Create or update project accounts/configuration when that is the highest-leverage blocker.
+7. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers.
+8. Upsert `TeeTimeMatch` rows for qualifying slots.
+9. Send Resend email alerts only for new pending matches, then mark them sent.
+10. Run tests, lint, build, and a browser smoke for any code or UI change.
+11. Finish the `AutomationRun` with outcome, checkpoints, notes, errors, changed files, and redacted setup changes when applicable.
 
 ## First Adapter
 
