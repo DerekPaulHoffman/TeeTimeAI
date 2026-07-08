@@ -8,8 +8,8 @@ Last updated: 2026-07-08
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-9x3rg84qh-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_4GBsjRDgyM1HKWi5xVpTBxbJaX1e`
+- Latest verified deployment: `teetimeai-8qqw9we59-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_8MEkzqZZtCtTMazgUpPKMbGXFMim`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -30,9 +30,9 @@ Last updated: 2026-07-08
 - Live `/dashboard` returns 200. Signed-out users see the account-management prompt instead of a missing sign-in route.
 - Live `/api/courses/discover?latitude=41.242&longitude=-73.209&radiusMeters=30000` returns 200 with demo courses while Google Places is not configured.
 - Live `POST /api/searches` accepts an alert email plus 1 to 5 ranked courses and creates an active search in Postgres.
-- Live `/api/automation/active-searches` returns 200 with the configured `AUTOMATION_API_KEY`; latest smoke saw 5 active searches in the queue.
+- Live `/api/automation/active-searches` returns 200 with the configured `AUTOMATION_API_KEY`; latest smoke saw 7 active searches in the queue.
 - Playwright browser smoke verified desktop course discovery, ranking, email-alert save, dashboard rendering, mobile layout, and zero browser console errors.
-- Vercel runtime error scan found no errors after the cleaned-env deployment.
+- Vercel runtime log scan found no errors after the final deployment; latest entries were 200/201 info logs for `/`, `/api/automation/active-searches`, and `/api/searches`.
 
 ## Current Runtime Mode
 
