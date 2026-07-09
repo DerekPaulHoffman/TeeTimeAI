@@ -5,7 +5,10 @@ import { useRouter } from "next/navigation";
 import {
   ArrowDown,
   ArrowUp,
+  CheckCircle2,
+  CircleAlert,
   CirclePause,
+  Clock3,
   GripVertical,
   Pencil,
   Play,
@@ -78,8 +81,8 @@ export function SearchStatusActions({
       return;
     }
 
-    const timeout = window.setTimeout(() => router.refresh(), 2500);
-    return () => window.clearTimeout(timeout);
+    const interval = window.setInterval(() => router.refresh(), 2500);
+    return () => window.clearInterval(interval);
   }, [localCheckStatus, router]);
 
   async function checkNow() {
@@ -241,6 +244,12 @@ export function SearchStatusActions({
       };
     });
   }
+
+  const checkStatusDisplay = getCheckStatusDisplay(
+    localCheckStatus,
+    initialLastCheckedAt,
+    initialNextCheckAt
+  );
 
   return (
     <div className={`search-actions${editing ? " is-editing" : ""}`}>
@@ -474,9 +483,32 @@ export function SearchStatusActions({
               {initialAdditionalEmails.length === 1 ? "" : "s"}
             </p>
           ) : null}
-          <p className="meta search-check-status">
-            {formatCheckStatus(localCheckStatus, initialLastCheckedAt, initialNextCheckAt)}
-          </p>
+          <div
+            aria-live="polite"
+            className={`search-check-status is-${checkStatusDisplay.tone}`}
+            role="status"
+          >
+            <span className="search-check-status-icon" aria-hidden="true">
+              {checkStatusDisplay.tone === "checking" ? (
+                <RefreshCw className="is-spinning" size={18} />
+              ) : checkStatusDisplay.tone === "updated" ? (
+                <CheckCircle2 size={18} />
+              ) : checkStatusDisplay.tone === "error" ? (
+                <CircleAlert size={18} />
+              ) : (
+                <Clock3 size={18} />
+              )}
+            </span>
+            <span className="search-check-status-copy">
+              <strong>{checkStatusDisplay.title}</strong>
+              <span>{checkStatusDisplay.detail}</span>
+              {checkStatusDisplay.timing ? (
+                <span className="search-check-status-timing">
+                  {checkStatusDisplay.timing}
+                </span>
+              ) : null}
+            </span>
+          </div>
         </>
       )}
       {error ? <p className="meta queue-action-error">{error}</p> : null}
@@ -484,26 +516,60 @@ export function SearchStatusActions({
   );
 }
 
-function formatCheckStatus(
+function getCheckStatusDisplay(
   status: SearchCheckStatus,
   lastCheckedAt: string | null,
   nextCheckAt: string | null
 ) {
   if (status === "QUEUED" || status === "CHECKING") {
-    return "Checking the official course sites now…";
+    return {
+      tone: "checking",
+      title: "We’re working on getting your tee times",
+      detail:
+        "We’re checking the official course sites now. This page will update automatically when we finish.",
+      timing: lastCheckedAt
+        ? `Previous check: ${formatCheckTimestamp(lastCheckedAt)}`
+        : null
+    } as const;
   }
   if (status === "FAILED") {
-    return nextCheckAt
-      ? `Could not finish the last check. Retrying at ${formatCheckTimestamp(nextCheckAt)}.`
-      : "Could not finish the last check.";
+    return {
+      tone: "error",
+      title: "We couldn’t finish the latest check",
+      detail: "Your search is still active and we’ll try the official course sites again.",
+      timing: nextCheckAt
+        ? `Next attempt: ${formatCheckTimestamp(nextCheckAt)}`
+        : lastCheckedAt
+          ? `Last attempt: ${formatCheckTimestamp(lastCheckedAt)}`
+          : null
+    } as const;
   }
   if (lastCheckedAt) {
-    return `Last checked ${formatCheckTimestamp(lastCheckedAt)}.`;
+    return {
+      tone: "updated",
+      title: "Tee times updated",
+      detail: `Last checked ${formatCheckTimestamp(lastCheckedAt)}.`,
+      timing: nextCheckAt
+        ? `Next check: ${formatCheckTimestamp(nextCheckAt)}`
+        : null
+    } as const;
   }
   if (status === "STOPPED") {
-    return "Checks are stopped while this search is paused.";
+    return {
+      tone: "paused",
+      title: "Automatic checks are paused",
+      detail: "Resume this search whenever you want us to start checking again.",
+      timing: null
+    } as const;
   }
-  return "Waiting for the first availability check.";
+  return {
+    tone: "waiting",
+    title: "We’re getting your tee-time search ready",
+    detail: "The first availability check will start shortly.",
+    timing: nextCheckAt
+      ? `First check: ${formatCheckTimestamp(nextCheckAt)}`
+      : null
+  } as const;
 }
 
 function formatCheckTimestamp(value: string) {

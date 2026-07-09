@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SearchStatusActions } from "./search-status-actions";
@@ -13,6 +13,7 @@ vi.mock("next/navigation", () => ({
 
 describe("SearchStatusActions", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     refreshMock.mockReset();
@@ -147,5 +148,61 @@ describe("SearchStatusActions", () => {
       })
     );
     expect(screen.getByText("Checking")).toBeTruthy();
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.getByText(/we’re working on getting your tee times/i)).toBeTruthy();
+    expect(screen.getByText(/update automatically when we finish/i)).toBeTruthy();
+  });
+
+  it("shows when tee times were updated and when the next check will run", () => {
+    render(
+      <SearchStatusActions
+        searchId="search-1"
+        status="ACTIVE"
+        initialDate="2026-08-15"
+        initialStartTime="13:00"
+        initialEndTime="17:00"
+        initialPlayers={2}
+        initialCadenceMinutes={15}
+        initialAdditionalEmails={[]}
+        initialCheckStatus="WAITING"
+        initialLastCheckedAt="2026-08-14T12:00:00.000Z"
+        initialNextCheckAt="2026-08-14T12:15:00.000Z"
+        initialCoursePreferences={[
+          { id: "pref-a", courseName: "Longshore Golf Course", rank: 1 }
+        ]}
+      />
+    );
+
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.getByText(/tee times updated/i)).toBeTruthy();
+    expect(screen.getByText(/last checked aug 14, 8:00 am edt/i)).toBeTruthy();
+    expect(screen.getByText(/next check: aug 14, 8:15 am edt/i)).toBeTruthy();
+  });
+
+  it("keeps refreshing the dashboard while a check is in progress", () => {
+    vi.useFakeTimers();
+
+    render(
+      <SearchStatusActions
+        searchId="search-1"
+        status="ACTIVE"
+        initialDate="2026-08-15"
+        initialStartTime="13:00"
+        initialEndTime="17:00"
+        initialPlayers={2}
+        initialCadenceMinutes={15}
+        initialAdditionalEmails={[]}
+        initialCheckStatus="CHECKING"
+        initialLastCheckedAt={null}
+        initialNextCheckAt={null}
+        initialCoursePreferences={[
+          { id: "pref-a", courseName: "Longshore Golf Course", rank: 1 }
+        ]}
+      />
+    );
+
+    act(() => vi.advanceTimersByTime(5100));
+
+    expect(refreshMock).toHaveBeenCalledTimes(2);
   });
 });
