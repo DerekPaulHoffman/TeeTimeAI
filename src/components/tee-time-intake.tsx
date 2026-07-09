@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useMemo, useState } from "react";
-import { Bell, LocateFixed, MapPinned, Plus, Save, Search, X } from "lucide-react";
+import { Bell, Check, LocateFixed, MapPinned, Plus, Save, Search, X } from "lucide-react";
 
 import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import type { CourseCandidate } from "@/lib/places/google";
@@ -31,11 +31,28 @@ export function TeeTimeIntake() {
   });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savedSignature, setSavedSignature] = useState<string | null>(null);
 
   const selectedIds = useMemo(
     () => new Set(selected.map((course) => course.googlePlaceId)),
     [selected]
   );
+  const searchSignature = useMemo(
+    () =>
+      JSON.stringify({
+        alertEmail: alertEmail.trim().toLowerCase(),
+        date,
+        startTime,
+        endTime,
+        players,
+        courses: selected.map((course, index) => ({
+          placeId: course.googlePlaceId,
+          rank: index + 1
+        }))
+      }),
+    [alertEmail, date, endTime, players, selected, startTime]
+  );
+  const isCurrentSearchSaved = savedSignature === searchSignature;
 
   async function discoverByCurrentLocation() {
     if (!navigator.geolocation) {
@@ -160,6 +177,7 @@ export function TeeTimeIntake() {
         type: "success",
         message: "Search saved. The Codex loop can now pick it up from Postgres."
       });
+      setSavedSignature(searchSignature);
     } catch (error) {
       setNotice({
         type: "error",
@@ -303,11 +321,11 @@ export function TeeTimeIntake() {
           className="button button-primary"
           type="button"
           onClick={saveSearch}
-          disabled={saving || selected.length === 0 || !alertEmail.trim()}
+          disabled={saving || isCurrentSearchSaved || selected.length === 0 || !alertEmail.trim()}
           style={{ marginTop: 18, width: "100%" }}
         >
-          {saving ? <Bell size={17} /> : <Save size={17} />}
-          {saving ? "Saving search" : "Save alert search"}
+          {saving ? <Bell size={17} /> : isCurrentSearchSaved ? <Check size={17} /> : <Save size={17} />}
+          {saving ? "Saving search" : isCurrentSearchSaved ? "Search saved" : "Save alert search"}
         </button>
         <p className="helper">
           Alerts use the email above. Accounts unlock pause and resume controls after Clerk

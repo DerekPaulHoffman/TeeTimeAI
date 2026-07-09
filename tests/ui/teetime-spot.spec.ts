@@ -38,8 +38,24 @@ test.describe("Tee Time Spot UI smoke", () => {
     await courseRows.nth(5).getByRole("button", { name: /^Add$/i }).click();
     await expect(page.getByText("You can prioritize up to 5 courses.")).toBeVisible();
 
+    let saveRequestCount = 0;
+    await page.route("**/api/searches", async (route) => {
+      saveRequestCount += 1;
+      await route.fulfill({
+        contentType: "application/json",
+        status: 201,
+        body: JSON.stringify({ search: { id: `ui-smoke-${saveRequestCount}` } })
+      });
+    });
+
     await page.getByLabel("Alert email").fill(`ui-smoke-${Date.now()}@example.com`);
-    await expect(page.getByRole("button", { name: /Save alert search/i })).toBeEnabled();
+    const saveButton = page.getByRole("button", { name: /Save alert search|Search saved/i });
+    await expect(saveButton).toBeEnabled();
+    await saveButton.click();
+    await expect(page.getByText("Search saved. The Codex loop can now pick it up from Postgres.")).toBeVisible();
+    await expect(saveButton).toBeDisabled();
+    await saveButton.click({ force: true });
+    expect(saveRequestCount, "unchanged saved searches should not submit more than once").toBe(1);
 
     await expectNoHorizontalOverflow(page, testInfo);
     await expectInteractiveElementsAreUsable(page, testInfo);
