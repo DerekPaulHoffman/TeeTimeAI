@@ -5,6 +5,9 @@ export type GooglePlace = {
     text?: string;
   };
   formattedAddress?: string;
+  businessStatus?: string;
+  primaryType?: string;
+  types?: string[];
   location?: {
     latitude?: number;
     longitude?: number;
@@ -47,6 +50,26 @@ export type NearbyCourseSearchInput = {
   radiusMeters?: number;
 };
 
+const NON_PUBLIC_PRIMARY_TYPES = new Set([
+  "association_or_organization",
+  "indoor_golf_course",
+  "sporting_goods_store",
+  "sports_club"
+]);
+
+const PRIVATE_OR_NON_COURSE_NAME_PATTERNS = [
+  /\bcountry\s+club\b/i,
+  /\bprivate\b/i,
+  /\bmembers?\s+only\b/i,
+  /\bgolf\s+galaxy\b/i,
+  /\bpga\s+tour\s+superstore\b/i,
+  /\bdick'?s\s+sporting\s+goods\b/i,
+  /\bx[-\s]?golf\b/i,
+  /\bgolf\s+lounge\b/i,
+  /\bsimulator\b/i,
+  /\bindoor\b/i
+];
+
 export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandidate {
   const googlePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
   const name = place.displayName?.text;
@@ -71,6 +94,32 @@ export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandi
   };
 }
 
+export function filterPublicGolfCoursePlaces(places: GooglePlace[]) {
+  return places.filter(isLikelyPublicGolfCoursePlace);
+}
+
+function isLikelyPublicGolfCoursePlace(place: GooglePlace) {
+  const name = place.displayName?.text ?? "";
+
+  if (place.businessStatus && place.businessStatus !== "OPERATIONAL") {
+    return false;
+  }
+
+  if (place.primaryType !== "golf_course") {
+    return false;
+  }
+
+  if (!place.types?.includes("golf_course")) {
+    return false;
+  }
+
+  if (NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType)) {
+    return false;
+  }
+
+  return !PRIVATE_OR_NON_COURSE_NAME_PATTERNS.some((pattern) => pattern.test(name));
+}
+
 export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
@@ -83,10 +132,11 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos"
+        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus"
     },
     body: JSON.stringify({
       includedTypes: ["golf_course"],
+      excludedPrimaryTypes: Array.from(NON_PUBLIC_PRIMARY_TYPES),
       maxResultCount: 20,
       locationRestriction: {
         circle: {
@@ -105,7 +155,7 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
   }
 
   const json = (await response.json()) as { places?: GooglePlace[] };
-  return (json.places ?? []).map(mapGooglePlaceToCourseCandidate);
+  return filterPublicGolfCoursePlaces(json.places ?? []).map(mapGooglePlaceToCourseCandidate);
 }
 
 function normalizePlaceId(id: string) {
