@@ -2058,7 +2058,7 @@ button {
   gap: 8px;
 }
 
-.figma-selected-card {
+.search-page .figma-selected-panel .figma-selected-card {
   align-items: center;
   background: #3d4a54;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -2071,7 +2071,7 @@ button {
   padding: 9px 10px;
 }
 
-.figma-selected-card.is-dragging {
+.search-page .figma-selected-panel .figma-selected-card.is-dragging {
   opacity: 0.72;
 }
 
@@ -2092,13 +2092,14 @@ button {
   width: 24px;
 }
 
-.figma-selected-card .course-thumbnail {
+.search-page .figma-selected-panel .figma-selected-card .course-thumbnail {
   border-radius: 999px;
+  grid-area: auto;
   height: 34px;
   width: 34px;
 }
 
-.figma-selected-card h3 {
+.search-page .figma-selected-panel .figma-selected-card h3 {
   color: #ffffff;
   font-size: 0.82rem;
   line-height: 1.2;
@@ -2223,5 +2224,16 @@ button {
 
   .figma-selected-card {
     grid-template-columns: auto auto 34px minmax(0, 1fr) auto auto;
+  }
+
+  .mobile-selection-bar {
+    gap: 8px;
+    padding-left: 56px;
+  }
+
+  .mobile-selection-bar span,
+  .mobile-selection-bar a,
+  .mobile-selection-bar .button {
+    font-size: 0.9rem;
   }
 }
