@@ -8,8 +8,8 @@ Last updated: 2026-07-09
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-b1im1pp7t-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_Go9Y5Cfrq4j4R1PJBDpaHpVNKZ7u`
+- Latest verified deployment: `teetimeai-78w74flcw-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_AhXpEZKxiNfsBffmfc5bR33kHKkX`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -71,6 +71,7 @@ Last updated: 2026-07-09
 - 2026-07-09 hourly product loop found 8 active searches, no current actionable probes, no recent notable probes, no pending alerts, and a clean baseline UI smoke. Current research confirmed transaction-scoped PostgreSQL advisory locks are the safer poller lease primitive for pooled Prisma/Neon connections, so the poller remains on `pg_try_advisory_xact_lock` with a 60-second transaction timeout instead of a session-level advisory lock. A one-off `npm run automation:poll` was run because the change touches poller lease behavior; verification run `cmrdkq4xt0000rc15kho2bpgp` processed 8 active searches, and the final inspect showed 22 recent `NO_MATCH` probes with `recentActionableProbes: []` and `pendingAlerts: []`. Checkpoints: `queue_confirmed=true`, `candidate_selected=true`, `tool_research_done=true`, `ui_smoke_done=true`, `verification_done=true`, `outcome_recorded=true`.
 - 2026-07-09 hourly product loop found the queue empty: `activeSearches: []`, `recentActionableProbes: []`, `recentNotableProbes: []`, and `pendingAlerts: []`; baseline UI smoke passed. The existing engagement/feedback and dashboard-management batch was carried through verification, with alert-only copy tightened so dashboard and email links say `Official site` / `Open official course page` instead of implying Tee Time Spot books tee times. Public analytics/feedback setup errors now avoid internal provider terms. Additive Prisma migrations for extra recipients and website engagement were checked; `migrate deploy` initially hit Prisma advisory lock `72707369`, a single stale idle pooled backend was terminated, and rerun reported no pending migrations. No one-off `npm run automation:poll` was run because no adapter or poller logic changed.
 - 2026-07-09 production deploy `dpl_Go9Y5Cfrq4j4R1PJBDpaHpVNKZ7u` verified focused tests, `npm run test:run`, `npm run lint`, `npm run build`, local `npm run ui:smoke`, live `/`, `/dashboard`, and `/email-preview` 200, production `$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\UI_SMOKE_BASE_URL`, final `npm run automation:inspect` with empty active queue and no pending alerts, and Vercel logs showing only 200/201/302 info entries for the smoke window. Checkpoints: `queue_confirmed=true`, `candidate_selected=true`, `tool_research_done=true`, `ui_smoke_done=true`, `verification_done=true`, `outcome_recorded=true`.
+- 2026-07-09 production deploy `dpl_AhXpEZKxiNfsBffmfc5bR33kHKkX` shipped the Figma Make-aligned product redesign plus extra alert email/dashboard visibility, engagement tracking, feedback capture, SEO metadata routes, and alert-email polish. Verified `npm run test:run`, `npm run lint`, `npm run build`, local `npm run ui:smoke`, live `/`, `/dashboard`, `/email-preview`, `/manifest.webmanifest`, `/robots.txt`, and `/sitemap.xml` 200, production `$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\UI_SMOKE_BASE_URL`, `vercel inspect` showing `Ready` with `teetimespot.com` and `www.teetimespot.com` aliases, and Vercel error logs returned no errors for the checked window.
 
 ## Current Runtime Mode
 
