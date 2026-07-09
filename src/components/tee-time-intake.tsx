@@ -56,7 +56,9 @@ type GoogleMapsWindow = {
       map: unknown;
       position: { lat: number; lng: number };
       title: string;
-    }) => unknown;
+    }) => {
+      addListener?: (eventName: string, handler: () => void) => void;
+    };
   };
 };
 
@@ -417,7 +419,6 @@ export function TeeTimeIntake() {
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
-                  <PhotoCredit course={course} />
                 </div>
                 <div className="course-actions">
                   {course.website ? (
@@ -562,28 +563,6 @@ function CourseThumbnail({
   );
 }
 
-function PhotoCredit({ course }: { course: CourseCandidate }) {
-  const attribution = course.photoAttributions?.find((credit) => credit.displayName);
-  if (!attribution?.displayName) {
-    return null;
-  }
-
-  const href = normalizeAttributionUri(attribution.uri);
-
-  return (
-    <p className="photo-credit">
-      Photo:{" "}
-      {href ? (
-        <a href={href} rel="noreferrer" target="_blank">
-          {attribution.displayName}
-        </a>
-      ) : (
-        attribution.displayName
-      )}
-    </p>
-  );
-}
-
 function CourseAddressLink({
   course,
   unavailableText = "Address unavailable"
@@ -654,11 +633,14 @@ function CourseResultsMap({
       courses.forEach((course, index) => {
         const position = { lat: course.latitude, lng: course.longitude };
         bounds.extend(position);
-        new googleMaps.Marker({
+        const marker = new googleMaps.Marker({
           label: String(index + 1),
           map,
           position,
           title: course.name
+        });
+        marker.addListener?.("click", () => {
+          window.open(getGoogleMapsSearchUrl(course), "_blank", "noopener,noreferrer");
         });
       });
 
@@ -705,7 +687,7 @@ function CourseResultsMap({
         <div
           aria-label={`${courses.length} nearby course locations on Google Maps`}
           className="course-results-map-embed"
-          role="img"
+          role="group"
         >
           <iframe
             className="course-results-map-frame"
@@ -714,15 +696,20 @@ function CourseResultsMap({
             src={getGoogleMapsEmbedUrl(mapCenter)}
             title={`${courses.length} nearby course locations on Google Maps`}
           />
-          <div className="course-results-map-overlay" aria-hidden="true">
+          <div className="course-results-map-overlay">
             {mapMarkers.map((marker) => (
-              <span
+              <a
+                aria-label={`Open ${marker.name} in Google Maps`}
                 className="course-results-map-pin"
+                href={marker.mapsUrl}
                 key={marker.id}
+                rel="noreferrer"
                 style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
+                target="_blank"
+                title={`Open ${marker.name} in Google Maps`}
               >
                 {marker.index}
-              </span>
+              </a>
             ))}
           </div>
           <div className="course-results-map-count">
@@ -744,14 +731,6 @@ function Notice({ notice }: { notice: Notice }) {
       {notice.message}
     </div>
   );
-}
-
-function normalizeAttributionUri(uri?: string) {
-  if (!uri) {
-    return undefined;
-  }
-
-  return uri.startsWith("//") ? `https:${uri}` : uri;
 }
 
 function sortCoursesByDistance(courses: CourseCandidate[]) {
@@ -799,6 +778,8 @@ function getCourseMapMarkers(courses: CourseCandidate[]) {
   return courses.slice(0, 25).map((course, index) => ({
     id: course.googlePlaceId,
     index: index + 1,
+    mapsUrl: getGoogleMapsSearchUrl(course),
+    name: course.name,
     x: 8 + ((course.longitude - minLongitude) / longitudeSpan) * 84,
     y: 8 + ((maxLatitude - course.latitude) / latitudeSpan) * 84
   }));

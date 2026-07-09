@@ -567,8 +567,17 @@ button {
   justify-content: center;
   min-width: 26px;
   padding: 0 6px;
+  pointer-events: auto;
   position: absolute;
+  text-decoration: none;
   transform: translate(-50%, -50%);
+}
+
+.course-results-map-pin:hover,
+.course-results-map-pin:focus-visible {
+  background: var(--fairway-dark);
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
 }
 
 .course-results-map-count {
@@ -638,22 +647,6 @@ button {
   font-size: 0.9rem;
   line-height: 1.45;
   margin: 0;
-}
-
-.photo-credit {
-  color: var(--muted);
-  font-size: 0.78rem;
-  line-height: 1.35;
-  margin: 5px 0 0;
-}
-
-.photo-credit a {
-  align-items: center;
-  display: inline-flex;
-  min-height: 24px;
-  min-width: 24px;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
 .rank-badge,
