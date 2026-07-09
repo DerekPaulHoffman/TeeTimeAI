@@ -179,7 +179,15 @@ async function main() {
           date: search.date.toISOString().slice(0, 10),
           window: `${search.startTime}-${search.endTime}`,
           players: search.players,
+          checkStatus: search.checkStatus,
+          workflowRunId: search.workflowRunId,
+          nextCheckAt: search.nextCheckAt,
+          lastCheckedAt: search.lastCheckedAt,
+          lastCheckOutcome: summarize(search.lastCheckOutcome),
           matchCount: search.matches.length,
+          availableMatchCount: search.matches.filter(
+            (match) => match.availabilityStatus === "AVAILABLE"
+          ).length,
           preferences: search.preferences.map((preference) => ({
             rank: preference.rank,
             courseId: preference.course.id,
@@ -227,6 +235,8 @@ async function main() {
           user: redactEmail(match.teeSearch.user.email),
           startsAt: match.startsAt,
           alertStatus: match.alertStatus,
+          availabilityStatus: match.availabilityStatus,
+          lastConfirmedAt: match.lastConfirmedAt,
           firstSeenAt: match.firstSeenAt,
           sourceId: match.sourceId
         })),

@@ -360,16 +360,17 @@ npx vercel env run -- npm run automation:inspect
 
 `automation:poll`:
 
-- Loads active searches.
-- Acquires a Postgres transaction-scoped advisory lease.
-- Drains pending alerts.
-- Checks supported courses.
+- Is a manual recovery command for due active searches, not the production scheduler.
+- Uses the same per-search checker as the durable workflow.
+- Acquires a per-search Postgres transaction-scoped advisory lease.
 - Records probes.
-- Upserts matches.
+- Reconciles currently available and gone matches.
 - Sends or dry-runs alerts.
 - Marks alerts sent/suppressed.
 
-`automation:inspect` is the preferred truth source for classifying poller runs. The poller can exit successfully without a useful terminal summary because the authoritative state is stored in `AutomationRun`, `CourseProbe`, `TeeTimeMatch`, and pending alerts.
+Creating, editing, resuming, or manually checking a search starts its durable workflow. Each run checks only that search, updates Postgres before sending email, calculates `nextCheckAt`, sleeps without active compute, and chains the next run onto the latest deployment. A daily recovery cron only restarts overdue or failed schedules.
+
+`automation:inspect` is the preferred truth source for classifying checks. The authoritative state is stored in `TeeSearch` scheduler fields, `AutomationRun`, `CourseProbe`, `TeeTimeMatch`, and pending alerts.
 
 `automation:improve` records a Codex-ready improvement prompt. The hourly loop should inspect recent failures, UI smoke results, and product friction, then ship the highest-leverage safe improvement.
 

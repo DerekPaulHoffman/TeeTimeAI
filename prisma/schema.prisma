@@ -46,6 +46,21 @@ enum AlertStatus {
   SUPPRESSED
 }
 
+enum SearchCheckStatus {
+  IDLE
+  QUEUED
+  CHECKING
+  WAITING
+  FAILED
+  STOPPED
+}
+
+enum MatchAvailabilityStatus {
+  AVAILABLE
+  GONE
+  UNKNOWN
+}
+
 enum FeedbackSentiment {
   LIKE
   DISLIKE
@@ -90,23 +105,30 @@ model Course {
 }
 
 model TeeSearch {
-  id             String             @id @default(cuid())
-  userId         String
-  date           DateTime
-  startTime      String
-  endTime        String
-  players        Int
-  cadenceMinutes Int                @default(15)
+  id               String            @id @default(cuid())
+  userId           String
+  date             DateTime
+  startTime        String
+  endTime          String
+  players          Int
+  cadenceMinutes   Int               @default(15)
   additionalEmails String[]          @default([])
-  status         SearchStatus       @default(ACTIVE)
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  preferences    CoursePreference[]
-  probes         CourseProbe[]
-  matches        TeeTimeMatch[]
+  status           SearchStatus      @default(ACTIVE)
+  checkStatus      SearchCheckStatus @default(IDLE)
+  scheduleVersion  Int               @default(0)
+  workflowRunId    String?
+  nextCheckAt      DateTime?
+  lastCheckedAt    DateTime?
+  lastCheckOutcome String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences      CoursePreference[]
+  probes           CourseProbe[]
+  matches          TeeTimeMatch[]
 
   @@index([status, date])
+  @@index([status, nextCheckAt])
   @@index([userId, status])
 }
 
@@ -143,25 +165,29 @@ model CourseProbe {
 }
 
 model TeeTimeMatch {
-  id             String      @id @default(cuid())
-  teeSearchId    String
-  courseId       String
-  sourceId       String
-  startsAt       DateTime
-  availableSpots Int
-  priceCents     Int?
-  holes          Int?
-  bookingUrl     String
-  evidenceUrl    String?
-  alertStatus    AlertStatus @default(PENDING)
-  firstSeenAt    DateTime    @default(now())
-  lastSeenAt     DateTime    @default(now())
-  sentAt         DateTime?
-  teeSearch      TeeSearch   @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course         Course      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                 String                  @id @default(cuid())
+  teeSearchId        String
+  courseId           String
+  sourceId           String
+  startsAt           DateTime
+  availableSpots     Int
+  priceCents         Int?
+  holes              Int?
+  bookingUrl         String
+  evidenceUrl        String?
+  alertStatus        AlertStatus             @default(PENDING)
+  availabilityStatus MatchAvailabilityStatus @default(AVAILABLE)
+  firstSeenAt        DateTime                @default(now())
+  lastSeenAt         DateTime                @default(now())
+  lastConfirmedAt    DateTime                @default(now())
+  unavailableAt      DateTime?
+  sentAt             DateTime?
+  teeSearch          TeeSearch               @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course             Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([teeSearchId, courseId, sourceId, startsAt])
   @@index([alertStatus, firstSeenAt])
+  @@index([teeSearchId, availabilityStatus, startsAt])
 }
 
 model AutomationRun {

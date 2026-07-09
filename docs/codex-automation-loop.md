@@ -1,10 +1,11 @@
 # Codex Automation Loop
 
-Tee Time Spot uses Postgres as the queue of user demand and a local Codex automation as the adaptive worker.
+Tee Time Spot uses Postgres as the queue of user demand, durable per-search Vercel Workflows for operational checks, and a local Codex automation only for product improvement.
 
 ## Cadence
 
-- Every 15 minutes: run `npm run automation:poll` against active searches.
+- Per search: create/edit/resume/manual-check starts an immediate durable workflow; the workflow sleeps until its own `nextCheckAt` between checks.
+- Daily recovery: query only for overdue or failed workflow schedules and restart those searches; do not fetch course availability when the recovery queue is empty.
 - Hourly: run `npm run automation:improve` to create a Codex-ready prompt from recent failures, adapter gaps, and UI friction.
 - Baseline UI/access check: run `npm run ui:smoke` locally, or set `UI_SMOKE_BASE_URL=https://teetimespot.com` before `npm run ui:smoke` for production.
 - Before deploys: run `npm run test:run`, `npm run lint`, `npm run build`, and `npm run ui:smoke`.

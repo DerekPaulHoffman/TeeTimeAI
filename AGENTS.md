@@ -148,9 +148,9 @@ Do not over-request fields. Keep field masks tight.
 
 There are two related but different automation workflows.
 
-### 15 Minute Poller
+### Event-Driven Search Checks
 
-The 15 minute poller is operational. If the user asks specifically for a poller run, keep it read-only unless they ask for fixes.
+Production search checks are owned by a durable per-search Vercel Workflow. Creating, editing, resuming, or explicitly checking an active search starts a workflow immediately. After each check it sleeps until that search's next useful check time, then starts the next run on the latest deployment.
 
 Preferred commands:
 
@@ -161,13 +161,16 @@ npx vercel env run -- npm run automation:inspect
 
 Important behavior:
 
-- `automation:poll` may exit cleanly with sparse terminal output.
+- `automation:poll` is a manual recovery command, not a recurring 15-minute production scheduler.
+- A daily recovery cron performs only a lightweight database query for overdue/stuck schedules and starts work only when needed.
+- `TeeSearch.checkStatus`, `nextCheckAt`, `lastCheckedAt`, `lastCheckOutcome`, and `workflowRunId` describe scheduler state.
+- `TeeTimeMatch.availabilityStatus` is independent from email `alertStatus`; emailed matches remain visible while they are still confirmed available.
 - The truth is in Postgres: `AutomationRun`, `CourseProbe`, `TeeTimeMatch`, and pending alerts.
 - Use `automation:inspect` to classify the result.
 - Report normalized outcomes such as `success`, `no new matches`, `alerts sent/dry-run`, `blocked_env`, `needs_adapter`, or `blocked_policy`.
-- Do not make product changes during a read-only poller run.
+- Do not revive the retired 15-minute Codex poller.
 
-The shared automation memory path for poller runs is:
+The historical automation memory path for manual recovery runs is:
 
 ```text
 C:\Users\Grim_Leaper\.codex\automations\teetimeai-active-search-poller\memory.md

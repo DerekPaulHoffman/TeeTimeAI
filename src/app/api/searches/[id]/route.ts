@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { getRequiredAppUser } from "@/lib/auth/current-user";
+import { startSearchSchedule } from "@/lib/automation/search-scheduler";
+import { stopSearchSchedule } from "@/lib/automation/db-service";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import {
   deleteTeeSearchForPoc,
@@ -67,7 +69,13 @@ export async function PATCH(
     const search = hasClerkConfig()
       ? await updateOwnedSearch(id, input)
       : await updateTeeSearchForPoc(id, input);
-    return NextResponse.json({ search });
+    let schedule = null;
+    if (search.status === "ACTIVE") {
+      schedule = await startSearchSchedule(search.id);
+    } else {
+      await stopSearchSchedule(search.id);
+    }
+    return NextResponse.json({ search, schedule });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not update search" },

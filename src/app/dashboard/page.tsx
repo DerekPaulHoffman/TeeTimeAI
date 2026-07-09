@@ -74,8 +74,10 @@ function DashboardView({
   notice?: string;
 }) {
   const activeCount = searches.filter((search) => search.status === "ACTIVE").length;
-  const pendingMatches = searches.flatMap((search) =>
-    search.matches.filter((match) => match.alertStatus === "PENDING")
+  const availableMatches = searches.flatMap((search) =>
+    search.matches.filter(
+      (match) => match.availabilityStatus === "AVAILABLE" && match.startsAt > new Date()
+    )
   );
   const watchedCourseCount = searches.reduce(
     (count, search) => count + search.preferences.length,
@@ -116,7 +118,7 @@ function DashboardView({
         </div>
         <div>
           <span>Matches found</span>
-          <strong>{pendingMatches.length}</strong>
+          <strong>{availableMatches.length}</strong>
         </div>
         <div>
           <span>Alert capacity</span>
@@ -165,6 +167,7 @@ function DashboardView({
                       </div>
                       {canManage ? (
                         <SearchStatusActions
+                          key={`${search.id}-${search.checkStatus}-${search.lastCheckedAt?.toISOString() ?? "never"}`}
                           searchId={search.id}
                           status={search.status}
                           initialDate={formatDateInputValue(search.date)}
@@ -173,6 +176,9 @@ function DashboardView({
                           initialPlayers={search.players}
                           initialCadenceMinutes={search.cadenceMinutes}
                           initialAdditionalEmails={search.additionalEmails}
+                          initialCheckStatus={search.checkStatus}
+                          initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null}
+                          initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
                           initialCoursePreferences={search.preferences.map((preference) => ({
                             id: preference.id,
                             courseName: preference.course.name,
@@ -273,7 +279,7 @@ function DashboardView({
           <dl className="sidebar-stat-list">
             <div>
               <dt>Matches found</dt>
-              <dd>{pendingMatches.length} so far</dd>
+              <dd>{availableMatches.length} available now</dd>
             </div>
             <div>
               <dt>Courses watched</dt>
@@ -287,9 +293,9 @@ function DashboardView({
           <div className="alert alert-info">
             We watch all your courses and only email you when something new opens up.
           </div>
-          {pendingMatches.length > 0 ? (
+          {availableMatches.length > 0 ? (
             <div className="match-list">
-              {pendingMatches.slice(0, 3).map((match) => (
+              {availableMatches.slice(0, 3).map((match) => (
                 <div className="match-row" key={match.id}>
                   <div>
                     <h3>{match.course.name}</h3>

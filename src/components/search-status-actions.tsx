@@ -1,6 +1,6 @@
 "use client";
 
-import { type DragEvent, useState } from "react";
+import { type DragEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowDown,
@@ -9,6 +9,7 @@ import {
   GripVertical,
   Pencil,
   Play,
+  RefreshCw,
   Save,
   Trash2,
   X
@@ -20,6 +21,7 @@ import {
 } from "@/lib/validation/search";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
+type SearchCheckStatus = "IDLE" | "QUEUED" | "CHECKING" | "WAITING" | "FAILED" | "STOPPED";
 type CoursePreferenceFormValue = {
   courseName: string;
   id: string;
@@ -35,6 +37,9 @@ export function SearchStatusActions({
   initialPlayers,
   initialCadenceMinutes,
   initialAdditionalEmails,
+  initialCheckStatus,
+  initialLastCheckedAt,
+  initialNextCheckAt,
   initialCoursePreferences
 }: {
   searchId: string;
@@ -45,11 +50,15 @@ export function SearchStatusActions({
   initialPlayers: number;
   initialCadenceMinutes: number;
   initialAdditionalEmails: string[];
+  initialCheckStatus: SearchCheckStatus;
+  initialLastCheckedAt: string | null;
+  initialNextCheckAt: string | null;
   initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [localStatus, setLocalStatus] = useState(status);
+  const [localCheckStatus, setLocalCheckStatus] = useState(initialCheckStatus);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draggedPreferenceId, setDraggedPreferenceId] = useState<string | null>(null);
@@ -63,6 +72,31 @@ export function SearchStatusActions({
     additionalEmails: initialAdditionalEmails.join("\n"),
     coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
   });
+
+  useEffect(() => {
+    if (localCheckStatus !== "QUEUED" && localCheckStatus !== "CHECKING") {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => router.refresh(), 2500);
+    return () => window.clearTimeout(timeout);
+  }, [localCheckStatus, router]);
+
+  async function checkNow() {
+    setPending(true);
+    setError(null);
+    const response = await fetch(`/api/searches/${searchId}/check`, {
+      method: "POST"
+    });
+
+    if (response.ok) {
+      setLocalCheckStatus("CHECKING");
+      router.refresh();
+    } else {
+      setError(await readError(response, "Could not check this search."));
+    }
+    setPending(false);
+  }
 
   async function update(status: SearchStatus) {
     setPending(true);
@@ -379,6 +413,29 @@ export function SearchStatusActions({
             </button>
             {localStatus === "ACTIVE" ? (
               <button
+                className="button button-ghost dashboard-check-button"
+                type="button"
+                onClick={checkNow}
+                disabled={
+                  pending || localCheckStatus === "QUEUED" || localCheckStatus === "CHECKING"
+                }
+                title="Check these courses now"
+              >
+                <RefreshCw
+                  className={
+                    localCheckStatus === "QUEUED" || localCheckStatus === "CHECKING"
+                      ? "is-spinning"
+                      : ""
+                  }
+                  size={16}
+                />
+                {localCheckStatus === "QUEUED" || localCheckStatus === "CHECKING"
+                  ? "Checking"
+                  : "Check now"}
+              </button>
+            ) : null}
+            {localStatus === "ACTIVE" ? (
+              <button
                 className="button button-ghost dashboard-icon-button"
                 type="button"
                 onClick={() => update("PAUSED")}
@@ -417,11 +474,47 @@ export function SearchStatusActions({
               {initialAdditionalEmails.length === 1 ? "" : "s"}
             </p>
           ) : null}
+          <p className="meta search-check-status">
+            {formatCheckStatus(localCheckStatus, initialLastCheckedAt, initialNextCheckAt)}
+          </p>
         </>
       )}
       {error ? <p className="meta queue-action-error">{error}</p> : null}
     </div>
   );
+}
+
+function formatCheckStatus(
+  status: SearchCheckStatus,
+  lastCheckedAt: string | null,
+  nextCheckAt: string | null
+) {
+  if (status === "QUEUED" || status === "CHECKING") {
+    return "Checking the official course sites now…";
+  }
+  if (status === "FAILED") {
+    return nextCheckAt
+      ? `Could not finish the last check. Retrying at ${formatCheckTimestamp(nextCheckAt)}.`
+      : "Could not finish the last check.";
+  }
+  if (lastCheckedAt) {
+    return `Last checked ${formatCheckTimestamp(lastCheckedAt)}.`;
+  }
+  if (status === "STOPPED") {
+    return "Checks are stopped while this search is paused.";
+  }
+  return "Waiting for the first availability check.";
+}
+
+function formatCheckTimestamp(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York",
+    timeZoneName: "short"
+  }).format(new Date(value));
 }
 
 function parseAdditionalEmails(value: string) {

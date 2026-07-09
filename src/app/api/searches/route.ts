@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getRequiredAppUser } from "@/lib/auth/current-user";
+import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/service";
 import { upsertGuestUser } from "@/lib/users/service";
@@ -36,7 +37,13 @@ export async function POST(request: NextRequest) {
     const input = teeSearchInputSchema.parse(await request.json());
     const user = await getSearchOwner(input.alertEmail);
     const search = await createTeeSearchForUser(user.id, input);
-    return NextResponse.json({ search }, { status: 201 });
+    let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
+    try {
+      schedule = await startSearchSchedule(search.id);
+    } catch (error) {
+      console.error("Could not start initial search workflow", error);
+    }
+    return NextResponse.json({ search, schedule }, { status: 201 });
   } catch (error) {
     return handleAppError(error);
   }

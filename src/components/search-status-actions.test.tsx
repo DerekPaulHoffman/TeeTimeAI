@@ -32,6 +32,9 @@ describe("SearchStatusActions", () => {
         initialPlayers={2}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
+        initialCheckStatus="WAITING"
+        initialLastCheckedAt="2026-08-14T12:00:00.000Z"
+        initialNextCheckAt="2026-08-14T12:15:00.000Z"
         initialCoursePreferences={[
           { id: "pref-a", courseName: "Longshore Golf Course", rank: 1 },
           { id: "pref-b", courseName: "Tashua Knolls Golf Course", rank: 2 }
@@ -69,6 +72,9 @@ describe("SearchStatusActions", () => {
         initialPlayers={2}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
+        initialCheckStatus="WAITING"
+        initialLastCheckedAt="2026-08-14T12:00:00.000Z"
+        initialNextCheckAt="2026-08-14T12:15:00.000Z"
         initialCoursePreferences={[
           { id: "pref-a", courseName: "Longshore Golf Course", rank: 1 },
           { id: "pref-b", courseName: "Tashua Knolls Golf Course", rank: 2 },
@@ -108,5 +114,38 @@ describe("SearchStatusActions", () => {
       { id: "pref-c", rank: 2 },
       { id: "pref-a", rank: 3 }
     ]);
+  });
+
+  it("queues an immediate availability check", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <SearchStatusActions
+        searchId="search-1"
+        status="ACTIVE"
+        initialDate="2026-08-15"
+        initialStartTime="13:00"
+        initialEndTime="17:00"
+        initialPlayers={2}
+        initialCadenceMinutes={15}
+        initialAdditionalEmails={[]}
+        initialCheckStatus="WAITING"
+        initialLastCheckedAt="2026-08-14T12:00:00.000Z"
+        initialNextCheckAt="2026-08-14T12:15:00.000Z"
+        initialCoursePreferences={[
+          { id: "pref-a", courseName: "Longshore Golf Course", rank: 1 }
+        ]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /check now/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith("/api/searches/search-1/check", {
+        method: "POST"
+      })
+    );
+    expect(screen.getByText("Checking")).toBeTruthy();
   });
 });

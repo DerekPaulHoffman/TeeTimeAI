@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 
 import type { BrowserDiscovery } from "./browser-discovery";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "./browser-discovery";
-import { withPostgresAdvisoryLease } from "./lease";
+import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 
@@ -56,15 +56,35 @@ export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
   return withPostgresAdvisoryLease(prisma, AUTOMATION_POLL_LEASE_KEY, worker);
 }
 
+export function runWithSearchCheckLease<T>(searchId: string, worker: () => Promise<T>) {
+  return withPostgresAdvisoryTextLease(prisma, `tee-search:${searchId}`, worker);
+}
+
 export async function listActiveSearchesForAutomation(): Promise<ActiveAutomationSearch[]> {
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
       date: {
         gte: startOfToday()
-      }
+      },
+      OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: new Date() } }]
     },
     orderBy: [{ date: "asc" }, { createdAt: "asc" }],
+    include: activeSearchInclude
+  });
+}
+
+export async function getActiveSearchForAutomation(
+  searchId: string
+): Promise<ActiveAutomationSearch | null> {
+  return prisma.teeSearch.findFirst({
+    where: {
+      id: searchId,
+      status: "ACTIVE",
+      date: {
+        gte: startOfToday()
+      }
+    },
     include: activeSearchInclude
   });
 }
@@ -127,12 +147,13 @@ export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTa
   return targets;
 }
 
-export async function listPendingMatchAlerts(): Promise<PendingAlertMatch[]> {
+export async function listPendingMatchAlerts(searchId?: string): Promise<PendingAlertMatch[]> {
   return prisma.teeTimeMatch.findMany({
     where: {
       alertStatus: "PENDING",
       teeSearch: {
-        status: "ACTIVE"
+        status: "ACTIVE",
+        ...(searchId ? { id: searchId } : {})
       }
     },
     orderBy: {
@@ -222,6 +243,21 @@ export async function recordTeeTimeMatch(input: {
   holes?: number;
   evidenceUrl?: string;
 }) {
+  const existing = await prisma.teeTimeMatch.findUnique({
+    where: {
+      teeSearchId_courseId_sourceId_startsAt: {
+        teeSearchId: input.searchId,
+        courseId: input.courseId,
+        sourceId: input.sourceId,
+        startsAt: input.startsAt
+      }
+    },
+    select: {
+      availabilityStatus: true
+    }
+  });
+
+  const confirmedAt = new Date();
   return prisma.teeTimeMatch.upsert({
     where: {
       teeSearchId_courseId_sourceId_startsAt: {
@@ -232,7 +268,13 @@ export async function recordTeeTimeMatch(input: {
       }
     },
     update: {
-      lastSeenAt: new Date(),
+      lastSeenAt: confirmedAt,
+      lastConfirmedAt: confirmedAt,
+      availabilityStatus: "AVAILABLE",
+      unavailableAt: null,
+      ...(existing?.availabilityStatus === "GONE"
+        ? { alertStatus: "PENDING", sentAt: null }
+        : {}),
       availableSpots: input.availableSpots,
       bookingUrl: input.bookingUrl,
       priceCents: input.priceCents,
@@ -250,6 +292,204 @@ export async function recordTeeTimeMatch(input: {
       holes: input.holes,
       evidenceUrl: input.evidenceUrl
     }
+  });
+}
+
+export async function markMissingMatchesUnavailable(input: {
+  searchId: string;
+  courseId: string;
+  date: Date;
+  confirmedSourceIds: string[];
+}) {
+  const dayStart = new Date(input.date);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+
+  return prisma.teeTimeMatch.updateMany({
+    where: {
+      teeSearchId: input.searchId,
+      courseId: input.courseId,
+      availabilityStatus: "AVAILABLE",
+      startsAt: {
+        gte: dayStart,
+        lt: dayEnd
+      },
+      ...(input.confirmedSourceIds.length > 0
+        ? { sourceId: { notIn: input.confirmedSourceIds } }
+        : {})
+    },
+    data: {
+      availabilityStatus: "GONE",
+      unavailableAt: new Date()
+    }
+  });
+}
+
+export async function queueSearchCheck(searchId: string) {
+  return prisma.teeSearch.update({
+    where: { id: searchId },
+    data: {
+      scheduleVersion: { increment: 1 },
+      checkStatus: "QUEUED",
+      nextCheckAt: new Date(),
+      lastCheckOutcome: null
+    },
+    select: {
+      id: true,
+      status: true,
+      scheduleVersion: true,
+      workflowRunId: true,
+      checkStatus: true,
+      updatedAt: true
+    }
+  });
+}
+
+export async function getSearchCheckRequestState(searchId: string) {
+  return prisma.teeSearch.findUnique({
+    where: { id: searchId },
+    select: {
+      id: true,
+      status: true,
+      checkStatus: true,
+      workflowRunId: true,
+      lastCheckedAt: true,
+      nextCheckAt: true
+    }
+  });
+}
+
+export async function attachSearchWorkflowRun(
+  searchId: string,
+  scheduleVersion: number,
+  workflowRunId: string
+) {
+  return prisma.teeSearch.updateMany({
+    where: {
+      id: searchId,
+      scheduleVersion
+    },
+    data: {
+      workflowRunId
+    }
+  });
+}
+
+export async function claimScheduledSearchCheck(searchId: string, scheduleVersion: number) {
+  const result = await prisma.teeSearch.updateMany({
+    where: {
+      id: searchId,
+      scheduleVersion,
+      status: "ACTIVE"
+    },
+    data: {
+      checkStatus: "CHECKING",
+      nextCheckAt: null
+    }
+  });
+
+  return result.count === 1;
+}
+
+export async function completeScheduledSearchCheck(input: {
+  searchId: string;
+  scheduleVersion: number;
+  outcome: string;
+  nextCheckAt: Date | null;
+}) {
+  return prisma.teeSearch.updateMany({
+    where: {
+      id: input.searchId,
+      scheduleVersion: input.scheduleVersion
+    },
+    data: {
+      checkStatus: input.nextCheckAt ? "WAITING" : "STOPPED",
+      lastCheckedAt: new Date(),
+      lastCheckOutcome: input.outcome,
+      nextCheckAt: input.nextCheckAt
+    }
+  });
+}
+
+export async function failScheduledSearchCheck(input: {
+  searchId: string;
+  scheduleVersion: number;
+  message: string;
+  nextCheckAt: Date;
+}) {
+  return prisma.teeSearch.updateMany({
+    where: {
+      id: input.searchId,
+      scheduleVersion: input.scheduleVersion
+    },
+    data: {
+      checkStatus: "FAILED",
+      lastCheckedAt: new Date(),
+      lastCheckOutcome: input.message,
+      nextCheckAt: input.nextCheckAt
+    }
+  });
+}
+
+export async function stopSearchSchedule(searchId: string) {
+  return prisma.teeSearch.update({
+    where: { id: searchId },
+    data: {
+      scheduleVersion: { increment: 1 },
+      checkStatus: "STOPPED",
+      nextCheckAt: null,
+      workflowRunId: null
+    }
+  });
+}
+
+export async function getSearchScheduleState(searchId: string, scheduleVersion: number) {
+  return prisma.teeSearch.findFirst({
+    where: {
+      id: searchId,
+      scheduleVersion,
+      status: "ACTIVE"
+    },
+    select: {
+      id: true,
+      scheduleVersion: true,
+      status: true,
+      nextCheckAt: true
+    }
+  });
+}
+
+export async function getSearchScheduleTiming(searchId: string, scheduleVersion: number) {
+  return prisma.teeSearch.findFirst({
+    where: {
+      id: searchId,
+      scheduleVersion,
+      status: "ACTIVE"
+    },
+    select: {
+      id: true,
+      date: true,
+      cadenceMinutes: true,
+      scheduleVersion: true
+    }
+  });
+}
+
+export async function listSearchesNeedingScheduleRecovery() {
+  const overdueBefore = new Date(Date.now() - 10 * 60 * 1000);
+  return prisma.teeSearch.findMany({
+    where: {
+      status: "ACTIVE",
+      date: { gte: startOfToday() },
+      OR: [
+        { checkStatus: "IDLE" },
+        { checkStatus: "FAILED", nextCheckAt: { lte: new Date() } },
+        { checkStatus: "WAITING", nextCheckAt: { lte: overdueBefore } }
+      ]
+    },
+    select: { id: true },
+    take: 25
   });
 }
 

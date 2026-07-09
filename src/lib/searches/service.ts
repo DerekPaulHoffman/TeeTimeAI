@@ -176,6 +176,20 @@ export async function listRecentTeeSearches(limit = 20) {
   });
 }
 
+export async function getTeeSearchForUser(userId: string, searchId: string) {
+  return prisma.teeSearch.findUnique({
+    where: { id: searchId, userId },
+    select: { id: true, status: true }
+  });
+}
+
+export async function getTeeSearchForPoc(searchId: string) {
+  return prisma.teeSearch.findUnique({
+    where: { id: searchId },
+    select: { id: true, status: true }
+  });
+}
+
 export async function updateTeeSearchStatusForUser(
   userId: string,
   searchId: string,
