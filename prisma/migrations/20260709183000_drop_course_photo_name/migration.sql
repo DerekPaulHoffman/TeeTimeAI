@@ -1,0 +1,1 @@
+ALTER TABLE "Course" DROP COLUMN IF EXISTS "photoName";

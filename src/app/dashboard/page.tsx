@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import Image from "next/image";
 import { auth } from "@clerk/nextjs/server";
 import {
   Bell,
@@ -147,7 +146,6 @@ function DashboardView({
                       <CourseImage
                         key={preference.id}
                         name={preference.course.name}
-                        photoName={preference.course.photoName}
                       />
                     ))}
                   </div>
@@ -336,24 +334,11 @@ function getCompactLocation(address: string | null) {
   return address;
 }
 
-function CourseImage({ name, photoName }: { name: string; photoName: string | null }) {
-  if (!photoName) {
-    return (
-      <div className="dashboard-course-image dashboard-course-image-empty">
-        <Flag size={18} />
-      </div>
-    );
-  }
-
+function CourseImage({ name }: { name: string }) {
   return (
-    <Image
-      alt={`${name} course photo`}
-      className="dashboard-course-image"
-      height={74}
-      src={`/api/courses/photo?name=${encodeURIComponent(photoName)}`}
-      unoptimized
-      width={104}
-    />
+    <div className="dashboard-course-image dashboard-course-image-empty" title={name}>
+      <Flag size={18} />
+    </div>
   );
 }
 

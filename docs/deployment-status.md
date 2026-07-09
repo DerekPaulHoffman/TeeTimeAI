@@ -31,7 +31,7 @@ Last updated: 2026-07-09
 - Live `/dashboard` returns 200. Signed-out users see the account-management prompt instead of a missing sign-in route.
 - Live `/api/location/geocode?q=Trumbull%2C%20CT` returns 200 with Google Places text-search coordinates and `demo=false`.
 - Live `/api/courses/discover?latitude=41.242&longitude=-73.209&radiusMeters=30000` returns 200 with 20 live Google Places courses and `demo=false`.
-- Live `/api/courses/photo` returns a 302 redirect to a Google-hosted course image when Places returns `photoName`.
+- Live `/api/courses/photo` returns a 302 redirect to a Google-hosted course image when Places returns a photo reference.
 - Live `POST /api/searches` accepts an alert email plus 1 to 5 ranked courses and creates an active search in Postgres.
 - Live `/api/automation/active-searches` returns 200 with the configured `x-automation-key`; latest smoke saw 9 active searches in the queue.
 - Playwright browser smoke verified desktop course discovery, ranking, email-alert save, dashboard rendering, mobile layout, and zero browser console errors.

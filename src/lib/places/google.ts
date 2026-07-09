@@ -40,7 +40,7 @@ export type CourseCandidate = {
   rating?: number;
   phone?: string;
   website?: string;
-  photoName?: string;
+  photoReference?: string;
   photoAttributions?: CoursePhotoAttribution[];
 };
 
@@ -91,7 +91,7 @@ export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandi
     rating: place.rating,
     phone: place.nationalPhoneNumber,
     website: place.websiteUri,
-    photoName: place.photos?.[0]?.name,
+    photoReference: place.photos?.[0]?.name,
     photoAttributions: place.photos?.[0]?.authorAttributions
   };
 }

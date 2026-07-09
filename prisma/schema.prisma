@@ -71,7 +71,6 @@ model Course {
   rating                Float?
   website               String?
   phone                 String?
-  photoName             String?
   isPublic              Boolean               @default(true)
   isManual              Boolean               @default(false)
   detectedBookingUrl    String?

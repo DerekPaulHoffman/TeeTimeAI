@@ -44,7 +44,7 @@ describe("Google Places mapping", () => {
       rating: 4.4,
       phone: "(203) 452-5171",
       website: "https://www.tashuaknolls.com",
-      photoName: "places/abc123/photos/photo1",
+      photoReference: "places/abc123/photos/photo1",
       photoAttributions: [
         {
           displayName: "Google contributor",

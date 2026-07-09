@@ -71,7 +71,6 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
           rating: course.rating,
           phone: course.phone,
           website: course.website,
-          photoName: course.photoName,
           isManual: !course.googlePlaceId
         }
       }

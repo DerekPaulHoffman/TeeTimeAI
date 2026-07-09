@@ -2,21 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { getGooglePlacesApiKey } from "@/lib/places/google";
 
-const photoNamePattern = /^places\/[^/]+\/photos\/[^/]+$/;
+const photoReferencePattern = /^places\/[^/]+\/photos\/[^/]+$/;
 
 export async function GET(request: NextRequest) {
   const apiKey = getGooglePlacesApiKey();
-  const name = request.nextUrl.searchParams.get("name");
+  const photoReference = request.nextUrl.searchParams.get("ref");
 
   if (!apiKey) {
     return NextResponse.json({ error: "Google Places is not configured" }, { status: 404 });
   }
 
-  if (!name || !photoNamePattern.test(name)) {
-    return NextResponse.json({ error: "Invalid photo name" }, { status: 400 });
+  if (!photoReference || !photoReferencePattern.test(photoReference)) {
+    return NextResponse.json({ error: "Invalid photo reference" }, { status: 400 });
   }
 
-  const photoUrl = new URL(`https://places.googleapis.com/v1/${name}/media`);
+  const photoUrl = new URL(`https://places.googleapis.com/v1/${photoReference}/media`);
   photoUrl.searchParams.set("maxWidthPx", "480");
   photoUrl.searchParams.set("maxHeightPx", "360");
   photoUrl.searchParams.set("skipHttpRedirect", "true");

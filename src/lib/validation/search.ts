@@ -18,8 +18,7 @@ const selectedCourseSchema = z.object({
   longitude: z.number().min(-180).max(180),
   rating: z.number().min(0).max(5).optional(),
   phone: z.string().optional(),
-  website: z.string().url().optional(),
-  photoName: z.string().optional()
+  website: z.string().url().optional()
 });
 
 export const teeSearchDetailsSchema = z

@@ -130,7 +130,7 @@ Current nearby search:
 - Sends `includedTypes: ["golf_course"]`.
 - Requests only needed fields.
 - Uses `places:searchText` style geocoding for typed location fallback.
-- Uses `/api/courses/photo` as a proxy/redirect for Places photo names.
+- Uses `/api/courses/photo` as a proxy/redirect for transient Places photo references.
 
 Filtering expectations:
 

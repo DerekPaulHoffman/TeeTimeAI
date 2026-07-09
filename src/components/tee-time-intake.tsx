@@ -440,7 +440,7 @@ function CourseThumbnail({
   const className =
     variant === "compact" ? "course-thumbnail course-thumbnail-compact" : "course-thumbnail";
 
-  if (!course.photoName) {
+  if (!course.photoReference) {
     return (
       <div className={`${className} course-thumbnail-empty`} aria-hidden="true">
         <MapPinned size={22} />
@@ -454,7 +454,7 @@ function CourseThumbnail({
       className={className}
       height={variant === "compact" ? 72 : 90}
       loading="lazy"
-      src={`/api/courses/photo?name=${encodeURIComponent(course.photoName)}`}
+      src={`/api/courses/photo?ref=${encodeURIComponent(course.photoReference)}`}
       unoptimized
       width={variant === "compact" ? 96 : 120}
     />
