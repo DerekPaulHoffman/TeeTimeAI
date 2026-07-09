@@ -14,6 +14,7 @@
     "automation:poll": "tsx scripts/automation/poll-active-searches.ts",
     "automation:improve": "tsx scripts/automation/improvement-loop.ts",
     "automation:inspect": "tsx scripts/automation/inspect-state.ts",
+    "automation:configure-known-foreup": "tsx scripts/automation/configure-known-foreup-courses.ts",
     "seed:foreup": "tsx scripts/seed-foreup.ts"
   },
   "dependencies": {

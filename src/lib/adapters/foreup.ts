@@ -2,7 +2,7 @@ import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 export type ForeupMetadata = {
   scheduleId: number;
-  bookingClassId: number;
+  bookingClassId?: number;
   bookingBaseUrl: string;
 };
 
@@ -22,7 +22,7 @@ export function isForeupMetadata(value: unknown): value is ForeupMetadata {
   const metadata = value as Partial<ForeupMetadata>;
   return (
     typeof metadata.scheduleId === "number" &&
-    typeof metadata.bookingClassId === "number" &&
+    (metadata.bookingClassId === undefined || typeof metadata.bookingClassId === "number") &&
     typeof metadata.bookingBaseUrl === "string"
   );
 }
@@ -39,8 +39,10 @@ export async function fetchForeupSlots(input: {
   url.searchParams.set("date", dateParam);
   url.searchParams.set("holes", "all");
   url.searchParams.set("players", String(input.players));
-  url.searchParams.set("booking_class", String(input.metadata.bookingClassId));
   url.searchParams.set("schedule_id", String(input.metadata.scheduleId));
+  if (input.metadata.bookingClassId !== undefined) {
+    url.searchParams.set("booking_class", String(input.metadata.bookingClassId));
+  }
 
   const response = await fetch(url, {
     headers: {

@@ -72,6 +72,40 @@ async function main() {
     }
   });
 
+  await prisma.course.upsert({
+    where: { googlePlaceId: "demo-oak-hills" },
+    update: {
+      detectedPlatform: "FOREUP",
+      automationEligibility: "ALLOWED",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+      policyNotes:
+        "Official site says public tee time reservations can be made online 8 days in advance; alert-only polling only.",
+      bookingMetadata: {
+        scheduleId: 11739,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+      }
+    },
+    create: {
+      googlePlaceId: "demo-oak-hills",
+      name: "Oak Hills Park Golf Course",
+      address: "165 Fillow St, Norwalk, CT",
+      latitude: 41.1151,
+      longitude: -73.4394,
+      rating: 4.2,
+      phone: "(203) 838-0303",
+      website: "https://www.oakhillsgc.com",
+      detectedPlatform: "FOREUP",
+      automationEligibility: "ALLOWED",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+      policyNotes:
+        "Official site says public tee time reservations can be made online 8 days in advance; alert-only polling only.",
+      bookingMetadata: {
+        scheduleId: 11739,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+      }
+    }
+  });
+
   const date = new Date();
   date.setDate(date.getDate() + 7);
   date.setHours(0, 0, 0, 0);
