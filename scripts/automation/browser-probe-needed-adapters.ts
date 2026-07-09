@@ -164,10 +164,25 @@ async function clickLikelyBookingLink(page: Page) {
     return;
   }
 
-  await Promise.race([
-    page.waitForURL(/./, { timeout: 5_000 }).catch(() => undefined),
-    link.click({ timeout: 5_000 }).catch(() => undefined)
-  ]);
+  const previousUrl = page.url();
+  const popupPromise = page.waitForEvent("popup", { timeout: 5_000 }).catch(() => null);
+  await link.click({ timeout: 5_000 }).catch(() => undefined);
+  const popup = await popupPromise;
+
+  if (popup) {
+    await popup.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+    await page.goto(popup.url(), { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(
+      () => undefined
+    );
+    await popup.close().catch(() => undefined);
+    return;
+  }
+
+  if (page.url() === previousUrl) {
+    await page.waitForURL((url) => url.toString() !== previousUrl, { timeout: 5_000 }).catch(
+      () => undefined
+    );
+  }
 }
 
 async function trySelectSearchDate(page: Page) {
