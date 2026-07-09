@@ -91,8 +91,11 @@ button {
 }
 
 .text-link {
+  align-items: center;
   color: #ffffff;
+  display: inline-flex;
   font-weight: 700;
+  min-height: 44px;
   text-shadow: 0 1px 14px rgba(0, 0, 0, 0.28);
 }
 
@@ -359,6 +362,9 @@ button {
 }
 
 .photo-credit a {
+  align-items: center;
+  display: inline-flex;
+  min-height: 24px;
   text-decoration: underline;
   text-underline-offset: 2px;
 }

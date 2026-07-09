@@ -50,6 +50,9 @@ See `docs/codex-automation-loop.md` for boundaries and run contract.
 npm run test:run
 npm run lint
 npm run build
+npm run ui:smoke
 ```
+
+`ui:smoke` runs Playwright against a local Next server by default. Set `UI_SMOKE_BASE_URL=https://teetimespot.com` to smoke production without starting a local server.
 
 The legacy Python crawler prototype is preserved under `legacy/python-crawler`.

@@ -6,13 +6,15 @@ Tee Time Spot uses Postgres as the queue of user demand and a local Codex automa
 
 - Every 15 minutes: run `npm run automation:poll` against active searches.
 - Hourly: run `npm run automation:improve` to create a Codex-ready prompt from recent failures, adapter gaps, and UI friction.
-- Before deploys: run `npm run test:run`, `npm run lint`, and `npm run build`.
+- Baseline UI/access check: run `npm run ui:smoke` locally, or set `UI_SMOKE_BASE_URL=https://teetimespot.com` before `npm run ui:smoke` for production.
+- Before deploys: run `npm run test:run`, `npm run lint`, `npm run build`, and `npm run ui:smoke`.
 
 ## Loop Engineering Standard
 
 The loop should improve the product every time it has credible evidence to act. It should not just rerun the same prompt.
 
 - Start each run by writing or confirming checkpoints: `queue_confirmed`, `candidate_selected`, `tool_research_done`, `ui_smoke_done`, `verification_done`, and `outcome_recorded`.
+- Run `npm run automation:inspect` and `npm run ui:smoke` before choosing a candidate unless a provider outage makes the smoke impossible. A smoke failure is evidence, not noise.
 - Use normalized terminal outcomes: `success`, `no_op`, `needs_adapter`, `blocked_policy`, `blocked_auth`, `blocked_tooling`, `blocked_env`, and `needs_human`.
 - Keep side effects idempotent. Email alerts, GitHub pushes, and future Slack/GitHub comments need stable keys so a retry cannot duplicate them.
 - Use a per-loop lease before mutating shared state so concurrent runs do not work the same candidate.
@@ -25,6 +27,8 @@ Every improvement run must actively look for better tools when the current appro
 - Run a short current-tool research pass for UI, automation, maps/search, email, or scraping gaps before picking a new approach.
 - For weak UI or UX, compare against current tee-time/waitlist products and AI design tools, then choose one concrete change to ship.
 - Use the browser for desktop and mobile smokes on onboarding, course ranking, dashboard state, and email preview.
+- The committed Playwright smoke checks desktop and mobile onboarding, typed-location discovery, course ranking limit enforcement, dashboard access/setup states, failed same-origin requests, browser console/page errors, horizontal overflow, and too-small interactive controls.
+- If email preview is missing or inaccessible, record that as a UI/product gap and either add a preview route or explain why another issue is higher leverage.
 - If the implemented UI still looks weak after a browser smoke, escalate to a stronger design workflow: Figma/Figma Make, v0, a generated design direction, or another current tool discovered during the research pass.
 - Do not blindly adopt generated output. Treat design tools as idea generators, then implement the best parts in the repo's Next.js app with tests and build verification.
 
@@ -61,8 +65,26 @@ Each automation run should:
 7. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers.
 8. Upsert `TeeTimeMatch` rows for qualifying slots.
 9. Send Resend email alerts only for new pending matches, then mark them sent.
-10. Run tests, lint, build, and a browser smoke for any code or UI change.
+10. Run tests, lint, build, and `npm run ui:smoke` for any code or UI change.
 11. Finish the `AutomationRun` with outcome, checkpoints, notes, errors, changed files, and redacted setup changes when applicable.
+
+## UI Smoke Contract
+
+The hourly loop should treat UI/access problems as product bugs. The smoke must pass before `ui_smoke_done` is true.
+
+```powershell
+npm run ui:smoke
+```
+
+For production verification after a deploy:
+
+```powershell
+$env:UI_SMOKE_BASE_URL = "https://teetimespot.com"
+npm run ui:smoke
+Remove-Item Env:\UI_SMOKE_BASE_URL
+```
+
+The smoke intentionally fails when course discovery returns too few courses to exercise the five-course limit. That points to a provider/configuration problem or a degraded demo mode, both of which the hourly loop should surface.
 
 ## First Adapter
 

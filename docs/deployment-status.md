@@ -8,8 +8,8 @@ Last updated: 2026-07-09
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-l957er0a5-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_BseBpUfu6Pc2gHHMqGFEdVntWcPT`
+- Latest verified deployment: `teetimeai-3l1whl9rf-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_BqL96wEn4CKwSfc4zf5JP6NmfSYo`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -18,6 +18,7 @@ Last updated: 2026-07-09
 - `npm run test:run`
 - `npm run lint`
 - `npm run build`
+- `npm run ui:smoke`
 - Production Vercel deploy completed successfully.
 - `teetimespot.com` was purchased through Vercel, attached to the `teetimeai` project, and verified.
 - `www.teetimespot.com` was attached to the same project and verified.
@@ -47,6 +48,8 @@ Last updated: 2026-07-09
 - 2026-07-08 production deploy `dpl_4MXwzjSdYrZvKv7hv2sm4cEQ7GKj` verified `/` 200, `/dashboard` 200, live Places geocode with `demo=false`, and live `POST /api/searches` with a composite Tashua Knolls & Tashua Glen course resolving to the seeded `FOREUP`/`ALLOWED` Tashua Knolls course. The smoke search was cancelled after verification, and a Vercel runtime log scan found no production warnings, errors, or fatals.
 - 2026-07-08 hourly product loop fixed alert retry/drainage for previously created pending matches. The poller now drains active pending `TeeTimeMatch` alerts before deduping new tee-sheet results, dry-runs reserved seed/test recipient domains, normalizes copied Resend env values, and gives the Postgres advisory lease a 60-second transaction timeout for live tee-sheet polling. Verification run `cmrcws2c70000z41550ogsmzn` processed 10 active searches successfully after draining the stale demo pending alert; latest inspect showed `pendingAlerts: []` and the only current actionable probe remains Oak Hills Park Golf Course `NEEDS_ADAPTER`.
 - 2026-07-09 hourly product loop identified Oak Hills Park Golf Course as an official ForeUP course (`booking/22739/11739`), updated the ForeUP adapter to support public tee sheets that do not require a booking class, seeded Oak Hills ForeUP metadata, and repaired the active Oak Hills course row in Postgres. Verification run `cmrcyxbi70000lc15iighvic0` processed 10 active searches; latest inspect showed `recentActionableProbes: []` and `pendingAlerts: []`.
+- 2026-07-09 loop hardening added a committed Playwright UI smoke (`npm run ui:smoke`) covering desktop/mobile onboarding, typed-location discovery, 1-to-5 ranking limit enforcement, dashboard access states, same-origin failed requests, console/page errors, horizontal overflow, and too-small interactive targets. The first smoke found undersized clickable attribution/header links, which were fixed in CSS.
+- 2026-07-09 production deploy `dpl_BqL96wEn4CKwSfc4zf5JP6NmfSYo` verified local tests/lint/build, local `npm run ui:smoke`, production `UI_SMOKE_BASE_URL=https://teetimespot.com npm run ui:smoke`, and clean Vercel error logs.
 
 ## Current Runtime Mode
 

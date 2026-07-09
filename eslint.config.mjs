@@ -9,7 +9,9 @@ const eslintConfig = [
       "coverage/**",
       "legacy/**",
       "node_modules/**",
-      "out/**"
+      "out/**",
+      "playwright-report/**",
+      "test-results/**"
     ]
   },
   ...nextVitals,
