@@ -1289,19 +1289,46 @@ button {
   align-items: center;
   background: #ffffff;
   border-top: 1px solid var(--line);
+  cursor: grab;
   display: grid;
   gap: 10px;
   grid-template-columns: auto auto minmax(0, 1fr) auto;
   min-height: 58px;
   padding: 10px 12px;
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease,
+    transform 160ms ease;
 }
 
 .queue-priority-row:first-child {
   border-top: 0;
 }
 
-.queue-priority-row > svg {
+.queue-priority-row:active {
+  cursor: grabbing;
+}
+
+.queue-priority-row.is-dragging {
+  background: #f6faf7;
+  opacity: 0.58;
+}
+
+.queue-priority-row.is-drop-target {
+  background: #f9fcf8;
+  box-shadow: inset 0 0 0 2px rgba(4, 99, 68, 0.28);
+}
+
+.queue-priority-drag-handle {
+  align-items: center;
   color: var(--muted);
+  display: inline-flex;
+  touch-action: none;
+}
+
+.queue-priority-row[draggable="true"] .queue-priority-drag-handle {
+  cursor: grab;
 }
 
 .queue-priority-name {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { type DragEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowDown,
@@ -52,6 +52,8 @@ export function SearchStatusActions({
   const [localStatus, setLocalStatus] = useState(status);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draggedPreferenceId, setDraggedPreferenceId] = useState<string | null>(null);
+  const [dropTargetPreferenceId, setDropTargetPreferenceId] = useState<string | null>(null);
   const [form, setForm] = useState({
     date: initialDate,
     startTime: initialStartTime,
@@ -130,17 +132,79 @@ export function SearchStatusActions({
       return;
     }
 
-    const nextPreferences = [...form.coursePreferences];
-    [nextPreferences[index], nextPreferences[nextIndex]] = [
-      nextPreferences[nextIndex],
-      nextPreferences[index]
-    ];
-    setForm({
-      ...form,
-      coursePreferences: nextPreferences.map((preference, preferenceIndex) => ({
-        ...preference,
-        rank: preferenceIndex + 1
-      }))
+    setForm((currentForm) => ({
+      ...currentForm,
+      coursePreferences: reorderCoursePreferences(
+        currentForm.coursePreferences,
+        index,
+        nextIndex
+      )
+    }));
+  }
+
+  function startCourseDrag(
+    event: DragEvent<HTMLDivElement>,
+    preference: CoursePreferenceFormValue
+  ) {
+    if (pending) {
+      event.preventDefault();
+      return;
+    }
+
+    setDraggedPreferenceId(preference.id);
+    setDropTargetPreferenceId(preference.id);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", preference.id);
+  }
+
+  function updateCourseDropTarget(
+    event: DragEvent<HTMLDivElement>,
+    preference: CoursePreferenceFormValue
+  ) {
+    if (!draggedPreferenceId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (dropTargetPreferenceId !== preference.id) {
+      setDropTargetPreferenceId(preference.id);
+    }
+  }
+
+  function dropCoursePreference(
+    event: DragEvent<HTMLDivElement>,
+    toPreference: CoursePreferenceFormValue
+  ) {
+    event.preventDefault();
+    const fromPreferenceId = event.dataTransfer.getData("text/plain") || draggedPreferenceId;
+    setDraggedPreferenceId(null);
+    setDropTargetPreferenceId(null);
+
+    if (!fromPreferenceId || fromPreferenceId === toPreference.id) {
+      return;
+    }
+
+    setForm((currentForm) => {
+      const fromIndex = currentForm.coursePreferences.findIndex(
+        (preference) => preference.id === fromPreferenceId
+      );
+      const toIndex = currentForm.coursePreferences.findIndex(
+        (preference) => preference.id === toPreference.id
+      );
+
+      if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+        return currentForm;
+      }
+
+      return {
+        ...currentForm,
+        coursePreferences: reorderCoursePreferences(
+          currentForm.coursePreferences,
+          fromIndex,
+          toIndex
+        )
+      };
     });
   }
 
@@ -208,10 +272,32 @@ export function SearchStatusActions({
                   Put the courses you care about most at the top.
                 </span>
               </div>
-              <div className="queue-priority-list">
+              <div className="queue-priority-list" role="list">
                 {form.coursePreferences.map((preference, index) => (
-                  <div className="queue-priority-row" key={preference.id}>
-                    <GripVertical size={16} aria-hidden="true" />
+                  <div
+                    aria-label={`Priority ${index + 1}: ${preference.courseName}`}
+                    className={[
+                      "queue-priority-row",
+                      draggedPreferenceId === preference.id ? "is-dragging" : "",
+                      dropTargetPreferenceId === preference.id ? "is-drop-target" : ""
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    draggable={!pending}
+                    key={preference.id}
+                    onDragEnd={() => {
+                      setDraggedPreferenceId(null);
+                      setDropTargetPreferenceId(null);
+                    }}
+                    onDragOver={(event) => updateCourseDropTarget(event, preference)}
+                    onDragStart={(event) => startCourseDrag(event, preference)}
+                    onDrop={(event) => dropCoursePreference(event, preference)}
+                    role="listitem"
+                    title="Drag to reorder"
+                  >
+                    <span className="queue-priority-drag-handle" aria-hidden="true">
+                      <GripVertical size={16} />
+                    </span>
                     <span className="course-rank-number">{index + 1}</span>
                     <span className="queue-priority-name">{preference.courseName}</span>
                     <div className="queue-priority-controls">
@@ -344,6 +430,24 @@ function parseAdditionalEmails(value: string) {
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean)
     .slice(0, MAX_ADDITIONAL_ALERT_EMAILS);
+}
+
+function reorderCoursePreferences(
+  preferences: CoursePreferenceFormValue[],
+  fromIndex: number,
+  toIndex: number
+) {
+  const nextPreferences = [...preferences];
+  const [movedPreference] = nextPreferences.splice(fromIndex, 1);
+  if (!movedPreference) {
+    return preferences;
+  }
+
+  nextPreferences.splice(toIndex, 0, movedPreference);
+  return nextPreferences.map((preference, preferenceIndex) => ({
+    ...preference,
+    rank: preferenceIndex + 1
+  }));
 }
 
 async function readError(response: Response, fallback: string) {

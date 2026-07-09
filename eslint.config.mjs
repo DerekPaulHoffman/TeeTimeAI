@@ -4,6 +4,7 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = [
   {
     ignores: [
+      ".codex-artifacts/**",
       ".next/**",
       ".venv/**",
       "coverage/**",
