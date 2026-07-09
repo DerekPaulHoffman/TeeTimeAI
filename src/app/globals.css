@@ -405,13 +405,38 @@ button {
   min-width: 0;
 }
 
-.course-badges,
-.dashboard-card-topline {
+.course-badges {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
   margin-bottom: 8px;
+}
+
+.dashboard-card-topline {
+  align-items: center;
+  background: #f5fbf7;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 16px 22px;
+}
+
+.dashboard-card-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  min-width: 0;
+}
+
+.dashboard-card-title h3 {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+  margin: 0;
 }
 
 .mini-pill {
@@ -694,7 +719,9 @@ button {
 }
 
 .dashboard-page {
-  padding: 104px clamp(20px, 5vw, 72px) 72px;
+  margin: 0 auto;
+  max-width: 1320px;
+  padding: 92px clamp(20px, 5vw, 72px) 72px;
 }
 
 .preview-page {
@@ -706,7 +733,7 @@ button {
   display: flex;
   gap: 20px;
   justify-content: space-between;
-  margin-bottom: 30px;
+  margin-bottom: 20px;
 }
 
 .preview-header {
@@ -718,9 +745,9 @@ button {
 }
 
 .dashboard-header h1 {
-  font-size: clamp(2.2rem, 5vw, 5.5rem);
+  font-size: clamp(2rem, 4vw, 3.8rem);
   letter-spacing: 0;
-  line-height: 0.96;
+  line-height: 1;
   margin: 0;
 }
 
@@ -734,39 +761,7 @@ button {
 .dashboard-grid {
   display: grid;
   gap: 24px;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 390px);
-}
-
-.dashboard-metrics {
-  display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 0 0 24px;
-}
-
-.metric-card {
-  align-items: center;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: 0 1px 0 rgba(17, 29, 24, 0.02);
-  color: var(--fairway-dark);
-  display: grid;
-  gap: 6px;
-  min-height: 118px;
-  padding: 18px;
-}
-
-.metric-card strong {
-  color: var(--ink);
-  font-size: 2.15rem;
-  line-height: 1;
-}
-
-.metric-card span {
-  color: var(--muted);
-  font-size: 0.9rem;
-  font-weight: 800;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
 }
 
 .preview-grid {
@@ -788,42 +783,37 @@ button {
   padding: 22px;
 }
 
-.dashboard-row {
-  align-items: start;
-  grid-template-columns: 132px 1fr auto;
-  min-width: 0;
-  padding: 14px;
+.dashboard-panel {
+  overflow: hidden;
+  padding: 0;
 }
 
-.dashboard-card-media {
-  display: grid;
-  gap: 8px;
+.dashboard-panel > .meta {
+  padding: 0 24px 18px;
+}
+
+.dashboard-row {
+  align-items: start;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
 }
 
 .dashboard-course-image {
   aspect-ratio: 4 / 3;
-  background: #e7eee8;
-  border-radius: 8px;
+  background-color: #e7eee8;
+  background-position: center;
+  background-size: cover;
+  border-radius: 10px;
   color: var(--fairway-dark);
   display: block;
-  height: auto;
-  object-fit: cover;
-  width: 104px;
-}
-
-.dashboard-course-image:nth-child(2) {
-  margin-left: 16px;
-}
-
-.dashboard-course-image:nth-child(3) {
-  margin-left: 32px;
-}
-
-.dashboard-course-image-empty {
-  align-items: center;
-  display: grid;
-  min-height: 78px;
-  place-items: center;
+  height: 58px;
+  overflow: hidden;
+  width: 72px;
 }
 
 .dashboard-card-main {
@@ -871,10 +861,12 @@ button {
 
 .panel-title-row {
   align-items: center;
+  border-bottom: 1px solid var(--line);
   display: flex;
   gap: 12px;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 0;
+  padding: 20px 24px;
 }
 
 .panel-title-row h2 {
@@ -887,19 +879,26 @@ button {
 
 .watch-stat-grid {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
-  margin-top: 14px;
+  gap: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 18px 22px;
 }
 
 .watch-stat {
-  background: #f5f7f2;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
   display: grid;
   gap: 6px;
-  min-height: 96px;
-  padding: 12px;
+  min-height: 0;
+  padding: 0 18px;
+}
+
+.watch-stat:first-child {
+  border-left: 0;
+  padding-left: 0;
 }
 
 .watch-stat svg,
@@ -908,7 +907,7 @@ button {
 }
 
 .watch-stat span,
-.sidebar-stat-list span {
+.sidebar-stat-list dt {
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 900;
@@ -922,19 +921,20 @@ button {
 
 .watch-course-list {
   display: grid;
-  gap: 10px;
-  margin-top: 14px;
+  gap: 0;
+  margin: 0;
 }
 
 .watch-course-row {
   align-items: center;
   background: #ffffff;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
   display: grid;
-  gap: 10px;
-  grid-template-columns: auto 1fr auto;
-  padding: 10px;
+  gap: 16px;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  padding: 18px 22px;
 }
 
 .watch-course-links {
@@ -958,6 +958,15 @@ button {
   width: 30px;
 }
 
+.watch-course-copy {
+  min-width: 0;
+}
+
+.watch-course-row .watch-course-copy .meta {
+  display: flex;
+  margin: 4px 0 0;
+}
+
 .watch-course-row .meta {
   align-items: center;
   display: inline-flex;
@@ -978,27 +987,37 @@ button {
 
 .dashboard-sidebar {
   align-self: start;
+  padding: 24px;
   position: sticky;
   top: 84px;
 }
 
 .sidebar-stat-list {
   display: grid;
-  gap: 10px;
-  margin: 18px 0 24px;
+  gap: 16px;
+  margin: 22px 0;
 }
 
 .sidebar-stat-list div {
-  background: #f5f7f2;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  display: grid;
-  gap: 5px;
-  padding: 14px;
+  align-items: baseline;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
 }
 
-.sidebar-stat-list strong {
-  font-size: 1.2rem;
+.sidebar-stat-list dd {
+  font-weight: 900;
+  margin: 0;
+  text-align: right;
+}
+
+.dashboard-add-search {
+  margin-top: 16px;
+  width: 100%;
+}
+
+.dashboard-sidebar .alert {
+  margin-top: 18px;
 }
 
 .preview-data {
@@ -1131,11 +1150,43 @@ button {
   min-width: 0;
 }
 
-.queue-edit-form {
-  display: grid;
-  gap: 10px;
+.search-actions.is-editing {
+  grid-column: 1 / -1;
   justify-items: stretch;
-  width: min(100%, 360px);
+  width: 100%;
+}
+
+.dashboard-action-row {
+  flex-wrap: nowrap;
+  justify-content: end;
+}
+
+.dashboard-icon-button {
+  min-height: 38px;
+  padding: 0;
+  width: 38px;
+}
+
+.dashboard-edit-button {
+  min-height: 38px;
+  padding: 0 14px;
+}
+
+.queue-edit-form {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  justify-items: stretch;
+  padding: 16px;
+  width: 100%;
+}
+
+.queue-edit-form label:nth-of-type(6),
+.queue-edit-actions {
+  grid-column: 1 / -1;
 }
 
 .queue-edit-form label {
@@ -1175,6 +1226,7 @@ button {
 
 .queue-action-error {
   color: var(--danger);
+  grid-column: 1 / -1;
   text-align: right;
 }
 
@@ -1223,6 +1275,14 @@ button {
   max-width: calc(100vw - 32px);
   padding: 18px;
   width: 360px;
+}
+
+.dashboard-page + .feedback-widget .feedback-launcher {
+  font-size: 0;
+  gap: 0;
+  min-width: 46px;
+  padding: 0;
+  width: 46px;
 }
 
 .feedback-panel-header {
@@ -1318,7 +1378,6 @@ button {
 
   .intake-layout,
   .dashboard-grid,
-  .dashboard-metrics,
   .preview-grid,
   .email-preview-layout,
   .flow-grid {
@@ -1388,7 +1447,6 @@ button {
 
   .course-row,
   .selected-row,
-  .dashboard-row,
   .match-row {
     align-items: start;
     grid-template-columns: 1fr;
@@ -1403,27 +1461,35 @@ button {
     flex: 1 1 140px;
   }
 
-  .dashboard-card-media {
-    display: flex;
+  .dashboard-card-topline {
+    grid-template-columns: 1fr;
   }
 
-  .dashboard-course-image,
-  .dashboard-course-image:nth-child(2),
-  .dashboard-course-image:nth-child(3) {
-    margin-left: 0;
-    width: min(32%, 116px);
+  .dashboard-action-row {
+    justify-content: start;
+  }
+
+  .dashboard-course-image {
+    height: 74px;
+    width: 100%;
   }
 
   .watch-stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .watch-stat:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+
   .watch-course-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: auto minmax(84px, 116px) minmax(0, 1fr);
   }
 
   .watch-course-links {
     align-items: start;
+    grid-column: 2 / -1;
     justify-items: start;
   }
 
@@ -1435,6 +1501,15 @@ button {
   .queue-edit-form {
     justify-items: stretch;
     width: 100%;
+  }
+
+  .queue-edit-form {
+    grid-template-columns: 1fr;
+  }
+
+  .queue-edit-form label:nth-of-type(6),
+  .queue-edit-actions {
+    grid-column: auto;
   }
 
   .search-actions .inline-actions {

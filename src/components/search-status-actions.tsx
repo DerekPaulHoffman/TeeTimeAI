@@ -103,7 +103,7 @@ export function SearchStatusActions({
   }
 
   return (
-    <div className="search-actions">
+    <div className={`search-actions${editing ? " is-editing" : ""}`}>
       {editing ? (
         <div className="queue-edit-form">
           <label>
@@ -172,7 +172,7 @@ export function SearchStatusActions({
               Up to {MAX_ADDITIONAL_ALERT_EMAILS} more recipients, one per line or comma.
             </span>
           </label>
-          <div className="inline-actions">
+          <div className="inline-actions queue-edit-actions">
             <button
               className="button button-dark"
               type="button"
@@ -197,9 +197,9 @@ export function SearchStatusActions({
         </div>
       ) : (
         <>
-          <div className="inline-actions">
+          <div className="inline-actions dashboard-action-row">
             <button
-              className="button button-ghost"
+              className="button button-ghost dashboard-edit-button"
               type="button"
               onClick={() => setEditing(true)}
               disabled={pending}
@@ -210,36 +210,36 @@ export function SearchStatusActions({
             </button>
             {localStatus === "ACTIVE" ? (
               <button
-                className="button button-ghost"
+                className="button button-ghost dashboard-icon-button"
                 type="button"
                 onClick={() => update("PAUSED")}
                 disabled={pending}
+                aria-label="Pause search"
                 title="Pause search"
               >
                 <CirclePause size={16} />
-                Pause
               </button>
             ) : (
               <button
-                className="button button-ghost"
+                className="button button-ghost dashboard-icon-button"
                 type="button"
                 onClick={() => update("ACTIVE")}
                 disabled={pending}
+                aria-label="Resume search"
                 title="Resume search"
               >
                 <Play size={16} />
-                Resume
               </button>
             )}
             <button
-              className="button button-ghost"
+              className="button button-ghost dashboard-icon-button"
               type="button"
               onClick={removeSearch}
               disabled={pending}
+              aria-label="Remove search"
               title="Remove search"
             >
               <Trash2 size={16} />
-              Remove
             </button>
           </div>
           {initialAdditionalEmails.length > 0 ? (

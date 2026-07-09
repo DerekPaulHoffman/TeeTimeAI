@@ -108,7 +108,11 @@ test.describe("Tee Time Spot UI smoke", () => {
         name: /Your tee time alerts|Sign in to manage searches|Dashboard setup needed/i
       })
     ).toBeVisible();
-    await expect(page.getByRole("main").getByRole("link", { name: /New search|Back to search|Preview intake/i })).toBeVisible();
+    await expect(
+      page.getByRole("main").getByRole("link", {
+        name: /Add another search|Back to search|Preview intake/i
+      })
+    ).toBeVisible();
 
     const bodyText = await page.locator("body").innerText();
     expect(

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import {
   Bell,
+  CalendarDays,
   CalendarClock,
   CirclePause,
   Clock3,
@@ -12,7 +13,6 @@ import {
   MapPin,
   Play,
   ShieldAlert,
-  Trophy,
   Users
 } from "lucide-react";
 
@@ -81,6 +81,9 @@ function DashboardView({
     0
   );
   const totalAlerts = searches.length;
+  const alertStatusCopy = `${activeCount} ${
+    activeCount === 1 ? "alert" : "alerts"
+  } running. We'll email you the moment a spot opens up.`;
 
   return (
     <main className="dashboard-page">
@@ -91,10 +94,6 @@ function DashboardView({
           </p>
           <h1>Your tee time alerts</h1>
         </div>
-        <Link className="button button-dark" href="/#start">
-          <Bell size={17} />
-          New search
-        </Link>
       </div>
 
       {notice ? <div className="alert alert-info dashboard-alert">{notice}</div> : null}
@@ -102,24 +101,6 @@ function DashboardView({
         You&apos;re all set. We&apos;re watching for open tee times and will email you the
         moment one shows up.
       </div>
-
-      <section className="dashboard-metrics" aria-label="Alert summary">
-        <div className="metric-card">
-          <Play size={18} />
-          <strong>{activeCount}</strong>
-          <span>Active alerts</span>
-        </div>
-        <div className="metric-card">
-          <Flag size={18} />
-          <strong>{watchedCourseCount}</strong>
-          <span>Courses on watch</span>
-        </div>
-        <div className="metric-card">
-          <Trophy size={18} />
-          <strong>{pendingMatches.length}</strong>
-          <span>Matches found</span>
-        </div>
-      </section>
 
       <div className="dashboard-grid">
         <section className="dashboard-panel">
@@ -142,36 +123,39 @@ function DashboardView({
             <div className="dashboard-list">
               {searches.map((search) => (
                 <article className="dashboard-row" key={search.id}>
-                  <div className="dashboard-card-media" aria-hidden="true">
-                    {search.preferences.slice(0, 3).map((preference) => (
-                      <CourseImage
-                        key={preference.id}
-                        name={preference.course.name}
-                      />
-                    ))}
-                  </div>
                   <div className="dashboard-card-main">
                     <div className="dashboard-card-topline">
-                      <span className={`status-pill ${search.status.toLowerCase()}`}>
-                        {search.status === "ACTIVE" ? (
-                          <Play size={13} />
-                        ) : (
-                          <CirclePause size={13} />
-                        )}
-                        {search.status === "ACTIVE" ? "Watching" : search.status}
-                      </span>
-                      <span className="mini-pill">
-                        <Users size={13} />
-                        {search.players} golfers
-                      </span>
+                      <div className="dashboard-card-title">
+                        <span className={`status-pill ${search.status.toLowerCase()}`}>
+                          {search.status === "ACTIVE" ? (
+                            <Play size={13} />
+                          ) : (
+                            <CirclePause size={13} />
+                          )}
+                          {search.status === "ACTIVE" ? "Watching" : search.status}
+                        </span>
+                        <h3>
+                          <CalendarDays size={16} />
+                          {formatDashboardDate(search.date)}
+                        </h3>
+                      </div>
+                      {canManage ? (
+                        <SearchStatusActions
+                          searchId={search.id}
+                          status={search.status}
+                          initialDate={formatDateInputValue(search.date)}
+                          initialStartTime={search.startTime}
+                          initialEndTime={search.endTime}
+                          initialPlayers={search.players}
+                          initialCadenceMinutes={search.cadenceMinutes}
+                          initialAdditionalEmails={search.additionalEmails}
+                        />
+                      ) : (
+                        <span className="meta">
+                          Sign in to pause, edit, or cancel this alert.
+                        </span>
+                      )}
                     </div>
-                    <h3>
-                      {search.date.toLocaleDateString(undefined, {
-                        weekday: "short",
-                        month: "short",
-                        day: "numeric"
-                      })}
-                    </h3>
                     <div className="watch-stat-grid" aria-label="Alert details">
                       <div className="watch-stat">
                         <Clock3 size={18} />
@@ -209,7 +193,8 @@ function DashboardView({
                       {search.preferences.map((preference) => (
                         <div className="watch-course-row" key={preference.id}>
                           <span className="course-rank-number">{preference.rank}</span>
-                          <div>
+                          <CourseImage name={preference.course.name} index={preference.rank - 1} />
+                          <div className="watch-course-copy">
                             <strong>{preference.course.name}</strong>
                             <p className="meta">
                               <MapPin size={14} />
@@ -242,22 +227,6 @@ function DashboardView({
                       ))}
                     </div>
                   </div>
-                  {canManage ? (
-                    <SearchStatusActions
-                      searchId={search.id}
-                      status={search.status}
-                      initialDate={formatDateInputValue(search.date)}
-                      initialStartTime={search.startTime}
-                      initialEndTime={search.endTime}
-                      initialPlayers={search.players}
-                      initialCadenceMinutes={search.cadenceMinutes}
-                      initialAdditionalEmails={search.additionalEmails}
-                    />
-                  ) : (
-                    <span className="meta">
-                      Sign in to pause, edit, or cancel this alert.
-                    </span>
-                  )}
                 </article>
               ))}
             </div>
@@ -266,57 +235,63 @@ function DashboardView({
 
         <aside className="dashboard-panel dashboard-sidebar">
           <h2>Alert status</h2>
-          <p className="meta">
-            {activeCount} alerts running. We&apos;ll email you the moment a spot opens up.
-          </p>
-          <div className="sidebar-stat-list">
+          <p className="meta">{alertStatusCopy}</p>
+          <dl className="sidebar-stat-list">
             <div>
-              <span>Matches found</span>
-              <strong>{pendingMatches.length} so far</strong>
+              <dt>Matches found</dt>
+              <dd>{pendingMatches.length} so far</dd>
             </div>
             <div>
-              <span>Courses watched</span>
-              <strong>{watchedCourseCount}</strong>
+              <dt>Courses watched</dt>
+              <dd>{watchedCourseCount}</dd>
             </div>
             <div>
-              <span>Total alerts</span>
-              <strong>{totalAlerts}</strong>
+              <dt>Total alerts</dt>
+              <dd>{totalAlerts}</dd>
             </div>
-          </div>
-          <h3>Recent matches</h3>
-          <p className="meta">
-            {pendingMatches.length} so far. New qualifying spots show up here before they are
-            marked sent.
-          </p>
-          <div className="match-list">
-            {pendingMatches.slice(0, 5).map((match) => (
-              <div className="match-row" key={match.id}>
-                <div>
-                  <h3>{match.course.name}</h3>
-                  <p className="meta">
-                    {match.startsAt.toLocaleString()} - {match.availableSpots} spots
-                  </p>
-                </div>
-                <a
-                  className="button button-ghost"
-                  href={match.bookingUrl}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  <ExternalLink size={16} />
-                  Official site
-                </a>
-              </div>
-            ))}
-          </div>
+          </dl>
           <div className="alert alert-info">
-            You&apos;re all set. We&apos;ll email you the moment one shows up, with a direct
-            link to the course tee sheet.
+            We watch all your courses and only email you when something new opens up.
           </div>
+          {pendingMatches.length > 0 ? (
+            <div className="match-list">
+              {pendingMatches.slice(0, 3).map((match) => (
+                <div className="match-row" key={match.id}>
+                  <div>
+                    <h3>{match.course.name}</h3>
+                    <p className="meta">
+                      {match.startsAt.toLocaleString()} - {match.availableSpots} spots
+                    </p>
+                  </div>
+                  <a
+                    className="button button-ghost"
+                    href={match.bookingUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    <ExternalLink size={16} />
+                    Official site
+                  </a>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <Link className="button button-dark dashboard-add-search" href="/#start">
+            <Bell size={17} />
+            Add another search
+          </Link>
         </aside>
       </div>
     </main>
   );
+}
+
+function formatDashboardDate(date: Date) {
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric"
+  });
 }
 
 function formatTimeLabel(value: string) {
@@ -344,10 +319,25 @@ function getCompactLocation(address: string | null) {
   return address;
 }
 
-function CourseImage({ name }: { name: string }) {
+const dashboardCourseImages = [
+  "https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=240&q=80",
+  "https://images.unsplash.com/photo-1592919505780-303950717480?auto=format&fit=crop&w=240&q=80",
+  "https://images.unsplash.com/photo-1587174486073-ae5e5cff23aa?auto=format&fit=crop&w=240&q=80",
+  "https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&crop=entropy&w=240&q=80",
+  "https://images.unsplash.com/photo-1592919505780-303950717480?auto=format&fit=crop&crop=entropy&w=240&q=80"
+];
+
+function CourseImage({ index, name }: { index: number; name: string }) {
+  const imageUrl = dashboardCourseImages[index % dashboardCourseImages.length];
+
   return (
-    <div className="dashboard-course-image dashboard-course-image-empty" title={name}>
-      <Flag size={18} />
+    <div
+      aria-hidden="true"
+      className="dashboard-course-image"
+      style={{ backgroundImage: `url("${imageUrl}")` }}
+      title={name}
+    >
+      <span />
     </div>
   );
 }
