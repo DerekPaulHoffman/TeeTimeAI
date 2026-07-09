@@ -562,6 +562,69 @@ button {
   max-width: 360px;
 }
 
+.course-fallback-map-shell {
+  height: 100%;
+  position: relative;
+  width: 100%;
+}
+
+.course-fallback-map {
+  height: 390px;
+  min-height: 360px;
+  width: 100%;
+}
+
+.course-fallback-map .leaflet-popup-content-wrapper {
+  border-radius: 8px;
+}
+
+.course-fallback-map .leaflet-popup-content {
+  margin: 0;
+  min-width: 220px;
+}
+
+.fallback-course-marker {
+  align-items: center;
+  background: #d93025;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 10px 22px rgba(17, 29, 24, 0.22);
+  color: #ffffff;
+  display: grid;
+  font-size: 0.78rem;
+  font-weight: 900;
+  place-items: center;
+}
+
+.fallback-course-marker span {
+  line-height: 1;
+}
+
+.course-fallback-map-note {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  bottom: 16px;
+  box-shadow: var(--soft-shadow);
+  color: var(--fairway-dark);
+  display: inline-flex;
+  font-size: 0.8rem;
+  font-weight: 800;
+  gap: 7px;
+  left: 16px;
+  max-width: calc(100% - 32px);
+  padding: 8px 12px;
+  position: absolute;
+  z-index: 500;
+}
+
+.course-fallback-map-note span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .course-map-info-window {
   color: var(--night);
   font-family: inherit;

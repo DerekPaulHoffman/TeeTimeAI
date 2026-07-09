@@ -1,7 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type * as Leaflet from "leaflet";
 import {
   Bell,
   Check,
@@ -855,35 +856,27 @@ function CourseResultsMap({
 
   return (
     <div className="course-results-map-shell">
-      {mapsApiKey ? (
-        mapLoadError ? (
-          <CourseMapUnavailable message="Google Maps could not load. Check that Maps JavaScript API is enabled for the browser key." />
-        ) : (
-          <div
-            aria-label={`${courses.length} nearby course locations on Google Maps`}
-            className="course-results-map"
-            id={mapElementId}
-            role="region"
-          />
-        )
+      {mapsApiKey && !mapLoadError ? (
+        <div
+          aria-label={`${courses.length} nearby course locations on Google Maps`}
+          className="course-results-map"
+          id={mapElementId}
+          role="region"
+        />
       ) : (
-        <CourseMapUnavailable message="Google Maps needs a browser API key before course pins can render." />
+        <CourseFallbackMap
+          courses={courses}
+          origin={origin}
+          reason={
+            mapsApiKey
+              ? "Google Maps could not load, so this interactive map uses OpenStreetMap."
+              : "Google Maps needs a browser API key, so this interactive map uses OpenStreetMap."
+          }
+        />
       )}
       <div className="course-results-map-count">
         <MapPinned size={16} />
         {courses.length} course locations found
-      </div>
-    </div>
-  );
-}
-
-function CourseMapUnavailable({ message }: { message: string }) {
-  return (
-    <div className="course-results-map-unavailable" role="note">
-      <MapPinned size={26} />
-      <div>
-        <h3>Map unavailable</h3>
-        <p>{message}</p>
       </div>
     </div>
   );
@@ -912,6 +905,104 @@ function createAdvancedCourseMarker(
 
   marker.append?.(pin);
   return marker;
+}
+
+function CourseFallbackMap({
+  courses,
+  origin,
+  reason
+}: {
+  courses: CourseCandidate[];
+  origin: SearchCoordinates | null;
+  reason: string;
+}) {
+  const mapElementRef = useRef<HTMLDivElement | null>(null);
+  const mapInstanceRef = useRef<Leaflet.Map | null>(null);
+  const mapCenter = useMemo(() => getCourseMapCenter(courses, origin), [courses, origin]);
+  const courseSignature = useMemo(
+    () =>
+      courses
+        .map((course) => `${course.googlePlaceId}:${course.latitude}:${course.longitude}`)
+        .join("|"),
+    [courses]
+  );
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function initializeFallbackMap() {
+      const leaflet = await import("leaflet");
+
+      if (isCancelled || !mapElementRef.current) {
+        return;
+      }
+
+      mapInstanceRef.current?.remove();
+      const map = leaflet
+        .map(mapElementRef.current, {
+          scrollWheelZoom: false,
+          zoomControl: true
+        })
+        .setView([mapCenter.latitude, mapCenter.longitude], 10);
+
+      leaflet
+        .tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: "&copy; OpenStreetMap contributors",
+          maxZoom: 19
+        })
+        .addTo(map);
+
+      const bounds = leaflet.latLngBounds([]);
+      courses.forEach((course, index) => {
+        const position: Leaflet.LatLngTuple = [course.latitude, course.longitude];
+        bounds.extend(position);
+        leaflet
+          .marker(position, {
+            icon: leaflet.divIcon({
+              className: "fallback-course-marker",
+              html: `<span>${index + 1}</span>`,
+              iconAnchor: [16, 16],
+              iconSize: [32, 32]
+            }),
+            title: `${index + 1}. ${course.name}`
+          })
+          .bindPopup(createFallbackMapPopupHtml(course, index))
+          .addTo(map);
+      });
+
+      if (bounds.isValid()) {
+        map.fitBounds(bounds, { padding: [34, 34] });
+      }
+
+      mapInstanceRef.current = map;
+      window.setTimeout(() => map.invalidateSize(), 0);
+    }
+
+    initializeFallbackMap().catch(() => {
+      // The course list remains usable if the fallback map cannot initialize.
+    });
+
+    return () => {
+      isCancelled = true;
+      mapInstanceRef.current?.remove();
+      mapInstanceRef.current = null;
+    };
+  }, [courses, courseSignature, mapCenter.latitude, mapCenter.longitude]);
+
+  return (
+    <div className="course-fallback-map-shell">
+      <div
+        aria-label={`${courses.length} nearby course locations on fallback map`}
+        className="course-fallback-map"
+        ref={mapElementRef}
+        role="region"
+      />
+      <div className="course-fallback-map-note">
+        <MapPinned size={16} />
+        <span>{reason}</span>
+      </div>
+    </div>
+  );
 }
 
 function loadGoogleMapsApi(apiKey: string) {
@@ -1038,6 +1129,50 @@ function createCourseMapInfoWindowContent(course: CourseCandidate) {
 
   container.appendChild(actions);
   return container;
+}
+
+function createFallbackMapPopupHtml(course: CourseCandidate, index: number) {
+  const mapsUrl = getGoogleMapsSearchUrl(course);
+  const websiteLink = course.website
+    ? `<a class="course-map-info-secondary" href="${escapeHtml(course.website)}" target="_blank" rel="noreferrer">Course site</a>`
+    : "";
+  const rating = course.rating
+    ? `<span>${escapeHtml(course.rating.toFixed(1))} rating</span>`
+    : "";
+  const distance =
+    course.distanceMeters !== undefined
+      ? `<span>${escapeHtml(formatDistance(course.distanceMeters))}</span>`
+      : "";
+
+  return `
+    <div class="course-map-info-window">
+      <span class="course-map-info-eyebrow">Course ${index + 1}</span>
+      <h3>${escapeHtml(course.name)}</h3>
+      ${
+        course.address
+          ? `<a class="course-map-info-address" href="${escapeHtml(mapsUrl)}" target="_blank" rel="noreferrer">${escapeHtml(course.address)}</a>`
+          : ""
+      }
+      ${
+        rating || distance
+          ? `<div class="course-map-info-meta">${rating}${distance}</div>`
+          : ""
+      }
+      <div class="course-map-info-actions">
+        <a class="course-map-info-primary" href="${escapeHtml(mapsUrl)}" target="_blank" rel="noreferrer">Google Maps</a>
+        ${websiteLink}
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function Notice({ notice }: { notice: Notice }) {

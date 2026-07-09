@@ -8,6 +8,7 @@ import { EngagementTracker } from "@/components/engagement-tracker";
 import { FeedbackWidget } from "@/components/feedback-widget";
 import { hasClerkConfig } from "@/lib/env";
 import { absoluteUrl, siteDescription, siteName, siteUrl } from "@/lib/seo";
+import "leaflet/dist/leaflet.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
