@@ -524,6 +524,8 @@ button {
   background: #e7eee8;
   border: 1px solid var(--line);
   border-radius: 8px;
+  contain: layout paint;
+  isolation: isolate;
   margin-top: 16px;
   overflow: hidden;
   position: relative;
@@ -532,6 +534,7 @@ button {
 .course-results-map {
   height: 390px;
   min-height: 360px;
+  overflow: hidden;
   width: 100%;
 }
 
