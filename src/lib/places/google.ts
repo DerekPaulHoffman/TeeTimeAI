@@ -66,6 +66,8 @@ const PRIVATE_OR_NON_COURSE_NAME_PATTERNS = [
   /\bdick'?s\s+sporting\s+goods\b/i,
   /\bx[-\s]?golf\b/i,
   /\bgolf\s+lounge\b/i,
+  /\bshorehaven\s+golf\s+club\b/i,
+  /\bsilvermine\s+golf\s+club\b/i,
   /\bsimulator\b/i,
   /\bindoor\b/i
 ];

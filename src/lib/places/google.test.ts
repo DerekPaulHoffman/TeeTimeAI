@@ -115,6 +115,22 @@ describe("Google Places mapping", () => {
         location: { latitude: 41.29, longitude: -73.04 }
       },
       {
+        id: "places/shorehaven",
+        displayName: { text: "Shorehaven Golf Club" },
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 41.097, longitude: -73.392 }
+      },
+      {
+        id: "places/silvermine",
+        displayName: { text: "Silvermine Golf Club" },
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 41.163, longitude: -73.42 }
+      },
+      {
         id: "places/x-golf",
         displayName: { text: "X-Golf Stratford" },
         primaryType: "indoor_golf_course",
