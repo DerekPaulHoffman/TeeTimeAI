@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 import type { SelectedCourseInput, TeeSearchInput } from "@/lib/validation/search";
 import { parseLocalDate } from "@/lib/validation/search";
 
-const COURSE_COORDINATE_TOLERANCE = 0.005;
+const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
+const COURSE_NAME_STOP_WORDS = new Set(["and", "course", "golf", "the"]);
 
 export async function createTeeSearchForUser(userId: string, input: TeeSearchInput) {
   const sortedCourses = [...input.courses].sort((a, b) => a.rank - b.rank);
@@ -76,16 +77,15 @@ async function findReusableCourse(course: SelectedCourseInput) {
     }
   }
 
-  const supportedNearbyCourse = await prisma.course.findFirst({
+  const supportedNearbyCourses = await prisma.course.findMany({
     where: {
-      name: course.name,
       latitude: {
-        gte: course.latitude - COURSE_COORDINATE_TOLERANCE,
-        lte: course.latitude + COURSE_COORDINATE_TOLERANCE
+        gte: course.latitude - SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
+        lte: course.latitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
       },
       longitude: {
-        gte: course.longitude - COURSE_COORDINATE_TOLERANCE,
-        lte: course.longitude + COURSE_COORDINATE_TOLERANCE
+        gte: course.longitude - SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
+        lte: course.longitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
       },
       detectedPlatform: {
         not: "UNKNOWN"
@@ -93,8 +93,11 @@ async function findReusableCourse(course: SelectedCourseInput) {
       automationEligibility: "ALLOWED"
     },
     orderBy: { updatedAt: "desc" },
-    select: { id: true }
+    select: { id: true, name: true }
   });
+  const supportedNearbyCourse = supportedNearbyCourses.find((candidate) =>
+    hasMeaningfulNameOverlap(course.name, candidate.name)
+  );
 
   if (supportedNearbyCourse) {
     return supportedNearbyCourse;
@@ -112,6 +115,29 @@ async function findReusableCourse(course: SelectedCourseInput) {
 
 function getStablePlaceId(course: SelectedCourseInput) {
   return course.googlePlaceId ?? `manual-${course.name}-${course.latitude}-${course.longitude}`;
+}
+
+function hasMeaningfulNameOverlap(selectedName: string, existingName: string) {
+  const selectedTokens = getMeaningfulNameTokens(selectedName);
+  const existingTokens = getMeaningfulNameTokens(existingName);
+
+  if (selectedTokens.size === 0 || existingTokens.size === 0) {
+    return false;
+  }
+
+  const overlapCount = [...existingTokens].filter((token) => selectedTokens.has(token)).length;
+  const requiredOverlap = Math.min(2, existingTokens.size);
+  return overlapCount >= requiredOverlap;
+}
+
+function getMeaningfulNameTokens(name: string) {
+  return new Set(
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(" ")
+      .filter((token) => token.length > 2 && !COURSE_NAME_STOP_WORDS.has(token))
+  );
 }
 
 export async function listTeeSearchesForUser(userId: string) {

@@ -6,7 +6,7 @@ import { createTeeSearchForUser } from "./service";
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     course: {
-      findFirst: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn()
     },
     teeSearch: {
@@ -20,10 +20,13 @@ const mockedPrisma = vi.mocked(prisma, { deep: true });
 describe("createTeeSearchForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.course.findMany.mockResolvedValue([]);
   });
 
   it("connects demo selections to an existing supported nearby course", async () => {
-    mockedPrisma.course.findFirst.mockResolvedValue({ id: "foreup-course-1" });
+    mockedPrisma.course.findMany.mockResolvedValue([
+      { id: "foreup-course-1", name: "Tashua Knolls Golf Course" }
+    ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
 
@@ -46,10 +49,9 @@ describe("createTeeSearchForUser", () => {
       ]
     });
 
-    expect(mockedPrisma.course.findFirst).toHaveBeenCalledWith(
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          name: "Tashua Knolls Golf Course",
           detectedPlatform: { not: "UNKNOWN" },
           automationEligibility: "ALLOWED"
         })
@@ -73,8 +75,99 @@ describe("createTeeSearchForUser", () => {
     );
   });
 
+  it("connects composite Google facility names to an existing supported nearby course", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      { id: "foreup-course-1", name: "Tashua Knolls Golf Course" }
+    ]);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "13:00",
+      endTime: "17:00",
+      players: 2,
+      cadenceMinutes: 15,
+      alertEmail: "golfer@example.com",
+      courses: [
+        {
+          googlePlaceId: "tashua-knolls-and-glen",
+          name: "Tashua Knolls & Tashua Glen Golf Course",
+          address: "40 Tashua Knolls Ln, Trumbull, CT",
+          latitude: 41.2888889,
+          longitude: -73.2494444,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [
+              {
+                rank: 1,
+                course: {
+                  connect: { id: "foreup-course-1" }
+                }
+              }
+            ]
+          }
+        })
+      })
+    );
+  });
+
+  it("does not connect unrelated nearby supported courses", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      { id: "foreup-course-1", name: "Tashua Knolls Golf Course" }
+    ]);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "13:00",
+      endTime: "17:00",
+      players: 2,
+      cadenceMinutes: 15,
+      alertEmail: "golfer@example.com",
+      courses: [
+        {
+          googlePlaceId: "oak-hills",
+          name: "Oak Hills Park Golf Course",
+          address: "165 Fillow St, Norwalk, CT",
+          latitude: 41.242,
+          longitude: -73.209,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [
+              expect.objectContaining({
+                course: {
+                  connectOrCreate: expect.objectContaining({
+                    where: {
+                      googlePlaceId: "oak-hills"
+                    }
+                  })
+                }
+              })
+            ]
+          }
+        })
+      })
+    );
+  });
+
   it("uses a stable manual place key when creating manual courses", async () => {
-    mockedPrisma.course.findFirst.mockResolvedValue(null);
+    mockedPrisma.course.findMany.mockResolvedValue([]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
 
