@@ -9,18 +9,28 @@ type TeeTimeAlertInput = {
   idempotencyKey?: string;
 };
 
-export async function sendTeeTimeAlert(input: TeeTimeAlertInput) {
+type TeeTimeAlertDelivery =
+  | {
+      id: string;
+      deliveryStatus: "dry_run";
+    }
+  | {
+      id?: string;
+      deliveryStatus: "sent";
+    };
+
+export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<TeeTimeAlertDelivery> {
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
 
   if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
-    console.log("[email:dry-run]", {
+    console.warn("[email:dry-run]", {
       to: input.to,
       courseName: input.courseName,
       startsAt: input.startsAt.toISOString(),
       bookingUrl: input.bookingUrl
     });
-    return { id: "dry-run" };
+    return { id: "dry-run", deliveryStatus: "dry_run" };
   }
 
   const resend = new Resend(apiKey);
@@ -28,7 +38,7 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput) {
     {
       from,
       to: input.to,
-      subject: `New tee time at ${input.courseName}`,
+      subject: `A spot opened up at ${input.courseName}`,
       html: renderAlertHtml(input)
     },
     input.idempotencyKey
@@ -44,7 +54,7 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput) {
     throw new Error(result.error.message);
   }
 
-  return result.data;
+  return { ...result.data, deliveryStatus: "sent" };
 }
 
 export function normalizeEmailEnvValue(value?: string) {
@@ -70,20 +80,75 @@ export function shouldDryRunRecipient(email: string) {
 export function renderAlertHtml(input: TeeTimeAlertInput) {
   const courseName = escapeHtml(input.courseName);
   const startsAt = escapeHtml(input.startsAt.toLocaleString());
+  const startsAtDate = escapeHtml(
+    input.startsAt.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "short",
+      day: "numeric"
+    })
+  );
+  const startsAtTime = escapeHtml(
+    input.startsAt.toLocaleTimeString(undefined, {
+      hour: "numeric",
+      minute: "2-digit"
+    })
+  );
   const availableSpots = escapeHtml(String(input.availableSpots));
   const bookingUrl = escapeHtml(input.bookingUrl);
 
   return `
-    <div style="font-family:Inter,Arial,sans-serif;line-height:1.5;color:#14231d">
-      <h1 style="font-size:24px;margin:0 0 12px">New tee time found</h1>
-      <p><strong>${courseName}</strong></p>
-      <p>${startsAt} &middot; ${availableSpots} spots available</p>
-      <p>
-        <a href="${bookingUrl}" style="background:#d9862f;color:#1d1309;padding:12px 16px;border-radius:999px;text-decoration:none;font-weight:700">
-          Open official booking page
-        </a>
-      </p>
-      <p style="color:#5c6c64;font-size:13px">Tee Time Spot does not hold or book this slot. Complete the reservation on the course site.</p>
+    <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
+      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
+        <div style="background:#111d18;color:#ffffff;padding:18px 22px">
+          <div style="font-weight:800;font-size:18px">Tee Time Spot</div>
+          <div style="color:rgba(255,255,255,.68);font-size:13px">teetimespot.com</div>
+        </div>
+        <div style="background:linear-gradient(90deg,rgba(17,29,24,.92),rgba(17,29,24,.7)),url('https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=1200&q=80') center/cover;color:#ffffff;padding:34px 22px">
+          <div style="display:inline-block;background:#e28a2f;color:#1d1309;border-radius:999px;padding:7px 11px;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">
+            New tee time alert
+          </div>
+          <p style="margin:18px 0 4px;color:rgba(255,255,255,.76);font-size:14px">${courseName}</p>
+          <h1 style="font-size:30px;line-height:1.05;margin:0 0 12px">A spot just opened up!</h1>
+          <p style="margin:0;color:rgba(255,255,255,.82)">
+            We found a tee time that matches your search. Open the official course page before it is gone.
+          </p>
+        </div>
+        <div style="padding:22px">
+          <div style="border:1px solid #d9e3dc;border-radius:10px;padding:18px;margin-bottom:18px">
+            <p style="font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#105338;margin:0 0 10px">Open now</p>
+            <p style="font-size:18px;font-weight:800;margin:0 0 14px">${startsAtDate}</p>
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:16px">
+              <div style="background:#f5f7f2;border-radius:8px;padding:12px">
+                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Tee time</div>
+                <div style="font-weight:800">${startsAtTime}</div>
+              </div>
+              <div style="background:#f5f7f2;border-radius:8px;padding:12px">
+                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Golfers</div>
+                <div style="font-weight:800">${availableSpots} players</div>
+              </div>
+              <div style="background:#f5f7f2;border-radius:8px;padding:12px">
+                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Course</div>
+                <div style="font-weight:800">18 holes</div>
+              </div>
+            </div>
+            <p style="margin:0 0 6px;font-weight:800">${courseName}</p>
+            <p style="margin:0;color:#5c6c64;font-size:14px">${startsAt}</p>
+          </div>
+          <p style="margin:0 0 22px">
+            <a href="${bookingUrl}" style="display:inline-block;background:#e28a2f;color:#1d1309;padding:14px 18px;border-radius:999px;text-decoration:none;font-weight:800">
+              Book this tee time
+            </a>
+          </p>
+          <div style="background:#e6f3f7;border-radius:10px;color:#174152;padding:14px 16px;font-size:14px">
+            That button goes straight to the course's own booking page. Tee Time Spot never
+            handles your payment or personal info.
+          </div>
+        </div>
+        <div style="background:#111d18;color:rgba(255,255,255,.72);padding:18px 22px;font-size:13px">
+          You're getting this because you set up an alert on teetimespot.com. Availability is
+          first come, first served.
+        </div>
+      </div>
     </div>
   `;
 }

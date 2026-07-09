@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
-import { createTeeSearchForUser } from "./service";
+import { createTeeSearchForUser, updateTeeSearchStatusForUser } from "./service";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -10,7 +10,10 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn()
     },
     teeSearch: {
-      create: vi.fn()
+      count: vi.fn(),
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn()
     }
   }
 }));
@@ -21,6 +24,7 @@ describe("createTeeSearchForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.course.findMany.mockResolvedValue([]);
+    mockedPrisma.teeSearch.count.mockResolvedValue(0);
   });
 
   it("connects demo selections to an existing supported nearby course", async () => {
@@ -37,6 +41,7 @@ describe("createTeeSearchForUser", () => {
       players: 2,
       cadenceMinutes: 15,
       alertEmail: "golfer@example.com",
+      additionalEmails: ["FRIEND@example.com", "friend@example.com"],
       courses: [
         {
           googlePlaceId: "tashua-knolls",
@@ -60,6 +65,7 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
+          additionalEmails: ["friend@example.com"],
           preferences: {
             create: [
               {
@@ -209,6 +215,58 @@ describe("createTeeSearchForUser", () => {
             ]
           }
         })
+      })
+    );
+  });
+
+  it("rejects a fourth queued search for the same user", async () => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(3);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "13:00",
+        endTime: "17:00",
+        players: 2,
+        cadenceMinutes: 15,
+        alertEmail: "golfer@example.com",
+        courses: [
+          {
+            googlePlaceId: "tashua-knolls",
+            name: "Tashua Knolls Golf Course",
+            latitude: 41.242,
+            longitude: -73.209,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow("You can keep up to 3 active or paused searches in the queue.");
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("updateTeeSearchStatusForUser", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.teeSearch.count.mockResolvedValue(0);
+  });
+
+  it("excludes the current search when enforcing queue capacity on resume", async () => {
+    mockedPrisma.teeSearch.update.mockResolvedValue({ id: "search-1" } as never);
+
+    await updateTeeSearchStatusForUser("user-1", "search-1", "ACTIVE");
+
+    expect(mockedPrisma.teeSearch.count).toHaveBeenCalledWith({
+      where: {
+        userId: "user-1",
+        status: { in: ["ACTIVE", "PAUSED"] },
+        id: { not: "search-1" }
+      }
+    });
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { status: "ACTIVE" }
       })
     );
   });

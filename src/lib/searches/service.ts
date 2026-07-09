@@ -1,13 +1,26 @@
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import type { SelectedCourseInput, TeeSearchInput } from "@/lib/validation/search";
+import {
+  MAX_QUEUED_SEARCHES_PER_USER,
+  type SelectedCourseInput,
+  type TeeSearchDetailsInput,
+  type TeeSearchInput
+} from "@/lib/validation/search";
 import { parseLocalDate } from "@/lib/validation/search";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const COURSE_NAME_STOP_WORDS = new Set(["and", "course", "golf", "the"]);
+const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
+type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
+
+export type TeeSearchUpdateInput = Partial<TeeSearchDetailsInput> & {
+  status?: SearchStatus;
+};
 
 export async function createTeeSearchForUser(userId: string, input: TeeSearchInput) {
+  await assertQueueCapacity(userId);
+
   const sortedCourses = [...input.courses].sort((a, b) => a.rank - b.rank);
   const coursePreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
 
@@ -19,6 +32,7 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
       endTime: input.endTime,
       players: input.players,
       cadenceMinutes: input.cadenceMinutes,
+      additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
       preferences: {
         create: coursePreferences
       }
@@ -159,8 +173,12 @@ export async function listRecentTeeSearches(limit = 20) {
 export async function updateTeeSearchStatusForUser(
   userId: string,
   searchId: string,
-  status: "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED"
+  status: SearchStatus
 ) {
+  if (QUEUED_SEARCH_STATUSES.includes(status as (typeof QUEUED_SEARCH_STATUSES)[number])) {
+    await assertQueueCapacity(userId, searchId);
+  }
+
   return prisma.teeSearch.update({
     where: {
       id: searchId,
@@ -169,6 +187,86 @@ export async function updateTeeSearchStatusForUser(
     data: { status },
     include: searchInclude
   });
+}
+
+export async function updateTeeSearchForUser(
+  userId: string,
+  searchId: string,
+  input: TeeSearchUpdateInput
+) {
+  if (
+    input.status &&
+    QUEUED_SEARCH_STATUSES.includes(input.status as (typeof QUEUED_SEARCH_STATUSES)[number])
+  ) {
+    await assertQueueCapacity(userId, searchId);
+  }
+
+  return prisma.teeSearch.update({
+    where: {
+      id: searchId,
+      userId
+    },
+    data: {
+      ...(input.date ? { date: parseLocalDate(input.date) } : {}),
+      ...(input.startTime ? { startTime: input.startTime } : {}),
+      ...(input.endTime ? { endTime: input.endTime } : {}),
+      ...(input.players ? { players: input.players } : {}),
+      ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
+      ...(input.additionalEmails ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) } : {}),
+      ...(input.status ? { status: input.status } : {})
+    },
+    include: searchInclude
+  });
+}
+
+export async function updateTeeSearchForPoc(searchId: string, input: TeeSearchUpdateInput) {
+  const search = await prisma.teeSearch.findUnique({
+    where: { id: searchId },
+    select: { userId: true }
+  });
+
+  if (!search) {
+    throw new Error("Search not found");
+  }
+
+  return updateTeeSearchForUser(search.userId, searchId, input);
+}
+
+export async function deleteTeeSearchForUser(userId: string, searchId: string) {
+  return prisma.teeSearch.delete({
+    where: {
+      id: searchId,
+      userId
+    }
+  });
+}
+
+export async function deleteTeeSearchForPoc(searchId: string) {
+  return prisma.teeSearch.delete({
+    where: {
+      id: searchId
+    }
+  });
+}
+
+async function assertQueueCapacity(userId: string, excludeSearchId?: string) {
+  const queuedCount = await prisma.teeSearch.count({
+    where: {
+      userId,
+      status: { in: [...QUEUED_SEARCH_STATUSES] },
+      ...(excludeSearchId ? { id: { not: excludeSearchId } } : {})
+    }
+  });
+
+  if (queuedCount >= MAX_QUEUED_SEARCHES_PER_USER) {
+    throw new Error(
+      `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`
+    );
+  }
+}
+
+function normalizeAdditionalEmails(emails: string[] = []) {
+  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean))];
 }
 
 export const searchInclude = {

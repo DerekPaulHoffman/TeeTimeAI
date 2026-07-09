@@ -2,10 +2,24 @@
 
 import Image from "next/image";
 import { useMemo, useState } from "react";
-import { Bell, Check, LocateFixed, MapPinned, Plus, Save, Search, X } from "lucide-react";
+import {
+  Bell,
+  Check,
+  ExternalLink,
+  Flag,
+  LocateFixed,
+  MapPin,
+  MapPinned,
+  Plus,
+  Search,
+  Star,
+  X
+} from "lucide-react";
 
 import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
+import { trackWebsiteEvent } from "@/lib/engagement/client";
 import type { CourseCandidate } from "@/lib/places/google";
+import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -27,11 +41,12 @@ export function TeeTimeIntake() {
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
   const [notice, setNotice] = useState<Notice>({
     type: "info",
-    message: "Use your current location or type a city/ZIP to load nearby golf courses."
+    message: "Enter a city or ZIP code, or use your current location."
   });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
+  const minSearchDate = tomorrow();
 
   const selectedIds = useMemo(
     () => new Set(selected.map((course) => course.googlePlaceId)),
@@ -53,6 +68,13 @@ export function TeeTimeIntake() {
     [alertEmail, date, endTime, players, selected, startTime]
   );
   const isCurrentSearchSaved = savedSignature === searchSignature;
+  const isDateFuture = date >= minSearchDate;
+  const isTimeWindowValid = endTime > startTime;
+  const saveBlocker = !isDateFuture
+    ? "Choose a future date for alerts."
+    : !isTimeWindowValid
+      ? "Choose an end time after the start time."
+      : null;
 
   async function discoverByCurrentLocation() {
     if (!navigator.geolocation) {
@@ -145,6 +167,11 @@ export function TeeTimeIntake() {
   }
 
   async function saveSearch() {
+    if (saveBlocker) {
+      setNotice({ type: "error", message: saveBlocker });
+      return;
+    }
+
     if (!alertEmail.trim()) {
       setNotice({ type: "error", message: "Enter the email that should receive tee time alerts." });
       return;
@@ -170,12 +197,19 @@ export function TeeTimeIntake() {
       });
 
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error("Could not save this search. Try again in a moment.");
       }
 
       setNotice({
         type: "success",
-        message: "Search saved. The Codex loop can now pick it up from Postgres."
+        message: "You're all set. We'll email you the moment a matching tee time opens up."
+      });
+      trackWebsiteEvent({
+        name: "search_submitted",
+        metadata: {
+          selectedCourseCount: selected.length,
+          players
+        }
       });
       setSavedSignature(searchSignature);
     } catch (error) {
@@ -184,7 +218,7 @@ export function TeeTimeIntake() {
         message:
           error instanceof Error
             ? error.message
-            : "Could not save this search. Confirm Neon is configured."
+            : "Could not save this search. Try again in a moment."
       });
     } finally {
       setSaving(false);
@@ -221,7 +255,7 @@ export function TeeTimeIntake() {
               value={players}
               onChange={(event) => setPlayers(Number(event.target.value))}
             >
-              {[1, 2, 3, 4, 5, 6, 7, 8].map((count) => (
+              {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
                 <option key={count} value={count}>
                   {count}
                 </option>
@@ -230,7 +264,15 @@ export function TeeTimeIntake() {
           </div>
           <div className="field">
             <label htmlFor="date">Date</label>
-            <input id="date" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+            <input
+              aria-invalid={!isDateFuture}
+              aria-describedby={!isDateFuture ? "search-form-guidance" : undefined}
+              id="date"
+              min={minSearchDate}
+              type="date"
+              value={date}
+              onChange={(event) => setDate(event.target.value)}
+            />
           </div>
           <div className="control-grid">
             <div className="field">
@@ -246,6 +288,8 @@ export function TeeTimeIntake() {
               <label htmlFor="endTime">End</label>
               <input
                 id="endTime"
+                aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
+                aria-invalid={!isTimeWindowValid}
                 type="time"
                 value={endTime}
                 onChange={(event) => setEndTime(event.target.value)}
@@ -272,23 +316,47 @@ export function TeeTimeIntake() {
             <div className="course-row" key={course.googlePlaceId}>
               <CourseThumbnail course={course} />
               <div className="course-copy">
+                <div className="course-badges">
+                  <span className="mini-pill">
+                    <Flag size={13} />
+                    Public course
+                  </span>
+                  {course.rating ? (
+                    <span className="mini-pill">
+                      <Star size={13} />
+                      {course.rating.toFixed(1)}
+                    </span>
+                  ) : null}
+                </div>
                 <h3>{course.name}</h3>
                 <p className="meta">
                   {course.address ?? "Address unavailable"}
-                  {course.rating ? ` - ${course.rating.toFixed(1)} rating` : ""}
                 </p>
                 <PhotoCredit course={course} />
               </div>
-              <button
-                className="button button-ghost"
-                type="button"
-                onClick={() => addCourse(course)}
-                disabled={selectedIds.has(course.googlePlaceId)}
-                title={selectedIds.has(course.googlePlaceId) ? "Already selected" : "Add course"}
-              >
-                <Plus size={17} />
-                Add
-              </button>
+              <div className="course-actions">
+                {course.website ? (
+                  <a
+                    className="button button-ghost"
+                    href={course.website}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    <ExternalLink size={16} />
+                    Site
+                  </a>
+                ) : null}
+                <button
+                  className="button button-dark"
+                  type="button"
+                  onClick={() => addCourse(course)}
+                  disabled={selectedIds.has(course.googlePlaceId)}
+                  title={selectedIds.has(course.googlePlaceId) ? "Already selected" : "Add course"}
+                >
+                  {selectedIds.has(course.googlePlaceId) ? <Check size={17} /> : <Plus size={17} />}
+                  {selectedIds.has(course.googlePlaceId) ? "Added" : "Add"}
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -296,50 +364,85 @@ export function TeeTimeIntake() {
 
       <aside className="summary-panel">
         <MapPinned size={28} />
-        <h2>Your ranked watchlist</h2>
-        <p>Select 1 to 5 courses. Rank order controls which matches get surfaced first.</p>
+        <h2>Your favorite courses</h2>
+        <p>Put your favorite at the top. We&apos;ll focus there first.</p>
         <div className="selected-list">
-          {selected.map((course, index) => (
-            <div className="selected-row" key={course.googlePlaceId}>
-              <div>
-                <span className="rank-badge">#{index + 1}</span>
-                <h3>{course.name}</h3>
-                <p className="meta">{course.address}</p>
-              </div>
-              <button
-                className="button button-secondary"
-                type="button"
-                onClick={() => removeCourse(course.googlePlaceId)}
-                title="Remove course"
-              >
-                <X size={17} />
-              </button>
+          {selected.length === 0 ? (
+            <div className="selected-empty">
+              <MapPin size={20} />
+              <span>Add at least one course to start alerts.</span>
             </div>
-          ))}
+          ) : (
+            selected.map((course, index) => (
+              <div className="selected-row selected-card" key={course.googlePlaceId}>
+                <CourseThumbnail course={course} variant="compact" />
+                <div className="selected-copy">
+                  <span className="rank-badge">Priority #{index + 1}</span>
+                  <h3>{course.name}</h3>
+                  <p className="meta">{course.address ?? "Course address unavailable"}</p>
+                  {course.website ? (
+                    <a
+                      className="course-link"
+                      href={course.website}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <ExternalLink size={14} />
+                      Official course link
+                    </a>
+                  ) : null}
+                </div>
+                <button
+                  className="button button-secondary icon-button"
+                  type="button"
+                  onClick={() => removeCourse(course.googlePlaceId)}
+                  title="Remove course"
+                  aria-label={`Remove ${course.name}`}
+                >
+                  <X size={17} />
+                </button>
+              </div>
+            ))
+          )}
         </div>
         <button
           className="button button-primary"
           type="button"
           onClick={saveSearch}
-          disabled={saving || isCurrentSearchSaved || selected.length === 0 || !alertEmail.trim()}
+          disabled={
+            saving ||
+            isCurrentSearchSaved ||
+            Boolean(saveBlocker) ||
+            selected.length === 0 ||
+            !alertEmail.trim()
+          }
           style={{ marginTop: 18, width: "100%" }}
         >
-          {saving ? <Bell size={17} /> : isCurrentSearchSaved ? <Check size={17} /> : <Save size={17} />}
-          {saving ? "Saving search" : isCurrentSearchSaved ? "Search saved" : "Save alert search"}
+          {saving ? <Bell size={17} /> : isCurrentSearchSaved ? <Check size={17} /> : <Bell size={17} />}
+          {saving ? "Starting alerts" : isCurrentSearchSaved ? "Search saved" : "Start getting alerts"}
         </button>
-        <p className="helper">
-          Alerts use the email above. Accounts unlock pause and resume controls after Clerk
-          sign-in is enabled.
+        <p className="helper" id="search-form-guidance">
+          {saveBlocker ??
+            "We'll email you as soon as a spot opens up. Sign in later to pause, edit, or cancel alerts."}
         </p>
       </aside>
     </div>
   );
 }
 
-function CourseThumbnail({ course }: { course: CourseCandidate }) {
+function CourseThumbnail({
+  course,
+  variant = "default"
+}: {
+  course: CourseCandidate;
+  variant?: "default" | "compact";
+}) {
+  const className =
+    variant === "compact" ? "course-thumbnail course-thumbnail-compact" : "course-thumbnail";
+
   if (!course.photoName) {
     return (
-      <div className="course-thumbnail course-thumbnail-empty" aria-hidden="true">
+      <div className={`${className} course-thumbnail-empty`} aria-hidden="true">
         <MapPinned size={22} />
       </div>
     );
@@ -348,12 +451,12 @@ function CourseThumbnail({ course }: { course: CourseCandidate }) {
   return (
     <Image
       alt={`${course.name} course photo`}
-      className="course-thumbnail"
-      height={90}
+      className={className}
+      height={variant === "compact" ? 72 : 90}
       loading="lazy"
       src={`/api/courses/photo?name=${encodeURIComponent(course.photoName)}`}
       unoptimized
-      width={120}
+      width={variant === "compact" ? 96 : 120}
     />
   );
 }
@@ -381,7 +484,14 @@ function PhotoCredit({ course }: { course: CourseCandidate }) {
 }
 
 function Notice({ notice }: { notice: Notice }) {
-  return <div className={`alert alert-${notice.type}`}>{notice.message}</div>;
+  return (
+    <div
+      className={`alert alert-${notice.type}`}
+      role={notice.type === "error" ? "alert" : "status"}
+    >
+      {notice.message}
+    </div>
+  );
 }
 
 function normalizeAttributionUri(uri?: string) {

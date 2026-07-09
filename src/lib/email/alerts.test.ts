@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeEmailEnvValue, renderAlertHtml, shouldDryRunRecipient } from "./alerts";
+import {
+  normalizeEmailEnvValue,
+  renderAlertHtml,
+  sendTeeTimeAlert,
+  shouldDryRunRecipient
+} from "./alerts";
 
 describe("renderAlertHtml", () => {
   it("escapes dynamic email fields", () => {
@@ -16,6 +21,21 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("https://example.com/book?x=&lt;bad&gt;");
     expect(html).not.toContain("<script>");
   });
+
+  it("keeps alerts limited to official first-come-first-served booking", () => {
+    const html = renderAlertHtml({
+      to: "player@example.com",
+      courseName: "Tashua Knolls",
+      startsAt: new Date("2026-07-09T14:30:00.000Z"),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/book"
+    });
+
+    expect(html).toContain("Book this tee time");
+    expect(html).toContain("official course");
+    expect(html).toMatch(/never\s+handles your payment or personal info/);
+    expect(html).toContain("first come");
+  });
 });
 
 describe("email alert delivery helpers", () => {
@@ -28,5 +48,18 @@ describe("email alert delivery helpers", () => {
     expect(shouldDryRunRecipient("codex@example.com")).toBe(true);
     expect(shouldDryRunRecipient("player@example.invalid")).toBe(true);
     expect(shouldDryRunRecipient("player@resend.dev")).toBe(false);
+  });
+
+  it("returns a dry-run delivery result for local recipients", async () => {
+    const result = await sendTeeTimeAlert({
+      to: "demo@teetimeai.local",
+      courseName: "Tashua Knolls",
+      startsAt: new Date("2026-07-09T14:30:00.000Z"),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/book",
+      idempotencyKey: "tee-time-match-test"
+    });
+
+    expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
   });
 });

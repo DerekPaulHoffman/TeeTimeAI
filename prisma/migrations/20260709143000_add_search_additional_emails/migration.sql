@@ -1,0 +1,2 @@
+ALTER TABLE "TeeSearch"
+ADD COLUMN "additionalEmails" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];

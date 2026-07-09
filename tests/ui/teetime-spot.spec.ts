@@ -15,16 +15,22 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByRole("link", { name: /Start a search/i })).toBeVisible();
     await expect(page.getByRole("link", { name: /View dashboard/i })).toBeVisible();
     await expect(page.getByRole("link", { name: /Preview email/i })).toBeVisible();
+    await expect(page.getByText("We keep watch")).toBeVisible();
 
     await page.getByRole("link", { name: /Start a search/i }).click();
     await expect(page.getByRole("heading", { name: /Tell us where/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Save alert search/i })).toBeDisabled();
+    await expect(page.getByText("Start getting alerts")).toBeVisible();
+    await expect(page.locator(".summary-panel button")).toBeDisabled();
+    await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
 
     await page.getByLabel("Location").fill("Trumbull, CT");
     await page.getByRole("button", { name: /Find courses/i }).click();
     await expect(
       page.getByText(/Found \d+ nearby golf courses|Loaded demo courses/i)
     ).toBeVisible();
+    await expect(page.getByRole("status")).toContainText(
+      /Found \d+ nearby golf courses|Loaded demo courses/i
+    );
 
     const courseRows = page.locator(".course-row");
     const courseCount = await courseRows.count();
@@ -37,6 +43,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByText("#5")).toBeVisible();
     await courseRows.nth(5).getByRole("button", { name: /^Add$/i }).click();
     await expect(page.getByText("You can prioritize up to 5 courses.")).toBeVisible();
+    await expect(page.locator(".alert-error[role='alert']")).toContainText(
+      "You can prioritize up to 5 courses."
+    );
 
     let saveRequestCount = 0;
     await page.route("**/api/searches", async (route) => {
@@ -49,13 +58,34 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
 
     await page.getByLabel("Alert email").fill(`ui-smoke-${Date.now()}@example.com`);
-    const saveButton = page.getByRole("button", { name: /Save alert search|Search saved/i });
+    const saveButton = page.getByRole("button", { name: /Start getting alerts|Search saved/i });
+    await expect(saveButton).toBeEnabled();
+
+    await page.getByLabel("Date").fill(formatLocalDate(new Date()));
+    await expect(page.getByText("Choose a future date for alerts.")).toBeVisible();
+    await expect(page.getByLabel("Date")).toHaveAttribute("aria-describedby", /search-form-guidance/);
+    await expect(saveButton).toBeDisabled();
+    await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
+
+    await page.getByLabel("End").fill("13:00");
+    await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
+    await expect(page.getByLabel("End")).toHaveAttribute("aria-describedby", /search-form-guidance/);
+    await expect(saveButton).toBeDisabled();
+    await page.getByLabel("End").fill("16:00");
+
     await expect(saveButton).toBeEnabled();
     await saveButton.click();
-    await expect(page.getByText("Search saved. The Codex loop can now pick it up from Postgres.")).toBeVisible();
+    await expect(
+      page.getByText("You're all set. We'll email you the moment a matching tee time opens up.")
+    ).toBeVisible();
     await expect(saveButton).toBeDisabled();
     await saveButton.click({ force: true });
     expect(saveRequestCount, "unchanged saved searches should not submit more than once").toBe(1);
+
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText, "onboarding should avoid implementation jargon").not.toMatch(
+      /\b(Codex|Postgres|Clerk|Neon|adapter|Google Places)\b/i
+    );
 
     await expectNoHorizontalOverflow(page, testInfo);
     await expectInteractiveElementsAreUsable(page, testInfo);
@@ -69,16 +99,22 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await expect(
       page.getByRole("heading", {
-        name: /Your tee time searches|Sign in to manage searches|Connect Neon/i
+        name: /Your tee time alerts|Sign in to manage searches|Dashboard setup needed/i
       })
     ).toBeVisible();
-    await expect(page.getByRole("link", { name: /New search|Back to search|Preview intake/i })).toBeVisible();
+    await expect(page.getByRole("main").getByRole("link", { name: /New search|Back to search|Preview intake/i })).toBeVisible();
 
     const bodyText = await page.locator("body").innerText();
     expect(
       bodyText,
       "dashboard should explain whether searches are manageable, signed out, or setup-blocked"
-    ).toMatch(/Automation state|Clerk|DATABASE_URL|Neon|sign in|account/i);
+    ).toMatch(/Watching now|Matches found|sign in|account|setup needed|Pause and resume/i);
+    expect(bodyText, "dashboard should avoid implementation jargon").not.toMatch(
+      /\b(Codex|Postgres|Clerk|Neon|DATABASE_URL|Prisma|POC)\b/i
+    );
+    expect(bodyText, "dashboard should not imply Tee Time Spot completes tee times itself").not.toMatch(
+      /Tee Time Spot books|we book|books tee times/i
+    );
 
     await expectNoHorizontalOverflow(page, testInfo);
     await expectInteractiveElementsAreUsable(page, testInfo);
@@ -90,13 +126,16 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/email-preview");
 
-    await expect(page.getByRole("heading", { name: "New tee time alert" })).toBeVisible();
-    await expect(page.getByText("Tashua Knolls Golf Course").first()).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Your tee time is waiting." })).toBeVisible();
+    await expect(page.getByText(/direct link to book/i)).toBeVisible();
     await expect(page.getByTitle("Rendered tee time alert email")).toBeVisible();
 
     const emailFrame = page.frameLocator("iframe[title='Rendered tee time alert email']");
-    await expect(emailFrame.getByRole("heading", { name: "New tee time found" })).toBeVisible();
-    await expect(emailFrame.getByRole("link", { name: "Open official booking page" })).toBeVisible();
+    await expect(emailFrame.locator("body")).toContainText("Tashua Knolls Golf Course");
+    await expect(emailFrame.locator("body")).toContainText("A spot just opened up!");
+    await expect(emailFrame.getByRole("link", { name: "Book this tee time" })).toBeVisible();
+    await expect(emailFrame.locator("body")).toContainText(/first come,\s+first served/i);
+    await expect(emailFrame.locator("body")).not.toContainText(/we book/i);
 
     await expectNoHorizontalOverflow(page, testInfo);
     await expectInteractiveElementsAreUsable(page, testInfo);
@@ -237,4 +276,17 @@ function isSameOrigin(url: string) {
   } catch {
     return false;
   }
+}
+
+function addLocalDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatLocalDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }

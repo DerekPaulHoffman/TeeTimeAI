@@ -144,6 +144,16 @@ export async function markMatchAlertSent(matchId: string) {
   });
 }
 
+export async function markMatchAlertSuppressed(matchId: string) {
+  return prisma.teeTimeMatch.update({
+    where: { id: matchId },
+    data: {
+      alertStatus: "SUPPRESSED",
+      sentAt: new Date()
+    }
+  });
+}
+
 export async function startAutomationRun(promptVersion: string) {
   return prisma.automationRun.create({
     data: { promptVersion }

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import {
+  MAX_ADDITIONAL_ALERT_EMAILS,
   MAX_COURSE_PREFERENCES,
+  MAX_PLAYERS_PER_SEARCH,
   MIN_COURSE_PREFERENCES,
   teeSearchInputSchema
 } from "./search";
@@ -19,6 +21,7 @@ describe("teeSearchInputSchema", () => {
       endTime: "16:00",
       players: 3,
       alertEmail: "golfer@example.com",
+      additionalEmails: ["FRIEND@example.com"],
       courses: [
         {
           googlePlaceId: "place-1",
@@ -34,6 +37,7 @@ describe("teeSearchInputSchema", () => {
     expect(result.courses).toHaveLength(MIN_COURSE_PREFERENCES);
     expect(result.courses[0]?.rank).toBe(1);
     expect(result.alertEmail).toBe("golfer@example.com");
+    expect(result.additionalEmails).toEqual(["friend@example.com"]);
   });
 
   it("rejects same-day or past searches", () => {
@@ -76,6 +80,26 @@ describe("teeSearchInputSchema", () => {
     ).toThrow(/5/);
   });
 
+  it("rejects player counts above one tee time group", () => {
+    expect(() =>
+      teeSearchInputSchema.parse({
+        date: tomorrow(),
+        startTime: "13:40",
+        endTime: "16:00",
+        players: MAX_PLAYERS_PER_SEARCH + 1,
+        courses: [
+          {
+            googlePlaceId: "place-1",
+            name: "Tashua Knolls",
+            rank: 1,
+            latitude: 41.242,
+            longitude: -73.209
+          }
+        ]
+      })
+    ).toThrow(String(MAX_PLAYERS_PER_SEARCH));
+  });
+
   it("rejects an end time that is not after the start time", () => {
     expect(() =>
       teeSearchInputSchema.parse({
@@ -115,5 +139,29 @@ describe("teeSearchInputSchema", () => {
         ]
       })
     ).toThrow(/email/i);
+  });
+
+  it("rejects more than three additional alert emails", () => {
+    expect(() =>
+      teeSearchInputSchema.parse({
+        date: tomorrow(),
+        startTime: "13:40",
+        endTime: "16:00",
+        players: 3,
+        additionalEmails: Array.from(
+          { length: MAX_ADDITIONAL_ALERT_EMAILS + 1 },
+          (_, index) => `extra-${index}@example.com`
+        ),
+        courses: [
+          {
+            googlePlaceId: "place-1",
+            name: "Tashua Knolls",
+            rank: 1,
+            latitude: 41.242,
+            longitude: -73.209
+          }
+        ]
+      })
+    ).toThrow(/3/);
   });
 });

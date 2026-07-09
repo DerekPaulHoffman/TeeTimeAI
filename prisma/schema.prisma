@@ -46,6 +46,12 @@ enum AlertStatus {
   SUPPRESSED
 }
 
+enum FeedbackSentiment {
+  LIKE
+  DISLIKE
+  BROKEN
+}
+
 model User {
   id          String      @id @default(cuid())
   clerkUserId String      @unique
@@ -91,6 +97,7 @@ model TeeSearch {
   endTime        String
   players        Int
   cadenceMinutes Int                @default(15)
+  additionalEmails String[]          @default([])
   status         SearchStatus       @default(ACTIVE)
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
@@ -167,4 +174,28 @@ model AutomationRun {
   changedFiles  Json?
   notes         String?
   probes        CourseProbe[]
+}
+
+model WebsiteEvent {
+  id        String   @id @default(cuid())
+  name      String
+  page      String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([name, createdAt])
+  @@index([createdAt])
+}
+
+model WebsiteFeedback {
+  id           String            @id @default(cuid())
+  sentiment    FeedbackSentiment
+  message      String?
+  page         String?
+  contactEmail String?
+  createdAt    DateTime          @default(now())
+  resolvedAt   DateTime?
+
+  @@index([sentiment, createdAt])
+  @@index([createdAt])
 }

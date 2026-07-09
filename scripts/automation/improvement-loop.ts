@@ -1,6 +1,12 @@
 import "./load-local-env";
 
 import { finishAutomationRun, startAutomationRun } from "@/lib/automation/db-service";
+import {
+  buildImprovementCheckpoints,
+  type ImprovementCandidateInput,
+  selectImprovementCandidate
+} from "@/lib/automation/improvement";
+import { prisma } from "@/lib/prisma";
 
 const PROMPT_VERSION = "tee-time-spot-improvement-loop-v4";
 
@@ -56,14 +62,161 @@ Hard boundaries:
 
 async function main() {
   const run = await startAutomationRun(PROMPT_VERSION);
-  await finishAutomationRun(run.id, {
-    outcome: "needs_codex_session",
-    notes: loopPrompt.trim()
+  const snapshot = await loadImprovementSnapshot();
+  const candidate = selectImprovementCandidate(snapshot);
+  const checkpoints = buildImprovementCheckpoints({
+    queueConfirmed: true,
+    candidateSelected: candidate.kind !== "empty_queue",
+    outcomeRecorded: true
   });
-  console.log(loopPrompt.trim());
+
+  await finishAutomationRun(run.id, {
+    outcome: candidate.outcome,
+    notes: JSON.stringify(
+      {
+        checkpoints,
+        candidate,
+        snapshot: {
+          activeSearchCount: snapshot.activeSearchCount,
+          pendingAlertCount: snapshot.pendingAlerts.length,
+          actionableProbeCount: snapshot.actionableProbes.length
+        },
+        nextPrompt: loopPrompt.trim()
+      },
+      null,
+      2
+    )
+  });
+  console.warn(
+    JSON.stringify(
+      {
+        automationRunId: run.id,
+        outcome: candidate.outcome,
+        checkpoints,
+        candidate
+      },
+      null,
+      2
+    )
+  );
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
+  const recentSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const [activeSearchCount, pendingAlerts, probes] = await Promise.all([
+    prisma.teeSearch.count({
+      where: {
+        status: "ACTIVE",
+        date: {
+          gte: today
+        }
+      }
+    }),
+    prisma.teeTimeMatch.findMany({
+      where: {
+        alertStatus: "PENDING",
+        teeSearch: {
+          status: "ACTIVE"
+        }
+      },
+      orderBy: {
+        firstSeenAt: "asc"
+      },
+      take: 10,
+      include: {
+        course: true
+      }
+    }),
+    prisma.courseProbe.findMany({
+      where: {
+        observedAt: {
+          gte: recentSince
+        },
+        outcome: {
+          in: [
+            "BLOCKED_POLICY",
+            "BLOCKED_AUTH",
+            "BLOCKED_TOOLING",
+            "FETCH_FAILED",
+            "NEEDS_ADAPTER"
+          ]
+        }
+      },
+      orderBy: {
+        observedAt: "desc"
+      },
+      take: 25,
+      include: {
+        course: true
+      }
+    })
+  ]);
+
+  return {
+    activeSearchCount,
+    pendingAlerts: pendingAlerts.map((alert) => ({
+      id: alert.id,
+      courseName: alert.course.name,
+      firstSeenAt: alert.firstSeenAt.toISOString()
+    })),
+    actionableProbes: latestProbePerCourseSearch(probes).flatMap((probe) => {
+      const outcome = probe.outcome;
+      if (!isActionableProbeOutcome(outcome)) {
+        return [];
+      }
+
+      return [
+        {
+          id: probe.id,
+          outcome,
+          courseName: probe.course.name,
+          platform: probe.course.detectedPlatform,
+          observedAt: probe.observedAt.toISOString(),
+          message: probe.message
+        }
+      ];
+    })
+  };
+}
+
+function isActionableProbeOutcome(
+  outcome: string
+): outcome is ImprovementCandidateInput["actionableProbes"][number]["outcome"] {
+  return (
+    outcome === "BLOCKED_POLICY" ||
+    outcome === "BLOCKED_AUTH" ||
+    outcome === "BLOCKED_TOOLING" ||
+    outcome === "FETCH_FAILED" ||
+    outcome === "NEEDS_ADAPTER"
+  );
+}
+
+function latestProbePerCourseSearch<
+  T extends {
+    teeSearchId: string;
+    courseId: string;
+  }
+>(probes: T[]) {
+  const latest = new Map<string, T>();
+
+  for (const probe of probes) {
+    const key = `${probe.teeSearchId}:${probe.courseId}`;
+    if (!latest.has(key)) {
+      latest.set(key, probe);
+    }
+  }
+
+  return [...latest.values()];
+}
+
+main()
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

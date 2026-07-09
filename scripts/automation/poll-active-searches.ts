@@ -4,6 +4,7 @@ import {
   finishAutomationRun,
   listActiveSearchesForAutomation,
   listPendingMatchAlerts,
+  markMatchAlertSuppressed,
   markMatchAlertSent,
   recordCourseProbe,
   recordTeeTimeMatch,
@@ -50,6 +51,7 @@ type AutomationSearch = {
   startTime: string;
   endTime: string;
   players: number;
+  additionalEmails: string[];
   user: {
     email: string;
   };
@@ -164,15 +166,14 @@ async function main() {
                 continue;
               }
 
-              await sendTeeTimeAlert({
-                to: search.user.email,
+              await deliverMatchAlert({
+                id: record.id,
+                recipients: getAlertRecipients(search.user.email, search.additionalEmails),
                 courseName: course.name,
                 startsAt: record.startsAt,
                 availableSpots: record.availableSpots,
-                bookingUrl: record.bookingUrl,
-                idempotencyKey: `tee-time-match-${record.id}`
+                bookingUrl: record.bookingUrl
               });
-              await markMatchAlertSent(record.id);
             }
           } catch (error) {
             await recordCourseProbe({
@@ -221,19 +222,54 @@ async function sendPendingMatchAlerts() {
   let sent = 0;
 
   for (const match of pendingMatches) {
-    await sendTeeTimeAlert({
-      to: match.teeSearch.user.email,
+    await deliverMatchAlert({
+      id: match.id,
+      recipients: getAlertRecipients(match.teeSearch.user.email, match.teeSearch.additionalEmails),
       courseName: match.course.name,
       startsAt: match.startsAt,
       availableSpots: match.availableSpots,
-      bookingUrl: match.bookingUrl,
-      idempotencyKey: `tee-time-match-${match.id}`
+      bookingUrl: match.bookingUrl
     });
-    await markMatchAlertSent(match.id);
     sent += 1;
   }
 
   return sent;
+}
+
+async function deliverMatchAlert(input: {
+  id: string;
+  recipients: string[];
+  courseName: string;
+  startsAt: Date;
+  availableSpots: number;
+  bookingUrl: string;
+}) {
+  const deliveries = [];
+
+  for (const recipient of input.recipients) {
+    deliveries.push(
+      await sendTeeTimeAlert({
+        to: recipient,
+        courseName: input.courseName,
+        startsAt: input.startsAt,
+        availableSpots: input.availableSpots,
+        bookingUrl: input.bookingUrl,
+        idempotencyKey: `tee-time-match-${input.id}-${recipient}`
+      })
+    );
+  }
+
+  if (deliveries.every((delivery) => delivery.deliveryStatus === "dry_run")) {
+    await markMatchAlertSuppressed(input.id);
+    return deliveries;
+  }
+
+  await markMatchAlertSent(input.id);
+  return deliveries;
+}
+
+function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = []) {
+  return [...new Set([primaryEmail, ...additionalEmails].map((email) => email.trim().toLowerCase()))];
 }
 
 main()
