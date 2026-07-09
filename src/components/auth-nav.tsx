@@ -8,10 +8,10 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
   if (!clerkEnabled) {
     return (
       <nav className="nav-actions">
-        <Link className="text-link" href="/dashboard">
+        <Link className="text-link" href="/dashboard" prefetch={false}>
           Dashboard
         </Link>
-        <Link className="button button-secondary" href="/#start">
+        <Link className="button button-secondary" href="/#start" prefetch={false}>
           Email alerts
         </Link>
       </nav>
@@ -32,7 +32,7 @@ function ConfiguredAuthNav() {
     <nav className="nav-actions">
       {isSignedIn ? (
         <>
-          <Link className="button button-secondary" href="/dashboard">
+          <Link className="button button-secondary" href="/dashboard" prefetch={false}>
             <LayoutDashboard size={17} />
             Dashboard
           </Link>

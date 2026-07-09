@@ -14,6 +14,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByRole("heading", { name: "Tee Time Spot" })).toBeVisible();
     await expect(page.getByRole("link", { name: /Start a search/i })).toBeVisible();
     await expect(page.getByRole("link", { name: /View dashboard/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Preview email/i })).toBeVisible();
 
     await page.getByRole("link", { name: /Start a search/i }).click();
     await expect(page.getByRole("heading", { name: /Tell us where/i })).toBeVisible();
@@ -62,6 +63,24 @@ test.describe("Tee Time Spot UI smoke", () => {
       bodyText,
       "dashboard should explain whether searches are manageable, signed out, or setup-blocked"
     ).toMatch(/Automation state|Clerk|DATABASE_URL|Neon|sign in|account/i);
+
+    await expectNoHorizontalOverflow(page, testInfo);
+    await expectInteractiveElementsAreUsable(page, testInfo);
+    await expectNoPageIssues(issues, testInfo);
+  });
+
+  test("alert email preview is accessible and stable", async ({ page }, testInfo) => {
+    const issues = collectPageIssues(page);
+
+    await page.goto("/email-preview");
+
+    await expect(page.getByRole("heading", { name: "New tee time alert" })).toBeVisible();
+    await expect(page.getByText("Tashua Knolls Golf Course").first()).toBeVisible();
+    await expect(page.getByTitle("Rendered tee time alert email")).toBeVisible();
+
+    const emailFrame = page.frameLocator("iframe[title='Rendered tee time alert email']");
+    await expect(emailFrame.getByRole("heading", { name: "New tee time found" })).toBeVisible();
+    await expect(emailFrame.getByRole("link", { name: "Open official booking page" })).toBeVisible();
 
     await expectNoHorizontalOverflow(page, testInfo);
     await expectInteractiveElementsAreUsable(page, testInfo);

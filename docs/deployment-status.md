@@ -8,8 +8,8 @@ Last updated: 2026-07-09
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-3l1whl9rf-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_BqL96wEn4CKwSfc4zf5JP6NmfSYo`
+- Latest verified deployment: `teetimeai-hehtqzv5m-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_ZbewQ6WNsULdWfhXah1VPz1DGnC9`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -50,6 +50,8 @@ Last updated: 2026-07-09
 - 2026-07-09 hourly product loop identified Oak Hills Park Golf Course as an official ForeUP course (`booking/22739/11739`), updated the ForeUP adapter to support public tee sheets that do not require a booking class, seeded Oak Hills ForeUP metadata, and repaired the active Oak Hills course row in Postgres. Verification run `cmrcyxbi70000lc15iighvic0` processed 10 active searches; latest inspect showed `recentActionableProbes: []` and `pendingAlerts: []`.
 - 2026-07-09 loop hardening added a committed Playwright UI smoke (`npm run ui:smoke`) covering desktop/mobile onboarding, typed-location discovery, 1-to-5 ranking limit enforcement, dashboard access states, same-origin failed requests, console/page errors, horizontal overflow, and too-small interactive targets. The first smoke found undersized clickable attribution/header links, which were fixed in CSS.
 - 2026-07-09 production deploy `dpl_BqL96wEn4CKwSfc4zf5JP6NmfSYo` verified local tests/lint/build, local `npm run ui:smoke`, production `UI_SMOKE_BASE_URL=https://teetimespot.com npm run ui:smoke`, and clean Vercel error logs.
+- 2026-07-09 hourly product loop found no current actionable probes and no pending alerts, so it shipped the strongest remaining UI/access gap: an accessible `/email-preview` route that renders the same alert HTML used by the Resend worker with fixed sample data and no email side effects. The Playwright smoke now covers the preview on desktop and mobile, and top-nav prefetching is disabled where it created noisy aborted same-origin RSC requests in production smoke.
+- 2026-07-09 production deploy `dpl_ZbewQ6WNsULdWfhXah1VPz1DGnC9` verified `npm run test:run`, `npm run lint`, `npm run build`, local `npm run ui:smoke`, live `/email-preview` 200, production `$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\UI_SMOKE_BASE_URL`, and no production warning/error/fatal Vercel runtime logs for the checked deployment window. Checkpoints: `queue_confirmed=true`, `candidate_selected=true`, `tool_research_done=true`, `ui_smoke_done=true`, `verification_done=true`, `outcome_recorded=true`.
 
 ## Current Runtime Mode
 

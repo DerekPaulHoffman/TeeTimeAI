@@ -22,6 +22,9 @@ export default function HomePage() {
               View dashboard
               <ArrowRight size={18} />
             </a>
+            <a className="button button-secondary" href="/email-preview">
+              Preview email
+            </a>
           </div>
         </div>
         <div className="hero-strip" aria-label="How Tee Time Spot works">
