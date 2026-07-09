@@ -31,6 +31,7 @@ type Notice = {
 
 declare global {
   interface Window {
+    gm_authFailure?: () => void;
     google?: GoogleMapsWindow;
     initTeeTimeSpotGoogleMaps?: () => void;
   }
@@ -62,6 +63,12 @@ type GoogleMapsNamespace = {
       zoom: number;
     }
   ) => GoogleMapInstance;
+  Marker: new (options: {
+    label?: string;
+    map: GoogleMapInstance;
+    position: GoogleMapsLatLng;
+    title: string;
+  }) => GoogleMapsClassicMarker;
   InfoWindow: new (options: {
     ariaLabel?: string;
     content?: Node | string;
@@ -69,7 +76,7 @@ type GoogleMapsNamespace = {
   }) => {
     close(): void;
     open(options: {
-      anchor?: GoogleMapsAdvancedMarker;
+      anchor?: GoogleMapsMarker;
       map: GoogleMapInstance;
       shouldFocus?: boolean;
     }): void;
@@ -98,6 +105,13 @@ type GoogleMapsAdvancedMarker = {
   map?: GoogleMapInstance | null;
 };
 
+type GoogleMapsClassicMarker = {
+  addListener?: (eventName: string, handler: () => void) => { remove?: () => void };
+  setMap(map: GoogleMapInstance | null): void;
+};
+
+type GoogleMapsMarker = GoogleMapsAdvancedMarker | GoogleMapsClassicMarker;
+
 const tomorrow = () => {
   return formatDateInputValue(addLocalDays(new Date(), 1));
 };
@@ -106,7 +120,6 @@ const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
 const COURSE_SEARCH_RADIUS_METERS = 50000;
 const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
-const GOOGLE_MAPS_DEMO_MAP_ID = "DEMO_MAP_ID";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
@@ -713,9 +726,12 @@ function CourseResultsMap({
   courses: CourseCandidate[];
   origin: SearchCoordinates | null;
 }) {
-  const mapsApiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY;
-  const mapsMapId = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID?.trim() || GOOGLE_MAPS_DEMO_MAP_ID;
+  const mapsApiKey = normalizeBrowserGoogleMapsApiKey(
+    process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY
+  );
+  const mapsMapId = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID?.trim();
   const mapElementId = "course-results-map";
+  const [mapLoadError, setMapLoadError] = useState(false);
   const mapCenter = useMemo(() => getCourseMapCenter(courses, origin), [courses, origin]);
   const courseSignature = useMemo(
     () =>
@@ -733,64 +749,66 @@ function CourseResultsMap({
     const apiKey = mapsApiKey;
     let isCancelled = false;
     let cleanupMarkers: (() => void) | undefined;
+    const handleAuthFailure = () => {
+      setMapLoadError(true);
+    };
+    window.gm_authFailure = handleAuthFailure;
 
     async function initializeMap() {
       const googleMaps = await loadGoogleMapsApi(apiKey);
       const advancedMarkers = googleMaps.marker;
       const element = document.getElementById(mapElementId);
 
-      if (
-        isCancelled ||
-        !element ||
-        !advancedMarkers?.AdvancedMarkerElement ||
-        !advancedMarkers.PinElement
-      ) {
+      if (isCancelled || !element) {
         return;
       }
 
       const center = { lat: mapCenter.latitude, lng: mapCenter.longitude };
-      const map = new googleMaps.Map(element, {
+      const mapOptions = {
         center,
         clickableIcons: true,
         fullscreenControl: true,
-        mapId: mapsMapId,
         mapTypeControl: false,
         streetViewControl: false,
-        zoom: 10
+        zoom: 10,
+        ...(mapsMapId ? { mapId: mapsMapId } : {})
+      };
+      const map = new googleMaps.Map(element, {
+        ...mapOptions
       });
       const bounds = new googleMaps.LatLngBounds();
       const infoWindow = new googleMaps.InfoWindow({
         ariaLabel: "Course details",
         maxWidth: 340
       });
-      const markers: GoogleMapsAdvancedMarker[] = [];
+      const markers: GoogleMapsMarker[] = [];
+      const advancedMarkerApi =
+        mapsMapId && advancedMarkers?.AdvancedMarkerElement && advancedMarkers.PinElement
+          ? advancedMarkers
+          : null;
 
       courses.forEach((course, index) => {
         const position = { lat: course.latitude, lng: course.longitude };
         bounds.extend(position);
-        const pin = new advancedMarkers.PinElement({
-          background: "#d93025",
-          borderColor: "#ffffff",
-          glyphColor: "#ffffff",
-          glyphText: String(index + 1),
-          scale: 1.18
-        });
-        const marker = new advancedMarkers.AdvancedMarkerElement({
-          gmpClickable: true,
-          map,
-          position,
-          title: `${index + 1}. ${course.name}`
-        });
+        const marker = advancedMarkerApi
+          ? createAdvancedCourseMarker(advancedMarkerApi, map, position, course.name, index)
+          : new googleMaps.Marker({
+              label: String(index + 1),
+              map,
+              position,
+              title: `${index + 1}. ${course.name}`
+            });
 
-        marker.append?.(pin);
         marker.addListener?.("click", () => {
           infoWindow.setContent(createCourseMapInfoWindowContent(course));
           infoWindow.open({ anchor: marker, map, shouldFocus: false });
         });
-        marker.addListener?.("gmp-click", () => {
-          infoWindow.setContent(createCourseMapInfoWindowContent(course));
-          infoWindow.open({ anchor: marker, map, shouldFocus: false });
-        });
+        if (advancedMarkerApi) {
+          marker.addListener?.("gmp-click", () => {
+            infoWindow.setContent(createCourseMapInfoWindowContent(course));
+            infoWindow.open({ anchor: marker, map, shouldFocus: false });
+          });
+        }
         markers.push(marker);
       });
 
@@ -801,6 +819,10 @@ function CourseResultsMap({
       cleanupMarkers = () => {
         infoWindow.close();
         markers.forEach((marker) => {
+          if ("setMap" in marker) {
+            marker.setMap(null);
+            return;
+          }
           marker.map = null;
         });
       };
@@ -808,10 +830,14 @@ function CourseResultsMap({
 
     initializeMap().catch(() => {
       // The course list remains usable if Google Maps JS cannot initialize.
+      setMapLoadError(true);
     });
 
     return () => {
       isCancelled = true;
+      if (window.gm_authFailure === handleAuthFailure) {
+        window.gm_authFailure = undefined;
+      }
       cleanupMarkers?.();
     }
   }, [
@@ -830,20 +856,18 @@ function CourseResultsMap({
   return (
     <div className="course-results-map-shell">
       {mapsApiKey ? (
-        <div
-          aria-label={`${courses.length} nearby course locations on Google Maps`}
-          className="course-results-map"
-          id={mapElementId}
-          role="region"
-        />
+        mapLoadError ? (
+          <CourseMapUnavailable message="Google Maps could not load. Check that Maps JavaScript API is enabled for the browser key." />
+        ) : (
+          <div
+            aria-label={`${courses.length} nearby course locations on Google Maps`}
+            className="course-results-map"
+            id={mapElementId}
+            role="region"
+          />
+        )
       ) : (
-        <div className="course-results-map-unavailable" role="status">
-          <MapPinned size={26} />
-          <div>
-            <h3>Map unavailable</h3>
-            <p>Google Maps needs a browser API key before course pins can render.</p>
-          </div>
-        </div>
+        <CourseMapUnavailable message="Google Maps needs a browser API key before course pins can render." />
       )}
       <div className="course-results-map-count">
         <MapPinned size={16} />
@@ -853,8 +877,45 @@ function CourseResultsMap({
   );
 }
 
+function CourseMapUnavailable({ message }: { message: string }) {
+  return (
+    <div className="course-results-map-unavailable" role="note">
+      <MapPinned size={26} />
+      <div>
+        <h3>Map unavailable</h3>
+        <p>{message}</p>
+      </div>
+    </div>
+  );
+}
+
+function createAdvancedCourseMarker(
+  advancedMarkers: NonNullable<GoogleMapsNamespace["marker"]>,
+  map: GoogleMapInstance,
+  position: GoogleMapsLatLng,
+  courseName: string,
+  index: number
+) {
+  const pin = new advancedMarkers.PinElement({
+    background: "#d93025",
+    borderColor: "#ffffff",
+    glyphColor: "#ffffff",
+    glyphText: String(index + 1),
+    scale: 1.18
+  });
+  const marker = new advancedMarkers.AdvancedMarkerElement({
+    gmpClickable: true,
+    map,
+    position,
+    title: `${index + 1}. ${courseName}`
+  });
+
+  marker.append?.(pin);
+  return marker;
+}
+
 function loadGoogleMapsApi(apiKey: string) {
-  if (window.google?.maps?.Map && window.google.maps.marker?.AdvancedMarkerElement) {
+  if (window.google?.maps?.Map) {
     return Promise.resolve(window.google.maps);
   }
 
@@ -910,6 +971,10 @@ function loadGoogleMapsApi(apiKey: string) {
   });
 
   return googleMapsLoaderPromise;
+}
+
+function normalizeBrowserGoogleMapsApiKey(apiKey?: string) {
+  return apiKey?.replace(/^\uFEFF/, "").trim();
 }
 
 function createCourseMapInfoWindowContent(course: CourseCandidate) {
