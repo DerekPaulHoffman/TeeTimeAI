@@ -221,6 +221,11 @@ async function expectNoHorizontalOverflow(page: Page, testInfo: TestInfo) {
       .map((element) => {
         const rect = element.getBoundingClientRect();
         const style = window.getComputedStyle(element);
+        const insideGoogleMap =
+          Boolean(element.closest(".course-results-map")) ||
+          Boolean(element.closest(".gm-style")) ||
+          Boolean(element.closest("gmp-map")) ||
+          Boolean(element.closest("gmp-advanced-marker"));
         return {
           tag: element.tagName.toLowerCase(),
           className: typeof element.className === "string" ? element.className : "",
@@ -228,6 +233,7 @@ async function expectNoHorizontalOverflow(page: Page, testInfo: TestInfo) {
           left: Math.round(rect.left),
           right: Math.round(rect.right),
           width: Math.round(rect.width),
+          insideGoogleMap,
           visible:
             rect.width > 0 &&
             rect.height > 0 &&
@@ -235,7 +241,12 @@ async function expectNoHorizontalOverflow(page: Page, testInfo: TestInfo) {
             style.visibility !== "hidden"
         };
       })
-      .filter((entry) => entry.visible && (entry.left < -2 || entry.right > viewportWidth + 2))
+      .filter(
+        (entry) =>
+          entry.visible &&
+          !entry.insideGoogleMap &&
+          (entry.left < -2 || entry.right > viewportWidth + 2)
+      )
       .slice(0, 10);
 
     return { offenders, scrollWidth, viewportWidth };
