@@ -90,4 +90,26 @@ describe("ForeUP adapter", () => {
       priceCents: 5200
     });
   });
+
+  it("treats ForeUP false responses as no available public slots", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => false
+      }))
+    );
+
+    const slots = await fetchForeupSlots({
+      courseId: "longshore",
+      date: new Date("2026-07-10T00:00:00-04:00"),
+      players: 3,
+      metadata: {
+        scheduleId: 23148,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/23148#/login"
+      }
+    });
+
+    expect(slots).toEqual([]);
+  });
 });

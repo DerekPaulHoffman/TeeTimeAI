@@ -54,7 +54,11 @@ export async function fetchForeupSlots(input: {
     throw new Error(`ForeUP returned ${response.status}`);
   }
 
-  const slots = (await response.json()) as ForeupApiSlot[];
+  const slots = (await response.json()) as ForeupApiSlot[] | false;
+  if (!Array.isArray(slots)) {
+    return [];
+  }
+
   return slots
     .filter((slot) => slot.time && slot.available_spots)
     .map((slot) => ({
