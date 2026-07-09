@@ -365,6 +365,7 @@ button {
   align-items: center;
   display: inline-flex;
   min-height: 24px;
+  min-width: 24px;
   text-decoration: underline;
   text-underline-offset: 2px;
 }
