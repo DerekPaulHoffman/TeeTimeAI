@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const localSmokePort = process.env.UI_SMOKE_PORT ?? "3100";
+const localSmokePort = process.env.UI_SMOKE_PORT ?? "3998";
 const baseURL = process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${localSmokePort}`;
 const shouldStartLocalServer = !process.env.UI_SMOKE_BASE_URL;
 
@@ -24,8 +24,8 @@ export default defineConfig({
   },
   webServer: shouldStartLocalServer
     ? {
-        command: `npm run dev -- --hostname 127.0.0.1 --port ${localSmokePort}`,
-        reuseExistingServer: !process.env.CI,
+        command: `npm run start -- --hostname 127.0.0.1 --port ${localSmokePort}`,
+        reuseExistingServer: false,
         timeout: 120_000,
         url: baseURL
       }

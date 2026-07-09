@@ -12,7 +12,7 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
           <Bell size={17} />
           My alerts
         </Link>
-        <Link className="button button-primary" href="/#start" prefetch={false}>
+        <Link className="button button-primary" href="/search" prefetch={false}>
           <Plus size={17} />
           New search
         </Link>
@@ -36,7 +36,7 @@ function ConfiguredAuthNav() {
         <Bell size={17} />
         My alerts
       </Link>
-      <Link className="button button-primary" href="/#start" prefetch={false}>
+      <Link className="button button-primary" href="/search" prefetch={false}>
         <Plus size={17} />
         New search
       </Link>

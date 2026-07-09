@@ -280,6 +280,11 @@ Required for live Google Places discovery:
 
 - `GOOGLE_PLACES_API_KEY`
 
+Required for the interactive course map:
+
+- `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY`
+- `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID`
+
 Required for live email sending:
 
 - `RESEND_API_KEY`

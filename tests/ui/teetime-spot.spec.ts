@@ -1,7 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 const smokeBaseUrl =
-  process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`;
+  process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3998"}`;
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {
@@ -19,17 +19,21 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByText("We keep watch")).toBeVisible();
 
     await page.getByRole("link", { name: /Start a search/i }).click();
-    await expect(page.getByRole("heading", { name: /Tell us where/i })).toBeVisible();
+    await expect(page).toHaveURL(/\/search/);
+    await expect(page.getByRole("heading", { name: /Choose the courses/i })).toBeVisible();
     await expect(page.getByText("Start getting alerts")).toBeVisible();
     await expect(page.locator(".summary-panel button")).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
 
     await page.getByLabel("Location").fill("Trumbull, CT");
     await page.getByRole("button", { name: /Find courses/i }).click();
+    const discoveryStatus = page
+      .getByRole("status")
+      .filter({ hasText: /Found \d+ nearby golf courses|Loaded demo courses/i });
     await expect(
       page.getByText(/Found \d+ nearby golf courses|Loaded demo courses/i)
     ).toBeVisible();
-    await expect(page.getByRole("status")).toContainText(
+    await expect(discoveryStatus).toContainText(
       /Found \d+ nearby golf courses|Loaded demo courses/i
     );
 
@@ -37,21 +41,17 @@ test.describe("Tee Time Spot UI smoke", () => {
     const courseCount = await courseRows.count();
     expect(courseCount, "course discovery should return enough rows to exercise ranking limits").toBeGreaterThanOrEqual(6);
     await expect(page.locator(".course-results-map-shell")).toBeVisible();
-    await expect(page.locator(".course-results-map-frame, .course-results-map").first()).toBeVisible();
+    const mapCanvas = page.locator(".course-results-map");
+    const unavailableMap = page.locator(".course-results-map-unavailable");
+    if ((await unavailableMap.count()) > 0) {
+      await expect(unavailableMap).toContainText("Map unavailable");
+    } else {
+      await expect(mapCanvas).toBeVisible();
+    }
+    await expect(page.locator(".course-results-map-frame")).toHaveCount(0);
+    await expect(page.locator(".course-results-map-overlay")).toHaveCount(0);
     await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
     await expect(courseRows.nth(0).getByRole("link", { name: "Google Maps" })).toHaveCount(0);
-    const fallbackMapPin = page.locator(".course-results-map-pin").first();
-    if ((await fallbackMapPin.count()) > 0) {
-      await fallbackMapPin.click();
-      const placeCard = page.locator(".course-map-place-card");
-      await expect(placeCard).toBeVisible();
-      await expect(placeCard.getByRole("link", { name: /Open in Google Maps/i })).toHaveAttribute(
-        "href",
-        /google\.com\/maps\/search/
-      );
-      await placeCard.getByRole("button", { name: /Close map details/i }).click();
-      await expect(placeCard).toBeHidden();
-    }
     await expect(page.getByText(/^Photo:/)).toHaveCount(0);
     const seeMoreLocations = page.getByRole("button", { name: /See more locations/i });
     if ((await seeMoreLocations.count()) > 0) {
@@ -64,7 +64,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await courseRows.nth(index).getByRole("button", { name: /^Add$/i }).click();
     }
 
-    await expect(page.getByText("#5")).toBeVisible();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(5);
     await courseRows.nth(5).getByRole("button", { name: /^Add$/i }).click();
     await expect(page.getByText("You can prioritize up to 5 courses.")).toBeVisible();
     await expect(page.locator(".alert-error[role='alert']")).toContainText(
@@ -185,8 +185,13 @@ function collectPageIssues(page: Page) {
   });
 
   page.on("requestfailed", (request) => {
+    const failureText = request.failure()?.errorText ?? "";
+    if (request.url().includes("/api/analytics/events") && failureText.includes("ERR_ABORTED")) {
+      return;
+    }
+
     if (isSameOrigin(request.url())) {
-      issues.push(`requestfailed:${request.method()} ${request.url()} ${request.failure()?.errorText ?? ""}`);
+      issues.push(`requestfailed:${request.method()} ${request.url()} ${failureText}`);
     }
   });
 

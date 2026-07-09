@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { ArrowRight, Bell, MapPin, Search } from "lucide-react";
 
-import { TeeTimeIntake } from "@/components/tee-time-intake";
 import { absoluteUrl, siteDescription, siteName } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -69,7 +68,7 @@ export default function HomePage() {
             No payment, no account, no friction.
           </p>
           <div className="hero-actions">
-            <a className="button button-primary" data-analytics-event="start_search_clicked" href="#start">
+            <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
               <Search size={18} />
               Start a search
             </a>
@@ -101,7 +100,7 @@ export default function HomePage() {
       <section className="section section-tight" id="start">
         <nav className="quick-jump-nav" aria-label="Page sections">
           <a href="#">Home</a>
-          <a href="#start">Search</a>
+          <a href="/search">Search</a>
           <a data-analytics-event="dashboard_opened" href="/dashboard">Dashboard</a>
           <a data-analytics-event="email_preview_opened" href="/email-preview">Email</a>
         </nav>
@@ -115,7 +114,20 @@ export default function HomePage() {
             email the moment a spot opens up.
           </p>
         </div>
-        <TeeTimeIntake />
+        <div className="search-entry-panel">
+          <MapPin size={24} />
+          <div>
+            <h3>Build your ranked course list.</h3>
+            <p className="meta">
+              Open the search page to find nearby public courses, compare distance and ratings,
+              and drag your favorite courses into the order we should check.
+            </p>
+          </div>
+          <a className="button button-dark" href="/search">
+            <Search size={17} />
+            Search courses
+          </a>
+        </div>
       </section>
 
       <section className="section flow-band">

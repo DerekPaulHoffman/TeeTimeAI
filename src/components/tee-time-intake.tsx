@@ -5,8 +5,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Check,
+  ChevronDown,
+  ChevronUp,
   ExternalLink,
-  Flag,
+  GripVertical,
   LocateFixed,
   MapPin,
   MapPinned,
@@ -18,7 +20,7 @@ import {
 
 import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
-import { getGoogleMapsEmbedUrl, getGoogleMapsSearchUrl } from "@/lib/maps";
+import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
@@ -30,36 +32,70 @@ type Notice = {
 declare global {
   interface Window {
     google?: GoogleMapsWindow;
-    initTeeTimeSpotCourseMap?: () => void;
+    initTeeTimeSpotGoogleMaps?: () => void;
   }
 }
 
 type GoogleMapsWindow = {
-  maps: {
-    LatLngBounds: new () => {
-      extend(position: { lat: number; lng: number }): void;
-    };
-    Map: new (
-      element: HTMLElement,
-      options: {
-        center: { lat: number; lng: number };
-        clickableIcons?: boolean;
-        mapTypeControl?: boolean;
-        streetViewControl?: boolean;
-        zoom: number;
-      }
-    ) => {
-      fitBounds(bounds: unknown): void;
-    };
-    Marker: new (options: {
-      label: string;
-      map: unknown;
-      position: { lat: number; lng: number };
-      title: string;
-    }) => {
-      addListener?: (eventName: string, handler: () => void) => void;
-    };
+  maps: GoogleMapsNamespace;
+};
+
+type GoogleMapsLatLng = { lat: number; lng: number };
+
+type GoogleMapInstance = {
+  fitBounds(bounds: unknown): void;
+};
+
+type GoogleMapsNamespace = {
+  LatLngBounds: new () => {
+    extend(position: GoogleMapsLatLng): void;
   };
+  Map: new (
+    element: HTMLElement,
+    options: {
+      center: GoogleMapsLatLng;
+      clickableIcons?: boolean;
+      fullscreenControl?: boolean;
+      mapId?: string;
+      mapTypeControl?: boolean;
+      streetViewControl?: boolean;
+      zoom: number;
+    }
+  ) => GoogleMapInstance;
+  InfoWindow: new (options: {
+    ariaLabel?: string;
+    content?: Node | string;
+    maxWidth?: number;
+  }) => {
+    close(): void;
+    open(options: {
+      anchor?: GoogleMapsAdvancedMarker;
+      map: GoogleMapInstance;
+      shouldFocus?: boolean;
+    }): void;
+    setContent(content: Node | string): void;
+  };
+  marker?: {
+    AdvancedMarkerElement: new (options: {
+      gmpClickable?: boolean;
+      map: GoogleMapInstance;
+      position: GoogleMapsLatLng;
+      title: string;
+    }) => GoogleMapsAdvancedMarker;
+    PinElement: new (options: {
+      background?: string;
+      borderColor?: string;
+      glyphColor?: string;
+      glyphText?: string;
+      scale?: number;
+    }) => Node;
+  };
+};
+
+type GoogleMapsAdvancedMarker = {
+  append?: (child: Node) => void;
+  addListener?: (eventName: string, handler: () => void) => { remove?: () => void };
+  map?: GoogleMapInstance | null;
 };
 
 const tomorrow = () => {
@@ -69,6 +105,10 @@ const tomorrow = () => {
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
 const COURSE_SEARCH_RADIUS_METERS = 50000;
+const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
+const GOOGLE_MAPS_DEMO_MAP_ID = "DEMO_MAP_ID";
+let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
+
 type SearchCoordinates = { latitude: number; longitude: number };
 
 export function TeeTimeIntake() {
@@ -89,6 +129,7 @@ export function TeeTimeIntake() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
+  const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
   const minSearchDate = tomorrow();
 
   const selectedIds = useMemo(
@@ -217,6 +258,40 @@ export function TeeTimeIntake() {
     setSelected((current) => current.filter((course) => course.googlePlaceId !== placeId));
   }
 
+  function moveSelectedCourse(placeId: string, direction: -1 | 1) {
+    setSelected((current) => {
+      const index = current.findIndex((course) => course.googlePlaceId === placeId);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  }
+
+  function reorderSelectedCourse(sourcePlaceId: string, targetPlaceId: string) {
+    if (sourcePlaceId === targetPlaceId) {
+      return;
+    }
+
+    setSelected((current) => {
+      const sourceIndex = current.findIndex((course) => course.googlePlaceId === sourcePlaceId);
+      const targetIndex = current.findIndex((course) => course.googlePlaceId === targetPlaceId);
+
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return current;
+      }
+
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }
+
   function showMoreCourses() {
     setVisibleCourseCount((current) =>
       Math.min(current + COURSE_REVEAL_INCREMENT, courses.length)
@@ -283,7 +358,7 @@ export function TeeTimeIntake() {
   }
 
   return (
-    <div className="intake-layout">
+    <div className="intake-layout search-page-layout">
       <div className="workspace">
         <div className="control-grid">
           <div className="field">
@@ -390,34 +465,28 @@ export function TeeTimeIntake() {
             const isSelected = selectedIndex >= 0;
 
             return (
-              <div className="course-row" key={course.googlePlaceId} role="listitem">
+              <div
+                className={isSelected ? "course-row course-row-selected" : "course-row"}
+                key={course.googlePlaceId}
+                role="listitem"
+              >
                 <CourseThumbnail course={course} />
+                {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
                 <div className="course-copy">
-                  <div className="course-badges">
-                    <span className="mini-pill">
-                      <Flag size={13} />
-                      Public course
-                    </span>
+                  <h3>{course.name}</h3>
+                  <p className="figma-course-meta">
+                    {course.distanceMeters !== undefined ? (
+                      <span>{formatDistance(course.distanceMeters)}</span>
+                    ) : null}
+                    <span>18 holes</span>
+                    <span>Par 72</span>
                     {course.rating ? (
-                      <span className="mini-pill">
+                      <span>
                         <Star size={13} />
                         {course.rating.toFixed(1)}
                       </span>
                     ) : null}
-                    {course.distanceMeters !== undefined ? (
-                      <span className="mini-pill">
-                        <MapPin size={13} />
-                        {formatDistance(course.distanceMeters)}
-                      </span>
-                    ) : null}
-                    {isSelected ? (
-                      <span className="mini-pill selected-course-pill">
-                        <Check size={13} />
-                        Priority {selectedIndex + 1}
-                      </span>
-                    ) : null}
-                  </div>
-                  <h3>{course.name}</h3>
+                  </p>
                   <CourseAddressLink course={course} />
                 </div>
                 <div className="course-actions">
@@ -433,13 +502,13 @@ export function TeeTimeIntake() {
                     </a>
                   ) : null}
                   <button
-                    className="button button-dark"
+                    className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
                     type="button"
                     onClick={() => addCourse(course)}
                     disabled={isSelected}
                     title={isSelected ? `Priority ${selectedIndex + 1}` : "Add course"}
                   >
-                    {isSelected ? <Check size={17} /> : <Plus size={17} />}
+                    {isSelected ? <Check size={13} /> : <Plus size={13} />}
                     {isSelected ? "Added" : "Add"}
                   </button>
                 </div>
@@ -462,10 +531,15 @@ export function TeeTimeIntake() {
         ) : null}
       </div>
 
-      <aside className="summary-panel">
-        <MapPinned size={28} />
-        <h2>Your favorite courses</h2>
-        <p>Put your favorite at the top. We&apos;ll focus there first.</p>
+      <aside className="summary-panel figma-selected-panel">
+        <div className="figma-selected-header">
+          <span className="figma-selected-icon">
+            <MapPinned size={18} />
+          </span>
+          <h2>Your courses</h2>
+          <span className="figma-count-pill">{selected.length}/5</span>
+        </div>
+        <p>Pick up to 5. Drag to rank them - #1 gets checked first.</p>
         <div className="selected-list">
           {selected.length === 0 ? (
             <div className="selected-empty">
@@ -474,28 +548,51 @@ export function TeeTimeIntake() {
             </div>
           ) : (
             selected.map((course, index) => (
-              <div className="selected-row selected-card" key={course.googlePlaceId}>
+              <div
+                className={
+                  draggedCourseId === course.googlePlaceId
+                    ? "selected-row selected-card figma-selected-card is-dragging"
+                    : "selected-row selected-card figma-selected-card"
+                }
+                draggable
+                key={course.googlePlaceId}
+                onDragEnd={() => setDraggedCourseId(null)}
+                onDragOver={(event) => event.preventDefault()}
+                onDragStart={() => setDraggedCourseId(course.googlePlaceId)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (draggedCourseId) {
+                    reorderSelectedCourse(draggedCourseId, course.googlePlaceId);
+                    setDraggedCourseId(null);
+                  }
+                }}
+              >
+                <GripVertical className="figma-drag-handle" size={16} />
+                <span className="figma-selected-rank">{index + 1}</span>
                 <CourseThumbnail course={course} variant="compact" />
                 <div className="selected-copy">
-                  <span className="rank-badge">Priority #{index + 1}</span>
                   <h3>{course.name}</h3>
-                  <CourseAddressLink course={course} unavailableText="Course address unavailable" />
-                  {course.website ? (
-                    <div className="selected-links">
-                      <a
-                        className="course-link"
-                        href={course.website}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        <ExternalLink size={14} />
-                        Official course link
-                      </a>
-                    </div>
-                  ) : null}
+                </div>
+                <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
+                  <button
+                    aria-label={`Move ${course.name} up`}
+                    disabled={index === 0}
+                    onClick={() => moveSelectedCourse(course.googlePlaceId, -1)}
+                    type="button"
+                  >
+                    <ChevronUp size={15} />
+                  </button>
+                  <button
+                    aria-label={`Move ${course.name} down`}
+                    disabled={index === selected.length - 1}
+                    onClick={() => moveSelectedCourse(course.googlePlaceId, 1)}
+                    type="button"
+                  >
+                    <ChevronDown size={15} />
+                  </button>
                 </div>
                 <button
-                  className="button button-secondary icon-button"
+                  className="figma-remove-course"
                   type="button"
                   onClick={() => removeCourse(course.googlePlaceId)}
                   title="Remove course"
@@ -528,6 +625,26 @@ export function TeeTimeIntake() {
             "We'll email you as soon as a spot opens up. Sign in later to pause, edit, or cancel alerts."}
         </p>
       </aside>
+      {selected.length > 0 ? (
+        <div className="mobile-selection-bar">
+          <span>{selected.length} {selected.length === 1 ? "course" : "courses"} selected</span>
+          <a href="#search-form-guidance">Reorder</a>
+          <button
+            className="button button-primary"
+            type="button"
+            onClick={saveSearch}
+            disabled={
+              saving ||
+              isCurrentSearchSaved ||
+              Boolean(saveBlocker) ||
+              selected.length === 0 ||
+              !alertEmail.trim()
+            }
+          >
+            Start alerts
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -597,14 +714,9 @@ function CourseResultsMap({
   origin: SearchCoordinates | null;
 }) {
   const mapsApiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY;
-  const mapId = "course-results-map";
-  const [selectedMapPlaceId, setSelectedMapPlaceId] = useState<string | null>(null);
+  const mapsMapId = process.env.NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID?.trim() || GOOGLE_MAPS_DEMO_MAP_ID;
+  const mapElementId = "course-results-map";
   const mapCenter = useMemo(() => getCourseMapCenter(courses, origin), [courses, origin]);
-  const mapMarkers = useMemo(() => getCourseMapMarkers(courses), [courses]);
-  const selectedMapCourse = useMemo(
-    () => courses.find((course) => course.googlePlaceId === selectedMapPlaceId) ?? null,
-    [courses, selectedMapPlaceId]
-  );
   const courseSignature = useMemo(
     () =>
       courses
@@ -618,62 +730,98 @@ function CourseResultsMap({
       return;
     }
 
-    window.initTeeTimeSpotCourseMap = () => {
-      const element = document.getElementById(mapId);
-      const googleMaps = window.google?.maps;
-      if (!element || !googleMaps) {
+    const apiKey = mapsApiKey;
+    let isCancelled = false;
+    let cleanupMarkers: (() => void) | undefined;
+
+    async function initializeMap() {
+      const googleMaps = await loadGoogleMapsApi(apiKey);
+      const advancedMarkers = googleMaps.marker;
+      const element = document.getElementById(mapElementId);
+
+      if (
+        isCancelled ||
+        !element ||
+        !advancedMarkers?.AdvancedMarkerElement ||
+        !advancedMarkers.PinElement
+      ) {
         return;
       }
 
       const center = { lat: mapCenter.latitude, lng: mapCenter.longitude };
       const map = new googleMaps.Map(element, {
         center,
-        clickableIcons: false,
+        clickableIcons: true,
+        fullscreenControl: true,
+        mapId: mapsMapId,
         mapTypeControl: false,
         streetViewControl: false,
         zoom: 10
       });
       const bounds = new googleMaps.LatLngBounds();
+      const infoWindow = new googleMaps.InfoWindow({
+        ariaLabel: "Course details",
+        maxWidth: 340
+      });
+      const markers: GoogleMapsAdvancedMarker[] = [];
 
       courses.forEach((course, index) => {
         const position = { lat: course.latitude, lng: course.longitude };
         bounds.extend(position);
-        const marker = new googleMaps.Marker({
-          label: String(index + 1),
+        const pin = new advancedMarkers.PinElement({
+          background: "#d93025",
+          borderColor: "#ffffff",
+          glyphColor: "#ffffff",
+          glyphText: String(index + 1),
+          scale: 1.18
+        });
+        const marker = new advancedMarkers.AdvancedMarkerElement({
+          gmpClickable: true,
           map,
           position,
-          title: course.name
+          title: `${index + 1}. ${course.name}`
         });
+
+        marker.append?.(pin);
         marker.addListener?.("click", () => {
-          setSelectedMapPlaceId(course.googlePlaceId);
+          infoWindow.setContent(createCourseMapInfoWindowContent(course));
+          infoWindow.open({ anchor: marker, map, shouldFocus: false });
         });
+        marker.addListener?.("gmp-click", () => {
+          infoWindow.setContent(createCourseMapInfoWindowContent(course));
+          infoWindow.open({ anchor: marker, map, shouldFocus: false });
+        });
+        markers.push(marker);
       });
 
       if (courses.length > 1) {
         map.fitBounds(bounds);
       }
-    };
 
-    if (window.google?.maps) {
-      window.initTeeTimeSpotCourseMap();
-      return;
+      cleanupMarkers = () => {
+        infoWindow.close();
+        markers.forEach((marker) => {
+          marker.map = null;
+        });
+      };
     }
 
-    const existingScript = document.querySelector<HTMLScriptElement>(
-      "script[data-tee-time-spot-google-map]"
-    );
-    if (existingScript) {
-      return;
-    }
+    initializeMap().catch(() => {
+      // The course list remains usable if Google Maps JS cannot initialize.
+    });
 
-    const script = document.createElement("script");
-    script.async = true;
-    script.dataset.teeTimeSpotGoogleMap = "true";
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
-      mapsApiKey
-    )}&callback=initTeeTimeSpotCourseMap`;
-    document.head.appendChild(script);
-  }, [courses, courseSignature, mapCenter.latitude, mapCenter.longitude, mapsApiKey]);
+    return () => {
+      isCancelled = true;
+      cleanupMarkers?.();
+    }
+  }, [
+    courses,
+    courseSignature,
+    mapCenter.latitude,
+    mapCenter.longitude,
+    mapsApiKey,
+    mapsMapId
+  ]);
 
   if (courses.length === 0) {
     return null;
@@ -685,113 +833,146 @@ function CourseResultsMap({
         <div
           aria-label={`${courses.length} nearby course locations on Google Maps`}
           className="course-results-map"
-          id={mapId}
-          role="img"
+          id={mapElementId}
+          role="region"
         />
       ) : (
-        <div
-          aria-label={`${courses.length} nearby course locations on Google Maps`}
-          className="course-results-map-embed"
-          role="group"
-        >
-          <iframe
-            className="course-results-map-frame"
-            loading="lazy"
-            referrerPolicy="no-referrer-when-downgrade"
-            src={getGoogleMapsEmbedUrl(mapCenter)}
-            title={`${courses.length} nearby course locations on Google Maps`}
-          />
-          <div className="course-results-map-overlay">
-            {mapMarkers.map((marker) => (
-              <button
-                aria-label={`Show details for ${marker.name}`}
-                className="course-results-map-pin"
-                key={marker.id}
-                onClick={() => setSelectedMapPlaceId(marker.id)}
-                style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
-                title={`Show details for ${marker.name}`}
-                type="button"
-              >
-                {marker.index}
-              </button>
-            ))}
-          </div>
-          <div className="course-results-map-count">
-            <MapPinned size={16} />
-            {courses.length} course locations found
+        <div className="course-results-map-unavailable" role="status">
+          <MapPinned size={26} />
+          <div>
+            <h3>Map unavailable</h3>
+            <p>Google Maps needs a browser API key before course pins can render.</p>
           </div>
         </div>
       )}
-      {selectedMapCourse ? (
-        <CourseMapPlaceCard
-          course={selectedMapCourse}
-          onClose={() => setSelectedMapPlaceId(null)}
-        />
-      ) : null}
+      <div className="course-results-map-count">
+        <MapPinned size={16} />
+        {courses.length} course locations found
+      </div>
     </div>
   );
 }
 
-function CourseMapPlaceCard({
-  course,
-  onClose
-}: {
-  course: CourseCandidate;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      aria-label={`${course.name} map details`}
-      className="course-map-place-card"
-      role="region"
-    >
-      <button
-        aria-label="Close map details"
-        className="course-map-place-card-close"
-        onClick={onClose}
-        type="button"
-      >
-        <X size={16} />
-      </button>
-      <span className="mini-pill">
-        <MapPin size={13} />
-        Selected course
-      </span>
-      <h3>{course.name}</h3>
-      <CourseAddressLink course={course} unavailableText="Address unavailable" />
-      <div className="course-map-place-meta" aria-label="Course details">
-        {course.rating ? (
-          <span>
-            <Star size={14} />
-            {course.rating.toFixed(1)}
-          </span>
-        ) : null}
-        {course.distanceMeters !== undefined ? (
-          <span>
-            <MapPin size={14} />
-            {formatDistance(course.distanceMeters)}
-          </span>
-        ) : null}
-      </div>
-      <div className="course-map-place-actions">
-        <a
-          className="button button-dark"
-          href={getGoogleMapsSearchUrl(course)}
-          rel="noreferrer"
-          target="_blank"
-        >
-          <ExternalLink size={16} />
-          Open in Google Maps
-        </a>
-        {course.website ? (
-          <a className="button button-ghost" href={course.website} rel="noreferrer" target="_blank">
-            <ExternalLink size={16} />
-            Course site
-          </a>
-        ) : null}
-      </div>
-    </div>
-  );
+function loadGoogleMapsApi(apiKey: string) {
+  if (window.google?.maps?.Map && window.google.maps.marker?.AdvancedMarkerElement) {
+    return Promise.resolve(window.google.maps);
+  }
+
+  if (googleMapsLoaderPromise) {
+    return googleMapsLoaderPromise;
+  }
+
+  googleMapsLoaderPromise = new Promise<GoogleMapsNamespace>((resolve, reject) => {
+    window.initTeeTimeSpotGoogleMaps = () => {
+      const googleMaps = window.google?.maps;
+      if (googleMaps?.Map) {
+        resolve(googleMaps);
+        return;
+      }
+      reject(new Error("Google Maps JavaScript API loaded without maps support"));
+    };
+
+    const existingScript = document.querySelector<HTMLScriptElement>(
+      "script[data-tee-time-spot-google-map]"
+    );
+    if (existingScript) {
+      if (window.google?.maps?.Map) {
+        resolve(window.google.maps);
+        return;
+      }
+      existingScript.addEventListener(
+        "load",
+        () => {
+          const googleMaps = window.google?.maps;
+          if (googleMaps?.Map) {
+            resolve(googleMaps);
+            return;
+          }
+          reject(new Error("Google Maps JavaScript API loaded without maps support"));
+        },
+        { once: true }
+      );
+      existingScript.addEventListener("error", () => reject(new Error("Google Maps failed to load")), {
+        once: true
+      });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.async = true;
+    script.dataset.teeTimeSpotGoogleMap = "true";
+    script.defer = true;
+    script.onerror = () => reject(new Error("Google Maps failed to load"));
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
+      apiKey
+    )}&v=weekly&libraries=marker&loading=async&callback=${GOOGLE_MAPS_SCRIPT_CALLBACK}`;
+    document.head.appendChild(script);
+  });
+
+  return googleMapsLoaderPromise;
+}
+
+function createCourseMapInfoWindowContent(course: CourseCandidate) {
+  const container = document.createElement("div");
+  container.className = "course-map-info-window";
+
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "course-map-info-eyebrow";
+  eyebrow.textContent = "Golf course";
+  container.appendChild(eyebrow);
+
+  const heading = document.createElement("h3");
+  heading.textContent = course.name;
+  container.appendChild(heading);
+
+  if (course.address) {
+    const address = document.createElement("a");
+    address.className = "course-map-info-address";
+    address.href = getGoogleMapsSearchUrl(course);
+    address.rel = "noreferrer";
+    address.target = "_blank";
+    address.textContent = course.address;
+    container.appendChild(address);
+  }
+
+  const details = document.createElement("div");
+  details.className = "course-map-info-meta";
+  if (course.rating) {
+    const rating = document.createElement("span");
+    rating.textContent = `${course.rating.toFixed(1)} rating`;
+    details.appendChild(rating);
+  }
+  if (course.distanceMeters !== undefined) {
+    const distance = document.createElement("span");
+    distance.textContent = formatDistance(course.distanceMeters);
+    details.appendChild(distance);
+  }
+  if (details.childElementCount > 0) {
+    container.appendChild(details);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "course-map-info-actions";
+  const mapsLink = document.createElement("a");
+  mapsLink.className = "course-map-info-primary";
+  mapsLink.href = getGoogleMapsSearchUrl(course);
+  mapsLink.rel = "noreferrer";
+  mapsLink.target = "_blank";
+  mapsLink.textContent = "Open in Google Maps";
+  actions.appendChild(mapsLink);
+
+  if (course.website) {
+    const websiteLink = document.createElement("a");
+    websiteLink.className = "course-map-info-secondary";
+    websiteLink.href = course.website;
+    websiteLink.rel = "noreferrer";
+    websiteLink.target = "_blank";
+    websiteLink.textContent = "Course site";
+    actions.appendChild(websiteLink);
+  }
+
+  container.appendChild(actions);
+  return container;
 }
 
 function Notice({ notice }: { notice: Notice }) {
@@ -831,27 +1012,4 @@ function getCourseMapCenter(courses: CourseCandidate[], origin: SearchCoordinate
     latitude: courses.reduce((sum, course) => sum + course.latitude, 0) / courses.length,
     longitude: courses.reduce((sum, course) => sum + course.longitude, 0) / courses.length
   };
-}
-
-function getCourseMapMarkers(courses: CourseCandidate[]) {
-  if (courses.length === 0) {
-    return [];
-  }
-
-  const latitudes = courses.map((course) => course.latitude);
-  const longitudes = courses.map((course) => course.longitude);
-  const minLatitude = Math.min(...latitudes);
-  const maxLatitude = Math.max(...latitudes);
-  const minLongitude = Math.min(...longitudes);
-  const maxLongitude = Math.max(...longitudes);
-  const latitudeSpan = Math.max(maxLatitude - minLatitude, 0.01);
-  const longitudeSpan = Math.max(maxLongitude - minLongitude, 0.01);
-
-  return courses.slice(0, 25).map((course, index) => ({
-    id: course.googlePlaceId,
-    index: index + 1,
-    name: course.name,
-    x: 8 + ((course.longitude - minLongitude) / longitudeSpan) * 84,
-    y: 8 + ((maxLatitude - course.latitude) / latitudeSpan) * 84
-  }));
 }
