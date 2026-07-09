@@ -4,6 +4,17 @@ import { prisma } from "@/lib/prisma";
 
 const knownForeupCourses = [
   {
+    name: "Longshore Golf Course",
+    detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes",
+    policyNotes:
+      "Official tee-times page says all tee times must be booked online; ForeUp Guests (Public) booking class exposes alert-only public inventory.",
+    bookingMetadata: {
+      scheduleId: 12897,
+      bookingClassId: 52697,
+      bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes"
+    }
+  },
+  {
     name: "Oak Hills Park Golf Course",
     detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
     policyNotes:

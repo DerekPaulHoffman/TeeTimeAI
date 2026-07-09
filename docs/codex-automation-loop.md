@@ -15,6 +15,9 @@ The loop should improve the product every time it has credible evidence to act. 
 
 - Start each run by writing or confirming checkpoints: `queue_confirmed`, `candidate_selected`, `tool_research_done`, `ui_smoke_done`, `verification_done`, and `outcome_recorded`.
 - Run `npm run automation:inspect` and `npm run ui:smoke` before choosing a candidate unless a provider outage makes the smoke impossible. A smoke failure is evidence, not noise.
+- Treat `AutomationRun.notes`, recent browser discoveries, probe history, and deployment notes as a living learning ledger. Each loop should record what went right, what went wrong, what assumption changed, and the next concrete action.
+- Repeated work must decay. If the same course, tool, provider, or UI issue has been inspected repeatedly with no new evidence, mark it stale or blocked and rotate to a different evidence-backed candidate.
+- A loop that has no fresh queue blocker, smoke failure, provider drift, new research finding, or learnable adapter should return `no_op` instead of inventing polish work.
 - Use normalized terminal outcomes: `success`, `no_op`, `needs_adapter`, `blocked_policy`, `blocked_auth`, `blocked_tooling`, `blocked_env`, and `needs_human`.
 - Keep side effects idempotent. Email alerts, GitHub pushes, and future Slack/GitHub comments need stable keys so a retry cannot duplicate them.
 - Use a per-loop lease before mutating shared state so concurrent runs do not work the same candidate.
@@ -25,6 +28,7 @@ The loop should improve the product every time it has credible evidence to act. 
 Every improvement run must actively look for better tools when the current approach is not producing a good product.
 
 - Run a short current-tool research pass for UI, automation, maps/search, email, or scraping gaps before picking a new approach.
+- Research must be decision-grade: cite the current source or product observed, state the decision it changes, and ship or record one concrete next action. Do not keep repeating generic research.
 - For weak UI or UX, compare against current tee-time/waitlist products and AI design tools, then choose one concrete change to ship.
 - Use the browser for desktop and mobile smokes on onboarding, course ranking, dashboard state, and email preview.
 - The committed Playwright smoke checks desktop and mobile onboarding, typed-location discovery, course ranking limit enforcement, dashboard access/setup states, failed same-origin requests, browser console/page errors, horizontal overflow, and too-small interactive controls.
@@ -58,15 +62,16 @@ Each automation run should:
 
 1. Create an `AutomationRun` row with a prompt version.
 2. Load active `TeeSearch` rows and ranked `CoursePreference` rows.
-3. Evaluate `Course.automationEligibility` and `policyNotes` before fetching.
-4. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
-5. Run a current-tool/design research pass when the selected candidate is UI quality, unsupported automation, or weak tooling.
-6. Create or update project accounts/configuration when that is the highest-leverage blocker.
-7. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers.
-8. Upsert `TeeTimeMatch` rows for qualifying slots.
-9. Send Resend email alerts only for new pending matches, then mark them sent.
-10. Run tests, lint, build, and `npm run ui:smoke` for any code or UI change.
-11. Finish the `AutomationRun` with outcome, checkpoints, notes, errors, changed files, and redacted setup changes when applicable.
+3. Load recent learning signals from `AutomationRun.notes`, `CourseAutomationDiscovery`, current probes, smoke evidence, and deployment notes.
+4. Evaluate `Course.automationEligibility` and `policyNotes` before fetching.
+5. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
+6. Run a current-tool/design research pass when the selected candidate is UI quality, unsupported automation, or weak tooling.
+7. Create or update project accounts/configuration when that is the highest-leverage blocker.
+8. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers.
+9. Upsert `TeeTimeMatch` rows for qualifying slots.
+10. Send Resend email alerts only for new pending matches, then mark them sent.
+11. Run tests, lint, build, and `npm run ui:smoke` for any code or UI change.
+12. Finish the `AutomationRun` with outcome, checkpoints, notes, errors, changed files, learning signals, stale candidates, changed assumptions, research decisions, and redacted setup changes when applicable.
 
 ## UI Smoke Contract
 

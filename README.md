@@ -2,7 +2,7 @@
 
 Tee Time Spot is an alert-only tee-time waitlist assistant for public golf courses.
 
-The product helps a golfer answer one practical question: "Where can I play, at the courses I actually like, in the window I am free?" A user enters a location, picks nearby public courses, ranks 1 to 5 favorites, chooses a future date, time window, player count, and alert recipients, then receives an email when a matching tee time appears. The user finishes booking directly on the official course website.
+The product helps a golfer answer one practical question: "Where can I play, at the courses I actually like, in the window I am free?" A user enters a location and search distance (15 miles by default), picks nearby public courses, ranks 1 to 5 favorites, chooses a future date, time window, player count, and alert recipients, then receives an email when a matching tee time appears. The user finishes booking directly on the official course website.
 
 Tee Time Spot does not book, hold, reserve, pay for, bypass controls, or enter account-specific checkout flows.
 
@@ -284,6 +284,9 @@ Required for the interactive course map:
 
 - `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY`
 - `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID`
+
+The browser key must have Google Maps JavaScript API enabled. Restrict it by HTTP
+referrer for the deployed domains after verifying the map loads.
 
 Required for live email sending:
 

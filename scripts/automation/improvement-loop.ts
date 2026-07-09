@@ -15,17 +15,18 @@ You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
 1. Run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, and pending alert state.
-2. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat failures as first-class improvement candidates.
-3. Confirm checkpoints: queue_confirmed, candidate_selected, tool_research_done, ui_smoke_done, verification_done, outcome_recorded.
-4. Pick the highest-leverage improvement from current evidence. If current actionable probes and pending alerts are empty, default to the strongest UI/accessibility/provider smoke finding.
-5. If the issue is adapter-related, add or refine one course-platform adapter without entering checkout, payment, login, or verification-code flows.
-6. If the issue is UI-related, inspect the Playwright screenshots/traces and use the browser to test onboarding, course ranking, dashboard state, and email preview or the absence of an email preview route on desktop and mobile.
-7. If the UI does not look good or a core flow is inaccessible, do not settle. Run current research for better design/tooling and try a stronger workflow such as Figma/Figma Make, v0, a generated design direction, or another current tool discovered during research.
-8. Use generated design output as input, not truth. Implement the best parts in the Next.js app and preserve the product boundaries.
-9. If setup/configuration is the blocker, create or update the project accounts, apps, API keys, deploy targets, callback URLs, webhooks, DNS records, and integrations needed to get Tee Time Spot working.
-10. For code changes, run focused tests plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, and \`npm run ui:smoke\`.
-11. For live-impacting changes, deploy to Vercel, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\` and inspect Vercel errors/warnings.
-12. Record outcome, checkpoints, changed files, research links, setup changes, UI smoke evidence, screenshot/trace paths when relevant, and blockers in AutomationRun/docs.
+2. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
+3. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat failures as first-class improvement candidates.
+4. Confirm checkpoints: queue_confirmed, candidate_selected, tool_research_done, ui_smoke_done, verification_done, outcome_recorded.
+5. Pick the highest-leverage improvement from current evidence, recent learning signals, and current product/tooling research. If current actionable probes and pending alerts are empty, default to the strongest UI/accessibility/provider smoke finding only when it is newly verified.
+6. If the issue is adapter-related, add or refine one course-platform adapter without entering checkout, payment, login, or verification-code flows.
+7. If the issue is UI-related, inspect the Playwright screenshots/traces and use the browser to test onboarding, course ranking, dashboard state, and email preview or the absence of an email preview route on desktop and mobile.
+8. If the UI does not look good or a core flow is inaccessible, do not settle. Run current research for better design/tooling and try a stronger workflow such as Figma/Figma Make, v0, a generated design direction, or another current tool discovered during research.
+9. Use generated design output as input, not truth. Implement the best parts in the Next.js app and preserve the product boundaries.
+10. If setup/configuration is the blocker, create or update the project accounts, apps, API keys, deploy targets, callback URLs, webhooks, DNS records, and integrations needed to get Tee Time Spot working.
+11. For code changes, run focused tests plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, and \`npm run ui:smoke\`.
+12. For live-impacting changes, deploy to Vercel, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\` and inspect Vercel errors/warnings.
+13. Record what went right, what went wrong, why the candidate was selected, whether research changed strategy, outcome, checkpoints, changed files, research links, setup changes, UI smoke evidence, screenshot/trace paths when relevant, and blockers in AutomationRun/docs.
 
 UI smoke expectations:
 - The smoke must cover desktop and mobile.
@@ -51,6 +52,8 @@ Tool research requirements:
 Loop engineering requirements:
 - Use stable idempotency keys for notifications and external side effects.
 - Use a per-loop lease before mutating shared candidates when more than one automation could run.
+- Maintain a living learning ledger in AutomationRun notes: open signals, stale repeated work, successful patterns, failed assumptions, research links, and next action.
+- If the same course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement.
 - Stop with a normalized terminal outcome: success, no_op, needs_adapter, blocked_policy, blocked_auth, blocked_tooling, blocked_env, or needs_human.
 
 Hard boundaries:
@@ -79,7 +82,8 @@ async function main() {
         snapshot: {
           activeSearchCount: snapshot.activeSearchCount,
           pendingAlertCount: snapshot.pendingAlerts.length,
-          actionableProbeCount: snapshot.actionableProbes.length
+          actionableProbeCount: snapshot.actionableProbes.length,
+          learningSignalCount: snapshot.learningSignals?.length ?? 0
         },
         nextPrompt: loopPrompt.trim()
       },
@@ -106,7 +110,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const [activeSearchCount, pendingAlerts, probes] = await Promise.all([
+  const [activeSearchCount, pendingAlerts, probes, recentRuns, recentDiscoveries] = await Promise.all([
     prisma.teeSearch.count({
       where: {
         status: "ACTIVE",
@@ -152,6 +156,21 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       include: {
         course: true
       }
+    }),
+    prisma.automationRun.findMany({
+      orderBy: {
+        startedAt: "desc"
+      },
+      take: 12
+    }),
+    prisma.courseAutomationDiscovery.findMany({
+      orderBy: {
+        createdAt: "desc"
+      },
+      take: 25,
+      include: {
+        course: true
+      }
     })
   ]);
 
@@ -178,8 +197,103 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
           message: probe.message
         }
       ];
-    })
+    }),
+    learningSignals: buildLearningSignals(recentRuns, recentDiscoveries)
   };
+}
+
+function buildLearningSignals(
+  recentRuns: Array<{
+    outcome: string | null;
+    notes: string | null;
+    startedAt: Date;
+  }>,
+  recentDiscoveries: Array<{
+    status: string;
+    detectedPlatform: string;
+    confidence: number;
+    bookingUrl: string | null;
+    createdAt: Date;
+    course: {
+      name: string;
+    };
+  }>
+) {
+  const signals = new Map<
+    string,
+    {
+      key: string;
+      kind: "adapter_gap" | "ui_smoke" | "provider_config" | "tooling" | "research";
+      summary: string;
+      lastSeenAt: string;
+      repeats: number;
+      nextAction?: string;
+      status?: "open" | "learned" | "blocked" | "stale";
+    }
+  >();
+
+  for (const discovery of recentDiscoveries) {
+    if (discovery.status !== "INSPECTED") {
+      continue;
+    }
+
+    const key = `adapter:${discovery.course.name}`;
+    const existing = signals.get(key);
+    signals.set(key, {
+      key,
+      kind: "adapter_gap",
+      summary: `${discovery.course.name} browser probe inspected ${discovery.bookingUrl ?? "course site"} but did not learn reusable ${discovery.detectedPlatform} metadata.`,
+      lastSeenAt: latestIso(existing?.lastSeenAt, discovery.createdAt),
+      repeats: (existing?.repeats ?? 0) + 1,
+      status: (existing?.repeats ?? 0) + 1 >= 2 ? "stale" : "open",
+      nextAction:
+        (existing?.repeats ?? 0) + 1 >= 2
+          ? "Do not rerun the same probe until a new booking URL, platform clue, or policy source appears."
+          : "Inspect current official booking surface and policy evidence."
+    });
+  }
+
+  for (const run of recentRuns) {
+    const notes = run.notes ?? "";
+    if (/ui smoke/i.test(notes) && /fail|failed|blocked/i.test(notes)) {
+      const key = "ui_smoke:recent_failure";
+      const existing = signals.get(key);
+      signals.set(key, {
+        key,
+        kind: "ui_smoke",
+        summary: "Recent UI smoke failure or blockage should be reviewed before polish work.",
+        lastSeenAt: latestIso(existing?.lastSeenAt, run.startedAt),
+        repeats: (existing?.repeats ?? 0) + 1,
+        status: "open",
+        nextAction: "Inspect trace/screenshot evidence, fix the root cause, and rerun smoke."
+      });
+    }
+
+    if (/research|best practice|compare|current tool/i.test(notes)) {
+      const key = "research:recent_strategy";
+      const existing = signals.get(key);
+      signals.set(key, {
+        key,
+        kind: "research",
+        summary: "Recent loop used external research; verify whether it produced a measurable product change.",
+        lastSeenAt: latestIso(existing?.lastSeenAt, run.startedAt),
+        repeats: (existing?.repeats ?? 0) + 1,
+        status: "open",
+        nextAction: "Record the research source, decision, shipped change, or reason it was rejected."
+      });
+    }
+  }
+
+  return [...signals.values()].sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+}
+
+function latestIso(current: string | undefined, next: Date) {
+  const nextIso = next.toISOString();
+  if (!current || nextIso > current) {
+    return nextIso;
+  }
+
+  return current;
 }
 
 function isActionableProbeOutcome(

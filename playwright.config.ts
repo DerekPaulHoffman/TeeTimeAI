@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const localSmokePort = process.env.UI_SMOKE_PORT ?? "3998";
+const localSmokePort = process.env.UI_SMOKE_PORT ?? "3100";
 const baseURL = process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${localSmokePort}`;
 const shouldStartLocalServer = !process.env.UI_SMOKE_BASE_URL;
 

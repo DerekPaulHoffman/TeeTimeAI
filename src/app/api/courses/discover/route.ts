@@ -2,19 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { demoCourses } from "@/lib/places/demo-courses";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
-
-const DEFAULT_COURSE_SEARCH_RADIUS_METERS = 50000;
-const MAX_GOOGLE_NEARBY_SEARCH_RADIUS_METERS = 50000;
+import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 
 export async function GET(request: NextRequest) {
   const latitude = Number(request.nextUrl.searchParams.get("latitude"));
   const longitude = Number(request.nextUrl.searchParams.get("longitude"));
-  const requestedRadiusMeters = Number(
-    request.nextUrl.searchParams.get("radiusMeters") ?? DEFAULT_COURSE_SEARCH_RADIUS_METERS
+  const radiusMeters = normalizeCourseSearchRadiusMeters(
+    request.nextUrl.searchParams.get("radiusMeters")
   );
-  const radiusMeters = Number.isFinite(requestedRadiusMeters)
-    ? Math.min(requestedRadiusMeters, MAX_GOOGLE_NEARBY_SEARCH_RADIUS_METERS)
-    : DEFAULT_COURSE_SEARCH_RADIUS_METERS;
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return NextResponse.json({ error: "Latitude and longitude are required" }, { status: 400 });

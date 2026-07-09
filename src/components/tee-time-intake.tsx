@@ -23,6 +23,11 @@ import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
+import {
+  COURSE_SEARCH_RADIUS_OPTIONS_MILES,
+  DEFAULT_COURSE_SEARCH_RADIUS_MILES,
+  milesToMeters
+} from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
 type Notice = {
@@ -119,7 +124,6 @@ const tomorrow = () => {
 
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
-const COURSE_SEARCH_RADIUS_METERS = 50000;
 const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
@@ -127,6 +131,9 @@ type SearchCoordinates = { latitude: number; longitude: number };
 
 export function TeeTimeIntake() {
   const [locationText, setLocationText] = useState("Trumbull, CT");
+  const [searchRadiusMiles, setSearchRadiusMiles] = useState(
+    DEFAULT_COURSE_SEARCH_RADIUS_MILES
+  );
   const [alertEmail, setAlertEmail] = useState("");
   const [date, setDate] = useState(tomorrow());
   const [startTime, setStartTime] = useState("13:40");
@@ -228,7 +235,7 @@ export function TeeTimeIntake() {
       const params = new URLSearchParams({
         latitude: String(coordinates.latitude),
         longitude: String(coordinates.longitude),
-        radiusMeters: String(COURSE_SEARCH_RADIUS_METERS)
+        radiusMeters: String(milesToMeters(searchRadiusMiles))
       });
       const response = await fetch(`/api/courses/discover?${params}`);
       if (!response.ok) {
@@ -243,7 +250,7 @@ export function TeeTimeIntake() {
         type: "success",
         message: data.demo
           ? "Loaded demo courses. Add Google Places keys for live discovery."
-          : `Found ${data.courses.length} nearby golf courses.`
+          : `Found ${data.courses.length} public golf courses within ${searchRadiusMiles} miles.`
       });
     } catch (error) {
       setNotice({
@@ -266,6 +273,15 @@ export function TeeTimeIntake() {
     }
 
     setSelected((current) => [...current, course]);
+  }
+
+  function toggleCourse(course: CourseCandidate) {
+    if (selectedIds.has(course.googlePlaceId)) {
+      removeCourse(course.googlePlaceId);
+      return;
+    }
+
+    addCourse(course);
   }
 
   function removeCourse(placeId: string) {
@@ -383,6 +399,21 @@ export function TeeTimeIntake() {
               onChange={(event) => setLocationText(event.target.value)}
               placeholder="City, state, or ZIP"
             />
+          </div>
+          <div className="field">
+            <label htmlFor="searchRadius">Distance from me</label>
+            <select
+              disabled={loading}
+              id="searchRadius"
+              value={searchRadiusMiles}
+              onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
+            >
+              {COURSE_SEARCH_RADIUS_OPTIONS_MILES.map((miles) => (
+                <option key={miles} value={miles}>
+                  Within {miles} miles
+                </option>
+              ))}
+            </select>
           </div>
           <div className="field">
             <label htmlFor="alertEmail">Alert email</label>
@@ -518,12 +549,12 @@ export function TeeTimeIntake() {
                   <button
                     className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
                     type="button"
-                    onClick={() => addCourse(course)}
-                    disabled={isSelected}
-                    title={isSelected ? `Priority ${selectedIndex + 1}` : "Add course"}
+                    onClick={() => toggleCourse(course)}
+                    aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
+                    title={isSelected ? `Remove priority ${selectedIndex + 1}` : "Add course"}
                   >
-                    {isSelected ? <Check size={13} /> : <Plus size={13} />}
-                    {isSelected ? "Added" : "Add"}
+                    {isSelected ? <X size={13} /> : <Plus size={13} />}
+                    {isSelected ? "Remove" : "Add"}
                   </button>
                 </div>
               </div>

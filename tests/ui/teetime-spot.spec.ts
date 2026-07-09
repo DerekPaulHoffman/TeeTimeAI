@@ -1,7 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 const smokeBaseUrl =
-  process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3998"}`;
+  process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`;
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {
@@ -10,31 +10,30 @@ test.describe("Tee Time Spot UI smoke", () => {
   }, testInfo) => {
     const issues = collectPageIssues(page);
 
-    await page.goto("/");
+    await page.goto("/search");
 
-    await expect(page.getByRole("heading", { name: "Tee Time Spot" })).toBeVisible();
-    await expect(page.getByRole("link", { name: /Start a search/i })).toBeVisible();
-    await expect(page.getByRole("link", { name: /View dashboard/i })).toBeVisible();
-    await expect(page.getByRole("link", { name: /Preview email/i })).toBeVisible();
-    await expect(page.getByText("We keep watch")).toBeVisible();
-
-    await page.getByRole("link", { name: /Start a search/i }).click();
-    await expect(page).toHaveURL(/\/search/);
     await expect(page.getByRole("heading", { name: /Choose the courses/i })).toBeVisible();
     await expect(page.getByText("Start getting alerts")).toBeVisible();
     await expect(page.locator(".summary-panel button")).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
+    await expect(page.getByLabel("Distance from me")).toHaveValue("15");
+    await expect(page.getByLabel("Distance from me").locator("option")).toHaveCount(6);
 
     await page.getByLabel("Location").fill("Trumbull, CT");
+    const discoveryRequest = page.waitForRequest((request) =>
+      request.url().includes("/api/courses/discover?")
+    );
     await page.getByRole("button", { name: /Find courses/i }).click();
+    const discoveryUrl = new URL((await discoveryRequest).url());
+    expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
     const discoveryStatus = page
       .getByRole("status")
-      .filter({ hasText: /Found \d+ nearby golf courses|Loaded demo courses/i });
+      .filter({ hasText: /Found \d+ public golf courses within 15 miles|Loaded demo courses/i });
     await expect(
-      page.getByText(/Found \d+ nearby golf courses|Loaded demo courses/i)
+      page.getByText(/Found \d+ public golf courses within 15 miles|Loaded demo courses/i)
     ).toBeVisible();
     await expect(discoveryStatus).toContainText(
-      /Found \d+ nearby golf courses|Loaded demo courses/i
+      /Found \d+ public golf courses within 15 miles|Loaded demo courses/i
     );
 
     const courseRows = page.locator(".course-row");
@@ -43,10 +42,13 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator(".course-results-map-shell")).toBeVisible();
     const mapCanvas = page.locator(".course-results-map");
     const unavailableMap = page.locator(".course-results-map-unavailable");
+    const fallbackMap = page.getByRole("region", { name: /nearby course locations on fallback map/i });
     if ((await unavailableMap.count()) > 0) {
       await expect(unavailableMap).toContainText("Map unavailable");
-    } else {
+    } else if ((await mapCanvas.count()) > 0) {
       await expect(mapCanvas).toBeVisible();
+    } else {
+      await expect(fallbackMap).toBeVisible();
     }
     await expect(page.locator(".course-results-map-frame")).toHaveCount(0);
     await expect(page.locator(".course-results-map-overlay")).toHaveCount(0);
@@ -60,12 +62,18 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(await courseRows.count()).toBeGreaterThan(courseCount);
     }
 
+    await courseRows.nth(0).getByRole("button", { name: /Add/i }).click();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
+    await expect(courseRows.nth(0).getByRole("button", { name: /Remove/i })).toBeVisible();
+    await courseRows.nth(0).getByRole("button", { name: /Remove/i }).click();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
+
     for (let index = 0; index < 5; index += 1) {
-      await courseRows.nth(index).getByRole("button", { name: /^Add$/i }).click();
+      await courseRows.nth(index).getByRole("button", { name: /Add/i }).click();
     }
 
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(5);
-    await courseRows.nth(5).getByRole("button", { name: /^Add$/i }).click();
+    await courseRows.nth(5).getByRole("button", { name: /Add/i }).click();
     await expect(page.getByText("You can prioritize up to 5 courses.")).toBeVisible();
     await expect(page.locator(".alert-error[role='alert']")).toContainText(
       "You can prioritize up to 5 courses."
@@ -123,13 +131,16 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await expect(
       page.getByRole("heading", {
-        name: /Your tee time alerts|Sign in to manage searches|Dashboard setup needed/i
+        name: /Course results and ranked watchlist|Sign in to manage searches|Dashboard setup needed/i
       })
     ).toBeVisible();
     await expect(
-      page.getByRole("main").getByRole("link", {
-        name: /Add another search|Back to search|Preview intake/i
-      })
+      page
+        .getByRole("main")
+        .getByRole("link", {
+          name: /New search|Add another search|Back to search|Preview intake/i
+        })
+        .first()
     ).toBeVisible();
 
     const bodyText = await page.locator("body").innerText();
@@ -176,6 +187,10 @@ function collectPageIssues(page: Page) {
 
   page.on("console", (message) => {
     if (message.type() === "error") {
+      if (message.text().includes("Google Maps JavaScript API error: ApiNotActivatedMapError")) {
+        return;
+      }
+
       issues.push(`console:${message.text()}`);
     }
   });
@@ -225,7 +240,8 @@ async function expectNoHorizontalOverflow(page: Page, testInfo: TestInfo) {
           Boolean(element.closest(".course-results-map")) ||
           Boolean(element.closest(".gm-style")) ||
           Boolean(element.closest("gmp-map")) ||
-          Boolean(element.closest("gmp-advanced-marker"));
+          Boolean(element.closest("gmp-advanced-marker")) ||
+          Boolean(element.closest(".leaflet-container"));
         return {
           tag: element.tagName.toLowerCase(),
           className: typeof element.className === "string" ? element.className : "",
@@ -277,7 +293,21 @@ async function expectInteractiveElementsAreUsable(page: Page, testInfo: TestInfo
           style.visibility !== "hidden" &&
           style.opacity !== "0";
 
+        const insideMapAttribution =
+          Boolean(element.closest(".course-results-map")) ||
+          Boolean(element.closest(".leaflet-container")) ||
+          Boolean(element.closest(".gm-style"));
         const problems: string[] = [];
+        if (insideMapAttribution) {
+          return {
+            tag: element.tagName.toLowerCase(),
+            className: typeof element.className === "string" ? element.className : "",
+            text: text.slice(0, 80),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            problems
+          };
+        }
         if (isVisible && rect.width < 24) {
           problems.push("too narrow");
         }

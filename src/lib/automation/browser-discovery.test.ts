@@ -38,6 +38,25 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("does not infer a ForeUP booking class from route segments without an observed API request", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-1",
+      courseName: "Longshore Golf Course",
+      sourceUrl: "https://www.longshoregolfcourse.com/tee-times",
+      finalUrl: "https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes",
+      observedUrls: ["https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes"],
+      visibleText: "Booking as Guests (Public)"
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.apiMetadata).toEqual({
+      scheduleId: 12897,
+      bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes"
+    });
+  });
+
   it("records useful website evidence even when no reusable adapter is learned", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
@@ -81,6 +100,33 @@ describe("buildBrowserDiscovery", () => {
         "fairchild-wheeler-golf-course-black-course"
       ],
       bookingBaseUrl: "https://fairchild-wheeler-red-course.book.teeitup.golf/"
+    });
+  });
+
+  it("learns reusable CPS metadata from CPS booking links", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-1",
+      courseName: "The Tradition Golf Club at Oak Lane",
+      sourceUrl: "https://www.traditionatoaklane.com/",
+      finalUrl: "https://traditionoaklane.cps.golf/",
+      observedUrls: ["https://traditionoaklane.cps.golf/onlineresweb/search-teetime"],
+      visibleText: "Tradition Golf Club at Oak Lane"
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.detectedPlatform).toBe("CUSTOM");
+    expect(discovery.bookingUrl).toBe("https://traditionoaklane.cps.golf/");
+    expect(discovery.apiEndpoint).toBe(
+      "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes"
+    );
+    expect(discovery.apiMetadata).toEqual({
+      provider: "CPS",
+      siteName: "traditionoaklane",
+      bookingBaseUrl: "https://traditionoaklane.cps.golf/",
+      courseIds: [1, 2],
+      holes: [18, 9]
     });
   });
 
@@ -159,6 +205,24 @@ describe("browser probe target selection", () => {
         bookingMetadata: {
           aliases: ["example"],
           bookingBaseUrl: "https://example.book.teeitup.golf/"
+        }
+      })
+    ).toBe(false);
+  });
+
+  it("skips CPS courses that already have reusable metadata", () => {
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "ALLOWED",
+        website: "https://example.com",
+        detectedBookingUrl: "https://example.cps.golf/",
+        bookingMetadata: {
+          provider: "CPS",
+          siteName: "example",
+          bookingBaseUrl: "https://example.cps.golf/",
+          courseIds: [1, 2],
+          holes: [18, 9]
         }
       })
     ).toBe(false);

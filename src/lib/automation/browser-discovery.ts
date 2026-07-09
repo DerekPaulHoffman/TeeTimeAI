@@ -21,6 +21,16 @@ export type BrowserDiscovery = {
   } | {
     aliases: string[];
     bookingBaseUrl: string;
+  } | {
+    provider: "CPS";
+    siteName: string;
+    bookingBaseUrl: string;
+    courseIds: number[];
+    holes?: number[];
+    clientId?: string;
+    websiteId?: string;
+    onlineApi?: string;
+    authorityBaseUrl?: string;
   };
   confidence: number;
   evidence: {
@@ -57,6 +67,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return teeItUpDiscovery;
   }
 
+  const cpsDiscovery = learnCpsDiscovery(evidence, observedUrls);
+
+  if (cpsDiscovery) {
+    return cpsDiscovery;
+  }
+
   const bookingUrl = pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
 
   return {
@@ -88,7 +104,48 @@ export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
     return false;
   }
 
+  if (course.detectedPlatform === "CUSTOM" && isReusableCpsMetadata(course.bookingMetadata)) {
+    return false;
+  }
+
   return Boolean(getBestProbeUrl(course));
+}
+
+function learnCpsDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const cpsUrl = observedUrls.map(parseUrl).find((url) => url?.hostname.endsWith(".cps.golf"));
+
+  if (!cpsUrl) {
+    return null;
+  }
+
+  const siteName = cpsUrl.hostname.split(".")[0];
+  const bookingBaseUrl = `${cpsUrl.origin}/`;
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    apiEndpoint: `${cpsUrl.origin}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes`,
+    apiMetadata: {
+      provider: "CPS",
+      siteName,
+      bookingBaseUrl,
+      courseIds: [1, 2],
+      holes: [18, 9]
+    },
+    confidence: 0.85,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "cps-booking-url"
+    }
+  };
 }
 
 function learnTeeItUpDiscovery(
@@ -172,8 +229,7 @@ function learnForeupDiscovery(
 
   const bookingBaseUrl =
     foreupBookingUrl ?? `https://foreupsoftware.com/index.php/booking/${scheduleId}#/teetimes`;
-  const bookingClassId =
-    getNumericSearchParam(foreupApiUrl, "booking_class") ?? getForeupBookingClassId(foreupBookingUrl);
+  const bookingClassId = getNumericSearchParam(foreupApiUrl, "booking_class");
 
   return {
     courseId: evidence.courseId,
@@ -212,6 +268,9 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
   }
   if (urls.some((url) => url.includes("clubcaddie.com"))) {
     return "CLUB_CADDIE";
+  }
+  if (urls.some((url) => parseUrl(url)?.hostname.endsWith(".cps.golf"))) {
+    return "CUSTOM";
   }
   return "UNKNOWN";
 }
@@ -264,11 +323,6 @@ function getNumericSearchParam(url: URL | null | undefined, key: string) {
 
 function getForeupScheduleId(value?: string) {
   const match = value?.match(/\/booking\/(?:\d+\/)?(\d+)/);
-  return match ? Number(match[1]) : undefined;
-}
-
-function getForeupBookingClassId(value?: string) {
-  const match = value?.match(/\/booking\/(\d+)\/\d+/);
   return match ? Number(match[1]) : undefined;
 }
 
@@ -331,5 +385,31 @@ function isReusableTeeItUpMetadata(value: unknown) {
     metadata.aliases.length > 0 &&
     metadata.aliases.every((alias) => typeof alias === "string") &&
     typeof metadata.bookingBaseUrl === "string"
+  );
+}
+
+function isReusableCpsMetadata(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const metadata = value as {
+    provider?: unknown;
+    siteName?: unknown;
+    bookingBaseUrl?: unknown;
+    courseIds?: unknown;
+    holes?: unknown;
+  };
+  return (
+    metadata.provider === "CPS" &&
+    typeof metadata.siteName === "string" &&
+    typeof metadata.bookingBaseUrl === "string" &&
+    Array.isArray(metadata.courseIds) &&
+    metadata.courseIds.length > 0 &&
+    metadata.courseIds.every((courseId) => typeof courseId === "number") &&
+    (metadata.holes === undefined ||
+      (Array.isArray(metadata.holes) &&
+        metadata.holes.length > 0 &&
+        metadata.holes.every((holes) => holes === 9 || holes === 18)))
   );
 }

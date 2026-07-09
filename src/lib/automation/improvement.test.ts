@@ -13,7 +13,8 @@ describe("selectImprovementCandidate", () => {
           firstSeenAt: "2026-07-09T12:00:00.000Z"
         }
       ],
-      actionableProbes: []
+      actionableProbes: [],
+      learningSignals: []
     });
 
     expect(candidate).toEqual({
@@ -37,7 +38,8 @@ describe("selectImprovementCandidate", () => {
           observedAt: "2026-07-09T12:00:00.000Z",
           message: "No supported adapter yet for GOLFNOW"
         }
-      ]
+      ],
+      learningSignals: []
     });
 
     expect(candidate).toMatchObject({
@@ -47,11 +49,55 @@ describe("selectImprovementCandidate", () => {
     });
   });
 
+  it("skips repeated stale adapter gaps and follows a living learning signal", () => {
+    const candidate = selectImprovementCandidate({
+      activeSearchCount: 2,
+      pendingAlerts: [],
+      actionableProbes: [
+        {
+          id: "probe-1",
+          outcome: "NEEDS_ADAPTER",
+          courseName: "Longshore Golf Course",
+          platform: "UNKNOWN",
+          observedAt: "2026-07-09T12:00:00.000Z",
+          message: "No supported adapter yet for UNKNOWN"
+        }
+      ],
+      learningSignals: [
+        {
+          key: "adapter:Longshore Golf Course",
+          kind: "adapter_gap",
+          summary: "Longshore was inspected twice with no reusable adapter learned.",
+          lastSeenAt: "2026-07-09T12:00:00.000Z",
+          repeats: 3,
+          status: "stale",
+          nextAction: "Only revisit if a new booking URL or platform signal appears."
+        },
+        {
+          key: "research:waitlist-ux",
+          kind: "research",
+          summary: "Compare current tee-time waitlist products for onboarding friction.",
+          lastSeenAt: "2026-07-09T12:00:00.000Z",
+          repeats: 1,
+          status: "open",
+          nextAction: "Ship one measurable UX improvement if research finds a gap."
+        }
+      ]
+    });
+
+    expect(candidate).toMatchObject({
+      outcome: "success",
+      kind: "learning_followup",
+      referenceId: "research:waitlist-ux"
+    });
+  });
+
   it("returns no_op when there is no active queue", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 0,
       pendingAlerts: [],
-      actionableProbes: []
+      actionableProbes: [],
+      learningSignals: []
     });
 
     expect(candidate).toEqual({

@@ -13,6 +13,7 @@ import {
 } from "@/lib/automation/db-service";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import { evaluateAutomationPolicy } from "@/lib/automation/policy";
+import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { sendTeeTimeAlert } from "@/lib/email/alerts";
@@ -282,7 +283,8 @@ function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = [
 function hasSupportedAdapter(course: AutomationCourse) {
   return (
     (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) ||
-    (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata))
+    (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) ||
+    (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata))
   );
 }
 
@@ -300,6 +302,15 @@ function fetchCourseSlots(course: AutomationCourse, date: Date, players: number)
     return fetchTeeItUpSlots({
       courseId: course.id,
       date,
+      metadata: course.bookingMetadata
+    });
+  }
+
+  if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
+    return fetchCpsSlots({
+      courseId: course.id,
+      date,
+      players,
       metadata: course.bookingMetadata
     });
   }

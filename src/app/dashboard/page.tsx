@@ -13,6 +13,7 @@ import {
   MapPin,
   Play,
   ShieldAlert,
+  Sparkles,
   Users
 } from "lucide-react";
 
@@ -90,17 +91,40 @@ function DashboardView({
       <div className="dashboard-header">
         <div>
           <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-            Your alerts
+            Tee Time Spot dashboard
           </p>
-          <h1>Your tee time alerts</h1>
+          <h1>Course results and ranked watchlist</h1>
+          <p className="dashboard-header-copy">
+            Track active tee time searches, tune the course order, and jump to any official booking site.
+          </p>
         </div>
+        <Link className="button button-dark" href="/search">
+          <Bell size={17} />
+          New search
+        </Link>
       </div>
 
       {notice ? <div className="alert alert-info dashboard-alert">{notice}</div> : null}
-      <div className="alert alert-success dashboard-alert">
-        You&apos;re all set. We&apos;re watching for open tee times and will email you the
-        moment one shows up.
-      </div>
+      <section className="dashboard-metric-strip" aria-label="Tee time alert summary">
+        <div>
+          <span>Active alerts</span>
+          <strong>{activeCount}</strong>
+        </div>
+        <div>
+          <span>Courses watched</span>
+          <strong>{watchedCourseCount}</strong>
+        </div>
+        <div>
+          <span>Matches found</span>
+          <strong>{pendingMatches.length}</strong>
+        </div>
+        <div>
+          <span>Alert capacity</span>
+          <strong>
+            {searches.length}/{MAX_QUEUED_SEARCHES_PER_USER}
+          </strong>
+        </div>
+      </section>
 
       <div className="dashboard-grid">
         <section className="dashboard-panel">
@@ -239,7 +263,12 @@ function DashboardView({
         </section>
 
         <aside className="dashboard-panel dashboard-sidebar">
-          <h2>Alert status</h2>
+          <div className="dashboard-sidebar-heading">
+            <span>
+              <Sparkles size={17} />
+            </span>
+            <h2>Alert status</h2>
+          </div>
           <p className="meta">{alertStatusCopy}</p>
           <dl className="sidebar-stat-list">
             <div>

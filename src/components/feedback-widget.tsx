@@ -149,9 +149,15 @@ export function FeedbackWidget() {
       ) : null}
 
       {!open ? (
-        <button className="feedback-launcher" type="button" onClick={openPanel}>
+        <button
+          aria-label="Open feedback form"
+          className="feedback-launcher"
+          title="Open feedback form"
+          type="button"
+          onClick={openPanel}
+        >
           <MessageSquare size={18} />
-          Feedback
+          <span>Feedback</span>
         </button>
       ) : null}
     </div>

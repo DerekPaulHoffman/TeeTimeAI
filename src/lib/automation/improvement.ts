@@ -18,10 +18,21 @@ type ActionableProbeInput = {
   message?: string | null;
 };
 
+type LearningSignalInput = {
+  key: string;
+  kind: "adapter_gap" | "ui_smoke" | "provider_config" | "tooling" | "research";
+  summary: string;
+  lastSeenAt: string;
+  repeats: number;
+  nextAction?: string;
+  status?: "open" | "learned" | "blocked" | "stale";
+};
+
 export type ImprovementCandidateInput = {
   activeSearchCount: number;
   pendingAlerts: PendingAlertInput[];
   actionableProbes: ActionableProbeInput[];
+  learningSignals?: LearningSignalInput[];
 };
 
 export type ImprovementCandidate = {
@@ -42,9 +53,11 @@ export type ImprovementCandidate = {
     | "tooling_blocker"
     | "fetch_failure"
     | "ui_smoke"
+    | "learning_followup"
     | "empty_queue";
   summary: string;
   referenceId?: string;
+  researchDirective?: string;
 };
 
 export type ImprovementCheckpoints = {
@@ -69,9 +82,23 @@ export function selectImprovementCandidate(
     };
   }
 
-  const [probe] = input.actionableProbes;
+  const probe = selectFreshProbe(input.actionableProbes, input.learningSignals ?? []);
   if (probe) {
     return candidateFromProbe(probe);
+  }
+
+  const learningFollowup = selectLearningFollowup(input.learningSignals ?? []);
+  if (learningFollowup) {
+    return {
+      outcome: learningFollowup.status === "blocked" ? "needs_human" : "success",
+      kind: "learning_followup",
+      summary: learningFollowup.nextAction
+        ? `${learningFollowup.summary} Next: ${learningFollowup.nextAction}`
+        : learningFollowup.summary,
+      referenceId: learningFollowup.key,
+      researchDirective:
+        "Refresh current product/tooling research before changing strategy, then record whether the follow-up learned, shipped, blocked, or went stale."
+    };
   }
 
   if (input.activeSearchCount === 0) {
@@ -86,7 +113,9 @@ export function selectImprovementCandidate(
     outcome: "needs_human",
     kind: "ui_smoke",
     summary:
-      "Active searches have no current adapter or alert blockers; run UI smoke and select the strongest verified UX or access issue."
+      "Active searches have no fresh adapter or alert blockers; run UI smoke, compare current product/tooling best practices, and select the strongest verified UX or access issue.",
+    researchDirective:
+      "Use current external research only when it can produce a concrete, verifiable repo or provider improvement."
   };
 }
 
@@ -115,7 +144,9 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
         outcome: "needs_adapter",
         kind: "adapter_gap",
         summary: `${probe.courseName} needs a ${probe.platform} adapter before it can be polled.`,
-        referenceId: probe.id
+        referenceId: probe.id,
+        researchDirective:
+          "Inspect current official booking surface and policy evidence before implementing; if unsupported after repeated inspection, record a blocked or stale learning instead of repeating the same probe."
       };
     case "BLOCKED_POLICY":
       return {
@@ -146,4 +177,61 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
         referenceId: probe.id
       };
   }
+}
+
+function selectFreshProbe(
+  probes: ActionableProbeInput[],
+  learningSignals: LearningSignalInput[]
+) {
+  const staleAdapterKeys = new Set(
+    learningSignals
+      .filter(
+        (signal) =>
+          signal.kind === "adapter_gap" &&
+          signal.repeats >= 2 &&
+          (signal.status === "stale" || signal.status === "blocked" || /no reusable adapter/i.test(signal.summary))
+      )
+      .map((signal) => normalizeKey(signal.key))
+  );
+
+  return probes.find((probe) => {
+    if (probe.outcome !== "NEEDS_ADAPTER") {
+      return true;
+    }
+
+    const courseKey = normalizeKey(`adapter:${probe.courseName}`);
+    return !staleAdapterKeys.has(courseKey);
+  });
+}
+
+function selectLearningFollowup(signals: LearningSignalInput[]) {
+  return signals
+    .filter((signal) => signal.status !== "stale")
+    .sort((a, b) => {
+      const statusScore = learningStatusScore(b.status) - learningStatusScore(a.status);
+      if (statusScore !== 0) {
+        return statusScore;
+      }
+
+      return b.repeats - a.repeats;
+    })[0];
+}
+
+function learningStatusScore(status: LearningSignalInput["status"]) {
+  switch (status) {
+    case "open":
+      return 4;
+    case "blocked":
+      return 3;
+    case "learned":
+      return 2;
+    case "stale":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function normalizeKey(value: string) {
+  return value.trim().toLowerCase();
 }

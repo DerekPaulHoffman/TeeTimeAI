@@ -54,6 +54,7 @@ Use copy such as "official site", "official booking page", "direct link", and "y
 - Clerk is the account system, but `CLERK_AUTH_READY` gates production account mode.
 - Guest/email-alert mode remains useful while auth is not fully enabled.
 - Google Places is used for course discovery and photos.
+- Course discovery defaults to a 15-mile radius and offers 5 to 30 mile choices.
 - Discovery should prefer public golf courses and filter stores, simulators, private clubs, and likely non-course results.
 - Extra recipients are part of the product: do not remove `TeeSearch.additionalEmails` or dashboard recipient UI.
 - Feedback is part of the product-learning loop: do not remove `WebsiteEvent`, `WebsiteFeedback`, or the feedback widget.
@@ -260,9 +261,16 @@ For Figma Make files:
 
 - Use `get_design_context` with `nodeId: "0:1"`.
 - Normal `get_metadata` and `get_screenshot` are not supported for `/make/` files.
-- The MCP response may return source-tree and asset links.
+- The MCP response usually returns `file://figma/make/source/...` source-tree links and `file://figma/make/image/...` asset links.
+- Start by reading `src/app/App.tsx`, then read only the imported screen/component files relevant to the requested surface.
+- For dashboard work, look for generated screen imports such as `src/imports/*Desktop*`, `src/imports/*Dashboard*`, `src/styles/theme.css`, `src/styles/globals.css`, `src/styles/tailwind.css`, and `default_shadcn_theme.css`.
+- Treat the Figma Make source as the design source of truth for layout, spacing, colors, typography, component composition, and asset references.
+- Treat the Figma Make source as reference code, not as app architecture. Port the visual structure into this repo's Next.js routes/components while preserving live data, auth, database models, product safety copy, and tests.
 - If resource links cannot be dereferenced, use the Make preview in the browser for visual validation.
-- Do not blindly paste generated Vite/shadcn output into the app. Preserve app architecture, tests, data model, and product-specific additions.
+- Do not blindly paste generated Vite/shadcn output into the app. Figma Make often generates a standalone Vite/static/shadcn app with mock data and different folder conventions.
+- When implementing from Make, map mock lists/cards/actions to real `TeeSearch`, `CoursePreference`, `TeeTimeMatch`, `CourseProbe`, and dashboard actions.
+- Download or reuse Make assets only when they are part of the visual design; do not replace functional icons/components with static screenshots.
+- Validate the implementation by running the local app and comparing browser screenshots against the Make preview or generated design reference.
 
 Current design additions that must survive redesigns:
 

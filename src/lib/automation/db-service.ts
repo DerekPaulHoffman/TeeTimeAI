@@ -192,7 +192,11 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
     return null;
   }
 
-  if (input.detectedPlatform !== "FOREUP" && input.detectedPlatform !== "TEEITUP") {
+  if (
+    input.detectedPlatform !== "FOREUP" &&
+    input.detectedPlatform !== "TEEITUP" &&
+    input.detectedPlatform !== "CUSTOM"
+  ) {
     return null;
   }
 
