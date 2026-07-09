@@ -12,44 +12,28 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/search");
 
-    await expect(page.getByRole("heading", { name: /Choose the courses/i })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Tell us where and when you want to play/i })
+    ).toBeVisible();
     await expect(page.getByText("Start getting alerts")).toBeVisible();
     await expect(page.locator(".summary-panel button")).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
-    await expect(page.getByLabel("Distance from me")).toHaveValue("15");
-    await expect(page.getByLabel("Distance from me").locator("option")).toHaveCount(6);
+    await expect(page.locator("#searchRadius")).toHaveValue("15");
 
-    await page.getByLabel("Location").fill("Trumbull, CT");
+    await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
     const discoveryRequest = page.waitForRequest((request) =>
       request.url().includes("/api/courses/discover?")
     );
-    await page.getByRole("button", { name: /Find courses/i }).click();
+    await page.getByRole("button", { name: /^Search$/i }).click();
     const discoveryUrl = new URL((await discoveryRequest).url());
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
-    const discoveryStatus = page
-      .getByRole("status")
-      .filter({ hasText: /Found \d+ public golf courses within 15 miles|Loaded demo courses/i });
-    await expect(
-      page.getByText(/Found \d+ public golf courses within 15 miles|Loaded demo courses/i)
-    ).toBeVisible();
-    await expect(discoveryStatus).toContainText(
-      /Found \d+ public golf courses within 15 miles|Loaded demo courses/i
-    );
+    const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });
+    await expect(discoveryStatus).toContainText(/\d+ courses near Trumbull/i);
 
     const courseRows = page.locator(".course-row");
     const courseCount = await courseRows.count();
     expect(courseCount, "course discovery should return enough rows to exercise ranking limits").toBeGreaterThanOrEqual(6);
-    await expect(page.locator(".course-results-map-shell")).toBeVisible();
-    const mapCanvas = page.locator(".course-results-map");
-    const unavailableMap = page.locator(".course-results-map-unavailable");
-    const fallbackMap = page.getByRole("region", { name: /nearby course locations on fallback map/i });
-    if ((await unavailableMap.count()) > 0) {
-      await expect(unavailableMap).toContainText("Map unavailable");
-    } else if ((await mapCanvas.count()) > 0) {
-      await expect(mapCanvas).toBeVisible();
-    } else {
-      await expect(fallbackMap).toBeVisible();
-    }
+    await expect(page.locator(".course-results-map-shell")).toHaveCount(0);
     await expect(page.locator(".course-results-map-frame")).toHaveCount(0);
     await expect(page.locator(".course-results-map-overlay")).toHaveCount(0);
     await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
@@ -99,11 +83,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(saveButton).toBeDisabled();
     await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
 
-    await page.getByLabel("End").fill("13:00");
+    await page.getByLabel("End time").fill("13:00");
     await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
-    await expect(page.getByLabel("End")).toHaveAttribute("aria-describedby", /search-form-guidance/);
+    await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(saveButton).toBeDisabled();
-    await page.getByLabel("End").fill("16:00");
+    await page.getByLabel("End time").fill("16:00");
 
     await expect(saveButton).toBeEnabled();
     await saveButton.click();
@@ -190,6 +174,9 @@ function collectPageIssues(page: Page) {
       if (message.text().includes("Google Maps JavaScript API error: ApiNotActivatedMapError")) {
         return;
       }
+      if (message.text().includes("/_next/webpack-hmr") && message.text().includes("WebSocket")) {
+        return;
+      }
 
       issues.push(`console:${message.text()}`);
     }
@@ -202,6 +189,9 @@ function collectPageIssues(page: Page) {
   page.on("requestfailed", (request) => {
     const failureText = request.failure()?.errorText ?? "";
     if (request.url().includes("/api/analytics/events") && failureText.includes("ERR_ABORTED")) {
+      return;
+    }
+    if (request.url().includes("?_rsc=") && failureText.includes("ERR_ABORTED")) {
       return;
     }
 

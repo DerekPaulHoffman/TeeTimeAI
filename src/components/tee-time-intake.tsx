@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Leaflet from "leaflet";
 import {
   Bell,
@@ -16,6 +16,7 @@ import {
   Plus,
   Search,
   Star,
+  Trees,
   X
 } from "lucide-react";
 
@@ -24,7 +25,6 @@ import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
 import {
-  COURSE_SEARCH_RADIUS_OPTIONS_MILES,
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
   milesToMeters
 } from "@/lib/places/radius";
@@ -128,19 +128,42 @@ const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
+type HoleFilter = "any" | "9" | "18";
 
-export function TeeTimeIntake() {
-  const [locationText, setLocationText] = useState("Trumbull, CT");
+export type TeeTimeIntakeInitialValues = {
+  location?: string;
+  email?: string;
+  players?: number;
+  date?: string;
+  startTime?: string;
+  endTime?: string;
+  holes?: HoleFilter;
+  radius?: number;
+  coordinates?: SearchCoordinates;
+};
+
+export function TeeTimeIntake({
+  initialValues = {}
+}: {
+  initialValues?: TeeTimeIntakeInitialValues;
+}) {
+  const [locationText, setLocationText] = useState(initialValues.location ?? "Trumbull, CT");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
-    DEFAULT_COURSE_SEARCH_RADIUS_MILES
+    initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
-  const [alertEmail, setAlertEmail] = useState("");
-  const [date, setDate] = useState(tomorrow());
-  const [startTime, setStartTime] = useState("13:40");
-  const [endTime, setEndTime] = useState("16:00");
-  const [players, setPlayers] = useState(3);
+  const [alertEmail, setAlertEmail] = useState(initialValues.email ?? "");
+  const [date, setDate] = useState(initialValues.date ?? tomorrow());
+  const [startTime, setStartTime] = useState(initialValues.startTime ?? "13:40");
+  const [endTime, setEndTime] = useState(initialValues.endTime ?? "16:00");
+  const [players, setPlayers] = useState(initialValues.players ?? 3);
+  const [holeFilter, setHoleFilter] = useState<HoleFilter>(initialValues.holes ?? "any");
   const [courses, setCourses] = useState<CourseCandidate[]>([]);
-  const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(null);
+  const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(
+    initialValues.coordinates ?? null
+  );
+  const [pendingCoordinates] = useState<SearchCoordinates | null>(
+    initialValues.coordinates ?? null
+  );
   const [visibleCourseCount, setVisibleCourseCount] = useState(INITIAL_VISIBLE_COURSE_COUNT);
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
   const [notice, setNotice] = useState<Notice>({
@@ -157,12 +180,28 @@ export function TeeTimeIntake() {
     () => new Set(selected.map((course) => course.googlePlaceId)),
     [selected]
   );
+  const filteredCourses = useMemo(() => {
+    const radiusMeters = milesToMeters(searchRadiusMiles);
+    const withinRadius = courses.filter(
+      (course) => course.distanceMeters === undefined || course.distanceMeters <= radiusMeters
+    );
+    const matchingHoles = holeFilter === "9" ? [] : withinRadius;
+
+    return [...matchingHoles].sort((a, b) => {
+      const aSelected = selectedIds.has(a.googlePlaceId) ? 0 : 1;
+      const bSelected = selectedIds.has(b.googlePlaceId) ? 0 : 1;
+      return (
+        aSelected - bSelected ||
+        (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) -
+          (b.distanceMeters ?? Number.MAX_SAFE_INTEGER)
+      );
+    });
+  }, [courses, holeFilter, searchRadiusMiles, selectedIds]);
   const visibleCourses = useMemo(
-    () => courses.slice(0, visibleCourseCount),
-    [courses, visibleCourseCount]
+    () => filteredCourses.slice(0, visibleCourseCount),
+    [filteredCourses, visibleCourseCount]
   );
-  const hiddenCourseCount = Math.max(courses.length - visibleCourses.length, 0);
-  const selectedCourseCount = selected.length;
+  const hiddenCourseCount = Math.max(filteredCourses.length - visibleCourses.length, 0);
   const searchSignature = useMemo(
     () =>
       JSON.stringify({
@@ -230,7 +269,7 @@ export function TeeTimeIntake() {
     }
   }
 
-  async function discoverCourses(coordinates: SearchCoordinates) {
+  const discoverCourses = useCallback(async (coordinates: SearchCoordinates) => {
     try {
       const params = new URLSearchParams({
         latitude: String(coordinates.latitude),
@@ -260,7 +299,7 @@ export function TeeTimeIntake() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [searchRadiusMiles]);
 
   function addCourse(course: CourseCandidate) {
     if (selected.length >= 5) {
@@ -274,6 +313,14 @@ export function TeeTimeIntake() {
 
     setSelected((current) => [...current, course]);
   }
+
+  useEffect(() => {
+    if (!pendingCoordinates) {
+      return;
+    }
+
+    void discoverCourses(pendingCoordinates);
+  }, [discoverCourses, pendingCoordinates]);
 
   function toggleCourse(course: CourseCandidate) {
     if (selectedIds.has(course.googlePlaceId)) {
@@ -324,7 +371,7 @@ export function TeeTimeIntake() {
 
   function showMoreCourses() {
     setVisibleCourseCount((current) =>
-      Math.min(current + COURSE_REVEAL_INCREMENT, courses.length)
+      Math.min(current + COURSE_REVEAL_INCREMENT, filteredCourses.length)
     );
   }
 
@@ -388,10 +435,10 @@ export function TeeTimeIntake() {
   }
 
   return (
-    <div className="intake-layout search-page-layout">
-      <div className="workspace">
-        <div className="control-grid">
-          <div className="field">
+    <div className="figma-search-experience">
+      <section className="figma-search-toolbar" aria-label="Course search filters">
+        <div className="figma-search-primary">
+          <div className="figma-search-field figma-location-field">
             <label htmlFor="location">Location</label>
             <input
               id="location"
@@ -399,34 +446,19 @@ export function TeeTimeIntake() {
               onChange={(event) => setLocationText(event.target.value)}
               placeholder="City, state, or ZIP"
             />
-          </div>
-          <div className="field">
-            <label htmlFor="searchRadius">Distance from me</label>
-            <select
+            <button
+              aria-label="Use current location"
+              className="figma-use-location"
               disabled={loading}
-              id="searchRadius"
-              value={searchRadiusMiles}
-              onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
+              onClick={discoverByCurrentLocation}
+              title="Use current location"
+              type="button"
             >
-              {COURSE_SEARCH_RADIUS_OPTIONS_MILES.map((miles) => (
-                <option key={miles} value={miles}>
-                  Within {miles} miles
-                </option>
-              ))}
-            </select>
+              <LocateFixed size={15} />
+            </button>
           </div>
-          <div className="field">
-            <label htmlFor="alertEmail">Alert email</label>
-            <input
-              id="alertEmail"
-              type="email"
-              value={alertEmail}
-              onChange={(event) => setAlertEmail(event.target.value)}
-              placeholder="you@example.com"
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="players">Players</label>
+          <label className="figma-search-field" htmlFor="players">
+            <span>Players</span>
             <select
               id="players"
               value={players}
@@ -434,13 +466,13 @@ export function TeeTimeIntake() {
             >
               {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
                 <option key={count} value={count}>
-                  {count}
+                  {count} {count === 1 ? "player" : "players"}
                 </option>
               ))}
             </select>
-          </div>
-          <div className="field">
-            <label htmlFor="date">Date</label>
+          </label>
+          <label className="figma-search-field" htmlFor="date">
+            <span>Date</span>
             <input
               aria-invalid={!isDateFuture}
               aria-describedby={!isDateFuture ? "search-form-guidance" : undefined}
@@ -450,59 +482,117 @@ export function TeeTimeIntake() {
               value={date}
               onChange={(event) => setDate(event.target.value)}
             />
-          </div>
-          <div className="control-grid">
-            <div className="field">
-              <label htmlFor="startTime">Start</label>
+          </label>
+          <fieldset className="figma-search-field figma-time-field">
+            <legend>Time window</legend>
+            <div>
               <input
+                aria-label="Start time"
                 id="startTime"
                 type="time"
                 value={startTime}
                 onChange={(event) => setStartTime(event.target.value)}
               />
-            </div>
-            <div className="field">
-              <label htmlFor="endTime">End</label>
+              <span aria-hidden="true">–</span>
               <input
-                id="endTime"
                 aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
                 aria-invalid={!isTimeWindowValid}
+                aria-label="End time"
+                id="endTime"
                 type="time"
                 value={endTime}
                 onChange={(event) => setEndTime(event.target.value)}
               />
             </div>
+          </fieldset>
+          <button
+            className="figma-search-submit"
+            type="button"
+            onClick={discoverByTypedLocation}
+            disabled={loading}
+          >
+            <Search size={15} />
+            {loading ? "Searching" : "Search"}
+          </button>
+        </div>
+        <div className="figma-filter-strip">
+          <span className="figma-filter-title">Filters</span>
+          <span className="figma-filter-divider" aria-hidden="true" />
+          <div className="figma-hole-filter" aria-label="Holes">
+            <strong>Holes</strong>
+            {(["any", "9", "18"] as const).map((value) => (
+              <button
+                aria-pressed={holeFilter === value}
+                className={holeFilter === value ? "is-active" : ""}
+                key={value}
+                onClick={() => setHoleFilter(value)}
+                type="button"
+              >
+                {value === "any" ? "Any" : value}
+              </button>
+            ))}
           </div>
+          <span className="figma-filter-divider" aria-hidden="true" />
+          <strong className="figma-within-label">Within</strong>
+          <label className="figma-distance-filter" htmlFor="searchRadius">
+            <span><em>1 mi</em><b>within {searchRadiusMiles} mi</b><em>50 mi</em></span>
+            <input
+              aria-label="Distance from me"
+              disabled={loading}
+              id="searchRadius"
+              max="50"
+              min="1"
+              type="range"
+              value={searchRadiusMiles}
+              onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
+              style={{
+                background: `linear-gradient(to right, #18332b 0 ${((searchRadiusMiles - 1) / 49) * 100}%, #d9e4df ${((searchRadiusMiles - 1) / 49) * 100}% 100%)`
+              }}
+            />
+          </label>
+          {holeFilter !== "any" || searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
+            <button
+              className="figma-reset-filters"
+              onClick={() => {
+                setHoleFilter("any");
+                setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
+              }}
+              type="button"
+            >
+              Reset
+            </button>
+          ) : null}
         </div>
+      </section>
 
-        <div className="inline-actions" style={{ marginTop: 18 }}>
-          <button className="button button-dark" type="button" onClick={discoverByTypedLocation} disabled={loading}>
-            <Search size={17} />
-            {loading ? "Searching" : "Find courses"}
-          </button>
-          <button className="button button-ghost" type="button" onClick={discoverByCurrentLocation} disabled={loading}>
-            <LocateFixed size={17} />
-            Use current location
-          </button>
-        </div>
-
-        <Notice notice={notice} />
-
-        {courses.length > 0 ? (
-          <div className="search-results-header">
-            <div>
-              <span className="eyebrow">Course results</span>
-              <h3>Nearby public courses</h3>
+      <div className="figma-results-layout">
+        <div className="figma-results-column">
+          {courses.length > 0 ? (
+            <div className="figma-results-banner" role="status">
+              <strong>{filteredCourses.length} courses</strong> near {locationText} — tap the ones you want and drag to rank them.
             </div>
-            <span className="results-count-pill">
-              {selectedCourseCount}/5 selected
-            </span>
-          </div>
-        ) : null}
-
-        <CourseResultsMap courses={courses} origin={searchCoordinates} />
-
-        <div className="course-list" role="list" aria-label="Nearby courses">
+          ) : (
+            <Notice notice={notice} />
+          )}
+          {courses.length > 0 && notice.type === "error" ? <Notice notice={notice} /> : null}
+          {isCurrentSearchSaved && notice.type === "success" ? <Notice notice={notice} /> : null}
+          {courses.length > 0 && filteredCourses.length === 0 ? (
+            <div className="figma-empty-results">
+              <h3>No courses match these filters.</h3>
+              <p>Show all nearby courses or expand the distance to keep looking.</p>
+              <button
+                className="button button-ghost"
+                onClick={() => {
+                  setHoleFilter("any");
+                  setSearchRadiusMiles(50);
+                }}
+                type="button"
+              >
+                Expand search
+              </button>
+            </div>
+          ) : null}
+          <div className="course-list figma-course-list" role="list" aria-label="Nearby courses">
           {visibleCourses.map((course) => {
             const selectedIndex = selected.findIndex(
               (selectedCourse) => selectedCourse.googlePlaceId === course.googlePlaceId
@@ -518,20 +608,19 @@ export function TeeTimeIntake() {
                 <CourseThumbnail course={course} />
                 {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
                 <div className="course-copy">
-                  <h3>{course.name}</h3>
-                  <p className="figma-course-meta">
-                    {course.distanceMeters !== undefined ? (
-                      <span>{formatDistance(course.distanceMeters)}</span>
-                    ) : null}
-                    <span>18 holes</span>
-                    <span>Par 72</span>
+                  <div className="figma-course-badges">
+                    <span className="figma-course-pill is-public"><Trees size={11} /> Public course</span>
                     {course.rating ? (
-                      <span>
-                        <Star size={13} />
-                        {course.rating.toFixed(1)}
+                      <span className="figma-course-pill is-rating">
+                        <Star size={11} /> {course.rating.toFixed(1)}
                       </span>
                     ) : null}
-                  </p>
+                    {course.distanceMeters !== undefined ? (
+                      <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
+                    ) : null}
+                    <span className="figma-course-pill">18 holes · Par 72</span>
+                  </div>
+                  <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
                 </div>
                 <div className="course-actions">
@@ -553,18 +642,18 @@ export function TeeTimeIntake() {
                     aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
                     title={isSelected ? `Remove priority ${selectedIndex + 1}` : "Add course"}
                   >
-                    {isSelected ? <X size={13} /> : <Plus size={13} />}
-                    {isSelected ? "Remove" : "Add"}
+                    {isSelected ? <Check size={13} /> : <Plus size={13} />}
+                    {isSelected ? "Added" : "Add"}
                   </button>
                 </div>
               </div>
             );
           })}
-        </div>
-        {courses.length > INITIAL_VISIBLE_COURSE_COUNT ? (
+          </div>
+        {filteredCourses.length > INITIAL_VISIBLE_COURSE_COUNT ? (
           <div className="course-list-footer">
             <span>
-              Showing {visibleCourses.length} of {courses.length} locations
+              Showing {visibleCourses.length} of {filteredCourses.length} locations
             </span>
             {hiddenCourseCount > 0 ? (
               <button className="button button-ghost" type="button" onClick={showMoreCourses}>
@@ -574,7 +663,7 @@ export function TeeTimeIntake() {
             ) : null}
           </div>
         ) : null}
-      </div>
+        </div>
 
       <aside className="summary-panel figma-selected-panel">
         <div className="figma-selected-header">
@@ -582,14 +671,14 @@ export function TeeTimeIntake() {
             <MapPinned size={18} />
           </span>
           <h2>Your courses</h2>
-          <span className="figma-count-pill">{selected.length}/5</span>
+          {selected.length > 0 ? <span className="figma-count-pill">{selected.length}/5</span> : null}
         </div>
         <p>Pick up to 5. Drag to rank them - #1 gets checked first.</p>
         <div className="selected-list">
           {selected.length === 0 ? (
             <div className="selected-empty">
-              <MapPin size={20} />
-              <span>Add at least one course to start alerts.</span>
+              <span className="figma-empty-flag" aria-hidden="true">⛳</span>
+              <span>Tap a course to add it here</span>
             </div>
           ) : (
             selected.map((course, index) => (
@@ -649,6 +738,18 @@ export function TeeTimeIntake() {
             ))
           )}
         </div>
+        {selected.length > 0 ? (
+          <label className="figma-alert-email" htmlFor="alertEmail">
+            <span>Alert email</span>
+            <input
+              id="alertEmail"
+              type="email"
+              value={alertEmail}
+              onChange={(event) => setAlertEmail(event.target.value)}
+              placeholder="you@example.com"
+            />
+          </label>
+        ) : null}
         <button
           className="button button-primary"
           type="button"
@@ -666,10 +767,11 @@ export function TeeTimeIntake() {
           {saving ? "Starting alerts" : isCurrentSearchSaved ? "Search saved" : "Start getting alerts"}
         </button>
         <p className="helper" id="search-form-guidance">
-          {saveBlocker ??
-            "We'll email you as soon as a spot opens up. Sign in later to pause, edit, or cancel alerts."}
+          {saveBlocker ?? "We'll email you the moment a spot opens up at any of these courses."}
         </p>
       </aside>
+      </div>
+      <CourseResultsMap courses={[]} origin={searchCoordinates} />
       {selected.length > 0 ? (
         <div className="mobile-selection-bar">
           <span>{selected.length} {selected.length === 1 ? "course" : "courses"} selected</span>

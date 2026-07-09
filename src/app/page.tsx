@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ArrowRight, Bell, MapPin, Search } from "lucide-react";
 
+import { HomeSearchForm } from "@/components/home-search-form";
 import { absoluteUrl, siteDescription, siteName } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -114,20 +115,7 @@ export default function HomePage() {
             email the moment a spot opens up.
           </p>
         </div>
-        <div className="search-entry-panel">
-          <MapPin size={24} />
-          <div>
-            <h3>Build your ranked course list.</h3>
-            <p className="meta">
-              Open the search page to find nearby public courses, compare distance and ratings,
-              and drag your favorite courses into the order we should check.
-            </p>
-          </div>
-          <a className="button button-dark" href="/search">
-            <Search size={17} />
-            Search courses
-          </a>
-        </div>
+        <HomeSearchForm />
       </section>
 
       <section className="section flow-band">

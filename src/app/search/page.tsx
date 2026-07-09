@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { TeeTimeIntake } from "@/components/tee-time-intake";
+import { TeeTimeIntake, type TeeTimeIntakeInitialValues } from "@/components/tee-time-intake";
 import { siteDescription } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -11,20 +11,43 @@ export const metadata: Metadata = {
   }
 };
 
-export default function SearchPage() {
+function valueOf(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+export default async function SearchPage({
+  searchParams
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const players = Number(valueOf(params.players));
+  const radius = Number(valueOf(params.radius));
+  const latitude = Number(valueOf(params.latitude));
+  const longitude = Number(valueOf(params.longitude));
+  const holes = valueOf(params.holes);
+  const initialValues: TeeTimeIntakeInitialValues = {
+    location: valueOf(params.location),
+    email: valueOf(params.email),
+    date: valueOf(params.date),
+    startTime: valueOf(params.startTime),
+    endTime: valueOf(params.endTime),
+    players: Number.isInteger(players) && players >= 1 && players <= 4 ? players : undefined,
+    radius: Number.isFinite(radius) && radius >= 1 && radius <= 50 ? radius : undefined,
+    holes: holes === "9" || holes === "18" || holes === "any" ? holes : undefined,
+    coordinates:
+      Number.isFinite(latitude) && Number.isFinite(longitude)
+        ? { latitude, longitude }
+        : undefined
+  };
+
   return (
     <main className="search-page">
       <div className="search-page-header">
-        <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-          New search
-        </p>
-        <h1>Choose the courses we should watch first.</h1>
-        <p>
-          Search nearby public courses, tap the ones you want, then rank your favorites so
-          Tee Time Spot checks them in the right order.
-        </p>
+        <p className="eyebrow">Set up your alert</p>
+        <h1>Tell us where and when you want to play.</h1>
       </div>
-      <TeeTimeIntake />
+      <TeeTimeIntake initialValues={initialValues} />
     </main>
   );
 }
