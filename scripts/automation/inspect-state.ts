@@ -14,7 +14,7 @@ async function main() {
     runs,
     activeSearches,
     probeCounts,
-    recentActionableProbes,
+    recentNotableProbes,
     recentMatches,
     pendingMatches
   ] =
@@ -106,6 +106,42 @@ async function main() {
       })
     ]);
 
+  const activeSearchIds = activeSearches.map((search) => search.id);
+  const activePreferenceCourseIds = new Set(
+    activeSearches.flatMap((search) =>
+      search.preferences.map((preference) => preference.courseId)
+    )
+  );
+  const recentActiveProbes =
+    activeSearchIds.length > 0
+      ? await prisma.courseProbe.findMany({
+          where: {
+            observedAt: {
+              gte: recentSince
+            },
+            teeSearchId: {
+              in: activeSearchIds
+            },
+            courseId: {
+              in: [...activePreferenceCourseIds]
+            }
+          },
+          orderBy: {
+            observedAt: "desc"
+          },
+          include: {
+            course: true,
+            teeSearch: {
+              include: {
+                user: true
+              }
+            },
+            automationRun: true
+          }
+        })
+      : [];
+  const currentActionableProbes = latestCurrentActionableProbes(recentActiveProbes);
+
   console.log(
     JSON.stringify(
       {
@@ -149,7 +185,20 @@ async function main() {
             probeCounts.map((probe) => [probe.outcome, probe._count._all])
           )
         },
-        recentActionableProbes: recentActionableProbes.map((probe) => ({
+        recentActionableProbes: currentActionableProbes.map((probe) => ({
+          id: probe.id,
+          observedAt: probe.observedAt,
+          outcome: probe.outcome,
+          course: probe.course.name,
+          platform: probe.course.detectedPlatform,
+          eligibility: probe.course.automationEligibility,
+          user: redactEmail(probe.teeSearch.user.email),
+          searchId: probe.teeSearchId,
+          automationRunId: probe.automationRunId,
+          automationRunOutcome: probe.automationRun?.outcome ?? null,
+          message: summarize(probe.message)
+        })),
+        recentNotableProbes: recentNotableProbes.map((probe) => ({
           id: probe.id,
           observedAt: probe.observedAt,
           outcome: probe.outcome,
@@ -188,6 +237,27 @@ async function main() {
 
 function summarize(notes: string | null) {
   return notes?.replace(/\s+/g, " ").trim().slice(0, 300) ?? null;
+}
+
+function latestCurrentActionableProbes<
+  T extends {
+    teeSearchId: string;
+    courseId: string;
+    outcome: string;
+  }
+>(probes: T[]) {
+  const latestBySearchCourse = new Map<string, T>();
+
+  for (const probe of probes) {
+    const key = `${probe.teeSearchId}:${probe.courseId}`;
+    if (!latestBySearchCourse.has(key)) {
+      latestBySearchCourse.set(key, probe);
+    }
+  }
+
+  return [...latestBySearchCourse.values()].filter(
+    (probe) => probe.outcome !== "NO_MATCH" && probe.outcome !== "MATCH_FOUND"
+  );
 }
 
 function redactEmail(email: string) {

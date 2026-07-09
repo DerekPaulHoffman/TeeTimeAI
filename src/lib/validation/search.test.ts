@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import {
   MAX_COURSE_PREFERENCES,
   MIN_COURSE_PREFERENCES,
@@ -7,9 +8,7 @@ import {
 } from "./search";
 
 const tomorrow = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  return date.toISOString().slice(0, 10);
+  return formatDateInputValue(addLocalDays(new Date(), 1));
 };
 
 describe("teeSearchInputSchema", () => {
@@ -38,7 +37,7 @@ describe("teeSearchInputSchema", () => {
   });
 
   it("rejects same-day or past searches", () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = formatDateInputValue(new Date());
 
     expect(() =>
       teeSearchInputSchema.parse({

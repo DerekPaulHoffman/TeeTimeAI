@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useMemo, useState } from "react";
 import { Bell, LocateFixed, MapPinned, Plus, Save, Search, X } from "lucide-react";
 
+import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import type { CourseCandidate } from "@/lib/places/google";
 
 type Notice = {
@@ -12,9 +13,7 @@ type Notice = {
 };
 
 const tomorrow = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  return date.toISOString().slice(0, 10);
+  return formatDateInputValue(addLocalDays(new Date(), 1));
 };
 
 export function TeeTimeIntake() {
