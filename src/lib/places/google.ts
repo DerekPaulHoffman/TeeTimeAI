@@ -37,6 +37,7 @@ export type CourseCandidate = {
   address?: string;
   latitude: number;
   longitude: number;
+  distanceMeters?: number;
   rating?: number;
   phone?: string;
   website?: string;
@@ -137,7 +138,15 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
     }
   }
 
-  return filterPublicGolfCoursePlaces([...placesById.values()]).map(mapGooglePlaceToCourseCandidate);
+  return filterPublicGolfCoursePlaces([...placesById.values()])
+    .map((place) => {
+      const course = mapGooglePlaceToCourseCandidate(place);
+      return {
+        ...course,
+        distanceMeters: getDistanceMeters(input, course)
+      };
+    })
+    .sort((a, b) => (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) - (b.distanceMeters ?? Number.MAX_SAFE_INTEGER));
 }
 
 async function searchNearbyGolfCoursePlaces(
@@ -184,6 +193,26 @@ async function searchNearbyGolfCoursePlaces(
 
 function normalizePlaceId(id: string) {
   return id.replace(/^places\//, "");
+}
+
+function getDistanceMeters(
+  from: Pick<CourseCandidate, "latitude" | "longitude">,
+  to: Pick<CourseCandidate, "latitude" | "longitude">
+) {
+  const earthRadiusMeters = 6371000;
+  const fromLatitude = toRadians(from.latitude);
+  const toLatitude = toRadians(to.latitude);
+  const latitudeDelta = toRadians(to.latitude - from.latitude);
+  const longitudeDelta = toRadians(to.longitude - from.longitude);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(fromLatitude) * Math.cos(toLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+
+  return Math.round(earthRadiusMeters * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine)));
+}
+
+function toRadians(value: number) {
+  return (value * Math.PI) / 180;
 }
 
 export function getGooglePlacesApiKey() {

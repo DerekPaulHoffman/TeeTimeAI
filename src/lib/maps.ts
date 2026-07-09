@@ -20,6 +20,16 @@ export function getGoogleMapsSearchUrl(course: CourseMapTarget) {
   return `https://www.google.com/maps/search/?${params.toString()}`;
 }
 
+export function getGoogleMapsEmbedUrl(center: Pick<CourseMapTarget, "latitude" | "longitude">) {
+  const params = new URLSearchParams({
+    output: "embed",
+    q: `${center.latitude},${center.longitude}`,
+    z: "10"
+  });
+
+  return `https://www.google.com/maps?${params.toString()}`;
+}
+
 function getGoogleMapsQuery(course: CourseMapTarget) {
   if (course.address) {
     return `${course.name}, ${course.address}`;

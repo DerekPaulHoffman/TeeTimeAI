@@ -36,6 +36,10 @@ test.describe("Tee Time Spot UI smoke", () => {
     const courseRows = page.locator(".course-row");
     const courseCount = await courseRows.count();
     expect(courseCount, "course discovery should return enough rows to exercise ranking limits").toBeGreaterThanOrEqual(6);
+    await expect(page.locator(".course-results-map-shell")).toBeVisible();
+    await expect(page.locator(".course-results-map-frame, .course-results-map").first()).toBeVisible();
+    await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
+    await expect(courseRows.nth(0).getByRole("link", { name: "Google Maps" })).toHaveCount(0);
     const seeMoreLocations = page.getByRole("button", { name: /See more locations/i });
     if ((await seeMoreLocations.count()) > 0) {
       await expect(page.getByText(/Showing \d+ of \d+ locations/i)).toBeVisible();

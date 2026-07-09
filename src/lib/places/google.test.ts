@@ -168,6 +168,15 @@ describe("Google Places mapping", () => {
         json: async () => ({
           places: [
             {
+              id: "places/centennial",
+              displayName: { text: "Centennial Golf Club" },
+              formattedAddress: "185 John Simpson Rd, Carmel Hamlet, NY",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.451, longitude: -73.711 }
+            },
+            {
               id: "places/tashua",
               displayName: { text: "Tashua Knolls & Tashua Glen Golf Course" },
               formattedAddress: "40 Tashua Knolls Ln, Trumbull, CT",
@@ -221,8 +230,11 @@ describe("Google Places mapping", () => {
 
     expect(courses.map((course) => course.name)).toEqual([
       "Tashua Knolls & Tashua Glen Golf Course",
-      "Fairchild Wheeler Golf Course"
+      "Fairchild Wheeler Golf Course",
+      "Centennial Golf Club"
     ]);
+    expect(courses[0]?.distanceMeters).toBe(0);
+    expect(courses[1]?.distanceMeters).toBeLessThan(courses[2]?.distanceMeters ?? 0);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,

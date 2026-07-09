@@ -18,7 +18,7 @@ import {
 
 import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
-import { getGoogleMapsSearchUrl } from "@/lib/maps";
+import { getGoogleMapsEmbedUrl, getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
@@ -67,6 +67,7 @@ const tomorrow = () => {
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
 const COURSE_SEARCH_RADIUS_METERS = 50000;
+type SearchCoordinates = { latitude: number; longitude: number };
 
 export function TeeTimeIntake() {
   const [locationText, setLocationText] = useState("Trumbull, CT");
@@ -76,6 +77,7 @@ export function TeeTimeIntake() {
   const [endTime, setEndTime] = useState("16:00");
   const [players, setPlayers] = useState(3);
   const [courses, setCourses] = useState<CourseCandidate[]>([]);
+  const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(null);
   const [visibleCourseCount, setVisibleCourseCount] = useState(INITIAL_VISIBLE_COURSE_COUNT);
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
   const [notice, setNotice] = useState<Notice>({
@@ -164,7 +166,7 @@ export function TeeTimeIntake() {
     }
   }
 
-  async function discoverCourses(coordinates: { latitude: number; longitude: number }) {
+  async function discoverCourses(coordinates: SearchCoordinates) {
     try {
       const params = new URLSearchParams({
         latitude: String(coordinates.latitude),
@@ -177,7 +179,8 @@ export function TeeTimeIntake() {
       }
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
-      setCourses(data.courses);
+      setSearchCoordinates(coordinates);
+      setCourses(sortCoursesByDistance(data.courses));
       setVisibleCourseCount(INITIAL_VISIBLE_COURSE_COUNT);
       setNotice({
         type: "success",
@@ -375,7 +378,7 @@ export function TeeTimeIntake() {
           </div>
         ) : null}
 
-        <CourseResultsMap courses={courses} />
+        <CourseResultsMap courses={courses} origin={searchCoordinates} />
 
         <div className="course-list" role="list" aria-label="Nearby courses">
           {visibleCourses.map((course) => {
@@ -399,6 +402,12 @@ export function TeeTimeIntake() {
                         {course.rating.toFixed(1)}
                       </span>
                     ) : null}
+                    {course.distanceMeters !== undefined ? (
+                      <span className="mini-pill">
+                        <MapPin size={13} />
+                        {formatDistance(course.distanceMeters)}
+                      </span>
+                    ) : null}
                     {isSelected ? (
                       <span className="mini-pill selected-course-pill">
                         <Check size={13} />
@@ -407,13 +416,10 @@ export function TeeTimeIntake() {
                     ) : null}
                   </div>
                   <h3>{course.name}</h3>
-                  <p className="meta">
-                    {course.address ?? "Address unavailable"}
-                  </p>
+                  <CourseAddressLink course={course} />
                   <PhotoCredit course={course} />
                 </div>
                 <div className="course-actions">
-                  <MapLink course={course} />
                   {course.website ? (
                     <a
                       className="button button-ghost"
@@ -472,9 +478,9 @@ export function TeeTimeIntake() {
                 <div className="selected-copy">
                   <span className="rank-badge">Priority #{index + 1}</span>
                   <h3>{course.name}</h3>
-                  <p className="meta">{course.address ?? "Course address unavailable"}</p>
-                  <div className="selected-links">
-                    {course.website ? (
+                  <CourseAddressLink course={course} unavailableText="Course address unavailable" />
+                  {course.website ? (
+                    <div className="selected-links">
                       <a
                         className="course-link"
                         href={course.website}
@@ -484,9 +490,8 @@ export function TeeTimeIntake() {
                         <ExternalLink size={14} />
                         Official course link
                       </a>
-                    ) : null}
-                    <MapLink course={course} compact />
-                  </div>
+                    </div>
+                  ) : null}
                 </div>
                 <button
                   className="button button-secondary icon-button"
@@ -579,9 +584,43 @@ function PhotoCredit({ course }: { course: CourseCandidate }) {
   );
 }
 
-function CourseResultsMap({ courses }: { courses: CourseCandidate[] }) {
+function CourseAddressLink({
+  course,
+  unavailableText = "Address unavailable"
+}: {
+  course: CourseCandidate;
+  unavailableText?: string;
+}) {
+  if (!course.address) {
+    return <p className="meta">{unavailableText}</p>;
+  }
+
+  return (
+    <p className="meta">
+      <a
+        className="course-address-link"
+        href={getGoogleMapsSearchUrl(course)}
+        rel="noreferrer"
+        target="_blank"
+      >
+        <MapPin size={14} />
+        {course.address}
+      </a>
+    </p>
+  );
+}
+
+function CourseResultsMap({
+  courses,
+  origin
+}: {
+  courses: CourseCandidate[];
+  origin: SearchCoordinates | null;
+}) {
   const mapsApiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY;
   const mapId = "course-results-map";
+  const mapCenter = useMemo(() => getCourseMapCenter(courses, origin), [courses, origin]);
+  const mapMarkers = useMemo(() => getCourseMapMarkers(courses), [courses]);
   const courseSignature = useMemo(
     () =>
       courses
@@ -602,10 +641,7 @@ function CourseResultsMap({ courses }: { courses: CourseCandidate[] }) {
         return;
       }
 
-      const center = {
-        lat: courses.reduce((sum, course) => sum + course.latitude, 0) / courses.length,
-        lng: courses.reduce((sum, course) => sum + course.longitude, 0) / courses.length
-      };
+      const center = { lat: mapCenter.latitude, lng: mapCenter.longitude };
       const map = new googleMaps.Map(element, {
         center,
         clickableIcons: false,
@@ -650,7 +686,7 @@ function CourseResultsMap({ courses }: { courses: CourseCandidate[] }) {
       mapsApiKey
     )}&callback=initTeeTimeSpotCourseMap`;
     document.head.appendChild(script);
-  }, [courses, courseSignature, mapsApiKey]);
+  }, [courses, courseSignature, mapCenter.latitude, mapCenter.longitude, mapsApiKey]);
 
   if (courses.length === 0) {
     return null;
@@ -666,26 +702,36 @@ function CourseResultsMap({ courses }: { courses: CourseCandidate[] }) {
           role="img"
         />
       ) : (
-        <div className="course-results-map-fallback">
-          <MapPinned size={24} />
-          <span>{courses.length} course locations found</span>
+        <div
+          aria-label={`${courses.length} nearby course locations on Google Maps`}
+          className="course-results-map-embed"
+          role="img"
+        >
+          <iframe
+            className="course-results-map-frame"
+            loading="lazy"
+            referrerPolicy="no-referrer-when-downgrade"
+            src={getGoogleMapsEmbedUrl(mapCenter)}
+            title={`${courses.length} nearby course locations on Google Maps`}
+          />
+          <div className="course-results-map-overlay" aria-hidden="true">
+            {mapMarkers.map((marker) => (
+              <span
+                className="course-results-map-pin"
+                key={marker.id}
+                style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
+              >
+                {marker.index}
+              </span>
+            ))}
+          </div>
+          <div className="course-results-map-count">
+            <MapPinned size={16} />
+            {courses.length} course locations found
+          </div>
         </div>
       )}
     </div>
-  );
-}
-
-function MapLink({ compact = false, course }: { compact?: boolean; course: CourseCandidate }) {
-  return (
-    <a
-      className={compact ? "course-link" : "button button-ghost"}
-      href={getGoogleMapsSearchUrl(course)}
-      rel="noreferrer"
-      target="_blank"
-    >
-      <MapPin size={compact ? 14 : 16} />
-      Google Maps
-    </a>
   );
 }
 
@@ -706,4 +752,54 @@ function normalizeAttributionUri(uri?: string) {
   }
 
   return uri.startsWith("//") ? `https:${uri}` : uri;
+}
+
+function sortCoursesByDistance(courses: CourseCandidate[]) {
+  return [...courses].sort(
+    (a, b) =>
+      (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) -
+      (b.distanceMeters ?? Number.MAX_SAFE_INTEGER)
+  );
+}
+
+function formatDistance(distanceMeters: number) {
+  const miles = distanceMeters / 1609.344;
+  return `${miles < 10 ? miles.toFixed(1) : Math.round(miles)} mi`;
+}
+
+function getCourseMapCenter(courses: CourseCandidate[], origin: SearchCoordinates | null) {
+  if (origin) {
+    return origin;
+  }
+
+  if (courses.length === 0) {
+    return { latitude: 41.242, longitude: -73.209 };
+  }
+
+  return {
+    latitude: courses.reduce((sum, course) => sum + course.latitude, 0) / courses.length,
+    longitude: courses.reduce((sum, course) => sum + course.longitude, 0) / courses.length
+  };
+}
+
+function getCourseMapMarkers(courses: CourseCandidate[]) {
+  if (courses.length === 0) {
+    return [];
+  }
+
+  const latitudes = courses.map((course) => course.latitude);
+  const longitudes = courses.map((course) => course.longitude);
+  const minLatitude = Math.min(...latitudes);
+  const maxLatitude = Math.max(...latitudes);
+  const minLongitude = Math.min(...longitudes);
+  const maxLongitude = Math.max(...longitudes);
+  const latitudeSpan = Math.max(maxLatitude - minLatitude, 0.01);
+  const longitudeSpan = Math.max(maxLongitude - minLongitude, 0.01);
+
+  return courses.slice(0, 25).map((course, index) => ({
+    id: course.googlePlaceId,
+    index: index + 1,
+    x: 8 + ((course.longitude - minLongitude) / longitudeSpan) * 84,
+    y: 8 + ((maxLatitude - course.latitude) / latitudeSpan) * 84
+  }));
 }
