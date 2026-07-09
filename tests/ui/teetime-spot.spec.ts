@@ -40,10 +40,18 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator(".course-results-map-frame, .course-results-map").first()).toBeVisible();
     await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
     await expect(courseRows.nth(0).getByRole("link", { name: "Google Maps" })).toHaveCount(0);
-    await expect(page.locator(".course-results-map-pin").first()).toHaveAttribute(
-      "href",
-      /google\.com\/maps\/search/
-    );
+    const fallbackMapPin = page.locator(".course-results-map-pin").first();
+    if ((await fallbackMapPin.count()) > 0) {
+      await fallbackMapPin.click();
+      const placeCard = page.locator(".course-map-place-card");
+      await expect(placeCard).toBeVisible();
+      await expect(placeCard.getByRole("link", { name: /Open in Google Maps/i })).toHaveAttribute(
+        "href",
+        /google\.com\/maps\/search/
+      );
+      await placeCard.getByRole("button", { name: /Close map details/i }).click();
+      await expect(placeCard).toBeHidden();
+    }
     await expect(page.getByText(/^Photo:/)).toHaveCount(0);
     const seeMoreLocations = page.getByRole("button", { name: /See more locations/i });
     if ((await seeMoreLocations.count()) > 0) {

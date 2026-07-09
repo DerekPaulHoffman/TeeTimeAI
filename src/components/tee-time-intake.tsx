@@ -598,8 +598,13 @@ function CourseResultsMap({
 }) {
   const mapsApiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY;
   const mapId = "course-results-map";
+  const [selectedMapPlaceId, setSelectedMapPlaceId] = useState<string | null>(null);
   const mapCenter = useMemo(() => getCourseMapCenter(courses, origin), [courses, origin]);
   const mapMarkers = useMemo(() => getCourseMapMarkers(courses), [courses]);
+  const selectedMapCourse = useMemo(
+    () => courses.find((course) => course.googlePlaceId === selectedMapPlaceId) ?? null,
+    [courses, selectedMapPlaceId]
+  );
   const courseSignature = useMemo(
     () =>
       courses
@@ -640,7 +645,7 @@ function CourseResultsMap({
           title: course.name
         });
         marker.addListener?.("click", () => {
-          window.open(getGoogleMapsSearchUrl(course), "_blank", "noopener,noreferrer");
+          setSelectedMapPlaceId(course.googlePlaceId);
         });
       });
 
@@ -698,18 +703,17 @@ function CourseResultsMap({
           />
           <div className="course-results-map-overlay">
             {mapMarkers.map((marker) => (
-              <a
-                aria-label={`Open ${marker.name} in Google Maps`}
+              <button
+                aria-label={`Show details for ${marker.name}`}
                 className="course-results-map-pin"
-                href={marker.mapsUrl}
                 key={marker.id}
-                rel="noreferrer"
+                onClick={() => setSelectedMapPlaceId(marker.id)}
                 style={{ left: `${marker.x}%`, top: `${marker.y}%` }}
-                target="_blank"
-                title={`Open ${marker.name} in Google Maps`}
+                title={`Show details for ${marker.name}`}
+                type="button"
               >
                 {marker.index}
-              </a>
+              </button>
             ))}
           </div>
           <div className="course-results-map-count">
@@ -718,6 +722,74 @@ function CourseResultsMap({
           </div>
         </div>
       )}
+      {selectedMapCourse ? (
+        <CourseMapPlaceCard
+          course={selectedMapCourse}
+          onClose={() => setSelectedMapPlaceId(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function CourseMapPlaceCard({
+  course,
+  onClose
+}: {
+  course: CourseCandidate;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      aria-label={`${course.name} map details`}
+      className="course-map-place-card"
+      role="region"
+    >
+      <button
+        aria-label="Close map details"
+        className="course-map-place-card-close"
+        onClick={onClose}
+        type="button"
+      >
+        <X size={16} />
+      </button>
+      <span className="mini-pill">
+        <MapPin size={13} />
+        Selected course
+      </span>
+      <h3>{course.name}</h3>
+      <CourseAddressLink course={course} unavailableText="Address unavailable" />
+      <div className="course-map-place-meta" aria-label="Course details">
+        {course.rating ? (
+          <span>
+            <Star size={14} />
+            {course.rating.toFixed(1)}
+          </span>
+        ) : null}
+        {course.distanceMeters !== undefined ? (
+          <span>
+            <MapPin size={14} />
+            {formatDistance(course.distanceMeters)}
+          </span>
+        ) : null}
+      </div>
+      <div className="course-map-place-actions">
+        <a
+          className="button button-dark"
+          href={getGoogleMapsSearchUrl(course)}
+          rel="noreferrer"
+          target="_blank"
+        >
+          <ExternalLink size={16} />
+          Open in Google Maps
+        </a>
+        {course.website ? (
+          <a className="button button-ghost" href={course.website} rel="noreferrer" target="_blank">
+            <ExternalLink size={16} />
+            Course site
+          </a>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -778,7 +850,6 @@ function getCourseMapMarkers(courses: CourseCandidate[]) {
   return courses.slice(0, 25).map((course, index) => ({
     id: course.googlePlaceId,
     index: index + 1,
-    mapsUrl: getGoogleMapsSearchUrl(course),
     name: course.name,
     x: 8 + ((course.longitude - minLongitude) / longitudeSpan) * 84,
     y: 8 + ((maxLatitude - course.latitude) / latitudeSpan) * 84
