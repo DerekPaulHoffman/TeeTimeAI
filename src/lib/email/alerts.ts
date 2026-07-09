@@ -10,7 +10,10 @@ type TeeTimeAlertInput = {
 };
 
 export async function sendTeeTimeAlert(input: TeeTimeAlertInput) {
-  if (!process.env.RESEND_API_KEY || !process.env.ALERT_EMAIL_FROM) {
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+
+  if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
     console.log("[email:dry-run]", {
       to: input.to,
       courseName: input.courseName,
@@ -20,10 +23,10 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput) {
     return { id: "dry-run" };
   }
 
-  const resend = new Resend(process.env.RESEND_API_KEY);
+  const resend = new Resend(apiKey);
   const result = await resend.emails.send(
     {
-      from: process.env.ALERT_EMAIL_FROM,
+      from,
       to: input.to,
       subject: `New tee time at ${input.courseName}`,
       html: renderAlertHtml(input)
@@ -42,6 +45,26 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput) {
   }
 
   return result.data;
+}
+
+export function normalizeEmailEnvValue(value?: string) {
+  return value?.replace(/\uFEFF/g, "").trim();
+}
+
+export function shouldDryRunRecipient(email: string) {
+  const domain = email.split("@")[1]?.toLowerCase();
+
+  return (
+    !domain ||
+    domain === "example.com" ||
+    domain === "example.net" ||
+    domain === "example.org" ||
+    domain === "invalid" ||
+    domain === "test" ||
+    domain.endsWith(".local") ||
+    domain.endsWith(".invalid") ||
+    domain.endsWith(".test")
+  );
 }
 
 export function renderAlertHtml(input: TeeTimeAlertInput) {

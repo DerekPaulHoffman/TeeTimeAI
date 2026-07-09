@@ -3,6 +3,7 @@ import "./load-local-env";
 import {
   finishAutomationRun,
   listActiveSearchesForAutomation,
+  listPendingMatchAlerts,
   markMatchAlertSent,
   recordCourseProbe,
   recordTeeTimeMatch,
@@ -63,6 +64,8 @@ async function main() {
   try {
     const lease = await runWithAutomationPollLease(async () => {
       const searches = (await listActiveSearchesForAutomation()) as AutomationSearch[];
+      const drainedPendingAlerts = await sendPendingMatchAlerts();
+
       for (const search of searches) {
         const searchWindow = {
           date: search.date.toISOString().slice(0, 10),
@@ -183,7 +186,10 @@ async function main() {
         }
       }
 
-      return searches.length;
+      return {
+        searches: searches.length,
+        drainedPendingAlerts
+      };
     });
 
     if (!lease.acquired) {
@@ -192,7 +198,10 @@ async function main() {
       return;
     }
 
-    notes.push(`Processed ${lease.value} active searches.`);
+    notes.push(`Processed ${lease.value.searches} active searches.`);
+    if (lease.value.drainedPendingAlerts > 0) {
+      notes.push(`Drained ${lease.value.drainedPendingAlerts} pending match alerts before polling.`);
+    }
     await finishAutomationRun(run.id, { outcome: "success", notes: notes.join("\n") });
   } catch (error) {
     await finishAutomationRun(run.id, {
@@ -205,6 +214,26 @@ async function main() {
     });
     throw error;
   }
+}
+
+async function sendPendingMatchAlerts() {
+  const pendingMatches = await listPendingMatchAlerts();
+  let sent = 0;
+
+  for (const match of pendingMatches) {
+    await sendTeeTimeAlert({
+      to: match.teeSearch.user.email,
+      courseName: match.course.name,
+      startsAt: match.startsAt,
+      availableSpots: match.availableSpots,
+      bookingUrl: match.bookingUrl,
+      idempotencyKey: `tee-time-match-${match.id}`
+    });
+    await markMatchAlertSent(match.id);
+    sent += 1;
+  }
+
+  return sent;
 }
 
 main()

@@ -45,6 +45,7 @@ Last updated: 2026-07-08
 - 2026-07-08 production deploy `dpl_BseBpUfu6Pc2gHHMqGFEdVntWcPT` verified `/` 200, `/dashboard` 200, live Places geocode, automation auth, and production Playwright intake rendering with the local-tomorrow date value and no failed resources.
 - 2026-07-08 hourly product loop prevented repeat unsupported duplicate records for known supported courses by reusing nearby supported course rows when Google Places returns a composite facility name with overlapping meaningful name tokens. Repaired 1 active Tashua Knolls & Tashua Glen preference to the seeded ForeUP Tashua Knolls course, then reran `npm run automation:poll`; verification run `cmrcukqhy00003015bail0usx` processed 10 active searches, current actionable probes dropped to only Oak Hills Park Golf Course `NEEDS_ADAPTER`, and no pending alerts remained.
 - 2026-07-08 production deploy `dpl_4MXwzjSdYrZvKv7hv2sm4cEQ7GKj` verified `/` 200, `/dashboard` 200, live Places geocode with `demo=false`, and live `POST /api/searches` with a composite Tashua Knolls & Tashua Glen course resolving to the seeded `FOREUP`/`ALLOWED` Tashua Knolls course. The smoke search was cancelled after verification, and a Vercel runtime log scan found no production warnings, errors, or fatals.
+- 2026-07-08 hourly product loop fixed alert retry/drainage for previously created pending matches. The poller now drains active pending `TeeTimeMatch` alerts before deduping new tee-sheet results, dry-runs reserved seed/test recipient domains, normalizes copied Resend env values, and gives the Postgres advisory lease a 60-second transaction timeout for live tee-sheet polling. Verification run `cmrcws2c70000z41550ogsmzn` processed 10 active searches successfully after draining the stale demo pending alert; latest inspect showed `pendingAlerts: []` and the only current actionable probe remains Oak Hills Park Golf Course `NEEDS_ADAPTER`.
 
 ## Current Runtime Mode
 
@@ -66,6 +67,7 @@ The public site is live as an email-alert proof of concept:
 - Resend: core sending is configured. The original marketplace-managed API key cannot be deleted through the Resend API; manage/remove it from the Vercel Marketplace dashboard if a full cleanup is needed.
 - Automation auth: `AUTOMATION_API_KEY` is set in production and local `.env.local`; keep it secret and rotate if exposed.
 - Automation worker: local scripts load ignored env files automatically for operator runs, but hosted/scheduled workers should still provide env vars through the runtime rather than relying on checked-in files.
+- Adapter coverage: Oak Hills Park Golf Course is active demand but still has `detectedPlatform=UNKNOWN` and no booking metadata. Identify its official booking provider and terms before adding a new adapter or marking it blocked.
 
 ## Notes
 

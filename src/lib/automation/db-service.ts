@@ -18,6 +18,19 @@ export type ActiveAutomationSearch = Prisma.TeeSearchGetPayload<{
   include: typeof activeSearchInclude;
 }>;
 
+const pendingAlertInclude = {
+  course: true,
+  teeSearch: {
+    include: {
+      user: true
+    }
+  }
+} satisfies Prisma.TeeTimeMatchInclude;
+
+export type PendingAlertMatch = Prisma.TeeTimeMatchGetPayload<{
+  include: typeof pendingAlertInclude;
+}>;
+
 export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
   return withPostgresAdvisoryLease(prisma, AUTOMATION_POLL_LEASE_KEY, worker);
 }
@@ -32,6 +45,21 @@ export async function listActiveSearchesForAutomation(): Promise<ActiveAutomatio
     },
     orderBy: [{ date: "asc" }, { createdAt: "asc" }],
     include: activeSearchInclude
+  });
+}
+
+export async function listPendingMatchAlerts(): Promise<PendingAlertMatch[]> {
+  return prisma.teeTimeMatch.findMany({
+    where: {
+      alertStatus: "PENDING",
+      teeSearch: {
+        status: "ACTIVE"
+      }
+    },
+    orderBy: {
+      firstSeenAt: "asc"
+    },
+    include: pendingAlertInclude
   });
 }
 
