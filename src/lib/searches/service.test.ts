@@ -1,18 +1,27 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
-import { createTeeSearchForUser, updateTeeSearchStatusForUser } from "./service";
+import {
+  createTeeSearchForUser,
+  updateTeeSearchForUser,
+  updateTeeSearchStatusForUser
+} from "./service";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
+    $transaction: vi.fn(),
     course: {
       findMany: vi.fn(),
       findUnique: vi.fn()
+    },
+    coursePreference: {
+      updateMany: vi.fn()
     },
     teeSearch: {
       count: vi.fn(),
       create: vi.fn(),
       findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       update: vi.fn()
     }
   }
@@ -269,5 +278,48 @@ describe("updateTeeSearchStatusForUser", () => {
         data: { status: "ACTIVE" }
       })
     );
+  });
+});
+
+describe("updateTeeSearchForUser", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (operations) =>
+      Promise.all(operations as Array<Promise<unknown>>)
+    );
+    mockedPrisma.teeSearch.findUniqueOrThrow
+      .mockResolvedValueOnce({ id: "search-1" } as never)
+      .mockResolvedValueOnce({ id: "search-1", preferences: [] } as never);
+    mockedPrisma.coursePreference.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("reorders course preferences without colliding with existing ranks", async () => {
+    await updateTeeSearchForUser("user-1", "search-1", {
+      coursePreferences: [
+        { id: "pref-b", rank: 1 },
+        { id: "pref-a", rank: 2 }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.findUniqueOrThrow).toHaveBeenNthCalledWith(1, {
+      where: { id: "search-1", userId: "user-1" },
+      select: { id: true }
+    });
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(1, {
+      where: { id: "pref-b", teeSearchId: "search-1" },
+      data: { rank: -1 }
+    });
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(2, {
+      where: { id: "pref-a", teeSearchId: "search-1" },
+      data: { rank: -2 }
+    });
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(3, {
+      where: { id: "pref-b", teeSearchId: "search-1" },
+      data: { rank: 1 }
+    });
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(4, {
+      where: { id: "pref-a", teeSearchId: "search-1" },
+      data: { rank: 2 }
+    });
   });
 });

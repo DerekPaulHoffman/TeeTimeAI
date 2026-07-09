@@ -9,15 +9,48 @@ import {
   updateTeeSearchForPoc,
   updateTeeSearchForUser
 } from "@/lib/searches/service";
-import { teeSearchDetailsSchema } from "@/lib/validation/search";
+import {
+  MAX_COURSE_PREFERENCES,
+  teeSearchDetailsSchema
+} from "@/lib/validation/search";
 
 const searchStatusSchema = z.enum(["ACTIVE", "PAUSED", "COMPLETED", "CANCELLED"]);
+const coursePreferenceRankUpdatesSchema = z
+  .array(
+    z.object({
+      id: z.string().trim().min(1),
+      rank: z.number().int().min(1).max(MAX_COURSE_PREFERENCES)
+    })
+  )
+  .min(1)
+  .max(MAX_COURSE_PREFERENCES)
+  .superRefine((value, context) => {
+    const ids = new Set(value.map((preference) => preference.id));
+    if (ids.size !== value.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["coursePreferences"],
+        message: "Course preferences must be unique"
+      });
+    }
+
+    const ranks = new Set(value.map((preference) => preference.rank));
+    if (ranks.size !== value.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["coursePreferences"],
+        message: "Course preference ranks must be unique"
+      });
+    }
+  });
 
 const updateSearchSchema = z.union([
-  z.object({ status: searchStatusSchema }),
+  z.object({ status: searchStatusSchema }).strict(),
   teeSearchDetailsSchema.extend({
+    coursePreferences: coursePreferenceRankUpdatesSchema.optional(),
     status: searchStatusSchema.optional()
-  })
+  }),
+  z.object({ coursePreferences: coursePreferenceRankUpdatesSchema }).strict()
 ]);
 
 export async function PATCH(

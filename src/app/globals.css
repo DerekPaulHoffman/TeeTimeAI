@@ -1185,7 +1185,8 @@ button {
 }
 
 .queue-edit-form label:nth-of-type(6),
-.queue-edit-actions {
+.queue-edit-actions,
+.queue-priority-editor {
   grid-column: 1 / -1;
 }
 
@@ -1232,6 +1233,63 @@ button {
 
 .recipient-count {
   text-align: right;
+}
+
+.queue-priority-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.queue-priority-editor > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.queue-priority-editor strong {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.queue-priority-list {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  overflow: hidden;
+}
+
+.queue-priority-row {
+  align-items: center;
+  background: #ffffff;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  min-height: 58px;
+  padding: 10px 12px;
+}
+
+.queue-priority-row:first-child {
+  border-top: 0;
+}
+
+.queue-priority-row > svg {
+  color: var(--muted);
+}
+
+.queue-priority-name {
+  font-weight: 900;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-priority-controls {
+  display: inline-flex;
+  gap: 6px;
 }
 
 .footer {
@@ -1508,7 +1566,8 @@ button {
   }
 
   .queue-edit-form label:nth-of-type(6),
-  .queue-edit-actions {
+  .queue-edit-actions,
+  .queue-priority-editor {
     grid-column: auto;
   }
 

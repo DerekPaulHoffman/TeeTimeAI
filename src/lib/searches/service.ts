@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import {
+  MAX_COURSE_PREFERENCES,
   MAX_QUEUED_SEARCHES_PER_USER,
   type SelectedCourseInput,
   type TeeSearchDetailsInput,
@@ -14,7 +15,13 @@ const COURSE_NAME_STOP_WORDS = new Set(["and", "course", "golf", "the"]);
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 
+export type CoursePreferenceRankUpdateInput = {
+  id: string;
+  rank: number;
+};
+
 export type TeeSearchUpdateInput = Partial<TeeSearchDetailsInput> & {
+  coursePreferences?: CoursePreferenceRankUpdateInput[];
   status?: SearchStatus;
 };
 
@@ -200,22 +207,107 @@ export async function updateTeeSearchForUser(
     await assertQueueCapacity(userId, searchId);
   }
 
-  return prisma.teeSearch.update({
-    where: {
-      id: searchId,
-      userId
-    },
-    data: {
-      ...(input.date ? { date: parseLocalDate(input.date) } : {}),
-      ...(input.startTime ? { startTime: input.startTime } : {}),
-      ...(input.endTime ? { endTime: input.endTime } : {}),
-      ...(input.players ? { players: input.players } : {}),
-      ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
-      ...(input.additionalEmails ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) } : {}),
-      ...(input.status ? { status: input.status } : {})
-    },
-    include: searchInclude
+  const teeSearchData = {
+    ...(input.date ? { date: parseLocalDate(input.date) } : {}),
+    ...(input.startTime ? { startTime: input.startTime } : {}),
+    ...(input.endTime ? { endTime: input.endTime } : {}),
+    ...(input.players ? { players: input.players } : {}),
+    ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
+    ...(input.additionalEmails
+      ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) }
+      : {}),
+    ...(input.status ? { status: input.status } : {})
+  };
+  const coursePreferences = normalizeCoursePreferenceRankUpdates(input.coursePreferences);
+
+  if (coursePreferences.length === 0) {
+    return prisma.teeSearch.update({
+      where: {
+        id: searchId,
+        userId
+      },
+      data: teeSearchData,
+      include: searchInclude
+    });
+  }
+
+  const operations = [
+    prisma.teeSearch.findUniqueOrThrow({
+      where: {
+        id: searchId,
+        userId
+      },
+      select: { id: true }
+    }),
+    ...coursePreferences.map((preference, index) =>
+      prisma.coursePreference.updateMany({
+        where: {
+          id: preference.id,
+          teeSearchId: searchId
+        },
+        data: { rank: -(index + 1) }
+      })
+    ),
+    ...coursePreferences.map((preference) =>
+      prisma.coursePreference.updateMany({
+        where: {
+          id: preference.id,
+          teeSearchId: searchId
+        },
+        data: { rank: preference.rank }
+      })
+    ),
+    prisma.teeSearch.update({
+      where: {
+        id: searchId,
+        userId
+      },
+      data: teeSearchData,
+      include: searchInclude
+    })
+  ];
+  const results = await prisma.$transaction(operations);
+  const updatedSearch = results.at(-1);
+  if (!updatedSearch) {
+    throw new Error("Could not update search");
+  }
+
+  return updatedSearch as Awaited<ReturnType<typeof prisma.teeSearch.update>>;
+}
+
+function normalizeCoursePreferenceRankUpdates(
+  preferences: CoursePreferenceRankUpdateInput[] | undefined
+) {
+  if (!preferences || preferences.length === 0) {
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  const seenRanks = new Set<number>();
+  const normalized = preferences.map((preference) => {
+    const id = preference.id.trim();
+    if (!id) {
+      throw new Error("Course preference id is required");
+    }
+    if (
+      !Number.isInteger(preference.rank) ||
+      preference.rank < 1 ||
+      preference.rank > MAX_COURSE_PREFERENCES
+    ) {
+      throw new Error("Course preference ranks must be between 1 and 5");
+    }
+    if (seenIds.has(id)) {
+      throw new Error("Course preference ids must be unique");
+    }
+    if (seenRanks.has(preference.rank)) {
+      throw new Error("Course preference ranks must be unique");
+    }
+    seenIds.add(id);
+    seenRanks.add(preference.rank);
+    return { id, rank: preference.rank };
   });
+
+  return normalized.sort((a, b) => a.rank - b.rank);
 }
 
 export async function updateTeeSearchForPoc(searchId: string, input: TeeSearchUpdateInput) {

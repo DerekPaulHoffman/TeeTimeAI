@@ -2,7 +2,17 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CirclePause, Pencil, Play, Save, Trash2, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  CirclePause,
+  GripVertical,
+  Pencil,
+  Play,
+  Save,
+  Trash2,
+  X
+} from "lucide-react";
 
 import {
   MAX_ADDITIONAL_ALERT_EMAILS,
@@ -10,6 +20,11 @@ import {
 } from "@/lib/validation/search";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
+type CoursePreferenceFormValue = {
+  courseName: string;
+  id: string;
+  rank: number;
+};
 
 export function SearchStatusActions({
   searchId,
@@ -19,7 +34,8 @@ export function SearchStatusActions({
   initialEndTime,
   initialPlayers,
   initialCadenceMinutes,
-  initialAdditionalEmails
+  initialAdditionalEmails,
+  initialCoursePreferences
 }: {
   searchId: string;
   status: SearchStatus;
@@ -29,6 +45,7 @@ export function SearchStatusActions({
   initialPlayers: number;
   initialCadenceMinutes: number;
   initialAdditionalEmails: string[];
+  initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
@@ -41,7 +58,8 @@ export function SearchStatusActions({
     endTime: initialEndTime,
     players: initialPlayers,
     cadenceMinutes: initialCadenceMinutes,
-    additionalEmails: initialAdditionalEmails.join("\n")
+    additionalEmails: initialAdditionalEmails.join("\n"),
+    coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
   });
 
   async function update(status: SearchStatus) {
@@ -70,7 +88,11 @@ export function SearchStatusActions({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...form,
-        additionalEmails: parseAdditionalEmails(form.additionalEmails)
+        additionalEmails: parseAdditionalEmails(form.additionalEmails),
+        coursePreferences: form.coursePreferences.map((preference, index) => ({
+          id: preference.id,
+          rank: index + 1
+        }))
       })
     });
 
@@ -100,6 +122,26 @@ export function SearchStatusActions({
       setError(await readError(response, "Could not remove search."));
     }
     setPending(false);
+  }
+
+  function moveCoursePreference(index: number, direction: -1 | 1) {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= form.coursePreferences.length) {
+      return;
+    }
+
+    const nextPreferences = [...form.coursePreferences];
+    [nextPreferences[index], nextPreferences[nextIndex]] = [
+      nextPreferences[nextIndex],
+      nextPreferences[index]
+    ];
+    setForm({
+      ...form,
+      coursePreferences: nextPreferences.map((preference, preferenceIndex) => ({
+        ...preference,
+        rank: preferenceIndex + 1
+      }))
+    });
   }
 
   return (
@@ -158,6 +200,47 @@ export function SearchStatusActions({
               ))}
             </select>
           </label>
+          {form.coursePreferences.length > 0 ? (
+            <div className="queue-priority-editor">
+              <div>
+                <strong>Course priority</strong>
+                <span className="field-hint">
+                  Put the courses you care about most at the top.
+                </span>
+              </div>
+              <div className="queue-priority-list">
+                {form.coursePreferences.map((preference, index) => (
+                  <div className="queue-priority-row" key={preference.id}>
+                    <GripVertical size={16} aria-hidden="true" />
+                    <span className="course-rank-number">{index + 1}</span>
+                    <span className="queue-priority-name">{preference.courseName}</span>
+                    <div className="queue-priority-controls">
+                      <button
+                        aria-label={`Move ${preference.courseName} up`}
+                        className="button button-ghost dashboard-icon-button"
+                        disabled={pending || index === 0}
+                        onClick={() => moveCoursePreference(index, -1)}
+                        title={`Move ${preference.courseName} up`}
+                        type="button"
+                      >
+                        <ArrowUp size={16} />
+                      </button>
+                      <button
+                        aria-label={`Move ${preference.courseName} down`}
+                        className="button button-ghost dashboard-icon-button"
+                        disabled={pending || index === form.coursePreferences.length - 1}
+                        onClick={() => moveCoursePreference(index, 1)}
+                        title={`Move ${preference.courseName} down`}
+                        type="button"
+                      >
+                        <ArrowDown size={16} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <label>
             Extra emails
             <textarea

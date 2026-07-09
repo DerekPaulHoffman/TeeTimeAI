@@ -149,6 +149,11 @@ function DashboardView({
                           initialPlayers={search.players}
                           initialCadenceMinutes={search.cadenceMinutes}
                           initialAdditionalEmails={search.additionalEmails}
+                          initialCoursePreferences={search.preferences.map((preference) => ({
+                            id: preference.id,
+                            courseName: preference.course.name,
+                            rank: preference.rank
+                          }))}
                         />
                       ) : (
                         <span className="meta">
