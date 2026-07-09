@@ -73,7 +73,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <OptionalClerkProvider enabled={clerkEnabled}>
           <div className="site-shell">
             <header className="topbar">
-              <Link className="brand" href="/">
+              <Link className="brand" href="/" aria-label="Tee Time Spot home">
                 <span className="brand-mark" aria-hidden="true">
                   <Flag size={18} />
                 </span>

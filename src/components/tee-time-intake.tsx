@@ -18,6 +18,7 @@ import {
 
 import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
+import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
@@ -30,6 +31,9 @@ const tomorrow = () => {
   return formatDateInputValue(addLocalDays(new Date(), 1));
 };
 
+const INITIAL_VISIBLE_COURSE_COUNT = 6;
+const COURSE_REVEAL_INCREMENT = 6;
+
 export function TeeTimeIntake() {
   const [locationText, setLocationText] = useState("Trumbull, CT");
   const [alertEmail, setAlertEmail] = useState("");
@@ -38,6 +42,7 @@ export function TeeTimeIntake() {
   const [endTime, setEndTime] = useState("16:00");
   const [players, setPlayers] = useState(3);
   const [courses, setCourses] = useState<CourseCandidate[]>([]);
+  const [visibleCourseCount, setVisibleCourseCount] = useState(INITIAL_VISIBLE_COURSE_COUNT);
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
   const [notice, setNotice] = useState<Notice>({
     type: "info",
@@ -52,6 +57,12 @@ export function TeeTimeIntake() {
     () => new Set(selected.map((course) => course.googlePlaceId)),
     [selected]
   );
+  const visibleCourses = useMemo(
+    () => courses.slice(0, visibleCourseCount),
+    [courses, visibleCourseCount]
+  );
+  const hiddenCourseCount = Math.max(courses.length - visibleCourses.length, 0);
+  const selectedCourseCount = selected.length;
   const searchSignature = useMemo(
     () =>
       JSON.stringify({
@@ -133,6 +144,7 @@ export function TeeTimeIntake() {
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
       setCourses(data.courses);
+      setVisibleCourseCount(INITIAL_VISIBLE_COURSE_COUNT);
       setNotice({
         type: "success",
         message: data.demo
@@ -164,6 +176,12 @@ export function TeeTimeIntake() {
 
   function removeCourse(placeId: string) {
     setSelected((current) => current.filter((course) => course.googlePlaceId !== placeId));
+  }
+
+  function showMoreCourses() {
+    setVisibleCourseCount((current) =>
+      Math.min(current + COURSE_REVEAL_INCREMENT, courses.length)
+    );
   }
 
   async function saveSearch() {
@@ -311,55 +329,94 @@ export function TeeTimeIntake() {
 
         <Notice notice={notice} />
 
-        <div className="course-list" aria-label="Nearby courses">
-          {courses.map((course) => (
-            <div className="course-row" key={course.googlePlaceId}>
-              <CourseThumbnail course={course} />
-              <div className="course-copy">
-                <div className="course-badges">
-                  <span className="mini-pill">
-                    <Flag size={13} />
-                    Public course
-                  </span>
-                  {course.rating ? (
-                    <span className="mini-pill">
-                      <Star size={13} />
-                      {course.rating.toFixed(1)}
-                    </span>
-                  ) : null}
-                </div>
-                <h3>{course.name}</h3>
-                <p className="meta">
-                  {course.address ?? "Address unavailable"}
-                </p>
-                <PhotoCredit course={course} />
-              </div>
-              <div className="course-actions">
-                {course.website ? (
-                  <a
-                    className="button button-ghost"
-                    href={course.website}
-                    rel="noreferrer"
-                    target="_blank"
-                  >
-                    <ExternalLink size={16} />
-                    Site
-                  </a>
-                ) : null}
-                <button
-                  className="button button-dark"
-                  type="button"
-                  onClick={() => addCourse(course)}
-                  disabled={selectedIds.has(course.googlePlaceId)}
-                  title={selectedIds.has(course.googlePlaceId) ? "Already selected" : "Add course"}
-                >
-                  {selectedIds.has(course.googlePlaceId) ? <Check size={17} /> : <Plus size={17} />}
-                  {selectedIds.has(course.googlePlaceId) ? "Added" : "Add"}
-                </button>
-              </div>
+        {courses.length > 0 ? (
+          <div className="search-results-header">
+            <div>
+              <span className="eyebrow">Course results</span>
+              <h3>Nearby public courses</h3>
             </div>
-          ))}
+            <span className="results-count-pill">
+              {selectedCourseCount}/5 selected
+            </span>
+          </div>
+        ) : null}
+
+        <div className="course-list" role="list" aria-label="Nearby courses">
+          {visibleCourses.map((course) => {
+            const selectedIndex = selected.findIndex(
+              (selectedCourse) => selectedCourse.googlePlaceId === course.googlePlaceId
+            );
+            const isSelected = selectedIndex >= 0;
+
+            return (
+              <div className="course-row" key={course.googlePlaceId} role="listitem">
+                <CourseThumbnail course={course} />
+                <div className="course-copy">
+                  <div className="course-badges">
+                    <span className="mini-pill">
+                      <Flag size={13} />
+                      Public course
+                    </span>
+                    {course.rating ? (
+                      <span className="mini-pill">
+                        <Star size={13} />
+                        {course.rating.toFixed(1)}
+                      </span>
+                    ) : null}
+                    {isSelected ? (
+                      <span className="mini-pill selected-course-pill">
+                        <Check size={13} />
+                        Priority {selectedIndex + 1}
+                      </span>
+                    ) : null}
+                  </div>
+                  <h3>{course.name}</h3>
+                  <p className="meta">
+                    {course.address ?? "Address unavailable"}
+                  </p>
+                  <PhotoCredit course={course} />
+                </div>
+                <div className="course-actions">
+                  <MapLink course={course} />
+                  {course.website ? (
+                    <a
+                      className="button button-ghost"
+                      href={course.website}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <ExternalLink size={16} />
+                      Site
+                    </a>
+                  ) : null}
+                  <button
+                    className="button button-dark"
+                    type="button"
+                    onClick={() => addCourse(course)}
+                    disabled={isSelected}
+                    title={isSelected ? `Priority ${selectedIndex + 1}` : "Add course"}
+                  >
+                    {isSelected ? <Check size={17} /> : <Plus size={17} />}
+                    {isSelected ? "Added" : "Add"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
+        {courses.length > INITIAL_VISIBLE_COURSE_COUNT ? (
+          <div className="course-list-footer">
+            <span>
+              Showing {visibleCourses.length} of {courses.length} locations
+            </span>
+            {hiddenCourseCount > 0 ? (
+              <button className="button button-ghost" type="button" onClick={showMoreCourses}>
+                <Plus size={16} />
+                See more locations
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <aside className="summary-panel">
@@ -380,17 +437,20 @@ export function TeeTimeIntake() {
                   <span className="rank-badge">Priority #{index + 1}</span>
                   <h3>{course.name}</h3>
                   <p className="meta">{course.address ?? "Course address unavailable"}</p>
-                  {course.website ? (
-                    <a
-                      className="course-link"
-                      href={course.website}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <ExternalLink size={14} />
-                      Official course link
-                    </a>
-                  ) : null}
+                  <div className="selected-links">
+                    {course.website ? (
+                      <a
+                        className="course-link"
+                        href={course.website}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <ExternalLink size={14} />
+                        Official course link
+                      </a>
+                    ) : null}
+                    <MapLink course={course} compact />
+                  </div>
                 </div>
                 <button
                   className="button button-secondary icon-button"
@@ -480,6 +540,20 @@ function PhotoCredit({ course }: { course: CourseCandidate }) {
         attribution.displayName
       )}
     </p>
+  );
+}
+
+function MapLink({ compact = false, course }: { compact?: boolean; course: CourseCandidate }) {
+  return (
+    <a
+      className={compact ? "course-link" : "button button-ghost"}
+      href={getGoogleMapsSearchUrl(course)}
+      rel="noreferrer"
+      target="_blank"
+    >
+      <MapPin size={compact ? 14 : 16} />
+      Google Maps
+    </a>
   );
 }
 

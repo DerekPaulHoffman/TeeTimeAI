@@ -20,6 +20,7 @@ import { SearchStatusActions } from "@/components/search-status-actions";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
+import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { listRecentTeeSearches, listTeeSearchesForUser } from "@/lib/searches/service";
 import { MAX_QUEUED_SEARCHES_PER_USER } from "@/lib/validation/search";
 
@@ -215,19 +216,28 @@ function DashboardView({
                               {getCompactLocation(preference.course.address)}
                             </p>
                           </div>
-                          {preference.course.detectedBookingUrl ?? preference.course.website ? (
+                          <div className="watch-course-links">
                             <a
-                              href={
-                                preference.course.detectedBookingUrl ??
-                                preference.course.website ??
-                                "#"
-                              }
+                              href={getGoogleMapsSearchUrl(preference.course)}
                               rel="noreferrer"
                               target="_blank"
                             >
-                              Official site <ExternalLink size={13} />
+                              Google Maps <ExternalLink size={13} />
                             </a>
-                          ) : null}
+                            {preference.course.detectedBookingUrl ?? preference.course.website ? (
+                              <a
+                                href={
+                                  preference.course.detectedBookingUrl ??
+                                  preference.course.website ??
+                                  "#"
+                                }
+                                rel="noreferrer"
+                                target="_blank"
+                              >
+                                Official site <ExternalLink size={13} />
+                              </a>
+                            ) : null}
+                          </div>
                         </div>
                       ))}
                     </div>

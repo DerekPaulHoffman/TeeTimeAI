@@ -61,7 +61,7 @@ button {
   left: 0;
   min-height: 60px;
   padding: 12px clamp(20px, 4vw, 56px);
-  position: fixed;
+  position: absolute;
   right: 0;
   top: 0;
   z-index: 10;
@@ -128,7 +128,7 @@ button {
 .button-primary {
   background: var(--flag);
   color: #1d1309;
-  box-shadow: 0 14px 28px rgba(213, 115, 24, 0.26);
+  box-shadow: none;
 }
 
 .button-secondary {
@@ -240,6 +240,10 @@ button {
 
 .section {
   padding: clamp(72px, 8vw, 118px) clamp(20px, 5vw, 72px);
+}
+
+.section[id] {
+  scroll-margin-top: 92px;
 }
 
 .section-tight {
@@ -432,6 +436,55 @@ button {
   justify-content: end;
 }
 
+.course-list-footer {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.9rem;
+  font-weight: 800;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 14px;
+}
+
+.search-results-header {
+  align-items: end;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding-top: 18px;
+}
+
+.search-results-header .eyebrow {
+  color: var(--fairway-dark);
+  display: block;
+  margin: 0 0 6px;
+}
+
+.search-results-header h3 {
+  font-size: 1.28rem;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.results-count-pill,
+.selected-course-pill {
+  align-items: center;
+  background: #f5dec6;
+  border-color: rgba(226, 138, 47, 0.32);
+  border-radius: 999px;
+  color: #6f3f0f;
+  display: inline-flex;
+  font-size: 0.78rem;
+  font-weight: 900;
+  min-height: 28px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
 .course-link {
   align-items: center;
   color: var(--fairway-dark);
@@ -444,6 +497,13 @@ button {
   min-height: 28px;
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+.selected-links {
+  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .course-row h3,
@@ -724,12 +784,14 @@ button {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
+  min-width: 0;
   padding: 22px;
 }
 
 .dashboard-row {
   align-items: start;
   grid-template-columns: 132px 1fr auto;
+  min-width: 0;
   padding: 14px;
 }
 
@@ -875,6 +937,14 @@ button {
   padding: 10px;
 }
 
+.watch-course-links {
+  align-items: end;
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  min-width: 0;
+}
+
 .course-rank-number {
   align-items: center;
   background: var(--night);
@@ -903,6 +973,7 @@ button {
   font-weight: 900;
   gap: 5px;
   min-height: 32px;
+  white-space: normal;
 }
 
 .dashboard-sidebar {
@@ -1349,6 +1420,11 @@ button {
 
   .watch-course-row {
     grid-template-columns: 1fr;
+  }
+
+  .watch-course-links {
+    align-items: start;
+    justify-items: start;
   }
 
   .watch-course-row a {
