@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   Check,
@@ -27,12 +27,46 @@ type Notice = {
   message: string;
 };
 
+declare global {
+  interface Window {
+    google?: GoogleMapsWindow;
+    initTeeTimeSpotCourseMap?: () => void;
+  }
+}
+
+type GoogleMapsWindow = {
+  maps: {
+    LatLngBounds: new () => {
+      extend(position: { lat: number; lng: number }): void;
+    };
+    Map: new (
+      element: HTMLElement,
+      options: {
+        center: { lat: number; lng: number };
+        clickableIcons?: boolean;
+        mapTypeControl?: boolean;
+        streetViewControl?: boolean;
+        zoom: number;
+      }
+    ) => {
+      fitBounds(bounds: unknown): void;
+    };
+    Marker: new (options: {
+      label: string;
+      map: unknown;
+      position: { lat: number; lng: number };
+      title: string;
+    }) => unknown;
+  };
+};
+
 const tomorrow = () => {
   return formatDateInputValue(addLocalDays(new Date(), 1));
 };
 
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
+const COURSE_SEARCH_RADIUS_METERS = 50000;
 
 export function TeeTimeIntake() {
   const [locationText, setLocationText] = useState("Trumbull, CT");
@@ -135,7 +169,7 @@ export function TeeTimeIntake() {
       const params = new URLSearchParams({
         latitude: String(coordinates.latitude),
         longitude: String(coordinates.longitude),
-        radiusMeters: "30000"
+        radiusMeters: String(COURSE_SEARCH_RADIUS_METERS)
       });
       const response = await fetch(`/api/courses/discover?${params}`);
       if (!response.ok) {
@@ -341,6 +375,8 @@ export function TeeTimeIntake() {
           </div>
         ) : null}
 
+        <CourseResultsMap courses={courses} />
+
         <div className="course-list" role="list" aria-label="Nearby courses">
           {visibleCourses.map((course) => {
             const selectedIndex = selected.findIndex(
@@ -540,6 +576,102 @@ function PhotoCredit({ course }: { course: CourseCandidate }) {
         attribution.displayName
       )}
     </p>
+  );
+}
+
+function CourseResultsMap({ courses }: { courses: CourseCandidate[] }) {
+  const mapsApiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY;
+  const mapId = "course-results-map";
+  const courseSignature = useMemo(
+    () =>
+      courses
+        .map((course) => `${course.googlePlaceId}:${course.latitude}:${course.longitude}`)
+        .join("|"),
+    [courses]
+  );
+
+  useEffect(() => {
+    if (!mapsApiKey || courses.length === 0) {
+      return;
+    }
+
+    window.initTeeTimeSpotCourseMap = () => {
+      const element = document.getElementById(mapId);
+      const googleMaps = window.google?.maps;
+      if (!element || !googleMaps) {
+        return;
+      }
+
+      const center = {
+        lat: courses.reduce((sum, course) => sum + course.latitude, 0) / courses.length,
+        lng: courses.reduce((sum, course) => sum + course.longitude, 0) / courses.length
+      };
+      const map = new googleMaps.Map(element, {
+        center,
+        clickableIcons: false,
+        mapTypeControl: false,
+        streetViewControl: false,
+        zoom: 10
+      });
+      const bounds = new googleMaps.LatLngBounds();
+
+      courses.forEach((course, index) => {
+        const position = { lat: course.latitude, lng: course.longitude };
+        bounds.extend(position);
+        new googleMaps.Marker({
+          label: String(index + 1),
+          map,
+          position,
+          title: course.name
+        });
+      });
+
+      if (courses.length > 1) {
+        map.fitBounds(bounds);
+      }
+    };
+
+    if (window.google?.maps) {
+      window.initTeeTimeSpotCourseMap();
+      return;
+    }
+
+    const existingScript = document.querySelector<HTMLScriptElement>(
+      "script[data-tee-time-spot-google-map]"
+    );
+    if (existingScript) {
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.async = true;
+    script.dataset.teeTimeSpotGoogleMap = "true";
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
+      mapsApiKey
+    )}&callback=initTeeTimeSpotCourseMap`;
+    document.head.appendChild(script);
+  }, [courses, courseSignature, mapsApiKey]);
+
+  if (courses.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="course-results-map-shell">
+      {mapsApiKey ? (
+        <div
+          aria-label={`${courses.length} nearby course locations on Google Maps`}
+          className="course-results-map"
+          id={mapId}
+          role="img"
+        />
+      ) : (
+        <div className="course-results-map-fallback">
+          <MapPinned size={24} />
+          <span>{courses.length} course locations found</span>
+        </div>
+      )}
+    </div>
   );
 }
 

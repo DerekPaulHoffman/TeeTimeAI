@@ -50,6 +50,8 @@ export type NearbyCourseSearchInput = {
   radiusMeters?: number;
 };
 
+type RankPreference = "POPULARITY" | "DISTANCE";
+
 const NON_PUBLIC_PRIMARY_TYPES = new Set([
   "association_or_organization",
   "indoor_golf_course",
@@ -123,6 +125,25 @@ function isLikelyPublicGolfCoursePlace(place: GooglePlace) {
 }
 
 export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
+  const placesById = new Map<string, GooglePlace>();
+
+  for (const rankPreference of ["POPULARITY", "DISTANCE"] satisfies RankPreference[]) {
+    const places = await searchNearbyGolfCoursePlaces(input, rankPreference);
+    for (const place of places) {
+      const id = normalizePlaceId(place.id ?? place.name ?? "");
+      if (id && !placesById.has(id)) {
+        placesById.set(id, place);
+      }
+    }
+  }
+
+  return filterPublicGolfCoursePlaces([...placesById.values()]).map(mapGooglePlaceToCourseCandidate);
+}
+
+async function searchNearbyGolfCoursePlaces(
+  input: NearbyCourseSearchInput,
+  rankPreference: RankPreference
+) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
     throw new Error("GOOGLE_PLACES_API_KEY is not configured");
@@ -140,6 +161,7 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
       includedTypes: ["golf_course"],
       excludedPrimaryTypes: Array.from(NON_PUBLIC_PRIMARY_TYPES),
       maxResultCount: 20,
+      rankPreference,
       locationRestriction: {
         circle: {
           center: {
@@ -157,7 +179,7 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
   }
 
   const json = (await response.json()) as { places?: GooglePlace[] };
-  return filterPublicGolfCoursePlaces(json.places ?? []).map(mapGooglePlaceToCourseCandidate);
+  return json.places ?? [];
 }
 
 function normalizePlaceId(id: string) {

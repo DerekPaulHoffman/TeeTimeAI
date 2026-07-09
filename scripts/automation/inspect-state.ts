@@ -16,7 +16,8 @@ async function main() {
     probeCounts,
     recentNotableProbes,
     recentMatches,
-    pendingMatches
+    pendingMatches,
+    recentBrowserDiscoveries
   ] =
     await Promise.all([
       prisma.automationRun.findMany({
@@ -102,6 +103,15 @@ async function main() {
               user: true
             }
           }
+        }
+      }),
+      prisma.courseAutomationDiscovery.findMany({
+        orderBy: {
+          createdAt: "desc"
+        },
+        take: 10,
+        include: {
+          course: true
         }
       })
     ]);
@@ -227,6 +237,17 @@ async function main() {
           startsAt: match.startsAt,
           firstSeenAt: match.firstSeenAt,
           sourceId: match.sourceId
+        })),
+        recentBrowserDiscoveries: recentBrowserDiscoveries.map((discovery) => ({
+          id: discovery.id,
+          course: discovery.course.name,
+          status: discovery.status,
+          platform: discovery.detectedPlatform,
+          confidence: discovery.confidence,
+          sourceUrl: discovery.sourceUrl,
+          bookingUrl: discovery.bookingUrl,
+          apiEndpoint: discovery.apiEndpoint,
+          createdAt: discovery.createdAt
         }))
       },
       null,

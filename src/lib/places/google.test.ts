@@ -159,32 +159,59 @@ describe("Google Places mapping", () => {
     expect(places.map((place) => place.displayName?.text)).toEqual(["Short Beach Golf Course"]);
   });
 
-  it("asks Places for primary type metadata and excludes obvious non-public results", async () => {
+  it("merges popularity and distance ranked Places results before filtering", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        places: [
-          {
-            id: "places/tashua",
-            displayName: { text: "Tashua Knolls & Tashua Glen Golf Course" },
-            formattedAddress: "40 Tashua Knolls Ln, Trumbull, CT",
-            primaryType: "golf_course",
-            types: ["golf_course"],
-            businessStatus: "OPERATIONAL",
-            location: { latitude: 41.242, longitude: -73.209 }
-          },
-          {
-            id: "places/golf-galaxy",
-            displayName: { text: "Golf Galaxy" },
-            primaryType: "sporting_goods_store",
-            types: ["golf_course", "sporting_goods_store"],
-            businessStatus: "OPERATIONAL",
-            location: { latitude: 41.102, longitude: -73.417 }
-          }
-        ]
-      })
-    } as Response);
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/tashua",
+              displayName: { text: "Tashua Knolls & Tashua Glen Golf Course" },
+              formattedAddress: "40 Tashua Knolls Ln, Trumbull, CT",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.242, longitude: -73.209 }
+            },
+            {
+              id: "places/golf-galaxy",
+              displayName: { text: "Golf Galaxy" },
+              primaryType: "sporting_goods_store",
+              types: ["golf_course", "sporting_goods_store"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.102, longitude: -73.417 }
+            }
+          ]
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/tashua",
+              displayName: { text: "Tashua Knolls & Tashua Glen Golf Course" },
+              formattedAddress: "40 Tashua Knolls Ln, Trumbull, CT",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.242, longitude: -73.209 }
+            },
+            {
+              id: "places/fairchild",
+              displayName: { text: "Fairchild Wheeler Golf Course" },
+              formattedAddress: "2390 Easton Tpke, Fairfield, CT",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.199, longitude: -73.236 }
+            }
+          ]
+        })
+      } as Response);
 
     const courses = await searchNearbyGolfCourses({
       latitude: 41.242,
@@ -193,15 +220,25 @@ describe("Google Places mapping", () => {
     });
 
     expect(courses.map((course) => course.name)).toEqual([
-      "Tashua Knolls & Tashua Glen Golf Course"
+      "Tashua Knolls & Tashua Glen Golf Course",
+      "Fairchild Wheeler Golf Course"
     ]);
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
       "https://places.googleapis.com/v1/places:searchNearby",
       expect.objectContaining({
         headers: expect.objectContaining({
           "X-Goog-FieldMask": expect.stringContaining("places.primaryType")
         }),
-        body: expect.stringContaining("excludedPrimaryTypes")
+        body: expect.stringContaining('"rankPreference":"POPULARITY"')
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://places.googleapis.com/v1/places:searchNearby",
+      expect.objectContaining({
+        body: expect.stringContaining('"rankPreference":"DISTANCE"')
       })
     );
   });

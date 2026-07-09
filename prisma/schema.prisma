@@ -83,6 +83,7 @@ model Course {
   preferences           CoursePreference[]
   probes                CourseProbe[]
   matches               TeeTimeMatch[]
+  automationDiscoveries CourseAutomationDiscovery[]
 
   @@index([latitude, longitude])
   @@index([detectedPlatform, automationEligibility])
@@ -173,6 +174,25 @@ model AutomationRun {
   changedFiles  Json?
   notes         String?
   probes        CourseProbe[]
+}
+
+model CourseAutomationDiscovery {
+  id               String   @id @default(cuid())
+  courseId         String
+  status           String
+  detectedPlatform DetectedPlatform @default(UNKNOWN)
+  sourceUrl        String
+  bookingUrl       String?
+  apiEndpoint      String?
+  apiMetadata      Json?
+  evidence         Json?
+  confidence       Float    @default(0)
+  createdAt        DateTime @default(now())
+  course           Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@index([courseId, createdAt])
+  @@index([status, createdAt])
+  @@index([detectedPlatform, createdAt])
 }
 
 model WebsiteEvent {

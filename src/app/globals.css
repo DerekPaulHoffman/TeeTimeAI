@@ -495,6 +495,31 @@ button {
   margin: 0;
 }
 
+.course-results-map-shell {
+  background: #e7eee8;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-top: 16px;
+  overflow: hidden;
+}
+
+.course-results-map,
+.course-results-map-fallback {
+  min-height: 360px;
+  width: 100%;
+}
+
+.course-results-map-fallback {
+  align-items: center;
+  color: var(--fairway-dark);
+  display: grid;
+  font-weight: 900;
+  gap: 10px;
+  justify-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
 .results-count-pill,
 .selected-course-pill {
   align-items: center;

@@ -1,6 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
-const smokeBaseUrl = process.env.UI_SMOKE_BASE_URL ?? "http://127.0.0.1:3000";
+const smokeBaseUrl =
+  process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`;
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {

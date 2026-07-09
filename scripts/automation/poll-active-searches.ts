@@ -11,8 +11,10 @@ import {
   runWithAutomationPollLease,
   startAutomationRun
 } from "@/lib/automation/db-service";
+import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import { evaluateAutomationPolicy } from "@/lib/automation/policy";
 import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
+import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { sendTeeTimeAlert } from "@/lib/email/alerts";
 import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-times/matching";
 
@@ -21,6 +23,8 @@ const PROMPT_VERSION = "tee-time-spot-local-codex-loop-v1";
 type AutomationCourse = {
   id: string;
   name: string;
+  website: string | null;
+  detectedBookingUrl: string | null;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   policyNotes: string | null;
   detectedPlatform:
@@ -99,24 +103,27 @@ async function main() {
             continue;
           }
 
-          if (course.detectedPlatform !== "FOREUP" || !isForeupMetadata(course.bookingMetadata)) {
+          if (!hasSupportedAdapter(course)) {
+            const browserProbeUrl = getBestProbeUrl(course);
+            const browserProbeQueued = shouldQueueBrowserProbe(course);
             await recordCourseProbe({
               searchId: search.id,
               courseId: course.id,
               automationRunId: run.id,
               outcome: "NEEDS_ADAPTER",
-              message: `No supported adapter yet for ${course.detectedPlatform}`
+              message: browserProbeQueued
+                ? `No supported adapter yet for ${course.detectedPlatform}; queued for browser probe.`
+                : `No supported adapter yet for ${course.detectedPlatform}`,
+              rawSummary: {
+                nextAction: browserProbeQueued ? "automation:browser-probe" : "manual_course_setup",
+                browserProbeUrl
+              }
             });
             continue;
           }
 
           try {
-            const rawSlots = await fetchForeupSlots({
-              courseId: course.id,
-              date: search.date,
-              players: search.players,
-              metadata: course.bookingMetadata
-            });
+            const rawSlots = await fetchCourseSlots(course, search.date, search.players);
             const matches = rankMatches(
               searchWindow,
               dedupeMatches(
@@ -270,6 +277,34 @@ async function deliverMatchAlert(input: {
 
 function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = []) {
   return [...new Set([primaryEmail, ...additionalEmails].map((email) => email.trim().toLowerCase()))];
+}
+
+function hasSupportedAdapter(course: AutomationCourse) {
+  return (
+    (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) ||
+    (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata))
+  );
+}
+
+function fetchCourseSlots(course: AutomationCourse, date: Date, players: number) {
+  if (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
+    return fetchForeupSlots({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
+    });
+  }
+
+  if (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
+    return fetchTeeItUpSlots({
+      courseId: course.id,
+      date,
+      metadata: course.bookingMetadata
+    });
+  }
+
+  return Promise.resolve([]);
 }
 
 main()

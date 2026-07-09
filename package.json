@@ -13,6 +13,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "automation:poll": "tsx scripts/automation/poll-active-searches.ts",
+    "automation:browser-probe": "tsx scripts/automation/browser-probe-needed-adapters.ts",
     "automation:improve": "tsx scripts/automation/improvement-loop.ts",
     "automation:inspect": "tsx scripts/automation/inspect-state.ts",
     "automation:configure-known-foreup": "tsx scripts/automation/configure-known-foreup-courses.ts",
