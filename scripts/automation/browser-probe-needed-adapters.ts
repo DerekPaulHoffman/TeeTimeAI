@@ -153,36 +153,42 @@ async function collectBrowserEvidence(
 }
 
 async function clickLikelyBookingLink(page: Page) {
-  const link = page
-    .locator("a[href]")
-    .filter({
-      hasText: /tee.?time|book|reserve|reservation/i
-    })
-    .first();
+  const href = await page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+      .map((anchor) => ({
+        href: anchor.href,
+        text: anchor.textContent?.replace(/\s+/g, " ").trim() ?? ""
+      }))
+      .filter((anchor) => /tee.?time|book|reserve|reservation|foreup|teeitup|golfnow|cps\.golf/i.test(`${anchor.text} ${anchor.href}`))
+      .map((anchor) => {
+        const searchable = `${anchor.text} ${anchor.href}`;
+        let score = 0;
+        if (/foreupsoftware\.com|\.book\.teeitup\.golf|golfnow\.com|cps\.golf/i.test(anchor.href)) {
+          score += 100;
+        }
+        if (/tee.?time/i.test(searchable)) {
+          score += 20;
+        }
+        if (/book|reserve|reservation/i.test(searchable)) {
+          score += 10;
+        }
+        if (/#$/.test(anchor.href)) {
+          score -= 50;
+        }
+        return { ...anchor, score };
+      })
+      .sort((a, b) => b.score - a.score);
 
-  if ((await link.count()) === 0) {
+    return candidates[0]?.href ?? null;
+  });
+
+  if (!href) {
     return;
   }
 
-  const previousUrl = page.url();
-  const popupPromise = page.waitForEvent("popup", { timeout: 5_000 }).catch(() => null);
-  await link.click({ timeout: 5_000 }).catch(() => undefined);
-  const popup = await popupPromise;
-
-  if (popup) {
-    await popup.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
-    await page.goto(popup.url(), { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(
-      () => undefined
-    );
-    await popup.close().catch(() => undefined);
-    return;
-  }
-
-  if (page.url() === previousUrl) {
-    await page.waitForURL((url) => url.toString() !== previousUrl, { timeout: 5_000 }).catch(
-      () => undefined
-    );
-  }
+  await page.goto(href, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(
+    () => undefined
+  );
 }
 
 async function trySelectSearchDate(page: Page) {
