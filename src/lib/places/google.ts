@@ -96,6 +96,7 @@ const NON_COURSE_NAME_PATTERNS = [
 
 const PLAYABLE_COURSE_NAME_PATTERN =
   /\b(?:course|links|park|center|resort|tpc)\b|\b\d+\s*(?:hole|course)\b/i;
+const SEMANTIC_FALLBACK_NAME_PATTERN = /\bgolf\s+(?:course|links)\b/i;
 
 const MEMBERSHIP_PLACE_TYPES = new Set(["association_or_organization", "sports_club"]);
 
@@ -135,24 +136,26 @@ function isLikelyPublicGolfCoursePlace(
   { publicCourseEvidenceIds = new Set<string>() }: PublicCourseFilterOptions
 ) {
   const name = place.displayName?.text ?? "";
+  const placeId = normalizePlaceId(place.id ?? place.name ?? "");
+  const placeTypes = place.types ?? [];
 
   if (place.businessStatus && place.businessStatus !== "OPERATIONAL") {
     return false;
   }
 
-  if (place.primaryType !== "golf_course") {
+  const hasTypedGolfCourseEvidence =
+    place.primaryType === "golf_course" && placeTypes.includes("golf_course");
+  const hasSemanticFallbackEvidence =
+    !place.primaryType &&
+    publicCourseEvidenceIds.has(placeId) &&
+    SEMANTIC_FALLBACK_NAME_PATTERN.test(name) &&
+    Boolean(place.websiteUri);
+
+  if (!hasTypedGolfCourseEvidence && !hasSemanticFallbackEvidence) {
     return false;
   }
 
-  if (!place.types?.includes("golf_course")) {
-    return false;
-  }
-
-  if (NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType)) {
-    return false;
-  }
-
-  if (place.types.includes("indoor_golf_course")) {
+  if (place.primaryType && NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType)) {
     return false;
   }
 
@@ -164,17 +167,12 @@ function isLikelyPublicGolfCoursePlace(
     return false;
   }
 
-  const placeId = normalizePlaceId(place.id ?? place.name ?? "");
   const hasMembershipShape =
-    /\bclub\b/i.test(name) && place.types.some((type) => MEMBERSHIP_PLACE_TYPES.has(type));
+    /\bclub\b/i.test(name) && placeTypes.some((type) => MEMBERSHIP_PLACE_TYPES.has(type));
   const hasGolfIdentity = /\bgolf\b/i.test(name);
   const hasExplicitCourseSurface = PLAYABLE_COURSE_NAME_PATTERN.test(name);
 
-  if (
-    hasMembershipShape &&
-    !hasExplicitCourseSurface &&
-    (!hasGolfIdentity || !publicCourseEvidenceIds.has(placeId))
-  ) {
+  if (hasMembershipShape && !hasExplicitCourseSurface && !hasGolfIdentity) {
     return false;
   }
 
@@ -183,13 +181,18 @@ function isLikelyPublicGolfCoursePlace(
 
 export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
   const placesById = new Map<string, GooglePlace>();
-  const [popularityPlaces, distancePlaces, publicCourseEvidenceIds] = await Promise.all([
+  const [popularityPlaces, distancePlaces, publicCoursePlaces] = await Promise.all([
     searchNearbyGolfCoursePlaces(input, "POPULARITY"),
     searchNearbyGolfCoursePlaces(input, "DISTANCE"),
-    searchPublicGolfCourseEvidenceIds(input)
+    searchPublicGolfCoursePlaces(input)
   ]);
+  const publicCourseEvidenceIds = new Set(
+    publicCoursePlaces
+      .map((place) => normalizePlaceId(place.id ?? place.name ?? ""))
+      .filter(Boolean)
+  );
 
-  for (const places of [popularityPlaces, distancePlaces]) {
+  for (const places of [popularityPlaces, distancePlaces, publicCoursePlaces]) {
     for (const place of places) {
       const id = normalizePlaceId(place.id ?? place.name ?? "");
       if (id && !placesById.has(id)) {
@@ -208,6 +211,7 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
         distanceMeters: getDistanceMeters(input, course)
       };
     })
+    .filter((course) => (course.distanceMeters ?? Number.MAX_SAFE_INTEGER) <= getSearchRadius(input))
     .sort((a, b) => (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) - (b.distanceMeters ?? Number.MAX_SAFE_INTEGER));
 }
 
@@ -239,7 +243,7 @@ async function searchNearbyGolfCoursePlaces(
             latitude: input.latitude,
             longitude: input.longitude
           },
-          radius: input.radiusMeters ?? 30000
+          radius: getSearchRadius(input)
         }
       }
     })
@@ -253,7 +257,7 @@ async function searchNearbyGolfCoursePlaces(
   return json.places ?? [];
 }
 
-async function searchPublicGolfCourseEvidenceIds(input: NearbyCourseSearchInput) {
+async function searchPublicGolfCoursePlaces(input: NearbyCourseSearchInput) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
     throw new Error("GOOGLE_PLACES_API_KEY is not configured");
@@ -265,41 +269,64 @@ async function searchPublicGolfCourseEvidenceIds(input: NearbyCourseSearchInput)
       headers: {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
-        "X-Goog-FieldMask": "places.id"
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.location,places.websiteUri,places.types,places.primaryType,places.businessStatus"
       },
       body: JSON.stringify({
         textQuery: "public golf courses",
-        includedType: "golf_course",
-        strictTypeFiltering: true,
         pageSize: 20,
         rankPreference: "RELEVANCE",
-        locationBias: {
-          circle: {
-            center: {
-              latitude: input.latitude,
-              longitude: input.longitude
-            },
-            radius: input.radiusMeters ?? 30000
-          }
-        }
+        ...getTextSearchLocation(input)
       })
     });
 
     if (!response.ok) {
-      return new Set<string>();
+      return [];
     }
 
-    const json = (await response.json()) as {
-      places?: Array<Pick<GooglePlace, "id" | "name">>;
-    };
-    return new Set(
-      (json.places ?? [])
-        .map((place) => normalizePlaceId(place.id ?? place.name ?? ""))
-        .filter(Boolean)
-    );
+    const json = (await response.json()) as { places?: GooglePlace[] };
+    return json.places ?? [];
   } catch {
-    return new Set<string>();
+    return [];
   }
+}
+
+function getSearchRadius(input: NearbyCourseSearchInput) {
+  return input.radiusMeters ?? 30000;
+}
+
+function getTextSearchLocation(input: NearbyCourseSearchInput) {
+  const radius = getSearchRadius(input);
+  const latitudeDelta = toDegrees(radius / 6371000);
+  const longitudeScale = Math.cos(toRadians(input.latitude));
+  const longitudeDelta = latitudeDelta / Math.max(Math.abs(longitudeScale), 0.01);
+  const lowLatitude = Math.max(-90, input.latitude - latitudeDelta);
+  const highLatitude = Math.min(90, input.latitude + latitudeDelta);
+  const lowLongitude = input.longitude - longitudeDelta;
+  const highLongitude = input.longitude + longitudeDelta;
+
+  if (lowLongitude < -180 || highLongitude > 180 || lowLatitude === -90 || highLatitude === 90) {
+    return {
+      locationBias: {
+        circle: {
+          center: {
+            latitude: input.latitude,
+            longitude: input.longitude
+          },
+          radius
+        }
+      }
+    };
+  }
+
+  return {
+    locationRestriction: {
+      rectangle: {
+        low: { latitude: lowLatitude, longitude: lowLongitude },
+        high: { latitude: highLatitude, longitude: highLongitude }
+      }
+    }
+  };
 }
 
 export function dedupeGolfCoursePlaces(places: GooglePlace[]) {
@@ -420,6 +447,10 @@ function getDistanceMeters(
 
 function toRadians(value: number) {
   return (value * Math.PI) / 180;
+}
+
+function toDegrees(value: number) {
+  return (value * 180) / Math.PI;
 }
 
 export function getGooglePlacesApiKey() {

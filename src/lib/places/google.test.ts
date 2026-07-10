@@ -89,6 +89,43 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("keeps a semantically corroborated public course when Google omits its golf type", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/h-smith-richardson",
+          displayName: { text: "H Smith Richardson Golf Course" },
+          types: ["point_of_interest", "establishment"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://hsrgolf.com/",
+          location: { latitude: 41.2158, longitude: -73.2689 }
+        },
+        {
+          id: "places/connecticut-club",
+          displayName: { text: "The Connecticut Golf Club" },
+          primaryType: "sports_club",
+          types: ["sports_club", "association_or_organization"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://example.com/",
+          location: { latitude: 41.264, longitude: -73.331 }
+        },
+        {
+          id: "places/unverified-course",
+          displayName: { text: "Unverified Golf Course" },
+          types: ["point_of_interest"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://example.com/",
+          location: { latitude: 41.2, longitude: -73.2 }
+        }
+      ],
+      { publicCourseEvidenceIds: new Set(["h-smith-richardson", "connecticut-club"]) }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "H Smith Richardson Golf Course"
+    ]);
+  });
+
   it("filters ancillary listings, private membership clubs, and closed businesses", () => {
     const places = filterPublicGolfCoursePlaces([
       {
@@ -156,6 +193,19 @@ describe("Google Places mapping", () => {
         location: { latitude: 37.695, longitude: -122.186 }
       },
       {
+        id: "places/whitney-farms",
+        displayName: { text: "Chris Bargas Golf Club at Whitney Farms" },
+        primaryType: "golf_course",
+        types: [
+          "golf_course",
+          "indoor_golf_course",
+          "sports_club",
+          "association_or_organization"
+        ],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 41.304, longitude: -73.213 }
+      },
+      {
         id: "places/x-golf",
         displayName: { text: "X-Golf Stratford" },
         primaryType: "indoor_golf_course",
@@ -183,6 +233,7 @@ describe("Google Places mapping", () => {
 
     expect(places.map((place) => place.displayName?.text)).toEqual([
       "Monarch Bay Golf Club",
+      "Chris Bargas Golf Club at Whitney Farms",
       "Short Beach Golf Course"
     ]);
   });
@@ -250,7 +301,7 @@ describe("Google Places mapping", () => {
               primaryType: "golf_course",
               types: ["golf_course"],
               businessStatus: "OPERATIONAL",
-              location: { latitude: 41.451, longitude: -73.711 }
+              location: { latitude: 41.35, longitude: -73.4 }
             },
             {
               id: "places/tashua",
@@ -340,9 +391,99 @@ describe("Google Places mapping", () => {
       "https://places.googleapis.com/v1/places:searchText",
       expect.objectContaining({
         headers: expect.objectContaining({
-          "X-Goog-FieldMask": "places.id"
+          "X-Goog-FieldMask": expect.stringContaining("places.displayName")
         }),
-        body: expect.stringContaining('"textQuery":"public golf courses"')
+        body: expect.stringContaining('"locationRestriction"')
+      })
+    );
+  });
+
+  it("adds a nearby semantic course that Google no longer types as a golf course", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/tashua",
+              displayName: { text: "Tashua Knolls Golf Course" },
+              formattedAddress: "40 Tashua Knolls Ln, Trumbull, CT",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.242, longitude: -73.209 }
+            }
+          ]
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: []
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/h-smith-richardson",
+              displayName: { text: "H Smith Richardson Golf Course" },
+              formattedAddress: "2425 Morehouse Hwy, Fairfield, CT",
+              types: ["point_of_interest", "establishment"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://hsrgolf.com/",
+              location: { latitude: 41.2158, longitude: -73.2689 }
+            },
+            {
+              id: "places/private-club",
+              displayName: { text: "The Connecticut Golf Club" },
+              formattedAddress: "915 Black Rock Tpke, Easton, CT",
+              primaryType: "sports_club",
+              types: ["sports_club", "association_or_organization"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://example.com/",
+              location: { latitude: 41.264, longitude: -73.331 }
+            },
+            {
+              id: "places/general-store",
+              displayName: { text: "General Store" },
+              formattedAddress: "Fairfield, CT",
+              types: ["point_of_interest"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://example.com/",
+              location: { latitude: 41.21, longitude: -73.26 }
+            },
+            {
+              id: "places/far-course",
+              displayName: { text: "Far Away Golf Course" },
+              formattedAddress: "Far Away, CT",
+              types: ["point_of_interest"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://example.com/",
+              location: { latitude: 41.55, longitude: -73.209 }
+            }
+          ]
+        })
+      } as Response);
+
+    const courses = await searchNearbyGolfCourses({
+      latitude: 41.242,
+      longitude: -73.209,
+      radiusMeters: 24140
+    });
+
+    expect(courses.map((course) => course.name)).toEqual([
+      "Tashua Knolls Golf Course",
+      "H Smith Richardson Golf Course"
+    ]);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://places.googleapis.com/v1/places:searchText",
+      expect.objectContaining({
+        body: expect.not.stringContaining('"strictTypeFiltering"')
       })
     );
   });
