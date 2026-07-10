@@ -54,6 +54,8 @@ The hourly improvement loop has broad authority to get Tee Time Spot working end
 
 The hourly loop is authorized to commit, push, and deploy its own verified work. A successful code or configuration improvement is not complete until its source-control and production handoff is complete.
 
+- Run the recurring automation from the dedicated checkout at `C:\dev\TeeTimeAI-automation`, not from the interactive workspace at `C:\dev\TeeTimeAI`.
+- Start every run with `npm run automation:preflight`. The preflight fetches `origin`, requires `main`, fast-forwards clean checkouts that are only behind, and returns `blocked_dirty_worktree` or `blocked_git` before the expensive loop starts.
 - Start by running `git fetch origin`, confirming the checkout is on `main`, confirming `main` is not diverged from `origin/main`, and inspecting `git status --short`.
 - When the tree is clean and `main` is only behind, update it with a fast-forward-only pull before selecting work.
 - If unrelated or unexplained changes already exist, do not stage, commit, overwrite, revert, or deploy them. Stop with `blocked_dirty_worktree` and identify the paths.
