@@ -109,6 +109,8 @@ Last updated: 2026-07-10
 
 - 2026-07-10 email availability and alert-control release deployed commit `ba264cd` as `dpl_GxphLjr8FTxqhUJC4tYJUQWBvvBh` (`teetimeai-mywqpxgqb-derekpaulhoffmans-projects.vercel.app`). Status and instant-alert emails now list every currently matching tee time by course with spots, price, and holes when available; new openings found together are batched into one email. Both email types include signed `I booked — stop these emails` and `Cancel this alert` controls that open a confirmation page before marking the search `COMPLETED` or `CANCELLED`, stopping its workflow schedule, and suppressing unsent matches. Verification passed 123 tests, lint with only the existing generated Workflow route warning, production build, local and production UI smoke 8/8, live `/`, `/dashboard`, `/email-preview`, `/alerts/stop?done=booked`, and `www.teetimespot.com` 200 checks, exact email-preview readback for both matching times and both stop controls, `vercel inspect` Ready with both production aliases, and no error-level Vercel logs in the verification window.
 
+- 2026-07-10 Google sign-in was enabled for the Clerk production instance. Google Auth Platform now has an external, in-production `Tee Time Spot` web client using Clerk's exact production callback URI, and Clerk reports Google as used for sign-in with the standard `openid`, email, and profile scopes. Live signed-out verification on `teetimespot.com` found the global `Sign in` control and a working `Continue with Google` option alongside email/password authentication; the signed-in account panel exposes `Manage account` and `Sign out`. Production UI smoke passed 8/8 across desktop and mobile.
+
 ## Current Runtime Mode
 
 The public site is live as an email-alert proof of concept:
@@ -118,13 +120,13 @@ The public site is live as an email-alert proof of concept:
 - Google Places nearby search, text geocoding, and photo requests all use the same normalized API key value. The separate Google Geocoding API is not required for the current typed-location flow.
 - Signed-out visitors may discover and rank courses, but alert creation and all management actions require an authenticated account.
 - Search creation now reuses an existing supported nearby course row before creating a new course, so alternate demo/place IDs do not drop ForeUP adapter metadata.
-- Clerk account mode is active in production with live keys and `CLERK_AUTH_READY=true`. Email/password sign-up and sign-in are enabled; Google OAuth is disabled until custom production credentials are configured.
+- Clerk account mode is active in production with live keys and `CLERK_AUTH_READY=true`. Email/password and Google sign-up/sign-in are enabled with custom production Google OAuth credentials.
 - Dashboard management actions require a signed-in Clerk account after Clerk auth is marked ready.
 - Email sending is live through Resend when `RESEND_API_KEY` and `ALERT_EMAIL_FROM` are present. Local/automation runs still dry-run if those vars are absent.
 
-## Remaining Provider Setup
+## Provider Status and Remaining Setup
 
-- Clerk production: core account auth is complete and active. Domain, DNS, SSL, mail DNS, live keys, email/password sign-up and sign-in, and the Vercel auth gate are configured. Google OAuth is optional and remains disabled until custom production credentials are added.
+- Clerk production: account auth is complete and active. Domain, DNS, SSL, mail DNS, live keys, email/password authentication, Google OAuth, and the Vercel auth gate are configured.
 - Google Maps key hygiene: Places API (New) is enabled and `GOOGLE_PLACES_API_KEY` is configured in Vercel. The current key was shared in chat during setup, so restrict it to the needed Google APIs and rotate it after confirming production remains healthy.
 - Resend: core sending is configured. The original marketplace-managed API key cannot be deleted through the Resend API; manage/remove it from the Vercel Marketplace dashboard if a full cleanup is needed.
 - Automation auth: `AUTOMATION_API_KEY` is set in production and local `.env.local`; keep it secret and rotate if exposed.
