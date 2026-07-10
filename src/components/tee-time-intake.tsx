@@ -28,7 +28,10 @@ import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
   milesToMeters
 } from "@/lib/places/radius";
-import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
+import {
+  DEFAULT_SEARCH_CADENCE_MINUTES,
+  MAX_PLAYERS_PER_SEARCH
+} from "@/lib/validation/search";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -396,7 +399,7 @@ export function TeeTimeIntake({
           startTime,
           endTime,
           players,
-          cadenceMinutes: 15,
+          cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES,
           alertEmail: alertEmail.trim(),
           courses: selected.map((course, index) => ({
             ...course,
@@ -406,6 +409,14 @@ export function TeeTimeIntake({
       });
 
       if (!response.ok) {
+        trackWebsiteEvent({
+          name: "search_submission_failed",
+          metadata: {
+            responseStatus: response.status,
+            selectedCourseCount: selected.length,
+            players
+          }
+        });
         throw new Error("Could not save this search. Try again in a moment.");
       }
 

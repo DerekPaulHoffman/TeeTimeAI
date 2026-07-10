@@ -6,6 +6,7 @@ import {
   MAX_COURSE_PREFERENCES,
   MAX_PLAYERS_PER_SEARCH,
   MIN_COURSE_PREFERENCES,
+  DEFAULT_SEARCH_CADENCE_MINUTES,
   teeSearchInputSchema
 } from "./search";
 
@@ -38,6 +39,27 @@ describe("teeSearchInputSchema", () => {
     expect(result.courses[0]?.rank).toBe(1);
     expect(result.alertEmail).toBe("golfer@example.com");
     expect(result.additionalEmails).toEqual(["friend@example.com"]);
+  });
+
+  it("defaults new searches to the five-minute launch cadence", () => {
+    const result = teeSearchInputSchema.parse({
+      date: tomorrow(),
+      startTime: "13:40",
+      endTime: "16:00",
+      players: 2,
+      alertEmail: "golfer@example.com",
+      courses: [
+        {
+          googlePlaceId: "place-1",
+          name: "Tashua Knolls",
+          rank: 1,
+          latitude: 41.242,
+          longitude: -73.209
+        }
+      ]
+    });
+
+    expect(result.cadenceMinutes).toBe(DEFAULT_SEARCH_CADENCE_MINUTES);
   });
 
   it("rejects same-day or past searches", () => {

@@ -50,6 +50,25 @@ describe("websiteEventInputSchema", () => {
       })
     ).toThrow(/invalid/i);
   });
+
+  it("accepts privacy-safe search submission failure context", () => {
+    const input = websiteEventInputSchema.parse({
+      name: "search_submission_failed",
+      page: "/search",
+      metadata: {
+        responseStatus: 400,
+        selectedCourseCount: 5,
+        players: 2
+      }
+    });
+
+    expect(input.name).toBe("search_submission_failed");
+    expect(input.metadata).toEqual({
+      responseStatus: 400,
+      selectedCourseCount: 5,
+      players: 2
+    });
+  });
 });
 
 describe("websiteFeedbackInputSchema", () => {

@@ -111,7 +111,7 @@ model TeeSearch {
   startTime        String
   endTime          String
   players          Int
-  cadenceMinutes   Int               @default(15)
+  cadenceMinutes   Int               @default(5)
   additionalEmails String[]          @default([])
   status           SearchStatus      @default(ACTIVE)
   checkStatus      SearchCheckStatus @default(IDLE)

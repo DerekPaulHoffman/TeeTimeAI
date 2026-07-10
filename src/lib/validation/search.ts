@@ -5,6 +5,8 @@ export const MAX_COURSE_PREFERENCES = 5;
 export const MAX_PLAYERS_PER_SEARCH = 4;
 export const MAX_QUEUED_SEARCHES_PER_USER = 3;
 export const MAX_ADDITIONAL_ALERT_EMAILS = 3;
+export const SEARCH_CADENCE_OPTIONS_MINUTES = [5, 15, 30, 60, 120] as const;
+export const DEFAULT_SEARCH_CADENCE_MINUTES = 5;
 
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm time");
 
@@ -27,7 +29,12 @@ export const teeSearchDetailsSchema = z
     startTime: timeSchema,
     endTime: timeSchema,
     players: z.number().int().min(1).max(MAX_PLAYERS_PER_SEARCH),
-    cadenceMinutes: z.number().int().min(15).max(120).default(15),
+    cadenceMinutes: z
+      .number()
+      .int()
+      .min(SEARCH_CADENCE_OPTIONS_MINUTES[0])
+      .max(SEARCH_CADENCE_OPTIONS_MINUTES.at(-1) ?? 120)
+      .default(DEFAULT_SEARCH_CADENCE_MINUTES),
     additionalEmails: z
       .array(z.string().trim().toLowerCase().email("Use a valid email"))
       .max(MAX_ADDITIONAL_ALERT_EMAILS, `Add up to ${MAX_ADDITIONAL_ALERT_EMAILS} extra emails`)

@@ -29,7 +29,31 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const startedAt = Date.now();
+  const requestId = request.headers.get("x-vercel-id");
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "Search submission started",
+      method: "POST",
+      requestId,
+      route: "/api/searches"
+    })
+  );
+
   if (!hasDatabaseConfig()) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        message: "Search submission failed",
+        method: "POST",
+        requestId,
+        route: "/api/searches",
+        status: 503,
+        durationMs: Date.now() - startedAt,
+        error: "Database configuration unavailable"
+      })
+    );
     return databaseSetupError();
   }
 
@@ -41,11 +65,47 @@ export async function POST(request: NextRequest) {
     try {
       schedule = await startSearchSchedule(search.id);
     } catch (error) {
-      console.error("Could not start initial search workflow", error);
+      console.error(
+        JSON.stringify({
+          level: "error",
+          message: "Initial search workflow did not start",
+          method: "POST",
+          requestId,
+          route: "/api/searches",
+          searchId: search.id,
+          error: getErrorMessage(error)
+        })
+      );
     }
+    console.log(
+      JSON.stringify({
+        level: "info",
+        message: "Search submission completed",
+        method: "POST",
+        requestId,
+        route: "/api/searches",
+        status: 201,
+        durationMs: Date.now() - startedAt,
+        courseCount: input.courses.length,
+        workflowStarted: Boolean(schedule)
+      })
+    );
     return NextResponse.json({ search, schedule }, { status: 201 });
   } catch (error) {
-    return handleAppError(error);
+    const response = handleAppError(error);
+    console.error(
+      JSON.stringify({
+        level: "error",
+        message: "Search submission failed",
+        method: "POST",
+        requestId,
+        route: "/api/searches",
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+        error: getErrorMessage(error)
+      })
+    );
+    return response;
   }
 }
 
@@ -81,7 +141,11 @@ async function getSearchOwner(alertEmail?: string) {
 }
 
 function handleAppError(error: unknown) {
-  const message = error instanceof Error ? error.message : "Request failed";
+  const message = getErrorMessage(error);
   const status = message === "Unauthorized" ? 401 : 400;
   return NextResponse.json({ error: message }, { status });
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Request failed";
 }

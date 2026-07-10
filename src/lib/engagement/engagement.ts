@@ -9,6 +9,7 @@ export const websiteEventNames = [
   "dashboard_opened",
   "email_preview_opened",
   "search_submitted",
+  "search_submission_failed",
   "feedback_opened",
   "feedback_submitted"
 ] as const;

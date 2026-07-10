@@ -20,7 +20,8 @@ import {
 
 import {
   MAX_ADDITIONAL_ALERT_EMAILS,
-  MAX_PLAYERS_PER_SEARCH
+  MAX_PLAYERS_PER_SEARCH,
+  SEARCH_CADENCE_OPTIONS_MINUTES
 } from "@/lib/validation/search";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
@@ -300,7 +301,7 @@ export function SearchStatusActions({
                 setForm({ ...form, cadenceMinutes: Number(event.target.value) })
               }
             >
-              {[15, 30, 60, 120].map((minutes) => (
+              {SEARCH_CADENCE_OPTIONS_MINUTES.map((minutes) => (
                 <option key={minutes} value={minutes}>
                   {minutes} min
                 </option>
