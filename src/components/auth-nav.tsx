@@ -2,12 +2,15 @@
 
 import Link from "next/link";
 import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
-import { Bell, LogIn, Plus } from "lucide-react";
+import { Bell, LogIn, MessageCircle, Plus } from "lucide-react";
+
+import { discordInviteUrl } from "@/lib/community";
 
 export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
   if (!clerkEnabled) {
     return (
       <nav className="nav-actions">
+        <DiscordNavLink />
         <Link className="button button-secondary" href="/dashboard" prefetch={false}>
           <Bell size={17} />
           My alerts
@@ -32,6 +35,7 @@ function ConfiguredAuthNav() {
 
   return (
     <nav className="nav-actions">
+      <DiscordNavLink />
       <Link className="button button-secondary" href="/dashboard" prefetch={false}>
         <Bell size={17} />
         My alerts
@@ -51,5 +55,20 @@ function ConfiguredAuthNav() {
         </SignInButton>
       )}
     </nav>
+  );
+}
+
+function DiscordNavLink() {
+  return (
+    <a
+      aria-label="Join Tee Time Spot Discord for feedback and product suggestions"
+      className="button button-community nav-community"
+      href={discordInviteUrl}
+      rel="noreferrer"
+      target="_blank"
+    >
+      <MessageCircle size={17} />
+      <span>Discord</span>
+    </a>
   );
 }

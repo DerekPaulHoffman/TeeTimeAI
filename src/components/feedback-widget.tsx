@@ -1,8 +1,17 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { Bug, MessageSquare, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import {
+  ArrowUpRight,
+  Bug,
+  MessageCircle,
+  MessageSquare,
+  ThumbsDown,
+  ThumbsUp,
+  X
+} from "lucide-react";
 
+import { discordInviteUrl } from "@/lib/community";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 
 type FeedbackSentiment = "like" | "dislike" | "broken";
@@ -88,6 +97,20 @@ export function FeedbackWidget() {
               <X size={17} />
             </button>
           </div>
+
+          <a
+            className="feedback-community-link"
+            href={discordInviteUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            <MessageCircle size={18} />
+            <span>
+              <strong>Have a product suggestion?</strong>
+              Join our Discord for ideas and longer feedback.
+            </span>
+            <ArrowUpRight size={16} />
+          </a>
 
           <div className="feedback-options" role="group" aria-label="Feedback type">
             {sentimentOptions.map((option) => {

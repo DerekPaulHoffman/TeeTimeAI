@@ -96,6 +96,8 @@ Implementation notes:
 
 The site includes a feedback widget and API because the POC is explicitly about proving whether people will use the product.
 
+The Tee Time Spot Discord at `https://discord.gg/ThexF85xCd` is the public community for longer-form feedback and product suggestions. The site links to it from the global navigation, feedback panel, and footer.
+
 Feedback events are stored in Postgres:
 
 - `WebsiteEvent` for page/interaction events.

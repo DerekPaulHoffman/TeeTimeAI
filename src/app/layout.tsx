@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Flag } from "lucide-react";
+import { Flag, MessageCircle } from "lucide-react";
 
 import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
 import { AuthNav } from "@/components/auth-nav";
 import { EngagementTracker } from "@/components/engagement-tracker";
 import { FeedbackWidget } from "@/components/feedback-widget";
+import { discordInviteUrl } from "@/lib/community";
 import { hasClerkConfig } from "@/lib/env";
 import { absoluteUrl, siteDescription, siteName, siteUrl } from "@/lib/seo";
 import "leaflet/dist/leaflet.css";
@@ -86,7 +87,17 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             {children}
             <FeedbackWidget />
             <footer className="footer">
-              We find the opening. You make the booking.
+              <div>
+                <strong>Tee Time Spot</strong>
+                <span>We find the opening. You make the booking.</span>
+              </div>
+              <a href={discordInviteUrl} rel="noreferrer" target="_blank">
+                <MessageCircle size={20} />
+                <span>
+                  <strong>Join our Discord</strong>
+                  <small>Feedback and product suggestions</small>
+                </span>
+              </a>
             </footer>
           </div>
         </OptionalClerkProvider>

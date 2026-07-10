@@ -94,6 +94,17 @@ button {
   gap: 10px;
 }
 
+.button-community {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+}
+
+.button-community:hover,
+.button-community:focus-visible {
+  background: rgba(255, 255, 255, 0.2);
+}
+
 .text-link {
   align-items: center;
   color: #ffffff;
@@ -1534,9 +1545,61 @@ button {
 }
 
 .footer {
+  align-items: center;
   background: var(--night);
   color: rgba(255, 255, 255, 0.8);
+  display: flex;
+  gap: 32px;
+  justify-content: space-between;
   padding: 32px clamp(20px, 5vw, 72px);
+}
+
+.footer > div,
+.footer > a,
+.footer > a span {
+  display: flex;
+}
+
+.footer > div,
+.footer > a span {
+  flex-direction: column;
+}
+
+.footer > div {
+  gap: 5px;
+}
+
+.footer > div strong {
+  color: #ffffff;
+}
+
+.footer > a {
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: #ffffff;
+  gap: 11px;
+  min-height: 52px;
+  padding: 7px 17px;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.footer > a:hover,
+.footer > a:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.32);
+  transform: translateY(-1px);
+}
+
+.footer > a span {
+  gap: 2px;
+}
+
+.footer > a small {
+  color: rgba(255, 255, 255, 0.68);
 }
 
 .feedback-widget {
@@ -1608,6 +1671,40 @@ button {
   display: grid;
   gap: 8px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.feedback-community-link {
+  align-items: center;
+  background: #f1f7f1;
+  border: 1px solid rgba(31, 122, 77, 0.2);
+  border-radius: 8px;
+  color: var(--ink);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 11px 12px;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease;
+}
+
+.feedback-community-link:hover,
+.feedback-community-link:focus-visible {
+  background: #e7f2e8;
+  border-color: rgba(31, 122, 77, 0.36);
+}
+
+.feedback-community-link > span {
+  color: var(--muted);
+  display: grid;
+  font-size: 0.82rem;
+  gap: 2px;
+  line-height: 1.35;
+}
+
+.feedback-community-link strong {
+  color: var(--ink);
+  font-size: 0.88rem;
 }
 
 .feedback-option {
@@ -1709,6 +1806,16 @@ button {
 
   .nav-actions .button {
     padding: 0 12px;
+  }
+
+  .nav-community {
+    min-width: 44px;
+    padding: 0;
+    width: 44px;
+  }
+
+  .nav-community span {
+    display: none;
   }
 
   .preview-header,
@@ -1853,6 +1960,11 @@ button {
 
   .feedback-option {
     justify-content: start;
+  }
+
+  .footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

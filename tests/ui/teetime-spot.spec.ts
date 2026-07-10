@@ -5,6 +5,23 @@ const smokeBaseUrl =
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {
+  test("publishes the Discord community for feedback and product suggestions", async ({ page }) => {
+    await page.goto("/");
+
+    const discordLinks = page.locator('a[href="https://discord.gg/ThexF85xCd"]');
+    await expect(discordLinks).toHaveCount(2);
+    await expect(
+      page.getByRole("link", {
+        name: "Join Tee Time Spot Discord for feedback and product suggestions"
+      })
+    ).toBeVisible();
+    await expect(page.getByText("Feedback and product suggestions", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Open feedback form" }).click();
+    await expect(page.getByText("Have a product suggestion?", { exact: true })).toBeVisible();
+    await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(3);
+  });
+
   test("onboarding discovery, ranking limit, and controls are usable", async ({
     page
   }, testInfo) => {
