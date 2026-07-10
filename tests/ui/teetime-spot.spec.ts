@@ -5,16 +5,21 @@ const smokeBaseUrl =
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {
-  test("publishes the Discord community for feedback and product suggestions", async ({ page }) => {
+  test("publishes the Discord community for feedback and product suggestions", async ({
+    page
+  }, testInfo) => {
     await page.goto("/");
 
     const discordLinks = page.locator('a[href="https://discord.gg/ThexF85xCd"]');
     await expect(discordLinks).toHaveCount(2);
-    await expect(
-      page.getByRole("link", {
-        name: "Join Tee Time Spot Discord for feedback and product suggestions"
-      })
-    ).toBeVisible();
+    const navDiscordLink = page.locator(
+      'a[aria-label="Join Tee Time Spot Discord for feedback and product suggestions"]'
+    );
+    if (testInfo.project.name.includes("mobile")) {
+      await expect(navDiscordLink).toBeHidden();
+    } else {
+      await expect(navDiscordLink).toBeVisible();
+    }
     await expect(
       page.getByRole("heading", { name: "Stop settling for your backup course." })
     ).toBeVisible();
@@ -37,13 +42,18 @@ test.describe("Tee Time Spot UI smoke", () => {
     page
   }, testInfo) => {
     const issues = collectPageIssues(page);
+    const isMobile = testInfo.project.name.includes("mobile");
 
     await page.goto("/search");
 
     await expect(
       page.getByRole("heading", { name: /Tell us where and when you want to play/i })
     ).toBeVisible();
-    await expect(page.getByText("Start getting alerts")).toBeVisible();
+    if (isMobile) {
+      await expect(page.getByText("Start getting alerts")).toBeHidden();
+    } else {
+      await expect(page.getByText("Start getting alerts")).toBeVisible();
+    }
     await expect(page.locator(".summary-panel button")).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
     await expect(page.locator("#searchRadius")).toHaveValue("15");
@@ -90,6 +100,13 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator(".alert-error[role='alert']")).toContainText(
       "You can prioritize up to 5 courses."
     );
+
+    if (isMobile) {
+      const selectionToggle = page.locator(".mobile-selection-toggle");
+      await expect(selectionToggle).toContainText("5 courses selected");
+      await selectionToggle.click();
+      await expect(page.locator(".figma-selected-panel.is-mobile-open")).toBeVisible();
+    }
 
     let saveRequestCount = 0;
     await page.route("**/api/searches", async (route) => {

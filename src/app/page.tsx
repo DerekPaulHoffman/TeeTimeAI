@@ -64,7 +64,12 @@ export default function HomePage() {
       <section className="hero">
         <div className="hero-content">
           <p className="eyebrow">For public course golfers</p>
-          <h1>Stop settling for your backup course.</h1>
+          <h1>
+            Stop settling
+            <br className="mobile-hero-break" /> for
+            <br />
+            your backup course.
+          </h1>
           <p className="hero-copy">
             Your favorites were full, so you booked your third choice. We watch your top
             picks around the clock — the moment a spot opens, you get a direct link to grab

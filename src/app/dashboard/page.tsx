@@ -271,10 +271,17 @@ function DashboardSearchCard({
             <Mail size={16} />
             <span>Emails</span>
             <strong className="watch-stat-email">
-              {search.user.email}
-              {search.additionalEmails.length > 0
-                ? ` +${search.additionalEmails.length} extra`
-                : ""}
+              <span className="watch-stat-email-full">
+                {search.user.email}
+                {search.additionalEmails.length > 0
+                  ? ` +${search.additionalEmails.length} extra`
+                  : ""}
+              </span>
+              <span className="watch-stat-email-compact">
+                {search.additionalEmails.length > 0
+                  ? `${search.additionalEmails.length + 1} recipients`
+                  : "Just you"}
+              </span>
             </strong>
           </div>
         </div>

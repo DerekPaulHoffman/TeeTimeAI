@@ -177,6 +177,8 @@ export function TeeTimeIntake({
   const [saving, setSaving] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
+  const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
+
   const minSearchDate = tomorrow();
 
   const selectedIds = useMemo(
@@ -335,7 +337,11 @@ export function TeeTimeIntake({
   }
 
   function removeCourse(placeId: string) {
-    setSelected((current) => current.filter((course) => course.googlePlaceId !== placeId));
+    const nextSelected = selected.filter((course) => course.googlePlaceId !== placeId);
+    setSelected(nextSelected);
+    if (nextSelected.length === 0) {
+      setMobileSelectionOpen(false);
+    }
   }
 
   function moveSelectedCourse(placeId: string, direction: -1 | 1) {
@@ -633,7 +639,7 @@ export function TeeTimeIntake({
                 {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
                 <div className="course-copy">
                   <div className="figma-course-badges">
-                    <span className="figma-course-pill is-public"><Trees size={11} /> Public course</span>
+                    <span className="figma-course-pill is-public"><Trees size={11} /> Public</span>
                     {course.rating ? (
                       <span className="figma-course-pill is-rating">
                         <Star size={11} /> {course.rating.toFixed(1)}
@@ -642,7 +648,7 @@ export function TeeTimeIntake({
                     {course.distanceMeters !== undefined ? (
                       <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
                     ) : null}
-                    <span className="figma-course-pill">18 holes · Par 72</span>
+                    <span className="figma-course-pill">18H · Par 72</span>
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
@@ -689,7 +695,14 @@ export function TeeTimeIntake({
         ) : null}
         </div>
 
-      <aside className="summary-panel figma-selected-panel">
+      <aside
+        className={
+          mobileSelectionOpen
+            ? "summary-panel figma-selected-panel is-mobile-open"
+            : "summary-panel figma-selected-panel"
+        }
+        id="mobile-watchlist-panel"
+      >
         <div className="figma-selected-header">
           <span className="figma-selected-icon">
             <MapPinned size={18} />
@@ -798,21 +811,27 @@ export function TeeTimeIntake({
       <CourseResultsMap courses={[]} origin={searchCoordinates} />
       {selected.length > 0 ? (
         <div className="mobile-selection-bar">
-          <span>{selected.length} {selected.length === 1 ? "course" : "courses"} selected</span>
-          <a href="#search-form-guidance">Reorder</a>
           <button
-            className="button button-primary"
+            aria-controls="mobile-watchlist-panel"
+            aria-expanded={mobileSelectionOpen}
+            className="mobile-selection-toggle"
             type="button"
-            onClick={saveSearch}
-            disabled={
-              saving ||
-              isCurrentSearchSaved ||
-              Boolean(saveBlocker) ||
-              selected.length === 0 ||
-              !alertEmail.trim()
-            }
+            onClick={() => setMobileSelectionOpen((open) => !open)}
           >
-            Start alerts
+            <span className="mobile-selection-summary">
+              <span className="mobile-selection-ranks" aria-hidden="true">
+                {selected.map((course, index) => (
+                  <span key={course.googlePlaceId}>{index + 1}</span>
+                ))}
+              </span>
+              <strong>
+                {selected.length} {selected.length === 1 ? "course" : "courses"} selected
+              </strong>
+            </span>
+            <span className="mobile-selection-view">
+              {mobileSelectionOpen ? "Close" : "View & reorder"}
+              <ChevronDown className={mobileSelectionOpen ? "is-open" : ""} size={15} />
+            </span>
           </button>
         </div>
       ) : null}

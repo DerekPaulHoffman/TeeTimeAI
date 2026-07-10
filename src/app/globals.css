@@ -4995,3 +4995,537 @@ button {
     padding: 0 16px 10px;
   }
 }
+
+/* Figma Make v36: phone-first refinements across every public surface. */
+.mobile-hero-break,
+.watch-stat-email-compact {
+  display: none;
+}
+
+.watch-stat-email-full,
+.watch-stat-email-compact {
+  color: inherit;
+  font: inherit;
+  grid-column: auto;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.email-browser-chrome {
+  background: #e8eaed;
+}
+
+.email-browser-chrome span:nth-child(1) {
+  background: #fc5f5a;
+}
+
+.email-browser-chrome span:nth-child(2) {
+  background: #fdbc40;
+}
+
+.email-browser-chrome span:nth-child(3) {
+  background: #33c748;
+}
+
+.email-browser-chrome strong {
+  background: #ffffff;
+  border-radius: 6px;
+  flex: 1;
+  margin-left: 4px;
+  padding: 6px 10px;
+  text-align: center;
+}
+
+@media (max-width: 920px) {
+  .dashboard-sidebar,
+  .preview-sidebar,
+  .search-page .figma-selected-panel {
+    display: none;
+  }
+
+  .search-page .figma-selected-panel.is-mobile-open {
+    bottom: 72px;
+    box-shadow: 0 -8px 32px rgba(17, 26, 34, 0.3);
+    display: block;
+    left: 12px;
+    margin: 0;
+    max-height: calc(100svh - 96px);
+    overflow-y: auto;
+    position: fixed;
+    right: 12px;
+    top: auto;
+    width: auto;
+    z-index: 31;
+  }
+
+  .mobile-selection-bar {
+    background: #111a22;
+    border-radius: 0;
+    bottom: 0;
+    display: block;
+    padding: 0;
+    z-index: 32;
+  }
+
+  .mobile-selection-toggle {
+    align-items: center;
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: #ffffff;
+    display: flex;
+    justify-content: space-between;
+    min-height: 64px;
+    padding: 12px 18px;
+    width: 100%;
+  }
+
+  .mobile-selection-summary {
+    align-items: center;
+    display: flex;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mobile-selection-summary strong {
+    font-size: 0.86rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-selection-ranks {
+    display: flex;
+    gap: 3px;
+  }
+
+  .mobile-selection-ranks > span {
+    align-items: center;
+    background: #d9862f;
+    border-radius: 999px;
+    color: #1d1309;
+    display: flex;
+    font-size: 0.68rem;
+    font-weight: 900;
+    height: 28px;
+    justify-content: center;
+    width: 28px;
+  }
+
+  .mobile-selection-view {
+    align-items: center;
+    color: rgba(255, 255, 255, 0.55);
+    display: flex;
+    flex: 0 0 auto;
+    font-size: 0.78rem;
+    font-weight: 650;
+    gap: 7px;
+    margin-left: 12px;
+  }
+
+  .mobile-selection-view svg {
+    transition: transform 180ms ease;
+  }
+
+  .mobile-selection-view svg.is-open {
+    transform: rotate(180deg);
+  }
+}
+
+@media (max-width: 620px) {
+  .topbar {
+    min-height: 60px;
+    padding: 12px 16px;
+  }
+
+  .brand-mark {
+    height: 30px;
+    width: 30px;
+  }
+
+  .brand-text,
+  .nav-button-label,
+  .nav-community {
+    display: none;
+  }
+
+  .nav-actions {
+    gap: 6px;
+  }
+
+  .nav-actions .button,
+  .nav-actions .button-secondary,
+  .nav-actions .button-primary {
+    height: 40px;
+    min-height: 40px;
+    min-width: 40px;
+    padding: 0;
+    width: 40px;
+  }
+
+  .nav-actions .button-primary:not(.nav-sign-in) {
+    font-size: inherit;
+    gap: 0;
+  }
+
+  .mobile-hero-break {
+    display: block;
+  }
+
+  .hero {
+    background-position: center;
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    max-height: none;
+    min-height: 100svh;
+    padding: 74px 16px 20px;
+  }
+
+  .hero-content {
+    margin: 0;
+    max-width: none;
+  }
+
+  .hero .eyebrow {
+    font-size: 0.69rem;
+    margin-bottom: 16px;
+  }
+
+  .hero h1 {
+    font-size: 44px;
+    line-height: 1.02;
+    max-width: none;
+  }
+
+  .hero-copy {
+    font-size: 1.125rem;
+    line-height: 1.6;
+    margin: 24px 0 28px;
+  }
+
+  .hero-actions {
+    flex-wrap: nowrap;
+    gap: 12px;
+  }
+
+  .hero-actions .button {
+    padding-inline: 20px;
+  }
+
+  .hero-strip {
+    bottom: auto;
+    gap: 12px;
+    grid-template-columns: 1fr;
+    left: auto;
+    margin-top: 16px;
+    max-width: none;
+    position: static;
+    transform: none;
+    width: 100%;
+  }
+
+  .hero-strip-item {
+    min-height: 0;
+    padding: 16px;
+  }
+
+  .hero-strip-item strong {
+    font-size: 0.88rem;
+  }
+
+  .hero-strip-item span {
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .scenario-section,
+  .section-tight,
+  .how-it-works-section,
+  .community-section {
+    padding: 48px 16px;
+  }
+
+  .home-intake-layout {
+    margin-top: 32px;
+  }
+
+  .home-search-form {
+    padding: 20px;
+  }
+
+  .home-form-filter-row {
+    padding: 12px 14px;
+  }
+
+  .home-form-actions {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .home-form-actions .button {
+    min-width: 0;
+    padding-inline: 14px;
+    width: auto;
+  }
+
+  .home-form-actions .button-dark {
+    width: 100%;
+  }
+
+  .home-form-actions p {
+    background: #e6f3f7;
+    border-radius: 12px;
+    color: #174152;
+    grid-column: 1 / -1;
+    margin: 6px 0 0;
+    padding: 12px 14px;
+  }
+
+  .how-it-works-section .section-heading h2 {
+    font-size: 2rem;
+  }
+
+  .community-copy {
+    padding: 30px 24px;
+  }
+
+  .community-points {
+    flex-basis: auto;
+    gap: 16px;
+    padding: 24px;
+    width: 100%;
+  }
+
+  .search-page {
+    padding-top: 60px;
+  }
+
+  .search-page-header {
+    min-height: 140px;
+    padding: 27px 32px 20px;
+  }
+
+  .search-page-header .eyebrow {
+    margin-bottom: 8px;
+  }
+
+  .search-page-header h1 {
+    font-size: 2.25rem;
+    line-height: 1.05;
+  }
+
+  .figma-search-experience {
+    margin-top: 24px;
+    padding-inline: 16px;
+  }
+
+  .figma-search-primary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .figma-search-field,
+  .figma-search-field:nth-child(2) {
+    border-right: 1px solid #f0f4f1;
+    border-top: 0;
+    min-height: 62px;
+    padding: 12px 16px;
+  }
+
+  .figma-search-field:nth-child(even) {
+    border-right: 0;
+  }
+
+  .figma-search-field:nth-child(n + 3) {
+    border-top: 1px solid #f0f4f1;
+  }
+
+  .figma-filter-strip {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+
+  .figma-hole-filter {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .figma-filter-strip .figma-filter-divider {
+    display: none;
+  }
+
+  .figma-distance-label {
+    width: auto;
+  }
+
+  .figma-distance-filter {
+    flex: 1 1 220px;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .figma-search-submit {
+    justify-content: center;
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .search-page .figma-course-list .course-row,
+  .search-page .figma-course-list .course-row-selected {
+    grid-template-areas:
+      "thumbnail"
+      "copy"
+      "actions";
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .search-page .figma-course-list .course-thumbnail,
+  .search-page .figma-course-list .course-row:not(.course-row-selected) .course-thumbnail {
+    border-radius: 15px 15px 0 0;
+    height: 128px;
+    min-height: 128px;
+    width: 100%;
+  }
+
+  .search-page .figma-course-list .course-row-selected .course-thumbnail {
+    box-shadow: inset 0 0 0 999px rgba(16, 83, 56, 0.3);
+  }
+
+  .search-page .figma-course-list .course-copy {
+    padding: 12px 16px 8px;
+  }
+
+  .figma-course-badges .figma-course-pill:last-child {
+    display: inline-flex;
+  }
+
+  .search-page .figma-course-list .course-actions {
+    justify-content: flex-start;
+    padding: 0 16px 12px;
+  }
+
+  .search-page .figma-course-list .course-actions .button-ghost {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
+  .search-page .figma-course-list .figma-add-button {
+    flex: 1;
+  }
+
+  .search-page .figma-course-list .course-rank-overlay {
+    font-size: 0.68rem;
+    height: 24px;
+    left: 12px;
+    top: 12px;
+    width: 24px;
+  }
+
+  .mobile-selection-toggle {
+    padding-inline: 14px;
+  }
+
+  .mobile-selection-summary strong,
+  .mobile-selection-view {
+    font-size: 0.75rem;
+  }
+
+  .mobile-selection-ranks > span {
+    height: 26px;
+    width: 26px;
+  }
+
+  .dashboard-header {
+    align-items: flex-start;
+    flex-direction: row;
+    gap: 12px;
+  }
+
+  .dashboard-header > div {
+    min-width: 0;
+  }
+
+  .dashboard-header h1 {
+    font-size: 2rem;
+  }
+
+  .dashboard-header .button {
+    flex: 0 0 120px;
+    line-height: 1.08;
+    min-height: 54px;
+    padding: 8px 16px;
+    white-space: normal;
+    width: 120px;
+  }
+
+  .dashboard-ready-message small {
+    display: none;
+  }
+
+  .watch-stat-email-full {
+    display: none;
+  }
+
+  .watch-stat-email-compact {
+    display: inline;
+  }
+
+  .watch-course-row {
+    grid-template-columns: 96px minmax(0, 1fr) auto;
+  }
+
+  .dashboard-course-image {
+    grid-row: auto;
+  }
+
+  .watch-course-links {
+    align-items: end;
+    grid-column: auto;
+    justify-items: end;
+    padding: 8px 12px 8px 0;
+  }
+
+  .preview-page {
+    padding: 92px 16px 48px;
+  }
+
+  .preview-header {
+    margin-bottom: 24px;
+  }
+
+  .preview-header > .button {
+    display: none;
+  }
+
+  .preview-header h1 {
+    font-size: 2.25rem;
+    line-height: 1.05;
+    margin-bottom: 10px;
+  }
+
+  .preview-header .meta {
+    font-size: 0.94rem;
+    line-height: 1.55;
+  }
+
+  .email-browser-chrome {
+    gap: 6px;
+    min-height: 64px;
+    padding: 12px 14px;
+  }
+
+  .email-browser-chrome strong {
+    font-size: 0.7rem;
+    margin-left: 4px;
+    padding: 7px 8px;
+  }
+
+  .email-browser-card .email-frame {
+    min-width: 0;
+  }
+}
