@@ -14,7 +14,7 @@ export async function GET() {
 
   if (!hasClerkConfig()) {
     return NextResponse.json(
-      { error: "Clerk accounts are not enabled. Use the dashboard POC view or submit by email." },
+      { error: "Account sign-in is not available yet. You can still submit a new email alert." },
       { status: 503 }
     );
   }

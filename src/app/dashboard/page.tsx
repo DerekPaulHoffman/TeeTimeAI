@@ -21,7 +21,7 @@ import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
-import { listRecentTeeSearches, listTeeSearchesForUser } from "@/lib/searches/service";
+import { listTeeSearchesForUser } from "@/lib/searches/service";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
 
@@ -41,15 +41,7 @@ export default async function DashboardPage() {
   }
 
   if (!hasClerkConfig()) {
-    const searches = await listRecentTeeSearches();
-    return (
-      <DashboardView
-        searches={searches}
-        canManage={false}
-        showRecipientEmail={false}
-        notice="Email alerts are active. Sign-in is being prepared, so recipient details and management controls stay private for now."
-      />
-    );
+    return <AuthUnavailableState />;
   }
 
   const { userId } = await auth();
@@ -427,6 +419,24 @@ function SignedOutState() {
         <h1>Sign in to manage searches</h1>
         <p className="meta">Saved tee time searches are tied to your account.</p>
         <Link className="button button-dark" href="/#start">
+          Back to search
+        </Link>
+      </div>
+    </main>
+  );
+}
+
+function AuthUnavailableState() {
+  return (
+    <main className="dashboard-page">
+      <div className="empty-state">
+        <ShieldAlert size={30} />
+        <h1>Account access is temporarily unavailable</h1>
+        <p className="meta">
+          Saved alerts stay private while sign-in is being configured. Email alerts continue
+          running normally.
+        </p>
+        <Link className="button button-dark" href="/search">
           Back to search
         </Link>
       </div>

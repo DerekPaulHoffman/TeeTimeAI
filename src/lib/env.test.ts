@@ -49,6 +49,15 @@ describe("hasClerkConfig", () => {
 
     expect(hasClerkConfig()).toBe(true);
   });
+
+  it("normalizes copied Clerk values before validating production auth", () => {
+    process.env.VERCEL_ENV = "production";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "\uFEFF pk_live_demo ";
+    process.env.CLERK_SECRET_KEY = "\uFEFFsk_live_demo\n";
+    process.env.CLERK_AUTH_READY = " true ";
+
+    expect(hasClerkConfig()).toBe(true);
+  });
 });
 
 function restoreEnv(key: keyof typeof originalEnv, value: string | undefined) {

@@ -1,6 +1,6 @@
 export function hasClerkConfig() {
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-  const secretKey = process.env.CLERK_SECRET_KEY;
+  const publishableKey = normalizeEnvValue(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+  const secretKey = normalizeEnvValue(process.env.CLERK_SECRET_KEY);
 
   if (!publishableKey || !secretKey || !isClerkKeyPair(publishableKey, secretKey)) {
     return false;
@@ -10,7 +10,7 @@ export function hasClerkConfig() {
     return (
       publishableKey.startsWith("pk_live_") &&
       secretKey.startsWith("sk_live_") &&
-      process.env.CLERK_AUTH_READY === "true"
+      normalizeEnvValue(process.env.CLERK_AUTH_READY) === "true"
     );
   }
 
@@ -29,4 +29,8 @@ function isClerkKeyPair(publishableKey?: string, secretKey?: string) {
   return Boolean(
     publishableKey?.match(/^pk_(test|live)_/) && secretKey?.match(/^sk_(test|live)_/)
   );
+}
+
+function normalizeEnvValue(value?: string) {
+  return value?.replace(/^\uFEFF/, "").trim();
 }

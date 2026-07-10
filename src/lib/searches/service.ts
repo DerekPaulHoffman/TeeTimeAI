@@ -168,24 +168,9 @@ export async function listTeeSearchesForUser(userId: string) {
   });
 }
 
-export async function listRecentTeeSearches(limit = 20) {
-  return prisma.teeSearch.findMany({
-    orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
-    take: limit,
-    include: searchListInclude
-  });
-}
-
 export async function getTeeSearchForUser(userId: string, searchId: string) {
   return prisma.teeSearch.findUnique({
     where: { id: searchId, userId },
-    select: { id: true, status: true }
-  });
-}
-
-export async function getTeeSearchForPoc(searchId: string) {
-  return prisma.teeSearch.findUnique({
-    where: { id: searchId },
     select: { id: true, status: true }
   });
 }
@@ -324,32 +309,11 @@ function normalizeCoursePreferenceRankUpdates(
   return normalized.sort((a, b) => a.rank - b.rank);
 }
 
-export async function updateTeeSearchForPoc(searchId: string, input: TeeSearchUpdateInput) {
-  const search = await prisma.teeSearch.findUnique({
-    where: { id: searchId },
-    select: { userId: true }
-  });
-
-  if (!search) {
-    throw new Error("Search not found");
-  }
-
-  return updateTeeSearchForUser(search.userId, searchId, input);
-}
-
 export async function deleteTeeSearchForUser(userId: string, searchId: string) {
   return prisma.teeSearch.delete({
     where: {
       id: searchId,
       userId
-    }
-  });
-}
-
-export async function deleteTeeSearchForPoc(searchId: string) {
-  return prisma.teeSearch.delete({
-    where: {
-      id: searchId
     }
   });
 }

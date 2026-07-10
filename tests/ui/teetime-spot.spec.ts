@@ -160,7 +160,7 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await expect(
       page.getByRole("heading", {
-        name: /My Alerts Dashboard|Sign in to manage searches|Dashboard setup needed/i
+        name: /My Alerts Dashboard|Sign in to manage searches|Dashboard setup needed|Account access is temporarily unavailable/i
       })
     ).toBeVisible();
     await expect(
