@@ -175,8 +175,8 @@ describe("SearchStatusActions", () => {
 
     expect(screen.getByRole("status")).toBeTruthy();
     expect(screen.getByText(/tee times updated/i)).toBeTruthy();
-    expect(screen.getByText(/last checked aug 14, 8:00 am edt/i)).toBeTruthy();
-    expect(screen.getByText(/next check: aug 14, 8:15 am edt/i)).toBeTruthy();
+    expect(screen.getByText(/last checked fri, aug 14, 8:00 am edt/i)).toBeTruthy();
+    expect(screen.getByText(/next check: fri, aug 14, 8:15 am edt/i)).toBeTruthy();
   });
 
   it("keeps refreshing the dashboard while a check is in progress", () => {

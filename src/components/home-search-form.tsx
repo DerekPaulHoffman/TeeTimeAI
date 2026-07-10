@@ -153,7 +153,7 @@ export function HomeSearchForm() {
       <div className="home-form-actions">
         <button className="button button-dark" type="submit">
           <Search size={17} />
-          Find courses
+          Browse courses
         </button>
         <button className="button button-ghost" onClick={useMyLocation} type="button">
           <LocateFixed size={17} />

@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
-import { Bell, LogIn, MessageCircle, Plus } from "lucide-react";
+import { Bell, LogIn, Search } from "lucide-react";
 
+import { DiscordMark } from "@/components/discord-mark";
 import { discordInviteUrl } from "@/lib/community";
 
 export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
@@ -16,8 +17,8 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
           My alerts
         </Link>
         <Link className="button button-primary" href="/search" prefetch={false}>
-          <Plus size={17} />
-          New search
+          <Search size={15} />
+          Find a tee time
         </Link>
       </nav>
     );
@@ -41,8 +42,8 @@ function ConfiguredAuthNav() {
         My alerts
       </Link>
       <Link className="button button-primary" href="/search" prefetch={false}>
-        <Plus size={17} />
-        New search
+        <Search size={15} />
+        Find a tee time
       </Link>
       {isSignedIn ? (
         <UserButton />
@@ -67,8 +68,8 @@ function DiscordNavLink() {
       rel="noreferrer"
       target="_blank"
     >
-      <MessageCircle size={17} />
-      <span>Discord</span>
+      <DiscordMark size={15} />
+      <span>Community</span>
     </a>
   );
 }

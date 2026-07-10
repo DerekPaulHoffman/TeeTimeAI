@@ -164,7 +164,7 @@ export async function listTeeSearchesForUser(userId: string) {
   return prisma.teeSearch.findMany({
     where: { userId },
     orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
-    include: searchInclude
+    include: searchListInclude
   });
 }
 
@@ -172,7 +172,7 @@ export async function listRecentTeeSearches(limit = 20) {
   return prisma.teeSearch.findMany({
     orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
     take: limit,
-    include: searchInclude
+    include: searchListInclude
   });
 }
 
@@ -387,5 +387,12 @@ export const searchInclude = {
     orderBy: { observedAt: "desc" },
     take: 5,
     include: { course: true }
+  }
+} satisfies Prisma.TeeSearchInclude;
+
+const searchListInclude = {
+  ...searchInclude,
+  user: {
+    select: { email: true }
   }
 } satisfies Prisma.TeeSearchInclude;

@@ -451,12 +451,15 @@ export function TeeTimeIntake({
         <div className="figma-search-primary">
           <div className="figma-search-field figma-location-field">
             <label htmlFor="location">Location</label>
-            <input
-              id="location"
-              value={locationText}
-              onChange={(event) => setLocationText(event.target.value)}
-              placeholder="City, state, or ZIP"
-            />
+            <div className="figma-search-value">
+              <span className="figma-search-value-icon" aria-hidden="true">📍</span>
+              <input
+                id="location"
+                value={locationText}
+                onChange={(event) => setLocationText(event.target.value)}
+                placeholder="City, state, or ZIP"
+              />
+            </div>
             <button
               aria-label="Use current location"
               className="figma-use-location"
@@ -470,81 +473,81 @@ export function TeeTimeIntake({
           </div>
           <label className="figma-search-field" htmlFor="players">
             <span>Players</span>
-            <select
-              id="players"
-              value={players}
-              onChange={(event) => setPlayers(Number(event.target.value))}
-            >
-              {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
-                <option key={count} value={count}>
-                  {count} {count === 1 ? "player" : "players"}
-                </option>
-              ))}
-            </select>
+            <div className="figma-search-value">
+              <span className="figma-search-value-icon" aria-hidden="true">🏌️</span>
+              <select
+                id="players"
+                value={players}
+                onChange={(event) => setPlayers(Number(event.target.value))}
+              >
+                {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
+                  <option key={count} value={count}>
+                    {count} {count === 1 ? "player" : "players"}
+                  </option>
+                ))}
+              </select>
+            </div>
           </label>
           <label className="figma-search-field" htmlFor="date">
             <span>Date</span>
-            <input
-              aria-invalid={!isDateFuture}
-              aria-describedby={!isDateFuture ? "search-form-guidance" : undefined}
-              id="date"
-              min={minSearchDate}
-              type="date"
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-            />
-          </label>
-          <fieldset className="figma-search-field figma-time-field">
-            <legend>Time window</legend>
-            <div>
+            <div className="figma-search-value">
+              <span className="figma-search-value-icon" aria-hidden="true">📅</span>
               <input
-                aria-label="Start time"
-                id="startTime"
-                type="time"
-                value={startTime}
-                onChange={(event) => setStartTime(event.target.value)}
-              />
-              <span aria-hidden="true">–</span>
-              <input
-                aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
-                aria-invalid={!isTimeWindowValid}
-                aria-label="End time"
-                id="endTime"
-                type="time"
-                value={endTime}
-                onChange={(event) => setEndTime(event.target.value)}
+                aria-invalid={!isDateFuture}
+                aria-describedby={!isDateFuture ? "search-form-guidance" : undefined}
+                id="date"
+                min={minSearchDate}
+                type="date"
+                value={date}
+                onChange={(event) => setDate(event.target.value)}
               />
             </div>
+          </label>
+          <fieldset className="figma-search-field figma-time-field">
+            <legend>Window</legend>
+            <div className="figma-search-value">
+              <span className="figma-search-value-icon" aria-hidden="true">⏰</span>
+              <div className="figma-time-inputs">
+                <input
+                  aria-label="Start time"
+                  id="startTime"
+                  type="time"
+                  value={startTime}
+                  onChange={(event) => setStartTime(event.target.value)}
+                />
+                <span aria-hidden="true">–</span>
+                <input
+                  aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
+                  aria-invalid={!isTimeWindowValid}
+                  aria-label="End time"
+                  id="endTime"
+                  type="time"
+                  value={endTime}
+                  onChange={(event) => setEndTime(event.target.value)}
+                />
+              </div>
+            </div>
           </fieldset>
-          <button
-            className="figma-search-submit"
-            type="button"
-            onClick={discoverByTypedLocation}
-            disabled={loading}
-          >
-            <Search size={15} />
-            {loading ? "Searching" : "Search"}
-          </button>
         </div>
         <div className="figma-filter-strip">
-          <span className="figma-filter-title">Filters</span>
-          <span className="figma-filter-divider" aria-hidden="true" />
           <div className="figma-hole-filter" aria-label="Holes">
             <strong>Holes</strong>
-            {(["any", "9", "18"] as const).map((value) => (
-              <button
-                aria-pressed={holeFilter === value}
-                className={holeFilter === value ? "is-active" : ""}
-                key={value}
-                onClick={() => setHoleFilter(value)}
-                type="button"
-              >
-                {value === "any" ? "Any" : value}
-              </button>
-            ))}
+            <div className="figma-hole-options">
+              {(["any", "9", "18"] as const).map((value) => (
+                <button
+                  aria-pressed={holeFilter === value}
+                  className={holeFilter === value ? "is-active" : ""}
+                  key={value}
+                  onClick={() => setHoleFilter(value)}
+                  type="button"
+                >
+                  {value === "any" ? "Any" : `${value}-hole`}
+                </button>
+              ))}
+            </div>
           </div>
           <span className="figma-filter-divider" aria-hidden="true" />
-          <strong className="figma-within-label">Within</strong>
+          <strong className="figma-distance-label">Distance</strong>
           <label className="figma-distance-filter" htmlFor="searchRadius">
             <span><em>1 mi</em><b>within {searchRadiusMiles} mi</b><em>50 mi</em></span>
             <input
@@ -570,9 +573,19 @@ export function TeeTimeIntake({
               }}
               type="button"
             >
-              Reset
+              <X size={10} />
+              Clear
             </button>
           ) : null}
+          <button
+            className="figma-search-submit"
+            type="button"
+            onClick={discoverByTypedLocation}
+            disabled={loading}
+          >
+            <Search size={15} />
+            {loading ? "Searching" : "Search"}
+          </button>
         </div>
       </section>
 

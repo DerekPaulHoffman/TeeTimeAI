@@ -15,7 +15,18 @@ test.describe("Tee Time Spot UI smoke", () => {
         name: "Join Tee Time Spot Discord for feedback and product suggestions"
       })
     ).toBeVisible();
-    await expect(page.getByText("Feedback and product suggestions", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Stop settling for your backup course." })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Built with golfers, not just for them." })
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "Share feedback, suggest features, swap public-course tips, and help us make Tee Time Spot more useful.",
+        { exact: true }
+      )
+    ).toBeVisible();
 
     await page.getByRole("button", { name: "Open feedback form" }).click();
     await expect(page.getByText("Have a product suggestion?", { exact: true })).toBeVisible();
@@ -132,14 +143,14 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await expect(
       page.getByRole("heading", {
-        name: /Course results and ranked watchlist|Sign in to manage searches|Dashboard setup needed/i
+        name: /My Alerts Dashboard|Sign in to manage searches|Dashboard setup needed/i
       })
     ).toBeVisible();
     await expect(
       page
         .getByRole("main")
         .getByRole("link", {
-          name: /New search|Add another search|Back to search|Preview intake/i
+          name: /Find a tee time|Add another search|Back to search|Preview intake/i
         })
         .first()
     ).toBeVisible();
