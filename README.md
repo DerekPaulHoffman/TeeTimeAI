@@ -57,15 +57,17 @@ Not allowed:
 
 ### Public Course Discovery
 
-Course discovery starts with Google Places Nearby Search using `includedTypes: ["golf_course"]`.
+Course discovery starts with Google Places Nearby Search constrained to the `golf_course` primary-type family. A separate IDs-only Text Search for `public golf courses` supplies positive evidence for ambiguous club-style listings without increasing the main result payload.
 
 The app currently filters likely non-public or non-course results because Google Places can include stores, simulators, and private clubs in the broader golf surface. Current filters require:
 
 - `primaryType === "golf_course"`
 - `types` includes `golf_course`
 - `businessStatus` is absent or `OPERATIONAL`
-- Excludes non-course or likely non-public primary types such as `sporting_goods_store`, `indoor_golf_course`, `sports_club`, and `association_or_organization`
-- Excludes known non-course/private-name patterns such as `Golf Galaxy`, `PGA TOUR Superstore`, `country club`, `private`, `members only`, `simulator`, and `indoor`
+- Excludes non-course primary types and secondary indoor-course signals
+- Excludes generic ancillary surfaces such as club fitting, pro shops, general stores, clubhouses, driving ranges, simulators, and junior or disc-golf clubs
+- Rejects explicit private/member names and ambiguous membership-club listings unless Google also returns them for the semantic public-course query
+- Collapses separate Place IDs that normalize to the same course identity at the same address or within the same venue, while preserving distinct co-located courses
 
 This is intentionally conservative. False positives, such as stores or private clubs, should be filtered before they reach the ranking UX. False negatives should be fixed carefully with evidence from the real Places result and the official course website.
 

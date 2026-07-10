@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  dedupeGolfCoursePlaces,
   filterPublicGolfCoursePlaces,
   getGooglePlacesApiKey,
   mapGooglePlaceToCourseCandidate,
@@ -88,7 +89,7 @@ describe("Google Places mapping", () => {
     ]);
   });
 
-  it("filters golf stores, indoor simulators, private clubs, and closed businesses", () => {
+  it("filters ancillary listings, private membership clubs, and closed businesses", () => {
     const places = filterPublicGolfCoursePlaces([
       {
         id: "places/golf-galaxy",
@@ -115,20 +116,44 @@ describe("Google Places mapping", () => {
         location: { latitude: 41.29, longitude: -73.04 }
       },
       {
-        id: "places/shorehaven",
-        displayName: { text: "Shorehaven Golf Club" },
+        id: "places/presidio-fitting",
+        displayName: { text: "Presidio Club Fitting" },
         primaryType: "golf_course",
         types: ["golf_course"],
         businessStatus: "OPERATIONAL",
         location: { latitude: 41.097, longitude: -73.392 }
       },
       {
-        id: "places/silvermine",
-        displayName: { text: "Silvermine Golf Club" },
+        id: "places/general-store",
+        displayName: { text: "General Store" },
         primaryType: "golf_course",
         types: ["golf_course"],
         businessStatus: "OPERATIONAL",
         location: { latitude: 41.163, longitude: -73.42 }
+      },
+      {
+        id: "places/alameda-junior",
+        displayName: { text: "Alameda Junior Golf Club" },
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 41.164, longitude: -73.421 }
+      },
+      {
+        id: "places/olympic",
+        displayName: { text: "The Olympic Club" },
+        primaryType: "golf_course",
+        types: ["golf_course", "sports_club", "association_or_organization"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 37.709, longitude: -122.495 }
+      },
+      {
+        id: "places/monarch",
+        displayName: { text: "Monarch Bay Golf Club" },
+        primaryType: "golf_course",
+        types: ["golf_course", "sports_club", "association_or_organization"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 37.695, longitude: -122.186 }
       },
       {
         id: "places/x-golf",
@@ -154,9 +179,60 @@ describe("Google Places mapping", () => {
         businessStatus: "OPERATIONAL",
         location: { latitude: 41.16, longitude: -73.12 }
       }
+    ], { publicCourseEvidenceIds: new Set(["monarch", "olympic"]) });
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Monarch Bay Golf Club",
+      "Short Beach Golf Course"
+    ]);
+  });
+
+  it("dedupes the same logical course without collapsing distinct courses at one venue", () => {
+    const places = dedupeGolfCoursePlaces([
+      {
+        id: "places/presidio-canonical",
+        displayName: { text: "Presidio Golf Course" },
+        formattedAddress: "300 Finley Rd, San Francisco, CA 94129, USA",
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        rating: 4.5,
+        websiteUri: "https://www.presidiogolf.com/",
+        photos: [{ name: "places/presidio-canonical/photos/1" }],
+        location: { latitude: 37.79049, longitude: -122.45979 }
+      },
+      {
+        id: "places/presidio-duplicate",
+        displayName: { text: "Presidio Golf" },
+        formattedAddress: "300 Finley Rd, San Francisco, CA 94129, USA",
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        location: { latitude: 37.79057, longitude: -122.45987 }
+      },
+      {
+        id: "places/fleming",
+        displayName: { text: "Fleming 9 Course" },
+        formattedAddress: "99 Harding Rd, San Francisco, CA 94132, USA",
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        websiteUri: "https://tpc.com/tpc-harding-park-fleming-course",
+        location: { latitude: 37.72563, longitude: -122.49106 }
+      },
+      {
+        id: "places/harding",
+        displayName: { text: "TPC Harding Park" },
+        formattedAddress: "99 Harding Rd, San Francisco, CA 94132, USA",
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        websiteUri: "https://tpc.com/hardingpark",
+        location: { latitude: 37.72482, longitude: -122.4932 }
+      }
     ]);
 
-    expect(places.map((place) => place.displayName?.text)).toEqual(["Short Beach Golf Course"]);
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Presidio Golf Course",
+      "Fleming 9 Course",
+      "TPC Harding Park"
+    ]);
   });
 
   it("merges popularity and distance ranked Places results before filtering", async () => {
@@ -220,6 +296,12 @@ describe("Google Places mapping", () => {
             }
           ]
         })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [{ id: "places/centennial" }, { id: "places/tashua" }, { id: "places/fairchild" }]
+        })
       } as Response);
 
     const courses = await searchNearbyGolfCourses({
@@ -235,7 +317,7 @@ describe("Google Places mapping", () => {
     ]);
     expect(courses[0]?.distanceMeters).toBe(0);
     expect(courses[1]?.distanceMeters).toBeLessThan(courses[2]?.distanceMeters ?? 0);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "https://places.googleapis.com/v1/places:searchNearby",
@@ -243,7 +325,7 @@ describe("Google Places mapping", () => {
         headers: expect.objectContaining({
           "X-Goog-FieldMask": expect.stringContaining("places.primaryType")
         }),
-        body: expect.stringContaining('"rankPreference":"POPULARITY"')
+        body: expect.stringContaining('"includedPrimaryTypes":["golf_course"]')
       })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -253,5 +335,124 @@ describe("Google Places mapping", () => {
         body: expect.stringContaining('"rankPreference":"DISTANCE"')
       })
     );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://places.googleapis.com/v1/places:searchText",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Goog-FieldMask": "places.id"
+        }),
+        body: expect.stringContaining('"textQuery":"public golf courses"')
+      })
+    );
+  });
+
+  it("removes SF sub-venues and an uncorroborated private club from discovery", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/presidio",
+              displayName: { text: "Presidio Golf Course" },
+              formattedAddress: "300 Finley Rd, San Francisco, CA 94129, USA",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.79049, longitude: -122.45979 }
+            },
+            {
+              id: "places/olympic",
+              displayName: { text: "The Olympic Club" },
+              formattedAddress: "599 CA-35, San Francisco, CA 94132, USA",
+              primaryType: "golf_course",
+              types: ["golf_course", "sports_club", "association_or_organization"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.70939, longitude: -122.49463 }
+            },
+            {
+              id: "places/monarch",
+              displayName: { text: "Monarch Bay Golf Club" },
+              formattedAddress: "13800 Monarch Bay Dr, San Leandro, CA 94577, USA",
+              primaryType: "golf_course",
+              types: ["golf_course", "sports_club", "association_or_organization"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.6951, longitude: -122.1856 }
+            }
+          ]
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/presidio-fitting",
+              displayName: { text: "Presidio Club Fitting" },
+              formattedAddress: "300 Finley Rd, San Francisco, CA 94129, USA",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.79057, longitude: -122.45987 }
+            },
+            {
+              id: "places/general-store",
+              displayName: { text: "General Store" },
+              formattedAddress: "San Francisco, CA 94129, USA",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.79425, longitude: -122.46874 }
+            },
+            {
+              id: "places/fleming",
+              displayName: { text: "Fleming 9 Course" },
+              formattedAddress: "99 Harding Rd, San Francisco, CA 94132, USA",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.72563, longitude: -122.49106 }
+            },
+            {
+              id: "places/harding",
+              displayName: { text: "TPC Harding Park" },
+              formattedAddress: "99 Harding Rd, San Francisco, CA 94132, USA",
+              primaryType: "golf_course",
+              types: ["golf_course", "sports_club", "association_or_organization"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 37.72482, longitude: -122.4932 }
+            }
+          ]
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            { id: "places/presidio" },
+            { id: "places/monarch" },
+            { id: "places/fleming" },
+            { id: "places/harding" }
+          ]
+        })
+      } as Response);
+
+    const courses = await searchNearbyGolfCourses({
+      latitude: 37.7749,
+      longitude: -122.4194,
+      radiusMeters: 38624
+    });
+
+    expect(courses.map((course) => course.name)).toEqual(
+      expect.arrayContaining([
+        "Presidio Golf Course",
+        "Monarch Bay Golf Club",
+        "Fleming 9 Course",
+        "TPC Harding Park"
+      ])
+    );
+    expect(courses).toHaveLength(4);
   });
 });
