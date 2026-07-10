@@ -5638,3 +5638,130 @@ button {
     min-width: 0;
   }
 }
+
+/* Signed-out dashboard and mobile account access refinements. */
+.dashboard-auth-page {
+  align-items: start;
+  display: grid;
+  min-height: calc(100svh - 86px);
+}
+
+.empty-state-auth {
+  margin-inline: auto;
+  max-width: 680px;
+  padding: clamp(32px, 6vw, 52px);
+  width: 100%;
+}
+
+.empty-state-auth-icon {
+  align-items: center;
+  background: #e7eee8;
+  border-radius: 999px;
+  color: var(--fairway-dark);
+  display: inline-flex;
+  height: 52px;
+  justify-content: center;
+  width: 52px;
+}
+
+.empty-state-auth h1 {
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+  margin: 26px 0 0;
+  max-width: 12ch;
+}
+
+.empty-state-auth .meta {
+  font-size: 1rem;
+  line-height: 1.6;
+  margin: 18px 0 0;
+  max-width: 34rem;
+}
+
+.dashboard-auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.feedback-widget {
+  pointer-events: none;
+}
+
+.feedback-widget > * {
+  pointer-events: auto;
+}
+
+@media (max-width: 620px) {
+  .nav-actions .nav-sign-in {
+    display: inline-flex;
+    font-size: 0.76rem;
+    gap: 6px;
+    min-width: auto;
+    padding-inline: 12px;
+    width: auto;
+  }
+
+  .dashboard-auth-page {
+    align-items: start;
+    padding: 84px 16px 40px;
+  }
+
+  .empty-state-auth {
+    border-radius: 16px;
+    padding: 26px 22px 24px;
+  }
+
+  .empty-state-auth-icon {
+    height: 46px;
+    width: 46px;
+  }
+
+  .empty-state-auth h1 {
+    font-size: 2.15rem;
+    margin-top: 22px;
+  }
+
+  .empty-state-auth .meta {
+    font-size: 0.94rem;
+    line-height: 1.55;
+    margin-top: 14px;
+  }
+
+  .dashboard-auth-actions {
+    display: grid;
+    margin-top: 24px;
+  }
+
+  .dashboard-auth-actions .button {
+    min-height: 48px;
+    width: 100%;
+  }
+
+  .feedback-widget {
+    bottom: max(16px, env(safe-area-inset-bottom));
+    left: 16px;
+    right: 16px;
+  }
+
+  .feedback-launcher,
+  .dashboard-page + .feedback-widget .feedback-launcher {
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    box-shadow: 0 8px 24px rgba(17, 29, 24, 0.14);
+    color: var(--ink);
+    font-size: 0.78rem;
+    gap: 7px;
+    min-height: 42px;
+    min-width: 0;
+    padding: 0 14px;
+    width: auto;
+  }
+
+  .feedback-launcher span {
+    display: inline;
+  }
+}

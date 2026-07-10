@@ -16,6 +16,7 @@ import {
   Users
 } from "lucide-react";
 
+import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { formatDateInputValue } from "@/lib/dates/local-date";
@@ -413,15 +414,18 @@ function SetupState() {
 
 function SignedOutState() {
   return (
-    <main className="dashboard-page">
-      <div className="empty-state">
-        <ShieldAlert size={30} />
+    <main className="dashboard-page dashboard-auth-page">
+      <section className="empty-state empty-state-auth">
+        <span className="empty-state-auth-icon" aria-hidden="true">
+          <ShieldAlert size={26} />
+        </span>
         <h1>Sign in to manage searches</h1>
-        <p className="meta">Saved tee time searches are tied to your account.</p>
-        <Link className="button button-dark" href="/#start">
-          Back to search
-        </Link>
-      </div>
+        <p className="meta">
+          Your saved tee time searches are tied to your account. Sign in to view, pause, or
+          update them.
+        </p>
+        <DashboardSignInActions />
+      </section>
     </main>
   );
 }

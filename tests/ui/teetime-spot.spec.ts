@@ -187,6 +187,24 @@ test.describe("Tee Time Spot UI smoke", () => {
         .first()
     ).toBeVisible();
 
+    const signedOutHeading = page.getByRole("heading", { name: "Sign in to manage searches" });
+    if (await signedOutHeading.isVisible()) {
+      await expect(page.getByRole("main").getByRole("button", { name: "Sign in" })).toBeVisible();
+      await expect(
+        page.getByRole("main").getByRole("link", { name: "Back to search" })
+      ).toBeVisible();
+
+      if (testInfo.project.name === "chromium-mobile") {
+        await expect(page.locator(".topbar").getByRole("button", { name: "Sign in" })).toBeVisible();
+      }
+    }
+
+    if (testInfo.project.name === "chromium-mobile") {
+      await expect(
+        page.getByRole("button", { name: "Open feedback form" }).getByText("Feedback")
+      ).toBeVisible();
+    }
+
     const bodyText = await page.locator("body").innerText();
     expect(
       bodyText,
