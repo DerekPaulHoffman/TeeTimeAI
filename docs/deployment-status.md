@@ -8,8 +8,8 @@ Last updated: 2026-07-10
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-evqlcwj3t-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_2JnNfqbPc9VNPLJeawiJpWBXKR6R`
+- Latest verified deployment: `teetimeai-asqtg3cbp-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_8PjrK5SrEyknrM4sg56M3AWEBc4c`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -104,6 +104,7 @@ Last updated: 2026-07-10
 - 2026-07-10 recipient-privacy rollback promoted `dpl_J3nwzCRqadvPonyM59aLK3G7u6yd` back to production after the Clerk-disabled POC dashboard exposed another guest search owner’s full recipient email. The misattributed production search was removed, the affected guest’s original five-course search was restored with its prior window and an active workflow, and live dashboard readback confirmed the email address was no longer rendered. Keep the actual-recipient label limited to authenticated, owner-scoped dashboards before redeploying the alert-experience release; production Clerk remains gated by `CLERK_AUTH_READY=false`.
 - 2026-07-10 authenticated-ownership hardening deployed commit `03ea9c7` as `dpl_2JnNfqbPc9VNPLJeawiJpWBXKR6R`. The dashboard no longer loads a global recent-search list when Clerk is unavailable; edit, delete, and check-now paths require account auth; authenticated users claim prior guest searches matching their normalized primary email; and user-scoped queries continue filtering by the database user id mapped from Clerk. Production remains safely gated because Vercel currently contains Clerk test/development keys and `CLERK_AUTH_READY=false`; replace them with live production-instance keys before enabling the flag. Verification passed 114 tests, lint with only the generated Workflow warning, build, local and production UI smoke 8/8, live owner-data redaction, 503 checks for disabled account APIs, production aliases, and a clean error-log scan.
 - 2026-07-10 Figma mobile release deployed feature commit `106c3a6` plus guest-privacy guard `d043a7f` as `dpl_5XH5sRJBn3akF8h1hCyybRF7krZf` (`teetimeai-cikicp9im-derekpaulhoffmans-projects.vercel.app`). Homepage, search filters and course cards, mobile ranking controls, My Alerts cards, and email previews now match the Figma Make v36 phone layouts. Because production Clerk remains gated, the public dashboard now keeps recipient addresses and edit/delete controls private while authenticated dashboards remain owner-scoped. Verification passed `npm run test:run` (24 files / 108 tests), lint with only the existing generated Workflow route warning, `npm run build`, local and production UI smoke 8/8, live `/`, `/search`, `/dashboard`, `/email-preview`, and `www.teetimespot.com` 200 checks, exact dashboard readback with zero recipient email addresses, `vercel inspect` Ready with both production aliases, and no error, fatal, or 500 Vercel logs in the verification window.
+- 2026-07-10 production authentication activation deployed commit `c9a4fcb` as `dpl_8PjrK5SrEyknrM4sg56M3AWEBc4c` (`teetimeai-asqtg3cbp-derekpaulhoffmans-projects.vercel.app`). Vercel production now uses the Clerk production instance's live keys with `CLERK_AUTH_READY=true`; email/password sign-up and sign-in are enabled, and the incomplete Google OAuth connection is disabled so users are not offered a broken provider. Live verification found `Sign in` in the global header, a working email/password modal with `Sign up`, a signed-out dashboard that exposes no alert-owner data, unauthenticated search APIs rejecting access, production UI smoke passing 8/8, `/`, `/dashboard`, and `/email-preview` returning 200, the deployment `Ready` with both production aliases, and no error-level Vercel logs in the checked window.
 
 ## Current Runtime Mode
 
@@ -114,13 +115,13 @@ The public site is live as an email-alert proof of concept:
 - Google Places nearby search, text geocoding, and photo requests all use the same normalized API key value. The separate Google Geocoding API is not required for the current typed-location flow.
 - Saved searches can still be stored in Neon by alert email for signed-out visitors.
 - Search creation now reuses an existing supported nearby course row before creating a new course, so alternate demo/place IDs do not drop ForeUP adapter metadata.
-- Clerk production keys are set in Vercel, but the app keeps Clerk disabled until `CLERK_AUTH_READY=true` because Google OAuth production credentials are still missing.
+- Clerk account mode is active in production with live keys and `CLERK_AUTH_READY=true`. Email/password sign-up and sign-in are enabled; Google OAuth is disabled until custom production credentials are configured.
 - Dashboard management actions require a signed-in Clerk account after Clerk auth is marked ready.
 - Email sending is live through Resend when `RESEND_API_KEY` and `ALERT_EMAIL_FROM` are present. Local/automation runs still dry-run if those vars are absent.
 
 ## Remaining Provider Setup
 
-- Clerk production: domain, DNS, SSL, mail DNS, and production keys are complete. Remaining blocker is Google OAuth production credentials. `clerk deploy status` reports `oauth_pending` for `google`; configure a Google OAuth client or disable Google OAuth in Clerk, then set `CLERK_AUTH_READY=true` in Vercel production and redeploy.
+- Clerk production: core account auth is complete and active. Domain, DNS, SSL, mail DNS, live keys, email/password sign-up and sign-in, and the Vercel auth gate are configured. Google OAuth is optional and remains disabled until custom production credentials are added.
 - Google Maps key hygiene: Places API (New) is enabled and `GOOGLE_PLACES_API_KEY` is configured in Vercel. The current key was shared in chat during setup, so restrict it to the needed Google APIs and rotate it after confirming production remains healthy.
 - Resend: core sending is configured. The original marketplace-managed API key cannot be deleted through the Resend API; manage/remove it from the Vercel Marketplace dashboard if a full cleanup is needed.
 - Automation auth: `AUTOMATION_API_KEY` is set in production and local `.env.local`; keep it secret and rotate if exposed.
