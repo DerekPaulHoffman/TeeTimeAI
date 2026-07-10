@@ -53,7 +53,7 @@ export async function fetchTeeItUpSlots(input: {
   const slots: TeeTimeSlot[] = [];
 
   for (const alias of input.metadata.aliases) {
-    const facilities = await fetchFacilities(alias);
+    const facilities = await fetchFacilities(alias, input.metadata.bookingBaseUrl);
     if (facilities.length === 0) {
       continue;
     }
@@ -65,7 +65,12 @@ export async function fetchTeeItUpSlots(input: {
       continue;
     }
 
-    const daySlots = await fetchFacilitySlots(alias, input.date, facilityIds);
+    const daySlots = await fetchFacilitySlots(
+      alias,
+      input.date,
+      facilityIds,
+      input.metadata.bookingBaseUrl
+    );
     const facilityByCourseId = new Map(
       facilities
         .filter((facility) => facility.courseId)
@@ -107,10 +112,10 @@ export async function fetchTeeItUpSlots(input: {
   return slots;
 }
 
-async function fetchFacilities(alias: string) {
+async function fetchFacilities(alias: string, bookingBaseUrl: string) {
   const url = `${TEEITUP_API_BASE_URL}/alias/${alias}/facilities`;
   const response = await fetch(url, {
-    headers: teeItUpHeaders(alias)
+    headers: teeItUpHeaders(alias, bookingBaseUrl)
   });
 
   if (!response.ok) {
@@ -120,10 +125,15 @@ async function fetchFacilities(alias: string) {
   return (await response.json()) as TeeItUpFacility[];
 }
 
-async function fetchFacilitySlots(alias: string, date: Date, facilityIds: number[]) {
+async function fetchFacilitySlots(
+  alias: string,
+  date: Date,
+  facilityIds: number[],
+  bookingBaseUrl: string
+) {
   const url = buildTeeTimesUrl(date, facilityIds);
   const response = await fetch(url.toString(), {
-    headers: teeItUpHeaders(alias)
+    headers: teeItUpHeaders(alias, bookingBaseUrl)
   });
 
   if (!response.ok) {
@@ -141,13 +151,29 @@ function buildTeeTimesUrl(date: Date, facilityIds: number[]) {
   return url;
 }
 
-function teeItUpHeaders(alias: string) {
+function teeItUpHeaders(alias: string, bookingBaseUrl: string) {
+  const bookingOrigin = getBookingOrigin(alias, bookingBaseUrl);
+
   return {
     accept: "application/json",
     "x-be-alias": alias,
-    origin: `https://${alias}.book.teeitup.golf`,
-    referer: `https://${alias}.book.teeitup.golf/`
+    origin: bookingOrigin,
+    referer: `${bookingOrigin}/`
   };
+}
+
+function getBookingOrigin(alias: string, bookingBaseUrl: string) {
+  try {
+    const bookingUrl = new URL(bookingBaseUrl);
+    const domainMatch = bookingUrl.hostname.match(/\.book\.teeitup\.(golf|com)$/i);
+    if (domainMatch?.[1]) {
+      return `https://${alias}.book.teeitup.${domainMatch[1].toLowerCase()}`;
+    }
+  } catch {
+    // Metadata validation only guarantees a string; keep the legacy provider origin as fallback.
+  }
+
+  return `https://${alias}.book.teeitup.golf`;
 }
 
 function pickBestRate(rates: TeeItUpRate[] = []) {

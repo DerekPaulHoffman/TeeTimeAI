@@ -72,6 +72,12 @@ describe("TeeItUp adapter", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "https://phx-api-be-east-1b.kenna.io/v2/tee-times?date=2026-07-10&facilityIds=13427&returnPromotedRates=true"
     );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: {
+        origin: "https://whitneyfarmsgolfcourse.book.teeitup.golf",
+        referer: "https://whitneyfarmsgolfcourse.book.teeitup.golf/"
+      }
+    });
     expect(slots).toMatchObject([
       {
         sourceId: "teeitup-13427-55c2dea0fe00b30300d44121-2026-07-10T17:50:00.000Z",
@@ -88,5 +94,44 @@ describe("TeeItUp adapter", () => {
         priceCents: 4200
       }
     ]);
+  });
+
+  it("uses the legacy .com booking origin when the course metadata requires it", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 5789,
+            courseId: "richter-course",
+            timeZone: "America/New_York"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchTeeItUpSlots({
+      courseId: "course-richter",
+      date: new Date("2026-07-11T00:00:00-04:00"),
+      metadata: {
+        aliases: ["richter-park-golf-course"],
+        bookingBaseUrl: "https://richter-park-golf-course.book.teeitup.com/"
+      }
+    });
+
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: {
+        origin: "https://richter-park-golf-course.book.teeitup.com",
+        referer: "https://richter-park-golf-course.book.teeitup.com/"
+      }
+    });
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      headers: {
+        origin: "https://richter-park-golf-course.book.teeitup.com",
+        referer: "https://richter-park-golf-course.book.teeitup.com/"
+      }
+    });
   });
 });

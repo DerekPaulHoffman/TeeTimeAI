@@ -165,10 +165,7 @@ function learnTeeItUpDiscovery(
   }
 
   const bookingUrl =
-    observedUrls.find((url) => {
-      const parsed = parseUrl(url);
-      return Boolean(parsed && getTeeItUpAlias(url) && parsed.hostname.endsWith(".book.teeitup.golf"));
-    }) ?? `https://${aliases[0]}.book.teeitup.golf/`;
+    observedUrls.find(isTeeItUpBookingUrl) ?? `https://${aliases[0]}.book.teeitup.golf/`;
 
   return {
     courseId: evidence.courseId,
@@ -336,7 +333,7 @@ function getTeeItUpAlias(value: string) {
     return null;
   }
 
-  const bookingHostMatch = url.hostname.match(/^(.+)\.book\.teeitup\.golf$/i);
+  const bookingHostMatch = url.hostname.match(/^(.+)\.book\.teeitup\.(?:golf|com)$/i);
   if (bookingHostMatch?.[1]) {
     return bookingHostMatch[1];
   }
@@ -349,6 +346,11 @@ function getTeeItUpAlias(value: string) {
   }
 
   return null;
+}
+
+function isTeeItUpBookingUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(url?.hostname.match(/^.+\.book\.teeitup\.(?:golf|com)$/i));
 }
 
 function isNonBookingHost(hostname: string) {

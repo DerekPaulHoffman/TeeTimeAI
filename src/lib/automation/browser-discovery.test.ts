@@ -103,6 +103,29 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("learns TeeItUp metadata from legacy .com booking links", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-richter",
+      courseName: "Richter Park Golf Course",
+      sourceUrl: "https://www.richterpark.com/request_tt/",
+      finalUrl: "https://www.richterpark.com/request_tt/",
+      observedUrls: ["https://richter-park-golf-course.book.teeitup.com/"],
+      visibleText: "Book a tee time online"
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.bookingUrl).toBe(
+      "https://richter-park-golf-course.book.teeitup.com/"
+    );
+    expect(discovery.apiMetadata).toEqual({
+      aliases: ["richter-park-golf-course"],
+      bookingBaseUrl: "https://richter-park-golf-course.book.teeitup.com/"
+    });
+  });
+
   it("learns reusable CPS metadata from CPS booking links", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
