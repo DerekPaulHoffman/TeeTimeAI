@@ -10,6 +10,7 @@ import { hasClerkConfig } from "@/lib/env";
 import { absoluteUrl, siteDescription, siteName, siteUrl } from "@/lib/seo";
 import "leaflet/dist/leaflet.css";
 import "./globals.css";
+import "./pricing.css";
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,

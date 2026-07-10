@@ -100,14 +100,17 @@ export async function fetchTeesnapSlots(input: {
         continue;
       }
 
+      const priceOptions = getPriceOptions(teeTime.prices);
+
       slots.push({
         courseId: input.courseId,
         sourceId: `teesnap-${input.metadata.courseId}-${teeTime.teeTime}-${section.teeOff ?? "tee"}`,
         startsAt: teeTime.teeTime.slice(0, 16),
         availableSpots,
         bookingUrl: withDateParam(input.metadata.bookingBaseUrl, input.date),
-        priceCents: getPriceCents(teeTime.prices, holes),
+        priceCents: priceOptions.find((option) => option.holes === holes)?.priceCents,
         holes,
+        priceOptions,
         evidenceUrl: url
       });
     }
@@ -150,15 +153,15 @@ function getAvailableSpots(section: TeesnapSection, bookingSizes: Map<number, nu
   return Math.max(0, 4 - bookedPlayers);
 }
 
-function getPriceCents(prices: TeesnapPrice[] = [], holes: 9 | 18) {
-  const roundType = holes === 9 ? "NINE_HOLE" : "EIGHTEEN_HOLE";
-  const price = prices.find((entry) => entry.roundType === roundType)?.price;
-  if (!price) {
-    return undefined;
-  }
+function getPriceOptions(prices: TeesnapPrice[] = []) {
+  return prices.flatMap((entry) => {
+    const holes = entry.roundType === "NINE_HOLE" ? 9 : entry.roundType === "EIGHTEEN_HOLE" ? 18 : null;
+    const parsed = Number(entry.price);
 
-  const parsed = Number(price);
-  return Number.isFinite(parsed) ? Math.round(parsed * 100) : undefined;
+    return holes && Number.isFinite(parsed) && parsed >= 0
+      ? [{ holes: holes as 9 | 18, priceCents: Math.round(parsed * 100) }]
+      : [];
+  });
 }
 
 function withDateParam(bookingBaseUrl: string, date: Date) {

@@ -103,6 +103,7 @@ export async function fetchTeeItUpSlots(input: {
           bookingUrl: withDateParam(input.metadata.bookingBaseUrl, input.date),
           priceCents: rate?.greenFeeCart,
           holes: rate?.holes,
+          priceOptions: getPriceOptions(slot.rates),
           evidenceUrl: buildTeeTimesUrl(input.date, facilityIds).toString()
         });
       }
@@ -178,6 +179,17 @@ function getBookingOrigin(alias: string, bookingBaseUrl: string) {
 
 function pickBestRate(rates: TeeItUpRate[] = []) {
   return [...rates].sort((a, b) => (b.holes ?? 0) - (a.holes ?? 0))[0];
+}
+
+function getPriceOptions(rates: TeeItUpRate[] = []): NonNullable<TeeTimeSlot["priceOptions"]> {
+  return rates.flatMap((rate) =>
+    (rate.holes === 9 || rate.holes === 18) &&
+    typeof rate.greenFeeCart === "number" &&
+    Number.isInteger(rate.greenFeeCart) &&
+    rate.greenFeeCart >= 0
+      ? [{ holes: rate.holes as 9 | 18, priceCents: rate.greenFeeCart }]
+      : []
+  );
 }
 
 function getAvailableSpots(rates: TeeItUpRate[] = []) {

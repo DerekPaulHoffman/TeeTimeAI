@@ -1,3 +1,5 @@
+import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
+
 export type GooglePlace = {
   id?: string;
   name?: string;
@@ -47,6 +49,7 @@ export type CourseCandidate = {
   website?: string;
   photoReference?: string;
   photoAttributions?: CoursePhotoAttribution[];
+  priceEstimate?: CoursePriceEstimate;
 };
 
 export type NearbyCourseSearchInput = {

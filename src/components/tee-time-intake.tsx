@@ -9,6 +9,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  CircleDollarSign,
   ExternalLink,
   GripVertical,
   LocateFixed,
@@ -30,6 +31,12 @@ import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
   milesToMeters
 } from "@/lib/places/radius";
+import {
+  hasPriceForView,
+  type CoursePriceEstimate,
+  type CoursePriceRange,
+  type CoursePriceView
+} from "@/lib/pricing/course-prices";
 import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
   MAX_PLAYERS_PER_SEARCH
@@ -133,7 +140,7 @@ const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
-type HoleFilter = "any" | "9" | "18";
+type HoleFilter = CoursePriceView;
 
 export type TeeTimeIntakeInitialValues = {
   location?: string;
@@ -235,13 +242,15 @@ function TeeTimeIntakeContent({
     const withinRadius = courses.filter(
       (course) => course.distanceMeters === undefined || course.distanceMeters <= radiusMeters
     );
-    const matchingHoles = holeFilter === "9" ? [] : withinRadius;
 
-    return [...matchingHoles].sort((a, b) => {
+    return [...withinRadius].sort((a, b) => {
       const aSelected = selectedIds.has(a.googlePlaceId) ? 0 : 1;
       const bSelected = selectedIds.has(b.googlePlaceId) ? 0 : 1;
+      const aHasRequestedPrice = hasPriceForView(a.priceEstimate, holeFilter) ? 0 : 1;
+      const bHasRequestedPrice = hasPriceForView(b.priceEstimate, holeFilter) ? 0 : 1;
       return (
         aSelected - bSelected ||
+        aHasRequestedPrice - bHasRequestedPrice ||
         (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) -
           (b.distanceMeters ?? Number.MAX_SAFE_INTEGER)
       );
@@ -588,8 +597,8 @@ function TeeTimeIntakeContent({
           </fieldset>
         </div>
         <div className="figma-filter-strip">
-          <div className="figma-hole-filter" aria-label="Holes">
-            <strong>Holes</strong>
+          <div className="figma-hole-filter" aria-label="Price view by round length">
+            <strong>Price view</strong>
             <div className="figma-hole-options">
               {(["any", "9", "18"] as const).map((value) => (
                 <button
@@ -656,6 +665,12 @@ function TeeTimeIntakeContent({
           ) : (
             <Notice notice={notice} />
           )}
+          {courses.length > 0 ? (
+            <p className="course-pricing-note">
+              <CircleDollarSign size={14} aria-hidden="true" />
+              Estimates use recently observed official tee-sheet rates. Final rates can vary.
+            </p>
+          ) : null}
           {courses.length > 0 && notice.type === "error" ? <Notice notice={notice} /> : null}
           {isCurrentSearchSaved && notice.type === "success" ? <Notice notice={notice} /> : null}
           {courses.length > 0 && filteredCourses.length === 0 ? (
@@ -700,10 +715,10 @@ function TeeTimeIntakeContent({
                     {course.distanceMeters !== undefined ? (
                       <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
                     ) : null}
-                    <span className="figma-course-pill">18H · Par 72</span>
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
+                  <CoursePriceDisplay estimate={course.priceEstimate} priceView={holeFilter} />
                 </div>
                 <div className="course-actions">
                   {course.website ? (
@@ -1458,6 +1473,75 @@ function Notice({ notice }: { notice: Notice }) {
       {notice.message}
     </div>
   );
+}
+
+function CoursePriceDisplay({
+  estimate,
+  priceView
+}: {
+  estimate?: CoursePriceEstimate;
+  priceView: HoleFilter;
+}) {
+  const ranges = [
+    { holes: 9 as const, range: estimate?.nineHoles },
+    { holes: 18 as const, range: estimate?.eighteenHoles }
+  ].filter(({ holes, range }) => priceView === "any" ? Boolean(range) : String(holes) === priceView);
+  const availableRanges = ranges.filter(
+    (entry): entry is { holes: 9 | 18; range: CoursePriceRange } => Boolean(entry.range)
+  );
+
+  if (availableRanges.length === 0) {
+    return (
+      <p className="course-price-unavailable">
+        {priceView === "any" ? "Recent rates not available" : `${priceView}-hole rate not observed`}
+      </p>
+    );
+  }
+
+  const observedLabel = estimate
+    ? new Date(estimate.observedAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric"
+      })
+    : undefined;
+
+  return (
+    <div
+      className="course-price-estimates"
+      title={observedLabel ? `Based on official rates observed through ${observedLabel}` : undefined}
+    >
+      {availableRanges.map(({ holes, range }) => (
+        <span
+          aria-label={`Estimated ${holes}-hole price ${formatAccessiblePriceRange(range)}`}
+          className="course-price-estimate"
+          key={holes}
+        >
+          <span>{holes}H</span>
+          <strong>{formatPriceRange(range)}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function formatPriceRange(range: CoursePriceRange) {
+  const minimum = formatUsd(range.minPriceCents);
+  const maximum = formatUsd(range.maxPriceCents);
+  return minimum === maximum ? minimum : `${minimum}–${maximum}`;
+}
+
+function formatAccessiblePriceRange(range: CoursePriceRange) {
+  const minimum = formatUsd(range.minPriceCents);
+  const maximum = formatUsd(range.maxPriceCents);
+  return minimum === maximum ? minimum : `${minimum} to ${maximum}`;
+}
+
+function formatUsd(priceCents: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: priceCents % 100 === 0 ? 0 : 2
+  }).format(priceCents / 100);
 }
 
 function sortCoursesByDistance(courses: CourseCandidate[]) {

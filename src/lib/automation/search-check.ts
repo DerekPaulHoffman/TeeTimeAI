@@ -27,6 +27,7 @@ import {
   summarizeSearchStatusAvailability,
   type SearchStatusCourseReport
 } from "@/lib/email/search-status";
+import { summarizeCourseSlotPrices } from "@/lib/pricing/course-prices";
 import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
@@ -179,6 +180,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     try {
       const rawSlots = await fetchCourseSlots(course, search.date, search.players);
       const availability = summarizeSearchStatusAvailability(searchWindow, rawSlots);
+      const pricing = summarizeCourseSlotPrices(rawSlots);
       const currentMatches = rankMatches(
         searchWindow,
         dedupeMatches(filterSlotsForSearch(searchWindow, rawSlots), [])
@@ -215,7 +217,10 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           currentMatches.length > 0
             ? `Confirmed ${currentMatches.length} qualifying tee times.`
             : "No qualifying tee times in the requested window",
-        rawSummary: availability
+        rawSummary: {
+          ...availability,
+          ...(pricing ? { pricing } : {})
+        }
       });
       courseResults.push({
         courseId: course.id,

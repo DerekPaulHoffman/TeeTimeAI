@@ -19,6 +19,10 @@ export type TeeTimeSlot = {
   bookingUrl: string;
   priceCents?: number;
   holes?: number;
+  priceOptions?: Array<{
+    holes: 9 | 18;
+    priceCents: number;
+  }>;
   evidenceUrl?: string;
 };
 

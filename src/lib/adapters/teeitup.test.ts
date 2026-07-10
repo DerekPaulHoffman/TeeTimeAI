@@ -84,14 +84,16 @@ describe("TeeItUp adapter", () => {
         startsAt: "2026-07-10T13:50",
         availableSpots: 4,
         holes: 18,
-        priceCents: 6700
+        priceCents: 6700,
+        priceOptions: [{ holes: 18, priceCents: 6700 }]
       },
       {
         sourceId: "teeitup-13427-55c2dea0fe00b30300d44121-2026-07-10T18:00:00.000Z",
         startsAt: "2026-07-10T14:00",
         availableSpots: 2,
         holes: 9,
-        priceCents: 4200
+        priceCents: 4200,
+        priceOptions: [{ holes: 9, priceCents: 4200 }]
       }
     ]);
   });

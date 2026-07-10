@@ -82,7 +82,11 @@ describe("fetchTeesnapSlots", () => {
         sourceId: "teesnap-1210-2026-07-11T12:30:00-FRONT_NINE",
         availableSpots: 2,
         priceCents: 4800,
-        holes: 18
+        holes: 18,
+        priceOptions: [
+          { holes: 9, priceCents: 2800 },
+          { holes: 18, priceCents: 4800 }
+        ]
       }),
       expect.objectContaining({
         sourceId: "teesnap-1210-2026-07-11T12:30:00-BACK_NINE",
