@@ -6,9 +6,7 @@ import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { stopSearchSchedule } from "@/lib/automation/db-service";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import {
-  deleteTeeSearchForPoc,
   deleteTeeSearchForUser,
-  updateTeeSearchForPoc,
   updateTeeSearchForUser
 } from "@/lib/searches/service";
 import {
@@ -63,12 +61,17 @@ export async function PATCH(
     return NextResponse.json({ error: "DATABASE_URL is required" }, { status: 503 });
   }
 
+  if (!hasClerkConfig()) {
+    return NextResponse.json(
+      { error: "Account sign-in is required to manage alerts." },
+      { status: 503 }
+    );
+  }
+
   try {
     const { id } = await context.params;
     const input = updateSearchSchema.parse(await request.json());
-    const search = hasClerkConfig()
-      ? await updateOwnedSearch(id, input)
-      : await updateTeeSearchForPoc(id, input);
+    const search = await updateOwnedSearch(id, input);
     let schedule = null;
     if (search.status === "ACTIVE") {
       schedule = await startSearchSchedule(search.id);
@@ -92,14 +95,17 @@ export async function DELETE(
     return NextResponse.json({ error: "DATABASE_URL is required" }, { status: 503 });
   }
 
+  if (!hasClerkConfig()) {
+    return NextResponse.json(
+      { error: "Account sign-in is required to manage alerts." },
+      { status: 503 }
+    );
+  }
+
   try {
     const { id } = await context.params;
-    if (hasClerkConfig()) {
-      const user = await getRequiredAppUser();
-      await deleteTeeSearchForUser(user.id, id);
-    } else {
-      await deleteTeeSearchForPoc(id);
-    }
+    const user = await getRequiredAppUser();
+    await deleteTeeSearchForUser(user.id, id);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

@@ -180,6 +180,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(bodyText, "dashboard should avoid implementation jargon").not.toMatch(
       /\b(Codex|Postgres|Clerk|Neon|DATABASE_URL|Prisma|POC)\b/i
     );
+    expect(bodyText, "public dashboard should not expose recipient email addresses").not.toMatch(
+      /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+    );
     expect(bodyText, "dashboard should not imply Tee Time Spot completes tee times itself").not.toMatch(
       /Tee Time Spot books|we book|books tee times/i
     );

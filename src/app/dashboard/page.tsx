@@ -45,8 +45,9 @@ export default async function DashboardPage() {
     return (
       <DashboardView
         searches={searches}
-        canManage
-        notice="Email alerts are active. Dashboard management is available while account sign-in is being prepared."
+        canManage={false}
+        showRecipientEmail={false}
+        notice="Email alerts are active. Sign-in is being prepared, so recipient details and management controls stay private for now."
       />
     );
   }
@@ -59,16 +60,18 @@ export default async function DashboardPage() {
   const user = await getRequiredAppUser();
   const searches = await listTeeSearchesForUser(user.id);
 
-  return <DashboardView searches={searches} canManage />;
+  return <DashboardView searches={searches} canManage showRecipientEmail />;
 }
 
 function DashboardView({
   searches,
   canManage,
+  showRecipientEmail,
   notice
 }: {
   searches: DashboardSearches;
   canManage: boolean;
+  showRecipientEmail: boolean;
   notice?: string;
 }) {
   const activeSearches = searches.filter((search) => search.status === "ACTIVE");
@@ -131,7 +134,12 @@ function DashboardView({
           ) : (
             <div className="dashboard-list">
               {activeSearches.map((search) => (
-                <DashboardSearchCard canManage={canManage} key={search.id} search={search} />
+                <DashboardSearchCard
+                  canManage={canManage}
+                  key={search.id}
+                  search={search}
+                  showRecipientEmail={showRecipientEmail}
+                />
               ))}
             </div>
           )}
@@ -142,7 +150,12 @@ function DashboardView({
               </div>
               <div className="dashboard-list dashboard-list-inactive">
                 {inactiveSearches.map((search) => (
-                  <DashboardSearchCard canManage={canManage} key={search.id} search={search} />
+                  <DashboardSearchCard
+                    canManage={canManage}
+                    key={search.id}
+                    search={search}
+                    showRecipientEmail={showRecipientEmail}
+                  />
                 ))}
               </div>
             </>
@@ -208,10 +221,12 @@ function DashboardView({
 
 function DashboardSearchCard({
   search,
-  canManage
+  canManage,
+  showRecipientEmail
 }: {
   search: DashboardSearches[number];
   canManage: boolean;
+  showRecipientEmail: boolean;
 }) {
   return (
     <article className="dashboard-row">
@@ -272,10 +287,15 @@ function DashboardSearchCard({
             <span>Emails</span>
             <strong className="watch-stat-email">
               <span className="watch-stat-email-full">
-                {search.user.email}
-                {search.additionalEmails.length > 0
-                  ? ` +${search.additionalEmails.length} extra`
-                  : ""}
+                {showRecipientEmail
+                  ? `${search.user.email}${
+                      search.additionalEmails.length > 0
+                        ? ` +${search.additionalEmails.length} extra`
+                        : ""
+                    }`
+                  : search.additionalEmails.length > 0
+                    ? `${search.additionalEmails.length + 1} recipients`
+                    : "Just you"}
               </span>
               <span className="watch-stat-email-compact">
                 {search.additionalEmails.length > 0
