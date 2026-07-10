@@ -8,8 +8,8 @@ Last updated: 2026-07-10
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-ioky25q1s-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_CyBYwD76mLrTJYk199KkqstBuJ3E`
+- Latest verified deployment: `teetimeai-6757sx528-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_7fvBJ7oBWwGA4hgFHVgXqxkBmocW`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
@@ -110,6 +110,7 @@ Last updated: 2026-07-10
 - 2026-07-10 email availability and alert-control release deployed commit `ba264cd` as `dpl_GxphLjr8FTxqhUJC4tYJUQWBvvBh` (`teetimeai-mywqpxgqb-derekpaulhoffmans-projects.vercel.app`). Status and instant-alert emails now list every currently matching tee time by course with spots, price, and holes when available; new openings found together are batched into one email. Both email types include signed `I booked — stop these emails` and `Cancel this alert` controls that open a confirmation page before marking the search `COMPLETED` or `CANCELLED`, stopping its workflow schedule, and suppressing unsent matches. Verification passed 123 tests, lint with only the existing generated Workflow route warning, production build, local and production UI smoke 8/8, live `/`, `/dashboard`, `/email-preview`, `/alerts/stop?done=booked`, and `www.teetimespot.com` 200 checks, exact email-preview readback for both matching times and both stop controls, `vercel inspect` Ready with both production aliases, and no error-level Vercel logs in the verification window.
 
 - 2026-07-10 Google sign-in was enabled for the Clerk production instance. Google Auth Platform now has an external, in-production `Tee Time Spot` web client using Clerk's exact production callback URI, and Clerk reports Google as used for sign-in with the standard `openid`, email, and profile scopes. Live Google OAuth completed successfully for the expected `derekpaulhoffman@gmail.com` account; the account panel exposes `Manage account` and `Sign out`, and the owner-scoped dashboard showed that same address on its single active alert. Signed-out verification also found the global `Sign in` control and a working `Continue with Google` option alongside email/password authentication. Production UI smoke passed 8/8 across desktop and mobile.
+- 2026-07-10 public-course recall release deployed commit `99d9399` as `dpl_7fvBJ7oBWwGA4hgFHVgXqxkBmocW` (`teetimeai-6757sx528-derekpaulhoffmans-projects.vercel.app`). Discovery now supplements typed Nearby results with bounded semantic public-course results when Google omits a valid course's golf type, enforces the requested radius locally, and no longer removes outdoor courses solely because of noisy secondary indoor or membership tags. Live 15-mile Trumbull discovery returned 15 courses with H Smith Richardson Golf Course and Chris Bargas Golf Club at Whitney Farms restored; live San Francisco discovery kept Presidio Golf Course to one result, excluded The Olympic Club, Presidio Club Fitting, General Store, and Alameda Junior Golf Club, and preserved Fleming 9 Course and TPC Harding Park separately. Verification passed 125 tests, lint with only the generated Workflow warning, production build, local and production UI smoke 8/8, direct desktop/mobile Trumbull rendering with zero console, page, or same-origin request errors, live core routes and both production aliases returning 200, `vercel inspect` Ready, and no error-level or 5xx Vercel logs in the verification window.
 
 ## Current Runtime Mode
 
