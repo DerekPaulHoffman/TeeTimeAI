@@ -49,12 +49,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(
       page.getByRole("heading", { name: /Tell us where and when you want to play/i })
     ).toBeVisible();
+    const alertActionButton = page.locator(".summary-panel > .button-primary");
+    await expect(alertActionButton).toContainText(
+      /Start getting alerts|Sign in to start sending alerts|Account access unavailable|Checking your account/i
+    );
     if (isMobile) {
-      await expect(page.getByText("Start getting alerts")).toBeHidden();
+      await expect(alertActionButton).toBeHidden();
     } else {
-      await expect(page.getByText("Start getting alerts")).toBeVisible();
+      await expect(alertActionButton).toBeVisible();
     }
-    await expect(page.locator(".summary-panel button")).toBeDisabled();
+    await expect(alertActionButton).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
     await expect(page.locator("#searchRadius")).toHaveValue("15");
 
@@ -118,30 +122,41 @@ test.describe("Tee Time Spot UI smoke", () => {
       });
     });
 
-    await page.getByLabel("Alert email").fill(`ui-smoke-${Date.now()}@example.com`);
-    const saveButton = page.getByRole("button", { name: /Start getting alerts|Search saved/i });
-    await expect(saveButton).toBeEnabled();
-
     await page.getByLabel("Date").fill(formatLocalDate(new Date()));
     await expect(page.getByText("Choose a future date for alerts.")).toBeVisible();
     await expect(page.getByLabel("Date")).toHaveAttribute("aria-describedby", /search-form-guidance/);
-    await expect(saveButton).toBeDisabled();
+    await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
 
     await page.getByLabel("End time").fill("13:00");
     await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
     await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
-    await expect(saveButton).toBeDisabled();
+    await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("End time").fill("16:00");
 
-    await expect(saveButton).toBeEnabled();
-    await saveButton.click();
-    await expect(
-      page.getByText("You're all set. We'll email you the moment a matching tee time opens up.")
-    ).toBeVisible();
-    await expect(saveButton).toBeDisabled();
-    await saveButton.click({ force: true });
-    expect(saveRequestCount, "unchanged saved searches should not submit more than once").toBe(1);
+    const alertActionText = await alertActionButton.innerText();
+    if (/Sign in to start sending alerts/i.test(alertActionText)) {
+      await expect(alertActionButton).toBeEnabled();
+      await alertActionButton.click();
+      await expect(page.getByRole("heading", { name: "Sign in to Tee Time Spot" })).toBeVisible();
+      await page.getByRole("button", { name: "Close modal" }).click();
+      expect(saveRequestCount, "signed-out visitors must not submit alert searches").toBe(0);
+    } else if (/Start getting alerts/i.test(alertActionText)) {
+      await expect(alertActionButton).toBeEnabled();
+      await alertActionButton.click();
+      await expect(
+        page.getByText("You're all set. We'll email you the moment a matching tee time opens up.")
+      ).toBeVisible();
+      await expect(alertActionButton).toBeDisabled();
+      await alertActionButton.click({ force: true });
+      expect(saveRequestCount, "unchanged saved searches should not submit more than once").toBe(1);
+    } else {
+      await expect(alertActionButton).toBeDisabled();
+      await expect(
+        page.getByText("Account access is temporarily unavailable, so alerts cannot be created.")
+      ).toBeVisible();
+      expect(saveRequestCount, "alerts must stay blocked while account access is unavailable").toBe(0);
+    }
 
     const bodyText = await page.locator("body").innerText();
     expect(bodyText, "onboarding should avoid implementation jargon").not.toMatch(

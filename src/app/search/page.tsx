@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { TeeTimeIntake, type TeeTimeIntakeInitialValues } from "@/components/tee-time-intake";
+import { hasClerkConfig } from "@/lib/env";
 import { siteDescription } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -28,7 +29,6 @@ export default async function SearchPage({
   const holes = valueOf(params.holes);
   const initialValues: TeeTimeIntakeInitialValues = {
     location: valueOf(params.location),
-    email: valueOf(params.email),
     date: valueOf(params.date),
     startTime: valueOf(params.startTime),
     endTime: valueOf(params.endTime),
@@ -47,7 +47,7 @@ export default async function SearchPage({
         <p className="eyebrow">Set up your alert</p>
         <h1>Tell us where and when you want to play.</h1>
       </div>
-      <TeeTimeIntake initialValues={initialValues} />
+      <TeeTimeIntake accountEnabled={hasClerkConfig()} initialValues={initialValues} />
     </main>
   );
 }

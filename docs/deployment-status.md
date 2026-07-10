@@ -32,7 +32,7 @@ Last updated: 2026-07-10
 - Live `/api/location/geocode?q=Trumbull%2C%20CT` returns 200 with Google Places text-search coordinates and `demo=false`.
 - Live `/api/courses/discover?latitude=41.242&longitude=-73.209&radiusMeters=30000` returns 200 with 20 live Google Places courses and `demo=false`.
 - Live `/api/courses/photo` returns a 302 redirect to a Google-hosted course image when Places returns a photo reference.
-- Live `POST /api/searches` accepts an alert email plus 1 to 5 ranked courses and creates an active search in Postgres.
+- Live `POST /api/searches` requires an authenticated account, uses that account's primary email, and accepts 1 to 5 ranked courses.
 - Live `/api/automation/active-searches` returns 200 with the configured `x-automation-key`; latest smoke saw 9 active searches in the queue.
 - Playwright browser smoke verified desktop course discovery, ranking, email-alert save, dashboard rendering, mobile layout, and zero browser console errors.
 - Vercel runtime log scan found no errors after the final deployment; latest entries were 200/201 info logs for `/`, `/api/automation/active-searches`, and `/api/searches`.
@@ -113,7 +113,7 @@ The public site is live as an email-alert proof of concept:
 - Nearby discovery uses Google Places in production, defaults to a 15-mile radius with 5-to-30-mile choices, and falls back to demo course data only when `GOOGLE_PLACES_API_KEY` is absent.
 - Google Places course thumbnails are implemented through `/api/courses/photo` and activate when live Places data returns `photos`.
 - Google Places nearby search, text geocoding, and photo requests all use the same normalized API key value. The separate Google Geocoding API is not required for the current typed-location flow.
-- Saved searches can still be stored in Neon by alert email for signed-out visitors.
+- Signed-out visitors may discover and rank courses, but alert creation and all management actions require an authenticated account.
 - Search creation now reuses an existing supported nearby course row before creating a new course, so alternate demo/place IDs do not drop ForeUP adapter metadata.
 - Clerk account mode is active in production with live keys and `CLERK_AUTH_READY=true`. Email/password sign-up and sign-in are enabled; Google OAuth is disabled until custom production credentials are configured.
 - Dashboard management actions require a signed-in Clerk account after Clerk auth is marked ready.

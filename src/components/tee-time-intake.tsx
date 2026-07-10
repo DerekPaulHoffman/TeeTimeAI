@@ -1,5 +1,6 @@
 "use client";
 
+import { SignInButton, useUser } from "@clerk/nextjs";
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Leaflet from "leaflet";
@@ -11,6 +12,7 @@ import {
   ExternalLink,
   GripVertical,
   LocateFixed,
+  LogIn,
   MapPin,
   MapPinned,
   Plus,
@@ -135,7 +137,6 @@ type HoleFilter = "any" | "9" | "18";
 
 export type TeeTimeIntakeInitialValues = {
   location?: string;
-  email?: string;
   players?: number;
   date?: string;
   startTime?: string;
@@ -145,16 +146,60 @@ export type TeeTimeIntakeInitialValues = {
   coordinates?: SearchCoordinates;
 };
 
+type IntakeAccountState =
+  | { status: "loading" | "signed-out" | "unavailable" | "missing-email" }
+  | { status: "signed-in"; email: string };
+
 export function TeeTimeIntake({
-  initialValues = {}
+  initialValues = {},
+  accountEnabled
 }: {
   initialValues?: TeeTimeIntakeInitialValues;
+  accountEnabled: boolean;
+}) {
+  if (!accountEnabled) {
+    return <TeeTimeIntakeContent initialValues={initialValues} accountState={{ status: "unavailable" }} />;
+  }
+
+  return <AuthenticatedTeeTimeIntake initialValues={initialValues} />;
+}
+
+function AuthenticatedTeeTimeIntake({
+  initialValues
+}: {
+  initialValues: TeeTimeIntakeInitialValues;
+}) {
+  const { isLoaded, isSignedIn, user } = useUser();
+
+  if (!isLoaded) {
+    return <TeeTimeIntakeContent initialValues={initialValues} accountState={{ status: "loading" }} />;
+  }
+
+  if (!isSignedIn) {
+    return <TeeTimeIntakeContent initialValues={initialValues} accountState={{ status: "signed-out" }} />;
+  }
+
+  const email = user.primaryEmailAddress?.emailAddress;
+  return (
+    <TeeTimeIntakeContent
+      initialValues={initialValues}
+      accountState={email ? { status: "signed-in", email } : { status: "missing-email" }}
+    />
+  );
+}
+
+function TeeTimeIntakeContent({
+  initialValues,
+  accountState
+}: {
+  initialValues: TeeTimeIntakeInitialValues;
+  accountState: IntakeAccountState;
 }) {
   const [locationText, setLocationText] = useState(initialValues.location ?? "Trumbull, CT");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
-  const [alertEmail, setAlertEmail] = useState(initialValues.email ?? "");
+  const alertEmail = accountState.status === "signed-in" ? accountState.email : "";
   const [date, setDate] = useState(initialValues.date ?? tomorrow());
   const [startTime, setStartTime] = useState(initialValues.startTime ?? "13:40");
   const [endTime, setEndTime] = useState(initialValues.endTime ?? "16:00");
@@ -385,6 +430,14 @@ export function TeeTimeIntake({
   }
 
   async function saveSearch() {
+    if (accountState.status !== "signed-in") {
+      setNotice({
+        type: "error",
+        message: "Sign in or create an account before starting alerts."
+      });
+      return;
+    }
+
     if (saveBlocker) {
       setNotice({ type: "error", message: saveBlocker });
       return;
@@ -406,7 +459,6 @@ export function TeeTimeIntake({
           endTime,
           players,
           cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES,
-          alertEmail: alertEmail.trim(),
           courses: selected.map((course, index) => ({
             ...course,
             rank: index + 1
@@ -777,34 +829,80 @@ export function TeeTimeIntake({
         </div>
         {selected.length > 0 ? (
           <label className="figma-alert-email" htmlFor="alertEmail">
-            <span>Alert email</span>
+            <span>Alert email from your account</span>
             <input
+              aria-describedby="search-form-guidance"
+              disabled={accountState.status !== "signed-in"}
               id="alertEmail"
+              readOnly
               type="email"
               value={alertEmail}
-              onChange={(event) => setAlertEmail(event.target.value)}
-              placeholder="you@example.com"
+              placeholder={
+                accountState.status === "signed-out"
+                  ? "Sign in to use your account email"
+                  : "Account email unavailable"
+              }
             />
           </label>
         ) : null}
-        <button
-          className="button button-primary"
-          type="button"
-          onClick={saveSearch}
-          disabled={
-            saving ||
-            isCurrentSearchSaved ||
-            Boolean(saveBlocker) ||
-            selected.length === 0 ||
-            !alertEmail.trim()
-          }
-          style={{ marginTop: 18, width: "100%" }}
-        >
-          {saving ? <Bell size={17} /> : isCurrentSearchSaved ? <Check size={17} /> : <Bell size={17} />}
-          {saving ? "Starting alerts" : isCurrentSearchSaved ? "Search saved" : "Start getting alerts"}
-        </button>
+        {accountState.status === "signed-out" ? (
+          <SignInButton mode="modal">
+            <button
+              className="button button-primary"
+              disabled={Boolean(saveBlocker) || selected.length === 0}
+              style={{ marginTop: 18, width: "100%" }}
+              type="button"
+            >
+              <LogIn size={17} />
+              Sign in to start sending alerts
+            </button>
+          </SignInButton>
+        ) : (
+          <button
+            className="button button-primary"
+            type="button"
+            onClick={saveSearch}
+            disabled={
+              accountState.status !== "signed-in" ||
+              saving ||
+              isCurrentSearchSaved ||
+              Boolean(saveBlocker) ||
+              selected.length === 0 ||
+              !alertEmail.trim()
+            }
+            style={{ marginTop: 18, width: "100%" }}
+          >
+            {saving ? (
+              <Bell size={17} />
+            ) : isCurrentSearchSaved ? (
+              <Check size={17} />
+            ) : (
+              <Bell size={17} />
+            )}
+            {accountState.status === "loading"
+              ? "Checking your account"
+              : accountState.status === "missing-email"
+                ? "Account email required"
+                : accountState.status === "unavailable"
+                  ? "Account access unavailable"
+                  : saving
+                    ? "Starting alerts"
+                    : isCurrentSearchSaved
+                      ? "Search saved"
+                      : "Start getting alerts"}
+          </button>
+        )}
         <p className="helper" id="search-form-guidance">
-          {saveBlocker ?? "We'll email you the moment a spot opens up at any of these courses."}
+          {saveBlocker ??
+            (accountState.status === "signed-out"
+              ? "Sign in or create an account so you can change, pause, or stop your alerts later."
+              : accountState.status === "loading"
+                ? "Checking your account before alerts can be created."
+                : accountState.status === "missing-email"
+                  ? "Add a primary email to your account before creating alerts."
+                  : accountState.status === "unavailable"
+                    ? "Account access is temporarily unavailable, so alerts cannot be created."
+                    : `Alerts will be sent to ${alertEmail} and stay manageable from your account.`)}
         </p>
       </aside>
       </div>

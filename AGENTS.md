@@ -23,7 +23,7 @@ The app should:
 
 - Discover nearby likely-public golf courses.
 - Let users rank 1 to 5 preferred courses.
-- Capture a future date, time window, player count, primary alert email, and optional extra recipients.
+- Capture a future date, time window, player count, the signed-in account email as the primary alert email, and optional extra recipients.
 - Store real demand in Postgres.
 - Let the automation find matching public tee times.
 - Email official booking links.
@@ -52,7 +52,7 @@ Use copy such as "official site", "official booking page", "direct link", and "y
 - No SMS until email demand is proven.
 - No payments or marketplace checkout in the POC.
 - Clerk is the account system, but `CLERK_AUTH_READY` gates production account mode.
-- Guest/email-alert mode remains useful while auth is not fully enabled.
+- Signed-out visitors may browse courses, but creating, changing, pausing, or stopping alerts requires a Clerk account.
 - Google Places is used for course discovery and photos.
 - Course discovery defaults to a 15-mile radius and offers 5 to 30 mile choices.
 - Discovery should prefer public golf courses and filter stores, simulators, private clubs, and likely non-course results.
@@ -88,7 +88,7 @@ Core folders:
 
 Core data:
 
-- `User`: account or guest-style owner.
+- `User`: Clerk account owner; legacy guest-style rows may remain only for sign-in migration.
 - `Course`: discovered/supported course plus automation metadata.
 - `TeeSearch`: saved demand.
 - `CoursePreference`: ranked course list.

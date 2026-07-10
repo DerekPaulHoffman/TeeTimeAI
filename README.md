@@ -169,7 +169,7 @@ Codex automation
 
 Core models:
 
-- `User`: Clerk user reference or guest-style alert-email user record.
+- `User`: Clerk user reference; legacy guest-style records are claimed by a matching account when that golfer signs in.
 - `Course`: Google place id, name, address, coordinates, phone, website, photo, public/manual flags, detected booking URL/platform, automation eligibility, policy notes, and booking metadata.
 - `TeeSearch`: user, date, start/end time, players, cadence, status, and additional alert emails.
 - `CoursePreference`: ranked join from a search to selected courses.
@@ -200,8 +200,8 @@ The homepage lets users:
 - See course photos, addresses, ratings, and official site links when available.
 - Select and rank 1 to 5 courses.
 - Choose future date, start/end time, and 1 to 4 players.
-- Add alert email and optional extra recipients.
-- Save a search.
+- Use the signed-in account email for alerts and optionally add extra recipients.
+- Sign in or create an account before saving a search, so it can be changed, paused, or stopped later.
 
 The intake should not expose implementation terms like `Codex`, `Postgres`, `Clerk`, `Neon`, `adapter`, or `Google Places` in normal user-facing copy.
 
@@ -220,7 +220,7 @@ The dashboard shows:
 - Edit/pause/resume/remove controls when management is available.
 - Recent pending matches.
 
-With Clerk disabled, the POC can still show/manage recent searches using the database-backed email mode. Once production auth is fully ready, dashboard management should be tied to Clerk accounts.
+Course discovery remains available while signed out. Creating and managing searches requires a Clerk account, and each dashboard is scoped to its authenticated owner.
 
 ### Email Preview
 
@@ -254,10 +254,10 @@ Public/product APIs:
 - `GET /api/location/geocode`
 - `GET /api/courses/discover`
 - `GET /api/courses/photo`
-- `POST /api/searches`
-- `GET /api/searches`
-- `PATCH /api/searches/[id]`
-- `DELETE /api/searches/[id]`
+- `POST /api/searches` (authenticated)
+- `GET /api/searches` (authenticated)
+- `PATCH /api/searches/[id]` (authenticated owner)
+- `DELETE /api/searches/[id]` (authenticated owner)
 - `POST /api/feedback`
 - `POST /api/analytics/events`
 

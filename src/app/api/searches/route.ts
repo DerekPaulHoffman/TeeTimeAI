@@ -4,7 +4,6 @@ import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/service";
-import { upsertGuestUser } from "@/lib/users/service";
 import { teeSearchInputSchema } from "@/lib/validation/search";
 
 export async function GET() {
@@ -14,7 +13,7 @@ export async function GET() {
 
   if (!hasClerkConfig()) {
     return NextResponse.json(
-      { error: "Account sign-in is not available yet. You can still submit a new email alert." },
+      { error: "Account sign-in is not available yet. Alerts cannot be created or managed." },
       { status: 503 }
     );
   }
@@ -57,9 +56,14 @@ export async function POST(request: NextRequest) {
     return databaseSetupError();
   }
 
+  if (!hasClerkConfig()) {
+    return accountSetupError();
+  }
+
   try {
-    const input = teeSearchInputSchema.parse(await request.json());
-    const user = await getSearchOwner(input.alertEmail);
+    const user = await getRequiredAppUser();
+    const submittedInput = teeSearchInputSchema.parse(await request.json());
+    const input = { ...submittedInput, alertEmail: user.email };
     const search = await createTeeSearchForUser(user.id, input);
     let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
     try {
@@ -116,28 +120,11 @@ function databaseSetupError() {
   );
 }
 
-function getGuestUserForSearch(alertEmail?: string) {
-  if (!alertEmail) {
-    throw new Error("Alert email is required.");
-  }
-
-  return upsertGuestUser(alertEmail);
-}
-
-async function getSearchOwner(alertEmail?: string) {
-  if (!hasClerkConfig()) {
-    return getGuestUserForSearch(alertEmail);
-  }
-
-  try {
-    return await getRequiredAppUser();
-  } catch (error) {
-    if (error instanceof Error && error.message === "Unauthorized") {
-      return getGuestUserForSearch(alertEmail);
-    }
-
-    throw error;
-  }
+function accountSetupError() {
+  return NextResponse.json(
+    { error: "Account sign-in is not available yet. Alerts cannot be created or managed." },
+    { status: 503 }
+  );
 }
 
 function handleAppError(error: unknown) {
