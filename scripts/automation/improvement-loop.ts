@@ -8,25 +8,27 @@ import {
 } from "@/lib/automation/improvement";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v4";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v5";
 
 const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
-1. Run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, and pending alert state.
-2. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
-3. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat failures as first-class improvement candidates.
-4. Confirm checkpoints: queue_confirmed, candidate_selected, tool_research_done, ui_smoke_done, verification_done, outcome_recorded.
-5. Pick the highest-leverage improvement from current evidence, recent learning signals, and current product/tooling research. If current actionable probes and pending alerts are empty, default to the strongest UI/accessibility/provider smoke finding only when it is newly verified.
-6. If the issue is adapter-related, add or refine one course-platform adapter without entering checkout, payment, login, or verification-code flows.
-7. If the issue is UI-related, inspect the Playwright screenshots/traces and use the browser to test onboarding, course ranking, dashboard state, and email preview or the absence of an email preview route on desktop and mobile.
-8. If the UI does not look good or a core flow is inaccessible, do not settle. Run current research for better design/tooling and try a stronger workflow such as Figma/Figma Make, v0, a generated design direction, or another current tool discovered during research.
-9. Use generated design output as input, not truth. Implement the best parts in the Next.js app and preserve the product boundaries.
-10. If setup/configuration is the blocker, create or update the project accounts, apps, API keys, deploy targets, callback URLs, webhooks, DNS records, and integrations needed to get Tee Time Spot working.
-11. For code changes, run focused tests plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, and \`npm run ui:smoke\`.
-12. For live-impacting changes, deploy to Vercel, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\` and inspect Vercel errors/warnings.
-13. Record what went right, what went wrong, why the candidate was selected, whether research changed strategy, outcome, checkpoints, changed files, research links, setup changes, UI smoke evidence, screenshot/trace paths when relevant, and blockers in AutomationRun/docs.
+1. Run \`git fetch origin\`, require a clean non-diverged \`main\` checkout, fast-forward only when behind, and record the starting SHA. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work.
+2. Run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
+3. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
+4. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
+5. Confirm checkpoints: queue_confirmed, candidate_selected, tool_research_done, ui_smoke_done, verification_done, git_committed, git_pushed, production_verified, outcome_recorded.
+6. Pick exactly one highest-leverage evidence-backed improvement. Prefer incidents, real-user blockers, alert failures, adapter gaps, funnel regressions, repeated feedback, and verified UI/access failures. If evidence is weak, return no_op without changing files.
+7. Implement the candidate end to end. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
+8. Use current official research or stronger design tools only when they materially change the selected implementation; do not perform generic hourly research.
+9. Run focused verification plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, \`npm run ui:smoke\`, and \`git diff --check\` for code changes.
+10. Inspect the final diff, stage only files owned by this run, create one clear commit, record its SHA, and run \`git push origin main\`. Never force-push or absorb unrelated changes.
+11. For safe additive Prisma migrations, apply production migrations before the app deploy. Destructive or irreversible data work requires fresh user approval.
+12. For live-impacting commits, run \`npx vercel --prod --yes\`, wait for Ready and production aliases, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\`, targeted route/API checks, and recent Vercel error-log inspection.
+13. If production verification fails because of this release, stop with incident. Roll back only when it is safe and no incompatible migration or irreversible state change exists.
+14. Confirm the working tree is clean and \`main\` matches \`origin/main\` after the push.
+15. Record evidence, decision, changed files, tests, commit SHA, deployment ID, production verification, what was learned, and blockers in AutomationRun and automation memory. Update repo deployment notes only for material changes or deployments, never for no_op.
 
 UI smoke expectations:
 - The smoke must cover desktop and mobile.
@@ -39,6 +41,7 @@ Operational authority:
 - You may create and configure project resources in Vercel, Neon, Clerk, Google Cloud/Places, Resend, Figma/Figma Make, v0, GitHub repo settings, monitoring tools, and replacement tools discovered during research.
 - You may use already-authenticated browser sessions and CLI auth for Tee Time Spot project setup.
 - You may update code, env examples, docs, database schema, seed data, deployment config, GitHub branches, and automation scripts.
+- You are explicitly authorized to create coherent commits, push the current \`main\` branch to \`origin\`, apply safe additive migrations, and deploy verified live-impacting work to Vercel.
 - Never commit secrets. Store credentials only in local env files, provider dashboards, GitHub/Vercel env vars, or the appropriate secret manager.
 - Record created/updated accounts, projects, callback URLs, webhooks, deploy targets, and key names with secret values redacted.
 - Prefer free tiers or already-approved plans. Paid upgrades, payment methods, legal commitments, production data deletion, ownership transfer, or domain purchases require fresh explicit user approval.
@@ -52,9 +55,10 @@ Tool research requirements:
 Loop engineering requirements:
 - Use stable idempotency keys for notifications and external side effects.
 - Use a per-loop lease before mutating shared candidates when more than one automation could run.
+- Never start implementation in a dirty or diverged checkout, never stage another task's files, and never force-push.
 - Maintain a living learning ledger in AutomationRun notes: open signals, stale repeated work, successful patterns, failed assumptions, research links, and next action.
 - If the same course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement.
-- Stop with a normalized terminal outcome: success, no_op, needs_adapter, blocked_policy, blocked_auth, blocked_tooling, blocked_env, or needs_human.
+- Stop with a normalized terminal outcome: success, no_op, incident, needs_adapter, blocked_policy, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, or needs_human.
 
 Hard boundaries:
 - Alert only; never book, hold, pay, bypass controls, or solve account-specific course flows.

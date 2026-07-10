@@ -6,7 +6,7 @@ Tee Time Spot uses Postgres as the queue of user demand, durable per-search Verc
 
 - Per search: create/edit/resume/manual-check starts an immediate durable workflow; the workflow sleeps until its own `nextCheckAt` between checks.
 - Daily recovery: query only for overdue or failed workflow schedules and restart those searches; do not fetch course availability when the recovery queue is empty.
-- Hourly: run `npm run automation:improve` to create a Codex-ready prompt from recent failures, adapter gaps, and UI friction.
+- Hourly: run one complete autonomous improvement cycle: inspect evidence, select one candidate, implement it, verify it, commit it, push it, deploy live-impacting work, verify production, and record what was learned.
 - Baseline UI/access check: run `npm run ui:smoke` locally, or set `UI_SMOKE_BASE_URL=https://teetimespot.com` before `npm run ui:smoke` for production.
 - Before deploys: run `npm run test:run`, `npm run lint`, `npm run build`, and `npm run ui:smoke`.
 
@@ -16,7 +16,7 @@ The loop should improve the product every time it has credible evidence to act. 
 
 - Start each run by writing or confirming checkpoints: `queue_confirmed`, `candidate_selected`, `tool_research_done`, `ui_smoke_done`, `verification_done`, and `outcome_recorded`.
 - Run `npm run automation:inspect` and `npm run ui:smoke` before choosing a candidate unless a provider outage makes the smoke impossible. A smoke failure is evidence, not noise.
-- Treat `AutomationRun.notes`, recent browser discoveries, probe history, and deployment notes as a living learning ledger. Each loop should record what went right, what went wrong, what assumption changed, and the next concrete action.
+- Treat `AutomationRun.notes`, `WebsiteEvent`, `WebsiteFeedback`, recent browser discoveries, probe history, and deployment notes as a living learning ledger. Each loop should record what went right, what went wrong, what assumption changed, and the next concrete action.
 - Repeated work must decay. If the same course, tool, provider, or UI issue has been inspected repeatedly with no new evidence, mark it stale or blocked and rotate to a different evidence-backed candidate.
 - A loop that has no fresh queue blocker, smoke failure, provider drift, new research finding, or learnable adapter should return `no_op` instead of inventing polish work.
 - Use normalized terminal outcomes: `success`, `no_op`, `needs_adapter`, `blocked_policy`, `blocked_auth`, `blocked_tooling`, `blocked_env`, and `needs_human`.
@@ -50,6 +50,22 @@ The hourly improvement loop has broad authority to get Tee Time Spot working end
 - It must prefer free tiers or already-approved plans. Paid upgrades, payment methods, legal commitments, production data deletion, ownership transfer, or domain purchases require a fresh explicit user approval.
 - If a service blocks setup with identity, billing, phone verification, captcha, or unavailable credentials, stop with `blocked_auth`, `blocked_env`, or `needs_human` and record the exact unblock step.
 
+## Git And Production Handoff
+
+The hourly loop is authorized to commit, push, and deploy its own verified work. A successful code or configuration improvement is not complete until its source-control and production handoff is complete.
+
+- Start by running `git fetch origin`, confirming the checkout is on `main`, confirming `main` is not diverged from `origin/main`, and inspecting `git status --short`.
+- When the tree is clean and `main` is only behind, update it with a fast-forward-only pull before selecting work.
+- If unrelated or unexplained changes already exist, do not stage, commit, overwrite, revert, or deploy them. Stop with `blocked_dirty_worktree` and identify the paths.
+- Keep each run to one coherent improvement and stage only its intended files. Never use `git add -A` without first proving every changed path belongs to the run.
+- Do not commit until focused tests, `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check` pass for a code change.
+- Create a clear imperative or Conventional Commit, record its SHA, and run `git push origin main`. If the push is rejected or the remote moved, stop with `blocked_git`; do not force-push or rewrite history.
+- For an additive, backward-compatible Prisma migration, run production migration status/deploy with the Vercel production environment before the app deployment. Destructive migrations, irreversible data changes, or broad backfills require fresh user approval.
+- Deploy with `npx vercel --prod --yes` when the commit affects the live app, production workflow, adapter runtime, or provider configuration. Docs-only and local-operator-only changes still require a commit and push but not a Vercel deployment.
+- After deployment, require `Ready`, the `teetimespot.com` and `www.teetimespot.com` aliases, production UI smoke, key route/API checks, recent error-log inspection, and confirmation that the deployed behavior corresponds to the pushed commit.
+- If production verification fails because of the new release, stop further improvement work and report `incident`. Prefer a safe rollback to the previous verified deployment only when no incompatible migration or irreversible state change is involved; otherwise require human intervention.
+- A `no_op` run must not edit repo files, create a commit, push, deploy, or append repetitive deployment notes.
+
 ## Boundaries
 
 - Alert only. Do not book, hold, pay, enter checkout, bypass controls, solve verification flows, or use account-specific course sessions.
@@ -61,18 +77,23 @@ The hourly improvement loop has broad authority to get Tee Time Spot working end
 
 Each automation run should:
 
-1. Create an `AutomationRun` row with a prompt version.
-2. Load active `TeeSearch` rows and ranked `CoursePreference` rows.
-3. Load recent learning signals from `AutomationRun.notes`, `CourseAutomationDiscovery`, current probes, smoke evidence, and deployment notes.
-4. Evaluate `Course.automationEligibility` and `policyNotes` before fetching.
-5. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
-6. Run a current-tool/design research pass when the selected candidate is UI quality, unsupported automation, or weak tooling.
-7. Create or update project accounts/configuration when that is the highest-leverage blocker.
-8. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers.
-9. Upsert `TeeTimeMatch` rows for qualifying slots.
-10. Send Resend email alerts only for new pending matches, then mark them sent.
-11. Run tests, lint, build, and `npm run ui:smoke` for any code or UI change.
-12. Finish the `AutomationRun` with outcome, checkpoints, notes, errors, changed files, learning signals, stale candidates, changed assumptions, research decisions, and redacted setup changes when applicable.
+1. Confirm a clean, synchronized `main` checkout and record the starting SHA.
+2. Create an `AutomationRun` row with a prompt version.
+3. Load active `TeeSearch` rows and ranked `CoursePreference` rows.
+4. Load current evidence from `WebsiteEvent`, `WebsiteFeedback`, recent learning signals, `CourseAutomationDiscovery`, current probes, smoke evidence, deployment notes, and recent Vercel logs.
+5. Select one evidence-backed candidate, preferring production incidents, real-user blockers, alert failures, adapter gaps, funnel regressions, repeated feedback, and verified UI/access failures in that order.
+6. Evaluate `Course.automationEligibility` and `policyNotes` before fetching.
+7. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
+8. Run a current-tool/design research pass only when it can change the selected implementation strategy.
+9. Implement one coherent improvement with focused tests and documentation where behavior changed.
+10. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers when worker behavior is explicitly verified.
+11. Upsert `TeeTimeMatch` rows and send Resend alerts only through the normal idempotent worker path.
+12. Run focused verification plus `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check`.
+13. Inspect the final diff, stage only intended files, create one coherent commit, and push `main` without force.
+14. Apply only safe additive production migrations, then deploy live-impacting work to Vercel.
+15. Verify the production deployment, aliases, routes/APIs, desktop/mobile smoke, logs, and expected behavior.
+16. Confirm the working tree is clean and `main` matches `origin/main` after the push.
+17. Finish the `AutomationRun` and automation memory with outcome, evidence, checkpoints, commit SHA, deployment ID, changed files, verification, learning signals, changed assumptions, and blockers. Do not write a repo note for `no_op`.
 
 ## UI Smoke Contract
 
