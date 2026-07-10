@@ -1,3 +1,5 @@
+import type { EmailStopUrls } from "@/lib/email/search-actions";
+
 export type SearchStatusEmailKind = "setup" | "daily";
 
 export type SearchStatusAvailability = {
@@ -15,6 +17,12 @@ export type SearchStatusCourseReport = {
   message?: string;
   bookingUrl?: string;
   availability?: SearchStatusAvailability;
+  matchingTimes?: Array<{
+    startsAt: string;
+    availableSpots: number;
+    priceCents?: number;
+    holes?: number;
+  }>;
 };
 
 export type SearchStatusSnapshot = Array<{
@@ -24,6 +32,7 @@ export type SearchStatusSnapshot = Array<{
 }>;
 
 export type SearchStatusEmailInput = {
+  searchId: string;
   to: string;
   kind: SearchStatusEmailKind;
   targetDate: string;
@@ -34,6 +43,7 @@ export type SearchStatusEmailInput = {
   courses: SearchStatusCourseReport[];
   previousSnapshot?: unknown;
   idempotencyKey?: string;
+  stopUrls?: EmailStopUrls;
 };
 
 const DAILY_STATUS_EMAIL_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -130,6 +140,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const courseRows = input.courses
     .map((course, index) => renderCourseReport(course, input.players, index + 1))
     .join("");
+  const stopControls = renderEmailStopControls(input.stopUrls);
 
   return `
     <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
@@ -168,6 +179,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
             We only send an instant email when a newly opened tee time matches your exact date, time window, and player count. Otherwise, you’ll receive at most one status update per day.
           </div>
           <p style="color:#5c6c64;font-size:13px;margin:16px 0 0">Last checked ${escapeHtml(checkedAt)}.</p>
+          ${stopControls}
         </div>
         <div style="background:#111d18;color:rgba(255,255,255,.72);padding:18px 22px;font-size:13px">
           Tee Time Spot sends you to the course’s official booking page. We never book, hold, or pay for tee times.
@@ -179,6 +191,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
 
 function renderCourseReport(course: SearchStatusCourseReport, players: number, rank: number) {
   const description = describeCourse(course, players);
+  const matchingTimes = renderMatchingTimes(course.matchingTimes);
   const bookingLink = course.bookingUrl
     ? `<p style="margin:10px 0 0"><a href="${escapeHtml(course.bookingUrl)}" style="color:#105338;font-weight:800;text-decoration:none">Open official booking page →</a></p>`
     : "";
@@ -188,6 +201,7 @@ function renderCourseReport(course: SearchStatusCourseReport, players: number, r
       <p style="font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:${description.color};margin:0 0 5px">Priority ${rank} · ${escapeHtml(description.label)}</p>
       <p style="font-size:16px;font-weight:800;margin:0 0 5px">${escapeHtml(course.courseName)}</p>
       <p style="margin:0;color:#4e5d56;font-size:14px">${escapeHtml(description.detail)}</p>
+      ${matchingTimes}
       ${bookingLink}
     </div>
   `;
@@ -198,7 +212,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
     return {
       label: "Matching time visible",
       color: "#147a52",
-      detail: `${course.availableMatches} matching tee time${course.availableMatches === 1 ? " is" : "s are"} visible. New openings trigger a separate instant alert.`
+      detail: `${course.availableMatches} tee time${course.availableMatches === 1 ? " matches" : "s match"} your search right now.`
     };
   }
 
@@ -261,6 +275,59 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   };
 }
 
+function renderMatchingTimes(times: SearchStatusCourseReport["matchingTimes"]) {
+  if (!times?.length) {
+    return "";
+  }
+
+  const rows = [...times]
+    .sort((left, right) => left.startsAt.localeCompare(right.startsAt))
+    .map((time) => {
+      const details = [
+        `${time.availableSpots} spot${time.availableSpots === 1 ? "" : "s"}`,
+        time.priceCents != null ? formatPrice(time.priceCents) : null,
+        time.holes ? `${time.holes} holes` : null
+      ].filter(Boolean);
+
+      return `
+        <tr>
+          <td style="border-top:1px solid #d9e3dc;padding:10px 0;font-size:18px;font-weight:800;color:#14231d">${escapeHtml(formatStartsAtTime(time.startsAt))}</td>
+          <td style="border-top:1px solid #d9e3dc;padding:10px 0;text-align:right;color:#4e5d56;font-size:13px">${escapeHtml(details.join(" · "))}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <div style="margin-top:13px">
+      <p style="font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#147a52;margin:0 0 4px">Available now</p>
+      <table role="presentation" style="border-collapse:collapse;width:100%">
+        ${rows}
+      </table>
+    </div>
+  `;
+}
+
+export function renderEmailStopControls(stopUrls?: EmailStopUrls) {
+  if (!stopUrls) {
+    return "";
+  }
+
+  return `
+    <div style="border-top:1px solid #d9e3dc;margin-top:22px;padding-top:20px">
+      <p style="font-size:16px;font-weight:800;margin:0 0 4px">Done with this alert?</p>
+      <p style="color:#5c6c64;font-size:13px;margin:0 0 12px">Turn it off and we’ll stop checking and emailing for this search.</p>
+      <p style="margin:0 0 8px">
+        <a href="${escapeHtml(stopUrls.booked)}" style="background:#147a52;border-radius:999px;color:#ffffff;display:block;font-weight:800;padding:12px 16px;text-align:center;text-decoration:none">I booked — stop these emails</a>
+      </p>
+      <p style="margin:0">
+        <a href="${escapeHtml(stopUrls.cancelled)}" style="border:1px solid #d9e3dc;border-radius:999px;color:#a33b35;display:block;font-weight:800;padding:11px 16px;text-align:center;text-decoration:none">Cancel this alert</a>
+      </p>
+      <p style="color:#6b766f;font-size:11px;margin:9px 0 0;text-align:center">Each button opens a confirmation page before anything is turned off.</p>
+    </div>
+  `;
+}
+
 function getCourseState(course: SearchStatusCourseReport) {
   if (course.outcome !== "NO_MATCH") {
     return course.outcome === "MATCH_FOUND"
@@ -316,6 +383,14 @@ function formatTime(value: string) {
   const suffix = hours >= 12 ? "PM" : "AM";
   const displayHour = hours % 12 || 12;
   return `${displayHour}:${String(minutes).padStart(2, "0")} ${suffix}`;
+}
+
+function formatPrice(priceCents: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: priceCents % 100 === 0 ? 0 : 2
+  }).format(priceCents / 100);
 }
 
 function escapeHtml(value: string) {

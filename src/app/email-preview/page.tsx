@@ -13,15 +13,30 @@ export const metadata: Metadata = {
   }
 };
 
+const previewStopUrls = {
+  booked: "https://teetimespot.com/alerts/stop?token=preview-booked",
+  cancelled: "https://teetimespot.com/alerts/stop?token=preview-cancelled"
+};
+
 const previewAlert = {
   to: "preview@teetimespot.com",
-  courseName: "Tashua Knolls Golf Course",
-  startsAt: new Date("2026-07-15T17:50:00-04:00"),
-  availableSpots: 3,
-  bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431"
+  searchId: "preview-search",
+  matches: [
+    {
+      courseName: "Tashua Knolls Golf Course",
+      startsAt: new Date("2026-07-15T13:50:00-04:00"),
+      availableSpots: 3,
+      priceCents: 5500,
+      holes: 18,
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431",
+      isNew: true
+    }
+  ],
+  stopUrls: previewStopUrls
 };
 
 const previewStatus = {
+  searchId: "preview-search",
   to: "preview@teetimespot.com",
   kind: "setup" as const,
   targetDate: "2026-07-15",
@@ -30,6 +45,32 @@ const previewStatus = {
   players: 2,
   checkedAt: new Date("2026-07-10T08:15:00-04:00"),
   courses: [
+    {
+      courseId: "fairchild",
+      courseName: "Fairchild Wheeler Golf Course",
+      outcome: "MATCH_FOUND" as const,
+      availableMatches: 2,
+      bookingUrl:
+        "https://fairchild-wheeler-red-course.book.teeitup.golf/?date=2026-07-15",
+      availability: {
+        visibleSlotCount: 12,
+        playerEligibleSlotCount: 10
+      },
+      matchingTimes: [
+        {
+          startsAt: "2026-07-15T07:40:00-04:00",
+          availableSpots: 4,
+          priceCents: 6700,
+          holes: 18
+        },
+        {
+          startsAt: "2026-07-15T08:10:00-04:00",
+          availableSpots: 2,
+          priceCents: 6700,
+          holes: 18
+        }
+      ]
+    },
     {
       courseId: "tashua",
       courseName: "Tashua Knolls Golf Course",
@@ -75,7 +116,8 @@ const previewStatus = {
       availableMatches: 0,
       bookingUrl: "https://example.com/oak-lane"
     }
-  ]
+  ],
+  stopUrls: previewStopUrls
 };
 
 export default function EmailPreviewPage() {
@@ -95,7 +137,7 @@ export default function EmailPreviewPage() {
             day, and an instant email only when a new time opens inside your exact range.
           </p>
         </div>
-        <a className="button button-secondary" href={previewAlert.bookingUrl}>
+        <a className="button button-secondary" href={previewAlert.matches[0].bookingUrl}>
           Official booking page
           <ExternalLink size={18} />
         </a>
@@ -213,7 +255,7 @@ export default function EmailPreviewPage() {
               </div>
               <div>
                 <dt>Golfers</dt>
-                <dd>{previewAlert.availableSpots} players</dd>
+                <dd>{previewAlert.matches[0].availableSpots} players</dd>
               </div>
               <div>
                 <dt>Sent to</dt>

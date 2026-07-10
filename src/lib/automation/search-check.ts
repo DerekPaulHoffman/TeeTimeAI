@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+
 import {
   finishAutomationRun,
   getActiveSearchForAutomation,
+  listAvailableMatchAlerts,
   listPendingMatchAlerts,
   markMatchAlertSent,
   markMatchAlertSuppressed,
@@ -105,8 +108,6 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     };
   }
 
-  await sendPendingMatchAlerts(searchId);
-
   const searchWindow = {
     date: search.date.toISOString().slice(0, 10),
     startTime: search.startTime,
@@ -184,7 +185,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       );
 
       for (const match of currentMatches) {
-        const record = await recordTeeTimeMatch({
+        await recordTeeTimeMatch({
           searchId: search.id,
           courseId: course.id,
           sourceId: match.sourceId,
@@ -195,18 +196,6 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           holes: match.holes,
           evidenceUrl: match.evidenceUrl
         });
-
-        if (record.alertStatus === "PENDING") {
-          await deliverMatchAlert({
-            id: record.id,
-            recipients: getAlertRecipients(search.user.email, search.additionalEmails),
-            courseName: course.name,
-            startsAt: record.startsAt,
-            availableSpots: record.availableSpots,
-            bookingUrl: record.bookingUrl
-          });
-          newlyAlertedMatches += 1;
-        }
       }
 
       await markMissingMatchesUnavailable({
@@ -238,7 +227,13 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           course.detectedBookingUrl ??
           course.website ??
           undefined,
-        availability
+        availability,
+        matchingTimes: currentMatches.map((match) => ({
+          startsAt: match.startsAt,
+          availableSpots: match.availableSpots,
+          priceCents: match.priceCents,
+          holes: match.holes
+        }))
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown adapter error";
@@ -259,6 +254,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       });
     }
   }
+
+  newlyAlertedMatches = await sendPendingMatchAlerts(searchId);
 
   let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = "skipped";
   try {
@@ -314,6 +311,7 @@ async function deliverSearchStatusReport(input: {
   const deliveries = await Promise.all(
     recipients.map((recipient) =>
       sendSearchStatusEmail({
+        searchId: input.search.id,
         to: recipient,
         kind,
         targetDate: input.searchWindow.date,
@@ -341,46 +339,49 @@ async function deliverSearchStatusReport(input: {
 
 async function sendPendingMatchAlerts(searchId: string) {
   const pendingMatches = await listPendingMatchAlerts(searchId);
-  for (const match of pendingMatches) {
-    await deliverMatchAlert({
-      id: match.id,
-      recipients: getAlertRecipients(match.teeSearch.user.email, match.teeSearch.additionalEmails),
-      courseName: match.course.name,
-      startsAt: match.startsAt,
-      availableSpots: match.availableSpots,
-      bookingUrl: match.bookingUrl
-    });
+  if (pendingMatches.length === 0) {
+    return 0;
   }
-}
 
-async function deliverMatchAlert(input: {
-  id: string;
-  recipients: string[];
-  courseName: string;
-  startsAt: Date;
-  availableSpots: number;
-  bookingUrl: string;
-}) {
+  const availableMatches = await listAvailableMatchAlerts(searchId);
+  if (availableMatches.length === 0) {
+    await Promise.all(pendingMatches.map((match) => markMatchAlertSuppressed(match.id)));
+    return 0;
+  }
+
+  const pendingIds = new Set(pendingMatches.map((match) => match.id));
+  const search = pendingMatches[0].teeSearch;
+  const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
+  const batchKey = createHash("sha256")
+    .update(pendingMatches.map((match) => match.id).sort().join(":"))
+    .digest("hex")
+    .slice(0, 24);
   const deliveries = await Promise.all(
-    input.recipients.map((recipient) =>
+    recipients.map((recipient) =>
       sendTeeTimeAlert({
+        searchId,
         to: recipient,
-        courseName: input.courseName,
-        startsAt: input.startsAt,
-        availableSpots: input.availableSpots,
-        bookingUrl: input.bookingUrl,
-        idempotencyKey: `tee-time-match-${input.id}-${recipient}`
+        matches: availableMatches.map((match) => ({
+          courseName: match.course.name,
+          startsAt: match.startsAt,
+          availableSpots: match.availableSpots,
+          bookingUrl: match.bookingUrl,
+          priceCents: match.priceCents,
+          holes: match.holes,
+          isNew: pendingIds.has(match.id)
+        })),
+        idempotencyKey: `tee-time-match-batch-${batchKey}-${recipient}`
       })
     )
   );
 
   if (deliveries.every((delivery) => delivery.deliveryStatus === "dry_run")) {
-    await markMatchAlertSuppressed(input.id);
+    await Promise.all(pendingMatches.map((match) => markMatchAlertSuppressed(match.id)));
   } else {
-    await markMatchAlertSent(input.id);
+    await Promise.all(pendingMatches.map((match) => markMatchAlertSent(match.id)));
   }
 
-  return deliveries;
+  return pendingMatches.length;
 }
 
 function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = []) {

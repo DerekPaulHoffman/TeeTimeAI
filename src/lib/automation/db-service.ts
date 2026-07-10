@@ -151,6 +151,7 @@ export async function listPendingMatchAlerts(searchId?: string): Promise<Pending
   return prisma.teeTimeMatch.findMany({
     where: {
       alertStatus: "PENDING",
+      availabilityStatus: "AVAILABLE",
       teeSearch: {
         status: "ACTIVE",
         ...(searchId ? { id: searchId } : {})
@@ -524,6 +525,20 @@ export async function markSearchStatusEmailSent(input: {
       statusEmailSentAt: input.sentAt,
       statusEmailSnapshot: input.snapshot
     }
+  });
+}
+
+export async function listAvailableMatchAlerts(searchId: string): Promise<PendingAlertMatch[]> {
+  return prisma.teeTimeMatch.findMany({
+    where: {
+      teeSearchId: searchId,
+      availabilityStatus: "AVAILABLE",
+      teeSearch: {
+        status: "ACTIVE"
+      }
+    },
+    orderBy: [{ course: { name: "asc" } }, { startsAt: "asc" }],
+    include: pendingAlertInclude
   });
 }
 

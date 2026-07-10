@@ -12,10 +12,15 @@ describe("renderAlertHtml", () => {
   it("escapes dynamic email fields", () => {
     const html = renderAlertHtml({
       to: "player@example.com",
-      courseName: "<script>alert('x')</script>",
-      startsAt: new Date("2026-07-09T14:30:00.000Z"),
-      availableSpots: 4,
-      bookingUrl: "https://example.com/book?x=<bad>"
+      searchId: "search-1",
+      matches: [
+        {
+          courseName: "<script>alert('x')</script>",
+          startsAt: new Date("2026-07-09T14:30:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book?x=<bad>"
+        }
+      ]
     });
 
     expect(html).toContain("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;");
@@ -26,16 +31,55 @@ describe("renderAlertHtml", () => {
   it("keeps alerts limited to official first-come-first-served booking", () => {
     const html = renderAlertHtml({
       to: "player@example.com",
-      courseName: "Tashua Knolls",
-      startsAt: new Date("2026-07-09T14:30:00.000Z"),
-      availableSpots: 4,
-      bookingUrl: "https://example.com/book"
+      searchId: "search-1",
+      matches: [
+        {
+          courseName: "Tashua Knolls",
+          startsAt: new Date("2026-07-09T14:30:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book"
+        }
+      ]
     });
 
     expect(html).toContain("Book this tee time");
-    expect(html).toContain("official course");
-    expect(html).toMatch(/never\s+handles your payment or personal info/);
+    expect(html).toContain("official booking page");
+    expect(html).toMatch(/never books,\s+holds, or handles payment/);
     expect(html).toContain("first come");
+  });
+
+  it("lists every available time and renders both stop-alert controls", () => {
+    const html = renderAlertHtml({
+      to: "player@example.com",
+      searchId: "search-1",
+      matches: [
+        {
+          courseName: "Fairchild Wheeler Golf Course",
+          startsAt: new Date("2026-07-11T07:40:00-04:00"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/fairchild",
+          isNew: true
+        },
+        {
+          courseName: "Fairchild Wheeler Golf Course",
+          startsAt: new Date("2026-07-11T08:10:00-04:00"),
+          availableSpots: 2,
+          bookingUrl: "https://example.com/fairchild",
+          isNew: false
+        }
+      ],
+      stopUrls: {
+        booked: "https://teetimespot.com/alerts/stop?token=booked",
+        cancelled: "https://teetimespot.com/alerts/stop?token=cancelled"
+      }
+    });
+
+    expect(html).toContain("7:40 AM");
+    expect(html).toContain("8:10 AM");
+    expect(html).toContain("4 spots");
+    expect(html).toContain("2 spots");
+    expect(html).toContain("I booked — stop these emails");
+    expect(html).toContain("Cancel this alert");
   });
 });
 
@@ -54,10 +98,15 @@ describe("email alert delivery helpers", () => {
   it("returns a dry-run delivery result for local recipients", async () => {
     const result = await sendTeeTimeAlert({
       to: "demo@teetimeai.local",
-      courseName: "Tashua Knolls",
-      startsAt: new Date("2026-07-09T14:30:00.000Z"),
-      availableSpots: 4,
-      bookingUrl: "https://example.com/book",
+      searchId: "search-1",
+      matches: [
+        {
+          courseName: "Tashua Knolls",
+          startsAt: new Date("2026-07-09T14:30:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book"
+        }
+      ],
       idempotencyKey: "tee-time-match-test"
     });
 
@@ -66,6 +115,7 @@ describe("email alert delivery helpers", () => {
 
   it("dry-runs setup status reports for reserved test recipients", async () => {
     const result = await sendSearchStatusEmail({
+      searchId: "search-1",
       to: "demo@teetimeai.local",
       kind: "setup",
       targetDate: "2026-07-11",

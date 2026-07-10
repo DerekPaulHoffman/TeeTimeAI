@@ -1,17 +1,31 @@
 import { Resend } from "resend";
 
 import {
+  renderEmailStopControls,
   renderSearchStatusHtml,
   type SearchStatusEmailInput
 } from "@/lib/email/search-status";
+import {
+  buildEmailStopUrls,
+  type EmailStopUrls
+} from "@/lib/email/search-actions";
 
-type TeeTimeAlertInput = {
-  to: string;
+export type TeeTimeAlertMatch = {
   courseName: string;
   startsAt: Date;
   availableSpots: number;
   bookingUrl: string;
+  priceCents?: number | null;
+  holes?: number | null;
+  isNew?: boolean;
+};
+
+export type TeeTimeAlertInput = {
+  to: string;
+  searchId: string;
+  matches: TeeTimeAlertMatch[];
   idempotencyKey?: string;
+  stopUrls?: EmailStopUrls;
 };
 
 export type EmailDelivery =
@@ -31,9 +45,9 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
     console.warn("[email:dry-run]", {
       to: input.to,
-      courseName: input.courseName,
-      startsAt: input.startsAt.toISOString(),
-      bookingUrl: input.bookingUrl
+      searchId: input.searchId,
+      matchingTimes: input.matches.length,
+      courses: new Set(input.matches.map((match) => match.courseName)).size
     });
     return { id: "dry-run", deliveryStatus: "dry_run" };
   }
@@ -43,8 +57,11 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
     {
       from,
       to: input.to,
-      subject: `A spot opened up at ${input.courseName}`,
-      html: renderAlertHtml(input)
+      subject: getMatchAlertSubject(input.matches),
+      html: renderAlertHtml({
+        ...input,
+        stopUrls: input.stopUrls ?? buildEmailStopUrls(input.searchId)
+      })
     },
     input.idempotencyKey
       ? {
@@ -86,7 +103,10 @@ export async function sendSearchStatusEmail(
         input.kind === "setup"
           ? "Your Tee Time Spot search is active"
           : "Your daily Tee Time Spot update",
-      html: renderSearchStatusHtml(input)
+      html: renderSearchStatusHtml({
+        ...input,
+        stopUrls: input.stopUrls ?? buildEmailStopUrls(input.searchId)
+      })
     },
     input.idempotencyKey
       ? {
@@ -125,23 +145,18 @@ export function shouldDryRunRecipient(email: string) {
 }
 
 export function renderAlertHtml(input: TeeTimeAlertInput) {
-  const courseName = escapeHtml(input.courseName);
-  const startsAt = escapeHtml(input.startsAt.toLocaleString());
-  const startsAtDate = escapeHtml(
-    input.startsAt.toLocaleDateString(undefined, {
-      weekday: "long",
-      month: "short",
-      day: "numeric"
-    })
+  const matches = [...input.matches].sort(
+    (left, right) => left.startsAt.getTime() - right.startsAt.getTime()
   );
-  const startsAtTime = escapeHtml(
-    input.startsAt.toLocaleTimeString(undefined, {
-      hour: "numeric",
-      minute: "2-digit"
-    })
-  );
-  const availableSpots = escapeHtml(String(input.availableSpots));
-  const bookingUrl = escapeHtml(input.bookingUrl);
+  const newMatchCount = matches.filter((match) => match.isNew !== false).length;
+  const courseCount = new Set(matches.map((match) => match.courseName)).size;
+  const heading = newMatchCount === 1 ? "A spot just opened up!" : "New tee times just opened up!";
+  const summary =
+    matches.length === 1
+      ? "We found a tee time that matches your search. Open the official course page before it is gone."
+      : `${matches.length} matching tee times are currently available across ${courseCount} course${courseCount === 1 ? "" : "s"}.`;
+  const courseGroups = renderAlertCourseGroups(matches);
+  const stopControls = renderEmailStopControls(input.stopUrls);
 
   return `
     <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
@@ -154,50 +169,110 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
           <div style="display:inline-block;background:#e28a2f;color:#1d1309;border-radius:999px;padding:7px 11px;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">
             New tee time alert
           </div>
-          <p style="margin:18px 0 4px;color:rgba(255,255,255,.76);font-size:14px">${courseName}</p>
-          <h1 style="font-size:30px;line-height:1.05;margin:0 0 12px">A spot just opened up!</h1>
-          <p style="margin:0;color:rgba(255,255,255,.82)">
-            We found a tee time that matches your search. Open the official course page before it is gone.
-          </p>
+          <h1 style="font-size:30px;line-height:1.05;margin:18px 0 12px">${heading}</h1>
+          <p style="margin:0;color:rgba(255,255,255,.82)">${escapeHtml(summary)}</p>
         </div>
         <div style="padding:22px">
-          <div style="border:1px solid #d9e3dc;border-radius:10px;padding:18px;margin-bottom:18px">
-            <p style="font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#105338;margin:0 0 10px">Open now</p>
-            <p style="font-size:18px;font-weight:800;margin:0 0 14px">${startsAtDate}</p>
-            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:16px">
-              <div style="background:#f5f7f2;border-radius:8px;padding:12px">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Tee time</div>
-                <div style="font-weight:800">${startsAtTime}</div>
-              </div>
-              <div style="background:#f5f7f2;border-radius:8px;padding:12px">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Golfers</div>
-                <div style="font-weight:800">${availableSpots} players</div>
-              </div>
-              <div style="background:#f5f7f2;border-radius:8px;padding:12px">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Course</div>
-                <div style="font-weight:800">18 holes</div>
-              </div>
-            </div>
-            <p style="margin:0 0 6px;font-weight:800">${courseName}</p>
-            <p style="margin:0;color:#5c6c64;font-size:14px">${startsAt}</p>
-          </div>
-          <p style="margin:0 0 22px">
-            <a href="${bookingUrl}" style="display:inline-block;background:#e28a2f;color:#1d1309;padding:14px 18px;border-radius:999px;text-decoration:none;font-weight:800">
-              Book this tee time
-            </a>
-          </p>
+          ${courseGroups}
           <div style="background:#e6f3f7;border-radius:10px;color:#174152;padding:14px 16px;font-size:14px">
-            That button goes straight to the course's own booking page. Tee Time Spot never
-            handles your payment or personal info.
+            Every button goes to the course’s official booking page. Tee Time Spot never books,
+            holds, or handles payment. Availability is first come, first served.
           </div>
+          ${stopControls}
         </div>
         <div style="background:#111d18;color:rgba(255,255,255,.72);padding:18px 22px;font-size:13px">
-          You're getting this because you set up an alert on teetimespot.com. Availability is
-          first come, first served.
+          You’re getting this because you set up an alert on teetimespot.com.
         </div>
       </div>
     </div>
   `;
+}
+
+function renderAlertCourseGroups(matches: TeeTimeAlertMatch[]) {
+  const groups = new Map<string, TeeTimeAlertMatch[]>();
+  for (const match of matches) {
+    const group = groups.get(match.courseName) ?? [];
+    group.push(match);
+    groups.set(match.courseName, group);
+  }
+
+  return [...groups.entries()]
+    .map(([courseName, courseMatches]) => {
+      const bookingUrl = courseMatches[0]?.bookingUrl ?? "";
+      const date = courseMatches[0]
+        ? courseMatches[0].startsAt.toLocaleDateString("en-US", {
+            weekday: "long",
+            month: "short",
+            day: "numeric",
+            timeZone: "America/New_York"
+          })
+        : "";
+      const rows = courseMatches
+        .map((match) => renderAlertMatchRow(match))
+        .join("");
+      const buttonLabel = matches.length === 1 ? "Book this tee time" : "Open official booking page";
+
+      return `
+        <div style="border:1px solid #d9e3dc;border-radius:10px;padding:18px;margin-bottom:14px">
+          <p style="font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#147a52;margin:0 0 6px">Available now</p>
+          <p style="font-size:18px;font-weight:800;margin:0">${escapeHtml(courseName)}</p>
+          <p style="color:#5c6c64;font-size:13px;margin:3px 0 12px">${escapeHtml(date)}</p>
+          <table role="presentation" style="border-collapse:collapse;width:100%">
+            ${rows}
+          </table>
+          <p style="margin:14px 0 0">
+            <a href="${escapeHtml(bookingUrl)}" style="display:block;background:#e28a2f;color:#1d1309;padding:13px 16px;border-radius:999px;text-align:center;text-decoration:none;font-weight:800">
+              ${buttonLabel}
+            </a>
+          </p>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderAlertMatchRow(match: TeeTimeAlertMatch) {
+  const time = match.startsAt.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/New_York"
+  });
+  const details = [
+    `${match.availableSpots} spot${match.availableSpots === 1 ? "" : "s"}`,
+    match.priceCents != null ? formatPrice(match.priceCents) : null,
+    match.holes ? `${match.holes} holes` : null
+  ].filter(Boolean);
+  const newBadge = match.isNew === false
+    ? ""
+    : '<span style="background:#e2f1e7;border-radius:999px;color:#105338;font-size:10px;font-weight:800;margin-left:7px;padding:3px 6px;vertical-align:2px">NEW</span>';
+
+  return `
+    <tr>
+      <td style="border-top:1px solid #d9e3dc;padding:11px 0;font-size:19px;font-weight:800">${escapeHtml(time)}${newBadge}</td>
+      <td style="border-top:1px solid #d9e3dc;padding:11px 0;text-align:right;color:#4e5d56;font-size:13px">${escapeHtml(details.join(" · "))}</td>
+    </tr>
+  `;
+}
+
+function getMatchAlertSubject(matches: TeeTimeAlertMatch[]) {
+  const newMatches = matches.filter((match) => match.isNew !== false);
+  const subjectMatches = newMatches.length > 0 ? newMatches : matches;
+  const courseNames = [...new Set(subjectMatches.map((match) => match.courseName))];
+  if (subjectMatches.length === 1) {
+    return `A spot opened up at ${courseNames[0]}`;
+  }
+  if (courseNames.length === 1) {
+    return `${subjectMatches.length} tee times opened at ${courseNames[0]}`;
+  }
+  return `${subjectMatches.length} matching tee times opened up`;
+}
+
+function formatPrice(priceCents: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: priceCents % 100 === 0 ? 0 : 2
+  }).format(priceCents / 100);
 }
 
 function escapeHtml(value: string) {

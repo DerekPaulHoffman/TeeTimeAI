@@ -50,6 +50,7 @@ describe("search status email cadence", () => {
 describe("renderSearchStatusHtml", () => {
   it("explains outside-window, not-visible, and work-in-progress course states", () => {
     const html = renderSearchStatusHtml({
+      searchId: "search-1",
       to: "player@example.com",
       kind: "setup",
       targetDate: "2026-07-11",
@@ -68,6 +69,43 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
     expect(html).toContain("x=&lt;unsafe&gt;");
+  });
+
+  it("shows every matching time with spots and email stop controls", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-1",
+      to: "player@example.com",
+      kind: "daily",
+      targetDate: "2026-07-11",
+      startTime: "07:30",
+      endTime: "09:00",
+      players: 2,
+      checkedAt: new Date("2026-07-10T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "fairchild",
+          courseName: "Fairchild Wheeler Golf Course",
+          outcome: "MATCH_FOUND",
+          availableMatches: 2,
+          bookingUrl: "https://example.com/fairchild",
+          matchingTimes: [
+            { startsAt: "2026-07-11T07:40:00-04:00", availableSpots: 4 },
+            { startsAt: "2026-07-11T08:10:00-04:00", availableSpots: 2 }
+          ]
+        }
+      ],
+      stopUrls: {
+        booked: "https://teetimespot.com/alerts/stop?token=booked",
+        cancelled: "https://teetimespot.com/alerts/stop?token=cancelled"
+      }
+    });
+
+    expect(html).toContain("7:40 AM");
+    expect(html).toContain("8:10 AM");
+    expect(html).toContain("4 spots");
+    expect(html).toContain("2 spots");
+    expect(html).toContain("I booked — stop these emails");
+    expect(html).toContain("Cancel this alert");
   });
 });
 

@@ -163,6 +163,115 @@ button {
   color: #ffffff;
 }
 
+.button-danger {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+.button-danger:hover,
+.button-danger:focus-visible {
+  background: #852f2a;
+}
+
+.email-action-page {
+  align-items: center;
+  background:
+    radial-gradient(circle at 50% 10%, rgba(216, 238, 245, 0.72), transparent 34rem),
+    var(--paper);
+  display: flex;
+  min-height: 100svh;
+  padding: 108px 20px 72px;
+}
+
+.email-action-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--soft-shadow);
+  margin: 0 auto;
+  max-width: 640px;
+  padding: clamp(28px, 6vw, 52px);
+  width: 100%;
+}
+
+.email-action-icon {
+  align-items: center;
+  background: var(--sky);
+  border-radius: 999px;
+  color: var(--fairway-dark);
+  display: flex;
+  height: 54px;
+  justify-content: center;
+  margin-bottom: 22px;
+  width: 54px;
+}
+
+.email-action-icon.is-booked,
+.email-action-icon.is-success {
+  background: #e2f1e7;
+  color: var(--fairway-dark);
+}
+
+.email-action-icon.is-cancelled {
+  background: #f8dfdb;
+  color: var(--danger);
+}
+
+.email-action-eyebrow {
+  color: var(--fairway-dark);
+  margin-bottom: 12px;
+}
+
+.email-action-panel h1 {
+  font-size: clamp(2.2rem, 7vw, 4.2rem);
+  letter-spacing: -0.04em;
+  line-height: 0.98;
+  margin: 0;
+}
+
+.email-action-copy {
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.65;
+  margin: 22px 0;
+}
+
+.email-action-summary {
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  margin: 26px 0;
+  padding: 20px 0;
+}
+
+.email-action-summary div {
+  align-items: center;
+  display: flex;
+  font-weight: 800;
+  gap: 10px;
+}
+
+.email-action-summary p {
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 2px 0 0 28px;
+}
+
+.email-action-buttons {
+  display: grid;
+  gap: 10px;
+}
+
+.email-action-buttons form {
+  display: grid;
+}
+
+.email-action-button {
+  min-height: 50px;
+  width: 100%;
+}
+
 .hero {
   background:
     linear-gradient(
