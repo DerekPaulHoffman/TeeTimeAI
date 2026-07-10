@@ -45,6 +45,7 @@ describe("fetchCpsSlots", () => {
 
       if (url.includes("/TeeTimes?")) {
         const teeTimesUrl = new URL(url);
+        expect(teeTimesUrl.searchParams.get("searchDate")).toBe("Sat Jul 11 2026");
         expect(teeTimesUrl.searchParams.get("courseIds")).toBe("1,2");
         expect(teeTimesUrl.searchParams.get("teeOffTimeMin")).toBe("0");
         expect(teeTimesUrl.searchParams.get("teeOffTimeMax")).toBe("23");
@@ -67,7 +68,7 @@ describe("fetchCpsSlots", () => {
           content: [
             {
               teeSheetId: 123,
-              startTime: "2026-07-10T09:20:00",
+              startTime: "2026-07-11T09:20:00",
               availableParticipantNo: [1, 2, 3, 4],
               holes: 9,
               teeSheetPrice: 89
@@ -81,7 +82,7 @@ describe("fetchCpsSlots", () => {
 
     const slots = await fetchCpsSlots({
       courseId: "course-1",
-      date: new Date("2026-07-10T12:00:00-04:00"),
+      date: new Date("2026-07-11T00:00:00.000Z"),
       players: 4,
       metadata: {
         provider: "CPS",
@@ -99,9 +100,9 @@ describe("fetchCpsSlots", () => {
       expect.objectContaining({
         courseId: "course-1",
         sourceId: "cps-traditionoaklane-123",
-        startsAt: "2026-07-10T09:20",
+        startsAt: "2026-07-11T09:20",
         availableSpots: 4,
-        bookingUrl: "https://traditionoaklane.cps.golf/?date=2026-07-10",
+        bookingUrl: "https://traditionoaklane.cps.golf/?date=2026-07-11",
         priceCents: 8900,
         holes: 9
       })

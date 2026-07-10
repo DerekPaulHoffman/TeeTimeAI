@@ -153,6 +153,62 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("learns CPS metadata from an official tee-time widget config", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-stanley",
+      courseName: "Stanley Golf Course SGC",
+      sourceUrl: "https://www.stanleygolfcourse.com/bookteetimes",
+      finalUrl: "https://www.stanleygolfcourse.com/bookteetimes",
+      observedUrls: ["https://www.stanleygolfcourse.com/bookteetimes"],
+      visibleText:
+        '{"baseURL":"https://stanleygolf.cps.golf/onlineresweb/search-teetime","newBookingEngine":true,"locations":[{"name":"Stanley Golf","courseId":"0"}]}'
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.detectedPlatform).toBe("CUSTOM");
+    expect(discovery.bookingUrl).toBe("https://stanleygolf.cps.golf/");
+    expect(discovery.apiMetadata).toEqual({
+      provider: "CPS",
+      siteName: "stanleygolf",
+      bookingBaseUrl: "https://stanleygolf.cps.golf/",
+      courseIds: [0],
+      holes: [18, 9]
+    });
+  });
+
+  it("learns reusable Teesnap metadata from public tee-sheet pages", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-hunter",
+      courseName: "Hunter Memorial Golf Course",
+      sourceUrl: "https://www.huntergolfclub.com/tee-times-beta",
+      finalUrl: "https://huntergolfclub.teesnap.net/",
+      observedUrls: [
+        "https://huntergolfclub.teesnap.net/",
+        "https://huntergolfclub.teesnap.net/customer-api/teetimes-day?course=1210&date=2026-07-11&players=4&holes=18&addons=off&profileId="
+      ],
+      visibleText:
+        'window.courses = [{"id":1210,"property_id":1060,"key":"huntergolfclub","name":"Hunter Golf Club","core_id":1389}]'
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.detectedPlatform).toBe("CUSTOM");
+    expect(discovery.bookingUrl).toBe("https://huntergolfclub.teesnap.net/");
+    expect(discovery.apiEndpoint).toBe(
+      "https://huntergolfclub.teesnap.net/customer-api/teetimes-day"
+    );
+    expect(discovery.apiMetadata).toEqual({
+      provider: "TEESNAP",
+      courseId: 1210,
+      bookingBaseUrl: "https://huntergolfclub.teesnap.net/",
+      defaultHoles: 18,
+      defaultAddons: "off"
+    });
+  });
+
   it("does not treat social media links as booking pages just because facebook contains book", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
@@ -233,7 +289,7 @@ describe("browser probe target selection", () => {
     ).toBe(false);
   });
 
-  it("skips CPS courses that already have reusable metadata", () => {
+  it("skips custom courses that already have reusable metadata", () => {
     expect(
       shouldQueueBrowserProbe({
         detectedPlatform: "CUSTOM",
@@ -246,6 +302,20 @@ describe("browser probe target selection", () => {
           bookingBaseUrl: "https://example.cps.golf/",
           courseIds: [1, 2],
           holes: [18, 9]
+        }
+      })
+    ).toBe(false);
+
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "ALLOWED",
+        website: "https://example.com",
+        detectedBookingUrl: "https://huntergolfclub.teesnap.net/",
+        bookingMetadata: {
+          provider: "TEESNAP",
+          courseId: 1210,
+          bookingBaseUrl: "https://huntergolfclub.teesnap.net/"
         }
       })
     ).toBe(false);

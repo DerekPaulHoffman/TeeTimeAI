@@ -91,6 +91,27 @@ describe("ForeUP adapter", () => {
     });
   });
 
+  it("keeps a stored midnight UTC search on the requested calendar date", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => []
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchForeupSlots({
+      courseId: "tashua",
+      date: new Date("2026-07-11T00:00:00.000Z"),
+      players: 1,
+      metadata: {
+        scheduleId: 2431,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19765/2431"
+      }
+    });
+
+    const requestedUrl = new URL(fetchMock.mock.calls[0]?.[0] as string);
+    expect(requestedUrl.searchParams.get("date")).toBe("07-11-2026");
+  });
+
   it("treats ForeUP false responses as no available public slots", async () => {
     vi.stubGlobal(
       "fetch",

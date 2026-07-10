@@ -31,6 +31,12 @@ export type BrowserDiscovery = {
     websiteId?: string;
     onlineApi?: string;
     authorityBaseUrl?: string;
+  } | {
+    provider: "TEESNAP";
+    courseId: number;
+    bookingBaseUrl: string;
+    defaultHoles?: 9 | 18;
+    defaultAddons?: string;
   };
   confidence: number;
   evidence: {
@@ -71,6 +77,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   if (cpsDiscovery) {
     return cpsDiscovery;
+  }
+
+  const teesnapDiscovery = learnTeesnapDiscovery(evidence, observedUrls);
+
+  if (teesnapDiscovery) {
+    return teesnapDiscovery;
   }
 
   const bookingUrl = pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
@@ -115,7 +127,9 @@ function learnCpsDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const cpsUrl = observedUrls.map(parseUrl).find((url) => url?.hostname.endsWith(".cps.golf"));
+  const cpsUrl =
+    observedUrls.map(parseUrl).find((url) => url?.hostname.endsWith(".cps.golf")) ??
+    getCpsWidgetUrl(evidence.visibleText);
 
   if (!cpsUrl) {
     return null;
@@ -123,6 +137,7 @@ function learnCpsDiscovery(
 
   const siteName = cpsUrl.hostname.split(".")[0];
   const bookingBaseUrl = `${cpsUrl.origin}/`;
+  const courseIds = getCpsCourseIds(cpsUrl, evidence.visibleText) ?? [1, 2];
 
   return {
     courseId: evidence.courseId,
@@ -135,7 +150,7 @@ function learnCpsDiscovery(
       provider: "CPS",
       siteName,
       bookingBaseUrl,
-      courseIds: [1, 2],
+      courseIds,
       holes: [18, 9]
     },
     confidence: 0.85,
@@ -144,6 +159,84 @@ function learnCpsDiscovery(
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "cps-booking-url"
+    }
+  };
+}
+
+function getCpsWidgetUrl(text?: string) {
+  const match = text?.match(/"baseURL"\s*:\s*"([^"]+\.cps\.golf\/[^"]+)"/i);
+  return parseUrl(match?.[1]);
+}
+
+function getCpsCourseIds(url: URL, text?: string) {
+  const courseIdFromUrl = getNumericSearchParam(url, "CourseId") ?? getNumericSearchParam(url, "courseId");
+  if (courseIdFromUrl !== undefined) {
+    return [courseIdFromUrl];
+  }
+
+  const courseIdsFromUrl = url.searchParams
+    .get("courseIds")
+    ?.split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value >= 0);
+  if (courseIdsFromUrl?.length) {
+    return courseIdsFromUrl;
+  }
+
+  const courseIds = [...(text?.matchAll(/"courseId"\s*:\s*"?(\d+)"?/gi) ?? [])].map((match) =>
+    Number(match[1])
+  );
+  return courseIds.length ? [...new Set(courseIds)] : undefined;
+}
+
+function learnTeesnapDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const bookingUrl = observedUrls.find(isTeesnapBookingUrl);
+  if (!bookingUrl) {
+    return null;
+  }
+
+  const courseId = getTeesnapCourseId(observedUrls, evidence.visibleText);
+  if (!courseId) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl,
+      apiEndpoint: new URL("/customer-api/teetimes-day", bookingUrl).toString(),
+      confidence: 0.55,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        learnedFrom: "teesnap-url-without-course-id"
+      }
+    };
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl,
+    apiEndpoint: new URL("/customer-api/teetimes-day", bookingUrl).toString(),
+    apiMetadata: {
+      provider: "TEESNAP",
+      courseId,
+      bookingBaseUrl: bookingUrl,
+      defaultHoles: 18,
+      defaultAddons: "off"
+    },
+    confidence: 0.85,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "teesnap-booking-page"
     }
   };
 }
@@ -269,6 +362,9 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
   if (urls.some((url) => parseUrl(url)?.hostname.endsWith(".cps.golf"))) {
     return "CUSTOM";
   }
+  if (urls.some(isTeesnapBookingUrl)) {
+    return "CUSTOM";
+  }
   return "UNKNOWN";
 }
 
@@ -353,6 +449,23 @@ function isTeeItUpBookingUrl(value: string) {
   return Boolean(url?.hostname.match(/^.+\.book\.teeitup\.(?:golf|com)$/i));
 }
 
+function isTeesnapBookingUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(url?.hostname.endsWith(".teesnap.net"));
+}
+
+function getTeesnapCourseId(urls: string[], text?: string) {
+  for (const url of urls.map(parseUrl)) {
+    const courseId = getNumericSearchParam(url, "course");
+    if (courseId) {
+      return courseId;
+    }
+  }
+
+  const match = text?.match(/"id"\s*:\s*(\d+)[\s\S]{0,500}?"core_id"\s*:\s*\d+/);
+  return match ? Number(match[1]) : undefined;
+}
+
 function isNonBookingHost(hostname: string) {
   return /(^|\.)facebook\.com$|(^|\.)instagram\.com$|(^|\.)x\.com$|(^|\.)twitter\.com$|(^|\.)youtube\.com$|(^|\.)linkedin\.com$/i.test(
     hostname
@@ -401,17 +514,21 @@ function isReusableCpsMetadata(value: unknown) {
     bookingBaseUrl?: unknown;
     courseIds?: unknown;
     holes?: unknown;
+    courseId?: unknown;
   };
   return (
-    metadata.provider === "CPS" &&
-    typeof metadata.siteName === "string" &&
-    typeof metadata.bookingBaseUrl === "string" &&
-    Array.isArray(metadata.courseIds) &&
-    metadata.courseIds.length > 0 &&
-    metadata.courseIds.every((courseId) => typeof courseId === "number") &&
-    (metadata.holes === undefined ||
-      (Array.isArray(metadata.holes) &&
-        metadata.holes.length > 0 &&
-        metadata.holes.every((holes) => holes === 9 || holes === 18)))
+    (metadata.provider === "CPS" &&
+      typeof metadata.siteName === "string" &&
+      typeof metadata.bookingBaseUrl === "string" &&
+      Array.isArray(metadata.courseIds) &&
+      metadata.courseIds.length > 0 &&
+      metadata.courseIds.every((courseId) => typeof courseId === "number") &&
+      (metadata.holes === undefined ||
+        (Array.isArray(metadata.holes) &&
+          metadata.holes.length > 0 &&
+          metadata.holes.every((holes) => holes === 9 || holes === 18)))) ||
+    (metadata.provider === "TEESNAP" &&
+      typeof metadata.courseId === "number" &&
+      typeof metadata.bookingBaseUrl === "string")
   );
 }

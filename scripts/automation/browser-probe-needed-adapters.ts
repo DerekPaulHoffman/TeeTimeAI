@@ -133,10 +133,35 @@ async function collectBrowserEvidence(
       .map((script) => script.src)
       .filter(Boolean)
       .slice(0, 80);
+    const inlineCourseData = Array.from(document.querySelectorAll<HTMLScriptElement>("script:not([src])"))
+      .map((script) => script.textContent ?? "")
+      .filter((text) => /window\.(courses|property)\s*=/.test(text))
+      .map((text) => text.slice(0, 5000))
+      .join("\n")
+      .slice(0, 8000);
+    const widgetConfigs = Array.from(document.querySelectorAll<HTMLElement>("[data-widget-config]"))
+      .map((element) => element.getAttribute("data-widget-config"))
+      .filter((value): value is string => Boolean(value))
+      .map((value) => {
+        try {
+          return atob(value);
+        } catch {
+          return "";
+        }
+      })
+      .filter((text) => /baseURL|courseId|tee-time/i.test(text))
+      .join("\n")
+      .slice(0, 8000);
     return {
       anchors,
       scripts,
-      visibleText: document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 2000)
+      visibleText: [
+        document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 2000),
+        inlineCourseData,
+        widgetConfigs
+      ]
+        .filter(Boolean)
+        .join("\n")
     };
   });
 

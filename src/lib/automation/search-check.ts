@@ -5,6 +5,7 @@ import {
   markMatchAlertSent,
   markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
+  markSearchStatusEmailSent,
   recordCourseProbe,
   recordTeeTimeMatch,
   runWithSearchCheckLease,
@@ -15,7 +16,14 @@ import { evaluateAutomationPolicy } from "@/lib/automation/policy";
 import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
-import { sendTeeTimeAlert } from "@/lib/email/alerts";
+import { fetchTeesnapSlots, isTeesnapMetadata } from "@/lib/adapters/teesnap";
+import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
+import {
+  buildSearchStatusSnapshot,
+  getSearchStatusEmailKind,
+  summarizeSearchStatusAvailability,
+  type SearchStatusCourseReport
+} from "@/lib/email/search-status";
 import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
@@ -38,18 +46,7 @@ type AutomationCourse = {
   bookingMetadata: unknown;
 };
 
-export type SearchCheckCourseResult = {
-  courseId: string;
-  courseName: string;
-  outcome:
-    | "MATCH_FOUND"
-    | "NO_MATCH"
-    | "BLOCKED_POLICY"
-    | "NEEDS_ADAPTER"
-    | "FETCH_FAILED";
-  availableMatches: number;
-  message?: string;
-};
+export type SearchCheckCourseResult = SearchStatusCourseReport;
 
 export type SearchCheckResult = {
   searchId: string;
@@ -57,6 +54,7 @@ export type SearchCheckResult = {
   courseResults: SearchCheckCourseResult[];
   availableMatches: number;
   newlyAlertedMatches: number;
+  statusEmailOutcome?: "sent" | "dry_run" | "skipped" | "failed";
 };
 
 export async function runSearchCheck(searchId: string, trigger = "scheduled") {
@@ -143,7 +141,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         courseName: course.name,
         outcome: "BLOCKED_POLICY",
         availableMatches: 0,
-        message: policy.reason
+        message: policy.reason,
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined
       });
       continue;
     }
@@ -170,13 +169,15 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         courseName: course.name,
         outcome: "NEEDS_ADAPTER",
         availableMatches: 0,
-        message
+        message,
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined
       });
       continue;
     }
 
     try {
       const rawSlots = await fetchCourseSlots(course, search.date, search.players);
+      const availability = summarizeSearchStatusAvailability(searchWindow, rawSlots);
       const currentMatches = rankMatches(
         searchWindow,
         dedupeMatches(filterSlotsForSearch(searchWindow, rawSlots), [])
@@ -224,13 +225,20 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         message:
           currentMatches.length > 0
             ? `Confirmed ${currentMatches.length} qualifying tee times.`
-            : "No qualifying tee times in the requested window"
+            : "No qualifying tee times in the requested window",
+        rawSummary: availability
       });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
         outcome,
-        availableMatches: currentMatches.length
+        availableMatches: currentMatches.length,
+        bookingUrl:
+          rawSlots[0]?.bookingUrl ??
+          course.detectedBookingUrl ??
+          course.website ??
+          undefined,
+        availability
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown adapter error";
@@ -246,9 +254,26 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         courseName: course.name,
         outcome: "FETCH_FAILED",
         availableMatches: 0,
-        message
+        message,
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined
       });
     }
+  }
+
+  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = "skipped";
+  try {
+    statusEmailOutcome = await deliverSearchStatusReport({
+      search,
+      searchWindow,
+      courseResults,
+      checkedAt: new Date()
+    });
+  } catch (error) {
+    statusEmailOutcome = "failed";
+    console.error("[email:status-failed]", {
+      searchId: search.id,
+      message: error instanceof Error ? error.message : "Unknown status email failure"
+    });
   }
 
   return {
@@ -256,8 +281,62 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     outcome: "success",
     courseResults,
     availableMatches: courseResults.reduce((total, course) => total + course.availableMatches, 0),
-    newlyAlertedMatches
+    newlyAlertedMatches,
+    statusEmailOutcome
   };
+}
+
+async function deliverSearchStatusReport(input: {
+  search: NonNullable<Awaited<ReturnType<typeof getActiveSearchForAutomation>>>;
+  searchWindow: {
+    date: string;
+    startTime: string;
+    endTime: string;
+    players: number;
+  };
+  courseResults: SearchCheckCourseResult[];
+  checkedAt: Date;
+}): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
+  const kind = getSearchStatusEmailKind(input.search.statusEmailSentAt, input.checkedAt);
+  if (!kind) {
+    return "skipped";
+  }
+
+  const snapshot = buildSearchStatusSnapshot(input.courseResults);
+  const recipients = getAlertRecipients(
+    input.search.user.email,
+    input.search.additionalEmails
+  );
+  const periodKey =
+    kind === "setup"
+      ? "setup"
+      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}`;
+  const deliveries = await Promise.all(
+    recipients.map((recipient) =>
+      sendSearchStatusEmail({
+        to: recipient,
+        kind,
+        targetDate: input.searchWindow.date,
+        startTime: input.searchWindow.startTime,
+        endTime: input.searchWindow.endTime,
+        players: input.searchWindow.players,
+        checkedAt: input.checkedAt,
+        courses: input.courseResults,
+        previousSnapshot: input.search.statusEmailSnapshot,
+        idempotencyKey: `tee-search-status-${input.search.id}-${periodKey}-${recipient}`
+      })
+    )
+  );
+
+  await markSearchStatusEmailSent({
+    searchId: input.search.id,
+    sentAt: input.checkedAt,
+    snapshot
+  });
+
+  return deliveries.every((delivery) => delivery.deliveryStatus === "dry_run")
+    ? "dry_run"
+    : "sent";
 }
 
 async function sendPendingMatchAlerts(searchId: string) {
@@ -312,7 +391,8 @@ function hasSupportedAdapter(course: AutomationCourse) {
   return (
     (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) ||
     (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) ||
-    (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata))
+    (course.detectedPlatform === "CUSTOM" &&
+      (isCpsMetadata(course.bookingMetadata) || isTeesnapMetadata(course.bookingMetadata)))
   );
 }
 
@@ -325,6 +405,9 @@ function fetchCourseSlots(course: AutomationCourse, date: Date, players: number)
   }
   if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
     return fetchCpsSlots({ courseId: course.id, date, players, metadata: course.bookingMetadata });
+  }
+  if (course.detectedPlatform === "CUSTOM" && isTeesnapMetadata(course.bookingMetadata)) {
+    return fetchTeesnapSlots({ courseId: course.id, date, players, metadata: course.bookingMetadata });
   }
   return Promise.resolve([]);
 }

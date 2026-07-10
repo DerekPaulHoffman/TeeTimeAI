@@ -208,7 +208,7 @@ function buildTeeTimesUrl(
   }
 ) {
   const url = new URL(`${onlineApi}/TeeTimes`);
-  url.searchParams.set("searchDate", input.date.toDateString());
+  url.searchParams.set("searchDate", formatCpsDate(input.date));
   url.searchParams.set("holes", String(input.holes));
   url.searchParams.set("numberOfPlayer", String(input.players));
   url.searchParams.set("courseIds", input.cpsCourseIds.join(","));
@@ -224,6 +224,28 @@ function buildTeeTimesUrl(
   url.searchParams.set("memberStoreId", "1");
   url.searchParams.set("searchType", "1");
   return url.toString();
+}
+
+function formatCpsDate(date: Date) {
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec"
+  ];
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth();
+  const day = date.getUTCDate();
+  return `${weekdays[date.getUTCDay()]} ${months[month]} ${String(day).padStart(2, "0")} ${year}`;
 }
 
 function cpsHeaders(configuration: CpsConfiguration, token: string) {

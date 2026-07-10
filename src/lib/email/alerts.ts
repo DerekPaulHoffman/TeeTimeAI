@@ -1,5 +1,10 @@
 import { Resend } from "resend";
 
+import {
+  renderSearchStatusHtml,
+  type SearchStatusEmailInput
+} from "@/lib/email/search-status";
+
 type TeeTimeAlertInput = {
   to: string;
   courseName: string;
@@ -9,7 +14,7 @@ type TeeTimeAlertInput = {
   idempotencyKey?: string;
 };
 
-type TeeTimeAlertDelivery =
+export type EmailDelivery =
   | {
       id: string;
       deliveryStatus: "dry_run";
@@ -19,7 +24,7 @@ type TeeTimeAlertDelivery =
       deliveryStatus: "sent";
     };
 
-export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<TeeTimeAlertDelivery> {
+export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailDelivery> {
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
 
@@ -40,6 +45,48 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<TeeTim
       to: input.to,
       subject: `A spot opened up at ${input.courseName}`,
       html: renderAlertHtml(input)
+    },
+    input.idempotencyKey
+      ? {
+          headers: {
+            "Idempotency-Key": input.idempotencyKey
+          }
+        }
+      : undefined
+  );
+
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+
+  return { ...result.data, deliveryStatus: "sent" };
+}
+
+export async function sendSearchStatusEmail(
+  input: SearchStatusEmailInput
+): Promise<EmailDelivery> {
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+
+  if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
+    console.warn("[email:status-dry-run]", {
+      to: input.to,
+      kind: input.kind,
+      targetDate: input.targetDate,
+      courses: input.courses.length
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+
+  const result = await new Resend(apiKey).emails.send(
+    {
+      from,
+      to: input.to,
+      subject:
+        input.kind === "setup"
+          ? "Your Tee Time Spot search is active"
+          : "Your daily Tee Time Spot update",
+      html: renderSearchStatusHtml(input)
     },
     input.idempotencyKey
       ? {

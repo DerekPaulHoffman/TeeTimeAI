@@ -513,6 +513,20 @@ export async function markMatchAlertSuppressed(matchId: string) {
   });
 }
 
+export async function markSearchStatusEmailSent(input: {
+  searchId: string;
+  sentAt: Date;
+  snapshot: Prisma.InputJsonValue;
+}) {
+  return prisma.teeSearch.update({
+    where: { id: input.searchId },
+    data: {
+      statusEmailSentAt: input.sentAt,
+      statusEmailSnapshot: input.snapshot
+    }
+  });
+}
+
 export async function startAutomationRun(promptVersion: string) {
   return prisma.automationRun.create({
     data: { promptVersion }

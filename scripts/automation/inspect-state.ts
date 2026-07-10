@@ -1,5 +1,7 @@
 import "./load-local-env";
 
+import { pathToFileURL } from "node:url";
+
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
@@ -275,6 +277,9 @@ function latestCurrentActionableProbes<
     teeSearchId: string;
     courseId: string;
     outcome: string;
+    course: {
+      automationEligibility: string;
+    };
   }
 >(probes: T[]) {
   const latestBySearchCourse = new Map<string, T>();
@@ -287,7 +292,10 @@ function latestCurrentActionableProbes<
   }
 
   return [...latestBySearchCourse.values()].filter(
-    (probe) => probe.outcome !== "NO_MATCH" && probe.outcome !== "MATCH_FOUND"
+    (probe) =>
+      probe.course.automationEligibility !== "BLOCKED" &&
+      probe.outcome !== "NO_MATCH" &&
+      probe.outcome !== "MATCH_FOUND"
   );
 }
 
@@ -297,11 +305,15 @@ function redactEmail(email: string) {
   return `${visible}${"*".repeat(Math.max(localPart.length - 2, 1))}@${domain}`;
 }
 
-main()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+export { latestCurrentActionableProbes };
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

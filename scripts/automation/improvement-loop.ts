@@ -183,6 +183,10 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     })),
     actionableProbes: latestProbePerCourseSearch(probes).flatMap((probe) => {
       const outcome = probe.outcome;
+      if (probe.course.automationEligibility === "BLOCKED") {
+        return [];
+      }
+
       if (!isActionableProbeOutcome(outcome)) {
         return [];
       }

@@ -2313,6 +2313,14 @@ button {
   }
 }
 
+.email-browser-card .email-status-frame {
+  height: 1220px;
+}
+
+.preview-section-header {
+  margin-top: 46px;
+}
+
 /* Final Figma Make overrides. Kept last so legacy page rules cannot override them. */
 :root {
   --figma-navy: #1d2b36;

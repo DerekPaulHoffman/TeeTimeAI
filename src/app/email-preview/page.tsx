@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
-import { Bell, Clock3, ExternalLink, Mail, Search } from "lucide-react";
+import { Bell, CalendarCheck2, Clock3, ExternalLink, Mail, Search } from "lucide-react";
 
 import { renderAlertHtml } from "@/lib/email/alerts";
+import { renderSearchStatusHtml } from "@/lib/email/search-status";
 
 export const metadata: Metadata = {
   title: "Email Preview",
-  description: "Preview a Tee Time Spot alert email.",
+  description: "Preview Tee Time Spot search updates and match alerts.",
   robots: {
     index: false,
     follow: false
@@ -20,20 +21,78 @@ const previewAlert = {
   bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431"
 };
 
+const previewStatus = {
+  to: "preview@teetimespot.com",
+  kind: "setup" as const,
+  targetDate: "2026-07-15",
+  startTime: "07:30",
+  endTime: "09:00",
+  players: 2,
+  checkedAt: new Date("2026-07-10T08:15:00-04:00"),
+  courses: [
+    {
+      courseId: "tashua",
+      courseName: "Tashua Knolls Golf Course",
+      outcome: "NO_MATCH" as const,
+      availableMatches: 0,
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431",
+      availability: {
+        visibleSlotCount: 18,
+        playerEligibleSlotCount: 18,
+        closestAfter: "2026-07-15T16:50"
+      }
+    },
+    {
+      courseId: "richter",
+      courseName: "Richter Park Golf Course",
+      outcome: "NO_MATCH" as const,
+      availableMatches: 0,
+      bookingUrl: "https://richterpark.cps.golf/",
+      availability: {
+        visibleSlotCount: 9,
+        playerEligibleSlotCount: 9,
+        closestBefore: "2026-07-15T07:10"
+      }
+    },
+    {
+      courseId: "whitney",
+      courseName: "Whitney Farms Golf Course",
+      outcome: "NO_MATCH" as const,
+      availableMatches: 0,
+      availability: { visibleSlotCount: 4, playerEligibleSlotCount: 0 }
+    },
+    {
+      courseId: "vue",
+      courseName: "The VUE CT",
+      outcome: "NO_MATCH" as const,
+      availableMatches: 0,
+      availability: { visibleSlotCount: 0, playerEligibleSlotCount: 0 }
+    },
+    {
+      courseId: "oak-lane",
+      courseName: "Oak Lane Country Club",
+      outcome: "NEEDS_ADAPTER" as const,
+      availableMatches: 0,
+      bookingUrl: "https://example.com/oak-lane"
+    }
+  ]
+};
+
 export default function EmailPreviewPage() {
-  const html = renderAlertHtml(previewAlert);
+  const statusHtml = renderSearchStatusHtml(previewStatus);
+  const alertHtml = renderAlertHtml(previewAlert);
 
   return (
     <main className="preview-page">
       <div className="preview-header">
         <div>
           <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-            What your alert looks like
+            What your emails look like
           </p>
-          <h1>Your tee time is waiting.</h1>
+          <h1>Useful updates, without inbox noise.</h1>
           <p className="meta">
-            The moment a spot opens up at one of your courses, this is the email that lands in
-            your inbox with a direct link to book it right then and there.
+            We send one setup report after your first check, at most one course-status update per
+            day, and an instant email only when a new time opens inside your exact range.
           </p>
         </div>
         <a className="button button-secondary" href={previewAlert.bookingUrl}>
@@ -42,35 +101,92 @@ export default function EmailPreviewPage() {
         </a>
       </div>
 
-      <section className="preview-grid email-preview-layout" aria-label="Alert preview details">
+      <section className="preview-grid email-preview-layout" aria-label="Search status email preview">
         <div className="preview-card email-browser-card">
           <div className="email-browser-chrome">
             <span />
             <span />
             <span />
-            <strong>Alert from Tee Time Spot - preview@teetimespot.com</strong>
+            <strong>Search update from Tee Time Spot - preview@teetimespot.com</strong>
           </div>
           <iframe
-            className="email-frame"
-            title="Rendered tee time alert email"
-            srcDoc={html}
+            className="email-frame email-status-frame"
+            title="Rendered search status email"
+            srcDoc={statusHtml}
           />
         </div>
 
         <aside className="preview-card preview-sidebar">
-          <h2>How it gets to you</h2>
+          <h2>What the status report tells you</h2>
+          <div className="delivery-step">
+            <CalendarCheck2 size={18} />
+            <div>
+              <strong>One report when your search starts</strong>
+              <p className="meta">It confirms what each selected course showed on the first check.</p>
+            </div>
+          </div>
           <div className="delivery-step">
             <Search size={18} />
             <div>
-              <strong>We watch 24/7</strong>
-              <p className="meta">As soon as a slot opens at one of your courses, we catch it.</p>
+              <strong>Course-by-course visibility</strong>
+              <p className="meta">
+                See times outside your range, dates that are not visible yet, capacity limits,
+                and connections we are still building.
+              </p>
             </div>
           </div>
           <div className="delivery-step">
             <Mail size={18} />
             <div>
-              <strong>Instant email</strong>
-              <p className="meta">You get an email right away. No app, no checking, no waiting.</p>
+              <strong>At most one daily update</strong>
+              <p className="meta">Repeated checks stay silent when nothing useful has changed.</p>
+            </div>
+          </div>
+          <div className="alert alert-info">
+            <Bell size={17} />
+            <span>
+              Status reports are separate from match alerts. A new qualifying opening still gets
+              an immediate email.
+            </span>
+          </div>
+        </aside>
+      </section>
+
+      <div className="preview-header preview-section-header">
+        <div>
+          <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
+            Instant match alert
+          </p>
+          <h2>A new time opened in your range.</h2>
+          <p className="meta">
+            This email is reserved for a genuinely new matching slot and includes the official
+            booking link.
+          </p>
+        </div>
+      </div>
+
+      <section className="preview-grid email-preview-layout" aria-label="Instant match email preview">
+        <div className="preview-card email-browser-card">
+          <div className="email-browser-chrome">
+            <span />
+            <span />
+            <span />
+            <strong>Match alert from Tee Time Spot - preview@teetimespot.com</strong>
+          </div>
+          <iframe
+            className="email-frame"
+            title="Rendered tee time alert email"
+            srcDoc={alertHtml}
+          />
+        </div>
+
+        <aside className="preview-card preview-sidebar">
+          <h2>How the match alert works</h2>
+          <div className="delivery-step">
+            <Mail size={18} />
+            <div>
+              <strong>Instant only for a new match</strong>
+              <p className="meta">It must fit your date, time window, and player count.</p>
             </div>
           </div>
           <div className="delivery-step">

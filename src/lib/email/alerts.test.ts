@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeEmailEnvValue,
   renderAlertHtml,
+  sendSearchStatusEmail,
   sendTeeTimeAlert,
   shouldDryRunRecipient
 } from "./alerts";
@@ -58,6 +59,30 @@ describe("email alert delivery helpers", () => {
       availableSpots: 4,
       bookingUrl: "https://example.com/book",
       idempotencyKey: "tee-time-match-test"
+    });
+
+    expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+  });
+
+  it("dry-runs setup status reports for reserved test recipients", async () => {
+    const result = await sendSearchStatusEmail({
+      to: "demo@teetimeai.local",
+      kind: "setup",
+      targetDate: "2026-07-11",
+      startTime: "07:30",
+      endTime: "09:00",
+      players: 1,
+      checkedAt: new Date("2026-07-10T12:00:00.000Z"),
+      courses: [
+        {
+          courseId: "course-1",
+          courseName: "Tashua Knolls",
+          outcome: "NO_MATCH",
+          availableMatches: 0,
+          availability: { visibleSlotCount: 4, playerEligibleSlotCount: 4 }
+        }
+      ],
+      idempotencyKey: "tee-search-status-test-setup"
     });
 
     expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });

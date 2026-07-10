@@ -77,8 +77,8 @@ model User {
 }
 
 model Course {
-  id                    String                @id @default(cuid())
-  googlePlaceId         String?               @unique
+  id                    String                      @id @default(cuid())
+  googlePlaceId         String?                     @unique
   name                  String
   address               String?
   latitude              Float
@@ -86,15 +86,15 @@ model Course {
   rating                Float?
   website               String?
   phone                 String?
-  isPublic              Boolean               @default(true)
-  isManual              Boolean               @default(false)
+  isPublic              Boolean                     @default(true)
+  isManual              Boolean                     @default(false)
   detectedBookingUrl    String?
-  detectedPlatform      DetectedPlatform      @default(UNKNOWN)
-  automationEligibility AutomationEligibility @default(UNKNOWN)
+  detectedPlatform      DetectedPlatform            @default(UNKNOWN)
+  automationEligibility AutomationEligibility       @default(UNKNOWN)
   policyNotes           String?
   bookingMetadata       Json?
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
+  createdAt             DateTime                    @default(now())
+  updatedAt             DateTime                    @updatedAt
   preferences           CoursePreference[]
   probes                CourseProbe[]
   matches               TeeTimeMatch[]
@@ -105,27 +105,29 @@ model Course {
 }
 
 model TeeSearch {
-  id               String            @id @default(cuid())
-  userId           String
-  date             DateTime
-  startTime        String
-  endTime          String
-  players          Int
-  cadenceMinutes   Int               @default(5)
-  additionalEmails String[]          @default([])
-  status           SearchStatus      @default(ACTIVE)
-  checkStatus      SearchCheckStatus @default(IDLE)
-  scheduleVersion  Int               @default(0)
-  workflowRunId    String?
-  nextCheckAt      DateTime?
-  lastCheckedAt    DateTime?
-  lastCheckOutcome String?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  preferences      CoursePreference[]
-  probes           CourseProbe[]
-  matches          TeeTimeMatch[]
+  id                  String             @id @default(cuid())
+  userId              String
+  date                DateTime
+  startTime           String
+  endTime             String
+  players             Int
+  cadenceMinutes      Int                @default(5)
+  additionalEmails    String[]           @default([])
+  status              SearchStatus       @default(ACTIVE)
+  checkStatus         SearchCheckStatus  @default(IDLE)
+  scheduleVersion     Int                @default(0)
+  workflowRunId       String?
+  nextCheckAt         DateTime?
+  lastCheckedAt       DateTime?
+  lastCheckOutcome    String?
+  statusEmailSentAt   DateTime?
+  statusEmailSnapshot Json?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences         CoursePreference[]
+  probes              CourseProbe[]
+  matches             TeeTimeMatch[]
 
   @@index([status, date])
   @@index([status, nextCheckAt])
@@ -203,7 +205,7 @@ model AutomationRun {
 }
 
 model CourseAutomationDiscovery {
-  id               String   @id @default(cuid())
+  id               String           @id @default(cuid())
   courseId         String
   status           String
   detectedPlatform DetectedPlatform @default(UNKNOWN)
@@ -212,9 +214,9 @@ model CourseAutomationDiscovery {
   apiEndpoint      String?
   apiMetadata      Json?
   evidence         Json?
-  confidence       Float    @default(0)
-  createdAt        DateTime @default(now())
-  course           Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  confidence       Float            @default(0)
+  createdAt        DateTime         @default(now())
+  course           Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@index([courseId, createdAt])
   @@index([status, createdAt])

@@ -75,9 +75,8 @@ export async function fetchForeupSlots(input: {
 }
 
 function formatForeupDate(date: Date) {
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${month}-${day}-${date.getFullYear()}`;
+  const [year, month, day] = date.toISOString().slice(0, 10).split("-");
+  return `${month}-${day}-${year}`;
 }
 
 function normalizeForeupTime(time: string) {
