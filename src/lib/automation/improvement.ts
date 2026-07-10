@@ -66,6 +66,9 @@ export type ImprovementCheckpoints = {
   tool_research_done: boolean;
   ui_smoke_done: boolean;
   verification_done: boolean;
+  git_committed: boolean;
+  git_pushed: boolean;
+  production_verified: boolean;
   outcome_recorded: boolean;
 };
 
@@ -125,6 +128,9 @@ export function buildImprovementCheckpoints(input: {
   toolResearchDone?: boolean;
   uiSmokeDone?: boolean;
   verificationDone?: boolean;
+  gitCommitted?: boolean;
+  gitPushed?: boolean;
+  productionVerified?: boolean;
   outcomeRecorded?: boolean;
 }): ImprovementCheckpoints {
   return {
@@ -133,6 +139,9 @@ export function buildImprovementCheckpoints(input: {
     tool_research_done: input.toolResearchDone ?? false,
     ui_smoke_done: input.uiSmokeDone ?? false,
     verification_done: input.verificationDone ?? false,
+    git_committed: input.gitCommitted ?? false,
+    git_pushed: input.gitPushed ?? false,
+    production_verified: input.productionVerified ?? false,
     outcome_recorded: input.outcomeRecorded ?? false
   };
 }

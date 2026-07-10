@@ -1,6 +1,32 @@
 import { describe, expect, it } from "vitest";
 
-import { selectImprovementCandidate } from "./improvement";
+import { buildImprovementCheckpoints, selectImprovementCandidate } from "./improvement";
+
+describe("buildImprovementCheckpoints", () => {
+  it("tracks git and production handoff independently from code verification", () => {
+    expect(
+      buildImprovementCheckpoints({
+        queueConfirmed: true,
+        candidateSelected: true,
+        verificationDone: true,
+        gitCommitted: true,
+        gitPushed: true,
+        productionVerified: false,
+        outcomeRecorded: true
+      })
+    ).toEqual({
+      queue_confirmed: true,
+      candidate_selected: true,
+      tool_research_done: false,
+      ui_smoke_done: false,
+      verification_done: true,
+      git_committed: true,
+      git_pushed: true,
+      production_verified: false,
+      outcome_recorded: true
+    });
+  });
+});
 
 describe("selectImprovementCandidate", () => {
   it("selects pending alerts before broader improvement work", () => {

@@ -14,12 +14,12 @@ Tee Time Spot uses Postgres as the queue of user demand, durable per-search Verc
 
 The loop should improve the product every time it has credible evidence to act. It should not just rerun the same prompt.
 
-- Start each run by writing or confirming checkpoints: `queue_confirmed`, `candidate_selected`, `tool_research_done`, `ui_smoke_done`, `verification_done`, and `outcome_recorded`.
+- Start each run by writing or confirming checkpoints: `queue_confirmed`, `candidate_selected`, `tool_research_done`, `ui_smoke_done`, `verification_done`, `git_committed`, `git_pushed`, `production_verified`, and `outcome_recorded`.
 - Run `npm run automation:inspect` and `npm run ui:smoke` before choosing a candidate unless a provider outage makes the smoke impossible. A smoke failure is evidence, not noise.
 - Treat `AutomationRun.notes`, `WebsiteEvent`, `WebsiteFeedback`, recent browser discoveries, probe history, and deployment notes as a living learning ledger. Each loop should record what went right, what went wrong, what assumption changed, and the next concrete action.
 - Repeated work must decay. If the same course, tool, provider, or UI issue has been inspected repeatedly with no new evidence, mark it stale or blocked and rotate to a different evidence-backed candidate.
 - A loop that has no fresh queue blocker, smoke failure, provider drift, new research finding, or learnable adapter should return `no_op` instead of inventing polish work.
-- Use normalized terminal outcomes: `success`, `no_op`, `needs_adapter`, `blocked_policy`, `blocked_auth`, `blocked_tooling`, `blocked_env`, and `needs_human`.
+- Use normalized terminal outcomes: `success`, `no_op`, `incident`, `needs_adapter`, `blocked_policy`, `blocked_auth`, `blocked_tooling`, `blocked_env`, `blocked_dirty_worktree`, `blocked_git`, `blocked_concurrent`, and `needs_human`.
 - Keep side effects idempotent. Email alerts, GitHub pushes, and future Slack/GitHub comments need stable keys so a retry cannot duplicate them.
 - Use a per-loop lease before mutating shared state so concurrent runs do not work the same candidate.
 - Stop cleanly when blocked. Record the blocker and next concrete unblock step instead of exploring indefinitely.
