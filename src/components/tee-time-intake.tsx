@@ -36,7 +36,10 @@ import {
 } from "@/lib/courses/intelligence";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
-import { LOCATION_INPUT_PLACEHOLDER } from "@/lib/places/location-input";
+import {
+  CURRENT_LOCATION_LABEL,
+  LOCATION_INPUT_PLACEHOLDER
+} from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
@@ -310,6 +313,7 @@ function TeeTimeIntakeContent({
     setLoading(true);
     navigator.geolocation.getCurrentPosition(
       async (position) => {
+        setLocationText(CURRENT_LOCATION_LABEL);
         await discoverCourses({
           latitude: position.coords.latitude,
           longitude: position.coords.longitude

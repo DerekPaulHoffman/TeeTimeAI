@@ -62,6 +62,30 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(3);
   });
 
+  test("shows when the current location has been selected", async ({ context, page }) => {
+    await context.grantPermissions(["geolocation"], { origin: smokeOrigin });
+    await context.setGeolocation({ latitude: 41.242, longitude: -73.209 });
+    await page.route("**/api/courses/discover?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ courses: [] }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+
+    await page.goto("/search");
+    const searchLocation = page.getByRole("textbox", { name: "Location", exact: true });
+    await page.getByRole("button", { name: "Use current location" }).click();
+    await expect(searchLocation).toHaveValue("Current location");
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Use my location" }).click();
+    await expect(page).toHaveURL(/\/search\?/);
+    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
+      "Current location"
+    );
+  });
+
   test("onboarding discovery, ranking limit, and controls are usable", async ({
     page
   }, testInfo) => {

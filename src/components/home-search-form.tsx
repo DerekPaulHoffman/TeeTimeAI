@@ -10,7 +10,10 @@ import {
   formatDateInputValue,
   getNextSaturdayDateInputValue
 } from "@/lib/dates/local-date";
-import { LOCATION_INPUT_PLACEHOLDER } from "@/lib/places/location-input";
+import {
+  CURRENT_LOCATION_LABEL,
+  LOCATION_INPUT_PLACEHOLDER
+} from "@/lib/places/location-input";
 import { DEFAULT_COURSE_SEARCH_RADIUS_MILES } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
@@ -59,8 +62,10 @@ export function HomeSearchForm() {
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
+        setLocation(CURRENT_LOCATION_LABEL);
         router.push(
           searchUrl({
+            location: CURRENT_LOCATION_LABEL,
             latitude: String(position.coords.latitude),
             longitude: String(position.coords.longitude)
           })
