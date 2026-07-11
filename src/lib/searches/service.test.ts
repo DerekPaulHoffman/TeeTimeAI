@@ -40,7 +40,11 @@ describe("createTeeSearchForUser", () => {
 
   it("connects demo selections to an existing supported nearby course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      { id: "foreup-course-1", name: "Tashua Knolls Golf Course" }
+      {
+        id: "foreup-course-1",
+        name: "Tashua Knolls Golf Course",
+        automationEligibility: "ALLOWED"
+      }
     ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
@@ -69,8 +73,13 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          detectedPlatform: { not: "UNKNOWN" },
-          automationEligibility: "ALLOWED"
+          OR: expect.arrayContaining([
+            {
+              automationEligibility: "ALLOWED",
+              detectedPlatform: { not: "UNKNOWN" }
+            },
+            { automationEligibility: "BLOCKED" }
+          ])
         })
       })
     );
@@ -96,7 +105,11 @@ describe("createTeeSearchForUser", () => {
 
   it("connects composite Google facility names to an existing supported nearby course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      { id: "foreup-course-1", name: "Tashua Knolls Golf Course" }
+      {
+        id: "foreup-course-1",
+        name: "Tashua Knolls Golf Course",
+        automationEligibility: "ALLOWED"
+      }
     ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
@@ -140,7 +153,11 @@ describe("createTeeSearchForUser", () => {
 
   it("does not connect unrelated nearby supported courses", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      { id: "foreup-course-1", name: "Tashua Knolls Golf Course" }
+      {
+        id: "foreup-course-1",
+        name: "Tashua Knolls Golf Course",
+        automationEligibility: "ALLOWED"
+      }
     ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
@@ -225,6 +242,119 @@ describe("createTeeSearchForUser", () => {
                   })
                 }
               })
+            ]
+          }
+        })
+      })
+    );
+  });
+
+  it("rejects a search when every selected course is official-site only", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "fairview-farm",
+      automationEligibility: "BLOCKED"
+    } as never);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 4,
+        cadenceMinutes: 5,
+        alertEmail: "golfer@example.com",
+        courses: [
+          {
+            googlePlaceId: "fairview-farm",
+            name: "Fairview Farm Golf Course",
+            latitude: 41.815,
+            longitude: -73.071,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow("Choose at least one course Tee Time Spot can monitor.");
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("reuses a nearby official-site-only course when its Google place id changed", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "fairview-farm",
+        name: "Fairview Farm Golf Course",
+        automationEligibility: "BLOCKED"
+      }
+    ] as never);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 4,
+        cadenceMinutes: 5,
+        alertEmail: "golfer@example.com",
+        courses: [
+          {
+            googlePlaceId: "replacement-fairview-place-id",
+            name: "Fairview Farm Golf Course",
+            latitude: 41.8151,
+            longitude: -73.0711,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow("Choose at least one course Tee Time Spot can monitor.");
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps a clearly identified official-site-only preference in a mixed search", async () => {
+    mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
+      if ("googlePlaceId" in where && where.googlePlaceId === "fairview-farm") {
+        return { id: "fairview-farm", automationEligibility: "BLOCKED" } as never;
+      }
+      if ("googlePlaceId" in where && where.googlePlaceId === "timberlin") {
+        return { id: "timberlin", automationEligibility: "ALLOWED" } as never;
+      }
+      return null;
+    });
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 4,
+      cadenceMinutes: 5,
+      alertEmail: "golfer@example.com",
+      courses: [
+        {
+          googlePlaceId: "fairview-farm",
+          name: "Fairview Farm Golf Course",
+          latitude: 41.815,
+          longitude: -73.071,
+          rank: 1
+        },
+        {
+          googlePlaceId: "timberlin",
+          name: "Timberlin Golf Course",
+          latitude: 41.62,
+          longitude: -72.77,
+          rank: 2
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [
+              expect.objectContaining({ course: { connect: { id: "fairview-farm" } } }),
+              expect.objectContaining({ course: { connect: { id: "timberlin" } } })
             ]
           }
         })

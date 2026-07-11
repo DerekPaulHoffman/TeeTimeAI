@@ -6,6 +6,7 @@ import {
   type ImprovementCandidateInput,
   selectImprovementCandidate
 } from "@/lib/automation/improvement";
+import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { prisma } from "@/lib/prisma";
 
 const PROMPT_VERSION = "tee-time-spot-improvement-loop-v6";
@@ -111,8 +112,7 @@ async function main() {
 
 async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
   const recentSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = startOfUtcCalendarDay();
 
   const [activeSearchCount, pendingAlerts, probes, recentRuns, recentDiscoveries] = await Promise.all([
     prisma.teeSearch.count({

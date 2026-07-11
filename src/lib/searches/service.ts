@@ -30,7 +30,13 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
   await assertQueueCapacity(userId);
 
   const sortedCourses = [...input.courses].sort((a, b) => a.rank - b.rank);
-  const coursePreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
+  const resolvedPreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
+  if (resolvedPreferences.every((preference) => preference.automationEligibility === "BLOCKED")) {
+    throw new Error(
+      "None of the selected courses offers a supported public online tee-time page. Choose at least one course Tee Time Spot can monitor."
+    );
+  }
+  const coursePreferences = resolvedPreferences.map((preference) => preference.create);
 
   return prisma.teeSearch.create({
     data: {
@@ -60,9 +66,12 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
       data: { timeZone }
     });
     return {
-      rank: course.rank,
-      course: {
-        connect: { id: reusableCourse.id }
+      automationEligibility: reusableCourse.automationEligibility,
+      create: {
+        rank: course.rank,
+        course: {
+          connect: { id: reusableCourse.id }
+        }
       }
     };
   }
@@ -70,23 +79,26 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
   const placeId = getStablePlaceId(course);
 
   return {
-    rank: course.rank,
-    course: {
-      connectOrCreate: {
-        where: {
-          googlePlaceId: placeId
-        },
-        create: {
-          googlePlaceId: placeId,
-          name: course.name,
-          address: course.address,
-          latitude: course.latitude,
-          longitude: course.longitude,
-          timeZone,
-          rating: course.rating,
-          phone: course.phone,
-          website: course.website,
-          isManual: !course.googlePlaceId
+    automationEligibility: "UNKNOWN",
+    create: {
+      rank: course.rank,
+      course: {
+        connectOrCreate: {
+          where: {
+            googlePlaceId: placeId
+          },
+          create: {
+            googlePlaceId: placeId,
+            name: course.name,
+            address: course.address,
+            latitude: course.latitude,
+            longitude: course.longitude,
+            timeZone,
+            rating: course.rating,
+            phone: course.phone,
+            website: course.website,
+            isManual: !course.googlePlaceId
+          }
         }
       }
     }
@@ -97,7 +109,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
   if (course.courseId) {
     const existingById = await prisma.course.findUnique({
       where: { id: course.courseId },
-      select: { id: true }
+      select: { id: true, automationEligibility: true }
     });
 
     if (existingById) {
@@ -105,7 +117,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
     }
   }
 
-  const supportedNearbyCourses = await prisma.course.findMany({
+  const reusableNearbyCourses = await prisma.course.findMany({
     where: {
       latitude: {
         gte: course.latitude - SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
@@ -115,30 +127,42 @@ async function findReusableCourse(course: SelectedCourseInput) {
         gte: course.longitude - SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
         lte: course.longitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
       },
-      detectedPlatform: {
-        not: "UNKNOWN"
-      },
-      automationEligibility: "ALLOWED"
+      OR: [
+        {
+          automationEligibility: "ALLOWED",
+          detectedPlatform: { not: "UNKNOWN" }
+        },
+        { automationEligibility: "BLOCKED" }
+      ]
     },
     orderBy: { updatedAt: "desc" },
-    select: { id: true, name: true }
+    select: { id: true, name: true, automationEligibility: true }
   });
-  const supportedNearbyCourse = supportedNearbyCourses.find((candidate) =>
-    hasMeaningfulNameOverlap(course.name, candidate.name)
+  const supportedNearbyCourse = reusableNearbyCourses.find(
+    (candidate) =>
+      candidate.automationEligibility === "ALLOWED" &&
+      hasMeaningfulNameOverlap(course.name, candidate.name)
   );
 
   if (supportedNearbyCourse) {
     return supportedNearbyCourse;
   }
 
-  if (!course.googlePlaceId) {
-    return null;
+  if (course.googlePlaceId) {
+    const exactCourse = await prisma.course.findUnique({
+      where: { googlePlaceId: course.googlePlaceId },
+      select: { id: true, automationEligibility: true }
+    });
+    if (exactCourse) {
+      return exactCourse;
+    }
   }
 
-  return prisma.course.findUnique({
-    where: { googlePlaceId: course.googlePlaceId },
-    select: { id: true }
-  });
+  return reusableNearbyCourses.find(
+    (candidate) =>
+      candidate.automationEligibility === "BLOCKED" &&
+      hasMeaningfulNameOverlap(course.name, candidate.name)
+  ) ?? null;
 }
 
 function getStablePlaceId(course: SelectedCourseInput) {

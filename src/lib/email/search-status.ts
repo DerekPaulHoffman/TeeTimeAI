@@ -138,12 +138,19 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   });
   const heading = input.kind === "setup" ? "We’re working on your tee times" : "Your daily tee-time update";
   const badge = input.kind === "setup" ? "Search is active" : "Daily update";
+  const hasOfficialSiteOnlyCourse = input.courses.some(
+    (course) => course.outcome === "BLOCKED_POLICY"
+  );
   const intro =
     input.kind === "setup"
-      ? "Your alert is set. We checked every selected course and will keep watching automatically."
+      ? hasOfficialSiteOnlyCourse
+        ? "Your alert is set. We’ll keep checking supported courses; courses marked Official site only are not automatically monitored."
+        : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
-        : "No course status changed since your last email. We’re still checking.";
+        : hasOfficialSiteOnlyCourse
+          ? "No course status changed since your last email. We’re still checking supported courses."
+          : "No course status changed since your last email. We’re still checking.";
   const courseRows = input.courses
     .map((course, index) => renderCourseReport(course, input.players, index + 1))
     .join("");

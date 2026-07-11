@@ -107,6 +107,39 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("I booked — stop these emails");
     expect(html).toContain("Cancel this alert");
   });
+
+  it("does not claim an official-site-only course is monitored automatically", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-1",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-12",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 4,
+      checkedAt: new Date("2026-07-11T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "fairview-farm",
+          courseName: "Fairview Farm Golf Course",
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 0,
+          bookingUrl: "https://fairviewfarmgc.com/"
+        },
+        {
+          courseId: "timberlin",
+          courseName: "Timberlin Golf Course",
+          outcome: "NO_MATCH",
+          availableMatches: 0
+        }
+      ]
+    });
+
+    expect(html).toContain("keep checking supported courses");
+    expect(html).toContain("Official site only");
+    expect(html).toContain("not automatically monitored");
+    expect(html).not.toContain("keep watching automatically");
+  });
 });
 
 describe("search status snapshots", () => {

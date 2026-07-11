@@ -10,6 +10,7 @@ import {
   markMissingMatchesUnavailable,
   markSearchStatusEmailSent,
   recordCourseProbe,
+  recordCourseProbeIfChanged,
   recordTeeTimeMatch,
   runWithSearchCheckLease,
   startAutomationRun
@@ -137,7 +138,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     });
 
     if (!policy.allowed) {
-      await recordCourseProbe({
+      await recordCourseProbeIfChanged({
         searchId: search.id,
         courseId: course.id,
         automationRunId,

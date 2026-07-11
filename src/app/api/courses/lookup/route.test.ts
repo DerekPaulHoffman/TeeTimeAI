@@ -4,8 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "./route";
 
 const mocks = vi.hoisted(() => ({
+  enrichCoursesWithAlertSupport: vi.fn(),
   getGooglePlacesApiKey: vi.fn(),
   searchGolfCoursesByName: vi.fn()
+}));
+
+vi.mock("@/lib/places/alert-support", () => ({
+  enrichCoursesWithAlertSupport: mocks.enrichCoursesWithAlertSupport
 }));
 
 vi.mock("@/lib/places/google", () => ({
@@ -17,6 +22,7 @@ describe("GET /api/courses/lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
   });
 
   it("returns matching course candidates with optional location context", async () => {
@@ -47,6 +53,9 @@ describe("GET /api/courses/lookup", () => {
       latitude: 40.73,
       longitude: -73.44
     });
+    expect(mocks.enrichCoursesWithAlertSupport).toHaveBeenCalledWith([
+      expect.objectContaining({ googlePlaceId: "bethpage-black" })
+    ]);
   });
 
   it("rejects short queries and incomplete coordinates", async () => {

@@ -52,6 +52,7 @@ export type CourseCandidate = {
   photoReference?: string;
   photoAttributions?: CoursePhotoAttribution[];
   priceEstimate?: CoursePriceEstimate;
+  alertSupport?: "OFFICIAL_SITE_ONLY";
 };
 
 export type NearbyCourseSearchInput = {

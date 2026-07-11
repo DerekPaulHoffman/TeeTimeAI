@@ -1,15 +1,27 @@
 import "./load-local-env";
 
 import { pathToFileURL } from "node:url";
+import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
+const activeSearchInspectionQuery = {
+  where: {
+    status: "ACTIVE"
+  },
+  include: {
+    user: true,
+    preferences: {
+      orderBy: { rank: "asc" },
+      include: { course: true }
+    },
+    matches: true
+  },
+  orderBy: [{ date: "asc" }, { createdAt: "asc" }]
+} satisfies Prisma.TeeSearchFindManyArgs;
 
 async function main() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
   const recentSince = new Date(Date.now() - RECENT_HOURS * 60 * 60 * 1000);
 
   const [
@@ -26,23 +38,7 @@ async function main() {
         orderBy: { startedAt: "desc" },
         take: 8
       }),
-      prisma.teeSearch.findMany({
-        where: {
-          status: "ACTIVE",
-          date: {
-            gte: today
-          }
-        },
-        include: {
-          user: true,
-          preferences: {
-            orderBy: { rank: "asc" },
-            include: { course: true }
-          },
-          matches: true
-        },
-        orderBy: [{ date: "asc" }, { createdAt: "asc" }]
-      }),
+      prisma.teeSearch.findMany(activeSearchInspectionQuery),
       prisma.courseProbe.groupBy({
         by: ["outcome"],
         where: {
@@ -305,7 +301,7 @@ function redactEmail(email: string) {
   return `${visible}${"*".repeat(Math.max(localPart.length - 2, 1))}@${domain}`;
 }
 
-export { latestCurrentActionableProbes };
+export { activeSearchInspectionQuery, latestCurrentActionableProbes };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main()

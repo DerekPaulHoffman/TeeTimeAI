@@ -75,7 +75,7 @@ function DashboardView({
       (match) => match.availabilityStatus === "AVAILABLE" && match.startsAt > new Date()
     )
   );
-  const watchedCourseCount = new Set(
+  const selectedCourseCount = new Set(
     searches.flatMap((search) =>
       search.preferences.map((preference) => preference.course.id)
     )
@@ -83,7 +83,7 @@ function DashboardView({
   const totalAlerts = searches.length;
   const alertStatusCopy = `${activeCount} ${
     activeCount === 1 ? "alert" : "alerts"
-  } running. We'll email you the moment a spot opens up.`;
+  } running. We'll email you when a spot opens at a supported course.`;
   const inactiveHeading = inactiveSearches.every((search) => search.status === "CANCELLED")
     ? "Cancelled"
     : "Paused and completed";
@@ -105,7 +105,7 @@ function DashboardView({
 
       <div className="alert alert-info dashboard-alert dashboard-ready-message">
         <p>
-          You&apos;re all set — we&apos;re watching for open tee times and will email you the moment one shows up.
+          You&apos;re all set — we&apos;re checking supported courses and will email you when a matching spot opens.
         </p>
         {notice ? <small>{notice}</small> : null}
       </div>
@@ -168,8 +168,8 @@ function DashboardView({
               </dd>
             </div>
             <div>
-              <dt>Courses watched</dt>
-              <dd>{watchedCourseCount}</dd>
+              <dt>Courses selected</dt>
+              <dd>{selectedCourseCount}</dd>
             </div>
             <div>
               <dt>Total alerts</dt>
@@ -309,6 +309,9 @@ function DashboardSearchCard({
               />
               <div className="watch-course-copy">
                 <strong>{preference.course.name}</strong>
+                {preference.course.automationEligibility === "BLOCKED" ? (
+                  <span className="watch-course-support">Official site only</span>
+                ) : null}
                 <p className="meta">
                   <MapPin size={12} />
                   {getCompactLocation(preference.course.address)} - {preference.course.timeZone}

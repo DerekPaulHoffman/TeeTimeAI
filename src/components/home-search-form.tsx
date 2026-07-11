@@ -5,28 +5,28 @@ import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
+import {
+  addLocalDays,
+  formatDateInputValue,
+  getNextSaturdayDateInputValue
+} from "@/lib/dates/local-date";
 import { DEFAULT_COURSE_SEARCH_RADIUS_MILES } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
 type HoleFilter = "any" | "9" | "18";
 
 function tomorrow() {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return formatDateInputValue(addLocalDays(new Date(), 1));
 }
 
 export function HomeSearchForm() {
   const router = useRouter();
   const [location, setLocation] = useState("Trumbull, CT");
   const [email, setEmail] = useState("");
-  const [players, setPlayers] = useState(2);
-  const [date, setDate] = useState(tomorrow);
-  const [startTime, setStartTime] = useState("13:00");
-  const [endTime, setEndTime] = useState("17:00");
+  const [players, setPlayers] = useState(4);
+  const [date, setDate] = useState(getNextSaturdayDateInputValue);
+  const [startTime, setStartTime] = useState("09:00");
+  const [endTime, setEndTime] = useState("18:00");
   const [holes, setHoles] = useState<HoleFilter>("any");
   const [radius, setRadius] = useState(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
 

@@ -9,6 +9,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  CircleOff,
   CircleDollarSign,
   ExternalLink,
   GripVertical,
@@ -23,7 +24,11 @@ import {
   X
 } from "lucide-react";
 
-import { addLocalDays, formatDateInputValue } from "@/lib/dates/local-date";
+import {
+  addLocalDays,
+  formatDateInputValue,
+  getNextSaturdayDateInputValue
+} from "@/lib/dates/local-date";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
@@ -41,6 +46,7 @@ import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
   MAX_PLAYERS_PER_SEARCH
 } from "@/lib/validation/search";
+import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -207,10 +213,12 @@ function TeeTimeIntakeContent({
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
   const alertEmail = accountState.status === "signed-in" ? accountState.email : "";
-  const [date, setDate] = useState(initialValues.date ?? tomorrow());
-  const [startTime, setStartTime] = useState(initialValues.startTime ?? "13:40");
-  const [endTime, setEndTime] = useState(initialValues.endTime ?? "16:00");
-  const [players, setPlayers] = useState(initialValues.players ?? 3);
+  const [date, setDate] = useState(
+    () => initialValues.date ?? getNextSaturdayDateInputValue()
+  );
+  const [startTime, setStartTime] = useState(initialValues.startTime ?? "09:00");
+  const [endTime, setEndTime] = useState(initialValues.endTime ?? "18:00");
+  const [players, setPlayers] = useState(initialValues.players ?? 4);
   const [holeFilter, setHoleFilter] = useState<HoleFilter>(initialValues.holes ?? "any");
   const [courses, setCourses] = useState<CourseCandidate[]>([]);
   const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(
@@ -276,11 +284,16 @@ function TeeTimeIntakeContent({
   const isCurrentSearchSaved = savedSignature === searchSignature;
   const isDateFuture = date >= minSearchDate;
   const isTimeWindowValid = endTime > startTime;
+  const hasMonitorableCourse = selected.some(
+    (course) => course.alertSupport !== "OFFICIAL_SITE_ONLY"
+  );
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
       ? "Choose an end time after the start time."
-      : null;
+      : selected.length > 0 && !hasMonitorableCourse
+        ? "Choose at least one course Tee Time Spot can monitor automatically."
+        : null;
 
   async function discoverByCurrentLocation() {
     if (!navigator.geolocation) {
@@ -476,6 +489,7 @@ function TeeTimeIntakeContent({
       });
 
       if (!response.ok) {
+        const responseBody = (await response.json().catch(() => null)) as { error?: string } | null;
         trackWebsiteEvent({
           name: "search_submission_failed",
           metadata: {
@@ -484,12 +498,12 @@ function TeeTimeIntakeContent({
             players
           }
         });
-        throw new Error("Could not save this search. Try again in a moment.");
+        throw new Error(responseBody?.error ?? "Could not save this search. Try again in a moment.");
       }
 
       setNotice({
         type: "success",
-        message: "You're all set. We'll email you the moment a matching tee time opens up."
+        message: buildSearchSavedMessage(selected)
       });
       trackWebsiteEvent({
         name: "search_submitted",
@@ -695,6 +709,7 @@ function TeeTimeIntakeContent({
               (selectedCourse) => selectedCourse.googlePlaceId === course.googlePlaceId
             );
             const isSelected = selectedIndex >= 0;
+            const isOfficialSiteOnly = course.alertSupport === "OFFICIAL_SITE_ONLY";
 
             return (
               <div
@@ -715,9 +730,19 @@ function TeeTimeIntakeContent({
                     {course.distanceMeters !== undefined ? (
                       <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
                     ) : null}
+                    {isOfficialSiteOnly ? (
+                      <span className="figma-course-pill is-official-site-only">
+                        <CircleOff size={11} /> Official site only
+                      </span>
+                    ) : null}
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
+                  {isOfficialSiteOnly ? (
+                    <p className="course-alert-support-note">
+                      Tee Time Spot cannot monitor this course automatically.
+                    </p>
+                  ) : null}
                   <CoursePriceDisplay estimate={course.priceEstimate} priceView={holeFilter} />
                 </div>
                 <div className="course-actions">
@@ -783,7 +808,7 @@ function TeeTimeIntakeContent({
           <h2>Your courses</h2>
           {selected.length > 0 ? <span className="figma-count-pill">{selected.length}/5</span> : null}
         </div>
-        <p>Pick up to 5. Drag to rank them - #1 gets checked first.</p>
+        <p>Pick up to 5. Drag to rank them. Supported courses are checked automatically.</p>
         <div className="selected-list">
           {selected.length === 0 ? (
             <div className="selected-empty">
@@ -816,6 +841,9 @@ function TeeTimeIntakeContent({
                 <CourseThumbnail course={course} variant="compact" />
                 <div className="selected-copy">
                   <h3>{course.name}</h3>
+                  {course.alertSupport === "OFFICIAL_SITE_ONLY" ? (
+                    <span className="selected-course-support">Official site only</span>
+                  ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
                   <button
@@ -1023,8 +1051,7 @@ function MissingCourseLookup({
           <h2 id="missing-course-heading">Can&apos;t find your course?</h2>
         </div>
         <p>
-          Search its name and town. We&apos;ll find the course listing, then check monitoring
-          support after you save.
+          Search its name and town. We&apos;ll show any known alert limitations before you add it.
         </p>
       </div>
       <form
@@ -1063,6 +1090,7 @@ function MissingCourseLookup({
         <div className="missing-course-results" role="list" aria-label="Course name matches">
           {results.map((course) => {
             const isSelected = selectedIds.has(course.googlePlaceId);
+            const isOfficialSiteOnly = course.alertSupport === "OFFICIAL_SITE_ONLY";
             return (
               <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
                 <CourseThumbnail course={course} variant="compact" />
@@ -1072,6 +1100,11 @@ function MissingCourseLookup({
                   {course.distanceMeters !== undefined ? (
                     <span className="missing-course-distance">
                       {formatDistance(course.distanceMeters)} away
+                    </span>
+                  ) : null}
+                  {isOfficialSiteOnly ? (
+                    <span className="missing-course-support">
+                      Official site only - not checked automatically
                     </span>
                   ) : null}
                 </div>

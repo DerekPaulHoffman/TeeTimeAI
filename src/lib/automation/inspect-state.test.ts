@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { latestCurrentActionableProbes } from "../../../scripts/automation/inspect-state";
+import {
+  activeSearchInspectionQuery,
+  latestCurrentActionableProbes
+} from "../../../scripts/automation/inspect-state";
+
+describe("activeSearchInspectionQuery", () => {
+  it("keeps same-day and stale active searches visible", () => {
+    expect(activeSearchInspectionQuery.where).toEqual({ status: "ACTIVE" });
+    expect(activeSearchInspectionQuery.where).not.toHaveProperty("date");
+  });
+});
 
 describe("latestCurrentActionableProbes", () => {
   it("does not surface resolved blocked-policy probes for blocked courses", () => {

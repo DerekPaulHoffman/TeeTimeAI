@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { demoCourses } from "@/lib/places/demo-courses";
+import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { enrichCoursesWithPriceEstimates } from "@/lib/pricing/course-price-enrichment";
@@ -22,12 +23,19 @@ export async function GET(request: NextRequest) {
 
   try {
     const courses = await searchNearbyGolfCourses({ latitude, longitude, radiusMeters });
-    const coursesWithPrices = await enrichCoursesWithPriceEstimates(courses).catch((error) => {
+    const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
+      console.warn(
+        "Course alert-support enrichment unavailable",
+        error instanceof Error ? error.message : "Unknown alert-support error"
+      );
+      return courses;
+    });
+    const coursesWithPrices = await enrichCoursesWithPriceEstimates(coursesWithSupport).catch((error) => {
       console.warn(
         "Course pricing enrichment unavailable",
         error instanceof Error ? error.message : "Unknown pricing error"
       );
-      return courses;
+      return coursesWithSupport;
     });
     return NextResponse.json({ courses: coursesWithPrices, demo: false });
   } catch (error) {

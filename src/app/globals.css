@@ -1267,6 +1267,14 @@ button {
   min-width: 0;
 }
 
+.watch-course-support {
+  color: #8a4f19;
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 800;
+  margin-top: 3px;
+}
+
 .watch-course-row .watch-course-copy .meta {
   display: flex;
   margin: 4px 0 0;
@@ -3181,6 +3189,11 @@ button {
   color: #8c5a07;
 }
 
+.figma-course-pill.is-official-site-only {
+  background: #f7eee3;
+  color: #8a4f19;
+}
+
 .search-page .figma-course-list .course-copy h3 {
   color: #051c2c;
   font-size: 0.92rem;
@@ -3193,6 +3206,13 @@ button {
 .search-page .figma-course-list .course-copy > .meta {
   color: #86a09a;
   font-size: 0.73rem;
+  margin: 5px 0 0;
+}
+
+.search-page .figma-course-list .course-alert-support-note {
+  color: #8a4f19;
+  font-size: 0.7rem;
+  font-weight: 700;
   margin: 5px 0 0;
 }
 
@@ -3411,6 +3431,22 @@ button {
   display: inline-block;
   font-size: 0.68rem;
   margin-top: 4px;
+}
+
+.missing-course-support {
+  color: #8a4f19;
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 750;
+  margin-top: 4px;
+}
+
+.selected-course-support {
+  color: #f2bb7f;
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 750;
+  margin-top: 3px;
 }
 
 .missing-course-result .figma-add-button {

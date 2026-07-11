@@ -5,6 +5,7 @@ import { zonedDateTimeToDate } from "@/lib/timezones";
 
 import type { BrowserDiscovery } from "./browser-discovery";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "./browser-discovery";
+import { startOfUtcCalendarDay } from "./date-boundary";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
@@ -67,7 +68,7 @@ export async function listActiveSearchesForAutomation(): Promise<ActiveAutomatio
     where: {
       status: "ACTIVE",
       date: {
-        gte: startOfToday()
+        gte: startOfUtcCalendarDay()
       },
       OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: new Date() } }]
     },
@@ -84,7 +85,7 @@ export async function getActiveSearchForAutomation(
       id: searchId,
       status: "ACTIVE",
       date: {
-        gte: startOfToday()
+        gte: startOfUtcCalendarDay()
       }
     },
     include: activeSearchInclude
@@ -96,7 +97,7 @@ export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTa
     where: {
       status: "ACTIVE",
       date: {
-        gte: startOfToday()
+        gte: startOfUtcCalendarDay()
       }
     },
     orderBy: [{ date: "asc" }, { createdAt: "asc" }],
@@ -166,7 +167,7 @@ export async function listPendingMatchAlerts(searchId?: string): Promise<Pending
   });
 }
 
-export async function recordCourseProbe(input: {
+type CourseProbeInput = {
   searchId: string;
   courseId: string;
   outcome:
@@ -181,7 +182,9 @@ export async function recordCourseProbe(input: {
   evidenceUrl?: string;
   rawSummary?: Prisma.InputJsonValue;
   automationRunId?: string;
-}) {
+};
+
+export async function recordCourseProbe(input: CourseProbeInput) {
   return prisma.courseProbe.create({
     data: {
       teeSearchId: input.searchId,
@@ -514,7 +517,7 @@ export async function listSearchesNeedingScheduleRecovery() {
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
-      date: { gte: startOfToday() },
+      date: { gte: startOfUtcCalendarDay() },
       OR: [
         { checkStatus: "IDLE" },
         { checkStatus: "FAILED", nextCheckAt: { lte: new Date() } },
@@ -560,6 +563,22 @@ export async function markSearchStatusEmailSent(input: {
   });
 }
 
+export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
+  const latest = await prisma.courseProbe.findFirst({
+    where: {
+      teeSearchId: input.searchId,
+      courseId: input.courseId
+    },
+    orderBy: { observedAt: "desc" }
+  });
+
+  if (latest?.outcome === input.outcome && latest.message === (input.message ?? null)) {
+    return latest;
+  }
+
+  return recordCourseProbe(input);
+}
+
 export async function listAvailableMatchAlerts(searchId: string): Promise<PendingAlertMatch[]> {
   return prisma.teeTimeMatch.findMany({
     where: {
@@ -599,10 +618,4 @@ export async function finishAutomationRun(
       notes: input.notes
     }
   });
-}
-
-function startOfToday() {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date;
 }

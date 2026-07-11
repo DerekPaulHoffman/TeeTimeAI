@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { markMissingMatchesUnavailable } from "./db-service";
+import { markMissingMatchesUnavailable, recordCourseProbeIfChanged } from "./db-service";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     teeTimeMatch: {
       updateMany: vi.fn()
+    },
+    courseProbe: {
+      create: vi.fn(),
+      findFirst: vi.fn()
     },
     $transaction: vi.fn()
   }
@@ -30,7 +34,7 @@ describe("markMissingMatchesUnavailable", () => {
       timeZone: "America/New_York",
       confirmedMatches: [
         {
-          sourceId: "still-available",
+          sourceId: "foreup-6654-2026-07-11 08:00",
           startsAt: new Date("2026-07-11T12:00:00.000Z")
         }
       ]
@@ -40,9 +44,13 @@ describe("markMissingMatchesUnavailable", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           alertStatus: "PENDING",
+          startsAt: {
+            gte: new Date("2026-07-11T04:00:00.000Z"),
+            lt: new Date("2026-07-12T04:00:00.000Z")
+          },
           NOT: [
             {
-              sourceId: "still-available",
+              sourceId: "foreup-6654-2026-07-11 08:00",
               startsAt: new Date("2026-07-11T12:00:00.000Z")
             }
           ]
@@ -64,5 +72,63 @@ describe("markMissingMatchesUnavailable", () => {
       })
     );
     expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
+  });
+});
+
+describe("recordCourseProbeIfChanged", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.courseProbe.create.mockResolvedValue({ id: "new-probe" } as never);
+  });
+
+  it("does not write the same Fairview policy block every five minutes", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "existing-probe",
+      outcome: "BLOCKED_POLICY",
+      message: "Course is explicitly marked as blocked for automation."
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "BLOCKED_POLICY",
+      message: "Course is explicitly marked as blocked for automation."
+    });
+
+    expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
+  });
+
+  it("records a transition from adapter work to a policy block", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "existing-probe",
+      outcome: "NEEDS_ADAPTER",
+      message: "No supported adapter yet for UNKNOWN"
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "BLOCKED_POLICY",
+      message: "Course is explicitly marked as blocked for automation."
+    });
+
+    expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
+  });
+
+  it("records a changed policy reason", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "existing-probe",
+      outcome: "BLOCKED_POLICY",
+      message: "Older policy reason"
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "BLOCKED_POLICY",
+      message: "Course is explicitly marked as blocked for automation."
+    });
+
+    expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
   });
 });

@@ -10,3 +10,8 @@ export function addLocalDays(date: Date, days: number) {
   next.setDate(next.getDate() + days);
   return next;
 }
+
+export function getNextSaturdayDateInputValue(from = new Date()) {
+  const daysUntilSaturday = (6 - from.getDay() + 7) % 7 || 7;
+  return formatDateInputValue(addLocalDays(from, daysUntilSaturday));
+}

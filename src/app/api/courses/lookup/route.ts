@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
 
 const MIN_QUERY_LENGTH = 2;
@@ -44,7 +45,14 @@ export async function GET(request: NextRequest) {
 
   try {
     const courses = await searchGolfCoursesByName({ query, latitude, longitude });
-    return NextResponse.json({ courses });
+    const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
+      console.warn(
+        "Course alert-support enrichment unavailable",
+        error instanceof Error ? error.message : "Unknown alert-support error"
+      );
+      return courses;
+    });
+    return NextResponse.json({ courses: coursesWithSupport });
   } catch (error) {
     console.error(
       "Course lookup failed",

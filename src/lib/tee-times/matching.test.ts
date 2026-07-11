@@ -31,6 +31,18 @@ describe("tee time matching", () => {
     ).toBe("2026-07-11T12:00:00.000Z");
   });
 
+  it.each([
+    ["Aaron 07:51", "2026-07-11T07:51", "2026-07-11T11:51:00.000Z"],
+    ["Aaron 08:00", "2026-07-11T08:00", "2026-07-11T12:00:00.000Z"],
+    ["Derek 12:50", "2026-07-11T12:50", "2026-07-11T16:50:00.000Z"],
+    ["Josh 06:48", "2026-07-12T06:48", "2026-07-12T10:48:00.000Z"],
+    ["Josh 06:57", "2026-07-12T06:57", "2026-07-12T10:57:00.000Z"]
+  ])("normalizes the historical %s provider clock in Eastern time", (_, localTime, expected) => {
+    expect(parseCourseLocalDateTime(localTime, "America/New_York").toISOString()).toBe(
+      expected
+    );
+  });
+
   it("filters slots to the requested date, player count, and time window", () => {
     const matches = filterSlotsForSearch(search, [
       {

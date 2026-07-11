@@ -5,6 +5,16 @@ const smokeBaseUrl =
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/analytics/events", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ event: { id: "ui-smoke-event" } }),
+        contentType: "application/json",
+        status: 201
+      });
+    });
+  });
+
   test("publishes the Discord community for feedback and product suggestions", async ({
     page
   }, testInfo) => {
@@ -26,6 +36,14 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(
       page.getByRole("heading", { name: "Built with golfers, not just for them." })
     ).toBeVisible();
+    const homeSearchForm = page.locator(".home-search-form");
+    await expect(homeSearchForm.locator('input[name="location"]')).toHaveValue("Trumbull, CT");
+    await expect(homeSearchForm.locator("select")).toHaveValue("4");
+    await expect(homeSearchForm.locator('input[type="date"]')).toHaveValue(
+      nextSaturdayDateInputValue()
+    );
+    await expect(homeSearchForm.locator('input[type="time"]').nth(0)).toHaveValue("09:00");
+    await expect(homeSearchForm.locator('input[type="time"]').nth(1)).toHaveValue("18:00");
     await expect(
       page.getByText(
         "Share feedback, suggest features, swap public-course tips, and help us make Tee Time Spot more useful.",
@@ -60,6 +78,13 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
     await expect(alertActionButton).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
+    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
+      "Trumbull, CT"
+    );
+    await expect(page.locator("#players")).toHaveValue("4");
+    await expect(page.locator("#date")).toHaveValue(nextSaturdayDateInputValue());
+    await expect(page.locator("#startTime")).toHaveValue("09:00");
+    await expect(page.locator("#endTime")).toHaveValue("18:00");
     await expect(page.locator("#searchRadius")).toHaveValue("15");
 
     await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
@@ -113,6 +138,16 @@ test.describe("Tee Time Spot UI smoke", () => {
               longitude: -73.456,
               distanceMeters: 78000,
               website: "https://parks.ny.gov/golf/11/details.aspx"
+            },
+            {
+              googlePlaceId: "ui-smoke-official-site-only",
+              name: "Fairview Farm Golf Course",
+              address: "300 Hill Rd, Harwinton, CT",
+              latitude: 41.815,
+              longitude: -73.071,
+              distanceMeters: 44000,
+              website: "https://fairviewfarmgc.com/",
+              alertSupport: "OFFICIAL_SITE_ONLY"
             }
           ]
         })
@@ -120,8 +155,28 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
     await page.getByLabel("Course name").fill("Bethpage Black, Farmingdale NY");
     await page.getByRole("button", { name: "Find course" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "1 match found" })).toBeVisible();
-    const missingCourseResult = page.locator(".missing-course-result");
+    await expect(page.getByRole("status").filter({ hasText: "2 matches found" })).toBeVisible();
+    const missingCourseResults = page.locator(".missing-course-result");
+    const blockedCourseResult = missingCourseResults.filter({
+      has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
+    });
+    await expect(blockedCourseResult).toContainText(
+      "Official site only - not checked automatically"
+    );
+    await blockedCourseResult.getByRole("button", { name: "Add Fairview Farm Golf Course" }).click();
+    if (isMobile) {
+      await page.locator(".mobile-selection-toggle").click();
+    }
+    await expect(page.getByText("Choose at least one course Tee Time Spot can monitor automatically.")).toBeVisible();
+    if (isMobile) {
+      await page.locator(".selected-list").getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
+    } else {
+      await blockedCourseResult.getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
+    }
+
+    const missingCourseResult = missingCourseResults.filter({
+      has: page.getByRole("heading", { name: "Bethpage Black Course" })
+    });
     await expect(missingCourseResult.getByRole("heading", { name: "Bethpage Black Course" })).toBeVisible();
     await missingCourseResult.getByRole("button", { name: "Add Bethpage Black Course" }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
@@ -168,11 +223,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
 
-    await page.getByLabel("End time").fill("13:00");
+    await page.getByLabel("End time").fill("08:00");
     await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
     await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(alertActionButton).toBeDisabled();
-    await page.getByLabel("End time").fill("16:00");
+    await page.getByLabel("End time").fill("18:00");
 
     const alertActionText = await alertActionButton.innerText();
     if (/Sign in to start sending alerts/i.test(alertActionText)) {
@@ -295,6 +350,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expectNoPageIssues(issues, testInfo);
   });
 });
+
+function nextSaturdayDateInputValue(from = new Date()) {
+  const date = new Date(from);
+  const daysUntilSaturday = (6 - date.getDay() + 7) % 7 || 7;
+  date.setDate(date.getDate() + daysUntilSaturday);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
 function collectPageIssues(page: Page) {
   const issues: string[] = [];
