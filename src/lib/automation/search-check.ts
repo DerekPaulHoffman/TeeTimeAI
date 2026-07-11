@@ -28,7 +28,12 @@ import {
   type SearchStatusCourseReport
 } from "@/lib/email/search-status";
 import { summarizeCourseSlotPrices } from "@/lib/pricing/course-prices";
-import { dedupeMatches, filterSlotsForSearch, rankMatches } from "@/lib/tee-times/matching";
+import {
+  dedupeMatches,
+  filterSlotsForSearch,
+  parseCourseLocalDateTime,
+  rankMatches
+} from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
 
@@ -191,7 +196,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           searchId: search.id,
           courseId: course.id,
           sourceId: match.sourceId,
-          startsAt: new Date(match.startsAt),
+          startsAt: parseCourseLocalDateTime(match.startsAt),
           availableSpots: match.availableSpots,
           bookingUrl: match.bookingUrl,
           priceCents: match.priceCents,

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { dedupeMatches, filterSlotsForSearch, rankMatches } from "./matching";
+import {
+  dedupeMatches,
+  filterSlotsForSearch,
+  parseCourseLocalDateTime,
+  rankMatches
+} from "./matching";
 
 const search = {
   date: "2026-08-10",
@@ -14,6 +19,18 @@ const search = {
 };
 
 describe("tee time matching", () => {
+  it("stores timezone-less course times consistently across runtimes", () => {
+    expect(parseCourseLocalDateTime("2026-07-11T08:00").toISOString()).toBe(
+      "2026-07-11T12:00:00.000Z"
+    );
+    expect(parseCourseLocalDateTime("2026-01-11T08:00").toISOString()).toBe(
+      "2026-01-11T13:00:00.000Z"
+    );
+    expect(
+      parseCourseLocalDateTime("2026-07-11T08:00:00-04:00").toISOString()
+    ).toBe("2026-07-11T12:00:00.000Z");
+  });
+
   it("filters slots to the requested date, player count, and time window", () => {
     const matches = filterSlotsForSearch(search, [
       {
