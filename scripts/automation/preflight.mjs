@@ -1,20 +1,8 @@
 import { execFileSync } from "node:child_process";
 
-type Outcome = "ok" | "blocked_dirty_worktree" | "blocked_git";
+import { getCheckoutMode, getPushRef } from "./preflight-git.mjs";
 
-type PreflightResult = {
-  outcome: Outcome;
-  cwd: string;
-  branch?: string;
-  startingSha?: string;
-  finalSha?: string;
-  ahead?: number;
-  behind?: number;
-  dirtyPaths?: string[];
-  message: string;
-};
-
-function git(args: string[]) {
+function git(args) {
   return execFileSync("git", args, {
     cwd: process.cwd(),
     encoding: "utf8",
@@ -22,13 +10,13 @@ function git(args: string[]) {
   }).trim();
 }
 
-function result(payload: PreflightResult) {
+function result(payload) {
   console.warn(JSON.stringify(payload, null, 2));
   process.exitCode = payload.outcome === "ok" ? 0 : 1;
 }
 
 function getAheadBehind() {
-  const [aheadText, behindText] = git(["rev-list", "--left-right", "--count", "main...origin/main"]).split(/\s+/);
+  const [aheadText, behindText] = git(["rev-list", "--left-right", "--count", "HEAD...origin/main"]).split(/\s+/);
   return {
     ahead: Number(aheadText),
     behind: Number(behindText)
@@ -47,17 +35,6 @@ function main() {
   const startingSha = git(["rev-parse", "HEAD"]);
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
 
-  if (branch !== "main") {
-    result({
-      outcome: "blocked_git",
-      cwd,
-      branch,
-      startingSha,
-      message: "Automation must run from the main branch."
-    });
-    return;
-  }
-
   git(["fetch", "origin"]);
 
   const dirtyPaths = getDirtyPaths();
@@ -71,20 +48,36 @@ function main() {
       ahead,
       behind,
       dirtyPaths,
-      message: "Working tree is dirty before the automation run; clear these paths or use the dedicated automation checkout."
+      message: "Working tree is dirty before the automation run; clear these paths or use a fresh automation worktree."
     });
     return;
   }
 
-  const initialCounts = getAheadBehind();
-  if (initialCounts.ahead > 0 && initialCounts.behind > 0) {
+  const checkoutMode = getCheckoutMode(branch);
+  if (!checkoutMode) {
     result({
       outcome: "blocked_git",
       cwd,
       branch,
       startingSha,
+      message: "Automation must run from main or a clean detached Codex worktree."
+    });
+    return;
+  }
+
+  const pushCommand = `git push origin ${getPushRef(checkoutMode)}`;
+  const initialCounts = getAheadBehind();
+
+  if (initialCounts.ahead > 0 && initialCounts.behind > 0) {
+    result({
+      outcome: "blocked_git",
+      cwd,
+      branch,
+      checkoutMode,
+      pushCommand,
+      startingSha,
       ...initialCounts,
-      message: "Local main diverged from origin/main; resolve manually before running automation."
+      message: "Checked-out HEAD diverged from origin/main; resolve manually before running automation."
     });
     return;
   }
@@ -94,15 +87,17 @@ function main() {
       outcome: "blocked_git",
       cwd,
       branch,
+      checkoutMode,
+      pushCommand,
       startingSha,
       ...initialCounts,
-      message: "Local main is ahead of origin/main; automation will not push or rewrite unexplained commits."
+      message: "Checked-out HEAD is ahead of origin/main; automation will not push or rewrite unexplained commits."
     });
     return;
   }
 
   if (initialCounts.behind > 0) {
-    git(["pull", "--ff-only"]);
+    git(["merge", "--ff-only", "origin/main"]);
   }
 
   const finalCounts = getAheadBehind();
@@ -113,10 +108,12 @@ function main() {
       outcome: "blocked_git",
       cwd,
       branch,
+      checkoutMode,
+      pushCommand,
       startingSha,
       finalSha,
       ...finalCounts,
-      message: "main and origin/main are not synchronized after preflight."
+      message: "Checked-out HEAD and origin/main are not synchronized after preflight."
     });
     return;
   }
@@ -125,11 +122,16 @@ function main() {
     outcome: "ok",
     cwd,
     branch,
+    checkoutMode,
+    pushCommand,
     startingSha,
     finalSha,
     ahead: 0,
     behind: 0,
-    message: "Automation preflight passed; main is clean and synchronized with origin/main."
+    message:
+      checkoutMode === "detached"
+        ? "Automation preflight passed; detached HEAD is clean and synchronized with origin/main."
+        : "Automation preflight passed; main is clean and synchronized with origin/main."
   });
 }
 

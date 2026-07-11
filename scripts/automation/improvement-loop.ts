@@ -8,14 +8,14 @@ import {
 } from "@/lib/automation/improvement";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v5";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v6";
 
 const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
-1. Run \`git fetch origin\`, require a clean non-diverged \`main\` checkout, fast-forward only when behind, and record the starting SHA. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work.
-2. Run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
+1. Run \`npm run automation:preflight\`, require a clean non-diverged checkout synchronized with \`origin/main\`, and record the starting SHA. A Codex-managed detached worktree is valid; follow preflight's reported push command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work.
+2. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
 3. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
 4. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
 5. Confirm checkpoints: queue_confirmed, candidate_selected, tool_research_done, ui_smoke_done, verification_done, git_committed, git_pushed, production_verified, outcome_recorded.
@@ -23,11 +23,11 @@ Every run:
 7. Implement the candidate end to end. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
 8. Use current official research or stronger design tools only when they materially change the selected implementation; do not perform generic hourly research.
 9. Run focused verification plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, \`npm run ui:smoke\`, and \`git diff --check\` for code changes.
-10. Inspect the final diff, stage only files owned by this run, create one clear commit, record its SHA, and run \`git push origin main\`. Never force-push or absorb unrelated changes.
+10. Inspect the final diff, stage only files owned by this run, create one clear commit, record its SHA, and run the push command reported by preflight: \`git push origin main\` on main or \`git push origin HEAD:main\` in a detached worktree. Never force-push or absorb unrelated changes.
 11. For safe additive Prisma migrations, apply production migrations before the app deploy. Destructive or irreversible data work requires fresh user approval.
 12. For live-impacting commits, run \`npx vercel --prod --yes\`, wait for Ready and production aliases, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\`, targeted route/API checks, and recent Vercel error-log inspection.
 13. If production verification fails because of this release, stop with incident. Roll back only when it is safe and no incompatible migration or irreversible state change exists.
-14. Confirm the working tree is clean and \`main\` matches \`origin/main\` after the push.
+14. Confirm the working tree is clean and the checked-out \`HEAD\` matches \`origin/main\` after the push.
 15. Record evidence, decision, changed files, tests, commit SHA, deployment ID, production verification, what was learned, and blockers in AutomationRun and automation memory. Update repo deployment notes only for material changes or deployments, never for no_op.
 
 UI smoke expectations:

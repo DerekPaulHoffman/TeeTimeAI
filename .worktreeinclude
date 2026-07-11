@@ -1,0 +1,4 @@
+# Local operator configuration required by Codex-managed worktrees.
+.env.local
+.env.production.local
+.vercel/project.json
