@@ -65,18 +65,34 @@ test.describe("Tee Time Spot UI smoke", () => {
   test("shows when the current location has been selected", async ({ context, page }) => {
     await context.grantPermissions(["geolocation"], { origin: smokeOrigin });
     await context.setGeolocation({ latitude: 41.242, longitude: -73.209 });
+    let discoveryRequests = 0;
+    let geocodeRequests = 0;
     await page.route("**/api/courses/discover?**", async (route) => {
+      discoveryRequests += 1;
       await route.fulfill({
         body: JSON.stringify({ courses: [] }),
         contentType: "application/json",
         status: 200
       });
     });
+    await page.route("**/api/location/geocode?**", async (route) => {
+      geocodeRequests += 1;
+      await route.abort();
+    });
 
     await page.goto("/search");
     const searchLocation = page.getByRole("textbox", { name: "Location", exact: true });
     await page.getByRole("button", { name: "Use current location" }).click();
     await expect(searchLocation).toHaveValue("Current location");
+    await expect(
+      page.getByRole("status").filter({ hasText: "Current location selected" })
+    ).toBeVisible();
+    expect(discoveryRequests).toBe(0);
+
+    await page.getByLabel("Players").selectOption("2");
+    await page.getByRole("button", { name: /^Search$/i }).click();
+    await expect.poll(() => discoveryRequests).toBe(1);
+    expect(geocodeRequests).toBe(0);
 
     await page.goto("/");
     await page.getByRole("button", { name: "Use my location" }).click();
@@ -84,6 +100,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
       "Current location"
     );
+    await page.waitForTimeout(200);
+    expect(discoveryRequests).toBe(1);
+
+    await page.getByRole("button", { name: /^Search$/i }).click();
+    await expect.poll(() => discoveryRequests).toBe(2);
+    expect(geocodeRequests).toBe(0);
   });
 
   test("onboarding discovery, ranking limit, and controls are usable", async ({
@@ -132,6 +154,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
     const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });
     await expect(discoveryStatus).toContainText(/\d+ courses near Trumbull/i);
+    const firstCourse = page.locator(".course-row").first();
+    await expect(firstCourse).toBeVisible();
+    await expect
+      .poll(async () => (await firstCourse.boundingBox())?.y ?? Number.MAX_SAFE_INTEGER)
+      .toBeLessThan(isMobile ? 180 : 220);
 
     const courseRows = page.locator(".course-row");
     const courseCount = await courseRows.count();

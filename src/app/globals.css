@@ -3128,6 +3128,7 @@ button {
   min-height: 96px;
   overflow: hidden;
   padding: 0;
+  scroll-margin-top: 84px;
 }
 
 .search-page .figma-course-list .course-row:hover {

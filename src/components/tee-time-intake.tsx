@@ -233,9 +233,6 @@ function TeeTimeIntakeContent({
   const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(
     initialValues.coordinates ?? null
   );
-  const [pendingCoordinates] = useState<SearchCoordinates | null>(
-    initialValues.coordinates ?? null
-  );
   const [visibleCourseCount, setVisibleCourseCount] = useState(INITIAL_VISIBLE_COURSE_COUNT);
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
   const [notice, setNotice] = useState<Notice>({
@@ -247,6 +244,8 @@ function TeeTimeIntakeContent({
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
   const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const shouldScrollToResultsRef = useRef(false);
 
   const minSearchDate = tomorrow();
 
@@ -304,7 +303,7 @@ function TeeTimeIntakeContent({
         ? "Choose at least one course Tee Time Spot can monitor automatically."
         : null;
 
-  async function discoverByCurrentLocation() {
+  function selectCurrentLocation() {
     if (!navigator.geolocation) {
       setNotice({ type: "error", message: "This browser does not support geolocation." });
       return;
@@ -312,14 +311,22 @@ function TeeTimeIntakeContent({
 
     setLoading(true);
     navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        setLocationText(CURRENT_LOCATION_LABEL);
-        await discoverCourses({
+      (position) => {
+        const coordinates = {
           latitude: position.coords.latitude,
           longitude: position.coords.longitude
+        };
+        setLocationText(CURRENT_LOCATION_LABEL);
+        setSearchCoordinates(coordinates);
+        setCourses([]);
+        setLoading(false);
+        setNotice({
+          type: "info",
+          message: "Current location selected. Adjust your search details, then select Search."
         });
       },
       () => {
+        shouldScrollToResultsRef.current = false;
         setLoading(false);
         setNotice({
           type: "error",
@@ -331,8 +338,15 @@ function TeeTimeIntakeContent({
     );
   }
 
-  async function discoverByTypedLocation() {
+  async function discoverFromSearchControls() {
     setLoading(true);
+    shouldScrollToResultsRef.current = true;
+
+    if (locationText.trim() === CURRENT_LOCATION_LABEL && searchCoordinates) {
+      await discoverCourses(searchCoordinates);
+      return;
+    }
+
     try {
       const geocode = await fetch(
         `/api/location/geocode?q=${encodeURIComponent(locationText.trim())}`
@@ -343,6 +357,7 @@ function TeeTimeIntakeContent({
       const coordinates = (await geocode.json()) as { latitude: number; longitude: number };
       await discoverCourses(coordinates);
     } catch (error) {
+      shouldScrollToResultsRef.current = false;
       setNotice({
         type: "error",
         message: error instanceof Error ? error.message : "Could not geocode that location."
@@ -364,6 +379,9 @@ function TeeTimeIntakeContent({
       }
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
+      if (data.courses.length === 0) {
+        shouldScrollToResultsRef.current = false;
+      }
       setSearchCoordinates(coordinates);
       setCourses(sortCoursesByDistance(data.courses));
       setVisibleCourseCount(INITIAL_VISIBLE_COURSE_COUNT);
@@ -374,6 +392,7 @@ function TeeTimeIntakeContent({
           : `Found ${data.courses.length} public golf courses within ${searchRadiusMiles} miles.`
       });
     } catch (error) {
+      shouldScrollToResultsRef.current = false;
       setNotice({
         type: "error",
         message: error instanceof Error ? error.message : "Could not load nearby courses."
@@ -382,6 +401,25 @@ function TeeTimeIntakeContent({
       setLoading(false);
     }
   }, [searchRadiusMiles]);
+
+  useEffect(() => {
+    if (!shouldScrollToResultsRef.current || courses.length === 0) {
+      return;
+    }
+
+    shouldScrollToResultsRef.current = false;
+    const animationFrame = window.requestAnimationFrame(() => {
+      const firstCourse = resultsRef.current?.querySelector<HTMLElement>(".course-row");
+      firstCourse?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+        block: "start"
+      });
+    });
+
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [courses]);
 
   function addCourse(course: CourseCandidate) {
     if (selected.length >= 5) {
@@ -395,14 +433,6 @@ function TeeTimeIntakeContent({
 
     setSelected((current) => [...current, course]);
   }
-
-  useEffect(() => {
-    if (!pendingCoordinates) {
-      return;
-    }
-
-    void discoverCourses(pendingCoordinates);
-  }, [discoverCourses, pendingCoordinates]);
 
   function toggleCourse(course: CourseCandidate) {
     if (selectedIds.has(course.googlePlaceId)) {
@@ -550,7 +580,10 @@ function TeeTimeIntakeContent({
               <input
                 id="location"
                 value={locationText}
-                onChange={(event) => setLocationText(event.target.value)}
+                onChange={(event) => {
+                  setLocationText(event.target.value);
+                  setSearchCoordinates(null);
+                }}
                 placeholder={LOCATION_INPUT_PLACEHOLDER}
               />
             </div>
@@ -558,7 +591,7 @@ function TeeTimeIntakeContent({
               aria-label="Use current location"
               className="figma-use-location"
               disabled={loading}
-              onClick={discoverByCurrentLocation}
+              onClick={selectCurrentLocation}
               title="Use current location"
               type="button"
             >
@@ -674,7 +707,7 @@ function TeeTimeIntakeContent({
           <button
             className="figma-search-submit"
             type="button"
-            onClick={discoverByTypedLocation}
+            onClick={discoverFromSearchControls}
             disabled={loading || locationText.trim().length === 0}
           >
             <Search size={15} />
@@ -683,7 +716,7 @@ function TeeTimeIntakeContent({
         </div>
       </section>
 
-      <div className="figma-results-layout">
+      <div className="figma-results-layout" ref={resultsRef}>
         <div className="figma-results-column">
           {courses.length > 0 ? (
             <div className="figma-results-banner" role="status">
