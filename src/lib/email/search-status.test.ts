@@ -64,7 +64,11 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("We’re working on your tee times");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("We’re working on connecting this course");
+    expect(html).toContain("We’re working on a safe connection");
+    expect(html).toContain("keep checking fully monitored courses");
+    expect(html).not.toContain("keep watching automatically");
+    expect(html).toContain("What we’re watching for you");
+    expect(html).toContain("Fully monitored ✓");
     expect(html).toContain("at most one status update per day");
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
@@ -124,7 +128,9 @@ describe("renderSearchStatusHtml", () => {
           courseName: "Fairview Farm Golf Course",
           outcome: "BLOCKED_POLICY",
           availableMatches: 0,
-          bookingUrl: "https://fairviewfarmgc.com/"
+          bookingUrl: "https://fairviewfarmgc.com/",
+          phone: "(860) 555-0102",
+          bookingAccess: "OFFICIAL_SITE"
         },
         {
           courseId: "timberlin",
@@ -138,7 +144,38 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("keep checking supported courses");
     expect(html).toContain("Official site only");
     expect(html).toContain("not automatically monitored");
+    expect(html).toContain("Open official site →");
+    expect(html).toContain("Call (860) 555-0102 →");
     expect(html).not.toContain("keep watching automatically");
+  });
+
+  it("gives phone-only courses a clear direct-booking action", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-1",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-12",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 4,
+      checkedAt: new Date("2026-07-11T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "phone-only",
+          courseName: "Pinebrook Golf Club",
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 0,
+          phone: "+1 (203) 555-0199",
+          bookingAccess: "PHONE_ONLY"
+        }
+      ]
+    });
+
+    expect(html).toContain("Priority 1 · Phone only");
+    expect(html).toContain("Call the course to check availability and book directly");
+    expect(html).toContain('href="tel:+12035550199"');
+    expect(html).toContain("Call +1 (203) 555-0199 →");
+    expect(html).not.toContain("Open official booking page");
   });
 });
 

@@ -22,6 +22,8 @@ export type SearchStatusCourseReport = {
   availableMatches: number;
   message?: string;
   bookingUrl?: string;
+  phone?: string;
+  bookingAccess?: "BOOKING_PAGE" | "OFFICIAL_SITE" | "PHONE_ONLY";
   availability?: SearchStatusAvailability;
   matchingTimes?: Array<{
     startsAt: string;
@@ -138,17 +140,22 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   });
   const heading = input.kind === "setup" ? "We’re working on your tee times" : "Your daily tee-time update";
   const badge = input.kind === "setup" ? "Search is active" : "Daily update";
-  const hasOfficialSiteOnlyCourse = input.courses.some(
+  const hasDirectOnlyCourse = input.courses.some(
     (course) => course.outcome === "BLOCKED_POLICY"
+  );
+  const hasWorkInProgressCourse = input.courses.some(
+    (course) => course.outcome === "NEEDS_ADAPTER"
   );
   const intro =
     input.kind === "setup"
-      ? hasOfficialSiteOnlyCourse
-        ? "Your alert is set. We’ll keep checking supported courses; courses marked Official site only are not automatically monitored."
+      ? hasDirectOnlyCourse
+        ? "Your alert is set. We’ll keep checking supported courses; courses marked Official site only or Phone only are not automatically monitored."
+        : hasWorkInProgressCourse
+          ? "Your alert is set. We’ll keep checking fully monitored courses while we work on connecting the others."
         : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
-        : hasOfficialSiteOnlyCourse
+        : hasDirectOnlyCourse
           ? "No course status changed since your last email. We’re still checking supported courses."
           : "No course status changed since your last email. We’re still checking.";
   const courseRows = input.courses
@@ -187,7 +194,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
               </td>
             </tr>
           </table>
-          <h2 style="font-size:19px;margin:0 0 12px">What each course is showing</h2>
+          <h2 style="font-size:20px;line-height:1.2;margin:0 0 5px">What we’re watching for you</h2>
+          <p style="color:#53645c;font-size:14px;margin:0 0 18px">Here’s the status of each course on your list. Some we monitor automatically — others need you to check directly.</p>
           ${courseRows}
           <div style="background:#e6f3f7;border-radius:10px;color:#174152;padding:14px 16px;font-size:14px;margin-top:18px">
             We only send an instant email when a newly opened tee time matches your exact date, time window, and player count. Otherwise, you’ll receive at most one status update per day.
@@ -207,18 +215,28 @@ function renderCourseReport(course: SearchStatusCourseReport, players: number, r
   const description = describeCourse(course, players);
   const timeZone = normalizeTimeZone(course.timeZone, DEFAULT_TIME_ZONE);
   const matchingTimes = renderMatchingTimes(course.matchingTimes, timeZone);
+  const bookingAccess = getBookingAccess(course);
   const bookingLink = course.bookingUrl
-    ? `<p style="margin:10px 0 0"><a href="${escapeHtml(course.bookingUrl)}" style="color:#105338;font-weight:800;text-decoration:none">Open official booking page →</a></p>`
+    ? `<a href="${escapeHtml(course.bookingUrl)}" style="color:#087746;display:inline-block;font-size:14px;font-weight:800;margin:0 18px 0 0;text-decoration:none">${bookingAccess === "OFFICIAL_SITE" ? "Open official site" : "Open official booking page"} →</a>`
+    : "";
+  const phoneHref = course.phone ? formatTelephoneHref(course.phone) : "";
+  const phoneLink = phoneHref
+    ? `<a href="${escapeHtml(phoneHref)}" style="color:#087746;display:inline-block;font-size:14px;font-weight:800;margin:0;text-decoration:none">Call ${escapeHtml(course.phone ?? "the course")} →</a>`
+    : "";
+  const actions = bookingLink || phoneLink
+    ? `<p style="margin:18px 0 0">${bookingLink}${phoneLink}</p>`
     : "";
 
   return `
-    <div style="border:1px solid #d9e3dc;border-left:4px solid ${description.color};border-radius:10px;padding:15px 16px;margin-bottom:10px">
-      <p style="font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:${description.color};margin:0 0 5px">Priority ${rank} · ${escapeHtml(description.label)}</p>
-      <p style="font-size:16px;font-weight:800;margin:0 0 5px">${escapeHtml(course.courseName)}</p>
-      <p style="color:#6b766f;font-size:11px;margin:0 0 5px">Times use the course timezone: ${escapeHtml(timeZone)}</p>
-      <p style="margin:0;color:#4e5d56;font-size:14px">${escapeHtml(description.detail)}</p>
+    <div style="background:#fbfaf4;border:1px solid ${description.borderColor};border-left:4px solid ${description.color};border-radius:14px;padding:17px 17px 18px;margin-bottom:12px">
+      <p style="margin:0 0 9px"><span style="background:${description.badgeBackground};border-radius:999px;color:${description.color};display:inline-block;font-size:10px;font-weight:800;letter-spacing:.08em;padding:5px 8px;text-transform:uppercase">Priority ${rank} · ${escapeHtml(description.monitoringLabel)}</span></p>
+      <p style="color:#10231b;font-size:16px;font-weight:800;margin:0 0 3px">${escapeHtml(course.courseName)}</p>
+      <p style="color:#829087;font-size:12px;margin:0 0 11px">Times use the course timezone: ${escapeHtml(timeZone)}</p>
+      <div style="background:${description.calloutBackground};border:1px solid ${description.calloutBorder};border-radius:10px;color:${description.calloutText};font-size:14px;line-height:1.45;padding:11px 13px">
+        <strong>${description.icon} ${escapeHtml(description.stateLabel)}.</strong> ${escapeHtml(description.detail)}
+      </div>
       ${matchingTimes}
-      ${bookingLink}
+      ${actions}
     </div>
   `;
 }
@@ -226,49 +244,82 @@ function renderCourseReport(course: SearchStatusCourseReport, players: number, r
 function describeCourse(course: SearchStatusCourseReport, players: number) {
   if (course.outcome === "MATCH_FOUND") {
     return {
-      label: "Matching time visible",
+      monitoringLabel: "Fully monitored ✓",
+      stateLabel: "Matching time visible",
+      icon: "✓",
       color: "#147a52",
+      badgeBackground: "#e8f4ec",
+      borderColor: "#b8ddc8",
+      calloutBackground: "#eef8f1",
+      calloutBorder: "#c6e5d2",
+      calloutText: "#285c43",
       detail: `${course.availableMatches} tee time${course.availableMatches === 1 ? " matches" : "s match"} your search right now.`
     };
   }
 
   if (course.outcome === "NEEDS_ADAPTER") {
     return {
-      label: "We’re working on it",
-      color: "#9a5a16",
-      detail: "We found the official booking page, but automatic availability checking is not ready yet. We’re working on connecting this course."
+      monitoringLabel: "We’re working on it",
+      stateLabel: "Automatic monitoring isn’t ready yet",
+      icon: "↗",
+      color: "#c75c0a",
+      badgeBackground: "#fff0e4",
+      borderColor: "#f1c79e",
+      calloutBackground: "#fff8f2",
+      calloutBorder: "#f3cfad",
+      calloutText: "#713706",
+      detail: course.bookingUrl
+        ? "We found this course’s official booking page and we’re working on a safe connection. Check their site directly in the meantime."
+        : course.phone
+          ? "We’re working on a safe connection. Call the course directly in the meantime."
+          : "We’re working on a safe connection. Check back soon for an update."
     };
   }
 
   if (course.outcome === "FETCH_FAILED") {
     return {
-      label: "Latest check incomplete",
+      monitoringLabel: "Monitoring · retrying",
+      stateLabel: "Latest check incomplete",
+      icon: "↻",
       color: "#a23a32",
+      badgeBackground: "#fbeae7",
+      borderColor: "#ecc4bf",
+      calloutBackground: "#fff5f3",
+      calloutBorder: "#efc9c4",
+      calloutText: "#7f302a",
       detail: "This course’s latest check did not finish. We’ll retry automatically; its official page is available in the meantime."
     };
   }
 
   if (course.outcome === "BLOCKED_POLICY") {
+    const isPhoneOnly = getBookingAccess(course) === "PHONE_ONLY";
     return {
-      label: "Official site only",
-      color: "#6b5a45",
-      detail: "We can’t automatically monitor this course and won’t bypass its restrictions. Please check the official booking page directly."
+      monitoringLabel: isPhoneOnly ? "Phone only" : "Official site only",
+      stateLabel: "Direct booking required",
+      icon: "⚠",
+      color: "#b66500",
+      badgeBackground: "#fff0d6",
+      borderColor: "#e8c987",
+      calloutBackground: "#fff9eb",
+      calloutBorder: "#edd39a",
+      calloutText: "#734500",
+      detail: isPhoneOnly
+        ? "We can’t automatically monitor this course. Call the course to check availability and book directly."
+        : `We can’t automatically monitor this course and won’t bypass its restrictions. Check the official site${course.phone ? " or call the course" : ""} to book directly.`
     };
   }
 
   const availability = course.availability;
   if (!availability || availability.visibleSlotCount === 0) {
     return {
-      label: "Nothing visible for this date yet",
-      color: "#52685e",
+      ...fullyMonitoredDescription("Nothing visible for this date yet"),
       detail: "The course returned no public times for this date. Its booking window may not be open yet, or the visible inventory may currently be full. We’ll keep checking."
     };
   }
 
   if (availability.playerEligibleSlotCount === 0) {
     return {
-      label: "Not enough open spots",
-      color: "#52685e",
+      ...fullyMonitoredDescription("Not enough open spots"),
       detail: `Times are visible, but none currently have room for ${players} player${players === 1 ? "" : "s"}.`
     };
   }
@@ -290,10 +341,38 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
           : "Times are visible, but none match your exact window.";
 
   return {
-    label: "No time in your window",
-    color: "#52685e",
+    ...fullyMonitoredDescription("No time in your window"),
     detail: closest
   };
+}
+
+function fullyMonitoredDescription(stateLabel: string) {
+  return {
+    monitoringLabel: "Fully monitored ✓",
+    stateLabel,
+    icon: "✓",
+    color: "#147a52",
+    badgeBackground: "#e8f4ec",
+    borderColor: "#b8ddc8",
+    calloutBackground: "#eef8f1",
+    calloutBorder: "#c6e5d2",
+    calloutText: "#285c43"
+  };
+}
+
+function getBookingAccess(course: SearchStatusCourseReport) {
+  if (course.bookingAccess) {
+    return course.bookingAccess;
+  }
+  if (course.bookingUrl) {
+    return "BOOKING_PAGE";
+  }
+  return course.phone ? "PHONE_ONLY" : undefined;
+}
+
+function formatTelephoneHref(phone: string) {
+  const normalized = phone.trim().replace(/(?!^\+)[^\d]/g, "");
+  return normalized ? `tel:${normalized}` : "";
 }
 
 function renderMatchingTimes(

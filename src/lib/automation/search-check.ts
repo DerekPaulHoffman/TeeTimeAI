@@ -42,6 +42,7 @@ type AutomationCourse = {
   id: string;
   name: string;
   timeZone: string;
+  phone: string | null;
   website: string | null;
   detectedBookingUrl: string | null;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
@@ -152,7 +153,9 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "BLOCKED_POLICY",
         availableMatches: 0,
         message: policy.reason,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        phone: course.phone ?? undefined,
+        bookingAccess: getCourseBookingAccess(course)
       });
       continue;
     }
@@ -181,7 +184,9 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "NEEDS_ADAPTER",
         availableMatches: 0,
         message,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        phone: course.phone ?? undefined,
+        bookingAccess: getCourseBookingAccess(course)
       });
       continue;
     }
@@ -250,6 +255,10 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           course.detectedBookingUrl ??
           course.website ??
           undefined,
+        phone: course.phone ?? undefined,
+        bookingAccess: rawSlots[0]?.bookingUrl
+          ? "BOOKING_PAGE"
+          : getCourseBookingAccess(course),
         availability,
         matchingTimes: currentMatches.map((match) => ({
           startsAt: match.startsAt,
@@ -274,7 +283,9 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "FETCH_FAILED",
         availableMatches: 0,
         message,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        phone: course.phone ?? undefined,
+        bookingAccess: getCourseBookingAccess(course)
       });
     }
   }
@@ -305,6 +316,18 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     newlyAlertedMatches,
     statusEmailOutcome
   };
+}
+
+function getCourseBookingAccess(
+  course: AutomationCourse
+): SearchStatusCourseReport["bookingAccess"] {
+  if (course.detectedBookingUrl) {
+    return "BOOKING_PAGE";
+  }
+  if (course.website) {
+    return "OFFICIAL_SITE";
+  }
+  return course.phone ? "PHONE_ONLY" : undefined;
 }
 
 async function deliverSearchStatusReport(input: {

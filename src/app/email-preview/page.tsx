@@ -46,6 +46,22 @@ const previewStatus = {
   checkedAt: new Date("2026-07-10T08:15:00-04:00"),
   courses: [
     {
+      courseId: "pinebrook",
+      courseName: "Pinebrook Golf Club",
+      outcome: "BLOCKED_POLICY" as const,
+      availableMatches: 0,
+      bookingUrl: "https://example.com/pinebrook",
+      phone: "(203) 555-0142",
+      bookingAccess: "OFFICIAL_SITE" as const
+    },
+    {
+      courseId: "oak-lane",
+      courseName: "Oak Lane Country Club",
+      outcome: "NEEDS_ADAPTER" as const,
+      availableMatches: 0,
+      bookingUrl: "https://example.com/oak-lane"
+    },
+    {
       courseId: "fairchild",
       courseName: "Fairchild Wheeler Golf Course",
       outcome: "MATCH_FOUND" as const,
@@ -108,13 +124,6 @@ const previewStatus = {
       outcome: "NO_MATCH" as const,
       availableMatches: 0,
       availability: { visibleSlotCount: 0, playerEligibleSlotCount: 0 }
-    },
-    {
-      courseId: "oak-lane",
-      courseName: "Oak Lane Country Club",
-      outcome: "NEEDS_ADAPTER" as const,
-      availableMatches: 0,
-      bookingUrl: "https://example.com/oak-lane"
     }
   ],
   stopUrls: previewStopUrls
@@ -170,10 +179,10 @@ export default function EmailPreviewPage() {
           <div className="delivery-step">
             <Search size={18} />
             <div>
-              <strong>Course-by-course visibility</strong>
+              <strong>Clear monitoring status</strong>
               <p className="meta">
-                See times outside your range, dates that are not visible yet, capacity limits,
-                and connections we are still building.
+                Each priority is marked fully monitored, we’re working on it, official-site only,
+                or phone only before the latest availability detail.
               </p>
             </div>
           </div>
