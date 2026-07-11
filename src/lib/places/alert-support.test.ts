@@ -17,7 +17,9 @@ describe("course alert support enrichment", () => {
         googlePlaceId: "fairview-farm",
         name: "Fairview Farm Golf Course",
         latitude: 41.815,
-        longitude: -73.071
+        longitude: -73.071,
+        bookingMethod: "PHONE_ONLY",
+        automationEligibility: "BLOCKED"
       }
     ] as never);
 
@@ -31,7 +33,7 @@ describe("course alert support enrichment", () => {
       }
     ]);
 
-    expect(course.alertSupport).toBe("OFFICIAL_SITE_ONLY");
+    expect(course.alertSupport).toBe("PHONE_ONLY");
   });
 
   it("matches an alternate place id only when name and coordinates agree", () => {
@@ -39,7 +41,9 @@ describe("course alert support enrichment", () => {
       googlePlaceId: "fairview-farm",
       name: "Fairview Farm Golf Course",
       latitude: 41.815,
-      longitude: -73.071
+      longitude: -73.071,
+      bookingMethod: "PHONE_ONLY" as const,
+      automationEligibility: "BLOCKED"
     };
 
     expect(

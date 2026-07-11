@@ -1,3 +1,8 @@
+import type {
+  AutomationReason,
+  BookingMethod
+} from "@/lib/courses/intelligence";
+
 export type BrowserDiscoveryEvidence = {
   courseId: string;
   courseName: string;
@@ -9,10 +14,15 @@ export type BrowserDiscoveryEvidence = {
 
 export type BrowserDiscovery = {
   courseId: string;
-  status: "LEARNED" | "INSPECTED" | "BLOCKED" | "FAILED";
+  status: "LEARNED" | "VERIFIED" | "INSPECTED" | "BLOCKED" | "FAILED";
   detectedPlatform: "UNKNOWN" | "FOREUP" | "GOLFNOW" | "TEEITUP" | "CHRONOGOLF" | "CLUB_CADDIE" | "CUSTOM";
   sourceUrl: string;
   bookingUrl?: string;
+  bookingMethod?: BookingMethod;
+  bookingPhone?: string;
+  automationEligibility?: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
+  automationReason?: AutomationReason;
+  intelligenceReviewAt?: Date | string;
   apiEndpoint?: string;
   apiMetadata?: {
     scheduleId: number;

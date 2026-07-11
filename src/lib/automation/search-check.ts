@@ -21,6 +21,7 @@ import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapSlots, isTeesnapMetadata } from "@/lib/adapters/teesnap";
+import type { AutomationReason, BookingMethod } from "@/lib/courses/intelligence";
 import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
 import {
   buildSearchStatusSnapshot,
@@ -43,9 +44,12 @@ type AutomationCourse = {
   name: string;
   timeZone: string;
   phone: string | null;
+  bookingPhone: string | null;
   website: string | null;
   detectedBookingUrl: string | null;
+  bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
+  automationReason: AutomationReason;
   policyNotes: string | null;
   detectedPlatform:
     | "UNKNOWN"
@@ -154,7 +158,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         availableMatches: 0,
         message: policy.reason,
         bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
-        phone: course.phone ?? undefined,
+        phone: course.bookingPhone ?? course.phone ?? undefined,
+        bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course)
       });
       continue;
@@ -185,7 +190,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         availableMatches: 0,
         message,
         bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
-        phone: course.phone ?? undefined,
+        phone: course.bookingPhone ?? course.phone ?? undefined,
+        bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course)
       });
       continue;
@@ -255,7 +261,10 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           course.detectedBookingUrl ??
           course.website ??
           undefined,
-        phone: course.phone ?? undefined,
+        phone: course.bookingPhone ?? course.phone ?? undefined,
+        bookingMethod: rawSlots[0]?.bookingUrl
+          ? "PUBLIC_ONLINE"
+          : course.bookingMethod,
         bookingAccess: rawSlots[0]?.bookingUrl
           ? "BOOKING_PAGE"
           : getCourseBookingAccess(course),
@@ -284,7 +293,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         availableMatches: 0,
         message,
         bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
-        phone: course.phone ?? undefined,
+        phone: course.bookingPhone ?? course.phone ?? undefined,
+        bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course)
       });
     }
@@ -321,13 +331,22 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
 function getCourseBookingAccess(
   course: AutomationCourse
 ): SearchStatusCourseReport["bookingAccess"] {
+  if (course.bookingMethod === "PHONE_ONLY") {
+    return "PHONE_ONLY";
+  }
+  if (course.bookingMethod === "CONTACT_COURSE") {
+    return "CONTACT_COURSE";
+  }
+  if (course.bookingMethod === "WALK_IN") {
+    return "WALK_IN";
+  }
   if (course.detectedBookingUrl) {
     return "BOOKING_PAGE";
   }
   if (course.website) {
     return "OFFICIAL_SITE";
   }
-  return course.phone ? "PHONE_ONLY" : undefined;
+  return course.bookingPhone || course.phone ? "PHONE_ONLY" : undefined;
 }
 
 async function deliverSearchStatusReport(input: {

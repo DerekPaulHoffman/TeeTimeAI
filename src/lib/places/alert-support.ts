@@ -1,3 +1,4 @@
+import { getCourseAlertSupport, type BookingMethod } from "@/lib/courses/intelligence";
 import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
 
@@ -9,6 +10,8 @@ type BlockedCourseRecord = {
   name: string;
   latitude: number;
   longitude: number;
+  bookingMethod: BookingMethod;
+  automationEligibility: string;
 };
 
 export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[]) {
@@ -35,15 +38,27 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
       googlePlaceId: true,
       name: true,
       latitude: true,
-      longitude: true
+      longitude: true,
+      bookingMethod: true,
+      automationEligibility: true
     }
   });
 
   return candidates.map((candidate) =>
-    findBlockedCourse(candidate, blockedCourses)
-      ? { ...candidate, alertSupport: "OFFICIAL_SITE_ONLY" as const }
-      : candidate
+    mapCourseAlertSupport(candidate, findBlockedCourse(candidate, blockedCourses))
   );
+}
+
+function mapCourseAlertSupport(
+  candidate: CourseCandidate,
+  course: BlockedCourseRecord | undefined
+) {
+  if (!course) {
+    return candidate;
+  }
+
+  const alertSupport = getCourseAlertSupport(course);
+  return alertSupport ? { ...candidate, alertSupport } : candidate;
 }
 
 export function findBlockedCourse(

@@ -86,7 +86,7 @@ Each automation run should:
 3. Load active `TeeSearch` rows and ranked `CoursePreference` rows.
 4. Load current evidence from `WebsiteEvent`, `WebsiteFeedback`, recent learning signals, `CourseAutomationDiscovery`, current probes, smoke evidence, deployment notes, and recent Vercel logs.
 5. Select one evidence-backed candidate, preferring production incidents, real-user blockers, alert failures, adapter gaps, funnel regressions, repeated feedback, and verified UI/access failures in that order.
-6. Evaluate `Course.automationEligibility` and `policyNotes` before fetching.
+6. Evaluate the reusable course-intelligence snapshot (`bookingMethod`, `automationEligibility`, `automationReason`, `policyNotes`, and review date) before fetching. Terminal findings such as phone-only booking must not return to normal per-search adapter probing; surface them as dedicated review work once `intelligenceReviewAt` is due.
 7. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
 8. Run a current-tool/design research pass only when it can change the selected implementation strategy.
 9. Implement one coherent improvement with focused tests and documentation where behavior changed.

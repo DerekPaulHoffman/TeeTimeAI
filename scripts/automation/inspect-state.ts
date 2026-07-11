@@ -3,6 +3,7 @@ import "./load-local-env";
 import { pathToFileURL } from "node:url";
 import type { Prisma } from "@prisma/client";
 
+import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
@@ -149,6 +150,14 @@ async function main() {
         })
       : [];
   const currentActionableProbes = latestCurrentActionableProbes(recentActiveProbes);
+  const courseIntelligenceReviews = [
+    ...new Map(
+      activeSearches
+        .flatMap((search) => search.preferences.map((preference) => preference.course))
+        .filter((course) => isCourseIntelligenceReviewDue(course.intelligenceReviewAt))
+        .map((course) => [course.id, course] as const)
+    ).values()
+  ];
 
   console.log(
     JSON.stringify(
@@ -192,8 +201,22 @@ async function main() {
             name: preference.course.name,
             platform: preference.course.detectedPlatform,
             eligibility: preference.course.automationEligibility,
+            bookingMethod: preference.course.bookingMethod,
+            automationReason: preference.course.automationReason,
+            intelligenceVerifiedAt: preference.course.intelligenceVerifiedAt,
+            intelligenceReviewAt: preference.course.intelligenceReviewAt,
             hasBookingMetadata: preference.course.bookingMetadata !== null
           }))
+          })),
+        courseIntelligenceReviews: courseIntelligenceReviews.map((course) => ({
+          courseId: course.id,
+          name: course.name,
+          bookingMethod: course.bookingMethod,
+          eligibility: course.automationEligibility,
+          automationReason: course.automationReason,
+          intelligenceVerifiedAt: course.intelligenceVerifiedAt,
+          intelligenceReviewAt: course.intelligenceReviewAt,
+          evidence: summarize(course.policyNotes)
         })),
         probeCounts: {
           hours: RECENT_HOURS,
@@ -208,6 +231,8 @@ async function main() {
           course: probe.course.name,
           platform: probe.course.detectedPlatform,
           eligibility: probe.course.automationEligibility,
+          bookingMethod: probe.course.bookingMethod,
+          automationReason: probe.course.automationReason,
           user: redactEmail(probe.teeSearch.user.email),
           searchId: probe.teeSearchId,
           automationRunId: probe.automationRunId,
@@ -221,6 +246,8 @@ async function main() {
           course: probe.course.name,
           platform: probe.course.detectedPlatform,
           eligibility: probe.course.automationEligibility,
+          bookingMethod: probe.course.bookingMethod,
+          automationReason: probe.course.automationReason,
           user: redactEmail(probe.teeSearch.user.email),
           searchId: probe.teeSearchId,
           automationRunId: probe.automationRunId,

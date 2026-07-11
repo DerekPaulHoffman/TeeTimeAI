@@ -1,4 +1,5 @@
 import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
+import type { CourseAlertSupport } from "@/lib/courses/intelligence";
 import { getTimeZoneForCoordinates } from "@/lib/timezones";
 
 export type GooglePlace = {
@@ -52,7 +53,7 @@ export type CourseCandidate = {
   photoReference?: string;
   photoAttributions?: CoursePhotoAttribution[];
   priceEstimate?: CoursePriceEstimate;
-  alertSupport?: "OFFICIAL_SITE_ONLY";
+  alertSupport?: CourseAlertSupport;
 };
 
 export type NearbyCourseSearchInput = {

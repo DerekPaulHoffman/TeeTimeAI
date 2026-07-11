@@ -15,6 +15,10 @@ async function main() {
     update: {
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceConfidence: 1,
       detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
       bookingMetadata: {
         scheduleId: 6654,
@@ -32,6 +36,10 @@ async function main() {
       website: "https://www.tashuaknolls.com",
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceConfidence: 1,
       detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
       bookingMetadata: {
         scheduleId: 6654,
@@ -46,6 +54,10 @@ async function main() {
     update: {
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceConfidence: 1,
       detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21120/6992#/teetimes",
       bookingMetadata: {
         scheduleId: 6992,
@@ -63,6 +75,10 @@ async function main() {
       website: "https://www.hsmithrichardsongolf.com",
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceConfidence: 1,
       detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21120/6992#/teetimes",
       bookingMetadata: {
         scheduleId: 6992,
@@ -77,6 +93,10 @@ async function main() {
     update: {
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceConfidence: 1,
       detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
       policyNotes:
         "Official site says public tee time reservations can be made online 8 days in advance; alert-only polling only.",
@@ -96,6 +116,10 @@ async function main() {
       website: "https://www.oakhillsgc.com",
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceConfidence: 1,
       detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
       policyNotes:
         "Official site says public tee time reservations can be made online 8 days in advance; alert-only polling only.",

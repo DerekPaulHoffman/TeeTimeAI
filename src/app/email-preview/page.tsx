@@ -46,12 +46,13 @@ const previewStatus = {
   checkedAt: new Date("2026-07-10T08:15:00-04:00"),
   courses: [
     {
-      courseId: "pinebrook",
-      courseName: "Pinebrook Golf Club",
+      courseId: "fairview-farm",
+      courseName: "Fairview Farm Golf Course",
       outcome: "BLOCKED_POLICY" as const,
       availableMatches: 0,
-      bookingUrl: "https://example.com/pinebrook",
-      phone: "(203) 555-0142",
+      bookingUrl: "https://fairviewfarmgc.com/",
+      phone: "(860) 689-1000",
+      bookingMethod: "PHONE_ONLY" as const,
       bookingAccess: "OFFICIAL_SITE" as const
     },
     {

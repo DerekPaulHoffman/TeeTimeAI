@@ -35,6 +35,10 @@ async function main() {
       data: {
         detectedPlatform: "FOREUP",
         automationEligibility: "ALLOWED",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: new Date(),
+        intelligenceConfidence: 1,
         detectedBookingUrl: course.detectedBookingUrl,
         policyNotes: course.policyNotes,
         bookingMetadata: course.bookingMetadata

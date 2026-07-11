@@ -165,8 +165,10 @@ describe("renderSearchStatusHtml", () => {
           courseName: "Pinebrook Golf Club",
           outcome: "BLOCKED_POLICY",
           availableMatches: 0,
+          bookingUrl: "https://pinebrook.example.com/",
           phone: "+1 (203) 555-0199",
-          bookingAccess: "PHONE_ONLY"
+          bookingMethod: "PHONE_ONLY",
+          bookingAccess: "OFFICIAL_SITE"
         }
       ]
     });
@@ -175,6 +177,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Call the course to check availability and book directly");
     expect(html).toContain('href="tel:+12035550199"');
     expect(html).toContain("Call +1 (203) 555-0199 →");
+    expect(html).toContain("Open official site →");
     expect(html).not.toContain("Open official booking page");
   });
 });

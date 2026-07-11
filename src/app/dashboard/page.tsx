@@ -19,6 +19,7 @@ import {
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
+import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
@@ -300,43 +301,60 @@ function DashboardSearchCard({
           </div>
         </div>
         <div className="watch-course-list">
-          {search.preferences.map((preference) => (
-            <div className="watch-course-row" key={preference.id}>
-              <CourseImage
-                index={preference.rank - 1}
-                name={preference.course.name}
-                rank={preference.rank}
-              />
-              <div className="watch-course-copy">
-                <strong>{preference.course.name}</strong>
-                {preference.course.automationEligibility === "BLOCKED" ? (
-                  <span className="watch-course-support">Official site only</span>
-                ) : null}
-                <p className="meta">
-                  <MapPin size={12} />
-                  {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
-                </p>
-              </div>
-              <div className="watch-course-links">
-                <a
-                  href={getGoogleMapsSearchUrl(preference.course)}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  Google Maps <ExternalLink size={11} />
-                </a>
-                {preference.course.detectedBookingUrl ?? preference.course.website ? (
+          {search.preferences.map((preference) => {
+            const alertSupport = getCourseAlertSupport(preference.course);
+            const usesPhoneBooking = ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(
+              preference.course.bookingMethod
+            );
+            const bookingPhone = usesPhoneBooking
+              ? preference.course.bookingPhone ?? preference.course.phone
+              : null;
+
+            return (
+              <div className="watch-course-row" key={preference.id}>
+                <CourseImage
+                  index={preference.rank - 1}
+                  name={preference.course.name}
+                  rank={preference.rank}
+                />
+                <div className="watch-course-copy">
+                  <strong>{preference.course.name}</strong>
+                  {alertSupport ? (
+                    <span className="watch-course-support">
+                      {getAlertSupportLabel(alertSupport)}
+                    </span>
+                  ) : null}
+                  <p className="meta">
+                    <MapPin size={12} />
+                    {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
+                  </p>
+                </div>
+                <div className="watch-course-links">
                   <a
-                    href={preference.course.detectedBookingUrl ?? preference.course.website ?? "#"}
+                    href={getGoogleMapsSearchUrl(preference.course)}
                     rel="noreferrer"
                     target="_blank"
                   >
-                    Official site <ExternalLink size={11} />
+                    Google Maps <ExternalLink size={11} />
                   </a>
-                ) : null}
+                  {preference.course.detectedBookingUrl ?? preference.course.website ? (
+                    <a
+                      href={preference.course.detectedBookingUrl ?? preference.course.website ?? "#"}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      Official site <ExternalLink size={11} />
+                    </a>
+                  ) : null}
+                  {bookingPhone ? (
+                    <a href={`tel:${formatTelephoneHref(bookingPhone)}`}>
+                      Call course
+                    </a>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </article>
@@ -386,6 +404,10 @@ function getCompactLocation(address: string | null) {
   }
 
   return address;
+}
+
+function formatTelephoneHref(phone: string) {
+  return phone.trim().replace(/(?!^\+)[^\d]/g, "");
 }
 
 const dashboardCourseImages = [

@@ -29,6 +29,11 @@ import {
   formatDateInputValue,
   getNextSaturdayDateInputValue
 } from "@/lib/dates/local-date";
+import {
+  getAlertSupportDescription,
+  getAlertSupportLabel,
+  isManualOnlyAlertSupport
+} from "@/lib/courses/intelligence";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import type { CourseCandidate } from "@/lib/places/google";
@@ -285,7 +290,7 @@ function TeeTimeIntakeContent({
   const isDateFuture = date >= minSearchDate;
   const isTimeWindowValid = endTime > startTime;
   const hasMonitorableCourse = selected.some(
-    (course) => course.alertSupport !== "OFFICIAL_SITE_ONLY"
+    (course) => !isManualOnlyAlertSupport(course.alertSupport)
   );
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
@@ -709,7 +714,7 @@ function TeeTimeIntakeContent({
               (selectedCourse) => selectedCourse.googlePlaceId === course.googlePlaceId
             );
             const isSelected = selectedIndex >= 0;
-            const isOfficialSiteOnly = course.alertSupport === "OFFICIAL_SITE_ONLY";
+            const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
 
             return (
               <div
@@ -730,17 +735,18 @@ function TeeTimeIntakeContent({
                     {course.distanceMeters !== undefined ? (
                       <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
                     ) : null}
-                    {isOfficialSiteOnly ? (
+                    {isManualOnly && course.alertSupport ? (
                       <span className="figma-course-pill is-official-site-only">
-                        <CircleOff size={11} /> Official site only
+                        <CircleOff size={11} /> {getAlertSupportLabel(course.alertSupport)}
                       </span>
                     ) : null}
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
-                  {isOfficialSiteOnly ? (
+                  {isManualOnly && course.alertSupport ? (
                     <p className="course-alert-support-note">
-                      Tee Time Spot cannot monitor this course automatically.
+                      {getAlertSupportDescription(course.alertSupport)} Tee Time Spot cannot
+                      monitor it automatically.
                     </p>
                   ) : null}
                   <CoursePriceDisplay estimate={course.priceEstimate} priceView={holeFilter} />
@@ -841,8 +847,10 @@ function TeeTimeIntakeContent({
                 <CourseThumbnail course={course} variant="compact" />
                 <div className="selected-copy">
                   <h3>{course.name}</h3>
-                  {course.alertSupport === "OFFICIAL_SITE_ONLY" ? (
-                    <span className="selected-course-support">Official site only</span>
+                  {course.alertSupport ? (
+                    <span className="selected-course-support">
+                      {getAlertSupportLabel(course.alertSupport)}
+                    </span>
                   ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
@@ -1090,7 +1098,7 @@ function MissingCourseLookup({
         <div className="missing-course-results" role="list" aria-label="Course name matches">
           {results.map((course) => {
             const isSelected = selectedIds.has(course.googlePlaceId);
-            const isOfficialSiteOnly = course.alertSupport === "OFFICIAL_SITE_ONLY";
+            const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
             return (
               <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
                 <CourseThumbnail course={course} variant="compact" />
@@ -1102,9 +1110,9 @@ function MissingCourseLookup({
                       {formatDistance(course.distanceMeters)} away
                     </span>
                   ) : null}
-                  {isOfficialSiteOnly ? (
+                  {isManualOnly && course.alertSupport ? (
                     <span className="missing-course-support">
-                      Official site only - not checked automatically
+                      {getAlertSupportLabel(course.alertSupport)} - not checked automatically
                     </span>
                   ) : null}
                 </div>

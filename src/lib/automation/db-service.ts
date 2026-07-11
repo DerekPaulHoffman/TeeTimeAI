@@ -1,6 +1,6 @@
-import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
+import { prisma } from "@/lib/prisma";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
 import type { BrowserDiscovery } from "./browser-discovery";
@@ -199,11 +199,18 @@ export async function recordCourseProbe(input: CourseProbeInput) {
 }
 
 export async function recordBrowserDiscovery(input: BrowserDiscovery) {
+  const learnedOnline = input.status === "LEARNED" && Boolean(input.apiMetadata);
   return prisma.courseAutomationDiscovery.create({
     data: {
       courseId: input.courseId,
       status: input.status,
       detectedPlatform: input.detectedPlatform,
+      bookingMethod:
+        input.bookingMethod ?? (learnedOnline && input.bookingUrl ? "PUBLIC_ONLINE" : "UNKNOWN"),
+      bookingPhone: input.bookingPhone,
+      automationEligibility:
+        input.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN"),
+      automationReason: input.automationReason ?? "NONE",
       sourceUrl: input.sourceUrl,
       bookingUrl: input.bookingUrl,
       apiEndpoint: input.apiEndpoint,
@@ -215,25 +222,45 @@ export async function recordBrowserDiscovery(input: BrowserDiscovery) {
 }
 
 export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
-  if (input.status !== "LEARNED" || !input.apiMetadata) {
+  const learnedOnlineAdapter =
+    input.status === "LEARNED" &&
+    Boolean(input.apiMetadata) &&
+    ["FOREUP", "TEEITUP", "CUSTOM"].includes(input.detectedPlatform);
+  const verifiedClassification = Boolean(
+    input.bookingMethod &&
+    input.bookingMethod !== "UNKNOWN" &&
+    input.automationEligibility &&
+    input.automationEligibility !== "UNKNOWN" &&
+    input.confidence >= 0.8
+  );
+
+  if (!learnedOnlineAdapter && !verifiedClassification) {
     return null;
   }
 
-  if (
-    input.detectedPlatform !== "FOREUP" &&
-    input.detectedPlatform !== "TEEITUP" &&
-    input.detectedPlatform !== "CUSTOM"
-  ) {
-    return null;
-  }
+  const bookingMethod = input.bookingMethod ?? "PUBLIC_ONLINE";
+  const automationEligibility = input.automationEligibility ?? "ALLOWED";
+  const manualOnly =
+    automationEligibility === "BLOCKED" &&
+    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(bookingMethod);
 
   return prisma.course.update({
     where: { id: input.courseId },
     data: {
       detectedPlatform: input.detectedPlatform,
-      automationEligibility: "ALLOWED",
-      detectedBookingUrl: input.bookingUrl,
-      bookingMetadata: input.apiMetadata
+      automationEligibility,
+      detectedBookingUrl: manualOnly ? null : input.bookingUrl,
+      bookingMetadata: manualOnly
+        ? Prisma.DbNull
+        : (input.apiMetadata as Prisma.InputJsonValue),
+      bookingMethod,
+      bookingPhone: input.bookingPhone,
+      automationReason: input.automationReason ?? "NONE",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceReviewAt: input.intelligenceReviewAt
+        ? new Date(input.intelligenceReviewAt)
+        : null,
+      intelligenceConfidence: input.confidence
     }
   });
 }

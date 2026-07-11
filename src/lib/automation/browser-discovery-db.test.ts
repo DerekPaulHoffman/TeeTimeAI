@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
@@ -56,6 +57,10 @@ describe("browser discovery persistence", () => {
         courseId: "course-1",
         status: "LEARNED",
         detectedPlatform: "FOREUP",
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingPhone: undefined,
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
         sourceUrl: "https://course.example.com",
         bookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
         apiEndpoint: "https://foreupsoftware.com/index.php/api/booking/times",
@@ -104,7 +109,50 @@ describe("browser discovery persistence", () => {
           scheduleId: 11739,
           bookingClassId: 22739,
           bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
-        }
+        },
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingPhone: undefined,
+        automationReason: "NONE",
+        intelligenceVerifiedAt: expect.any(Date),
+        intelligenceReviewAt: null,
+        intelligenceConfidence: 0.95
+      }
+    });
+  });
+
+  it("applies a high-confidence phone-only finding without adapter metadata", async () => {
+    mockedPrisma.course.update.mockResolvedValue({ id: "fairview" } as never);
+
+    await applyBrowserDiscoveryToCourse({
+      courseId: "fairview",
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "PHONE_ONLY",
+      bookingPhone: "(860) 689-1000",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      intelligenceReviewAt: "2026-10-10T00:00:00.000Z",
+      sourceUrl: "https://fairviewfarmgc.com/",
+      confidence: 1,
+      evidence: {
+        learnedFrom: "official-site-research",
+        observedUrls: ["https://fairviewfarmgc.com/golf/"]
+      }
+    });
+
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith({
+      where: { id: "fairview" },
+      data: {
+        detectedPlatform: "UNKNOWN",
+        automationEligibility: "BLOCKED",
+        detectedBookingUrl: null,
+        bookingMetadata: Prisma.DbNull,
+        bookingMethod: "PHONE_ONLY",
+        bookingPhone: "(860) 689-1000",
+        automationReason: "NO_ONLINE_BOOKING",
+        intelligenceVerifiedAt: expect.any(Date),
+        intelligenceReviewAt: new Date("2026-10-10T00:00:00.000Z"),
+        intelligenceConfidence: 1
       }
     });
   });

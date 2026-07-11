@@ -30,6 +30,26 @@ enum DetectedPlatform {
   CUSTOM
 }
 
+enum BookingMethod {
+  UNKNOWN
+  PUBLIC_ONLINE
+  PHONE_ONLY
+  ONLINE_OR_PHONE
+  CONTACT_COURSE
+  WALK_IN
+}
+
+enum AutomationReason {
+  NONE
+  NO_ONLINE_BOOKING
+  UNSUPPORTED_PLATFORM
+  AUTOMATION_PROHIBITED
+  ACCOUNT_REQUIRED
+  CAPTCHA_OR_QUEUE
+  TEMPORARILY_UNAVAILABLE
+  OTHER
+}
+
 enum ProbeOutcome {
   MATCH_FOUND
   NO_MATCH
@@ -77,32 +97,40 @@ model User {
 }
 
 model Course {
-  id                    String                      @id @default(cuid())
-  googlePlaceId         String?                     @unique
-  name                  String
-  address               String?
-  latitude              Float
-  longitude             Float
-  timeZone              String                      @default("America/New_York")
-  rating                Float?
-  website               String?
-  phone                 String?
-  isPublic              Boolean                     @default(true)
-  isManual              Boolean                     @default(false)
-  detectedBookingUrl    String?
-  detectedPlatform      DetectedPlatform            @default(UNKNOWN)
-  automationEligibility AutomationEligibility       @default(UNKNOWN)
-  policyNotes           String?
-  bookingMetadata       Json?
-  createdAt             DateTime                    @default(now())
-  updatedAt             DateTime                    @updatedAt
-  preferences           CoursePreference[]
-  probes                CourseProbe[]
-  matches               TeeTimeMatch[]
-  automationDiscoveries CourseAutomationDiscovery[]
+  id                     String                      @id @default(cuid())
+  googlePlaceId          String?                     @unique
+  name                   String
+  address                String?
+  latitude               Float
+  longitude              Float
+  timeZone               String                      @default("America/New_York")
+  rating                 Float?
+  website                String?
+  phone                  String?
+  isPublic               Boolean                     @default(true)
+  isManual               Boolean                     @default(false)
+  detectedBookingUrl     String?
+  detectedPlatform       DetectedPlatform            @default(UNKNOWN)
+  bookingMethod          BookingMethod               @default(UNKNOWN)
+  bookingPhone           String?
+  automationEligibility  AutomationEligibility       @default(UNKNOWN)
+  automationReason       AutomationReason            @default(NONE)
+  policyNotes            String?
+  bookingMetadata        Json?
+  intelligenceVerifiedAt DateTime?
+  intelligenceReviewAt   DateTime?
+  intelligenceConfidence Float?
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  preferences            CoursePreference[]
+  probes                 CourseProbe[]
+  matches                TeeTimeMatch[]
+  automationDiscoveries  CourseAutomationDiscovery[]
 
   @@index([latitude, longitude])
   @@index([detectedPlatform, automationEligibility])
+  @@index([bookingMethod, automationEligibility])
+  @@index([intelligenceReviewAt])
 }
 
 model TeeSearch {
@@ -207,22 +235,27 @@ model AutomationRun {
 }
 
 model CourseAutomationDiscovery {
-  id               String           @id @default(cuid())
-  courseId         String
-  status           String
-  detectedPlatform DetectedPlatform @default(UNKNOWN)
-  sourceUrl        String
-  bookingUrl       String?
-  apiEndpoint      String?
-  apiMetadata      Json?
-  evidence         Json?
-  confidence       Float            @default(0)
-  createdAt        DateTime         @default(now())
-  course           Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                    String                @id @default(cuid())
+  courseId              String
+  status                String
+  detectedPlatform      DetectedPlatform      @default(UNKNOWN)
+  bookingMethod         BookingMethod         @default(UNKNOWN)
+  bookingPhone          String?
+  automationEligibility AutomationEligibility @default(UNKNOWN)
+  automationReason      AutomationReason      @default(NONE)
+  sourceUrl             String
+  bookingUrl            String?
+  apiEndpoint           String?
+  apiMetadata           Json?
+  evidence              Json?
+  confidence            Float                 @default(0)
+  createdAt             DateTime              @default(now())
+  course                Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@index([courseId, createdAt])
   @@index([status, createdAt])
   @@index([detectedPlatform, createdAt])
+  @@index([bookingMethod, createdAt])
 }
 
 model WebsiteEvent {

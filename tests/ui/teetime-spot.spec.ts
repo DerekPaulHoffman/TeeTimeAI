@@ -147,7 +147,7 @@ test.describe("Tee Time Spot UI smoke", () => {
               longitude: -73.071,
               distanceMeters: 44000,
               website: "https://fairviewfarmgc.com/",
-              alertSupport: "OFFICIAL_SITE_ONLY"
+              alertSupport: "PHONE_ONLY"
             }
           ]
         })
@@ -161,7 +161,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });
     await expect(blockedCourseResult).toContainText(
-      "Official site only - not checked automatically"
+      "Phone only - not checked automatically"
     );
     await blockedCourseResult.getByRole("button", { name: "Add Fairview Farm Golf Course" }).click();
     if (isMobile) {
@@ -333,6 +333,9 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     const statusFrame = page.frameLocator("iframe[title='Rendered search status email']");
     await expect(statusFrame.locator("body")).toContainText("We’re working on your tee times");
+    await expect(statusFrame.locator("body")).toContainText("Fairview Farm Golf Course");
+    await expect(statusFrame.locator("body")).toContainText("Phone only");
+    await expect(statusFrame.getByRole("link", { name: "Call (860) 689-1000" })).toBeVisible();
     await expect(statusFrame.locator("body")).toContainText("No time in your window");
     await expect(statusFrame.locator("body")).toContainText("Nothing visible for this date yet");
     await expect(statusFrame.locator("body")).toContainText("We’re working on it");

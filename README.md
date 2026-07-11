@@ -172,10 +172,11 @@ Codex automation
 Core models:
 
 - `User`: Clerk user reference; legacy guest-style records are claimed by a matching account when that golfer signs in.
-- `Course`: Google place id, name, address, coordinates, phone, website, photo, public/manual flags, detected booking URL/platform, automation eligibility, policy notes, and booking metadata.
+- `Course`: canonical current course profile, including identity/location, official contact details, typed booking method, booking phone, detected booking URL/platform, automation eligibility/reason, provider metadata, and intelligence verification/review timestamps.
 - `TeeSearch`: user, date, start/end time, players, cadence, status, and additional alert emails.
 - `CoursePreference`: ranked join from a search to selected courses.
 - `CourseProbe`: per-course automation observation, outcome, message, evidence, raw summary, and optional automation run.
+- `CourseAutomationDiscovery`: append-only evidence history for learned booking access, platform metadata, automation classification, sources, and confidence. Accepted findings update the reusable `Course` snapshot.
 - `TeeTimeMatch`: normalized available slot evidence, available spots, optional price/holes, booking URL, first/last seen, and alert status.
 - `AutomationRun`: durable record for poll/improvement runs, prompt version, outcome, errors, changed files, and notes.
 - `WebsiteEvent`: product analytics events.
@@ -186,6 +187,8 @@ Important enums:
 - `SearchStatus`: `ACTIVE`, `PAUSED`, `COMPLETED`, `CANCELLED`
 - `AutomationEligibility`: `UNKNOWN`, `ALLOWED`, `BLOCKED`, `NEEDS_REVIEW`
 - `DetectedPlatform`: `UNKNOWN`, `FOREUP`, `GOLFNOW`, `TEEITUP`, `CHRONOGOLF`, `CLUB_CADDIE`, `CUSTOM`
+- `BookingMethod`: `UNKNOWN`, `PUBLIC_ONLINE`, `PHONE_ONLY`, `ONLINE_OR_PHONE`, `CONTACT_COURSE`, `WALK_IN`
+- `AutomationReason`: `NONE`, `NO_ONLINE_BOOKING`, `UNSUPPORTED_PLATFORM`, `AUTOMATION_PROHIBITED`, `ACCOUNT_REQUIRED`, `CAPTCHA_OR_QUEUE`, `TEMPORARILY_UNAVAILABLE`, `OTHER`
 - `ProbeOutcome`: `MATCH_FOUND`, `NO_MATCH`, `BLOCKED_POLICY`, `BLOCKED_AUTH`, `BLOCKED_TOOLING`, `FETCH_FAILED`, `NEEDS_ADAPTER`
 - `AlertStatus`: `PENDING`, `SENT`, `SUPPRESSED`
 - `FeedbackSentiment`: `LIKE`, `DISLIKE`, `BROKEN`

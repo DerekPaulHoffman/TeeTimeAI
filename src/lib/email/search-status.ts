@@ -1,3 +1,4 @@
+import type { BookingMethod } from "@/lib/courses/intelligence";
 import type { EmailStopUrls } from "@/lib/email/search-actions";
 import {
   DEFAULT_TIME_ZONE,
@@ -23,7 +24,13 @@ export type SearchStatusCourseReport = {
   message?: string;
   bookingUrl?: string;
   phone?: string;
-  bookingAccess?: "BOOKING_PAGE" | "OFFICIAL_SITE" | "PHONE_ONLY";
+  bookingMethod?: BookingMethod;
+  bookingAccess?:
+    | "BOOKING_PAGE"
+    | "OFFICIAL_SITE"
+    | "PHONE_ONLY"
+    | "CONTACT_COURSE"
+    | "WALK_IN";
   availability?: SearchStatusAvailability;
   matchingTimes?: Array<{
     startsAt: string;
@@ -216,8 +223,11 @@ function renderCourseReport(course: SearchStatusCourseReport, players: number, r
   const timeZone = normalizeTimeZone(course.timeZone, DEFAULT_TIME_ZONE);
   const matchingTimes = renderMatchingTimes(course.matchingTimes, timeZone);
   const bookingAccess = getBookingAccess(course);
+  const bookingLinkLabel = bookingAccess === "BOOKING_PAGE"
+    ? "Open official booking page"
+    : "Open official site";
   const bookingLink = course.bookingUrl
-    ? `<a href="${escapeHtml(course.bookingUrl)}" style="color:#087746;display:inline-block;font-size:14px;font-weight:800;margin:0 18px 0 0;text-decoration:none">${bookingAccess === "OFFICIAL_SITE" ? "Open official site" : "Open official booking page"} →</a>`
+    ? `<a href="${escapeHtml(course.bookingUrl)}" style="color:#087746;display:inline-block;font-size:14px;font-weight:800;margin:0 18px 0 0;text-decoration:none">${bookingLinkLabel} →</a>`
     : "";
   const phoneHref = course.phone ? formatTelephoneHref(course.phone) : "";
   const phoneLink = phoneHref
@@ -292,9 +302,23 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   }
 
   if (course.outcome === "BLOCKED_POLICY") {
-    const isPhoneOnly = getBookingAccess(course) === "PHONE_ONLY";
+    const bookingAccess = getBookingAccess(course);
+    const monitoringLabel = bookingAccess === "PHONE_ONLY"
+      ? "Phone only"
+      : bookingAccess === "CONTACT_COURSE"
+        ? "Contact course"
+        : bookingAccess === "WALK_IN"
+          ? "Walk-in only"
+          : "Official site only";
+    const detail = bookingAccess === "PHONE_ONLY"
+      ? "We can’t automatically monitor this course. Call the course to check availability and book directly."
+      : bookingAccess === "CONTACT_COURSE"
+        ? "We can’t automatically monitor this course. Contact the course directly to check availability and book."
+        : bookingAccess === "WALK_IN"
+          ? "We can’t automatically monitor this course. Check with the course in person for availability and booking."
+          : `We can’t automatically monitor this course and won’t bypass its restrictions. Check the official site${course.phone ? " or call the course" : ""} to book directly.`;
     return {
-      monitoringLabel: isPhoneOnly ? "Phone only" : "Official site only",
+      monitoringLabel,
       stateLabel: "Direct booking required",
       icon: "⚠",
       color: "#b66500",
@@ -303,9 +327,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff9eb",
       calloutBorder: "#edd39a",
       calloutText: "#734500",
-      detail: isPhoneOnly
-        ? "We can’t automatically monitor this course. Call the course to check availability and book directly."
-        : `We can’t automatically monitor this course and won’t bypass its restrictions. Check the official site${course.phone ? " or call the course" : ""} to book directly.`
+      detail
     };
   }
 
@@ -361,6 +383,21 @@ function fullyMonitoredDescription(stateLabel: string) {
 }
 
 function getBookingAccess(course: SearchStatusCourseReport) {
+  if (course.bookingMethod === "PHONE_ONLY") {
+    return "PHONE_ONLY";
+  }
+  if (course.bookingMethod === "CONTACT_COURSE") {
+    return "CONTACT_COURSE";
+  }
+  if (course.bookingMethod === "WALK_IN") {
+    return "WALK_IN";
+  }
+  if (
+    course.bookingMethod === "PUBLIC_ONLINE" ||
+    course.bookingMethod === "ONLINE_OR_PHONE"
+  ) {
+    return course.bookingUrl ? "BOOKING_PAGE" : course.bookingAccess;
+  }
   if (course.bookingAccess) {
     return course.bookingAccess;
   }
@@ -433,9 +470,13 @@ export function renderEmailStopControls(stopUrls?: EmailStopUrls) {
 
 function getCourseState(course: SearchStatusCourseReport) {
   if (course.outcome !== "NO_MATCH") {
-    return course.outcome === "MATCH_FOUND"
-      ? `${course.outcome}:${course.availableMatches}`
-      : course.outcome;
+    if (course.outcome === "MATCH_FOUND") {
+      return `${course.outcome}:${course.availableMatches}`;
+    }
+    return [
+      course.outcome,
+      course.bookingMethod ?? getBookingAccess(course) ?? "UNKNOWN"
+    ].join(":");
   }
   if (!course.availability || course.availability.visibleSlotCount === 0) {
     return "NO_MATCH:DATE_NOT_VISIBLE";

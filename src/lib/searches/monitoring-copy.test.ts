@@ -9,14 +9,25 @@ describe("buildSearchSavedMessage", () => {
     );
   });
 
-  it("names an official-site-only course without claiming it is monitored", () => {
+  it("names a phone-only course without claiming it is monitored", () => {
     const message = buildSearchSavedMessage([
-      { name: "Fairview Farm Golf Course", alertSupport: "OFFICIAL_SITE_ONLY" },
+      { name: "Fairview Farm Golf Course", alertSupport: "PHONE_ONLY" },
       { name: "Timberlin Golf Course" }
     ]);
 
     expect(message).toContain("We'll monitor supported courses");
-    expect(message).toContain("Fairview Farm Golf Course is official-site only");
+    expect(message).toContain("Fairview Farm Golf Course is phone only");
     expect(message).toContain("won't be checked automatically");
+  });
+
+  it("can describe multiple durable manual booking modes", () => {
+    const message = buildSearchSavedMessage([
+      { name: "Phone Course", alertSupport: "PHONE_ONLY" },
+      { name: "Walk-in Course", alertSupport: "WALK_IN_ONLY" }
+    ]);
+
+    expect(message).toContain("Phone Course is phone only");
+    expect(message).toContain("Walk-in Course is walk-in only");
+    expect(message).toContain("They won't be checked automatically");
   });
 });
