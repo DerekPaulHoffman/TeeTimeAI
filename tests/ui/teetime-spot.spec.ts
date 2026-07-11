@@ -37,7 +37,13 @@ test.describe("Tee Time Spot UI smoke", () => {
       page.getByRole("heading", { name: "Built with golfers, not just for them." })
     ).toBeVisible();
     const homeSearchForm = page.locator(".home-search-form");
-    await expect(homeSearchForm.locator('input[name="location"]')).toHaveValue("Trumbull, CT");
+    const homeLocation = homeSearchForm.locator('input[name="location"]');
+    await expect(homeLocation).toHaveValue("");
+    await expect(homeLocation).toHaveAttribute(
+      "placeholder",
+      "City and state, ZIP code, or street address"
+    );
+    await expect(homeLocation).toHaveAttribute("required", "");
     await expect(homeSearchForm.locator("select")).toHaveValue("4");
     await expect(homeSearchForm.locator('input[type="date"]')).toHaveValue(
       nextSaturdayDateInputValue()
@@ -78,20 +84,26 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
     await expect(alertActionButton).toBeDisabled();
     await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
-    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
-      "Trumbull, CT"
+    const locationInput = page.getByRole("textbox", { name: "Location", exact: true });
+    await expect(locationInput).toHaveValue("");
+    await expect(locationInput).toHaveAttribute(
+      "placeholder",
+      "City and state, ZIP code, or street address"
     );
+    const courseSearchButton = page.getByRole("button", { name: /^Search$/i });
+    await expect(courseSearchButton).toBeDisabled();
     await expect(page.locator("#players")).toHaveValue("4");
     await expect(page.locator("#date")).toHaveValue(nextSaturdayDateInputValue());
     await expect(page.locator("#startTime")).toHaveValue("09:00");
     await expect(page.locator("#endTime")).toHaveValue("18:00");
     await expect(page.locator("#searchRadius")).toHaveValue("15");
 
-    await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
+    await locationInput.fill("Trumbull, CT");
+    await expect(courseSearchButton).toBeEnabled();
     const discoveryRequest = page.waitForRequest((request) =>
       request.url().includes("/api/courses/discover?")
     );
-    await page.getByRole("button", { name: /^Search$/i }).click();
+    await courseSearchButton.click();
     const discoveryUrl = new URL((await discoveryRequest).url());
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
     const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });

@@ -36,6 +36,7 @@ import {
 } from "@/lib/courses/intelligence";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
+import { LOCATION_INPUT_PLACEHOLDER } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
@@ -213,7 +214,7 @@ function TeeTimeIntakeContent({
   initialValues: TeeTimeIntakeInitialValues;
   accountState: IntakeAccountState;
 }) {
-  const [locationText, setLocationText] = useState(initialValues.location ?? "Trumbull, CT");
+  const [locationText, setLocationText] = useState(initialValues.location ?? "");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
@@ -236,7 +237,7 @@ function TeeTimeIntakeContent({
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
   const [notice, setNotice] = useState<Notice>({
     type: "info",
-    message: "Enter a city or ZIP code, or use your current location."
+    message: "Enter a city and state, ZIP code, or street address, or use your current location."
   });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -318,7 +319,8 @@ function TeeTimeIntakeContent({
         setLoading(false);
         setNotice({
           type: "error",
-          message: "Location access was blocked. Type a city or ZIP instead."
+          message:
+            "Location access was blocked. Enter a city and state, ZIP code, or street address instead."
         });
       },
       { enableHighAccuracy: true, timeout: 10000 }
@@ -328,7 +330,9 @@ function TeeTimeIntakeContent({
   async function discoverByTypedLocation() {
     setLoading(true);
     try {
-      const geocode = await fetch(`/api/location/geocode?q=${encodeURIComponent(locationText)}`);
+      const geocode = await fetch(
+        `/api/location/geocode?q=${encodeURIComponent(locationText.trim())}`
+      );
       if (!geocode.ok) {
         throw new Error(await geocode.text());
       }
@@ -543,7 +547,7 @@ function TeeTimeIntakeContent({
                 id="location"
                 value={locationText}
                 onChange={(event) => setLocationText(event.target.value)}
-                placeholder="City, state, or ZIP"
+                placeholder={LOCATION_INPUT_PLACEHOLDER}
               />
             </div>
             <button
@@ -667,7 +671,7 @@ function TeeTimeIntakeContent({
             className="figma-search-submit"
             type="button"
             onClick={discoverByTypedLocation}
-            disabled={loading}
+            disabled={loading || locationText.trim().length === 0}
           >
             <Search size={15} />
             {loading ? "Searching" : "Search"}
@@ -679,7 +683,7 @@ function TeeTimeIntakeContent({
         <div className="figma-results-column">
           {courses.length > 0 ? (
             <div className="figma-results-banner" role="status">
-              <strong>{filteredCourses.length} courses</strong> near {locationText} — tap the ones you want and drag to rank them.
+              <strong>{filteredCourses.length} courses</strong> near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
             </div>
           ) : (
             <Notice notice={notice} />

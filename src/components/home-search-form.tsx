@@ -10,6 +10,7 @@ import {
   formatDateInputValue,
   getNextSaturdayDateInputValue
 } from "@/lib/dates/local-date";
+import { LOCATION_INPUT_PLACEHOLDER } from "@/lib/places/location-input";
 import { DEFAULT_COURSE_SEARCH_RADIUS_MILES } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
@@ -21,7 +22,7 @@ function tomorrow() {
 
 export function HomeSearchForm() {
   const router = useRouter();
-  const [location, setLocation] = useState("Trumbull, CT");
+  const [location, setLocation] = useState("");
   const [email, setEmail] = useState("");
   const [players, setPlayers] = useState(4);
   const [date, setDate] = useState(getNextSaturdayDateInputValue);
@@ -79,7 +80,8 @@ export function HomeSearchForm() {
           <input
             name="location"
             onChange={(event) => setLocation(event.target.value)}
-            placeholder="City, state, or ZIP"
+            placeholder={LOCATION_INPUT_PLACEHOLDER}
+            required
             value={location}
           />
         </label>
@@ -159,7 +161,10 @@ export function HomeSearchForm() {
           <LocateFixed size={17} />
           Use my location
         </button>
-        <p>Enter a city or ZIP code — or just use your current location — to find courses near you.</p>
+        <p>
+          Enter a city and state, ZIP code, or street address — or use your current
+          location — to find courses near you.
+        </p>
       </div>
     </form>
   );
