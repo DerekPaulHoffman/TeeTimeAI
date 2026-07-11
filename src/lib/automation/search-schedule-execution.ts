@@ -5,6 +5,7 @@ import {
   getSearchScheduleTiming
 } from "@/lib/automation/db-service";
 import { runSearchCheck } from "@/lib/automation/search-check";
+import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
 
 const BOOKING_WINDOW_LEAD_DAYS = 14;
 const FAILED_CHECK_RETRY_MINUTES = 5;
@@ -21,8 +22,36 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
   }
 
   try {
+    const searchExpiresAt = calculateSearchWindowEnd(
+      timing.date,
+      timing.endTime,
+      timing.preferences.map((preference) => preference.course.timeZone),
+      timing.userTimeZone
+    );
+    if (new Date() >= searchExpiresAt) {
+      await completeScheduledSearchCheck({
+        searchId,
+        scheduleVersion,
+        outcome: "search window ended",
+        nextCheckAt: null,
+        completeSearch: true
+      });
+      return {
+        outcome: "completed",
+        nextCheckAt: null,
+        availableMatches: 0,
+        newlyAlertedMatches: 0,
+        courseResults: []
+      };
+    }
+
     const result = await runSearchCheck(searchId, "workflow");
-    const nextCheckAt = calculateNextCheckAt(timing.date, timing.cadenceMinutes);
+    const nextCheckAt = calculateNextCheckAt(
+      timing.date,
+      timing.cadenceMinutes,
+      new Date(),
+      searchExpiresAt
+    );
     await completeScheduledSearchCheck({
       searchId,
       scheduleVersion,
@@ -50,9 +79,12 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
   }
 }
 
-export function calculateNextCheckAt(date: Date, cadenceMinutes: number, now = new Date()) {
-  const searchExpiresAt = new Date(date);
-  searchExpiresAt.setDate(searchExpiresAt.getDate() + 1);
+export function calculateNextCheckAt(
+  date: Date,
+  cadenceMinutes: number,
+  now = new Date(),
+  searchExpiresAt = endOfSearchDate(date)
+) {
   if (now >= searchExpiresAt) {
     return null;
   }
@@ -64,7 +96,33 @@ export function calculateNextCheckAt(date: Date, cadenceMinutes: number, now = n
   }
 
   const next = new Date(now.getTime() + cadenceMinutes * 60 * 1000);
-  return next < searchExpiresAt ? next : null;
+  return next < searchExpiresAt ? next : searchExpiresAt;
+}
+
+export function calculateSearchWindowEnd(
+  date: Date,
+  endTime: string,
+  courseTimeZones: string[],
+  fallbackTimeZone: string
+) {
+  const dateValue = date.toISOString().slice(0, 10);
+  const timeZones = courseTimeZones.length > 0 ? courseTimeZones : [fallbackTimeZone];
+  return new Date(
+    Math.max(
+      ...timeZones.map((timeZone) =>
+        zonedDateTimeToDate(
+          `${dateValue}T${endTime}:00`,
+          normalizeTimeZone(timeZone, fallbackTimeZone)
+        ).getTime()
+      )
+    )
+  );
+}
+
+function endOfSearchDate(date: Date) {
+  const searchExpiresAt = new Date(date);
+  searchExpiresAt.setDate(searchExpiresAt.getDate() + 1);
+  return searchExpiresAt;
 }
 
 function summarizeCheckOutcome(result: Awaited<ReturnType<typeof runSearchCheck>>) {

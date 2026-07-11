@@ -468,6 +468,7 @@ export async function completeScheduledSearchCheck(input: {
   scheduleVersion: number;
   outcome: string;
   nextCheckAt: Date | null;
+  completeSearch?: boolean;
 }) {
   return prisma.teeSearch.updateMany({
     where: {
@@ -475,6 +476,7 @@ export async function completeScheduledSearchCheck(input: {
       scheduleVersion: input.scheduleVersion
     },
     data: {
+      ...(input.completeSearch ? { status: "COMPLETED" as const } : {}),
       checkStatus: input.nextCheckAt ? "WAITING" : "STOPPED",
       lastCheckedAt: new Date(),
       lastCheckOutcome: input.outcome,
@@ -541,8 +543,19 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
     select: {
       id: true,
       date: true,
+      endTime: true,
+      userTimeZone: true,
       cadenceMinutes: true,
-      scheduleVersion: true
+      scheduleVersion: true,
+      preferences: {
+        select: {
+          course: {
+            select: {
+              timeZone: true
+            }
+          }
+        }
+      }
     }
   });
 }
