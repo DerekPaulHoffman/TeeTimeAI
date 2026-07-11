@@ -54,6 +54,7 @@ export type SearchStatusEmailInput = {
   startTime: string;
   endTime: string;
   players: number;
+  requestedLayoutHoles?: 9 | 18 | null;
   userTimeZone?: string;
   checkedAt: Date;
   courses: SearchStatusCourseReport[];
@@ -147,6 +148,9 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const changedCourses = getChangedCourseNames(currentSnapshot, input.previousSnapshot);
   const targetDate = formatDate(input.targetDate);
   const window = `${formatTime(input.startTime)}–${formatTime(input.endTime)} course local`;
+  const courseLayout = input.requestedLayoutHoles
+    ? `${input.requestedLayoutHoles}-hole`
+    : "Any layout";
   const checkedAt = input.checkedAt.toLocaleString("en-US", {
     month: "short",
     day: "numeric",
@@ -203,6 +207,11 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
               <td style="background:#f5f7f2;border-radius:8px;padding:12px">
                 <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Window</div>
                 <div style="font-weight:800">${escapeHtml(window)}</div>
+              </td>
+              <td style="width:8px"></td>
+              <td style="background:#f5f7f2;border-radius:8px;padding:12px">
+                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Course layout</div>
+                <div style="font-weight:800">${escapeHtml(courseLayout)}</div>
               </td>
               <td style="width:8px"></td>
               <td style="background:#f5f7f2;border-radius:8px;padding:12px">

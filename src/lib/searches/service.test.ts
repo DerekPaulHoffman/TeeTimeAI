@@ -78,7 +78,8 @@ describe("createTeeSearchForUser", () => {
               automationEligibility: "ALLOWED",
               detectedPlatform: { not: "UNKNOWN" }
             },
-            { automationEligibility: "BLOCKED" }
+            { automationEligibility: "BLOCKED" },
+            { layoutHolesVerifiedAt: { not: null } }
           ])
         })
       })
@@ -362,6 +363,141 @@ describe("createTeeSearchForUser", () => {
     );
   });
 
+  it("persists a verified compatible physical course-layout preference", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "eighteen-hole-course",
+      name: "Verified Eighteen Golf Course",
+      automationEligibility: "ALLOWED",
+      layoutHoleCounts: [18],
+      layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+    } as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 4,
+      cadenceMinutes: 5,
+      requestedLayoutHoles: 18,
+      courses: [
+        {
+          courseId: "eighteen-hole-course",
+          name: "Verified Eighteen Golf Course",
+          latitude: 41.2,
+          longitude: -73.2,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ requestedLayoutHoles: 18 })
+      })
+    );
+  });
+
+  it("rejects Woodhaven for an 18-hole physical course-layout search", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "woodhaven",
+      name: "Woodhaven Country Club",
+      automationEligibility: "UNKNOWN",
+      layoutHoleCounts: [9],
+      layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+    } as never);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "09:00",
+        endTime: "18:00",
+        players: 4,
+        cadenceMinutes: 5,
+        requestedLayoutHoles: 18,
+        courses: [
+          {
+            courseId: "woodhaven",
+            name: "Woodhaven Country Club",
+            latitude: 41.415596,
+            longitude: -73.039627,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow(
+      "The selected course layout does not match this 18-hole search: Woodhaven Country Club (9-hole)."
+    );
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("reuses verified nearby Woodhaven evidence when Google returns an alternate id", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "woodhaven",
+        name: "Woodhaven Golf Course",
+        automationEligibility: "UNKNOWN",
+        layoutHoleCounts: [9],
+        layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+      }
+    ] as never);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "09:00",
+        endTime: "18:00",
+        players: 4,
+        cadenceMinutes: 5,
+        requestedLayoutHoles: 18,
+        courses: [
+          {
+            googlePlaceId: "alternate-woodhaven-id",
+            name: "Woodhaven Country Club",
+            latitude: 41.4157,
+            longitude: -73.0395,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow(/Woodhaven Golf Course \(9-hole\)/);
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("allows an unverified course in a layout-specific search", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "unverified-course",
+      name: "Unverified Public Course",
+      automationEligibility: "ALLOWED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null
+    } as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 4,
+      cadenceMinutes: 5,
+      requestedLayoutHoles: 18,
+      courses: [
+        {
+          courseId: "unverified-course",
+          name: "Unverified Public Course",
+          latitude: 41.2,
+          longitude: -73.2,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
+  });
+
   it("rejects a fourth queued search for the same user", async () => {
     mockedPrisma.teeSearch.count.mockResolvedValue(3);
 
@@ -455,5 +591,26 @@ describe("updateTeeSearchForUser", () => {
       where: { id: "pref-a", teeSearchId: "search-1" },
       data: { rank: 2 }
     });
+  });
+
+  it("rejects changing a search to an incompatible verified layout", async () => {
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      id: "search-1",
+      preferences: [
+        {
+          course: {
+            name: "Woodhaven Country Club",
+            layoutHoleCounts: [9],
+            layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+          }
+        }
+      ]
+    } as never);
+
+    await expect(
+      updateTeeSearchForUser("user-1", "search-1", { requestedLayoutHoles: 18 })
+    ).rejects.toThrow("Woodhaven Country Club (9-hole)");
+
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
   });
 });

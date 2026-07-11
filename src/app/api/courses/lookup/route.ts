@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
+import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 
 const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 120;
@@ -52,7 +53,16 @@ export async function GET(request: NextRequest) {
       );
       return courses;
     });
-    return NextResponse.json({ courses: coursesWithSupport });
+    const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport).catch(
+      (error) => {
+        console.warn(
+          "Course hole-layout enrichment unavailable",
+          error instanceof Error ? error.message : "Unknown hole-layout error"
+        );
+        return coursesWithSupport;
+      }
+    );
+    return NextResponse.json({ courses: coursesWithLayouts });
   } catch (error) {
     console.error(
       "Course lookup failed",

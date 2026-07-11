@@ -120,6 +120,9 @@ model Course {
   intelligenceVerifiedAt DateTime?
   intelligenceReviewAt   DateTime?
   intelligenceConfidence Float?
+  layoutHoleCounts       Int[]                       @default([])
+  layoutHolesEvidenceUrl String?
+  layoutHolesVerifiedAt  DateTime?
   createdAt              DateTime                    @default(now())
   updatedAt              DateTime                    @updatedAt
   preferences            CoursePreference[]
@@ -134,30 +137,31 @@ model Course {
 }
 
 model TeeSearch {
-  id                  String             @id @default(cuid())
-  userId              String
-  date                DateTime
-  startTime           String
-  endTime             String
-  userTimeZone        String             @default("America/New_York")
-  players             Int
-  cadenceMinutes      Int                @default(5)
-  additionalEmails    String[]           @default([])
-  status              SearchStatus       @default(ACTIVE)
-  checkStatus         SearchCheckStatus  @default(IDLE)
-  scheduleVersion     Int                @default(0)
-  workflowRunId       String?
-  nextCheckAt         DateTime?
-  lastCheckedAt       DateTime?
-  lastCheckOutcome    String?
-  statusEmailSentAt   DateTime?
-  statusEmailSnapshot Json?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
-  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  preferences         CoursePreference[]
-  probes              CourseProbe[]
-  matches             TeeTimeMatch[]
+  id                   String             @id @default(cuid())
+  userId               String
+  date                 DateTime
+  startTime            String
+  endTime              String
+  userTimeZone         String             @default("America/New_York")
+  players              Int
+  requestedLayoutHoles Int?
+  cadenceMinutes       Int                @default(5)
+  additionalEmails     String[]           @default([])
+  status               SearchStatus       @default(ACTIVE)
+  checkStatus          SearchCheckStatus  @default(IDLE)
+  scheduleVersion      Int                @default(0)
+  workflowRunId        String?
+  nextCheckAt          DateTime?
+  lastCheckedAt        DateTime?
+  lastCheckOutcome     String?
+  statusEmailSentAt    DateTime?
+  statusEmailSnapshot  Json?
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+  user                 User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences          CoursePreference[]
+  probes               CourseProbe[]
+  matches              TeeTimeMatch[]
 
   @@index([status, date])
   @@index([status, nextCheckAt])

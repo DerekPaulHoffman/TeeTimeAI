@@ -19,6 +19,7 @@ import {
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
+import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
 import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
@@ -246,6 +247,9 @@ function DashboardSearchCard({
               initialEndTime={search.endTime}
               initialUserTimeZone={search.userTimeZone}
               initialPlayers={search.players}
+              initialRequestedLayoutHoles={normalizeRequestedLayoutHoles(
+                search.requestedLayoutHoles
+              )}
               initialCadenceMinutes={search.cadenceMinutes}
               initialAdditionalEmails={search.additionalEmails}
               initialCheckStatus={search.checkStatus}
@@ -274,8 +278,13 @@ function DashboardSearchCard({
           </div>
           <div className="watch-stat">
             <Flag size={16} />
-            <span>Courses</span>
-            <strong>{search.preferences.length} on watch</strong>
+            <span>Courses / layout</span>
+            <strong>
+              {search.preferences.length} on watch ·{" "}
+              {search.requestedLayoutHoles
+                ? `${search.requestedLayoutHoles}-hole`
+                : "any layout"}
+            </strong>
           </div>
           <div className="watch-stat">
             <Mail size={16} />

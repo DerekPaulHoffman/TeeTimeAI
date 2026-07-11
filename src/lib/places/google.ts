@@ -1,5 +1,6 @@
 import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
 import type { CourseAlertSupport } from "@/lib/courses/intelligence";
+import type { CourseLayoutHoleCount } from "@/lib/courses/course-layout";
 import { getTimeZoneForCoordinates } from "@/lib/timezones";
 
 export type GooglePlace = {
@@ -54,6 +55,10 @@ export type CourseCandidate = {
   photoAttributions?: CoursePhotoAttribution[];
   priceEstimate?: CoursePriceEstimate;
   alertSupport?: CourseAlertSupport;
+  layoutHoleCounts?: CourseLayoutHoleCount[];
+  layoutHolesStatus?: "VERIFIED" | "UNVERIFIED";
+  layoutHolesEvidenceUrl?: string;
+  layoutHolesVerifiedAt?: string;
 };
 
 export type NearbyCourseSearchInput = {

@@ -21,8 +21,14 @@ const emailMocks = vi.hoisted(() => ({
   sendTeeTimeAlert: vi.fn()
 }));
 
+const adapterMocks = vi.hoisted(() => ({
+  fetchForeupSlots: vi.fn(),
+  isForeupMetadata: vi.fn()
+}));
+
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
+vi.mock("@/lib/adapters/foreup", () => adapterMocks);
 
 import { runSearchCheck } from "./search-check";
 
@@ -32,6 +38,7 @@ const search = {
   startTime: "07:00",
   endTime: "10:00",
   players: 2,
+  requestedLayoutHoles: null as 9 | 18 | null,
   userTimeZone: "America/New_York",
   statusEmailSentAt: null as Date | null,
   statusEmailSnapshot: null,
@@ -53,7 +60,9 @@ const search = {
         automationReason: "POLICY_RESTRICTED",
         policyNotes: "Automated retrieval is not allowed.",
         detectedPlatform: "UNKNOWN",
-        bookingMetadata: null
+        bookingMetadata: null,
+        layoutHoleCounts: [] as number[],
+        layoutHolesVerifiedAt: null as Date | null
       }
     }
   ],
@@ -105,6 +114,8 @@ describe("runSearchCheck email cadence", () => {
       id: "match-email-1",
       deliveryStatus: "sent"
     });
+    adapterMocks.isForeupMetadata.mockReturnValue(true);
+    adapterMocks.fetchForeupSlots.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -112,10 +123,15 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("uses the setup report for initial matches instead of sending a second instant email", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      requestedLayoutHoles: 18
+    });
+
     const result = await runSearchCheck("search-1", "test");
 
     expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "setup" })
+      expect.objectContaining({ kind: "setup", requestedLayoutHoles: 18 })
     );
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
     expect(dbMocks.markMatchAlertSent).toHaveBeenCalledWith("match-1");
@@ -143,5 +159,56 @@ describe("runSearchCheck email cadence", () => {
         statusEmailOutcome: "covered_by_match_alert"
       })
     );
+  });
+
+  it("does not fetch or alert a legacy course with a verified incompatible layout", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      requestedLayoutHoles: 18,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            id: "woodhaven",
+            name: "Woodhaven Country Club",
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            policyNotes: null,
+            bookingMetadata: { courseId: "woodhaven" },
+            layoutHoleCounts: [9],
+            layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupSlots).not.toHaveBeenCalled();
+    expect(dbMocks.recordTeeTimeMatch).not.toHaveBeenCalled();
+    expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "woodhaven",
+      date: "2026-07-12",
+      timeZone: "America/New_York",
+      confirmedMatches: []
+    });
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "woodhaven",
+        outcome: "NO_MATCH",
+        message: expect.stringContaining("requested 18-hole physical course layout")
+      })
+    );
+    expect(result.courseResults).toEqual([
+      expect.objectContaining({
+        courseId: "woodhaven",
+        outcome: "NO_MATCH",
+        availableMatches: 0
+      })
+    ]);
   });
 });

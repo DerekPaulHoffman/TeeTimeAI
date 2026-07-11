@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { demoCourses } from "@/lib/places/demo-courses";
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
+import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { enrichCoursesWithPriceEstimates } from "@/lib/pricing/course-price-enrichment";
 
@@ -30,12 +31,21 @@ export async function GET(request: NextRequest) {
       );
       return courses;
     });
-    const coursesWithPrices = await enrichCoursesWithPriceEstimates(coursesWithSupport).catch((error) => {
+    const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport).catch(
+      (error) => {
+        console.warn(
+          "Course hole-layout enrichment unavailable",
+          error instanceof Error ? error.message : "Unknown hole-layout error"
+        );
+        return coursesWithSupport;
+      }
+    );
+    const coursesWithPrices = await enrichCoursesWithPriceEstimates(coursesWithLayouts).catch((error) => {
       console.warn(
         "Course pricing enrichment unavailable",
         error instanceof Error ? error.message : "Unknown pricing error"
       );
-      return coursesWithSupport;
+      return coursesWithLayouts;
     });
     return NextResponse.json({ courses: coursesWithPrices, demo: false });
   } catch (error) {

@@ -43,6 +43,7 @@ const previewStatus = {
   startTime: "07:30",
   endTime: "09:00",
   players: 2,
+  requestedLayoutHoles: 18 as const,
   checkedAt: new Date("2026-07-10T08:15:00-04:00"),
   courses: [
     {

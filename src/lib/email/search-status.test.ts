@@ -101,6 +101,7 @@ describe("renderSearchStatusHtml", () => {
       startTime: "07:30",
       endTime: "09:00",
       players: 1,
+      requestedLayoutHoles: 18,
       checkedAt: new Date("2026-07-10T12:15:00.000Z"),
       courses
     });
@@ -112,6 +113,8 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("keep checking fully monitored courses");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we’re watching for you");
+    expect(html).toContain("Course layout");
+    expect(html).toContain("18-hole");
     expect(html).toContain("Fully monitored ✓");
     expect(html).toContain("at most one morning status update per day");
     expect(html).not.toContain("<Needs Adapter>");

@@ -5,12 +5,17 @@ import { GET } from "./route";
 
 const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
+  enrichCoursesWithHoleLayouts: vi.fn(),
   getGooglePlacesApiKey: vi.fn(),
   searchGolfCoursesByName: vi.fn()
 }));
 
 vi.mock("@/lib/places/alert-support", () => ({
   enrichCoursesWithAlertSupport: mocks.enrichCoursesWithAlertSupport
+}));
+
+vi.mock("@/lib/places/hole-layout-enrichment", () => ({
+  enrichCoursesWithHoleLayouts: mocks.enrichCoursesWithHoleLayouts
 }));
 
 vi.mock("@/lib/places/google", () => ({
@@ -23,6 +28,12 @@ describe("GET /api/courses/lookup", () => {
     vi.clearAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
+    mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) =>
+      courses.map((course: object) => ({
+        ...course,
+        layoutHolesStatus: "UNVERIFIED"
+      }))
+    );
   });
 
   it("returns matching course candidates with optional location context", async () => {
@@ -44,7 +55,8 @@ describe("GET /api/courses/lookup", () => {
       courses: [
         expect.objectContaining({
           googlePlaceId: "bethpage-black",
-          name: "Bethpage Black Course"
+          name: "Bethpage Black Course",
+          layoutHolesStatus: "UNVERIFIED"
         })
       ]
     });
@@ -54,6 +66,9 @@ describe("GET /api/courses/lookup", () => {
       longitude: -73.44
     });
     expect(mocks.enrichCoursesWithAlertSupport).toHaveBeenCalledWith([
+      expect.objectContaining({ googlePlaceId: "bethpage-black" })
+    ]);
+    expect(mocks.enrichCoursesWithHoleLayouts).toHaveBeenCalledWith([
       expect.objectContaining({ googlePlaceId: "bethpage-black" })
     ]);
   });

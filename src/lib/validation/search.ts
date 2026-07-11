@@ -7,6 +7,7 @@ export const MAX_QUEUED_SEARCHES_PER_USER = 3;
 export const MAX_ADDITIONAL_ALERT_EMAILS = 3;
 export const SEARCH_CADENCE_OPTIONS_MINUTES = [5, 15, 30, 60, 120] as const;
 export const DEFAULT_SEARCH_CADENCE_MINUTES = 5;
+export const COURSE_LAYOUT_HOLE_OPTIONS = [9, 18] as const;
 
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm time");
 const DEFAULT_SEARCH_TIME_ZONE = "America/New_York";
@@ -46,6 +47,10 @@ export const teeSearchDetailsSchema = z
     endTime: timeSchema,
     userTimeZone: timeZoneSchema.default(DEFAULT_SEARCH_TIME_ZONE),
     players: z.number().int().min(1).max(MAX_PLAYERS_PER_SEARCH),
+    requestedLayoutHoles: z
+      .union([z.literal(COURSE_LAYOUT_HOLE_OPTIONS[0]), z.literal(COURSE_LAYOUT_HOLE_OPTIONS[1])])
+      .nullable()
+      .optional(),
     cadenceMinutes: z
       .number()
       .int()

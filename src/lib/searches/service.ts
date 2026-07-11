@@ -1,5 +1,10 @@
 import { Prisma } from "@prisma/client";
 
+import {
+  getCourseLayoutCompatibility,
+  getCourseLayoutLabel,
+  type CourseLayoutHoleCount
+} from "@/lib/courses/course-layout";
 import { prisma } from "@/lib/prisma";
 import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
 import {
@@ -31,6 +36,7 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
 
   const sortedCourses = [...input.courses].sort((a, b) => a.rank - b.rank);
   const resolvedPreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
+  assertCourseLayoutsCompatible(resolvedPreferences, input.requestedLayoutHoles);
   if (resolvedPreferences.every((preference) => preference.automationEligibility === "BLOCKED")) {
     throw new Error(
       "None of the selected courses offers a supported public online tee-time page. Choose at least one course Tee Time Spot can monitor."
@@ -46,6 +52,7 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
       endTime: input.endTime,
       userTimeZone: normalizeTimeZone(input.userTimeZone),
       players: input.players,
+      requestedLayoutHoles: input.requestedLayoutHoles ?? null,
       cadenceMinutes: input.cadenceMinutes,
       additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
       preferences: {
@@ -67,6 +74,7 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
     });
     return {
       automationEligibility: reusableCourse.automationEligibility,
+      course: reusableCourse,
       create: {
         rank: course.rank,
         course: {
@@ -80,6 +88,11 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
 
   return {
     automationEligibility: "UNKNOWN",
+    course: {
+      name: course.name,
+      layoutHoleCounts: [] as number[],
+      layoutHolesVerifiedAt: null
+    },
     create: {
       rank: course.rank,
       course: {
@@ -109,7 +122,13 @@ async function findReusableCourse(course: SelectedCourseInput) {
   if (course.courseId) {
     const existingById = await prisma.course.findUnique({
       where: { id: course.courseId },
-      select: { id: true, automationEligibility: true }
+      select: {
+        id: true,
+        name: true,
+        automationEligibility: true,
+        layoutHoleCounts: true,
+        layoutHolesVerifiedAt: true
+      }
     });
 
     if (existingById) {
@@ -132,11 +151,18 @@ async function findReusableCourse(course: SelectedCourseInput) {
           automationEligibility: "ALLOWED",
           detectedPlatform: { not: "UNKNOWN" }
         },
-        { automationEligibility: "BLOCKED" }
+        { automationEligibility: "BLOCKED" },
+        { layoutHolesVerifiedAt: { not: null } }
       ]
     },
     orderBy: { updatedAt: "desc" },
-    select: { id: true, name: true, automationEligibility: true }
+    select: {
+      id: true,
+      name: true,
+      automationEligibility: true,
+      layoutHoleCounts: true,
+      layoutHolesVerifiedAt: true
+    }
   });
   const supportedNearbyCourse = reusableNearbyCourses.find(
     (candidate) =>
@@ -151,11 +177,26 @@ async function findReusableCourse(course: SelectedCourseInput) {
   if (course.googlePlaceId) {
     const exactCourse = await prisma.course.findUnique({
       where: { googlePlaceId: course.googlePlaceId },
-      select: { id: true, automationEligibility: true }
+      select: {
+        id: true,
+        name: true,
+        automationEligibility: true,
+        layoutHoleCounts: true,
+        layoutHolesVerifiedAt: true
+      }
     });
     if (exactCourse) {
       return exactCourse;
     }
+  }
+
+  const verifiedNearbyCourse = reusableNearbyCourses.find(
+    (candidate) =>
+      Boolean(candidate.layoutHolesVerifiedAt) &&
+      hasMeaningfulNameOverlap(course.name, candidate.name)
+  );
+  if (verifiedNearbyCourse) {
+    return verifiedNearbyCourse;
   }
 
   return reusableNearbyCourses.find(
@@ -238,12 +279,35 @@ export async function updateTeeSearchForUser(
     await assertQueueCapacity(userId, searchId);
   }
 
+  if (input.requestedLayoutHoles !== undefined && input.requestedLayoutHoles !== null) {
+    const existingSearch = await prisma.teeSearch.findUniqueOrThrow({
+      where: { id: searchId, userId },
+      select: {
+        preferences: {
+          include: {
+            course: {
+              select: {
+                name: true,
+                layoutHoleCounts: true,
+                layoutHolesVerifiedAt: true
+              }
+            }
+          }
+        }
+      }
+    });
+    assertCourseLayoutsCompatible(existingSearch.preferences, input.requestedLayoutHoles);
+  }
+
   const teeSearchData = {
     ...(input.date ? { date: parseLocalDate(input.date) } : {}),
     ...(input.startTime ? { startTime: input.startTime } : {}),
     ...(input.endTime ? { endTime: input.endTime } : {}),
     ...(input.userTimeZone ? { userTimeZone: normalizeTimeZone(input.userTimeZone) } : {}),
     ...(input.players ? { players: input.players } : {}),
+    ...(input.requestedLayoutHoles !== undefined
+      ? { requestedLayoutHoles: input.requestedLayoutHoles }
+      : {}),
     ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
     ...(input.additionalEmails
       ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) }
@@ -369,6 +433,41 @@ async function assertQueueCapacity(userId: string, excludeSearchId?: string) {
 
 function normalizeAdditionalEmails(emails: string[] = []) {
   return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean))];
+}
+
+function assertCourseLayoutsCompatible(
+  preferences: Array<{
+    course: {
+      name: string;
+      layoutHoleCounts: readonly number[];
+      layoutHolesVerifiedAt: Date | null;
+    };
+  }>,
+  requestedLayoutHoles: CourseLayoutHoleCount | null | undefined
+) {
+  if (!requestedLayoutHoles) {
+    return;
+  }
+
+  const incompatibleCourses = preferences
+    .map((preference) => preference.course)
+    .filter(
+      (course) =>
+        Boolean(course.layoutHolesVerifiedAt) &&
+        getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
+          "incompatible"
+    );
+
+  if (incompatibleCourses.length === 0) {
+    return;
+  }
+
+  const details = incompatibleCourses
+    .map((course) => `${course.name} (${getCourseLayoutLabel(course.layoutHoleCounts)})`)
+    .join(", ");
+  throw new Error(
+    `The selected course layout does not match this ${requestedLayoutHoles}-hole search: ${details}.`
+  );
 }
 
 export const searchInclude = {

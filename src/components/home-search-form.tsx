@@ -126,8 +126,8 @@ export function HomeSearchForm() {
         </label>
       </div>
       <div className="home-form-filter-row">
-        <div className="home-hole-filter" aria-label="Holes">
-          <strong>Holes</strong>
+        <div className="home-hole-filter" aria-label="Course layout">
+          <strong>Course layout</strong>
           {(["any", "9", "18"] as const).map((value) => (
             <button
               aria-pressed={holes === value}
@@ -136,7 +136,7 @@ export function HomeSearchForm() {
               onClick={() => setHoles(value)}
               type="button"
             >
-              {value === "any" ? "Any" : value}
+              {value === "any" ? "Any" : `${value}-hole`}
             </button>
           ))}
         </div>

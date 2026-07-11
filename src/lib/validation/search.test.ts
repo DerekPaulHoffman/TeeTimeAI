@@ -42,7 +42,50 @@ describe("teeSearchInputSchema", () => {
     expect(result.alertEmail).toBe("golfer@example.com");
     expect(result.additionalEmails).toEqual(["friend@example.com"]);
     expect(result.userTimeZone).toBe("America/Los_Angeles");
+    expect(result.requestedLayoutHoles).toBeUndefined();
     expect(result.courses[0]?.timeZone).toBe("America/New_York");
+  });
+
+  it.each([9, 18] as const)("accepts a %i-hole physical course-layout preference", (holes) => {
+    const result = teeSearchInputSchema.parse({
+      date: tomorrow(),
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 4,
+      requestedLayoutHoles: holes,
+      courses: [
+        {
+          googlePlaceId: "place-1",
+          name: "Verified Course",
+          rank: 1,
+          latitude: 41.242,
+          longitude: -73.209
+        }
+      ]
+    });
+
+    expect(result.requestedLayoutHoles).toBe(holes);
+  });
+
+  it("rejects unsupported physical course-layout values", () => {
+    expect(() =>
+      teeSearchInputSchema.parse({
+        date: tomorrow(),
+        startTime: "09:00",
+        endTime: "18:00",
+        players: 4,
+        requestedLayoutHoles: 27,
+        courses: [
+          {
+            googlePlaceId: "place-1",
+            name: "Verified Course",
+            rank: 1,
+            latitude: 41.242,
+            longitude: -73.209
+          }
+        ]
+      })
+    ).toThrow();
   });
 
   it("defaults new searches to the five-minute launch cadence", () => {

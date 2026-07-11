@@ -40,6 +40,7 @@ export function SearchStatusActions({
   initialEndTime,
   initialUserTimeZone,
   initialPlayers,
+  initialRequestedLayoutHoles,
   initialCadenceMinutes,
   initialAdditionalEmails,
   initialCheckStatus,
@@ -54,6 +55,7 @@ export function SearchStatusActions({
   initialEndTime: string;
   initialUserTimeZone: string;
   initialPlayers: number;
+  initialRequestedLayoutHoles: 9 | 18 | null;
   initialCadenceMinutes: number;
   initialAdditionalEmails: string[];
   initialCheckStatus: SearchCheckStatus;
@@ -75,6 +77,7 @@ export function SearchStatusActions({
     endTime: initialEndTime,
     userTimeZone: initialUserTimeZone,
     players: initialPlayers,
+    requestedLayoutHoles: initialRequestedLayoutHoles,
     cadenceMinutes: initialCadenceMinutes,
     additionalEmails: initialAdditionalEmails.join("\n"),
     coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
@@ -295,6 +298,25 @@ export function SearchStatusActions({
                   {count}
                 </option>
               ))}
+            </select>
+          </label>
+          <label>
+            Course layout
+            <select
+              value={form.requestedLayoutHoles ?? "any"}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  requestedLayoutHoles:
+                    event.target.value === "any"
+                      ? null
+                      : Number(event.target.value) as 9 | 18
+                })
+              }
+            >
+              <option value="any">Any layout</option>
+              <option value="9">9-hole</option>
+              <option value="18">18-hole</option>
             </select>
           </label>
           <label>

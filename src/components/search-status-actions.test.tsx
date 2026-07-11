@@ -32,6 +32,7 @@ describe("SearchStatusActions", () => {
         initialEndTime="17:00"
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
+        initialRequestedLayoutHoles={18}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
@@ -58,6 +59,7 @@ describe("SearchStatusActions", () => {
       { id: "pref-b", rank: 1 },
       { id: "pref-a", rank: 2 }
     ]);
+    expect(JSON.parse(requestInit.body as string).requestedLayoutHoles).toBe(18);
   });
 
   it("saves course priorities reordered by dragging rows", async () => {
@@ -73,6 +75,7 @@ describe("SearchStatusActions", () => {
         initialEndTime="17:00"
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
+        initialRequestedLayoutHoles={null}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
@@ -132,6 +135,7 @@ describe("SearchStatusActions", () => {
         initialEndTime="17:00"
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
+        initialRequestedLayoutHoles={null}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
@@ -166,6 +170,7 @@ describe("SearchStatusActions", () => {
         initialEndTime="17:00"
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
+        initialRequestedLayoutHoles={null}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
@@ -195,6 +200,7 @@ describe("SearchStatusActions", () => {
         initialEndTime="17:00"
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
+        initialRequestedLayoutHoles={null}
         initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="CHECKING"

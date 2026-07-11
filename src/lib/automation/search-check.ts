@@ -22,6 +22,10 @@ import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapSlots, isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import type { AutomationReason, BookingMethod } from "@/lib/courses/intelligence";
+import {
+  getCourseLayoutCompatibility,
+  getCourseLayoutLabel
+} from "@/lib/courses/course-layout";
 import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
 import {
   buildSearchStatusSnapshot,
@@ -60,6 +64,8 @@ type AutomationCourse = {
     | "CLUB_CADDIE"
     | "CUSTOM";
   bookingMetadata: unknown;
+  layoutHoleCounts: number[];
+  layoutHolesVerifiedAt: Date | null;
 };
 
 export type SearchCheckCourseResult = SearchStatusCourseReport;
@@ -133,9 +139,50 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
   };
   const courseResults: SearchCheckCourseResult[] = [];
   let newlyAlertedMatches = 0;
+  const requestedLayoutHoles =
+    search.requestedLayoutHoles === 9 || search.requestedLayoutHoles === 18
+      ? search.requestedLayoutHoles
+      : null;
 
   for (const preference of search.preferences) {
     const course = preference.course as AutomationCourse;
+
+    if (
+      requestedLayoutHoles &&
+      course.layoutHolesVerifiedAt &&
+      getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
+        "incompatible"
+    ) {
+      const message = `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
+      await markMissingMatchesUnavailable({
+        searchId: search.id,
+        courseId: course.id,
+        date: searchWindow.date,
+        timeZone: course.timeZone,
+        confirmedMatches: []
+      });
+      await recordCourseProbeIfChanged({
+        searchId: search.id,
+        courseId: course.id,
+        automationRunId,
+        outcome: "NO_MATCH",
+        message
+      });
+      courseResults.push({
+        courseId: course.id,
+        courseName: course.name,
+        timeZone: course.timeZone,
+        outcome: "NO_MATCH",
+        availableMatches: 0,
+        message,
+        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        phone: course.bookingPhone ?? course.phone ?? undefined,
+        bookingMethod: course.bookingMethod,
+        bookingAccess: getCourseBookingAccess(course)
+      });
+      continue;
+    }
+
     const policy = evaluateAutomationPolicy({
       automationEligibility: course.automationEligibility,
       termsText: course.policyNotes,
@@ -419,6 +466,11 @@ async function deliverSearchStatusReport(input: {
         startTime: input.searchWindow.startTime,
         endTime: input.searchWindow.endTime,
         players: input.searchWindow.players,
+        requestedLayoutHoles:
+          input.search.requestedLayoutHoles === 9 ||
+          input.search.requestedLayoutHoles === 18
+            ? input.search.requestedLayoutHoles
+            : null,
         userTimeZone: input.search.userTimeZone,
         checkedAt: input.checkedAt,
         courses: input.courseResults,

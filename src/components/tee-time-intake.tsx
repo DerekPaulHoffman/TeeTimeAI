@@ -12,6 +12,7 @@ import {
   CircleOff,
   CircleDollarSign,
   ExternalLink,
+  Flag,
   GripVertical,
   LocateFixed,
   LogIn,
@@ -34,6 +35,11 @@ import {
   getAlertSupportLabel,
   isManualOnlyAlertSupport
 } from "@/lib/courses/intelligence";
+import {
+  getCourseLayoutCompatibility,
+  getCourseLayoutLabel,
+  type CourseLayoutHoleCount
+} from "@/lib/courses/course-layout";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import {
@@ -46,10 +52,8 @@ import {
   milesToMeters
 } from "@/lib/places/radius";
 import {
-  hasPriceForView,
   type CoursePriceEstimate,
-  type CoursePriceRange,
-  type CoursePriceView
+  type CoursePriceRange
 } from "@/lib/pricing/course-prices";
 import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
@@ -155,7 +159,7 @@ const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
-type HoleFilter = CoursePriceView;
+type CourseLayoutFilter = "any" | "9" | "18";
 
 export type TeeTimeIntakeInitialValues = {
   location?: string;
@@ -163,7 +167,7 @@ export type TeeTimeIntakeInitialValues = {
   date?: string;
   startTime?: string;
   endTime?: string;
-  holes?: HoleFilter;
+  holes?: CourseLayoutFilter;
   radius?: number;
   coordinates?: SearchCoordinates;
 };
@@ -228,7 +232,9 @@ function TeeTimeIntakeContent({
   const [startTime, setStartTime] = useState(initialValues.startTime ?? "09:00");
   const [endTime, setEndTime] = useState(initialValues.endTime ?? "18:00");
   const [players, setPlayers] = useState(initialValues.players ?? 4);
-  const [holeFilter, setHoleFilter] = useState<HoleFilter>(initialValues.holes ?? "any");
+  const [holeFilter, setHoleFilter] = useState<CourseLayoutFilter>(
+    initialValues.holes ?? "any"
+  );
   const [courses, setCourses] = useState<CourseCandidate[]>([]);
   const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(
     initialValues.coordinates ?? null
@@ -253,22 +259,42 @@ function TeeTimeIntakeContent({
     () => new Set(selected.map((course) => course.googlePlaceId)),
     [selected]
   );
-  const filteredCourses = useMemo(() => {
+  const requestedLayoutHoles: CourseLayoutHoleCount | null =
+    holeFilter === "9" ? 9 : holeFilter === "18" ? 18 : null;
+  const { filteredCourses, incompatibleCourseCount } = useMemo(() => {
     const radiusMeters = milesToMeters(searchRadiusMiles);
     const withinRadius = courses.filter(
       (course) => course.distanceMeters === undefined || course.distanceMeters <= radiusMeters
     );
+    const compatibleOrUnknown = withinRadius.filter(
+      (course) =>
+        getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) !==
+        "incompatible"
+    );
 
-    return [...withinRadius].sort((a, b) => {
-      const aHasRequestedPrice = hasPriceForView(a.priceEstimate, holeFilter) ? 0 : 1;
-      const bHasRequestedPrice = hasPriceForView(b.priceEstimate, holeFilter) ? 0 : 1;
+    const sortedCourses = [...compatibleOrUnknown].sort((a, b) => {
+      const aCompatibility = getCourseLayoutCompatibility(
+        a.layoutHoleCounts,
+        requestedLayoutHoles
+      );
+      const bCompatibility = getCourseLayoutCompatibility(
+        b.layoutHoleCounts,
+        requestedLayoutHoles
+      );
+      const aCompatibilityRank = aCompatibility === "unknown" ? 1 : 0;
+      const bCompatibilityRank = bCompatibility === "unknown" ? 1 : 0;
       return (
-        aHasRequestedPrice - bHasRequestedPrice ||
+        aCompatibilityRank - bCompatibilityRank ||
         (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) -
           (b.distanceMeters ?? Number.MAX_SAFE_INTEGER)
       );
     });
-  }, [courses, holeFilter, searchRadiusMiles]);
+
+    return {
+      filteredCourses: sortedCourses,
+      incompatibleCourseCount: withinRadius.length - compatibleOrUnknown.length
+    };
+  }, [courses, requestedLayoutHoles, searchRadiusMiles]);
   const visibleCourses = useMemo(
     () => filteredCourses.slice(0, visibleCourseCount),
     [filteredCourses, visibleCourseCount]
@@ -282,12 +308,13 @@ function TeeTimeIntakeContent({
         startTime,
         endTime,
         players,
+        requestedLayoutHoles,
         courses: selected.map((course, index) => ({
           placeId: course.googlePlaceId,
           rank: index + 1
         }))
       }),
-    [alertEmail, date, endTime, players, selected, startTime]
+    [alertEmail, date, endTime, players, requestedLayoutHoles, selected, startTime]
   );
   const isCurrentSearchSaved = savedSignature === searchSignature;
   const isDateFuture = date >= minSearchDate;
@@ -295,10 +322,17 @@ function TeeTimeIntakeContent({
   const hasMonitorableCourse = selected.some(
     (course) => !isManualOnlyAlertSupport(course.alertSupport)
   );
+  const incompatibleSelectedCourse = selected.find(
+    (course) =>
+      getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
+      "incompatible"
+  );
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
       ? "Choose an end time after the start time."
+      : incompatibleSelectedCourse && requestedLayoutHoles
+        ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : selected.length > 0 && !hasMonitorableCourse
         ? "Choose at least one course Tee Time Spot can monitor automatically."
         : null;
@@ -422,6 +456,17 @@ function TeeTimeIntakeContent({
   }, [courses]);
 
   function addCourse(course: CourseCandidate) {
+    if (
+      getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
+      "incompatible"
+    ) {
+      setNotice({
+        type: "error",
+        message: `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match this ${requestedLayoutHoles}-hole course search.`
+      });
+      return;
+    }
+
     if (selected.length >= 5) {
       setNotice({ type: "error", message: "You can prioritize up to 5 courses." });
       return;
@@ -523,6 +568,7 @@ function TeeTimeIntakeContent({
           endTime,
           userTimeZone,
           players,
+          requestedLayoutHoles,
           cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES,
           courses: selected.map((course, index) => ({
             ...course,
@@ -538,7 +584,8 @@ function TeeTimeIntakeContent({
           metadata: {
             responseStatus: response.status,
             selectedCourseCount: selected.length,
-            players
+            players,
+            requestedLayoutHoles
           }
         });
         throw new Error(responseBody?.error ?? "Could not save this search. Try again in a moment.");
@@ -552,7 +599,8 @@ function TeeTimeIntakeContent({
         name: "search_submitted",
         metadata: {
           selectedCourseCount: selected.length,
-          players
+          players,
+          requestedLayoutHoles
         }
       });
       setSavedSignature(searchSignature);
@@ -657,8 +705,8 @@ function TeeTimeIntakeContent({
           </fieldset>
         </div>
         <div className="figma-filter-strip">
-          <div className="figma-hole-filter" aria-label="Price view by round length">
-            <strong>Price view</strong>
+          <div className="figma-hole-filter" aria-label="Course layout">
+            <strong>Course layout</strong>
             <div className="figma-hole-options">
               {(["any", "9", "18"] as const).map((value) => (
                 <button
@@ -731,6 +779,14 @@ function TeeTimeIntakeContent({
               Estimates use recently observed official tee-sheet rates. Final rates can vary.
             </p>
           ) : null}
+          {requestedLayoutHoles && incompatibleCourseCount > 0 ? (
+            <p className="course-pricing-note" role="status">
+              <Flag size={14} aria-hidden="true" />
+              Hiding {incompatibleCourseCount} verified{" "}
+              {incompatibleCourseCount === 1 ? "course" : "courses"} without an{" "}
+              {requestedLayoutHoles}-hole layout. Unverified courses follow verified matches.
+            </p>
+          ) : null}
           {courses.length > 0 && notice.type === "error" ? <Notice notice={notice} /> : null}
           {isCurrentSearchSaved && notice.type === "success" ? <Notice notice={notice} /> : null}
           {courses.length > 0 && filteredCourses.length === 0 ? (
@@ -756,6 +812,10 @@ function TeeTimeIntakeContent({
             );
             const isSelected = selectedIndex >= 0;
             const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
+            const layoutCompatibility = getCourseLayoutCompatibility(
+              course.layoutHoleCounts,
+              requestedLayoutHoles
+            );
 
             return (
               <div
@@ -781,6 +841,15 @@ function TeeTimeIntakeContent({
                         <CircleOff size={11} /> {getAlertSupportLabel(course.alertSupport)}
                       </span>
                     ) : null}
+                    {course.layoutHoleCounts?.length ? (
+                      <span className="figma-course-pill">
+                        <Flag size={11} /> {getCourseLayoutLabel(course.layoutHoleCounts)} course
+                      </span>
+                    ) : requestedLayoutHoles && layoutCompatibility === "unknown" ? (
+                      <span className="figma-course-pill">
+                        <Flag size={11} /> Layout unverified
+                      </span>
+                    ) : null}
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
@@ -790,7 +859,7 @@ function TeeTimeIntakeContent({
                       monitor it automatically.
                     </p>
                   ) : null}
-                  <CoursePriceDisplay estimate={course.priceEstimate} priceView={holeFilter} />
+                  <CoursePriceDisplay estimate={course.priceEstimate} />
                 </div>
                 <div className="course-actions">
                   {course.website ? (
@@ -834,6 +903,7 @@ function TeeTimeIntakeContent({
         ) : null}
         <MissingCourseLookup
           origin={searchCoordinates}
+          requestedLayoutHoles={requestedLayoutHoles}
           selectedIds={selectedIds}
           onAddCourse={addCourse}
           onRemoveCourse={removeCourse}
@@ -888,6 +958,13 @@ function TeeTimeIntakeContent({
                 <CourseThumbnail course={course} variant="compact" />
                 <div className="selected-copy">
                   <h3>{course.name}</h3>
+                  {course.layoutHoleCounts?.length ? (
+                    <span className="selected-course-support">
+                      {getCourseLayoutLabel(course.layoutHoleCounts)} course
+                    </span>
+                  ) : requestedLayoutHoles ? (
+                    <span className="selected-course-support">Layout unverified</span>
+                  ) : null}
                   {course.alertSupport ? (
                     <span className="selected-course-support">
                       {getAlertSupportLabel(course.alertSupport)}
@@ -1037,11 +1114,13 @@ function TeeTimeIntakeContent({
 
 function MissingCourseLookup({
   origin,
+  requestedLayoutHoles,
   selectedIds,
   onAddCourse,
   onRemoveCourse
 }: {
   origin: SearchCoordinates | null;
+  requestedLayoutHoles: CourseLayoutHoleCount | null;
   selectedIds: ReadonlySet<string>;
   onAddCourse: (course: CourseCandidate) => void;
   onRemoveCourse: (placeId: string) => void;
@@ -1140,6 +1219,11 @@ function MissingCourseLookup({
           {results.map((course) => {
             const isSelected = selectedIds.has(course.googlePlaceId);
             const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
+            const layoutCompatibility = getCourseLayoutCompatibility(
+              course.layoutHoleCounts,
+              requestedLayoutHoles
+            );
+            const isIncompatible = layoutCompatibility === "incompatible";
             return (
               <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
                 <CourseThumbnail course={course} variant="compact" />
@@ -1160,13 +1244,14 @@ function MissingCourseLookup({
                 <button
                   aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
                   className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
+                  disabled={isIncompatible && !isSelected}
                   onClick={() =>
                     isSelected ? onRemoveCourse(course.googlePlaceId) : onAddCourse(course)
                   }
                   type="button"
                 >
                   {isSelected ? <Check size={13} /> : <Plus size={13} />}
-                  {isSelected ? "Added" : "Add"}
+                  {isSelected ? "Added" : isIncompatible ? "Doesn’t match" : "Add"}
                 </button>
               </div>
             );
@@ -1700,26 +1785,18 @@ function Notice({ notice }: { notice: Notice }) {
   );
 }
 
-function CoursePriceDisplay({
-  estimate,
-  priceView
-}: {
-  estimate?: CoursePriceEstimate;
-  priceView: HoleFilter;
-}) {
+function CoursePriceDisplay({ estimate }: { estimate?: CoursePriceEstimate }) {
   const ranges = [
     { holes: 9 as const, range: estimate?.nineHoles },
     { holes: 18 as const, range: estimate?.eighteenHoles }
-  ].filter(({ holes, range }) => priceView === "any" ? Boolean(range) : String(holes) === priceView);
+  ];
   const availableRanges = ranges.filter(
     (entry): entry is { holes: 9 | 18; range: CoursePriceRange } => Boolean(entry.range)
   );
 
   if (availableRanges.length === 0) {
     return (
-      <p className="course-price-unavailable">
-        {priceView === "any" ? "Recent rates not available" : `${priceView}-hole rate not observed`}
-      </p>
+      <p className="course-price-unavailable">Recent rates not available</p>
     );
   }
 
