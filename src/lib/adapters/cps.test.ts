@@ -21,7 +21,7 @@ describe("fetchCpsSlots", () => {
   });
 
   it("registers a transaction and maps CPS tee times", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = input.toString();
 
       if (url.endsWith("/onlineresweb/Home/Configuration")) {
@@ -44,6 +44,9 @@ describe("fetchCpsSlots", () => {
       }
 
       if (url.includes("/TeeTimes?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["x-timezoneid"]).toBe("America/Denver");
+        expect(headers["x-timezone-offset"]).toBe("360");
         const teeTimesUrl = new URL(url);
         expect(teeTimesUrl.searchParams.get("searchDate")).toBe("Sat Jul 11 2026");
         expect(teeTimesUrl.searchParams.get("courseIds")).toBe("1,2");
@@ -84,6 +87,7 @@ describe("fetchCpsSlots", () => {
       courseId: "course-1",
       date: new Date("2026-07-11T00:00:00.000Z"),
       players: 4,
+      timeZone: "America/Denver",
       metadata: {
         provider: "CPS",
         siteName: "traditionoaklane",

@@ -40,6 +40,7 @@ const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
 type AutomationCourse = {
   id: string;
   name: string;
+  timeZone: string;
   website: string | null;
   detectedBookingUrl: string | null;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
@@ -146,6 +147,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
+        timeZone: course.timeZone,
         outcome: "BLOCKED_POLICY",
         availableMatches: 0,
         message: policy.reason,
@@ -174,6 +176,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
+        timeZone: course.timeZone,
         outcome: "NEEDS_ADAPTER",
         availableMatches: 0,
         message,
@@ -190,13 +193,17 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         searchWindow,
         dedupeMatches(filterSlotsForSearch(searchWindow, rawSlots), [])
       );
+      const normalizedCurrentMatches = currentMatches.map((match) => ({
+        match,
+        startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone)
+      }));
 
-      for (const match of currentMatches) {
+      for (const { match, startsAt } of normalizedCurrentMatches) {
         await recordTeeTimeMatch({
           searchId: search.id,
           courseId: course.id,
           sourceId: match.sourceId,
-          startsAt: parseCourseLocalDateTime(match.startsAt),
+          startsAt,
           availableSpots: match.availableSpots,
           bookingUrl: match.bookingUrl,
           priceCents: match.priceCents,
@@ -208,8 +215,12 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       await markMissingMatchesUnavailable({
         searchId: search.id,
         courseId: course.id,
-        date: search.date,
-        confirmedSourceIds: [...new Set(currentMatches.map((match) => match.sourceId))]
+        date: searchWindow.date,
+        timeZone: course.timeZone,
+        confirmedMatches: normalizedCurrentMatches.map(({ match, startsAt }) => ({
+          sourceId: match.sourceId,
+          startsAt
+        }))
       });
 
       const outcome = currentMatches.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
@@ -230,6 +241,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
+        timeZone: course.timeZone,
         outcome,
         availableMatches: currentMatches.length,
         bookingUrl:
@@ -257,6 +269,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
+        timeZone: course.timeZone,
         outcome: "FETCH_FAILED",
         availableMatches: 0,
         message,
@@ -328,6 +341,7 @@ async function deliverSearchStatusReport(input: {
         startTime: input.searchWindow.startTime,
         endTime: input.searchWindow.endTime,
         players: input.searchWindow.players,
+        userTimeZone: input.search.userTimeZone,
         checkedAt: input.checkedAt,
         courses: input.courseResults,
         previousSnapshot: input.search.statusEmailSnapshot,
@@ -373,6 +387,7 @@ async function sendPendingMatchAlerts(searchId: string) {
         to: recipient,
         matches: availableMatches.map((match) => ({
           courseName: match.course.name,
+          courseTimeZone: match.course.timeZone,
           startsAt: match.startsAt,
           availableSpots: match.availableSpots,
           bookingUrl: match.bookingUrl,
@@ -380,6 +395,7 @@ async function sendPendingMatchAlerts(searchId: string) {
           holes: match.holes,
           isNew: pendingIds.has(match.id)
         })),
+        userTimeZone: search.userTimeZone,
         idempotencyKey: `tee-time-match-batch-${batchKey}-${recipient}`
       })
     )
@@ -415,7 +431,13 @@ function fetchCourseSlots(course: AutomationCourse, date: Date, players: number)
     return fetchTeeItUpSlots({ courseId: course.id, date, metadata: course.bookingMetadata });
   }
   if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
-    return fetchCpsSlots({ courseId: course.id, date, players, metadata: course.bookingMetadata });
+    return fetchCpsSlots({
+      courseId: course.id,
+      date,
+      players,
+      timeZone: course.timeZone,
+      metadata: course.bookingMetadata
+    });
   }
   if (course.detectedPlatform === "CUSTOM" && isTeesnapMetadata(course.bookingMetadata)) {
     return fetchTeesnapSlots({ courseId: course.id, date, players, metadata: course.bookingMetadata });

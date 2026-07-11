@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
 import {
   MAX_COURSE_PREFERENCES,
   MAX_QUEUED_SEARCHES_PER_USER,
@@ -37,6 +38,7 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
       date: parseLocalDate(input.date),
       startTime: input.startTime,
       endTime: input.endTime,
+      userTimeZone: normalizeTimeZone(input.userTimeZone),
       players: input.players,
       cadenceMinutes: input.cadenceMinutes,
       additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
@@ -49,9 +51,14 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
 }
 
 async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
+  const timeZone = getTimeZoneForCoordinates(course.latitude, course.longitude);
   const reusableCourse = await findReusableCourse(course);
 
   if (reusableCourse) {
+    await prisma.course.update({
+      where: { id: reusableCourse.id },
+      data: { timeZone }
+    });
     return {
       rank: course.rank,
       course: {
@@ -75,6 +82,7 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
           address: course.address,
           latitude: course.latitude,
           longitude: course.longitude,
+          timeZone,
           rating: course.rating,
           phone: course.phone,
           website: course.website,
@@ -210,6 +218,7 @@ export async function updateTeeSearchForUser(
     ...(input.date ? { date: parseLocalDate(input.date) } : {}),
     ...(input.startTime ? { startTime: input.startTime } : {}),
     ...(input.endTime ? { endTime: input.endTime } : {}),
+    ...(input.userTimeZone ? { userTimeZone: normalizeTimeZone(input.userTimeZone) } : {}),
     ...(input.players ? { players: input.players } : {}),
     ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
     ...(input.additionalEmails

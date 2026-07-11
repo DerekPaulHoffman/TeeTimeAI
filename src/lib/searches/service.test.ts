@@ -12,7 +12,8 @@ vi.mock("@/lib/prisma", () => ({
     $transaction: vi.fn(),
     course: {
       findMany: vi.fn(),
-      findUnique: vi.fn()
+      findUnique: vi.fn(),
+      update: vi.fn()
     },
     coursePreference: {
       updateMany: vi.fn()
@@ -33,6 +34,7 @@ describe("createTeeSearchForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.course.findMany.mockResolvedValue([]);
+    mockedPrisma.course.update.mockResolvedValue({ id: "course-1" } as never);
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
   });
 
@@ -47,6 +49,7 @@ describe("createTeeSearchForUser", () => {
       date: "2026-08-15",
       startTime: "13:00",
       endTime: "17:00",
+      userTimeZone: "America/Los_Angeles",
       players: 2,
       cadenceMinutes: 15,
       alertEmail: "golfer@example.com",
@@ -75,6 +78,7 @@ describe("createTeeSearchForUser", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           additionalEmails: ["friend@example.com"],
+          userTimeZone: "America/Los_Angeles",
           preferences: {
             create: [
               {

@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
+import { zonedDateTimeToDate } from "@/lib/timezones";
+
 import type { BrowserDiscovery } from "./browser-discovery";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "./browser-discovery";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
@@ -299,15 +301,14 @@ export async function recordTeeTimeMatch(input: {
 export async function markMissingMatchesUnavailable(input: {
   searchId: string;
   courseId: string;
-  date: Date;
-  confirmedSourceIds: string[];
+  date: string;
+  timeZone: string;
+  confirmedMatches: Array<{ sourceId: string; startsAt: Date }>;
 }) {
-  const dayStart = new Date(input.date);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const dayStart = zonedDateTimeToDate(`${input.date}T00:00:00`, input.timeZone);
+  const dayEnd = zonedDateTimeToDate(`${addIsoDateDays(input.date, 1)}T00:00:00`, input.timeZone);
 
-  const missingMatchWhere = {
+  const missingMatchWhere: Prisma.TeeTimeMatchWhereInput = {
     teeSearchId: input.searchId,
     courseId: input.courseId,
     availabilityStatus: "AVAILABLE" as const,
@@ -315,8 +316,13 @@ export async function markMissingMatchesUnavailable(input: {
       gte: dayStart,
       lt: dayEnd
     },
-    ...(input.confirmedSourceIds.length > 0
-      ? { sourceId: { notIn: input.confirmedSourceIds } }
+    ...(input.confirmedMatches.length > 0
+      ? {
+          NOT: input.confirmedMatches.map((match) => ({
+            sourceId: match.sourceId,
+            startsAt: match.startsAt
+          }))
+        }
       : {})
   };
   const unavailableAt = new Date();
@@ -345,6 +351,12 @@ export async function markMissingMatchesUnavailable(input: {
       }
     })
   ]);
+}
+
+function addIsoDateDays(value: string, days: number) {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return date.toISOString().slice(0, 10);
 }
 
 export async function queueSearchCheck(searchId: string) {

@@ -83,6 +83,7 @@ model Course {
   address               String?
   latitude              Float
   longitude             Float
+  timeZone              String                      @default("America/New_York")
   rating                Float?
   website               String?
   phone                 String?
@@ -110,6 +111,7 @@ model TeeSearch {
   date                DateTime
   startTime           String
   endTime             String
+  userTimeZone        String             @default("America/New_York")
   players             Int
   cadenceMinutes      Int                @default(5)
   additionalEmails    String[]           @default([])

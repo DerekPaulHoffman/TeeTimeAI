@@ -4,6 +4,8 @@ Tee Time Spot is an alert-only tee-time waitlist assistant for public golf cours
 
 The product helps a golfer answer one practical question: "Where can I play, at the courses I actually like, in the window I am free?" A user enters a location and search distance (15 miles by default), picks nearby public courses, ranks 1 to 5 favorites, chooses a future date, time window, player count, and alert recipients, then receives an email when a matching tee time appears. The user finishes booking directly on the official course website.
 
+Search windows are interpreted in each selected course's IANA timezone. The browser timezone is stored with the search for recipient-facing timestamps; instant alerts show the course-local time as the booking source of truth and also show the golfer's local time when it differs.
+
 Tee Time Spot does not book, hold, reserve, pay for, bypass controls, or enter account-specific checkout flows.
 
 ## Current State

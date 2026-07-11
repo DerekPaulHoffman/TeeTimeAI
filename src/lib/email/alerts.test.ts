@@ -10,6 +10,27 @@ import {
 } from "./alerts";
 
 describe("renderAlertHtml", () => {
+  it("shows course-local time and the recipient's time when the zones differ", () => {
+    const html = renderAlertHtml({
+      to: "player@example.com",
+      searchId: "search-1",
+      userTimeZone: "America/Los_Angeles",
+      matches: [
+        {
+          courseName: "Tashua Knolls",
+          courseTimeZone: "America/New_York",
+          startsAt: new Date("2026-07-11T13:00:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book"
+        }
+      ]
+    });
+
+    expect(html).toContain("9:00 AM EDT");
+    expect(html).toContain("6:00 AM PDT for you");
+    expect(html).toContain("course local time (America/New_York)");
+  });
+
   it("escapes dynamic email fields", () => {
     const html = renderAlertHtml({
       to: "player@example.com",

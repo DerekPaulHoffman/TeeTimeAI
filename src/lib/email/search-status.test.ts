@@ -62,7 +62,7 @@ describe("renderSearchStatusHtml", () => {
     });
 
     expect(html).toContain("We’re working on your tee times");
-    expect(html).toContain("7:10 AM before your window");
+    expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
     expect(html).toContain("We’re working on connecting this course");
     expect(html).toContain("at most one status update per day");

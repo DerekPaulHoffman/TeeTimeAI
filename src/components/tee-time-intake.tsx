@@ -456,6 +456,8 @@ function TeeTimeIntakeContent({
 
     setSaving(true);
     try {
+      const userTimeZone =
+        Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York";
       const response = await fetch("/api/searches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -463,6 +465,7 @@ function TeeTimeIntakeContent({
           date,
           startTime,
           endTime,
+          userTimeZone,
           players,
           cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES,
           courses: selected.map((course, index) => ({
@@ -568,7 +571,7 @@ function TeeTimeIntakeContent({
             </div>
           </label>
           <fieldset className="figma-search-field figma-time-field">
-            <legend>Window</legend>
+            <legend>Window (course-local time)</legend>
             <div className="figma-search-value">
               <span className="figma-search-value-icon" aria-hidden="true">⏰</span>
               <div className="figma-time-inputs">

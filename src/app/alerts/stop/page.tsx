@@ -77,7 +77,7 @@ export default async function StopAlertPage({ searchParams }: StopAlertPageProps
             <Users size={18} />
             <span>
               {search.players} golfer{search.players === 1 ? "" : "s"} · {formatTime(search.startTime)}–
-              {formatTime(search.endTime)}
+              {formatTime(search.endTime)} course local time
             </span>
           </div>
           <p>{courseNames.join(", ")}</p>
@@ -166,7 +166,7 @@ function formatSearchDate(date: Date) {
     month: "long",
     day: "numeric",
     year: "numeric",
-    timeZone: "America/New_York"
+    timeZone: "UTC"
   });
 }
 

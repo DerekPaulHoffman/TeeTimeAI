@@ -1,4 +1,9 @@
 import type { EmailStopUrls } from "@/lib/email/search-actions";
+import {
+  DEFAULT_TIME_ZONE,
+  normalizeTimeZone,
+  zonedDateTimeToDate
+} from "@/lib/timezones";
 
 export type SearchStatusEmailKind = "setup" | "daily";
 
@@ -12,6 +17,7 @@ export type SearchStatusAvailability = {
 export type SearchStatusCourseReport = {
   courseId: string;
   courseName: string;
+  timeZone?: string;
   outcome: "MATCH_FOUND" | "NO_MATCH" | "BLOCKED_POLICY" | "NEEDS_ADAPTER" | "FETCH_FAILED";
   availableMatches: number;
   message?: string;
@@ -39,6 +45,7 @@ export type SearchStatusEmailInput = {
   startTime: string;
   endTime: string;
   players: number;
+  userTimeZone?: string;
   checkedAt: Date;
   courses: SearchStatusCourseReport[];
   previousSnapshot?: unknown;
@@ -120,13 +127,13 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const currentSnapshot = buildSearchStatusSnapshot(input.courses);
   const changedCourses = getChangedCourseNames(currentSnapshot, input.previousSnapshot);
   const targetDate = formatDate(input.targetDate);
-  const window = `${formatTime(input.startTime)}–${formatTime(input.endTime)}`;
+  const window = `${formatTime(input.startTime)}–${formatTime(input.endTime)} course local`;
   const checkedAt = input.checkedAt.toLocaleString("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "America/New_York",
+    timeZone: normalizeTimeZone(input.userTimeZone, DEFAULT_TIME_ZONE),
     timeZoneName: "short"
   });
   const heading = input.kind === "setup" ? "We’re working on your tee times" : "Your daily tee-time update";
@@ -191,7 +198,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
 
 function renderCourseReport(course: SearchStatusCourseReport, players: number, rank: number) {
   const description = describeCourse(course, players);
-  const matchingTimes = renderMatchingTimes(course.matchingTimes);
+  const timeZone = normalizeTimeZone(course.timeZone, DEFAULT_TIME_ZONE);
+  const matchingTimes = renderMatchingTimes(course.matchingTimes, timeZone);
   const bookingLink = course.bookingUrl
     ? `<p style="margin:10px 0 0"><a href="${escapeHtml(course.bookingUrl)}" style="color:#105338;font-weight:800;text-decoration:none">Open official booking page →</a></p>`
     : "";
@@ -200,6 +208,7 @@ function renderCourseReport(course: SearchStatusCourseReport, players: number, r
     <div style="border:1px solid #d9e3dc;border-left:4px solid ${description.color};border-radius:10px;padding:15px 16px;margin-bottom:10px">
       <p style="font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:${description.color};margin:0 0 5px">Priority ${rank} · ${escapeHtml(description.label)}</p>
       <p style="font-size:16px;font-weight:800;margin:0 0 5px">${escapeHtml(course.courseName)}</p>
+      <p style="color:#6b766f;font-size:11px;margin:0 0 5px">Times use the course timezone: ${escapeHtml(timeZone)}</p>
       <p style="margin:0;color:#4e5d56;font-size:14px">${escapeHtml(description.detail)}</p>
       ${matchingTimes}
       ${bookingLink}
@@ -257,8 +266,13 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
     };
   }
 
-  const before = availability.closestBefore ? formatStartsAtTime(availability.closestBefore) : null;
-  const after = availability.closestAfter ? formatStartsAtTime(availability.closestAfter) : null;
+  const timeZone = normalizeTimeZone(course.timeZone, DEFAULT_TIME_ZONE);
+  const before = availability.closestBefore
+    ? formatStartsAtTime(availability.closestBefore, timeZone)
+    : null;
+  const after = availability.closestAfter
+    ? formatStartsAtTime(availability.closestAfter, timeZone)
+    : null;
   const closest =
     before && after
       ? `The closest visible times are ${before} before your window and ${after} after it.`
@@ -275,7 +289,10 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   };
 }
 
-function renderMatchingTimes(times: SearchStatusCourseReport["matchingTimes"]) {
+function renderMatchingTimes(
+  times: SearchStatusCourseReport["matchingTimes"],
+  timeZone: string
+) {
   if (!times?.length) {
     return "";
   }
@@ -291,7 +308,7 @@ function renderMatchingTimes(times: SearchStatusCourseReport["matchingTimes"]) {
 
       return `
         <tr>
-          <td style="border-top:1px solid #d9e3dc;padding:10px 0;font-size:18px;font-weight:800;color:#14231d">${escapeHtml(formatStartsAtTime(time.startsAt))}</td>
+          <td style="border-top:1px solid #d9e3dc;padding:10px 0;font-size:18px;font-weight:800;color:#14231d">${escapeHtml(formatStartsAtTime(time.startsAt, timeZone))}</td>
           <td style="border-top:1px solid #d9e3dc;padding:10px 0;text-align:right;color:#4e5d56;font-size:13px">${escapeHtml(details.join(" · "))}</td>
         </tr>
       `;
@@ -374,8 +391,13 @@ function formatDate(value: string) {
   });
 }
 
-function formatStartsAtTime(value: string) {
-  return formatTime(value.slice(11, 16));
+function formatStartsAtTime(value: string, timeZone: string) {
+  return zonedDateTimeToDate(value, timeZone).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone,
+    timeZoneName: "short"
+  });
 }
 
 function formatTime(value: string) {

@@ -17,12 +17,14 @@
     "automation:preflight": "node scripts/automation/preflight.mjs",
     "automation:improve": "tsx scripts/automation/improvement-loop.ts",
     "automation:inspect": "tsx scripts/automation/inspect-state.ts",
+    "automation:backfill-timezones": "tsx scripts/automation/backfill-course-timezones.ts",
     "automation:configure-known-foreup": "tsx scripts/automation/configure-known-foreup-courses.ts",
     "seed:foreup": "tsx scripts/seed-foreup.ts"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.5.14",
     "@neondatabase/serverless": "^1.1.0",
+    "@photostructure/tz-lookup": "^11.5.0",
     "@prisma/adapter-neon": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "@types/leaflet": "^1.9.21",

@@ -186,7 +186,7 @@ function DashboardView({
                   <div>
                     <h3>{match.course.name}</h3>
                     <p className="meta">
-                      {match.startsAt.toLocaleString()} - {match.availableSpots} spots
+                      {formatDashboardMatch(match.startsAt, match.course.timeZone)} - {match.availableSpots} spots
                     </p>
                   </div>
                   <a
@@ -243,6 +243,7 @@ function DashboardSearchCard({
               initialDate={formatDateInputValue(search.date)}
               initialStartTime={search.startTime}
               initialEndTime={search.endTime}
+              initialUserTimeZone={search.userTimeZone}
               initialPlayers={search.players}
               initialCadenceMinutes={search.cadenceMinutes}
               initialAdditionalEmails={search.additionalEmails}
@@ -262,7 +263,7 @@ function DashboardSearchCard({
         <div className="watch-stat-grid" aria-label="Alert details">
           <div className="watch-stat">
             <Clock3 size={16} />
-            <span>Your window</span>
+            <span>Course-local window</span>
             <strong>{formatTimeLabel(search.startTime)} – {formatTimeLabel(search.endTime)}</strong>
           </div>
           <div className="watch-stat">
@@ -310,7 +311,7 @@ function DashboardSearchCard({
                 <strong>{preference.course.name}</strong>
                 <p className="meta">
                   <MapPin size={12} />
-                  {getCompactLocation(preference.course.address)}
+                  {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
                 </p>
               </div>
               <div className="watch-course-links">
@@ -344,6 +345,18 @@ function formatDashboardDate(date: Date) {
     weekday: "short",
     month: "short",
     day: "numeric"
+  });
+}
+
+function formatDashboardMatch(date: Date, timeZone: string) {
+  return date.toLocaleString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone,
+    timeZoneName: "short"
   });
 }
 

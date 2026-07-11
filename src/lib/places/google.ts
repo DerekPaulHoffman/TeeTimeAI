@@ -1,4 +1,5 @@
 import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
+import { getTimeZoneForCoordinates } from "@/lib/timezones";
 
 export type GooglePlace = {
   id?: string;
@@ -43,6 +44,7 @@ export type CourseCandidate = {
   address?: string;
   latitude: number;
   longitude: number;
+  timeZone: string;
   distanceMeters?: number;
   rating?: number;
   phone?: string;
@@ -125,6 +127,7 @@ export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandi
     address: place.formattedAddress,
     latitude,
     longitude,
+    timeZone: getTimeZoneForCoordinates(latitude, longitude),
     rating: place.rating,
     phone: place.nationalPhoneNumber,
     website: place.websiteUri,

@@ -17,7 +17,7 @@ export async function getEmailStopSearchSummary(searchId: string) {
         orderBy: { rank: "asc" },
         select: {
           rank: true,
-          course: { select: { name: true } }
+          course: { select: { name: true, timeZone: true } }
         }
       }
     }

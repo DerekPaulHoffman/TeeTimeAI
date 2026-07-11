@@ -38,6 +38,7 @@ export function SearchStatusActions({
   initialDate,
   initialStartTime,
   initialEndTime,
+  initialUserTimeZone,
   initialPlayers,
   initialCadenceMinutes,
   initialAdditionalEmails,
@@ -51,6 +52,7 @@ export function SearchStatusActions({
   initialDate: string;
   initialStartTime: string;
   initialEndTime: string;
+  initialUserTimeZone: string;
   initialPlayers: number;
   initialCadenceMinutes: number;
   initialAdditionalEmails: string[];
@@ -71,6 +73,7 @@ export function SearchStatusActions({
     date: initialDate,
     startTime: initialStartTime,
     endTime: initialEndTime,
+    userTimeZone: initialUserTimeZone,
     players: initialPlayers,
     cadenceMinutes: initialCadenceMinutes,
     additionalEmails: initialAdditionalEmails.join("\n"),
@@ -249,7 +252,8 @@ export function SearchStatusActions({
   const checkStatusDisplay = getCheckStatusDisplay(
     localCheckStatus,
     initialLastCheckedAt,
-    initialNextCheckAt
+    initialNextCheckAt,
+    initialUserTimeZone
   );
 
   return (
@@ -520,7 +524,8 @@ export function SearchStatusActions({
 function getCheckStatusDisplay(
   status: SearchCheckStatus,
   lastCheckedAt: string | null,
-  nextCheckAt: string | null
+  nextCheckAt: string | null,
+  timeZone: string
 ) {
   if (status === "QUEUED" || status === "CHECKING") {
     return {
@@ -529,7 +534,7 @@ function getCheckStatusDisplay(
       detail:
         "We’re checking the official course sites now. This page will update automatically when we finish.",
       timing: lastCheckedAt
-        ? `Previous check: ${formatCheckTimestamp(lastCheckedAt)}`
+        ? `Previous check: ${formatCheckTimestamp(lastCheckedAt, timeZone)}`
         : null
     } as const;
   }
@@ -539,9 +544,9 @@ function getCheckStatusDisplay(
       title: "We couldn’t finish the latest check",
       detail: "Your search is still active and we’ll try the official course sites again.",
       timing: nextCheckAt
-        ? `Next attempt: ${formatCheckTimestamp(nextCheckAt)}`
+        ? `Next attempt: ${formatCheckTimestamp(nextCheckAt, timeZone)}`
         : lastCheckedAt
-          ? `Last attempt: ${formatCheckTimestamp(lastCheckedAt)}`
+          ? `Last attempt: ${formatCheckTimestamp(lastCheckedAt, timeZone)}`
           : null
     } as const;
   }
@@ -549,9 +554,9 @@ function getCheckStatusDisplay(
     return {
       tone: "updated",
       title: "Tee times updated",
-      detail: `Last checked ${formatCheckTimestamp(lastCheckedAt)}.`,
+      detail: `Last checked ${formatCheckTimestamp(lastCheckedAt, timeZone)}.`,
       timing: nextCheckAt
-        ? `Next check: ${formatCheckTimestamp(nextCheckAt)}`
+        ? `Next check: ${formatCheckTimestamp(nextCheckAt, timeZone)}`
         : null
     } as const;
   }
@@ -568,19 +573,19 @@ function getCheckStatusDisplay(
     title: "We’re getting your tee-time search ready",
     detail: "The first availability check will start shortly.",
     timing: nextCheckAt
-      ? `First check: ${formatCheckTimestamp(nextCheckAt)}`
+      ? `First check: ${formatCheckTimestamp(nextCheckAt, timeZone)}`
       : null
   } as const;
 }
 
-function formatCheckTimestamp(value: string) {
+function formatCheckTimestamp(value: string, timeZone: string) {
   return new Intl.DateTimeFormat("en-US", {
     weekday: "short",
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "America/New_York",
+    timeZone,
     timeZoneName: "short"
   }).format(new Date(value));
 }

@@ -20,6 +20,7 @@ describe("teeSearchInputSchema", () => {
       date: tomorrow(),
       startTime: "13:40",
       endTime: "16:00",
+      userTimeZone: "America/Los_Angeles",
       players: 3,
       alertEmail: "golfer@example.com",
       additionalEmails: ["FRIEND@example.com"],
@@ -29,7 +30,8 @@ describe("teeSearchInputSchema", () => {
           name: "Tashua Knolls",
           rank: 1,
           latitude: 41.242,
-          longitude: -73.209
+          longitude: -73.209,
+          timeZone: "America/New_York"
         }
       ],
       cadenceMinutes: 15
@@ -39,6 +41,8 @@ describe("teeSearchInputSchema", () => {
     expect(result.courses[0]?.rank).toBe(1);
     expect(result.alertEmail).toBe("golfer@example.com");
     expect(result.additionalEmails).toEqual(["friend@example.com"]);
+    expect(result.userTimeZone).toBe("America/Los_Angeles");
+    expect(result.courses[0]?.timeZone).toBe("America/New_York");
   });
 
   it("defaults new searches to the five-minute launch cadence", () => {

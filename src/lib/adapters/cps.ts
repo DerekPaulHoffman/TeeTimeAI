@@ -1,4 +1,5 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import { getTimeZoneOffsetMinutes, zonedDateTimeToDate } from "@/lib/timezones";
 
 export type CpsMetadata = {
   provider: "CPS";
@@ -71,11 +72,12 @@ export async function fetchCpsSlots(input: {
   courseId: string;
   date: Date;
   players: number;
+  timeZone?: string;
   metadata: CpsMetadata;
 }): Promise<TeeTimeSlot[]> {
   const configuration = await loadConfiguration(input.metadata);
   const token = await fetchShortLivedToken(configuration);
-  const headers = cpsHeaders(configuration, token);
+  const headers = cpsHeaders(configuration, token, input.timeZone ?? "America/New_York", input.date);
   const slots: TeeTimeSlot[] = [];
   const seen = new Set<string>();
 
@@ -248,7 +250,16 @@ function formatCpsDate(date: Date) {
   return `${weekdays[date.getUTCDay()]} ${months[month]} ${String(day).padStart(2, "0")} ${year}`;
 }
 
-function cpsHeaders(configuration: CpsConfiguration, token: string) {
+function cpsHeaders(
+  configuration: CpsConfiguration,
+  token: string,
+  timeZone: string,
+  date: Date
+) {
+  const dateValue = date.toISOString().slice(0, 10);
+  const courseNoon = zonedDateTimeToDate(`${dateValue}T12:00:00`, timeZone);
+  const offsetMinutes = Math.abs(getTimeZoneOffsetMinutes(courseNoon, timeZone));
+
   return {
     accept: "application/json, text/plain, */*",
     authorization: `Bearer ${token}`,
@@ -260,8 +271,8 @@ function cpsHeaders(configuration: CpsConfiguration, token: string) {
     "x-productid": "1",
     "x-componentid": "1",
     "x-siteid": "1",
-    "x-timezone-offset": "240",
-    "x-timezoneid": "America/New_York",
+    "x-timezone-offset": String(offsetMinutes),
+    "x-timezoneid": timeZone,
     "x-moduleid": "7",
     referer: new URL(configuration.onlineApi).origin + "/"
   };

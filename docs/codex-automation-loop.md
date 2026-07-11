@@ -75,7 +75,7 @@ The hourly loop is authorized to commit, push, and deploy its own verified work.
 - Alert only. Do not book, hold, pay, enter checkout, bypass controls, solve verification flows, or use account-specific course sessions.
 - Respect policy blockers. If a course prohibits automated retrieval, mark it `BLOCKED` and record a `BLOCKED_POLICY` probe.
 - Keep observations per course. A failed course probe must not hide successful probes for other ranked courses.
-- Only email newly seen matching slots. Alert suppression dedupes by search, course, and source id so source-local times and stored UTC times cannot trigger duplicate emails.
+- Only email newly seen matching slots. Availability reconciliation uses the search, course, provider source id, and exact course-local instant so a corrected timestamp retires stale shifted rows instead of keeping duplicate availability alive.
 
 ## Run Contract
 

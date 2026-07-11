@@ -26,15 +26,26 @@ describe("markMissingMatchesUnavailable", () => {
     await markMissingMatchesUnavailable({
       searchId: "search-1",
       courseId: "course-1",
-      date: new Date("2026-07-11T00:00:00.000Z"),
-      confirmedSourceIds: ["still-available"]
+      date: "2026-07-11",
+      timeZone: "America/New_York",
+      confirmedMatches: [
+        {
+          sourceId: "still-available",
+          startsAt: new Date("2026-07-11T12:00:00.000Z")
+        }
+      ]
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           alertStatus: "PENDING",
-          sourceId: { notIn: ["still-available"] }
+          NOT: [
+            {
+              sourceId: "still-available",
+              startsAt: new Date("2026-07-11T12:00:00.000Z")
+            }
+          ]
         }),
         data: expect.objectContaining({
           alertStatus: "SUPPRESSED",

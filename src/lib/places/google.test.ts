@@ -43,6 +43,7 @@ describe("Google Places mapping", () => {
       address: "40 Tashua Knolls Ln, Trumbull, CT",
       latitude: 41.242,
       longitude: -73.209,
+      timeZone: "America/New_York",
       rating: 4.4,
       phone: "(203) 452-5171",
       website: "https://www.tashuaknolls.com",

@@ -9,6 +9,21 @@ export const SEARCH_CADENCE_OPTIONS_MINUTES = [5, 15, 30, 60, 120] as const;
 export const DEFAULT_SEARCH_CADENCE_MINUTES = 5;
 
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm time");
+const DEFAULT_SEARCH_TIME_ZONE = "America/New_York";
+const isValidSearchTimeZone = (value: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+};
+const timeZoneSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(100)
+  .refine(isValidSearchTimeZone, "Use a valid IANA time zone");
 
 const selectedCourseSchema = z.object({
   googlePlaceId: z.string().min(1).optional(),
@@ -18,6 +33,7 @@ const selectedCourseSchema = z.object({
   rank: z.number().int().min(1).max(MAX_COURSE_PREFERENCES),
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
+  timeZone: timeZoneSchema.optional(),
   rating: z.number().min(0).max(5).optional(),
   phone: z.string().optional(),
   website: z.string().url().optional()
@@ -28,6 +44,7 @@ export const teeSearchDetailsSchema = z
     date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD date"),
     startTime: timeSchema,
     endTime: timeSchema,
+    userTimeZone: timeZoneSchema.default(DEFAULT_SEARCH_TIME_ZONE),
     players: z.number().int().min(1).max(MAX_PLAYERS_PER_SEARCH),
     cadenceMinutes: z
       .number()

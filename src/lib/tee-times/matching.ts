@@ -74,51 +74,12 @@ export function rankMatches(search: SearchWindow, slots: TeeTimeSlot[]) {
 
 export function parseCourseLocalDateTime(
   value: string,
-  timeZone = "America/New_York"
+  timeZone = DEFAULT_TIME_ZONE
 ) {
-  if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(value)) {
-    return new Date(value);
-  }
-
-  const match = value.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
-  );
-  if (!match) {
-    return new Date(value);
-  }
-
-  const [, year, month, day, hour, minute, second = "0"] = match;
-  const utcGuess = Date.UTC(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second)
-  );
-  const zonedParts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(new Date(utcGuess));
-  const byType = new Map(zonedParts.map((part) => [part.type, part.value]));
-  const zonedGuess = Date.UTC(
-    Number(byType.get("year")),
-    Number(byType.get("month")) - 1,
-    Number(byType.get("day")),
-    Number(byType.get("hour")),
-    Number(byType.get("minute")),
-    Number(byType.get("second"))
-  );
-
-  return new Date(utcGuess - (zonedGuess - utcGuess));
+  return zonedDateTimeToDate(value, timeZone);
 }
 
 function matchKey(match: ExistingMatchKey) {
   return `${match.courseId}:${match.sourceId}`;
 }
+import { DEFAULT_TIME_ZONE, zonedDateTimeToDate } from "@/lib/timezones";
