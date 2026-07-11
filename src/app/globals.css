@@ -3254,6 +3254,187 @@ button {
   margin: 0 0 10px;
 }
 
+.missing-course-lookup {
+  border-top: 1px solid #d8e2dd;
+  margin-top: 28px;
+  padding-top: 24px;
+}
+
+.missing-course-heading {
+  align-items: end;
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(220px, 0.75fr) minmax(280px, 1fr);
+}
+
+.missing-course-heading .eyebrow {
+  color: #557168;
+  font-size: 0.64rem;
+  margin: 0 0 7px;
+}
+
+.missing-course-heading h2 {
+  color: #10251f;
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.missing-course-heading > p {
+  color: #637a73;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.missing-course-form {
+  margin-top: 16px;
+}
+
+.missing-course-form > label {
+  color: #617a72;
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  margin-bottom: 7px;
+  text-transform: uppercase;
+}
+
+.missing-course-form > div {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cfdcd5;
+  border-radius: 999px;
+  display: flex;
+  gap: 8px;
+  padding: 5px 5px 5px 15px;
+}
+
+.missing-course-form > div:focus-within {
+  border-color: #18332b;
+  box-shadow: 0 0 0 3px rgba(24, 51, 43, 0.1);
+}
+
+.missing-course-form svg {
+  color: #7e938d;
+  flex: 0 0 auto;
+}
+
+.missing-course-form input {
+  background: transparent;
+  border: 0;
+  color: #10251f;
+  flex: 1;
+  font: inherit;
+  font-size: 0.88rem;
+  min-height: 36px;
+  min-width: 0;
+  outline: 0;
+  padding: 0;
+}
+
+.missing-course-form button {
+  align-items: center;
+  background: #18332b;
+  border: 0;
+  border-radius: 999px;
+  color: #ffffff;
+  display: inline-flex;
+  font-size: 0.78rem;
+  font-weight: 900;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 18px;
+  white-space: nowrap;
+}
+
+.missing-course-form button:hover:not(:disabled) {
+  background: #254c40;
+}
+
+.missing-course-status {
+  color: #557168;
+  font-size: 0.78rem;
+  margin: 9px 4px 0;
+}
+
+.missing-course-status.is-error {
+  color: #a33b33;
+}
+
+.missing-course-results {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.missing-course-result {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dce4df;
+  border-radius: 14px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 66px minmax(0, 1fr) auto;
+  min-height: 70px;
+  overflow: hidden;
+  padding: 0 12px 0 0;
+}
+
+.missing-course-result .course-thumbnail {
+  align-self: stretch;
+  border-radius: 13px 0 0 13px;
+  height: 100%;
+  min-height: 68px;
+  width: 66px;
+}
+
+.missing-course-result h3 {
+  color: #10251f;
+  font-size: 0.88rem;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.missing-course-result .meta {
+  margin: 4px 0 0;
+}
+
+.missing-course-result .course-address-link {
+  color: #718982;
+  font-size: 0.72rem;
+}
+
+.missing-course-distance {
+  color: #557168;
+  display: inline-block;
+  font-size: 0.68rem;
+  margin-top: 4px;
+}
+
+.missing-course-result .figma-add-button {
+  align-items: center;
+  background: #f5f7f5;
+  border: 1px solid #d7e1dc;
+  border-radius: 999px;
+  color: #50645e;
+  display: inline-flex;
+  font-size: 0.73rem;
+  font-weight: 850;
+  gap: 5px;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 13px;
+  white-space: nowrap;
+}
+
+.missing-course-result .figma-add-button.is-added {
+  background: #e5f7ec;
+  border-color: #b9e8cc;
+  color: #087446;
+}
+
 .search-page .figma-results-layout .figma-selected-panel {
   background: #121e27;
   border: 0;
@@ -3464,6 +3645,47 @@ button {
 
   .search-page .figma-course-list .course-rank-overlay {
     left: 29px;
+  }
+
+  .missing-course-heading {
+    align-items: start;
+    gap: 8px;
+    grid-template-columns: 1fr;
+  }
+
+  .missing-course-form > div {
+    align-items: stretch;
+    border-radius: 14px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 8px 8px 8px 13px;
+  }
+
+  .missing-course-form > div > svg {
+    align-self: center;
+  }
+
+  .missing-course-form button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .missing-course-result {
+    align-items: stretch;
+    grid-template-columns: 64px minmax(0, 1fr);
+    padding: 0;
+  }
+
+  .missing-course-result > div:nth-child(2) {
+    align-self: center;
+    padding: 9px 10px 2px 0;
+  }
+
+  .missing-course-result .figma-add-button {
+    border-radius: 9px;
+    grid-column: 2;
+    justify-self: start;
+    margin: 0 0 9px;
   }
 }
 

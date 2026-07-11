@@ -88,6 +88,35 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(await courseRows.count()).toBeGreaterThan(courseCount);
     }
 
+    await page.route("**/api/courses/lookup?**", async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        status: 200,
+        body: JSON.stringify({
+          courses: [
+            {
+              googlePlaceId: "ui-smoke-missing-course",
+              name: "Bethpage Black Course",
+              address: "99 Quaker Meeting House Rd, Farmingdale, NY",
+              latitude: 40.744,
+              longitude: -73.456,
+              distanceMeters: 78000,
+              website: "https://parks.ny.gov/golf/11/details.aspx"
+            }
+          ]
+        })
+      });
+    });
+    await page.getByLabel("Course name").fill("Bethpage Black, Farmingdale NY");
+    await page.getByRole("button", { name: "Find course" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "1 match found" })).toBeVisible();
+    const missingCourseResult = page.locator(".missing-course-result");
+    await expect(missingCourseResult.getByRole("heading", { name: "Bethpage Black Course" })).toBeVisible();
+    await missingCourseResult.getByRole("button", { name: "Add Bethpage Black Course" }).click();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
+    await missingCourseResult.getByRole("button", { name: "Remove Bethpage Black Course" }).click();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
+
     await courseRows.nth(0).getByRole("button", { name: /Add/i }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
     await expect(courseRows.nth(0).getByRole("button", { name: /Remove/i })).toBeVisible();

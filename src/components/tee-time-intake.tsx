@@ -760,6 +760,12 @@ function TeeTimeIntakeContent({
             ) : null}
           </div>
         ) : null}
+        <MissingCourseLookup
+          origin={searchCoordinates}
+          selectedIds={selectedIds}
+          onAddCourse={addCourse}
+          onRemoveCourse={removeCourse}
+        />
         </div>
 
       <aside
@@ -949,6 +955,143 @@ function TeeTimeIntakeContent({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function MissingCourseLookup({
+  origin,
+  selectedIds,
+  onAddCourse,
+  onRemoveCourse
+}: {
+  origin: SearchCoordinates | null;
+  selectedIds: ReadonlySet<string>;
+  onAddCourse: (course: CourseCandidate) => void;
+  onRemoveCourse: (placeId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<CourseCandidate[]>([]);
+  const [lookupState, setLookupState] = useState<"idle" | "loading" | "success" | "error">(
+    "idle"
+  );
+  const [lookupMessage, setLookupMessage] = useState("");
+
+  async function lookupCourse() {
+    const normalizedQuery = query.trim();
+    if (normalizedQuery.length < 2) {
+      setLookupState("error");
+      setLookupMessage("Enter at least 2 characters from the course name.");
+      return;
+    }
+
+    setLookupState("loading");
+    setLookupMessage("Looking for matching public courses…");
+
+    try {
+      const params = new URLSearchParams({ q: normalizedQuery });
+      if (origin) {
+        params.set("latitude", String(origin.latitude));
+        params.set("longitude", String(origin.longitude));
+      }
+
+      const response = await fetch(`/api/courses/lookup?${params}`);
+      const data = (await response.json()) as { courses?: CourseCandidate[]; error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not look up that course.");
+      }
+
+      const matches = data.courses ?? [];
+      setResults(matches);
+      setLookupState("success");
+      setLookupMessage(
+        matches.length === 0
+          ? "No public courses matched. Try the full course name plus its city or state."
+          : `${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`
+      );
+    } catch (error) {
+      setResults([]);
+      setLookupState("error");
+      setLookupMessage(error instanceof Error ? error.message : "Could not look up that course.");
+    }
+  }
+
+  return (
+    <section className="missing-course-lookup" aria-labelledby="missing-course-heading">
+      <div className="missing-course-heading">
+        <div>
+          <p className="eyebrow">Still looking?</p>
+          <h2 id="missing-course-heading">Can&apos;t find your course?</h2>
+        </div>
+        <p>
+          Search its name and town. We&apos;ll find the course listing, then check monitoring
+          support after you save.
+        </p>
+      </div>
+      <form
+        className="missing-course-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void lookupCourse();
+        }}
+      >
+        <label htmlFor="missingCourseQuery">Course name</label>
+        <div>
+          <Search aria-hidden="true" size={17} />
+          <input
+            autoComplete="off"
+            id="missingCourseQuery"
+            maxLength={120}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="e.g. Bethpage Black, Farmingdale NY"
+            type="search"
+            value={query}
+          />
+          <button disabled={lookupState === "loading"} type="submit">
+            {lookupState === "loading" ? "Looking…" : "Find course"}
+          </button>
+        </div>
+      </form>
+      {lookupMessage ? (
+        <p
+          className={`missing-course-status ${lookupState === "error" ? "is-error" : ""}`}
+          role={lookupState === "error" ? "alert" : "status"}
+        >
+          {lookupMessage}
+        </p>
+      ) : null}
+      {results.length > 0 ? (
+        <div className="missing-course-results" role="list" aria-label="Course name matches">
+          {results.map((course) => {
+            const isSelected = selectedIds.has(course.googlePlaceId);
+            return (
+              <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
+                <CourseThumbnail course={course} variant="compact" />
+                <div>
+                  <h3>{course.name}</h3>
+                  <CourseAddressLink course={course} />
+                  {course.distanceMeters !== undefined ? (
+                    <span className="missing-course-distance">
+                      {formatDistance(course.distanceMeters)} away
+                    </span>
+                  ) : null}
+                </div>
+                <button
+                  aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
+                  className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
+                  onClick={() =>
+                    isSelected ? onRemoveCourse(course.googlePlaceId) : onAddCourse(course)
+                  }
+                  type="button"
+                >
+                  {isSelected ? <Check size={13} /> : <Plus size={13} />}
+                  {isSelected ? "Added" : "Add"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

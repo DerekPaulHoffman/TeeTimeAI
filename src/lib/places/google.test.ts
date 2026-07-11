@@ -5,6 +5,7 @@ import {
   filterPublicGolfCoursePlaces,
   getGooglePlacesApiKey,
   mapGooglePlaceToCourseCandidate,
+  searchGolfCoursesByName,
   searchNearbyGolfCourses
 } from "./google";
 
@@ -61,6 +62,73 @@ describe("Google Places mapping", () => {
     expect(getGooglePlacesApiKey()).toBe("copied-key");
 
     delete process.env.GOOGLE_PLACES_API_KEY;
+  });
+
+  it("finds public golf courses by name with a location bias", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        places: [
+          {
+            id: "places/bethpage-black",
+            displayName: { text: "Bethpage Black Course" },
+            formattedAddress: "99 Quaker Meeting House Rd, Farmingdale, NY",
+            primaryType: "golf_course",
+            types: ["golf_course"],
+            businessStatus: "OPERATIONAL",
+            websiteUri: "https://parks.ny.gov/golf/11/details.aspx",
+            location: { latitude: 40.744, longitude: -73.456 }
+          },
+          {
+            id: "places/private-club",
+            displayName: { text: "Example Private Country Club" },
+            formattedAddress: "Farmingdale, NY",
+            primaryType: "golf_course",
+            types: ["golf_course"],
+            businessStatus: "OPERATIONAL",
+            location: { latitude: 40.75, longitude: -73.45 }
+          }
+        ]
+      })
+    } as Response);
+
+    const courses = await searchGolfCoursesByName({
+      query: " Bethpage Black ",
+      latitude: 40.73,
+      longitude: -73.44
+    });
+
+    expect(courses).toHaveLength(1);
+    expect(courses[0]).toEqual(
+      expect.objectContaining({
+        googlePlaceId: "bethpage-black",
+        name: "Bethpage Black Course",
+        distanceMeters: expect.any(Number)
+      })
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://places.googleapis.com/v1/places:searchText",
+      expect.objectContaining({
+        body: expect.stringContaining('"strictTypeFiltering":true')
+      })
+    );
+    const requestBody = JSON.parse(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string
+    );
+    expect(requestBody).toEqual(
+      expect.objectContaining({
+        textQuery: "Bethpage Black",
+        includedType: "golf_course",
+        pageSize: 8,
+        locationBias: {
+          circle: {
+            center: { latitude: 40.73, longitude: -73.44 },
+            radius: 50000
+          }
+        }
+      })
+    );
   });
 
   it("keeps likely public outdoor golf courses from Places results", () => {

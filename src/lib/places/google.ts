@@ -58,6 +58,12 @@ export type NearbyCourseSearchInput = {
   radiusMeters?: number;
 };
 
+export type CourseNameSearchInput = {
+  query: string;
+  latitude?: number;
+  longitude?: number;
+};
+
 type RankPreference = "POPULARITY" | "DISTANCE";
 
 type PublicCourseFilterOptions = {
@@ -216,6 +222,59 @@ export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
     })
     .filter((course) => (course.distanceMeters ?? Number.MAX_SAFE_INTEGER) <= getSearchRadius(input))
     .sort((a, b) => (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) - (b.distanceMeters ?? Number.MAX_SAFE_INTEGER));
+}
+
+export async function searchGolfCoursesByName(input: CourseNameSearchInput) {
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey) {
+    throw new Error("GOOGLE_PLACES_API_KEY is not configured");
+  }
+
+  const hasLocationBias =
+    Number.isFinite(input.latitude) && Number.isFinite(input.longitude);
+  const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask":
+        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus"
+    },
+    body: JSON.stringify({
+      textQuery: input.query.trim(),
+      includedType: "golf_course",
+      strictTypeFiltering: true,
+      pageSize: 8,
+      rankPreference: "RELEVANCE",
+      ...(hasLocationBias
+        ? {
+            locationBias: {
+              circle: {
+                center: {
+                  latitude: input.latitude,
+                  longitude: input.longitude
+                },
+                radius: 50000
+              }
+            }
+          }
+        : {})
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Google Places course search failed with ${response.status}`);
+  }
+
+  const json = (await response.json()) as { places?: GooglePlace[] };
+  const origin = hasLocationBias
+    ? { latitude: input.latitude as number, longitude: input.longitude as number }
+    : null;
+
+  return dedupeGolfCoursePlaces(filterPublicGolfCoursePlaces(json.places ?? [])).map((place) => {
+    const course = mapGooglePlaceToCourseCandidate(place);
+    return origin ? { ...course, distanceMeters: getDistanceMeters(origin, course) } : course;
+  });
 }
 
 async function searchNearbyGolfCoursePlaces(
