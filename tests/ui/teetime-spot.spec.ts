@@ -188,11 +188,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
 
     await page.route("**/api/courses/lookup?**", async (route) => {
+      const lookupQuery = new URL(route.request().url()).searchParams.get("q");
       await route.fulfill({
         contentType: "application/json",
         status: 200,
         body: JSON.stringify({
-          courses: [
+          courses: lookupQuery === "Known Course, Somewhere CT" ? [] : [
             {
               googlePlaceId: "ui-smoke-missing-course",
               name: "Bethpage Black Course",
@@ -216,7 +217,8 @@ test.describe("Tee Time Spot UI smoke", () => {
         })
       });
     });
-    await page.getByLabel("Course name").fill("Bethpage Black, Farmingdale NY");
+    const missingCourseInput = page.getByRole("searchbox", { name: "Course name", exact: true });
+    await missingCourseInput.fill("Bethpage Black, Farmingdale NY");
     await page.getByRole("button", { name: "Find course" }).click();
     await expect(page.getByRole("status").filter({ hasText: "2 matches found" })).toBeVisible();
     const missingCourseResults = page.locator(".missing-course-result");
@@ -245,6 +247,31 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
     await missingCourseResult.getByRole("button", { name: "Remove Bethpage Black Course" }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
+
+    await page.route("**/api/feedback", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ feedback: { id: "ui-smoke-course-miss" } }),
+        contentType: "application/json",
+        status: 201
+      });
+    });
+    const courseMissReport = page.waitForRequest(
+      (request) => request.url().includes("/api/feedback") && request.method() === "POST"
+    );
+    await missingCourseInput.fill("Known Course, Somewhere CT");
+    await page.getByRole("button", { name: "Find course" }).click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "We've logged it for review" })
+    ).toBeVisible();
+    const courseMissPayload = (await courseMissReport).postDataJSON();
+    expect(courseMissPayload).toEqual(
+      expect.objectContaining({
+        sentiment: "broken",
+        message: expect.stringContaining("[COURSE_LOOKUP_MISS]")
+      })
+    );
+    expect(courseMissPayload.message).toContain("Known Course, Somewhere CT");
+    expect(courseMissPayload.message).toContain("Trumbull, CT");
 
     await courseRows.nth(0).getByRole("button", { name: /Add/i }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);

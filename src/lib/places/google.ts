@@ -86,12 +86,12 @@ const NON_PUBLIC_PRIMARY_TYPES = new Set([
   "sports_club"
 ]);
 
-const PRIVATE_NAME_PATTERNS = [
-  /\bcountry\s+club\b/i,
+const EXPLICIT_PRIVATE_NAME_PATTERNS = [
   /\bprivate\b/i,
   /\bmembers?\s+only\b/i,
   /\bmembership\s+required\b/i
 ];
+const AMBIGUOUS_COUNTRY_CLUB_NAME_PATTERN = /\bcountry\s+club\b/i;
 
 const NON_COURSE_NAME_PATTERNS = [
   /\bclub\s*fitting\b/i,
@@ -117,6 +117,21 @@ const PLAYABLE_COURSE_NAME_PATTERN =
 const SEMANTIC_FALLBACK_NAME_PATTERN = /\bgolf\s+(?:course|links)\b/i;
 
 const MEMBERSHIP_PLACE_TYPES = new Set(["association_or_organization", "sports_club"]);
+// Some public golf facilities are misclassified by Google as organizations and omitted from
+// generic nearby results. Keep this registry evidence-backed and narrow so reported misses can be
+// guaranteed in nearby discovery without weakening the private-club filter.
+const VERIFIED_PUBLIC_COURSES = [
+  {
+    placeId: "ChIJHRdhRQt16IkRnZxbawELtdM",
+    name: "Grassy Hill Country Club",
+    latitude: 41.2675142,
+    longitude: -73.044987,
+    evidenceUrl: "https://grassyhillcountryclub.com/"
+  }
+] as const;
+const VERIFIED_PUBLIC_COURSE_PLACE_IDS = new Set<string>(
+  VERIFIED_PUBLIC_COURSES.map((course) => course.placeId)
+);
 
 export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandidate {
   const googlePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
@@ -157,6 +172,8 @@ function isLikelyPublicGolfCoursePlace(
   const name = place.displayName?.text ?? "";
   const placeId = normalizePlaceId(place.id ?? place.name ?? "");
   const placeTypes = place.types ?? [];
+  const hasPublicCourseEvidence = publicCourseEvidenceIds.has(placeId);
+  const isVerifiedPublicCourse = VERIFIED_PUBLIC_COURSE_PLACE_IDS.has(placeId);
 
   if (place.businessStatus && place.businessStatus !== "OPERATIONAL") {
     return false;
@@ -165,20 +182,30 @@ function isLikelyPublicGolfCoursePlace(
   const hasTypedGolfCourseEvidence =
     place.primaryType === "golf_course" && placeTypes.includes("golf_course");
   const hasSemanticFallbackEvidence =
-    !place.primaryType &&
-    publicCourseEvidenceIds.has(placeId) &&
-    SEMANTIC_FALLBACK_NAME_PATTERN.test(name) &&
+    hasPublicCourseEvidence &&
+    (isVerifiedPublicCourse ||
+      (!place.primaryType && SEMANTIC_FALLBACK_NAME_PATTERN.test(name))) &&
     Boolean(place.websiteUri);
 
   if (!hasTypedGolfCourseEvidence && !hasSemanticFallbackEvidence) {
     return false;
   }
 
-  if (place.primaryType && NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType)) {
+  if (
+    place.primaryType &&
+    NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType) &&
+    !isVerifiedPublicCourse
+  ) {
     return false;
   }
 
-  if (PRIVATE_NAME_PATTERNS.some((pattern) => pattern.test(name))) {
+  if (EXPLICIT_PRIVATE_NAME_PATTERNS.some((pattern) => pattern.test(name))) {
+    return false;
+  }
+
+  // "Country Club" is not proof of private access. Keep it only when a separate
+  // public-course text search corroborates the same Google place.
+  if (AMBIGUOUS_COUNTRY_CLUB_NAME_PATTERN.test(name) && !hasPublicCourseEvidence) {
     return false;
   }
 
@@ -191,7 +218,12 @@ function isLikelyPublicGolfCoursePlace(
   const hasGolfIdentity = /\bgolf\b/i.test(name);
   const hasExplicitCourseSurface = PLAYABLE_COURSE_NAME_PATTERN.test(name);
 
-  if (hasMembershipShape && !hasExplicitCourseSurface && !hasGolfIdentity) {
+  if (
+    hasMembershipShape &&
+    !hasExplicitCourseSurface &&
+    !hasGolfIdentity &&
+    !isVerifiedPublicCourse
+  ) {
     return false;
   }
 
@@ -200,18 +232,24 @@ function isLikelyPublicGolfCoursePlace(
 
 export async function searchNearbyGolfCourses(input: NearbyCourseSearchInput) {
   const placesById = new Map<string, GooglePlace>();
-  const [popularityPlaces, distancePlaces, publicCoursePlaces] = await Promise.all([
+  const [popularityPlaces, distancePlaces, publicCoursePlaces, verifiedPublicCoursePlaces] = await Promise.all([
     searchNearbyGolfCoursePlaces(input, "POPULARITY"),
     searchNearbyGolfCoursePlaces(input, "DISTANCE"),
-    searchPublicGolfCoursePlaces(input)
+    searchPublicGolfCoursePlaces(input),
+    searchVerifiedPublicCoursePlaces(input)
   ]);
   const publicCourseEvidenceIds = new Set(
-    publicCoursePlaces
+    [...publicCoursePlaces, ...verifiedPublicCoursePlaces]
       .map((place) => normalizePlaceId(place.id ?? place.name ?? ""))
       .filter(Boolean)
   );
 
-  for (const places of [popularityPlaces, distancePlaces, publicCoursePlaces]) {
+  for (const places of [
+    popularityPlaces,
+    distancePlaces,
+    publicCoursePlaces,
+    verifiedPublicCoursePlaces
+  ]) {
     for (const place of places) {
       const id = normalizePlaceId(place.id ?? place.name ?? "");
       if (id && !placesById.has(id)) {
@@ -277,14 +315,82 @@ export async function searchGolfCoursesByName(input: CourseNameSearchInput) {
   }
 
   const json = (await response.json()) as { places?: GooglePlace[] };
+  const primaryPlaces = json.places ?? [];
+  const initiallyAcceptedPlaces = filterPublicGolfCoursePlaces(primaryPlaces);
+  const needsPublicAccessCorroboration =
+    initiallyAcceptedPlaces.length === 0 ||
+    primaryPlaces.some((place) =>
+      AMBIGUOUS_COUNTRY_CLUB_NAME_PATTERN.test(place.displayName?.text ?? "")
+    );
+  const publicCoursePlaces = needsPublicAccessCorroboration
+    ? await searchPublicGolfCoursePlacesByName(input)
+    : [];
+  const publicCourseEvidenceIds = new Set(
+    publicCoursePlaces
+      .map((place) => normalizePlaceId(place.id ?? place.name ?? ""))
+      .filter(Boolean)
+  );
   const origin = hasLocationBias
     ? { latitude: input.latitude as number, longitude: input.longitude as number }
     : null;
 
-  return dedupeGolfCoursePlaces(filterPublicGolfCoursePlaces(json.places ?? [])).map((place) => {
+  return dedupeGolfCoursePlaces(
+    filterPublicGolfCoursePlaces([...primaryPlaces, ...publicCoursePlaces], {
+      publicCourseEvidenceIds
+    })
+  ).map((place) => {
     const course = mapGooglePlaceToCourseCandidate(place);
     return origin ? { ...course, distanceMeters: getDistanceMeters(origin, course) } : course;
   });
+}
+
+async function searchPublicGolfCoursePlacesByName(input: CourseNameSearchInput) {
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey) {
+    return [];
+  }
+
+  const hasLocationBias =
+    Number.isFinite(input.latitude) && Number.isFinite(input.longitude);
+
+  try {
+    const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus"
+      },
+      body: JSON.stringify({
+        textQuery: `${input.query.trim()} public golf course`,
+        pageSize: 8,
+        rankPreference: "RELEVANCE",
+        ...(hasLocationBias
+          ? {
+              locationBias: {
+                circle: {
+                  center: {
+                    latitude: input.latitude,
+                    longitude: input.longitude
+                  },
+                  radius: 50000
+                }
+              }
+            }
+          : {})
+      })
+    });
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const json = (await response.json()) as { places?: GooglePlace[] };
+    return json.places ?? [];
+  } catch {
+    return [];
+  }
 }
 
 async function searchNearbyGolfCoursePlaces(
@@ -361,6 +467,44 @@ async function searchPublicGolfCoursePlaces(input: NearbyCourseSearchInput) {
   } catch {
     return [];
   }
+}
+
+async function searchVerifiedPublicCoursePlaces(input: NearbyCourseSearchInput) {
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey) {
+    return [];
+  }
+
+  const nearbyVerifiedCourses = VERIFIED_PUBLIC_COURSES.filter(
+    (course) => getDistanceMeters(input, course) <= getSearchRadius(input)
+  );
+
+  return (
+    await Promise.all(
+      nearbyVerifiedCourses.map(async (course) => {
+        try {
+          const response = await fetch(
+            `https://places.googleapis.com/v1/places/${course.placeId}`,
+            {
+              headers: {
+                "X-Goog-Api-Key": apiKey,
+                "X-Goog-FieldMask":
+                  "id,displayName,formattedAddress,location,rating,nationalPhoneNumber,websiteUri,photos,types,primaryType,businessStatus"
+              }
+            }
+          );
+
+          if (!response.ok) {
+            return null;
+          }
+
+          return (await response.json()) as GooglePlace;
+        } catch {
+          return null;
+        }
+      })
+    )
+  ).filter((place): place is GooglePlace => place !== null);
 }
 
 function getSearchRadius(input: NearbyCourseSearchInput) {

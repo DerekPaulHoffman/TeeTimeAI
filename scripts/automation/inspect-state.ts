@@ -32,7 +32,9 @@ async function main() {
     recentNotableProbes,
     recentMatches,
     pendingMatches,
-    recentBrowserDiscoveries
+    recentBrowserDiscoveries,
+    recentWebsiteEvents,
+    unresolvedWebsiteFeedback
   ] =
     await Promise.all([
       prisma.automationRun.findMany({
@@ -112,6 +114,15 @@ async function main() {
         include: {
           course: true
         }
+      }),
+      prisma.websiteEvent.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 20
+      }),
+      prisma.websiteFeedback.findMany({
+        where: { resolvedAt: null },
+        orderBy: { createdAt: "desc" },
+        take: 20
       })
     ]);
 
@@ -283,6 +294,21 @@ async function main() {
           bookingUrl: discovery.bookingUrl,
           apiEndpoint: discovery.apiEndpoint,
           createdAt: discovery.createdAt
+        })),
+        recentWebsiteEvents: recentWebsiteEvents.map((event) => ({
+          id: event.id,
+          name: event.name,
+          page: event.page,
+          metadata: event.metadata,
+          createdAt: event.createdAt
+        })),
+        unresolvedWebsiteFeedback: unresolvedWebsiteFeedback.map((feedback) => ({
+          id: feedback.id,
+          sentiment: feedback.sentiment,
+          message: summarize(feedback.message),
+          page: feedback.page,
+          contactEmail: feedback.contactEmail ? redactEmail(feedback.contactEmail) : null,
+          createdAt: feedback.createdAt
         }))
       },
       null,

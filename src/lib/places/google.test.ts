@@ -132,6 +132,67 @@ describe("Google Places mapping", () => {
     );
   });
 
+  it("corroborates a public course whose name contains Country Club", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const grassyHillPlace = {
+      id: "places/ChIJHRdhRQt16IkRnZxbawELtdM",
+      displayName: { text: "Grassy Hill Country Club" },
+      formattedAddress: "441 Clark Ln, Orange, CT 06477",
+      primaryType: "association_or_organization",
+      types: ["association_or_organization", "point_of_interest", "establishment"],
+      businessStatus: "OPERATIONAL",
+      websiteUri: "https://grassyhillcountryclub.com/",
+      location: { latitude: 41.278, longitude: -73.025 }
+    };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/orange-hills",
+              displayName: { text: "Orange Hills Country Club" },
+              primaryType: "association_or_organization",
+              types: ["golf_course", "association_or_organization"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://orangehillscountryclub.com/",
+              location: { latitude: 41.276, longitude: -73.002 }
+            }
+          ]
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ places: [grassyHillPlace] })
+      } as Response);
+
+    const courses = await searchGolfCoursesByName({
+      query: "Grassy Hill Country Club, Orange CT",
+      latitude: 41.2307,
+      longitude: -73.064
+    });
+
+    expect(courses).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "ChIJHRdhRQt16IkRnZxbawELtdM",
+        name: "Grassy Hill Country Club",
+        distanceMeters: expect.any(Number)
+      })
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const corroborationBody = JSON.parse(
+      (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body as string
+    );
+    expect(corroborationBody).toEqual(
+      expect.objectContaining({
+        textQuery: "Grassy Hill Country Club, Orange CT public golf course",
+        pageSize: 8
+      })
+    );
+    expect(corroborationBody).not.toHaveProperty("strictTypeFiltering");
+  });
+
   it("keeps likely public outdoor golf courses from Places results", () => {
     const places = filterPublicGolfCoursePlaces([
       {
@@ -297,13 +358,29 @@ describe("Google Places mapping", () => {
         types: ["golf_course", "tourist_attraction"],
         businessStatus: "OPERATIONAL",
         location: { latitude: 41.16, longitude: -73.12 }
+      },
+      {
+        id: "places/ChIJHRdhRQt16IkRnZxbawELtdM",
+        displayName: { text: "Grassy Hill Country Club" },
+        primaryType: "association_or_organization",
+        types: ["association_or_organization", "point_of_interest", "establishment"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://grassyhillcountryclub.com/",
+        location: { latitude: 41.278, longitude: -73.025 }
       }
-    ], { publicCourseEvidenceIds: new Set(["monarch", "olympic"]) });
+    ], {
+      publicCourseEvidenceIds: new Set([
+        "monarch",
+        "olympic",
+        "ChIJHRdhRQt16IkRnZxbawELtdM"
+      ])
+    });
 
     expect(places.map((place) => place.displayName?.text)).toEqual([
       "Monarch Bay Golf Club",
       "Chris Bargas Golf Club at Whitney Farms",
-      "Short Beach Golf Course"
+      "Short Beach Golf Course",
+      "Grassy Hill Country Club"
     ]);
   });
 
@@ -447,7 +524,8 @@ describe("Google Places mapping", () => {
         json: async () => ({
           places: [{ id: "places/centennial" }, { id: "places/tashua" }, { id: "places/fairchild" }]
         })
-      } as Response);
+      } as Response)
+      .mockResolvedValueOnce({ ok: false } as Response);
 
     const courses = await searchNearbyGolfCourses({
       latitude: 41.242,
@@ -462,7 +540,7 @@ describe("Google Places mapping", () => {
     ]);
     expect(courses[0]?.distanceMeters).toBe(0);
     expect(courses[1]?.distanceMeters).toBeLessThan(courses[2]?.distanceMeters ?? 0);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       "https://places.googleapis.com/v1/places:searchNearby",
@@ -561,7 +639,8 @@ describe("Google Places mapping", () => {
             }
           ]
         })
-      } as Response);
+      } as Response)
+      .mockResolvedValueOnce({ ok: false } as Response);
 
     const courses = await searchNearbyGolfCourses({
       latitude: 41.242,
@@ -578,6 +657,51 @@ describe("Google Places mapping", () => {
       "https://places.googleapis.com/v1/places:searchText",
       expect.objectContaining({
         body: expect.not.stringContaining('"strictTypeFiltering"')
+      })
+    );
+  });
+
+  it("guarantees a verified reported course in nearby Milford discovery", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ places: [] }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ places: [] }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ places: [] }) } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          id: "ChIJHRdhRQt16IkRnZxbawELtdM",
+          displayName: { text: "Grassy Hill Country Club" },
+          formattedAddress: "441 Clark Ln, Orange, CT 06477",
+          primaryType: "association_or_organization",
+          types: ["association_or_organization", "point_of_interest", "establishment"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://grassyhillcountryclub.com/",
+          location: { latitude: 41.2675142, longitude: -73.044987 }
+        })
+      } as Response);
+
+    const courses = await searchNearbyGolfCourses({
+      latitude: 41.2306979,
+      longitude: -73.064036,
+      radiusMeters: 24140
+    });
+
+    expect(courses).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "ChIJHRdhRQt16IkRnZxbawELtdM",
+        name: "Grassy Hill Country Club",
+        distanceMeters: expect.any(Number)
+      })
+    ]);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      "https://places.googleapis.com/v1/places/ChIJHRdhRQt16IkRnZxbawELtdM",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Goog-FieldMask": expect.stringContaining("displayName")
+        })
       })
     );
   });

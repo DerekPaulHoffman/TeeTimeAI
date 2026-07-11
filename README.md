@@ -251,6 +251,10 @@ The feedback widget appears globally and lets users report:
 - Optional contact email
 
 It posts to `/api/feedback`. Page/interaction events post to `/api/analytics/events`.
+When a direct course-name lookup still returns no result, the search experience automatically
+creates an unresolved `[COURSE_LOOKUP_MISS]` feedback item with the query and location context.
+`npm run automation:inspect` surfaces unresolved feedback so the developer improvement loop can
+investigate real missing-course reports.
 
 ## API Surfaces
 
@@ -258,6 +262,7 @@ Public/product APIs:
 
 - `GET /api/location/geocode`
 - `GET /api/courses/discover`
+- `GET /api/courses/lookup`
 - `GET /api/courses/photo`
 - `POST /api/searches` (authenticated)
 - `GET /api/searches` (authenticated)

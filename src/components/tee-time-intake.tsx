@@ -902,6 +902,8 @@ function TeeTimeIntakeContent({
           </div>
         ) : null}
         <MissingCourseLookup
+          contactEmail={alertEmail}
+          locationLabel={locationText}
           origin={searchCoordinates}
           requestedLayoutHoles={requestedLayoutHoles}
           selectedIds={selectedIds}
@@ -1113,12 +1115,16 @@ function TeeTimeIntakeContent({
 }
 
 function MissingCourseLookup({
+  contactEmail,
+  locationLabel,
   origin,
   requestedLayoutHoles,
   selectedIds,
   onAddCourse,
   onRemoveCourse
 }: {
+  contactEmail: string;
+  locationLabel: string;
   origin: SearchCoordinates | null;
   requestedLayoutHoles: CourseLayoutHoleCount | null;
   selectedIds: ReadonlySet<string>;
@@ -1131,6 +1137,41 @@ function MissingCourseLookup({
     "idle"
   );
   const [lookupMessage, setLookupMessage] = useState("");
+  const reportedMisses = useRef(new Set<string>());
+
+  async function reportMissingCourse(normalizedQuery: string) {
+    const reportKey = `${normalizedQuery.toLowerCase()}|${locationLabel.trim().toLowerCase()}`;
+    if (reportedMisses.current.has(reportKey)) {
+      return true;
+    }
+
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sentiment: "broken",
+          message: `[COURSE_LOOKUP_MISS] ${JSON.stringify({
+            query: normalizedQuery,
+            location: locationLabel.trim() || undefined,
+            latitude: origin?.latitude,
+            longitude: origin?.longitude
+          })}`,
+          page: "/search#missing-course",
+          contactEmail: contactEmail || undefined
+        })
+      });
+
+      if (response.ok) {
+        reportedMisses.current.add(reportKey);
+        return true;
+      }
+    } catch {
+      // The user still gets a useful recovery path when reporting is unavailable.
+    }
+
+    return false;
+  }
 
   async function lookupCourse() {
     const normalizedQuery = query.trim();
@@ -1159,9 +1200,14 @@ function MissingCourseLookup({
       const matches = data.courses ?? [];
       setResults(matches);
       setLookupState("success");
+      const missWasReported = matches.length === 0
+        ? await reportMissingCourse(normalizedQuery)
+        : false;
       setLookupMessage(
         matches.length === 0
-          ? "No public courses matched. Try the full course name plus its city or state."
+          ? missWasReported
+            ? `We couldn't find “${normalizedQuery}” yet. We've logged it for review and will look into it.`
+            : `We couldn't find “${normalizedQuery}” yet. Try the full course name plus its city or state, or send it through Feedback so we can investigate.`
           : `${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`
       );
     } catch (error) {
@@ -1172,14 +1218,15 @@ function MissingCourseLookup({
   }
 
   return (
-    <section className="missing-course-lookup" aria-labelledby="missing-course-heading">
+    <section className="missing-course-lookup" aria-labelledby="missing-course-heading" id="missing-course">
       <div className="missing-course-heading">
         <div>
           <p className="eyebrow">Still looking?</p>
           <h2 id="missing-course-heading">Can&apos;t find your course?</h2>
         </div>
         <p>
-          Search its name and town. We&apos;ll show any known alert limitations before you add it.
+          Search its name and town. If we still miss it, we&apos;ll log it for review instead of
+          assuming it doesn&apos;t exist.
         </p>
       </div>
       <form
