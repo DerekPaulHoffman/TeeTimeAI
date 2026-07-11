@@ -3,6 +3,7 @@ import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
 
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
+const GENERIC_NAME_MATCH_COORDINATE_TOLERANCE = 0.0015;
 const COURSE_NAME_STOP_WORDS = new Set(["and", "club", "course", "golf", "park", "the"]);
 
 type BlockedCourseRecord = {
@@ -75,7 +76,9 @@ export function findBlockedCourse(
       (course) =>
         Math.abs(course.latitude - candidate.latitude) <= COURSE_MATCH_COORDINATE_TOLERANCE &&
         Math.abs(course.longitude - candidate.longitude) <= COURSE_MATCH_COORDINATE_TOLERANCE &&
-        hasMeaningfulNameOverlap(candidate.name, course.name)
+        (hasMeaningfulNameOverlap(candidate.name, course.name) ||
+          (isGenericCourseName(candidate.name) &&
+            coordinateDistance(candidate, course) <= GENERIC_NAME_MATCH_COORDINATE_TOLERANCE))
     )
     .sort(
       (left, right) =>
@@ -101,6 +104,10 @@ function hasMeaningfulNameOverlap(leftName: string, rightName: string) {
   }
 
   return [...right].filter((token) => left.has(token)).length >= Math.min(2, right.size);
+}
+
+function isGenericCourseName(name: string) {
+  return getMeaningfulNameTokens(name).size === 0;
 }
 
 function getMeaningfulNameTokens(name: string) {

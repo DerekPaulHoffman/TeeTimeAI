@@ -355,6 +355,31 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("replaces a generic same-location result with the identified course", () => {
+    const places = dedupeGolfCoursePlaces([
+      {
+        id: "places/generic-fairview",
+        displayName: { text: "Golf Course" },
+        formattedAddress: "Harwinton, CT 06791, USA",
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        location: { latitude: 41.7478038, longitude: -73.074469 }
+      },
+      {
+        id: "places/fairview-farm",
+        displayName: { text: "Fairview Farm Golf Course" },
+        formattedAddress: "300 Hill Rd, Harwinton, CT 06791, USA",
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        websiteUri: "https://fairviewfarmgc.com/",
+        location: { latitude: 41.7470436, longitude: -73.07518 }
+      }
+    ]);
+
+    expect(places).toHaveLength(1);
+    expect(places[0]?.displayName?.text).toBe("Fairview Farm Golf Course");
+  });
+
   it("merges popularity and distance ranked Places results before filtering", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const fetchMock = vi

@@ -428,7 +428,16 @@ function isDuplicateCoursePlace(first: GooglePlace, second: GooglePlace) {
 
   const firstIdentity = normalizeCourseIdentity(first.displayName?.text ?? "");
   const secondIdentity = normalizeCourseIdentity(second.displayName?.text ?? "");
-  if (!firstIdentity || firstIdentity !== secondIdentity) {
+  const firstLocation = getPlaceLocation(first);
+  const secondLocation = getPlaceLocation(second);
+  if (!firstIdentity || !secondIdentity) {
+    return Boolean(
+      firstLocation &&
+        secondLocation &&
+        getDistanceMeters(firstLocation, secondLocation) <= 150
+    );
+  }
+  if (firstIdentity !== secondIdentity) {
     return false;
   }
 
@@ -442,8 +451,6 @@ function isDuplicateCoursePlace(first: GooglePlace, second: GooglePlace) {
     return true;
   }
 
-  const firstLocation = getPlaceLocation(first);
-  const secondLocation = getPlaceLocation(second);
   return Boolean(
     firstLocation && secondLocation && getDistanceMeters(firstLocation, secondLocation) <= 1000
   );
@@ -489,6 +496,7 @@ function getPlaceLocation(place: GooglePlace) {
 
 function getPlaceCompletenessScore(place: GooglePlace) {
   return (
+    Number(Boolean(normalizeCourseIdentity(place.displayName?.text ?? ""))) * 3 +
     Number(Boolean(place.formattedAddress)) +
     Number(Boolean(place.rating)) +
     Number(Boolean(place.nationalPhoneNumber)) +

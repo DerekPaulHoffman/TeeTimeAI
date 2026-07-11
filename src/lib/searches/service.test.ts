@@ -312,6 +312,41 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
   });
 
+  it("reuses a blocked course when Google returns a generic label at the same location", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "fairview-farm",
+        name: "Fairview Farm Golf Course",
+        latitude: 41.7470436,
+        longitude: -73.07518,
+        automationEligibility: "BLOCKED"
+      }
+    ] as never);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 4,
+        cadenceMinutes: 5,
+        alertEmail: "golfer@example.com",
+        courses: [
+          {
+            googlePlaceId: "generic-fairview-place-id",
+            name: "Golf Course",
+            latitude: 41.7478038,
+            longitude: -73.074469,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow("Choose at least one course Tee Time Spot can monitor.");
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
   it("keeps a clearly identified official-site-only preference in a mixed search", async () => {
     mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
       if ("googlePlaceId" in where && where.googlePlaceId === "fairview-farm") {

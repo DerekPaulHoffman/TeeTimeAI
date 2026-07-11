@@ -69,4 +69,38 @@ describe("course alert support enrichment", () => {
       )
     ).toBeUndefined();
   });
+
+  it("matches a generic Google label only at the blocked course location", () => {
+    const blocked = {
+      googlePlaceId: "fairview-farm",
+      name: "Fairview Farm Golf Course",
+      latitude: 41.7470436,
+      longitude: -73.07518,
+      bookingMethod: "PHONE_ONLY" as const,
+      automationEligibility: "BLOCKED"
+    };
+
+    expect(
+      findBlockedCourse(
+        {
+          googlePlaceId: "generic-fairview",
+          name: "Golf Course",
+          latitude: 41.7478038,
+          longitude: -73.074469
+        },
+        [blocked]
+      )
+    ).toBe(blocked);
+    expect(
+      findBlockedCourse(
+        {
+          googlePlaceId: "generic-elsewhere",
+          name: "Golf Course",
+          latitude: 41.7578038,
+          longitude: -73.074469
+        },
+        [blocked]
+      )
+    ).toBeUndefined();
+  });
 });

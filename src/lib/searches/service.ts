@@ -17,6 +17,7 @@ import {
 import { parseLocalDate } from "@/lib/validation/search";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
+const GENERIC_NAME_REUSE_COORDINATE_TOLERANCE = 0.0015;
 const COURSE_NAME_STOP_WORDS = new Set(["and", "course", "golf", "the"]);
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
@@ -159,6 +160,8 @@ async function findReusableCourse(course: SelectedCourseInput) {
     select: {
       id: true,
       name: true,
+      latitude: true,
+      longitude: true,
       automationEligibility: true,
       layoutHoleCounts: true,
       layoutHolesVerifiedAt: true
@@ -202,7 +205,9 @@ async function findReusableCourse(course: SelectedCourseInput) {
   return reusableNearbyCourses.find(
     (candidate) =>
       candidate.automationEligibility === "BLOCKED" &&
-      hasMeaningfulNameOverlap(course.name, candidate.name)
+      (hasMeaningfulNameOverlap(course.name, candidate.name) ||
+        (isGenericCourseName(course.name) &&
+          coordinateDistance(course, candidate) <= GENERIC_NAME_REUSE_COORDINATE_TOLERANCE))
   ) ?? null;
 }
 
@@ -221,6 +226,20 @@ function hasMeaningfulNameOverlap(selectedName: string, existingName: string) {
   const overlapCount = [...existingTokens].filter((token) => selectedTokens.has(token)).length;
   const requiredOverlap = Math.min(2, existingTokens.size);
   return overlapCount >= requiredOverlap;
+}
+
+function isGenericCourseName(name: string) {
+  return getMeaningfulNameTokens(name).size === 0;
+}
+
+function coordinateDistance(
+  selected: Pick<SelectedCourseInput, "latitude" | "longitude">,
+  existing: { latitude: number; longitude: number }
+) {
+  return Math.hypot(
+    existing.latitude - selected.latitude,
+    existing.longitude - selected.longitude
+  );
 }
 
 function getMeaningfulNameTokens(name: string) {
