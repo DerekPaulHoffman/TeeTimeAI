@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Resend } from "resend";
 
 import {
@@ -53,20 +55,30 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   }
 
   const resend = new Resend(apiKey);
+  const stopUrls =
+    input.stopUrls ??
+    buildStableEmailStopUrls(
+      input.searchId,
+      input.matches[0]?.startsAt.toISOString().slice(0, 10)
+    );
+  const email = {
+    from,
+    to: input.to,
+    subject: getMatchAlertSubject(input.matches),
+    html: renderAlertHtml({
+      ...input,
+      stopUrls
+    })
+  };
   const result = await resend.emails.send(
-    {
-      from,
-      to: input.to,
-      subject: getMatchAlertSubject(input.matches),
-      html: renderAlertHtml({
-        ...input,
-        stopUrls: input.stopUrls ?? buildEmailStopUrls(input.searchId)
-      })
-    },
+    email,
     input.idempotencyKey
       ? {
           headers: {
-            "Idempotency-Key": input.idempotencyKey
+            "Idempotency-Key": buildContentScopedEmailIdempotencyKey(
+              input.idempotencyKey,
+              email
+            )
           }
         }
       : undefined
@@ -95,23 +107,27 @@ export async function sendSearchStatusEmail(
     return { id: "dry-run", deliveryStatus: "dry_run" };
   }
 
+  const email = {
+    from,
+    to: input.to,
+    subject:
+      input.kind === "setup"
+        ? "Your Tee Time Spot search is active"
+        : "Your daily Tee Time Spot update",
+    html: renderSearchStatusHtml({
+      ...input,
+      stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)
+    })
+  };
   const result = await new Resend(apiKey).emails.send(
-    {
-      from,
-      to: input.to,
-      subject:
-        input.kind === "setup"
-          ? "Your Tee Time Spot search is active"
-          : "Your daily Tee Time Spot update",
-      html: renderSearchStatusHtml({
-        ...input,
-        stopUrls: input.stopUrls ?? buildEmailStopUrls(input.searchId)
-      })
-    },
+    email,
     input.idempotencyKey
       ? {
           headers: {
-            "Idempotency-Key": input.idempotencyKey
+            "Idempotency-Key": buildContentScopedEmailIdempotencyKey(
+              input.idempotencyKey,
+              email
+            )
           }
         }
       : undefined
@@ -126,6 +142,19 @@ export async function sendSearchStatusEmail(
 
 export function normalizeEmailEnvValue(value?: string) {
   return value?.replace(/\uFEFF/g, "").trim();
+}
+
+export function buildContentScopedEmailIdempotencyKey(
+  baseKey: string,
+  email: { from: string; to: string; subject: string; html: string }
+) {
+  const scopeHash = createHash("sha256").update(baseKey).digest("hex").slice(0, 16);
+  const contentHash = createHash("sha256")
+    .update(JSON.stringify(email))
+    .digest("hex")
+    .slice(0, 24);
+
+  return `tee-time-email-${scopeHash}-${contentHash}`;
 }
 
 export function shouldDryRunRecipient(email: string) {
@@ -273,6 +302,17 @@ function formatPrice(priceCents: number) {
     currency: "USD",
     maximumFractionDigits: priceCents % 100 === 0 ? 0 : 2
   }).format(priceCents / 100);
+}
+
+function buildStableEmailStopUrls(searchId: string, targetDate?: string) {
+  if (!targetDate) {
+    return buildEmailStopUrls(searchId);
+  }
+
+  const tokenAnchor = new Date(`${targetDate}T00:00:00.000Z`);
+  return buildEmailStopUrls(searchId, {
+    now: Number.isNaN(tokenAnchor.getTime()) ? undefined : tokenAnchor
+  });
 }
 
 function escapeHtml(value: string) {

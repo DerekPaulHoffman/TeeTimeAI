@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildContentScopedEmailIdempotencyKey,
   normalizeEmailEnvValue,
   renderAlertHtml,
   sendSearchStatusEmail,
@@ -84,6 +85,27 @@ describe("renderAlertHtml", () => {
 });
 
 describe("email alert delivery helpers", () => {
+  it("scopes Resend idempotency keys to the exact email content", () => {
+    const email = {
+      from: "alerts@teetimespot.com",
+      to: "Player@ExampleGolf.com",
+      subject: "A spot opened up",
+      html: "<p>7:51 AM</p>"
+    };
+    const baseKey = "tee-time-match-batch-private-player@example.com";
+    const key = buildContentScopedEmailIdempotencyKey(baseKey, email);
+
+    expect(buildContentScopedEmailIdempotencyKey(baseKey, email)).toBe(key);
+    expect(
+      buildContentScopedEmailIdempotencyKey(baseKey, {
+        ...email,
+        html: "<p>8:01 AM</p>"
+      })
+    ).not.toBe(key);
+    expect(key).not.toContain("Player");
+    expect(key).not.toContain("example.com");
+  });
+
   it("normalizes copied env values before they are used in Resend headers", () => {
     expect(normalizeEmailEnvValue("\uFEFFre_test_key\uFEFF\n")).toBe("re_test_key");
   });

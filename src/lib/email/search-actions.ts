@@ -18,10 +18,13 @@ type EmailStopTokenPayload = {
 
 const EMAIL_STOP_TOKEN_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
 
-export function buildEmailStopUrls(searchId: string): EmailStopUrls {
+export function buildEmailStopUrls(
+  searchId: string,
+  options: { now?: Date } = {}
+): EmailStopUrls {
   return {
-    booked: buildEmailStopUrl(searchId, "booked"),
-    cancelled: buildEmailStopUrl(searchId, "cancelled")
+    booked: buildEmailStopUrl(searchId, "booked", options),
+    cancelled: buildEmailStopUrl(searchId, "cancelled", options)
   };
 }
 
@@ -86,8 +89,12 @@ export function verifyEmailStopToken(
   }
 }
 
-function buildEmailStopUrl(searchId: string, reason: EmailStopReason) {
-  const token = createEmailStopToken(searchId, reason);
+function buildEmailStopUrl(
+  searchId: string,
+  reason: EmailStopReason,
+  options: { now?: Date }
+) {
+  const token = createEmailStopToken(searchId, reason, options);
   return absoluteUrl(`/alerts/stop?token=${encodeURIComponent(token)}`);
 }
 
