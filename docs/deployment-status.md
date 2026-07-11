@@ -115,6 +115,8 @@ Last updated: 2026-07-10
 
 - 2026-07-10 missing-course lookup release deployed commit `a68cd23` as `dpl_3CKAsNBCwKe9GkYg2d2tEQZmkcZY` (`teetimeai-pji7xkmqv-derekpaulhoffmans-projects.vercel.app`). Golfers can search by course name and town when nearby discovery does not show the course, review public Google Places matches, and add or remove a verified place from the ranked alert list while monitoring support remains explicitly deferred until save. Verification passed 135 tests, lint with only the generated Workflow warning, production build, local and production UI smoke 8/8, live `/`, `/search`, `/dashboard`, `/email-preview`, and both production aliases with 200 responses, a real Bethpage Black lookup returning one course, `vercel inspect` Ready with both production aliases, and an empty production error-log query.
 
+- 2026-07-10 course-list continuity release deployed commit `b09f120` as `dpl_4b83r3t6piuCpjKWGWPT9JTbiCK1` (`teetimeai-k8ga3nhc8-derekpaulhoffmans-projects.vercel.app`). Selecting a course no longer re-sorts nearby discovery results, so golfers can continue through the populated list while the separate selected-course panel preserves ranking. Verification passed 142 tests, lint with only the existing generated Workflow warning, production build, local and production UI smoke 8/8, live `/`, `/search`, `/dashboard`, `/email-preview`, and both production aliases with 200 responses, `vercel inspect` Ready with `teetimespot.com` and `www.teetimespot.com`, and an empty production error-log query.
+
 ## Current Runtime Mode
 
 The public site is live as an email-alert proof of concept:
