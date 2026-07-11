@@ -307,24 +307,44 @@ export async function markMissingMatchesUnavailable(input: {
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
 
-  return prisma.teeTimeMatch.updateMany({
-    where: {
-      teeSearchId: input.searchId,
-      courseId: input.courseId,
-      availabilityStatus: "AVAILABLE",
-      startsAt: {
-        gte: dayStart,
-        lt: dayEnd
-      },
-      ...(input.confirmedSourceIds.length > 0
-        ? { sourceId: { notIn: input.confirmedSourceIds } }
-        : {})
+  const missingMatchWhere = {
+    teeSearchId: input.searchId,
+    courseId: input.courseId,
+    availabilityStatus: "AVAILABLE" as const,
+    startsAt: {
+      gte: dayStart,
+      lt: dayEnd
     },
-    data: {
-      availabilityStatus: "GONE",
-      unavailableAt: new Date()
-    }
-  });
+    ...(input.confirmedSourceIds.length > 0
+      ? { sourceId: { notIn: input.confirmedSourceIds } }
+      : {})
+  };
+  const unavailableAt = new Date();
+
+  return prisma.$transaction([
+    prisma.teeTimeMatch.updateMany({
+      where: {
+        ...missingMatchWhere,
+        alertStatus: "PENDING"
+      },
+      data: {
+        alertStatus: "SUPPRESSED",
+        availabilityStatus: "GONE",
+        sentAt: unavailableAt,
+        unavailableAt
+      }
+    }),
+    prisma.teeTimeMatch.updateMany({
+      where: {
+        ...missingMatchWhere,
+        alertStatus: { not: "PENDING" }
+      },
+      data: {
+        availabilityStatus: "GONE",
+        unavailableAt
+      }
+    })
+  ]);
 }
 
 export async function queueSearchCheck(searchId: string) {
