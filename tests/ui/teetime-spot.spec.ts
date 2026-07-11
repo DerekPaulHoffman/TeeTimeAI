@@ -88,6 +88,17 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(await courseRows.count()).toBeGreaterThan(courseCount);
     }
 
+    const courseOrderBeforeSelection = await courseRows.locator("h3").allTextContents();
+    const laterCourse = courseRows.nth(4);
+    await laterCourse.getByRole("button", { name: /Add/i }).click();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
+    expect(
+      await courseRows.locator("h3").allTextContents(),
+      "adding a course should preserve the discovery order so users can keep moving through the list"
+    ).toEqual(courseOrderBeforeSelection);
+    await laterCourse.getByRole("button", { name: /Remove/i }).click();
+    await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
+
     await page.route("**/api/courses/lookup?**", async (route) => {
       await route.fulfill({
         contentType: "application/json",

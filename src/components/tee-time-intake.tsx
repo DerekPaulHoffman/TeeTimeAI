@@ -244,18 +244,15 @@ function TeeTimeIntakeContent({
     );
 
     return [...withinRadius].sort((a, b) => {
-      const aSelected = selectedIds.has(a.googlePlaceId) ? 0 : 1;
-      const bSelected = selectedIds.has(b.googlePlaceId) ? 0 : 1;
       const aHasRequestedPrice = hasPriceForView(a.priceEstimate, holeFilter) ? 0 : 1;
       const bHasRequestedPrice = hasPriceForView(b.priceEstimate, holeFilter) ? 0 : 1;
       return (
-        aSelected - bSelected ||
         aHasRequestedPrice - bHasRequestedPrice ||
         (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) -
           (b.distanceMeters ?? Number.MAX_SAFE_INTEGER)
       );
     });
-  }, [courses, holeFilter, searchRadiusMiles, selectedIds]);
+  }, [courses, holeFilter, searchRadiusMiles]);
   const visibleCourses = useMemo(
     () => filteredCourses.slice(0, visibleCourseCount),
     [filteredCourses, visibleCourseCount]
