@@ -6,6 +6,8 @@ Tee Time Spot uses Postgres as the queue of user demand, durable per-search Verc
 
 - Per search: create/edit/resume/manual-check starts an immediate durable workflow; the workflow sleeps until its own `nextCheckAt` between checks.
 - Daily recovery: query only for overdue or failed workflow schedules and restart those searches; do not fetch course availability when the recovery queue is empty.
+- Email cadence: the first completed check sends one setup report containing current results and does not also send an instant match email. Later status reports become due after 8:00 AM in the golfer's timezone, and a new-opening alert on that check satisfies the morning update instead of creating a second email.
+- Reopened matches alert again only after they were continuously unavailable for at least 30 minutes, which prevents short provider inventory flaps from creating repeat email noise.
 - Hourly: run one complete autonomous improvement cycle: inspect evidence, select one candidate, implement it, verify it, commit it, push it, deploy live-impacting work, verify production, and record what was learned.
 - Baseline UI/access check: run `npm run ui:smoke` locally, or set `UI_SMOKE_BASE_URL=https://teetimespot.com` before `npm run ui:smoke` for production.
 - Before deploys: run `npm run test:run`, `npm run lint`, `npm run build`, and `npm run ui:smoke`.

@@ -143,8 +143,8 @@ export default function EmailPreviewPage() {
           </p>
           <h1>Useful updates, without inbox noise.</h1>
           <p className="meta">
-            We send one setup report after your first check, at most one course-status update per
-            day, and an instant email only when a new time opens inside your exact range.
+            We send one setup report with the results of your first check, one morning update, and
+            an instant email only when a new time opens inside your exact range.
           </p>
         </div>
         <a className="button button-secondary" href={previewAlert.matches[0].bookingUrl}>
@@ -190,15 +190,15 @@ export default function EmailPreviewPage() {
           <div className="delivery-step">
             <Mail size={18} />
             <div>
-              <strong>At most one daily update</strong>
-              <p className="meta">Repeated checks stay silent when nothing useful has changed.</p>
+              <strong>One predictable morning update</strong>
+              <p className="meta">It becomes due after 8:00 AM in your local timezone.</p>
             </div>
           </div>
           <div className="alert alert-info">
             <Bell size={17} />
             <span>
-              Status reports are separate from match alerts. A new qualifying opening still gets
-              an immediate email.
+              A first-check match is included in the setup report. Later openings get an immediate
+              email, which replaces that morning’s separate status update when they coincide.
             </span>
           </div>
         </aside>

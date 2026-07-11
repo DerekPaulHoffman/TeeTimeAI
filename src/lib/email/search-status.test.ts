@@ -39,11 +39,55 @@ const courses: SearchStatusCourseReport[] = [
 ];
 
 describe("search status email cadence", () => {
-  it("sends once for setup and then no more than once every 24 hours", () => {
-    const now = new Date("2026-07-10T12:00:00.000Z");
-    expect(getSearchStatusEmailKind(null, now)).toBe("setup");
-    expect(getSearchStatusEmailKind(new Date("2026-07-09T13:00:00.000Z"), now)).toBeNull();
-    expect(getSearchStatusEmailKind(new Date("2026-07-09T12:00:00.000Z"), now)).toBe("daily");
+  it("sends setup once and waits until 8 AM on a new local day for the morning report", () => {
+    const lastSentAt = new Date("2026-07-10T03:00:00.000Z"); // Jul 9, 11 PM EDT
+
+    expect(getSearchStatusEmailKind(null, new Date("2026-07-10T12:00:00.000Z"))).toBe(
+      "setup"
+    );
+    expect(
+      getSearchStatusEmailKind(
+        lastSentAt,
+        new Date("2026-07-10T11:59:00.000Z"),
+        "America/New_York"
+      )
+    ).toBeNull();
+    expect(
+      getSearchStatusEmailKind(
+        lastSentAt,
+        new Date("2026-07-10T12:00:00.000Z"),
+        "America/New_York"
+      )
+    ).toBe("daily");
+  });
+
+  it("does not send a second morning report on the same local day", () => {
+    expect(
+      getSearchStatusEmailKind(
+        new Date("2026-07-10T12:05:00.000Z"),
+        new Date("2026-07-10T20:00:00.000Z"),
+        "America/New_York"
+      )
+    ).toBeNull();
+  });
+
+  it("uses the golfer timezone when deciding whether morning has started", () => {
+    const lastSentAt = new Date("2026-07-10T05:00:00.000Z"); // Jul 9, 10 PM PDT
+
+    expect(
+      getSearchStatusEmailKind(
+        lastSentAt,
+        new Date("2026-07-10T14:59:00.000Z"),
+        "America/Los_Angeles"
+      )
+    ).toBeNull();
+    expect(
+      getSearchStatusEmailKind(
+        lastSentAt,
+        new Date("2026-07-10T15:00:00.000Z"),
+        "America/Los_Angeles"
+      )
+    ).toBe("daily");
   });
 });
 
@@ -69,7 +113,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we’re watching for you");
     expect(html).toContain("Fully monitored ✓");
-    expect(html).toContain("at most one status update per day");
+    expect(html).toContain("at most one morning status update per day");
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
     expect(html).toContain("x=&lt;unsafe&gt;");

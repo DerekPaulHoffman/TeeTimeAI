@@ -375,7 +375,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(statusFrame.locator("body")).toContainText("No time in your window");
     await expect(statusFrame.locator("body")).toContainText("Nothing visible for this date yet");
     await expect(statusFrame.locator("body")).toContainText("We’re working on it");
-    await expect(statusFrame.locator("body")).toContainText(/at most one status update per day/i);
+    await expect(statusFrame.locator("body")).toContainText(
+      /at most one morning status update per day/i
+    );
 
     const emailFrame = page.frameLocator("iframe[title='Rendered tee time alert email']");
     await expect(emailFrame.locator("body")).toContainText("Tashua Knolls Golf Course");

@@ -1,10 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { markMissingMatchesUnavailable, recordCourseProbeIfChanged } from "./db-service";
+import {
+  markMissingMatchesUnavailable,
+  recordCourseProbeIfChanged,
+  recordTeeTimeMatch
+} from "./db-service";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     teeTimeMatch: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
       updateMany: vi.fn()
     },
     courseProbe: {
@@ -18,6 +24,63 @@ vi.mock("@/lib/prisma", () => ({
 import { prisma } from "@/lib/prisma";
 
 const mockedPrisma = vi.mocked(prisma);
+
+describe("recordTeeTimeMatch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
+    mockedPrisma.teeTimeMatch.upsert.mockResolvedValue({ id: "match-1" } as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not re-alert a tee time that briefly disappears and returns", async () => {
+    mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
+      availabilityStatus: "GONE",
+      unavailableAt: new Date("2026-07-10T11:45:00.000Z")
+    } as never);
+
+    await recordTeeTimeMatch({
+      searchId: "search-1",
+      courseId: "course-1",
+      sourceId: "slot-1",
+      startsAt: new Date("2026-07-11T12:00:00.000Z"),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/book"
+    });
+
+    expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.not.objectContaining({ alertStatus: "PENDING" })
+      })
+    );
+  });
+
+  it("re-alerts a tee time that returns after being absent for 30 minutes", async () => {
+    mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
+      availabilityStatus: "GONE",
+      unavailableAt: new Date("2026-07-10T11:30:00.000Z")
+    } as never);
+
+    await recordTeeTimeMatch({
+      searchId: "search-1",
+      courseId: "course-1",
+      sourceId: "slot-1",
+      startsAt: new Date("2026-07-11T12:00:00.000Z"),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/book"
+    });
+
+    expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ alertStatus: "PENDING", sentAt: null })
+      })
+    );
+  });
+});
 
 describe("markMissingMatchesUnavailable", () => {
   beforeEach(() => {

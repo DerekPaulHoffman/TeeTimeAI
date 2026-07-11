@@ -70,7 +70,7 @@ export type SearchCheckResult = {
   courseResults: SearchCheckCourseResult[];
   availableMatches: number;
   newlyAlertedMatches: number;
-  statusEmailOutcome?: "sent" | "dry_run" | "skipped" | "failed";
+  statusEmailOutcome?: "sent" | "dry_run" | "skipped" | "covered_by_match_alert" | "failed";
 };
 
 export async function runSearchCheck(searchId: string, trigger = "scheduled") {
@@ -300,22 +300,61 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     }
   }
 
-  newlyAlertedMatches = await sendPendingMatchAlerts(searchId);
-
+  const checkedAt = new Date();
+  const statusEmailKind = getSearchStatusEmailKind(
+    search.statusEmailSentAt,
+    checkedAt,
+    search.userTimeZone
+  );
   let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = "skipped";
-  try {
-    statusEmailOutcome = await deliverSearchStatusReport({
-      search,
-      searchWindow,
-      courseResults,
-      checkedAt: new Date()
-    });
-  } catch (error) {
-    statusEmailOutcome = "failed";
-    console.error("[email:status-failed]", {
-      searchId: search.id,
-      message: error instanceof Error ? error.message : "Unknown status email failure"
-    });
+
+  if (statusEmailKind === "setup") {
+    try {
+      statusEmailOutcome = await deliverSearchStatusReport({
+        search,
+        searchWindow,
+        courseResults,
+        checkedAt,
+        kind: statusEmailKind
+      });
+      newlyAlertedMatches = await settlePendingMatchesCoveredByStatusReport(
+        searchId,
+        statusEmailOutcome
+      );
+    } catch (error) {
+      statusEmailOutcome = "failed";
+      console.error("[email:status-failed]", {
+        searchId: search.id,
+        message: error instanceof Error ? error.message : "Unknown status email failure"
+      });
+    }
+  } else {
+    newlyAlertedMatches = await sendPendingMatchAlerts(searchId);
+
+    if (statusEmailKind === "daily" && newlyAlertedMatches > 0) {
+      await markSearchStatusReportSatisfied({
+        searchId: search.id,
+        checkedAt,
+        courseResults
+      });
+      statusEmailOutcome = "covered_by_match_alert";
+    } else if (statusEmailKind === "daily") {
+      try {
+        statusEmailOutcome = await deliverSearchStatusReport({
+          search,
+          searchWindow,
+          courseResults,
+          checkedAt,
+          kind: statusEmailKind
+        });
+      } catch (error) {
+        statusEmailOutcome = "failed";
+        console.error("[email:status-failed]", {
+          searchId: search.id,
+          message: error instanceof Error ? error.message : "Unknown status email failure"
+        });
+      }
+    }
   }
 
   return {
@@ -359,19 +398,15 @@ async function deliverSearchStatusReport(input: {
   };
   courseResults: SearchCheckCourseResult[];
   checkedAt: Date;
+  kind: "setup" | "daily";
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
-  const kind = getSearchStatusEmailKind(input.search.statusEmailSentAt, input.checkedAt);
-  if (!kind) {
-    return "skipped";
-  }
-
   const snapshot = buildSearchStatusSnapshot(input.courseResults);
   const recipients = getAlertRecipients(
     input.search.user.email,
     input.search.additionalEmails
   );
   const periodKey =
-    kind === "setup"
+    input.kind === "setup"
       ? "setup"
       : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}`;
   const deliveries = await Promise.all(
@@ -379,7 +414,7 @@ async function deliverSearchStatusReport(input: {
       sendSearchStatusEmail({
         searchId: input.search.id,
         to: recipient,
-        kind,
+        kind: input.kind,
         targetDate: input.searchWindow.date,
         startTime: input.searchWindow.startTime,
         endTime: input.searchWindow.endTime,
@@ -402,6 +437,38 @@ async function deliverSearchStatusReport(input: {
   return deliveries.every((delivery) => delivery.deliveryStatus === "dry_run")
     ? "dry_run"
     : "sent";
+}
+
+async function markSearchStatusReportSatisfied(input: {
+  searchId: string;
+  checkedAt: Date;
+  courseResults: SearchCheckCourseResult[];
+}) {
+  await markSearchStatusEmailSent({
+    searchId: input.searchId,
+    sentAt: input.checkedAt,
+    snapshot: buildSearchStatusSnapshot(input.courseResults)
+  });
+}
+
+async function settlePendingMatchesCoveredByStatusReport(
+  searchId: string,
+  statusEmailOutcome: "sent" | "dry_run" | "skipped" | "covered_by_match_alert" | "failed"
+) {
+  const pendingMatches = await listPendingMatchAlerts(searchId);
+  if (pendingMatches.length === 0) {
+    return 0;
+  }
+
+  if (statusEmailOutcome === "dry_run") {
+    await Promise.all(pendingMatches.map((match) => markMatchAlertSuppressed(match.id)));
+  } else if (statusEmailOutcome === "sent") {
+    await Promise.all(pendingMatches.map((match) => markMatchAlertSent(match.id)));
+  } else {
+    return 0;
+  }
+
+  return pendingMatches.length;
 }
 
 async function sendPendingMatchAlerts(searchId: string) {

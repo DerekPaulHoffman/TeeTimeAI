@@ -62,7 +62,7 @@ export type SearchStatusEmailInput = {
   stopUrls?: EmailStopUrls;
 };
 
-const DAILY_STATUS_EMAIL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const MORNING_STATUS_EMAIL_HOUR = 8;
 
 export function summarizeSearchStatusAvailability(
   search: {
@@ -94,15 +94,25 @@ export function summarizeSearchStatusAvailability(
 
 export function getSearchStatusEmailKind(
   lastSentAt: Date | null,
-  now = new Date()
+  now = new Date(),
+  timeZone = DEFAULT_TIME_ZONE
 ): SearchStatusEmailKind | null {
   if (!lastSentAt) {
     return "setup";
   }
 
-  return now.getTime() - lastSentAt.getTime() >= DAILY_STATUS_EMAIL_INTERVAL_MS
-    ? "daily"
-    : null;
+  const normalizedTimeZone = normalizeTimeZone(timeZone, DEFAULT_TIME_ZONE);
+  const currentLocalTime = getLocalDateAndHour(now, normalizedTimeZone);
+  const lastSentLocalTime = getLocalDateAndHour(lastSentAt, normalizedTimeZone);
+
+  if (
+    currentLocalTime.date <= lastSentLocalTime.date ||
+    currentLocalTime.hour < MORNING_STATUS_EMAIL_HOUR
+  ) {
+    return null;
+  }
+
+  return "daily";
 }
 
 export function buildSearchStatusSnapshot(
@@ -145,8 +155,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     timeZone: normalizeTimeZone(input.userTimeZone, DEFAULT_TIME_ZONE),
     timeZoneName: "short"
   });
-  const heading = input.kind === "setup" ? "We’re working on your tee times" : "Your daily tee-time update";
-  const badge = input.kind === "setup" ? "Search is active" : "Daily update";
+  const heading = input.kind === "setup" ? "We’re working on your tee times" : "Your morning tee-time update";
+  const badge = input.kind === "setup" ? "Search is active" : "Morning update";
   const hasDirectOnlyCourse = input.courses.some(
     (course) => course.outcome === "BLOCKED_POLICY"
   );
@@ -205,7 +215,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
           <p style="color:#53645c;font-size:14px;margin:0 0 18px">Here’s the status of each course on your list. Some we monitor automatically — others need you to check directly.</p>
           ${courseRows}
           <div style="background:#e6f3f7;border-radius:10px;color:#174152;padding:14px 16px;font-size:14px;margin-top:18px">
-            We only send an instant email when a newly opened tee time matches your exact date, time window, and player count. Otherwise, you’ll receive at most one status update per day.
+            We only send an instant email when a newly opened tee time matches your exact date, time window, and player count. Otherwise, you’ll receive at most one morning status update per day.
           </div>
           <p style="color:#5c6c64;font-size:13px;margin:16px 0 0">Last checked ${escapeHtml(checkedAt)}.</p>
           ${stopControls}
@@ -216,6 +226,27 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
       </div>
     </div>
   `;
+}
+
+function getLocalDateAndHour(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date);
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  const year = values.get("year") ?? "0000";
+  const month = values.get("month") ?? "00";
+  const day = values.get("day") ?? "00";
+  const hour = Number(values.get("hour") ?? "0");
+
+  return {
+    date: `${year}-${month}-${day}`,
+    hour: hour === 24 ? 0 : hour
+  };
 }
 
 function renderCourseReport(course: SearchStatusCourseReport, players: number, rank: number) {

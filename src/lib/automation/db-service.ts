@@ -9,6 +9,7 @@ import { startOfUtcCalendarDay } from "./date-boundary";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
+const REOPEN_ALERT_MINIMUM_ABSENCE_MS = 30 * 60 * 1000;
 
 const activeSearchInclude = {
   user: true,
@@ -286,11 +287,18 @@ export async function recordTeeTimeMatch(input: {
       }
     },
     select: {
-      availabilityStatus: true
+      availabilityStatus: true,
+      unavailableAt: true
     }
   });
 
   const confirmedAt = new Date();
+  const shouldAlertReopenedMatch = Boolean(
+    existing?.availabilityStatus === "GONE" &&
+      (!existing.unavailableAt ||
+        confirmedAt.getTime() - existing.unavailableAt.getTime() >=
+          REOPEN_ALERT_MINIMUM_ABSENCE_MS)
+  );
   return prisma.teeTimeMatch.upsert({
     where: {
       teeSearchId_courseId_sourceId_startsAt: {
@@ -305,7 +313,7 @@ export async function recordTeeTimeMatch(input: {
       lastConfirmedAt: confirmedAt,
       availabilityStatus: "AVAILABLE",
       unavailableAt: null,
-      ...(existing?.availabilityStatus === "GONE"
+      ...(shouldAlertReopenedMatch
         ? { alertStatus: "PENDING", sentAt: null }
         : {}),
       availableSpots: input.availableSpots,
