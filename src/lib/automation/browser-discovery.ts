@@ -22,6 +22,7 @@ export type BrowserDiscovery = {
   bookingPhone?: string;
   automationEligibility?: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason?: AutomationReason;
+  policyNotes?: string;
   intelligenceReviewAt?: Date | string;
   apiEndpoint?: string;
   apiMetadata?: {
@@ -171,6 +172,128 @@ function learnCpsDiscovery(
       learnedFrom: "cps-booking-url"
     }
   };
+}
+
+export async function enrichChronogolfDiscovery(
+  discovery: BrowserDiscovery,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscovery> {
+  if (discovery.detectedPlatform !== "CHRONOGOLF") {
+    return discovery;
+  }
+
+  const clubId = getChronogolfClubId(discovery);
+  if (!clubId) {
+    return discovery;
+  }
+
+  const lookupUrl = `https://www.chronogolf.com/club/${clubId}`;
+  const response = await fetchImpl(lookupUrl, {
+    headers: { Accept: "text/html" },
+    redirect: "follow"
+  });
+  if (!response.ok) {
+    return {
+      ...discovery,
+      evidence: {
+        ...discovery.evidence,
+        learnedFrom: "chronogolf-public-profile-unavailable"
+      }
+    };
+  }
+
+  const html = await response.text();
+  const club = parseChronogolfClubProfile(html);
+  if (!club) {
+    return discovery;
+  }
+
+  const canonicalUrl = response.url || lookupUrl;
+  const profileSummary = `Chronogolf public club profile ${canonicalUrl} reports onlineBookingEnabled=${String(
+    club.onlineBookingEnabled
+  )} and ${club.courseCount} public course records.`;
+
+  if (club.onlineBookingEnabled === false) {
+    return {
+      ...discovery,
+      status: "VERIFIED",
+      bookingUrl: canonicalUrl,
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      policyNotes: `${profileSummary} Tee Time Spot must direct golfers to the course instead of attempting automated retrieval.`,
+      intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      confidence: 0.95,
+      evidence: {
+        ...discovery.evidence,
+        observedUrls: uniqueUrls([...discovery.evidence.observedUrls, canonicalUrl]),
+        learnedFrom: "chronogolf-public-club-profile"
+      }
+    };
+  }
+
+  if (club.onlineBookingEnabled === true) {
+    return {
+      ...discovery,
+      status: "INSPECTED",
+      bookingUrl: canonicalUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      policyNotes: `${profileSummary} A policy-safe public Chronogolf adapter still requires focused endpoint verification.`,
+      confidence: 0.9,
+      evidence: {
+        ...discovery.evidence,
+        observedUrls: uniqueUrls([...discovery.evidence.observedUrls, canonicalUrl]),
+        learnedFrom: "chronogolf-public-club-profile"
+      }
+    };
+  }
+
+  return discovery;
+}
+
+function getChronogolfClubId(discovery: BrowserDiscovery) {
+  const urlMatch = discovery.evidence.observedUrls
+    .map((url) => url.match(/chronogolf\.com\/club\/(\d+)(?:\/|$)/i)?.[1])
+    .find(Boolean);
+  const textMatch = discovery.evidence.visibleText?.match(
+    /(?:clubId|club_id)["'\s:=]+(\d+)/i
+  )?.[1];
+  const clubId = Number(urlMatch ?? textMatch);
+  return Number.isInteger(clubId) && clubId > 0 ? clubId : null;
+}
+
+function parseChronogolfClubProfile(html: string) {
+  const nextData = html.match(
+    /<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i
+  )?.[1];
+  if (!nextData) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(nextData) as {
+      props?: {
+        pageProps?: {
+          club?: {
+            features?: { onlineBookingEnabled?: boolean };
+            courses?: unknown[];
+          };
+        };
+      };
+    };
+    const club = parsed.props?.pageProps?.club;
+    if (!club) {
+      return null;
+    }
+    return {
+      onlineBookingEnabled: club.features?.onlineBookingEnabled,
+      courseCount: Array.isArray(club.courses) ? club.courses.length : 0
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getCpsWidgetUrl(text?: string) {

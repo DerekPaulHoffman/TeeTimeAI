@@ -30,6 +30,7 @@ async function main() {
     activeSearches,
     probeCounts,
     recentNotableProbes,
+    openCourseSupportIncidents,
     recentMatches,
     pendingMatches,
     recentBrowserDiscoveries,
@@ -78,6 +79,13 @@ async function main() {
           },
           automationRun: true
         }
+      }),
+      prisma.courseSupportIncident.findMany({
+        where: {
+          status: { not: "RESOLVED" }
+        },
+        orderBy: [{ status: "desc" }, { firstSeenAt: "asc" }],
+        include: { course: true }
       }),
       prisma.teeTimeMatch.findMany({
         orderBy: { firstSeenAt: "desc" },
@@ -249,6 +257,23 @@ async function main() {
           automationRunId: probe.automationRunId,
           automationRunOutcome: probe.automationRun?.outcome ?? null,
           message: summarize(probe.message)
+        })),
+        openCourseSupportIncidents: openCourseSupportIncidents.map((incident) => ({
+          id: incident.id,
+          status: incident.status,
+          kind: incident.kind,
+          course: incident.course.name,
+          platform: incident.course.detectedPlatform,
+          cycle: incident.cycle,
+          firstAffectedSearchId: incident.firstAffectedSearchId,
+          affectedSearchCount: incident.affectedSearchCount,
+          occurrenceCount: incident.occurrenceCount,
+          firstSeenAt: incident.firstSeenAt,
+          lastSeenAt: incident.lastSeenAt,
+          ownerNotifiedAt: incident.ownerNotifiedAt,
+          escalatedAt: incident.escalatedAt,
+          latestMessage: summarize(incident.latestMessage),
+          nextAction: summarize(incident.nextAction)
         })),
         recentNotableProbes: recentNotableProbes.map((probe) => ({
           id: probe.id,

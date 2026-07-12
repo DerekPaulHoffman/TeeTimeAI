@@ -307,6 +307,7 @@ Required for live email sending:
 - `RESEND_API_KEY`
 - `ALERT_EMAIL_FROM`
 - `RESEND_EMAIL_DOMAIN`
+- `OPERATOR_ALERT_EMAIL` (receives deduplicated course-monitoring incident, escalation, and resolution emails)
 
 Required for automation endpoints/scripts:
 

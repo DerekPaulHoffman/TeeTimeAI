@@ -4,6 +4,7 @@ import {
   buildContentScopedEmailIdempotencyKey,
   normalizeEmailEnvValue,
   renderAlertHtml,
+  renderCourseSupportOperatorHtml,
   sendSearchStatusEmail,
   sendTeeTimeAlert,
   shouldDryRunRecipient
@@ -102,6 +103,32 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("2 spots");
     expect(html).toContain("I booked — stop these emails");
     expect(html).toContain("Cancel this alert");
+  });
+});
+
+describe("renderCourseSupportOperatorHtml", () => {
+  it("renders actionable incident evidence without exposing unsafe markup", () => {
+    const html = renderCourseSupportOperatorHtml({
+      event: "opened",
+      incidentId: "incident-1",
+      cycle: 1,
+      courseId: "course-1",
+      courseName: "Pequabuck <Golf Club>",
+      platform: "CHRONOGOLF",
+      bookingUrl: "https://www.chronogolf.com/club/3563",
+      firstAffectedSearchId: "search-1",
+      affectedSearchCount: 2,
+      kind: "NEEDS_ADAPTER",
+      message: "No supported adapter yet",
+      nextAction: "Inspect the official public booking surface",
+      firstSeenAt: new Date("2026-07-12T14:00:00.000Z")
+    });
+
+    expect(html).toContain("Pequabuck &lt;Golf Club&gt;");
+    expect(html).toContain("Affected active searches when opened:</strong> 2");
+    expect(html).toContain("Inspect the official public booking surface");
+    expect(html).toContain("https://www.chronogolf.com/club/3563");
+    expect(html).not.toContain("Pequabuck <Golf Club>");
   });
 });
 

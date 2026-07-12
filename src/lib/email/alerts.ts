@@ -43,6 +43,28 @@ export type EmailDelivery =
       deliveryStatus: "sent";
     };
 
+export type CourseSupportOperatorEmailInput = {
+  event: "opened" | "escalated" | "resolved";
+  incidentId: string;
+  cycle: number;
+  courseId: string;
+  courseName: string;
+  platform: string;
+  bookingUrl?: string | null;
+  firstAffectedSearchId?: string | null;
+  affectedSearchCount: number;
+  kind: string;
+  message?: string | null;
+  nextAction?: string | null;
+  firstSeenAt: Date;
+  resolution?: string | null;
+  resolutionMessage?: string | null;
+};
+
+export type OperatorEmailDelivery = EmailDelivery | {
+  deliveryStatus: "not_configured";
+};
+
 export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailDelivery> {
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
@@ -143,6 +165,49 @@ export async function sendSearchStatusEmail(
   return { ...result.data, deliveryStatus: "sent" };
 }
 
+export async function sendCourseSupportOperatorEmail(
+  input: CourseSupportOperatorEmailInput
+): Promise<OperatorEmailDelivery> {
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
+
+  if (!to) {
+    console.error("[email:operator-not-configured]", {
+      incidentId: input.incidentId,
+      courseId: input.courseId,
+      event: input.event
+    });
+    return { deliveryStatus: "not_configured" };
+  }
+
+  if (!apiKey || !from || shouldDryRunRecipient(to)) {
+    console.warn("[email:operator-dry-run]", {
+      to,
+      incidentId: input.incidentId,
+      courseId: input.courseId,
+      event: input.event
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+
+  const email = {
+    from,
+    to,
+    subject: getCourseSupportOperatorSubject(input),
+    html: renderCourseSupportOperatorHtml(input)
+  };
+  const result = await new Resend(apiKey).emails.send(email, {
+    idempotencyKey: `course-support/${input.incidentId}/${input.cycle}/${input.event}`
+  });
+
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+
+  return { ...result.data, deliveryStatus: "sent" };
+}
+
 export function normalizeEmailEnvValue(value?: string) {
   return value?.replace(/\uFEFF/g, "").trim();
 }
@@ -174,6 +239,61 @@ export function shouldDryRunRecipient(email: string) {
     domain.endsWith(".invalid") ||
     domain.endsWith(".test")
   );
+}
+
+export function renderCourseSupportOperatorHtml(input: CourseSupportOperatorEmailInput) {
+  const eventLabel =
+    input.event === "opened"
+      ? "New course monitoring incident"
+      : input.event === "escalated"
+        ? "Course monitoring needs human review"
+        : "Course monitoring incident resolved";
+  const resolution = input.resolution
+    ? `<p><strong>Resolution:</strong> ${escapeHtml(input.resolution.replaceAll("_", " ").toLowerCase())}</p>`
+    : "";
+  const resolutionMessage = input.resolutionMessage
+    ? `<p><strong>Resolution notes:</strong> ${escapeHtml(input.resolutionMessage)}</p>`
+    : "";
+  const bookingLink = input.bookingUrl
+    ? `<p><a href="${escapeHtml(input.bookingUrl)}" style="color:#087746;font-weight:800">Inspect official course surface →</a></p>`
+    : "";
+
+  return `
+    <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
+      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
+        <div style="background:#111d18;color:#ffffff;padding:18px 22px">
+          <div style="font-weight:800;font-size:18px">Tee Time Spot operations</div>
+          <div style="color:rgba(255,255,255,.68);font-size:13px">${escapeHtml(eventLabel)}</div>
+        </div>
+        <div style="padding:22px">
+          <h1 style="font-size:24px;line-height:1.15;margin:0 0 16px">${escapeHtml(input.courseName)}</h1>
+          <p><strong>Status event:</strong> ${escapeHtml(input.event)}</p>
+          <p><strong>Incident:</strong> ${escapeHtml(input.incidentId)} · cycle ${input.cycle}</p>
+          <p><strong>Course ID:</strong> ${escapeHtml(input.courseId)}</p>
+          <p><strong>Detected platform:</strong> ${escapeHtml(input.platform)}</p>
+          <p><strong>Issue:</strong> ${escapeHtml(input.kind.replaceAll("_", " ").toLowerCase())}</p>
+          <p><strong>First affected search:</strong> ${escapeHtml(input.firstAffectedSearchId ?? "unknown")}</p>
+          <p><strong>Affected active searches when opened:</strong> ${input.affectedSearchCount}</p>
+          <p><strong>First seen:</strong> ${escapeHtml(input.firstSeenAt.toISOString())}</p>
+          ${input.message ? `<p><strong>Evidence:</strong> ${escapeHtml(input.message)}</p>` : ""}
+          ${input.nextAction ? `<p><strong>Next action:</strong> ${escapeHtml(input.nextAction)}</p>` : ""}
+          ${resolution}
+          ${resolutionMessage}
+          ${bookingLink}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function getCourseSupportOperatorSubject(input: CourseSupportOperatorEmailInput) {
+  if (input.event === "opened") {
+    return `Action needed: monitoring gap at ${input.courseName}`;
+  }
+  if (input.event === "escalated") {
+    return `Human review needed: ${input.courseName}`;
+  }
+  return `Resolved: ${input.courseName} monitoring incident`;
 }
 
 export function renderAlertHtml(input: TeeTimeAlertInput) {

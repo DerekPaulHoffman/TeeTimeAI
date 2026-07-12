@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   buildBrowserDiscovery,
+  enrichChronogolfDiscovery,
   getBestProbeUrl,
   shouldQueueBrowserProbe,
   type BrowserDiscoveryEvidence
@@ -330,3 +331,79 @@ describe("browser probe target selection", () => {
     ).toBe("https://booking.example.com/tee-times");
   });
 });
+
+describe("Chronogolf public profile enrichment", () => {
+  it("classifies a club with online booking disabled as direct-contact only", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "pequabuck",
+      courseName: "Pequabuck Golf Club",
+      sourceUrl: "https://pequabuckgolf.com/",
+      observedUrls: ["https://chronogolf.com/club/3563/ping"]
+    });
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      url: "https://www.chronogolf.com/club/pequabuck-golf-club-of-bristol",
+      text: vi.fn().mockResolvedValue(
+        chronogolfNextData({ onlineBookingEnabled: false, courses: [] })
+      )
+    });
+
+    const enriched = await enrichChronogolfDiscovery(discovery, fetchImpl as typeof fetch);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://www.chronogolf.com/club/3563",
+      expect.objectContaining({ redirect: "follow" })
+    );
+    expect(enriched).toEqual(
+      expect.objectContaining({
+        status: "VERIFIED",
+        detectedPlatform: "CHRONOGOLF",
+        bookingMethod: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        confidence: 0.95
+      })
+    );
+    expect(enriched.policyNotes).toContain("onlineBookingEnabled=false");
+  });
+
+  it("keeps an online-enabled Chronogolf club in human review until an adapter is verified", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-chrono",
+      courseName: "Public Chronogolf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://www.chronogolf.com/club/4444/ping"]
+    });
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      url: "https://www.chronogolf.com/club/public-chrono",
+      text: vi.fn().mockResolvedValue(
+        chronogolfNextData({ onlineBookingEnabled: true, courses: [{ id: 1 }] })
+      )
+    });
+
+    const enriched = await enrichChronogolfDiscovery(discovery, fetchImpl as typeof fetch);
+
+    expect(enriched).toEqual(
+      expect.objectContaining({
+        status: "INSPECTED",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "UNSUPPORTED_PLATFORM"
+      })
+    );
+  });
+});
+
+function chronogolfNextData(input: { onlineBookingEnabled: boolean; courses: unknown[] }) {
+  return `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+    props: {
+      pageProps: {
+        club: {
+          features: { onlineBookingEnabled: input.onlineBookingEnabled },
+          courses: input.courses
+        }
+      }
+    }
+  })}</script></html>`;
+}

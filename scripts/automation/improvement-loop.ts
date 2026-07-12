@@ -114,7 +114,14 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
   const recentSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const today = startOfUtcCalendarDay();
 
-  const [activeSearchCount, pendingAlerts, probes, recentRuns, recentDiscoveries] = await Promise.all([
+  const [
+    activeSearchCount,
+    pendingAlerts,
+    probes,
+    openSupportIncidents,
+    recentRuns,
+    recentDiscoveries
+  ] = await Promise.all([
     prisma.teeSearch.count({
       where: {
         status: "ACTIVE",
@@ -161,6 +168,23 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         course: true
       }
     }),
+    prisma.courseSupportIncident.findMany({
+      where: {
+        status: { not: "RESOLVED" },
+        course: {
+          preferences: {
+            some: {
+              teeSearch: {
+                status: "ACTIVE",
+                date: { gte: today }
+              }
+            }
+          }
+        }
+      },
+      orderBy: [{ status: "desc" }, { firstSeenAt: "asc" }],
+      include: { course: true }
+    }),
     prisma.automationRun.findMany({
       orderBy: {
         startedAt: "desc"
@@ -178,6 +202,29 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     })
   ]);
 
+  const incidentCourseIds = new Set(openSupportIncidents.map((incident) => incident.courseId));
+  const probeCandidates = latestProbePerCourseSearch(probes).flatMap((probe) => {
+    const outcome = probe.outcome;
+    if (
+      incidentCourseIds.has(probe.courseId) ||
+      probe.course.automationEligibility === "BLOCKED" ||
+      !isActionableProbeOutcome(outcome)
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        id: probe.id,
+        outcome,
+        courseName: probe.course.name,
+        platform: probe.course.detectedPlatform,
+        observedAt: probe.observedAt.toISOString(),
+        message: probe.message
+      }
+    ];
+  });
+
   return {
     activeSearchCount,
     pendingAlerts: pendingAlerts.map((alert) => ({
@@ -185,27 +232,17 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       courseName: alert.course.name,
       firstSeenAt: alert.firstSeenAt.toISOString()
     })),
-    actionableProbes: latestProbePerCourseSearch(probes).flatMap((probe) => {
-      const outcome = probe.outcome;
-      if (probe.course.automationEligibility === "BLOCKED") {
-        return [];
-      }
-
-      if (!isActionableProbeOutcome(outcome)) {
-        return [];
-      }
-
-      return [
-        {
-          id: probe.id,
-          outcome,
-          courseName: probe.course.name,
-          platform: probe.course.detectedPlatform,
-          observedAt: probe.observedAt.toISOString(),
-          message: probe.message
-        }
-      ];
-    }),
+    actionableProbes: [
+      ...openSupportIncidents.map((incident) => ({
+        id: incident.id,
+        outcome: incident.kind,
+        courseName: incident.course.name,
+        platform: incident.course.detectedPlatform,
+        observedAt: incident.lastSeenAt.toISOString(),
+        message: `${incident.status}: ${incident.latestMessage ?? incident.initialMessage ?? "Course monitoring incident remains unresolved."}`
+      })),
+      ...probeCandidates
+    ],
     learningSignals: buildLearningSignals(recentRuns, recentDiscoveries)
   };
 }

@@ -2,7 +2,11 @@ import "./load-local-env";
 
 import { chromium, type Page } from "playwright";
 
-import { buildBrowserDiscovery, type BrowserDiscoveryEvidence } from "@/lib/automation/browser-discovery";
+import {
+  buildBrowserDiscovery,
+  enrichChronogolfDiscovery,
+  type BrowserDiscoveryEvidence
+} from "@/lib/automation/browser-discovery";
 import {
   applyBrowserDiscoveryToCourse,
   finishAutomationRun,
@@ -11,6 +15,7 @@ import {
   recordCourseProbe,
   startAutomationRun
 } from "@/lib/automation/db-service";
+import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { prisma } from "@/lib/prisma";
 
 const PROMPT_VERSION = "tee-time-spot-browser-probe-v1";
@@ -41,17 +46,32 @@ async function main() {
             courseName: target.course.name,
             sourceUrl: target.probeUrl
           });
-          const discovery = buildBrowserDiscovery(evidence);
+          const discovery = await enrichChronogolfDiscovery(buildBrowserDiscovery(evidence));
 
           await recordBrowserDiscovery(discovery);
-          await applyBrowserDiscoveryToCourse(discovery);
+          const appliedCourse = await applyBrowserDiscoveryToCourse(discovery);
+          const directBookingVerified =
+            appliedCourse &&
+            discovery.automationEligibility === "BLOCKED" &&
+            ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+              discovery.bookingMethod ?? "UNKNOWN"
+            );
+          if (directBookingVerified) {
+            await resolveCourseSupportIncident({
+              courseId: target.course.id,
+              resolution: "DIRECT_BOOKING_CLASSIFIED",
+              message: `${target.course.name} was verified as ${discovery.bookingMethod}; automatic monitoring is not available.`
+            });
+          }
           await recordCourseProbe({
             searchId: target.searchId,
             courseId: target.course.id,
             automationRunId: run.id,
-            outcome: discovery.status === "LEARNED" ? "NEEDS_ADAPTER" : "NEEDS_ADAPTER",
+            outcome: directBookingVerified ? "BLOCKED_POLICY" : "NEEDS_ADAPTER",
             message:
-              discovery.status === "LEARNED"
+              directBookingVerified
+                ? `Browser probe verified direct booking classification: ${discovery.bookingMethod}.`
+                : discovery.status === "LEARNED"
                 ? `Browser probe learned ${discovery.detectedPlatform} adapter metadata; rerun the poller to verify tee-sheet retrieval.`
                 : `Browser probe inspected site but did not learn a reusable adapter yet.`,
             evidenceUrl: discovery.bookingUrl,

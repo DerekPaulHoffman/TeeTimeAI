@@ -17,6 +17,10 @@ import {
 } from "@/lib/automation/db-service";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import { evaluateAutomationPolicy } from "@/lib/automation/policy";
+import {
+  reportCourseSupportIssue,
+  resolveCourseSupportIncident
+} from "@/lib/automation/support-incidents";
 import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
@@ -197,6 +201,11 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "BLOCKED_POLICY",
         message: policy.reason
       });
+      await resolveCourseSupportIncident({
+        courseId: course.id,
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        message: `${course.name} was conclusively classified for direct booking: ${policy.reason}`
+      });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -229,6 +238,15 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           browserProbeUrl
         }
       });
+      const supportIssue = await reportCourseSupportIssue({
+        course,
+        searchId: search.id,
+        kind: "NEEDS_ADAPTER",
+        message,
+        nextAction: browserProbeQueued
+          ? `Inspect ${browserProbeUrl} with automation:browser-probe and verify a policy-safe public adapter.`
+          : "Classify the official booking method and determine whether policy-safe monitoring is possible."
+      });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -239,7 +257,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
-        bookingAccess: getCourseBookingAccess(course)
+        bookingAccess: getCourseBookingAccess(course),
+        supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
       continue;
     }
@@ -297,6 +316,11 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           ...(pricing ? { pricing } : {})
         }
       });
+      await resolveCourseSupportIncident({
+        courseId: course.id,
+        resolution: "MONITORING_RESTORED",
+        message: `${course.name} completed a policy-safe automated tee-sheet check with outcome ${outcome}.`
+      });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -332,6 +356,13 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "FETCH_FAILED",
         message
       });
+      const supportIssue = await reportCourseSupportIssue({
+        course,
+        searchId: search.id,
+        kind: "FETCH_FAILED",
+        message,
+        nextAction: "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
+      });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -342,7 +373,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
-        bookingAccess: getCourseBookingAccess(course)
+        bookingAccess: getCourseBookingAccess(course),
+        supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
     }
   }

@@ -17,6 +17,9 @@ vi.mock("@/lib/prisma", () => ({
       create: vi.fn(),
       findMany: vi.fn()
     },
+    courseSupportIncident: {
+      findMany: vi.fn()
+    },
     teeSearch: {
       findMany: vi.fn()
     }
@@ -28,6 +31,7 @@ const mockedPrisma = vi.mocked(prisma, { deep: true });
 describe("browser discovery persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([]);
   });
 
   it("records browser evidence and learned API metadata", async () => {

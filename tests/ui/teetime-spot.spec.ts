@@ -422,13 +422,13 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByTitle("Rendered tee time alert email")).toBeVisible();
 
     const statusFrame = page.frameLocator("iframe[title='Rendered search status email']");
-    await expect(statusFrame.locator("body")).toContainText("We’re working on your tee times");
+    await expect(statusFrame.locator("body")).toContainText("Your tee-time alert is active");
     await expect(statusFrame.locator("body")).toContainText("Fairview Farm Golf Course");
     await expect(statusFrame.locator("body")).toContainText("Phone only");
     await expect(statusFrame.getByRole("link", { name: "Call (860) 689-1000" })).toBeVisible();
     await expect(statusFrame.locator("body")).toContainText("No time in your window");
     await expect(statusFrame.locator("body")).toContainText("Nothing visible for this date yet");
-    await expect(statusFrame.locator("body")).toContainText("We’re working on it");
+    await expect(statusFrame.locator("body")).toContainText("Needs support");
     await expect(statusFrame.locator("body")).toContainText(
       /at most one morning status update per day/i
     );

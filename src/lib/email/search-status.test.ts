@@ -106,10 +106,11 @@ describe("renderSearchStatusHtml", () => {
       courses
     });
 
-    expect(html).toContain("We’re working on your tee times");
+    expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("We’re working on a safe connection");
+    expect(html).toContain("Needs support");
+    expect(html).toContain("Automatic monitoring isn’t available yet");
     expect(html).toContain("keep checking fully monitored courses");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we’re watching for you");
@@ -226,6 +227,49 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Call +1 (203) 555-0199 →");
     expect(html).toContain("Open official site →");
     expect(html).not.toContain("Open official booking page");
+  });
+
+  it("only claims the team was alerted when operator delivery succeeded", () => {
+    const baseInput = {
+      searchId: "search-1",
+      to: "player@example.com",
+      kind: "daily" as const,
+      targetDate: "2026-07-12",
+      startTime: "13:40",
+      endTime: "16:00",
+      players: 3,
+      checkedAt: new Date("2026-07-12T12:15:00.000Z")
+    };
+    const pendingHtml = renderSearchStatusHtml({
+      ...baseInput,
+      courses: [
+        {
+          courseId: "pequabuck",
+          courseName: "Pequabuck Golf Club",
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          supportStatus: "PENDING_ALERT"
+        }
+      ]
+    });
+    const alertedHtml = renderSearchStatusHtml({
+      ...baseInput,
+      courses: [
+        {
+          courseId: "pequabuck",
+          courseName: "Pequabuck Golf Club",
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          supportStatus: "TEAM_ALERTED"
+        }
+      ]
+    });
+
+    expect(pendingHtml).toContain("Needs support");
+    expect(pendingHtml).not.toContain("Our team has been alerted");
+    expect(alertedHtml).toContain("Team alerted");
+    expect(alertedHtml).toContain("Our team has been alerted");
+    expect(alertedHtml).not.toContain("We’re working on it");
   });
 });
 

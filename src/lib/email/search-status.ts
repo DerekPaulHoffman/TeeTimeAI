@@ -25,6 +25,7 @@ export type SearchStatusCourseReport = {
   bookingUrl?: string;
   phone?: string;
   bookingMethod?: BookingMethod;
+  supportStatus?: "TEAM_ALERTED" | "PENDING_ALERT";
   bookingAccess?:
     | "BOOKING_PAGE"
     | "OFFICIAL_SITE"
@@ -159,7 +160,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     timeZone: normalizeTimeZone(input.userTimeZone, DEFAULT_TIME_ZONE),
     timeZoneName: "short"
   });
-  const heading = input.kind === "setup" ? "We’re working on your tee times" : "Your morning tee-time update";
+  const heading = input.kind === "setup" ? "Your tee-time alert is active" : "Your morning tee-time update";
   const badge = input.kind === "setup" ? "Search is active" : "Morning update";
   const hasDirectOnlyCourse = input.courses.some(
     (course) => course.outcome === "BLOCKED_POLICY"
@@ -172,7 +173,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
       ? hasDirectOnlyCourse
         ? "Your alert is set. We’ll keep checking supported courses; courses marked Official site only or Phone only are not automatically monitored."
         : hasWorkInProgressCourse
-          ? "Your alert is set. We’ll keep checking fully monitored courses while we work on connecting the others."
+          ? "Your alert is set. We’ll keep checking fully monitored courses. Courses marked Needs support require a direct check until monitoring is verified."
         : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
@@ -308,9 +309,10 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   }
 
   if (course.outcome === "NEEDS_ADAPTER") {
+    const teamAlerted = course.supportStatus === "TEAM_ALERTED";
     return {
-      monitoringLabel: "We’re working on it",
-      stateLabel: "Automatic monitoring isn’t ready yet",
+      monitoringLabel: teamAlerted ? "Team alerted" : "Needs support",
+      stateLabel: "Automatic monitoring isn’t available yet",
       icon: "↗",
       color: "#c75c0a",
       badgeBackground: "#fff0e4",
@@ -318,17 +320,20 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff8f2",
       calloutBorder: "#f3cfad",
       calloutText: "#713706",
-      detail: course.bookingUrl
-        ? "We found this course’s official booking page and we’re working on a safe connection. Check their site directly in the meantime."
-        : course.phone
-          ? "We’re working on a safe connection. Call the course directly in the meantime."
-          : "We’re working on a safe connection. Check back soon for an update."
+      detail: `${teamAlerted ? "Our team has been alerted, and this course will stay on the support queue until it is resolved. " : ""}${
+        course.bookingUrl
+          ? "Check the official site directly in the meantime."
+          : course.phone
+            ? "Call the course directly in the meantime."
+            : "Automatic availability checks are not currently available for this course."
+      }`
     };
   }
 
   if (course.outcome === "FETCH_FAILED") {
+    const teamAlerted = course.supportStatus === "TEAM_ALERTED";
     return {
-      monitoringLabel: "Monitoring · retrying",
+      monitoringLabel: teamAlerted ? "Team alerted · retrying" : "Monitoring retrying",
       stateLabel: "Latest check incomplete",
       icon: "↻",
       color: "#a23a32",
@@ -337,7 +342,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff5f3",
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
-      detail: "This course’s latest check did not finish. We’ll retry automatically; its official page is available in the meantime."
+      detail: `This course’s latest check did not finish. We’ll retry automatically.${teamAlerted ? " Our team has been alerted, and the issue will remain open until monitoring succeeds or the course is reclassified." : ""} Its official page is available in the meantime.`
     };
   }
 

@@ -87,6 +87,24 @@ enum FeedbackSentiment {
   BROKEN
 }
 
+enum CourseSupportIncidentStatus {
+  AUTO_INVESTIGATING
+  NEEDS_HUMAN
+  RESOLVED
+}
+
+enum CourseSupportIncidentKind {
+  NEEDS_ADAPTER
+  FETCH_FAILED
+  BLOCKED_AUTH
+  BLOCKED_TOOLING
+}
+
+enum CourseSupportResolution {
+  MONITORING_RESTORED
+  DIRECT_BOOKING_CLASSIFIED
+}
+
 model User {
   id          String      @id @default(cuid())
   clerkUserId String      @unique
@@ -129,6 +147,7 @@ model Course {
   probes                 CourseProbe[]
   matches                TeeTimeMatch[]
   automationDiscoveries  CourseAutomationDiscovery[]
+  supportIncident        CourseSupportIncident?
 
   @@index([latitude, longitude])
   @@index([detectedPlatform, automationEligibility])
@@ -260,6 +279,39 @@ model CourseAutomationDiscovery {
   @@index([status, createdAt])
   @@index([detectedPlatform, createdAt])
   @@index([bookingMethod, createdAt])
+}
+
+model CourseSupportIncident {
+  id                    String                      @id @default(cuid())
+  courseId              String                      @unique
+  firstAffectedSearchId String?
+  cycle                 Int                         @default(1)
+  status                CourseSupportIncidentStatus @default(AUTO_INVESTIGATING)
+  kind                  CourseSupportIncidentKind
+  courseNameSnapshot    String
+  platformSnapshot      DetectedPlatform
+  bookingUrlSnapshot    String?
+  initialMessage        String?
+  latestMessage         String?
+  nextAction            String?
+  affectedSearchCount   Int                         @default(1)
+  occurrenceCount       Int                         @default(1)
+  firstSeenAt           DateTime                    @default(now())
+  lastSeenAt            DateTime                    @default(now())
+  ownerNotifiedAt       DateTime?
+  escalatedAt           DateTime?
+  escalationNotifiedAt  DateTime?
+  resolvedAt            DateTime?
+  resolution            CourseSupportResolution?
+  resolutionMessage     String?
+  resolutionNotifiedAt  DateTime?
+  createdAt             DateTime                    @default(now())
+  updatedAt             DateTime                    @updatedAt
+  course                Course                      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@index([status, lastSeenAt])
+  @@index([ownerNotifiedAt])
+  @@index([resolutionNotifiedAt])
 }
 
 model WebsiteEvent {

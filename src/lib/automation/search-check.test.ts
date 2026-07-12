@@ -26,9 +26,15 @@ const adapterMocks = vi.hoisted(() => ({
   isForeupMetadata: vi.fn()
 }));
 
+const supportIncidentMocks = vi.hoisted(() => ({
+  reportCourseSupportIssue: vi.fn(),
+  resolveCourseSupportIncident: vi.fn()
+}));
+
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
+vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 
 import { runSearchCheck } from "./search-check";
 
@@ -116,6 +122,12 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(true);
     adapterMocks.fetchForeupSlots.mockResolvedValue([]);
+    supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: true
+    });
+    supportIncidentMocks.resolveCourseSupportIncident.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -239,5 +251,38 @@ describe("runSearchCheck email cadence", () => {
         availableMatches: 0
       })
     ]);
+  });
+
+  it("opens a persistent operator incident for unsupported courses", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchId: "search-1",
+        kind: "NEEDS_ADAPTER"
+      })
+    );
+    expect(result.courseResults[0]).toEqual(
+      expect.objectContaining({
+        outcome: "NEEDS_ADAPTER",
+        supportStatus: "TEAM_ALERTED"
+      })
+    );
   });
 });

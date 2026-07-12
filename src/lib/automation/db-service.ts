@@ -94,23 +94,35 @@ export async function getActiveSearchForAutomation(
 }
 
 export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTarget[]> {
-  const searches = await prisma.teeSearch.findMany({
-    where: {
-      status: "ACTIVE",
-      date: {
-        gte: startOfUtcCalendarDay()
+  const [searches, openIncidents] = await Promise.all([
+    prisma.teeSearch.findMany({
+      where: {
+        status: "ACTIVE",
+        date: {
+          gte: startOfUtcCalendarDay()
+        }
+      },
+      orderBy: [{ date: "asc" }, { createdAt: "asc" }],
+      include: {
+        preferences: {
+          orderBy: { rank: "asc" },
+          include: { course: true }
+        }
       }
-    },
-    orderBy: [{ date: "asc" }, { createdAt: "asc" }],
-    include: {
-      preferences: {
-        orderBy: { rank: "asc" },
-        include: { course: true }
-      }
-    }
-  });
+    }),
+    prisma.courseSupportIncident.findMany({
+      where: { status: { not: "RESOLVED" } },
+      select: { courseId: true, status: true }
+    })
+  ]);
+  const incidentPriority = new Map(
+    openIncidents.map((incident) => [
+      incident.courseId,
+      incident.status === "NEEDS_HUMAN" ? 0 : 1
+    ])
+  );
 
-  const targets: BrowserProbeTarget[] = [];
+  const targets: Array<BrowserProbeTarget & { supportPriority: number }> = [];
   const queuedCourseIds = new Set<string>();
 
   for (const search of searches) {
@@ -138,17 +150,26 @@ export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTa
           automationEligibility: course.automationEligibility,
           bookingMetadata: course.bookingMetadata
         },
-        probeUrl
+        probeUrl,
+        supportPriority: incidentPriority.get(course.id) ?? 2
       });
       queuedCourseIds.add(course.id);
-
-      if (targets.length >= limit) {
-        return targets;
-      }
     }
   }
 
-  return targets;
+  return targets
+    .sort((left, right) => left.supportPriority - right.supportPriority || left.rank - right.rank)
+    .slice(0, limit)
+    .map((target) => ({
+      searchId: target.searchId,
+      date: target.date,
+      startTime: target.startTime,
+      endTime: target.endTime,
+      players: target.players,
+      rank: target.rank,
+      course: target.course,
+      probeUrl: target.probeUrl
+    }));
 }
 
 export async function listPendingMatchAlerts(searchId?: string): Promise<PendingAlertMatch[]> {
@@ -257,6 +278,7 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
       bookingMethod,
       bookingPhone: input.bookingPhone,
       automationReason: input.automationReason ?? "NONE",
+      policyNotes: input.policyNotes,
       intelligenceVerifiedAt: new Date(),
       intelligenceReviewAt: input.intelligenceReviewAt
         ? new Date(input.intelligenceReviewAt)

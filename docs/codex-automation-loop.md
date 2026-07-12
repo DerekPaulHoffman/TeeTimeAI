@@ -8,6 +8,7 @@ Tee Time Spot uses Postgres as the queue of user demand, durable per-search Verc
 - Daily recovery: query only for overdue or failed workflow schedules and restart those searches; do not fetch course availability when the recovery queue is empty.
 - Email cadence: the first completed check sends one setup report containing current results and does not also send an instant match email. Later status reports become due after 8:00 AM in the golfer's timezone, and a new-opening alert on that check satisfies the morning update instead of creating a second email.
 - Reopened matches alert again only after they were continuously unavailable for at least 30 minutes, which prevents short provider inventory flaps from creating repeat email noise.
+- Course support: the first `NEEDS_ADAPTER` or `FETCH_FAILED` result opens a persistent `CourseSupportIncident` and immediately attempts a deduplicated operator email. Unresolved incidents escalate to `NEEDS_HUMAN` after 30 minutes, remain actionable regardless of probe age, and send a resolution email only after monitoring succeeds or direct-booking classification is verified.
 - Hourly: run one complete autonomous improvement cycle: inspect evidence, select one candidate, implement it, verify it, commit it, push it, deploy live-impacting work, verify production, and record what was learned.
 - Baseline UI/access check: run `npm run ui:smoke` locally, or set `UI_SMOKE_BASE_URL=https://teetimespot.com` before `npm run ui:smoke` for production.
 - Before deploys: run `npm run test:run`, `npm run lint`, `npm run build`, and `npm run ui:smoke`.
@@ -20,7 +21,7 @@ The loop should improve the product every time it has credible evidence to act. 
 - Run `npm run automation:inspect` and `npm run ui:smoke` before choosing a candidate unless a provider outage makes the smoke impossible. A smoke failure is evidence, not noise.
 - Treat `AutomationRun.notes`, `WebsiteEvent`, `WebsiteFeedback`, recent browser discoveries, probe history, and deployment notes as a living learning ledger. Each loop should record what went right, what went wrong, what assumption changed, and the next concrete action.
 - Repeated work must decay. If the same course, tool, provider, or UI issue has been inspected repeatedly with no new evidence, mark it stale or blocked and rotate to a different evidence-backed candidate.
-- A loop that has no fresh queue blocker, smoke failure, provider drift, new research finding, or learnable adapter should return `no_op` instead of inventing polish work.
+- A loop that has no open course-support incident, fresh queue blocker, smoke failure, provider drift, new research finding, or learnable adapter should return `no_op` instead of inventing polish work. An active unresolved `CourseSupportIncident` can never be aged into `no_op`.
 - Use normalized terminal outcomes: `success`, `no_op`, `incident`, `needs_adapter`, `blocked_policy`, `blocked_auth`, `blocked_tooling`, `blocked_env`, `blocked_dirty_worktree`, `blocked_git`, `blocked_concurrent`, and `needs_human`.
 - Keep side effects idempotent. Email alerts, GitHub pushes, and future Slack/GitHub comments need stable keys so a retry cannot duplicate them.
 - Use a per-loop lease before mutating shared state so concurrent runs do not work the same candidate.
@@ -86,20 +87,21 @@ Each automation run should:
 1. Confirm a clean checkout whose `HEAD` is synchronized with `origin/main`, and record the starting SHA and preflight push command.
 2. Create an `AutomationRun` row with a prompt version.
 3. Load active `TeeSearch` rows and ranked `CoursePreference` rows.
-4. Load current evidence from `WebsiteEvent`, `WebsiteFeedback`, recent learning signals, `CourseAutomationDiscovery`, current probes, smoke evidence, deployment notes, and recent Vercel logs.
+4. Load current evidence from open `CourseSupportIncident` rows, `WebsiteEvent`, `WebsiteFeedback`, recent learning signals, `CourseAutomationDiscovery`, current probes, smoke evidence, deployment notes, and recent Vercel logs.
 5. Select one evidence-backed candidate, preferring production incidents, real-user blockers, alert failures, adapter gaps, funnel regressions, repeated feedback, and verified UI/access failures in that order.
 6. Evaluate the reusable course-intelligence snapshot (`bookingMethod`, `automationEligibility`, `automationReason`, `policyNotes`, and review date) before fetching. Terminal findings such as phone-only booking must not return to normal per-search adapter probing; surface them as dedicated review work once `intelligenceReviewAt` is due.
 7. Use the matching adapter only when `detectedPlatform` and `bookingMetadata` are known.
 8. Run a current-tool/design research pass only when it can change the selected implementation strategy.
 9. Implement one coherent improvement with focused tests and documentation where behavior changed.
-10. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers when worker behavior is explicitly verified.
-11. Upsert `TeeTimeMatch` rows and send Resend alerts only through the normal idempotent worker path.
-12. Run focused verification plus `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check`.
-13. Inspect the final diff, stage only intended files, create one coherent commit, and run the push command reported by preflight without force.
-14. Apply only safe additive production migrations, then deploy live-impacting work to Vercel.
-15. Verify the production deployment, aliases, routes/APIs, desktop/mobile smoke, logs, and expected behavior.
-16. Confirm the working tree is clean and checked-out `HEAD` matches `origin/main` after the push.
-17. Finish the `AutomationRun` and automation memory with outcome, evidence, checkpoints, commit SHA, deployment ID, changed files, verification, learning signals, changed assumptions, and blockers. Do not write a repo note for `no_op`.
+10. Record `CourseProbe` rows for `NO_MATCH`, `MATCH_FOUND`, `NEEDS_ADAPTER`, `FETCH_FAILED`, and blockers when worker behavior is explicitly verified. Browser probing must prioritize courses with open incidents.
+11. Open, touch, escalate, or resolve course-support incidents through the normal search-check/browser-probe paths. Only customer emails with a confirmed operator delivery may say the team was alerted.
+12. Upsert `TeeTimeMatch` rows and send Resend alerts only through the normal idempotent worker path.
+13. Run focused verification plus `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check`.
+14. Inspect the final diff, stage only intended files, create one coherent commit, and run the push command reported by preflight without force.
+15. Apply only safe additive production migrations, then deploy live-impacting work to Vercel.
+16. Verify the production deployment, aliases, routes/APIs, desktop/mobile smoke, logs, and expected behavior.
+17. Confirm the working tree is clean and checked-out `HEAD` matches `origin/main` after the push.
+18. Finish the `AutomationRun` and automation memory with outcome, evidence, checkpoints, commit SHA, deployment ID, changed files, verification, learning signals, changed assumptions, and blockers. Do not write a repo note for `no_op`.
 
 ## UI Smoke Contract
 
