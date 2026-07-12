@@ -1274,7 +1274,26 @@ function MissingCourseLookup({
             return (
               <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
                 <CourseThumbnail course={course} variant="compact" />
-                <div>
+                <div className="missing-course-copy">
+                  <div className="figma-course-badges missing-course-badges">
+                    <span className="figma-course-pill is-public">
+                      <Trees size={11} /> Public
+                    </span>
+                    {isManualOnly && course.alertSupport ? (
+                      <span className="figma-course-pill is-official-site-only">
+                        <CircleOff size={11} /> {getAlertSupportLabel(course.alertSupport)}
+                      </span>
+                    ) : null}
+                    {course.layoutHoleCounts?.length ? (
+                      <span className="figma-course-pill">
+                        <Flag size={11} /> {getCourseLayoutLabel(course.layoutHoleCounts)} course
+                      </span>
+                    ) : requestedLayoutHoles ? (
+                      <span className="figma-course-pill">
+                        <Flag size={11} /> Layout unverified
+                      </span>
+                    ) : null}
+                  </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
                   {course.distanceMeters !== undefined ? (
@@ -1284,7 +1303,12 @@ function MissingCourseLookup({
                   ) : null}
                   {isManualOnly && course.alertSupport ? (
                     <span className="missing-course-support">
-                      {getAlertSupportLabel(course.alertSupport)} - not checked automatically
+                      Not checked automatically
+                    </span>
+                  ) : null}
+                  {isIncompatible && requestedLayoutHoles ? (
+                    <span className="missing-course-support">
+                      Does not match an {requestedLayoutHoles}-hole course search
                     </span>
                   ) : null}
                 </div>

@@ -3089,6 +3089,7 @@ button {
   gap: 24px;
   grid-template-columns: minmax(0, 1fr) 320px;
   margin-top: 24px;
+  scroll-margin-top: 76px;
 }
 
 .figma-results-column {
@@ -3397,6 +3398,7 @@ button {
   border-radius: 14px;
   display: grid;
   gap: 12px;
+  grid-template-areas: "thumbnail copy actions";
   grid-template-columns: 66px minmax(0, 1fr) auto;
   min-height: 70px;
   overflow: hidden;
@@ -3434,6 +3436,15 @@ button {
   margin-top: 4px;
 }
 
+.missing-course-copy {
+  grid-area: copy;
+  min-width: 0;
+}
+
+.missing-course-badges {
+  margin-bottom: 5px;
+}
+
 .missing-course-support {
   color: #8a4f19;
   display: block;
@@ -3460,6 +3471,7 @@ button {
   font-size: 0.73rem;
   font-weight: 850;
   gap: 5px;
+  grid-area: actions;
   justify-content: center;
   min-height: 34px;
   padding: 0 13px;
@@ -3709,20 +3721,32 @@ button {
 
   .missing-course-result {
     align-items: stretch;
-    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 0;
+    grid-template-areas:
+      "thumbnail"
+      "copy"
+      "actions";
+    grid-template-columns: minmax(0, 1fr);
     padding: 0;
   }
 
-  .missing-course-result > div:nth-child(2) {
+  .missing-course-result .course-thumbnail,
+  .missing-course-result .course-thumbnail-compact {
+    border-radius: 13px 13px 0 0;
+    height: 128px;
+    min-height: 128px;
+    width: 100%;
+  }
+
+  .missing-course-copy {
     align-self: center;
-    padding: 9px 10px 2px 0;
+    padding: 12px 16px 8px;
   }
 
   .missing-course-result .figma-add-button {
-    border-radius: 9px;
-    grid-column: 2;
-    justify-self: start;
-    margin: 0 0 9px;
+    border-radius: 999px;
+    justify-self: stretch;
+    margin: 0 16px 12px;
   }
 }
 
@@ -5341,6 +5365,14 @@ button {
   padding: 12px 16px;
 }
 
+.watch-course-badges {
+  margin-bottom: 6px;
+}
+
+.watch-course-badges .figma-course-pill {
+  min-height: 22px;
+}
+
 .watch-course-links {
   align-self: stretch;
   justify-content: center;
@@ -5428,8 +5460,13 @@ button {
 
   .mobile-selection-bar {
     background: #111a22;
+    border-top: 2px solid var(--flag);
     border-radius: 0;
     bottom: 0;
+    box-shadow:
+      0 -4px 0 rgba(226, 138, 47, 0.2),
+      0 -14px 34px rgba(226, 138, 47, 0.34),
+      0 -24px 48px rgba(17, 29, 24, 0.2);
     display: block;
     padding: 0;
     z-index: 32;

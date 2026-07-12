@@ -20,6 +20,7 @@ playwright-report/
 test-results/
 tsconfig.tsbuildinfo
 .codex-artifacts/
+.codex-remote-attachments/
 
 # IDE
 .vscode/

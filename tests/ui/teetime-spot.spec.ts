@@ -180,6 +180,21 @@ test.describe("Tee Time Spot UI smoke", () => {
     const laterCourse = courseRows.nth(4);
     await laterCourse.getByRole("button", { name: /Add/i }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
+    if (isMobile) {
+      const mobileSelectionBar = page.locator(".mobile-selection-bar");
+      await expect(mobileSelectionBar).toBeVisible();
+      const mobileBarStyles = await mobileSelectionBar.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        return {
+          borderTopColor: styles.borderTopColor,
+          borderTopWidth: styles.borderTopWidth,
+          boxShadow: styles.boxShadow
+        };
+      });
+      expect(mobileBarStyles.borderTopWidth).toBe("2px");
+      expect(mobileBarStyles.borderTopColor).toBe("rgb(226, 138, 47)");
+      expect(mobileBarStyles.boxShadow).toContain("rgba(226, 138, 47");
+    }
     expect(
       await courseRows.locator("h3").allTextContents(),
       "adding a course should preserve the discovery order so users can keep moving through the list"
@@ -226,8 +241,19 @@ test.describe("Tee Time Spot UI smoke", () => {
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });
     await expect(blockedCourseResult).toContainText(
-      "Phone only - not checked automatically"
+      "Phone only"
     );
+    await expect(blockedCourseResult).toContainText("Not checked automatically");
+    await expect(blockedCourseResult.locator(".figma-course-pill.is-public")).toHaveText("Public");
+    if (isMobile) {
+      const resultBox = await blockedCourseResult.boundingBox();
+      const thumbnailBox = await blockedCourseResult.locator(".course-thumbnail").boundingBox();
+      expect(resultBox).not.toBeNull();
+      expect(thumbnailBox).not.toBeNull();
+      expect(resultBox!.height, "manual course results should stay compact on mobile").toBeLessThan(360);
+      expect(thumbnailBox!.width).toBeGreaterThan(resultBox!.width - 4);
+      expect(Math.abs(thumbnailBox!.y - resultBox!.y)).toBeLessThan(2);
+    }
     await blockedCourseResult.getByRole("button", { name: "Add Fairview Farm Golf Course" }).click();
     if (isMobile) {
       await page.locator(".mobile-selection-toggle").click();

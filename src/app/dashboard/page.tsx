@@ -4,6 +4,7 @@ import { auth } from "@clerk/nextjs/server";
 import {
   CalendarDays,
   CalendarClock,
+  CircleOff,
   CirclePause,
   Clock3,
   ExternalLink,
@@ -13,6 +14,7 @@ import {
   Play,
   Plus,
   ShieldAlert,
+  Trees,
   Users
 } from "lucide-react";
 
@@ -327,12 +329,17 @@ function DashboardSearchCard({
                   rank={preference.rank}
                 />
                 <div className="watch-course-copy">
-                  <strong>{preference.course.name}</strong>
-                  {alertSupport ? (
-                    <span className="watch-course-support">
-                      {getAlertSupportLabel(alertSupport)}
+                  <div className="figma-course-badges watch-course-badges">
+                    <span className="figma-course-pill is-public">
+                      <Trees size={11} /> Public
                     </span>
-                  ) : null}
+                    {alertSupport ? (
+                      <span className="figma-course-pill is-official-site-only">
+                        <CircleOff size={11} /> {getAlertSupportLabel(alertSupport)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <strong>{preference.course.name}</strong>
                   <p className="meta">
                     <MapPin size={12} />
                     {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
