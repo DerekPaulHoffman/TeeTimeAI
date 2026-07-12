@@ -218,7 +218,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       const message = browserProbeQueued
         ? `No supported adapter yet for ${course.detectedPlatform}; queued for browser probe.`
         : `No supported adapter yet for ${course.detectedPlatform}`;
-      await recordCourseProbe({
+      await recordCourseProbeIfChanged({
         searchId: search.id,
         courseId: course.id,
         automationRunId,

@@ -161,6 +161,35 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
+  it("records an unchanged unsupported course probe only once", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            bookingMethod: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            automationReason: "NONE",
+            policyNotes: null
+          }
+        }
+      ]
+    });
+
+    await runSearchCheck("search-1", "test");
+
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "course-1",
+        outcome: "NEEDS_ADAPTER",
+        message: expect.stringContaining("queued for browser probe")
+      })
+    );
+    expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
+  });
+
   it("does not fetch or alert a legacy course with a verified incompatible layout", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
