@@ -60,7 +60,7 @@ function main() {
       cwd,
       branch,
       startingSha,
-      message: "Automation must run from main or a clean detached Codex worktree."
+      message: "Automation must run from a dedicated named task branch created from origin/main; main and detached HEAD are not valid work branches."
     });
     return;
   }
@@ -128,10 +128,7 @@ function main() {
     finalSha,
     ahead: 0,
     behind: 0,
-    message:
-      checkoutMode === "detached"
-        ? "Automation preflight passed; detached HEAD is clean and synchronized with origin/main."
-        : "Automation preflight passed; main is clean and synchronized with origin/main."
+    message: "Automation preflight passed; the named task branch is clean and synchronized with origin/main."
   });
 }
 

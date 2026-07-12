@@ -58,15 +58,16 @@ The hourly improvement loop has broad authority to get Tee Time Spot working end
 The hourly loop is authorized to commit, push, and deploy its own verified work. A successful code or configuration improvement is not complete until its source-control and production handoff is complete.
 
 - Run the recurring automation from an isolated automation checkout or Codex-managed worktree, not from the interactive workspace at `C:\dev\TeeTimeAI`. For manual local automation runs, use the dedicated checkout at `C:\dev\TeeTimeAI-automation`.
-- Start every run with `npm run automation:preflight`. The preflight fetches `origin`, accepts either `main` or a clean detached Codex-managed worktree, fast-forwards clean checkouts that are only behind, and returns `blocked_dirty_worktree` or `blocked_git` before the expensive loop starts.
+- Before every run, fetch `origin/main` and create a unique named task branch such as `automation/hourly-YYYYMMDD-HHmmss` from it. Never work, commit, or remain on `main`, and never leave the run detached.
+- Run `npm run automation:preflight` immediately after branch creation. The preflight fetches `origin`, accepts only a clean named task branch, fast-forwards a branch that is only behind, reports `git push origin HEAD:main`, and returns `blocked_dirty_worktree` or `blocked_git` before the expensive loop starts.
 - Preflight is dependency-free so it can run before `npm install` in a fresh worktree. After the gate passes, install lockfile-declared dependencies when `node_modules` is absent.
 - Keep ignored local operator configuration available to future Codex-managed worktrees through `.worktreeinclude`; never commit the copied secret/config files themselves.
-- Start by confirming the checkout is clean and its `HEAD` is not ahead of or diverged from `origin/main`. A detached worktree is expected when `main` is already checked out in the interactive workspace.
+- Start by confirming the task branch is clean and its `HEAD` is not ahead of or diverged from `origin/main`.
 - When the tree is clean and `HEAD` is only behind, update it with a fast-forward-only merge of `origin/main` before selecting work.
 - If unrelated or unexplained changes already exist, do not stage, commit, overwrite, revert, or deploy them. Stop with `blocked_dirty_worktree` and identify the paths.
 - Keep each run to one coherent improvement and stage only its intended files. Never use `git add -A` without first proving every changed path belongs to the run.
 - Do not commit until focused tests, `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check` pass for a code change.
-- Create a clear imperative or Conventional Commit, record its SHA, and use the push command reported by preflight: `git push origin main` on `main`, or `git push origin HEAD:main` from a detached automation worktree. If the push is rejected or the remote moved, stop with `blocked_git`; do not force-push or rewrite history.
+- Create a clear imperative or Conventional Commit on the run's task branch, record its SHA, fetch and rebase onto current `origin/main` when needed, rerun affected verification, and use the preflight command `git push origin HEAD:main`. If the push is rejected or the remote moved, stop with `blocked_git`; do not force-push or rewrite history.
 - For an additive, backward-compatible Prisma migration, run production migration status/deploy with the Vercel production environment before the app deployment. Destructive migrations, irreversible data changes, or broad backfills require fresh user approval.
 - Deploy with `npx vercel --prod --yes` when the commit affects the live app, production workflow, adapter runtime, or provider configuration. Docs-only and local-operator-only changes still require a commit and push but not a Vercel deployment.
 - After deployment, require `Ready`, the `teetimespot.com` and `www.teetimespot.com` aliases, production UI smoke, key route/API checks, recent error-log inspection, and confirmation that the deployed behavior corresponds to the pushed commit.
@@ -84,7 +85,7 @@ The hourly loop is authorized to commit, push, and deploy its own verified work.
 
 Each automation run should:
 
-1. Confirm a clean checkout whose `HEAD` is synchronized with `origin/main`, and record the starting SHA and preflight push command.
+1. Create a unique named task branch from current `origin/main`, confirm it is clean and synchronized, and record the branch, starting SHA, and preflight `git push origin HEAD:main` command.
 2. Create an `AutomationRun` row with a prompt version.
 3. Load active `TeeSearch` rows and ranked `CoursePreference` rows.
 4. Load current evidence from open `CourseSupportIncident` rows, `WebsiteEvent`, `WebsiteFeedback`, recent learning signals, `CourseAutomationDiscovery`, current probes, smoke evidence, deployment notes, and recent Vercel logs.
@@ -100,7 +101,7 @@ Each automation run should:
 14. Inspect the final diff, stage only intended files, create one coherent commit, and run the push command reported by preflight without force.
 15. Apply only safe additive production migrations, then deploy live-impacting work to Vercel.
 16. Verify the production deployment, aliases, routes/APIs, desktop/mobile smoke, logs, and expected behavior.
-17. Confirm the working tree is clean and checked-out `HEAD` matches `origin/main` after the push.
+17. Confirm the task branch working tree is clean and checked-out `HEAD` matches `origin/main` after the push.
 18. Finish the `AutomationRun` and automation memory with outcome, evidence, checkpoints, commit SHA, deployment ID, changed files, verification, learning signals, changed assumptions, and blockers. Do not write a repo note for `no_op`.
 
 ## UI Smoke Contract

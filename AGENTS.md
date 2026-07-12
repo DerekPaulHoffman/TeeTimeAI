@@ -7,7 +7,10 @@ This file is the operating contract for Codex and other coding agents working in
 - Work in the existing repo folder: `C:\dev\TeeTimeAI`.
 - Do not create a new repository folder, clone directory, or linked worktree unless the user first gives explicit approval.
 - Do not prefix new git branch names with `codex/` unless the user explicitly asks for that naming convention.
-- Preserve the current branch unless the user asks for a branch change.
+- Every Codex thread that may edit, commit, push, or deploy must use its own named task branch created from current `origin/main` before file edits. Never implement or commit directly on `main`.
+- If the thread already owns a task branch, preserve it. Otherwise fetch `origin/main` and create a concise branch such as `fix/course-dedupe`, `feature/alert-controls`, or `chore/automation-policy`.
+- Read-only threads and read-only automations must not create branches because they must not change git state.
+- If unrelated work makes branch creation unsafe in the current checkout, do not switch, stash, or absorb it. Use an already-approved isolated worktree or ask for explicit worktree approval.
 - Never revert user changes you did not make.
 - Never run destructive commands such as `git reset --hard` or `git checkout --` without explicit user approval.
 - Never commit secrets, `.env*` files, `.vercel/`, provider tokens, API keys, or copied credential values.
@@ -383,7 +386,11 @@ Update docs when decisions change. Do not let old TeeTimeAI branding creep back 
 - Include tests/docs with behavior changes.
 - Do not stage unrelated user work without understanding it.
 - Run `git status --short` before and after commits.
-- Use the existing branch unless instructed otherwise.
+- Commit on the thread-owned task branch, never on `main`.
+- Before publishing, fetch `origin/main`, rebase the clean task branch when needed, and rerun affected verification.
+- When the user authorizes a direct push or production release, fast-forward `main` from the verified task branch with `git push origin HEAD:main`. Do not check out or commit on local `main`, and never force-push `main`.
+- Push the task branch itself only when a PR, review branch, or remote backup is useful or requested.
+- After pushing to `main`, require `git rev-list --left-right --count HEAD...origin/main` to report `0 0` before deployment or completion.
 - Push only when the user has asked for or clearly authorized end-to-end implementation/deploy work.
 
 ## Current Known Gaps

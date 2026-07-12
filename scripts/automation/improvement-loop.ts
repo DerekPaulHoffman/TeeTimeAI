@@ -9,13 +9,13 @@ import {
 import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v6";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v7";
 
 const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
-1. Run \`npm run automation:preflight\`, require a clean non-diverged checkout synchronized with \`origin/main\`, and record the starting SHA. A Codex-managed detached worktree is valid; follow preflight's reported push command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work.
+1. Before edits, fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work.
 2. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
 3. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
 4. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
@@ -24,7 +24,7 @@ Every run:
 7. Implement the candidate end to end. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
 8. Use current official research or stronger design tools only when they materially change the selected implementation; do not perform generic hourly research.
 9. Run focused verification plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, \`npm run ui:smoke\`, and \`git diff --check\` for code changes.
-10. Inspect the final diff, stage only files owned by this run, create one clear commit, record its SHA, and run the push command reported by preflight: \`git push origin main\` on main or \`git push origin HEAD:main\` in a detached worktree. Never force-push or absorb unrelated changes.
+10. Inspect the final diff, stage only files owned by this run, create one clear commit on the run's task branch, record its SHA, fetch and rebase onto current \`origin/main\` when needed, rerun affected verification, and fast-forward main with \`git push origin HEAD:main\`. Never check out or commit on \`main\`, force-push, or absorb unrelated changes.
 11. For safe additive Prisma migrations, apply production migrations before the app deploy. Destructive or irreversible data work requires fresh user approval.
 12. For live-impacting commits, run \`npx vercel --prod --yes\`, wait for Ready and production aliases, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\`, targeted route/API checks, and recent Vercel error-log inspection.
 13. If production verification fails because of this release, stop with incident. Roll back only when it is safe and no incompatible migration or irreversible state change exists.
@@ -42,7 +42,7 @@ Operational authority:
 - You may create and configure project resources in Vercel, Neon, Clerk, Google Cloud/Places, Resend, Figma/Figma Make, v0, GitHub repo settings, monitoring tools, and replacement tools discovered during research.
 - You may use already-authenticated browser sessions and CLI auth for Tee Time Spot project setup.
 - You may update code, env examples, docs, database schema, seed data, deployment config, GitHub branches, and automation scripts.
-- You are explicitly authorized to create coherent commits, push the current \`main\` branch to \`origin\`, apply safe additive migrations, and deploy verified live-impacting work to Vercel.
+- You are explicitly authorized to create a unique task branch for each run, create coherent commits on that branch, fast-forward \`origin/main\` with \`git push origin HEAD:main\`, apply safe additive migrations, and deploy verified live-impacting work to Vercel.
 - Never commit secrets. Store credentials only in local env files, provider dashboards, GitHub/Vercel env vars, or the appropriate secret manager.
 - Record created/updated accounts, projects, callback URLs, webhooks, deploy targets, and key names with secret values redacted.
 - Prefer free tiers or already-approved plans. Paid upgrades, payment methods, legal commitments, production data deletion, ownership transfer, or domain purchases require fresh explicit user approval.

@@ -1,15 +1,11 @@
 export function getCheckoutMode(branch) {
-  if (branch === "main") {
-    return "main";
+  if (branch === "main" || branch === "HEAD") {
+    return null;
   }
 
-  if (branch === "HEAD") {
-    return "detached";
-  }
-
-  return null;
+  return "thread_branch";
 }
 
 export function getPushRef(checkoutMode) {
-  return checkoutMode === "detached" ? "HEAD:main" : "main";
+  return checkoutMode === "thread_branch" ? "HEAD:main" : null;
 }
