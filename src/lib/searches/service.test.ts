@@ -347,6 +347,111 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
   });
 
+  it("does not reuse an arbitrary blocked course for an ambiguous generic label", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "bethpage-black",
+        name: "Bethpage Black Golf Course",
+        latitude: 40.7445,
+        longitude: -73.455,
+        automationEligibility: "BLOCKED"
+      },
+      {
+        id: "bethpage-red",
+        name: "Bethpage Red Golf Course",
+        latitude: 40.7435,
+        longitude: -73.455,
+        automationEligibility: "BLOCKED"
+      }
+    ] as never);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 4,
+      cadenceMinutes: 5,
+      courses: [
+        {
+          googlePlaceId: "generic-bethpage",
+          name: "Golf Course",
+          latitude: 40.744,
+          longitude: -73.455,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [
+              expect.objectContaining({
+                course: {
+                  connectOrCreate: expect.objectContaining({
+                    where: { googlePlaceId: "generic-bethpage" }
+                  })
+                }
+              })
+            ]
+          }
+        })
+      })
+    );
+  });
+
+  it("does not reuse a different numbered course at the same resort", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "pinehurst-no-4",
+        name: "Pinehurst No. 4",
+        latitude: 35.194,
+        longitude: -79.469,
+        automationEligibility: "ALLOWED"
+      }
+    ] as never);
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 4,
+      cadenceMinutes: 5,
+      courses: [
+        {
+          googlePlaceId: "pinehurst-no-2",
+          name: "Pinehurst No. 2",
+          latitude: 35.195,
+          longitude: -79.47,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [
+              expect.objectContaining({
+                course: {
+                  connectOrCreate: expect.objectContaining({
+                    where: { googlePlaceId: "pinehurst-no-2" }
+                  })
+                }
+              })
+            ]
+          }
+        })
+      })
+    );
+  });
+
   it("keeps a clearly identified official-site-only preference in a mixed search", async () => {
     mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
       if ("googlePlaceId" in where && where.googlePlaceId === "fairview-farm") {

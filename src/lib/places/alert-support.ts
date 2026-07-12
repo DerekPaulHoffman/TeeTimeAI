@@ -1,16 +1,17 @@
 import { getCourseAlertSupport, type BookingMethod } from "@/lib/courses/intelligence";
+import {
+  findUniqueGenericCourseMatch,
+  getCourseDistanceMeters,
+  haveCompatibleCourseNames,
+  isGenericCourseName,
+  type CourseIdentity
+} from "@/lib/places/course-identity";
 import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
 
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
-const GENERIC_NAME_MATCH_COORDINATE_TOLERANCE = 0.0015;
-const COURSE_NAME_STOP_WORDS = new Set(["and", "club", "course", "golf", "park", "the"]);
 
-type BlockedCourseRecord = {
-  googlePlaceId: string | null;
-  name: string;
-  latitude: number;
-  longitude: number;
+type BlockedCourseRecord = CourseIdentity & {
   bookingMethod: BookingMethod;
   automationEligibility: string;
 };
@@ -38,8 +39,11 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
     select: {
       googlePlaceId: true,
       name: true,
+      address: true,
       latitude: true,
       longitude: true,
+      website: true,
+      phone: true,
       bookingMethod: true,
       automationEligibility: true
     }
@@ -71,51 +75,21 @@ export function findBlockedCourse(
     return exact;
   }
 
-  return courses
+  const nearbyCourses = courses.filter(
+    (course) =>
+      Math.abs(course.latitude - candidate.latitude) <= COURSE_MATCH_COORDINATE_TOLERANCE &&
+      Math.abs(course.longitude - candidate.longitude) <= COURSE_MATCH_COORDINATE_TOLERANCE
+  );
+  if (isGenericCourseName(candidate.name)) {
+    return findUniqueGenericCourseMatch(candidate, nearbyCourses);
+  }
+
+  return nearbyCourses
     .filter(
-      (course) =>
-        Math.abs(course.latitude - candidate.latitude) <= COURSE_MATCH_COORDINATE_TOLERANCE &&
-        Math.abs(course.longitude - candidate.longitude) <= COURSE_MATCH_COORDINATE_TOLERANCE &&
-        (hasMeaningfulNameOverlap(candidate.name, course.name) ||
-          (isGenericCourseName(candidate.name) &&
-            coordinateDistance(candidate, course) <= GENERIC_NAME_MATCH_COORDINATE_TOLERANCE))
+      (course) => haveCompatibleCourseNames(candidate.name, course.name)
     )
     .sort(
       (left, right) =>
-        coordinateDistance(candidate, left) - coordinateDistance(candidate, right)
+        getCourseDistanceMeters(candidate, left) - getCourseDistanceMeters(candidate, right)
     )[0];
-}
-
-function coordinateDistance(
-  candidate: Pick<CourseCandidate, "latitude" | "longitude">,
-  course: Pick<BlockedCourseRecord, "latitude" | "longitude">
-) {
-  return Math.hypot(
-    course.latitude - candidate.latitude,
-    course.longitude - candidate.longitude
-  );
-}
-
-function hasMeaningfulNameOverlap(leftName: string, rightName: string) {
-  const left = getMeaningfulNameTokens(leftName);
-  const right = getMeaningfulNameTokens(rightName);
-  if (left.size === 0 || right.size === 0) {
-    return false;
-  }
-
-  return [...right].filter((token) => left.has(token)).length >= Math.min(2, right.size);
-}
-
-function isGenericCourseName(name: string) {
-  return getMeaningfulNameTokens(name).size === 0;
-}
-
-function getMeaningfulNameTokens(name: string) {
-  return new Set(
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .split(" ")
-      .filter((token) => token.length > 0 && !COURSE_NAME_STOP_WORDS.has(token))
-  );
 }

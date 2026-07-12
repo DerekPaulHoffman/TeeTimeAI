@@ -457,6 +457,77 @@ describe("Google Places mapping", () => {
     expect(places[0]?.displayName?.text).toBe("Fairview Farm Golf Course");
   });
 
+  it("dedupes the generic Fairview label regardless of result ordering", () => {
+    const fairview = {
+      id: "places/fairview-farm",
+      displayName: { text: "Fairview Farm Golf Course" },
+      formattedAddress: "300 Hill Rd, Harwinton, CT 06791, USA",
+      primaryType: "golf_course",
+      types: ["golf_course"],
+      location: { latitude: 41.7470436, longitude: -73.07518 }
+    };
+    const generic = {
+      id: "places/generic-fairview",
+      displayName: { text: "Golf Course" },
+      formattedAddress: "Harwinton, CT 06791, USA",
+      primaryType: "golf_course",
+      types: ["golf_course"],
+      location: { latitude: 41.7478038, longitude: -73.074469 }
+    };
+
+    expect(dedupeGolfCoursePlaces([fairview, generic])).toEqual([fairview]);
+    expect(dedupeGolfCoursePlaces([generic, fairview])).toEqual([fairview]);
+  });
+
+  it("does not collapse an ambiguous generic label or distinct courses at dense venues", () => {
+    const places = dedupeGolfCoursePlaces([
+      {
+        id: "places/generic-bethpage",
+        displayName: { text: "Golf Course" },
+        formattedAddress: "Farmingdale, NY 11735, USA",
+        location: { latitude: 40.744, longitude: -73.455 }
+      },
+      {
+        id: "places/bethpage-black",
+        displayName: { text: "Bethpage Black Golf Course" },
+        formattedAddress: "99 Quaker Meeting House Rd, Farmingdale, NY 11735, USA",
+        nationalPhoneNumber: "(516) 249-0700",
+        websiteUri: "https://www.bethpagegolfcourse.com/",
+        location: { latitude: 40.7445, longitude: -73.455 }
+      },
+      {
+        id: "places/bethpage-red",
+        displayName: { text: "Bethpage Red Golf Course" },
+        formattedAddress: "99 Quaker Meeting House Rd, Farmingdale, NY 11735, USA",
+        nationalPhoneNumber: "(516) 249-0700",
+        websiteUri: "https://www.bethpagegolfcourse.com/",
+        location: { latitude: 40.7435, longitude: -73.455 }
+      },
+      {
+        id: "places/torrey-facility",
+        displayName: { text: "Torrey Pines Golf Course" },
+        formattedAddress: "11480 N Torrey Pines Rd, La Jolla, CA 92037, USA",
+        websiteUri: "https://www.sandiego.gov/torrey-pines",
+        location: { latitude: 32.8998, longitude: -117.243 }
+      },
+      {
+        id: "places/torrey-south",
+        displayName: { text: "Torrey Pines Golf Course: South Course" },
+        formattedAddress: "11480 N Torrey Pines Rd, La Jolla, CA 92037, USA",
+        websiteUri: "https://www.sandiego.gov/torrey-pines",
+        location: { latitude: 32.8995, longitude: -117.243 }
+      }
+    ]);
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Golf Course",
+      "Bethpage Black Golf Course",
+      "Bethpage Red Golf Course",
+      "Torrey Pines Golf Course",
+      "Torrey Pines Golf Course: South Course"
+    ]);
+  });
+
   it("merges popularity and distance ranked Places results before filtering", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const fetchMock = vi

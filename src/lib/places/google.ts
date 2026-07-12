@@ -1,6 +1,13 @@
 import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
 import type { CourseAlertSupport } from "@/lib/courses/intelligence";
 import type { CourseLayoutHoleCount } from "@/lib/courses/course-layout";
+import {
+  areEquivalentNamedCourses,
+  findUniqueGenericCourseMatch,
+  isGenericCourseName,
+  normalizeCourseIdentityName,
+  type CourseIdentity
+} from "@/lib/places/course-identity";
 import { getTimeZoneForCoordinates } from "@/lib/timezones";
 
 export type GooglePlace = {
@@ -546,101 +553,103 @@ function getTextSearchLocation(input: NearbyCourseSearchInput) {
 }
 
 export function dedupeGolfCoursePlaces(places: GooglePlace[]) {
-  const deduped: GooglePlace[] = [];
+  const placesById = new Map<string, { place: GooglePlace; firstIndex: number }>();
+  const placesWithoutIds: Array<{ place: GooglePlace; firstIndex: number }> = [];
 
-  for (const place of places) {
-    const duplicateIndex = deduped.findIndex((candidate) => isDuplicateCoursePlace(candidate, place));
+  places.forEach((place, index) => {
+    const id = normalizePlaceId(place.id ?? place.name ?? "");
+    if (!id) {
+      placesWithoutIds.push({ place, firstIndex: index });
+      return;
+    }
+
+    const existing = placesById.get(id);
+    if (!existing) {
+      placesById.set(id, { place, firstIndex: index });
+      return;
+    }
+    if (getPlaceCompletenessScore(place) > getPlaceCompletenessScore(existing.place)) {
+      placesById.set(id, { place, firstIndex: existing.firstIndex });
+    }
+  });
+
+  const indexedPlaces = [...placesById.values(), ...placesWithoutIds];
+  const identifiedPlaces: Array<{
+    place: GooglePlace;
+    firstIndex: number;
+    identity: CourseIdentity;
+  }> = [];
+  const genericPlaces: typeof identifiedPlaces = [];
+  const incompletePlaces: Array<{ place: GooglePlace; firstIndex: number }> = [];
+
+  for (const indexedPlace of indexedPlaces) {
+    const identity = getPlaceCourseIdentity(indexedPlace.place);
+    if (!identity) {
+      incompletePlaces.push(indexedPlace);
+    } else if (isGenericCourseName(identity.name)) {
+      genericPlaces.push({ ...indexedPlace, identity });
+    } else {
+      identifiedPlaces.push({ ...indexedPlace, identity });
+    }
+  }
+
+  const dedupedIdentified: typeof identifiedPlaces = [];
+  for (const identified of identifiedPlaces) {
+    const duplicateIndex = dedupedIdentified.findIndex((candidate) =>
+      areEquivalentNamedCourses(candidate.identity, identified.identity)
+    );
     if (duplicateIndex === -1) {
-      deduped.push(place);
+      dedupedIdentified.push(identified);
       continue;
     }
 
-    if (getPlaceCompletenessScore(place) > getPlaceCompletenessScore(deduped[duplicateIndex])) {
-      deduped[duplicateIndex] = place;
+    const duplicate = dedupedIdentified[duplicateIndex];
+    if (getPlaceCompletenessScore(identified.place) > getPlaceCompletenessScore(duplicate.place)) {
+      dedupedIdentified[duplicateIndex] = {
+        ...identified,
+        firstIndex: Math.min(duplicate.firstIndex, identified.firstIndex)
+      };
     }
   }
 
-  return deduped;
-}
-
-function isDuplicateCoursePlace(first: GooglePlace, second: GooglePlace) {
-  const firstId = normalizePlaceId(first.id ?? first.name ?? "");
-  const secondId = normalizePlaceId(second.id ?? second.name ?? "");
-  if (firstId && firstId === secondId) {
-    return true;
-  }
-
-  const firstIdentity = normalizeCourseIdentity(first.displayName?.text ?? "");
-  const secondIdentity = normalizeCourseIdentity(second.displayName?.text ?? "");
-  const firstLocation = getPlaceLocation(first);
-  const secondLocation = getPlaceLocation(second);
-  if (!firstIdentity || !secondIdentity) {
-    return Boolean(
-      firstLocation &&
-        secondLocation &&
-        getDistanceMeters(firstLocation, secondLocation) <= 150
-    );
-  }
-  if (firstIdentity !== secondIdentity) {
-    return false;
-  }
-
-  const firstAddress = normalizeAddress(first.formattedAddress);
-  const secondAddress = normalizeAddress(second.formattedAddress);
-  if (firstAddress && firstAddress === secondAddress) {
-    return true;
-  }
-
-  if (containingPlaceIds(first).has(secondId) || containingPlaceIds(second).has(firstId)) {
-    return true;
-  }
-
-  return Boolean(
-    firstLocation && secondLocation && getDistanceMeters(firstLocation, secondLocation) <= 1000
-  );
-}
-
-function normalizeCourseIdentity(name: string) {
-  return name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/\b(?:the|golf|course|club|links|tpc|facility)\b/g, " ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
-function normalizeAddress(address?: string) {
-  return address
-    ?.normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
-function containingPlaceIds(place: GooglePlace) {
-  return new Set(
-    (place.containingPlaces ?? [])
-      .map((containingPlace) =>
-        normalizePlaceId(containingPlace.id ?? containingPlace.name ?? "")
+  const retainedGeneric = genericPlaces.filter(
+    (generic) =>
+      !findUniqueGenericCourseMatch(
+        generic.identity,
+        dedupedIdentified.map((candidate) => candidate.identity)
       )
-      .filter(Boolean)
   );
+
+  return [...dedupedIdentified, ...retainedGeneric, ...incompletePlaces]
+    .sort((left, right) => left.firstIndex - right.firstIndex)
+    .map(({ place }) => place);
 }
 
-function getPlaceLocation(place: GooglePlace) {
+function getPlaceCourseIdentity(place: GooglePlace): CourseIdentity | undefined {
+  const name = place.displayName?.text;
   const latitude = place.location?.latitude;
   const longitude = place.location?.longitude;
-  return latitude === undefined || longitude === undefined ? undefined : { latitude, longitude };
+  if (!name || latitude === undefined || longitude === undefined) {
+    return undefined;
+  }
+
+  return {
+    googlePlaceId: normalizePlaceId(place.id ?? place.name ?? ""),
+    name,
+    address: place.formattedAddress,
+    latitude,
+    longitude,
+    website: place.websiteUri,
+    phone: place.nationalPhoneNumber,
+    containingPlaceIds: (place.containingPlaces ?? [])
+      .map((containingPlace) => normalizePlaceId(containingPlace.id ?? containingPlace.name ?? ""))
+      .filter(Boolean)
+  };
 }
 
 function getPlaceCompletenessScore(place: GooglePlace) {
   return (
-    Number(Boolean(normalizeCourseIdentity(place.displayName?.text ?? ""))) * 3 +
+    Number(Boolean(normalizeCourseIdentityName(place.displayName?.text ?? ""))) * 3 +
     Number(Boolean(place.formattedAddress)) +
     Number(Boolean(place.rating)) +
     Number(Boolean(place.nationalPhoneNumber)) +

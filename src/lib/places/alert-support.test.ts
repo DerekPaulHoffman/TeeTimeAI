@@ -103,4 +103,33 @@ describe("course alert support enrichment", () => {
       )
     ).toBeUndefined();
   });
+
+  it("does not assign a generic label when multiple blocked courses are equally plausible", () => {
+    const generic = {
+      googlePlaceId: "generic-bethpage",
+      name: "Golf Course",
+      latitude: 40.744,
+      longitude: -73.455
+    };
+    const courses = [
+      {
+        googlePlaceId: "bethpage-black",
+        name: "Bethpage Black Golf Course",
+        latitude: 40.7445,
+        longitude: -73.455,
+        bookingMethod: "OFFICIAL_SITE" as const,
+        automationEligibility: "BLOCKED"
+      },
+      {
+        googlePlaceId: "bethpage-red",
+        name: "Bethpage Red Golf Course",
+        latitude: 40.7435,
+        longitude: -73.455,
+        bookingMethod: "OFFICIAL_SITE" as const,
+        automationEligibility: "BLOCKED"
+      }
+    ];
+
+    expect(findBlockedCourse(generic, courses)).toBeUndefined();
+  });
 });

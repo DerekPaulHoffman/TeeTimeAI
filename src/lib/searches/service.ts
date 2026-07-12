@@ -5,6 +5,11 @@ import {
   getCourseLayoutLabel,
   type CourseLayoutHoleCount
 } from "@/lib/courses/course-layout";
+import {
+  findUniqueGenericCourseMatch,
+  haveCompatibleCourseNames,
+  isGenericCourseName
+} from "@/lib/places/course-identity";
 import { prisma } from "@/lib/prisma";
 import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
 import {
@@ -17,8 +22,6 @@ import {
 import { parseLocalDate } from "@/lib/validation/search";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
-const GENERIC_NAME_REUSE_COORDINATE_TOLERANCE = 0.0015;
-const COURSE_NAME_STOP_WORDS = new Set(["and", "course", "golf", "the"]);
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 
@@ -160,8 +163,11 @@ async function findReusableCourse(course: SelectedCourseInput) {
     select: {
       id: true,
       name: true,
+      address: true,
       latitude: true,
       longitude: true,
+      website: true,
+      phone: true,
       automationEligibility: true,
       layoutHoleCounts: true,
       layoutHolesVerifiedAt: true
@@ -170,7 +176,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
   const supportedNearbyCourse = reusableNearbyCourses.find(
     (candidate) =>
       candidate.automationEligibility === "ALLOWED" &&
-      hasMeaningfulNameOverlap(course.name, candidate.name)
+      haveCompatibleCourseNames(course.name, candidate.name)
   );
 
   if (supportedNearbyCourse) {
@@ -196,60 +202,28 @@ async function findReusableCourse(course: SelectedCourseInput) {
   const verifiedNearbyCourse = reusableNearbyCourses.find(
     (candidate) =>
       Boolean(candidate.layoutHolesVerifiedAt) &&
-      hasMeaningfulNameOverlap(course.name, candidate.name)
+      haveCompatibleCourseNames(course.name, candidate.name)
   );
   if (verifiedNearbyCourse) {
     return verifiedNearbyCourse;
   }
 
-  return reusableNearbyCourses.find(
-    (candidate) =>
-      candidate.automationEligibility === "BLOCKED" &&
-      (hasMeaningfulNameOverlap(course.name, candidate.name) ||
-        (isGenericCourseName(course.name) &&
-          coordinateDistance(course, candidate) <= GENERIC_NAME_REUSE_COORDINATE_TOLERANCE))
-  ) ?? null;
+  const blockedNearbyCourses = reusableNearbyCourses.filter(
+    (candidate) => candidate.automationEligibility === "BLOCKED"
+  );
+  if (isGenericCourseName(course.name)) {
+    return findUniqueGenericCourseMatch(course, blockedNearbyCourses) ?? null;
+  }
+
+  return (
+    blockedNearbyCourses.find((candidate) =>
+      haveCompatibleCourseNames(course.name, candidate.name)
+    ) ?? null
+  );
 }
 
 function getStablePlaceId(course: SelectedCourseInput) {
   return course.googlePlaceId ?? `manual-${course.name}-${course.latitude}-${course.longitude}`;
-}
-
-function hasMeaningfulNameOverlap(selectedName: string, existingName: string) {
-  const selectedTokens = getMeaningfulNameTokens(selectedName);
-  const existingTokens = getMeaningfulNameTokens(existingName);
-
-  if (selectedTokens.size === 0 || existingTokens.size === 0) {
-    return false;
-  }
-
-  const overlapCount = [...existingTokens].filter((token) => selectedTokens.has(token)).length;
-  const requiredOverlap = Math.min(2, existingTokens.size);
-  return overlapCount >= requiredOverlap;
-}
-
-function isGenericCourseName(name: string) {
-  return getMeaningfulNameTokens(name).size === 0;
-}
-
-function coordinateDistance(
-  selected: Pick<SelectedCourseInput, "latitude" | "longitude">,
-  existing: { latitude: number; longitude: number }
-) {
-  return Math.hypot(
-    existing.latitude - selected.latitude,
-    existing.longitude - selected.longitude
-  );
-}
-
-function getMeaningfulNameTokens(name: string) {
-  return new Set(
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, " ")
-      .split(" ")
-      .filter((token) => token.length > 2 && !COURSE_NAME_STOP_WORDS.has(token))
-  );
 }
 
 export async function listTeeSearchesForUser(userId: string) {
