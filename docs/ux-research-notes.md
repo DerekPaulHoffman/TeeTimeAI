@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-13: Sitemaps should cover canonical public routes with trustworthy fields
+
+- Sources: [Google Search Central: Build and submit a sitemap](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap) (last updated 2025-12-10 UTC) and [Next.js sitemap file convention](https://nextjs.org/docs/app/api-reference/file-conventions/metadata/sitemap) (last updated 2026-03-25), accessed 2026-07-13 America/New_York.
+- Finding: sitemaps should list the canonical absolute URLs intended for search results. Google only uses `lastmod` when it consistently reflects a significant page update, and ignores `changefreq` and `priority`; Next.js supports a typed `sitemap.ts` route for programmatic URL generation.
+- Tee Time Spot evidence: production `/search` is indexable, has its own canonical URL, and is the primary product workflow, but the live sitemap listed only `/`. The sitemap also generated deployment-time freshness plus `changefreq` and `priority` values that were not backed by page-specific update evidence.
+- Decision: list both canonical public routes (`/` and `/search`) and omit guessed or ignored freshness/priority fields. Keep account, email-preview, and signed action routes out because their metadata is explicitly `noindex`.
+
 ## 2026-07-13: Invalid locations need descriptive, announced recovery copy
 
 - Sources: [W3C Understanding SC 3.3.1: Error Identification](https://www.w3.org/WAI/WCAG22/Understanding/error-identification) (updated 2026-03-09) and [W3C Understanding SC 4.1.3: Status Messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages), accessed 2026-07-13 America/New_York.
