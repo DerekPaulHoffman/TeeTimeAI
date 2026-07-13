@@ -1,15 +1,23 @@
 import type { WebsiteEventInput } from "./engagement";
+import { sanitizePagePath } from "./page-path";
+import { detectWebsiteTrafficClass } from "./traffic-class";
 
 export function trackWebsiteEvent(event: WebsiteEventInput) {
   const payload = JSON.stringify({
     ...event,
-    page: event.page ?? getCurrentPage()
+    page: sanitizePagePath(event.page) ?? getCurrentPage(),
+    trafficClass: detectWebsiteTrafficClass()
   });
 
   if (typeof navigator !== "undefined" && "sendBeacon" in navigator) {
-    const blob = new Blob([payload], { type: "application/json" });
-    navigator.sendBeacon("/api/analytics/events", blob);
-    return;
+    try {
+      const blob = new Blob([payload], { type: "application/json" });
+      if (navigator.sendBeacon("/api/analytics/events", blob)) {
+        return;
+      }
+    } catch {
+      // Fall through to a keepalive request when beacon queuing is unavailable.
+    }
   }
 
   void fetch("/api/analytics/events", {
@@ -27,5 +35,5 @@ function getCurrentPage() {
     return undefined;
   }
 
-  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  return sanitizePagePath(window.location.pathname);
 }

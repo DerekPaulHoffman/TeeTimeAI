@@ -6,6 +6,7 @@ import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
 import { AuthNav } from "@/components/auth-nav";
 import { EngagementTracker } from "@/components/engagement-tracker";
 import { FeedbackWidget } from "@/components/feedback-widget";
+import { SiteObservability } from "@/components/site-observability";
 import { hasClerkConfig } from "@/lib/env";
 import { absoluteUrl, siteDescription, siteName, siteUrl } from "@/lib/seo";
 import "leaflet/dist/leaflet.css";
@@ -92,6 +93,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             </footer>
           </div>
         </OptionalClerkProvider>
+        <SiteObservability enabled={Boolean(process.env.VERCEL_URL)} />
       </body>
     </html>
   );

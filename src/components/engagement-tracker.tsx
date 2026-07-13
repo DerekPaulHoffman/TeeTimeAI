@@ -4,17 +4,14 @@ import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 
 import { trackWebsiteEvent } from "@/lib/engagement/client";
-import type { WebsiteEventInput } from "@/lib/engagement/engagement";
 
 export function EngagementTracker() {
   const pathname = usePathname();
 
   useEffect(() => {
-    const search = window.location.search;
-    const hash = window.location.hash;
     trackWebsiteEvent({
       name: "page_viewed",
-      page: `${pathname}${search}${hash}`
+      page: pathname
     });
   }, [pathname]);
 
@@ -22,9 +19,14 @@ export function EngagementTracker() {
     function handleTrackedClick(event: MouseEvent) {
       const target = event.target instanceof Element ? event.target : null;
       const element = target?.closest<HTMLElement>("[data-analytics-event]");
-      const name = element?.dataset.analyticsEvent as WebsiteEventInput["name"] | undefined;
+      const name = element?.dataset.analyticsEvent;
 
-      if (!element || !name) {
+      if (
+        !element ||
+        (name !== "start_search_clicked" &&
+          name !== "dashboard_opened" &&
+          name !== "email_preview_opened")
+      ) {
         return;
       }
 

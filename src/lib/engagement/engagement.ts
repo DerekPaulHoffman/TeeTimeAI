@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 
+import { sanitizePagePath } from "@/lib/engagement/page-path";
+import { websiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 export const websiteEventNames = [
@@ -14,17 +16,64 @@ export const websiteEventNames = [
   "feedback_submitted"
 ] as const;
 
-export const websiteEventInputSchema = z.object({
-  name: z.enum(websiteEventNames),
-  page: z.string().trim().max(500).optional(),
-  metadata: z.record(z.string(), z.unknown()).optional()
-});
+const trafficClassSchema = z.enum(websiteTrafficClasses).optional().default("UNCLASSIFIED");
+const pageSchema = z
+  .string()
+  .trim()
+  .max(2000)
+  .transform((value) => sanitizePagePath(value))
+  .optional();
+const clickMetadataSchema = z
+  .object({
+    label: z.string().trim().min(1).max(120)
+  })
+  .strict();
+const searchMetadataSchema = z
+  .object({
+    selectedCourseCount: z.number().int().min(0).max(5),
+    players: z.number().int().min(1).max(4),
+    requestedLayoutHoles: z.union([z.literal(9), z.literal(18), z.null()]).optional()
+  })
+  .strict();
+
+const eventBase = {
+  page: pageSchema,
+  trafficClass: trafficClassSchema
+};
+
+export const websiteEventInputSchema = z.discriminatedUnion("name", [
+  z.object({ name: z.literal("page_viewed"), ...eventBase }).strict(),
+  z.object({ name: z.literal("feedback_opened"), ...eventBase }).strict(),
+  z.object({ name: z.literal("start_search_clicked"), ...eventBase, metadata: clickMetadataSchema }).strict(),
+  z.object({ name: z.literal("dashboard_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
+  z.object({ name: z.literal("email_preview_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
+  z.object({ name: z.literal("search_submitted"), ...eventBase, metadata: searchMetadataSchema }).strict(),
+  z
+    .object({
+      name: z.literal("search_submission_failed"),
+      ...eventBase,
+      metadata: searchMetadataSchema.extend({
+        responseStatus: z.number().int().min(100).max(599)
+      })
+    })
+    .strict(),
+  z
+    .object({
+      name: z.literal("feedback_submitted"),
+      ...eventBase,
+      metadata: z
+        .object({ sentiment: z.enum(["like", "dislike", "broken"]) })
+        .strict()
+    })
+    .strict()
+]);
 
 export const websiteFeedbackInputSchema = z
   .object({
     sentiment: z.enum(["like", "dislike", "broken"]),
     message: z.string().trim().max(2000).optional().default(""),
-    page: z.string().trim().max(500).optional(),
+    page: pageSchema,
+    trafficClass: trafficClassSchema,
     contactEmail: z
       .string()
       .trim()
@@ -33,6 +82,7 @@ export const websiteFeedbackInputSchema = z
       .optional()
       .or(z.literal("").transform(() => undefined))
   })
+  .strict()
   .superRefine((value, context) => {
     if (value.sentiment === "broken" && !value.message) {
       context.addIssue({
@@ -47,22 +97,25 @@ export const websiteFeedbackInputSchema = z
     message: value.message || undefined
   }));
 
-export type WebsiteEventInput = z.infer<typeof websiteEventInputSchema>;
-export type WebsiteFeedbackInput = z.infer<typeof websiteFeedbackInputSchema>;
+export type WebsiteEventInput = z.input<typeof websiteEventInputSchema>;
+export type WebsiteFeedbackInput = z.input<typeof websiteFeedbackInputSchema>;
 
-export async function createWebsiteEvent(input: WebsiteEventInput) {
+export async function createWebsiteEvent(input: unknown) {
   const event = websiteEventInputSchema.parse(input);
 
   return prisma.websiteEvent.create({
     data: {
       name: event.name,
       page: event.page,
-      metadata: event.metadata as Prisma.InputJsonObject | undefined
+      metadata: (
+        "metadata" in event ? event.metadata : undefined
+      ) as Prisma.InputJsonObject | undefined,
+      trafficClass: event.trafficClass
     }
   });
 }
 
-export async function submitWebsiteFeedback(input: WebsiteFeedbackInput) {
+export async function submitWebsiteFeedback(input: unknown) {
   const feedback = websiteFeedbackInputSchema.parse(input);
 
   return prisma.websiteFeedback.create({
@@ -70,7 +123,8 @@ export async function submitWebsiteFeedback(input: WebsiteFeedbackInput) {
       sentiment: feedback.sentiment.toUpperCase() as "LIKE" | "DISLIKE" | "BROKEN",
       message: feedback.message,
       page: feedback.page,
-      contactEmail: feedback.contactEmail
+      contactEmail: feedback.contactEmail,
+      trafficClass: feedback.trafficClass
     }
   });
 }

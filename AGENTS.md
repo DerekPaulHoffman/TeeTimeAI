@@ -112,6 +112,7 @@ Expected env names:
 - `RESEND_EMAIL_DOMAIN`
 - `ALERT_EMAIL_FROM`
 - `AUTOMATION_API_KEY`
+- `EMAIL_ACTION_SECRET`
 - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
 - `CLERK_SECRET_KEY`
 - `CLERK_AUTH_READY`
@@ -183,13 +184,15 @@ C:\Users\Grim_Leaper\.codex\automations\teetimeai-active-search-poller\memory.md
 
 The hourly improvement loop is allowed to improve the product when evidence supports a change.
 
+For this hourly workflow, `no_op` is not a valid terminal outcome. An empty first queue or a healthy baseline is the nonterminal state `exploration_required`: rotate to least-recently covered locations, devices, routes, feedback, course gaps, accessibility, performance, security, metadata, and current-practice evidence until the run finds a safe valuable improvement or a concrete blocker. This rule does not change legitimate `no_op` behavior for event-driven search checks or browser probes.
+
 It should:
 
 - Run or inspect queue state.
 - Run UI smoke.
 - Identify the highest-leverage blocker or improvement.
 - Use current tool/design research when UI/tooling is weak.
-- Implement one coherent improvement.
+- Implement one coherent batch of compatible improvements that can be completed and verified safely in the run.
 - Verify with tests, lint, build, and browser smoke.
 - Record outcome, changed files, and blockers.
 
@@ -197,12 +200,23 @@ Required checkpoints:
 
 - `queue_confirmed`
 - `candidate_selected`
+- `provenance_recorded`
 - `tool_research_done`
 - `ui_smoke_done`
 - `verification_done`
 - `outcome_recorded`
 
 Do not mark a checkpoint true unless it happened.
+
+Before the first file edit, persist durable `AutomationRun` provenance containing the automation id, owner run and Codex thread, branch, starting and expected `HEAD`, and every planned path. Add paths to the durable plan before expanding the edit. A dirty checkout may be resumed only when the immediately preceding unfinished run belongs to the same hourly automation and its recorded branch, expected `HEAD`, owner run, owner thread, and complete planned-path set match exactly; otherwise stop with `blocked_dirty_worktree`.
+
+Use `npm run automation:improve` to prepare the unfinished owner row, `npm run automation:improve -- claim --run-id <id> --path <path>` before edits, and pipe the structured terminal JSON to `npm run automation:improve -- closeout --run-id <id>`. Use `--owner-thread` only when `CODEX_THREAD_ID` is unavailable and the actual current Codex thread id is known. Dirty recovery requires a separate same-thread `--recover-run <id>` invocation; never infer the claim from the latest row.
+
+Acquire the short transaction-scoped hourly initialization/state-update lease before candidate selection, path claims, or closeout. The lease serializes those database transitions; the single unfinished owner `AutomationRun` is the durable guard for the rest of the run. Keep `outcome_recorded=false` during preparation, editing, and verification; set it true only in the same closeout write that records `completedAt` and the terminal outcome. Terminal exceptions must close the owned run with a redacted error and concrete blocker.
+
+Enter closeout no later than 40 minutes after the run starts or when only 20 minutes remain before the next scheduled launch. Start no new exploration or edits after that point; reserve the closeout budget for tests, diff review, commit, rebase, push, deployment, production verification, and the durable final record.
+
+Every automated browser context must set session storage key `tee-time-spot:traffic-class` to `AUTOMATION`; explicit manual test contexts may use `TEST`. Do not add a persistent visitor/session identifier, and do not allow unmarked automation traffic to persist as public funnel evidence.
 
 ## Course Automation Rules
 

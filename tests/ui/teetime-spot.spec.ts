@@ -6,6 +6,9 @@ const smokeOrigin = new URL(smokeBaseUrl).origin;
 
 test.describe("Tee Time Spot UI smoke", () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem("tee-time-spot:traffic-class", "AUTOMATION");
+    });
     await page.route("**/api/analytics/events", async (route) => {
       await route.fulfill({
         body: JSON.stringify({ event: { id: "ui-smoke-event" } }),
@@ -107,6 +110,22 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
   });
 
+  test("transfers homepage search details without putting them in the URL", async ({ page }) => {
+    await page.goto("/");
+    const homeSearchForm = page.locator(".home-search-form");
+    await expect(homeSearchForm.getByLabel("Alert email")).toHaveCount(0);
+    await homeSearchForm.getByLabel("Location").fill("06825");
+    await homeSearchForm.locator("select").selectOption("2");
+    await homeSearchForm.getByRole("button", { name: "Browse courses" }).click();
+
+    await expect(page).toHaveURL(/\/search$/);
+    expect(new URL(page.url()).search).toBe("");
+    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
+      "06825"
+    );
+    await expect(page.getByLabel("Players")).toHaveValue("2");
+  });
+
   test("keeps search labels and supporting copy at AA contrast colors", async ({ page }) => {
     await page.goto("/search");
 
@@ -170,7 +189,8 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/");
     await page.getByRole("button", { name: "Use my location" }).click();
-    await expect(page).toHaveURL(/\/search\?/);
+    await expect(page).toHaveURL(/\/search$/);
+    expect(new URL(page.url()).search).toBe("");
     await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
       "Current location"
     );

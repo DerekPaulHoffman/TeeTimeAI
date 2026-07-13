@@ -451,9 +451,11 @@ function buildStableEmailStopUrls(searchId: string, targetDate?: string) {
     return buildEmailStopUrls(searchId);
   }
 
-  const tokenAnchor = new Date(`${targetDate}T00:00:00.000Z`);
+  const searchDateStart = new Date(`${targetDate}T00:00:00.000Z`);
+  const expiresAt = new Date(searchDateStart);
+  expiresAt.setUTCDate(expiresAt.getUTCDate() + 8);
   return buildEmailStopUrls(searchId, {
-    now: Number.isNaN(tokenAnchor.getTime()) ? undefined : tokenAnchor
+    expiresAt: Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt
   });
 }
 

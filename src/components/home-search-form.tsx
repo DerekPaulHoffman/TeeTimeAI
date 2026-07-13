@@ -1,7 +1,6 @@
 "use client";
 
 import { LocateFixed, Search } from "lucide-react";
-import type { Route } from "next";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
@@ -20,6 +19,7 @@ import {
   MIN_COURSE_SEARCH_RADIUS_MILES
 } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
+import { storeSearchPrefill, type SearchPrefill } from "@/lib/searches/search-prefill";
 
 type HoleFilter = "any" | "9" | "18";
 
@@ -30,7 +30,6 @@ function tomorrow() {
 export function HomeSearchForm() {
   const router = useRouter();
   const [location, setLocation] = useState("");
-  const [email, setEmail] = useState("");
   const [players, setPlayers] = useState(4);
   const [date, setDate] = useState(getNextSaturdayDateInputValue);
   const [startTime, setStartTime] = useState("09:00");
@@ -38,44 +37,49 @@ export function HomeSearchForm() {
   const [holes, setHoles] = useState<HoleFilter>("any");
   const [radius, setRadius] = useState(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
 
-  function searchUrl(extra?: Record<string, string>) {
-    const params = new URLSearchParams({
+  function searchPrefill(extra?: Partial<SearchPrefill>): SearchPrefill {
+    return {
       location,
-      email,
-      players: String(players),
+      players,
       date,
       startTime,
       endTime,
       holes,
-      radius: String(radius),
+      radius,
       ...extra
-    });
-    return `/search?${params}` as Route;
+    };
+  }
+
+  function goToSearch(prefill: SearchPrefill) {
+    storeSearchPrefill(prefill);
+    router.push("/search");
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    router.push(searchUrl());
+    goToSearch(searchPrefill());
   }
 
   function useMyLocation() {
     if (!navigator.geolocation) {
-      router.push(searchUrl());
+      goToSearch(searchPrefill());
       return;
     }
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
         setLocation(CURRENT_LOCATION_LABEL);
-        router.push(
-          searchUrl({
+        goToSearch(
+          searchPrefill({
             location: CURRENT_LOCATION_LABEL,
-            latitude: String(position.coords.latitude),
-            longitude: String(position.coords.longitude)
+            coordinates: {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude
+            }
           })
         );
       },
-      () => router.push(searchUrl())
+      () => goToSearch(searchPrefill())
     );
   }
 
@@ -95,16 +99,6 @@ export function HomeSearchForm() {
             placeholder={LOCATION_INPUT_PLACEHOLDER}
             required
             value={location}
-          />
-        </label>
-        <label>
-          <span>Alert email</span>
-          <input
-            name="email"
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="you@example.com"
-            type="email"
-            value={email}
           />
         </label>
       </div>

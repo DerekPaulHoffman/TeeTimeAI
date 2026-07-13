@@ -16,11 +16,11 @@ type EmailStopTokenPayload = {
   expiresAt: number;
 };
 
-const EMAIL_STOP_TOKEN_LIFETIME_MS = 400 * 24 * 60 * 60 * 1000;
+const EMAIL_STOP_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function buildEmailStopUrls(
   searchId: string,
-  options: { now?: Date } = {}
+  options: { now?: Date; expiresAt?: Date } = {}
 ): EmailStopUrls {
   return {
     booked: buildEmailStopUrl(searchId, "booked", options),
@@ -31,14 +31,19 @@ export function buildEmailStopUrls(
 export function createEmailStopToken(
   searchId: string,
   reason: EmailStopReason,
-  options: { now?: Date; secret?: string } = {}
+  options: { now?: Date; expiresAt?: Date; secret?: string } = {}
 ) {
   const now = options.now ?? new Date();
+  const expiresAt = options.expiresAt ?? new Date(now.getTime() + EMAIL_STOP_TOKEN_LIFETIME_MS);
+  if (expiresAt.getTime() <= now.getTime()) {
+    throw new Error("Email alert control expiration must be in the future");
+  }
+
   const payload: EmailStopTokenPayload = {
     version: 1,
     searchId,
     reason,
-    expiresAt: now.getTime() + EMAIL_STOP_TOKEN_LIFETIME_MS
+    expiresAt: expiresAt.getTime()
   };
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const signature = sign(encodedPayload, options.secret ?? getEmailActionSecret());
@@ -92,7 +97,7 @@ export function verifyEmailStopToken(
 function buildEmailStopUrl(
   searchId: string,
   reason: EmailStopReason,
-  options: { now?: Date }
+  options: { now?: Date; expiresAt?: Date }
 ) {
   const token = createEmailStopToken(searchId, reason, options);
   return absoluteUrl(`/alerts/stop?token=${encodeURIComponent(token)}`);
@@ -103,9 +108,9 @@ function sign(payload: string, secret: string) {
 }
 
 function getEmailActionSecret() {
-  const secret = process.env.AUTOMATION_API_KEY?.replace(/\uFEFF/g, "").trim();
+  const secret = process.env.EMAIL_ACTION_SECRET?.replace(/\uFEFF/g, "").trim();
   if (!secret) {
-    throw new Error("AUTOMATION_API_KEY is required for email alert controls");
+    throw new Error("EMAIL_ACTION_SECRET is required for email alert controls");
   }
   return secret;
 }

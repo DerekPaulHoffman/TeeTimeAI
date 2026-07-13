@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  closeHourlyImprovementRun,
   markMissingMatchesUnavailable,
   recordCourseProbeIfChanged,
-  recordTeeTimeMatch
+  recordTeeTimeMatch,
+  updateHourlyImprovementRunState
 } from "./db-service";
+import {
+  buildHourlyImprovementRunProvenance,
+  buildImprovementCheckpoints,
+  type HourlyImprovementRunRecord
+} from "./improvement";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -17,6 +24,9 @@ vi.mock("@/lib/prisma", () => ({
       create: vi.fn(),
       findFirst: vi.fn()
     },
+    automationRun: {
+      updateMany: vi.fn()
+    },
     $transaction: vi.fn()
   }
 }));
@@ -24,6 +34,68 @@ vi.mock("@/lib/prisma", () => ({
 import { prisma } from "@/lib/prisma";
 
 const mockedPrisma = vi.mocked(prisma);
+
+function buildHourlyRecord(): HourlyImprovementRunRecord {
+  return {
+    schemaVersion: 1,
+    automationId: "teetimeai-hourly-product-improvement-loop",
+    promptVersion: "tee-time-spot-improvement-loop-v8",
+    lifecycle: "candidate_selected",
+    owner: {
+      runId: "run-hourly-1",
+      threadId: "thread-hourly-1"
+    },
+    provenance: buildHourlyImprovementRunProvenance({
+      ownerRunId: "run-hourly-1",
+      ownerThreadId: "thread-hourly-1",
+      branch: "automation/hourly-20260713-120000",
+      startingSha: "0123456789abcdef0123456789abcdef01234567",
+      plannedPaths: ["src/lib/automation/improvement.ts"]
+    }),
+    checkpoints: buildImprovementCheckpoints({
+      queueConfirmed: true,
+      candidateSelected: true,
+      provenanceRecorded: true
+    })
+  };
+}
+
+describe("hourly improvement durable state", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.automationRun.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("refuses to persist outcome_recorded before closeout", async () => {
+    const record = buildHourlyRecord();
+    record.checkpoints.outcome_recorded = true;
+
+    await expect(updateHourlyImprovementRunState("run-hourly-1", record)).rejects.toThrow(
+      "outcome_recorded may only become true"
+    );
+    expect(mockedPrisma.automationRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("sets completedAt, terminal outcome, and outcome_recorded atomically", async () => {
+    await closeHourlyImprovementRun("run-hourly-1", {
+      outcome: "success",
+      record: buildHourlyRecord(),
+      changedFiles: ["src/lib/automation/improvement.ts"]
+    });
+
+    expect(mockedPrisma.automationRun.updateMany).toHaveBeenCalledTimes(1);
+    const update = mockedPrisma.automationRun.updateMany.mock.calls[0]?.[0];
+    expect(update?.data).toMatchObject({
+      completedAt: expect.any(Date),
+      outcome: "success",
+      changedFiles: ["src/lib/automation/improvement.ts"]
+    });
+    expect(JSON.parse(String(update?.data.notes))).toMatchObject({
+      lifecycle: "closeout",
+      checkpoints: { outcome_recorded: true }
+    });
+  });
+});
 
 describe("recordTeeTimeMatch", () => {
   beforeEach(() => {

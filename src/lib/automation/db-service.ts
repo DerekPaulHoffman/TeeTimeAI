@@ -6,6 +6,12 @@ import { zonedDateTimeToDate } from "@/lib/timezones";
 import type { BrowserDiscovery } from "./browser-discovery";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "./browser-discovery";
 import { startOfUtcCalendarDay } from "./date-boundary";
+import {
+  hasCompletePreEditProvenance,
+  HOURLY_IMPROVEMENT_AUTOMATION_ID,
+  markImprovementOutcomeRecorded,
+  type HourlyImprovementRunRecord
+} from "./improvement";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
@@ -62,6 +68,14 @@ export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
 
 export function runWithSearchCheckLease<T>(searchId: string, worker: () => Promise<T>) {
   return withPostgresAdvisoryTextLease(prisma, `tee-search:${searchId}`, worker);
+}
+
+export function runWithHourlyImprovementLease<T>(worker: () => Promise<T>) {
+  return withPostgresAdvisoryTextLease(
+    prisma,
+    "tee-time-spot:hourly-improvement",
+    worker
+  );
 }
 
 export async function listActiveSearchesForAutomation(): Promise<ActiveAutomationSearch[]> {
@@ -667,6 +681,82 @@ export async function startAutomationRun(promptVersion: string) {
   return prisma.automationRun.create({
     data: { promptVersion }
   });
+}
+
+export async function updateHourlyImprovementRunState(
+  id: string,
+  record: HourlyImprovementRunRecord
+) {
+  if (record.checkpoints.outcome_recorded) {
+    throw new Error(
+      "outcome_recorded may only become true in the atomic hourly improvement closeout"
+    );
+  }
+  if (
+    record.automationId !== HOURLY_IMPROVEMENT_AUTOMATION_ID ||
+    record.owner.runId !== id ||
+    record.provenance.ownerRunId !== id
+  ) {
+    throw new Error("Hourly improvement state does not match its durable owner run");
+  }
+  if (
+    record.checkpoints.provenance_recorded &&
+    !hasCompletePreEditProvenance(record.provenance)
+  ) {
+    throw new Error(
+      "provenance_recorded requires owner, branch, SHA, thread, and planned-path evidence"
+    );
+  }
+
+  const result = await prisma.automationRun.updateMany({
+    where: {
+      id,
+      completedAt: null
+    },
+    data: {
+      notes: JSON.stringify(record)
+    }
+  });
+
+  return result.count === 1;
+}
+
+export async function closeHourlyImprovementRun(
+  id: string,
+  input: {
+    outcome: string;
+    record: HourlyImprovementRunRecord;
+    errors?: Prisma.InputJsonValue;
+    changedFiles?: Prisma.InputJsonValue;
+  }
+) {
+  if (
+    input.record.automationId !== HOURLY_IMPROVEMENT_AUTOMATION_ID ||
+    input.record.owner.runId !== id ||
+    input.record.provenance.ownerRunId !== id
+  ) {
+    throw new Error("Hourly improvement closeout does not match its durable owner run");
+  }
+  const closeoutRecord: HourlyImprovementRunRecord = {
+    ...input.record,
+    lifecycle: input.record.blocker ? "blocked" : "closeout",
+    checkpoints: markImprovementOutcomeRecorded(input.record.checkpoints)
+  };
+  const result = await prisma.automationRun.updateMany({
+    where: {
+      id,
+      completedAt: null
+    },
+    data: {
+      completedAt: new Date(),
+      outcome: input.outcome,
+      errors: input.errors,
+      changedFiles: input.changedFiles,
+      notes: JSON.stringify(closeoutRecord)
+    }
+  });
+
+  return result.count === 1;
 }
 
 export async function finishAutomationRun(

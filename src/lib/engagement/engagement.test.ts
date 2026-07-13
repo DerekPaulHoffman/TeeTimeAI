@@ -22,22 +22,21 @@ vi.mock("@/lib/prisma", () => ({
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 describe("websiteEventInputSchema", () => {
-  it("accepts supported first-party event names with useful context", () => {
+  it("accepts supported events while removing URL parameters", () => {
     const input = websiteEventInputSchema.parse({
-      name: "feedback_opened",
-      page: "https://teetimespot.com/",
+      name: "start_search_clicked",
+      page: "https://teetimespot.com/?email=golfer@example.com#start",
       metadata: {
-        source: "floating-widget",
-        variant: "footer"
+        label: "Browse courses"
       }
     });
 
     expect(input).toEqual({
-      name: "feedback_opened",
-      page: "https://teetimespot.com/",
+      name: "start_search_clicked",
+      page: "/",
+      trafficClass: "UNCLASSIFIED",
       metadata: {
-        source: "floating-widget",
-        variant: "footer"
+        label: "Browse courses"
       }
     });
   });
@@ -63,27 +62,41 @@ describe("websiteEventInputSchema", () => {
     });
 
     expect(input.name).toBe("search_submission_failed");
-    expect(input.metadata).toEqual({
+    expect("metadata" in input ? input.metadata : undefined).toEqual({
       responseStatus: 400,
       selectedCourseCount: 5,
       players: 2
     });
   });
+
+  it("rejects metadata fields that are not allowlisted for the event", () => {
+    expect(() =>
+      websiteEventInputSchema.parse({
+        name: "search_submitted",
+        metadata: {
+          selectedCourseCount: 2,
+          players: 4,
+          searchId: "must-not-be-stored"
+        }
+      })
+    ).toThrow(/unrecognized/i);
+  });
 });
 
 describe("websiteFeedbackInputSchema", () => {
-  it("normalizes feedback text and contact email", () => {
+  it("normalizes feedback text, email, and page path", () => {
     const input = websiteFeedbackInputSchema.parse({
       sentiment: "broken",
       message: "  The course search button did not respond.  ",
-      page: "https://teetimespot.com/#start",
+      page: "https://teetimespot.com/?email=golfer@example.com#start",
       contactEmail: "GOLFER@example.com"
     });
 
     expect(input).toEqual({
       sentiment: "broken",
       message: "The course search button did not respond.",
-      page: "https://teetimespot.com/#start",
+      page: "/",
+      trafficClass: "UNCLASSIFIED",
       contactEmail: "golfer@example.com"
     });
   });
@@ -104,24 +117,27 @@ describe("engagement persistence", () => {
     vi.clearAllMocks();
   });
 
-  it("stores website analytics events without requiring personal data", async () => {
+  it("stores only allowlisted website analytics fields", async () => {
     mockedPrisma.websiteEvent.create.mockResolvedValue({ id: "event-1" } as never);
 
     await createWebsiteEvent({
       name: "search_submitted",
-      page: "/",
+      page: "/search?email=golfer@example.com",
       metadata: {
-        selectedCourseCount: 3
+        selectedCourseCount: 3,
+        players: 4
       }
     });
 
     expect(mockedPrisma.websiteEvent.create).toHaveBeenCalledWith({
       data: {
         name: "search_submitted",
-        page: "/",
+        page: "/search",
         metadata: {
-          selectedCourseCount: 3
-        }
+          selectedCourseCount: 3,
+          players: 4
+        },
+        trafficClass: "UNCLASSIFIED"
       }
     });
   });
@@ -141,7 +157,8 @@ describe("engagement persistence", () => {
         sentiment: "LIKE",
         message: "Clean setup flow.",
         page: "/",
-        contactEmail: "player@example.com"
+        contactEmail: "player@example.com",
+        trafficClass: "UNCLASSIFIED"
       }
     });
   });

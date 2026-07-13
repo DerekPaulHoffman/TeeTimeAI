@@ -41,6 +41,9 @@ const discoveredCourses = [
 
 test.describe("physical course layout filtering", () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      window.sessionStorage.setItem("tee-time-spot:traffic-class", "AUTOMATION");
+    });
     await page.route("**/api/analytics/events", async (route) => {
       await route.fulfill({
         body: JSON.stringify({ event: { id: "course-layout-test-event" } }),

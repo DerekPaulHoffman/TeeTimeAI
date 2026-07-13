@@ -1,6 +1,75 @@
 import { describe, expect, it } from "vitest";
 
-import { buildImprovementCheckpoints, selectImprovementCandidate } from "./improvement";
+import {
+  assessDirtyWorktreeRecovery,
+  buildHourlyImprovementRunProvenance,
+  buildImprovementCheckpoints,
+  hasCompletePreEditProvenance,
+  isHourlyImprovementClaimWindowOpen,
+  markImprovementOutcomeRecorded,
+  sanitizeAutomationText,
+  selectImprovementCandidate,
+  validateHourlyCloseoutAudit,
+  validateHourlyRunCommitTopology
+} from "./improvement";
+
+describe("hourly closeout boundaries", () => {
+  it("allows claims before minute 40 and rejects them at the boundary", () => {
+    const startedAt = new Date("2026-07-13T12:00:00.000Z");
+
+    expect(
+      isHourlyImprovementClaimWindowOpen({
+        startedAt,
+        now: new Date("2026-07-13T12:39:59.999Z")
+      })
+    ).toBe(true);
+    expect(
+      isHourlyImprovementClaimWindowOpen({
+        startedAt,
+        now: new Date("2026-07-13T12:40:00.000Z")
+      })
+    ).toBe(false);
+  });
+
+  it("accepts one owner commit rebased over upstream changes", () => {
+    expect(
+      validateHourlyRunCommitTopology({
+        startingSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        headSha: "cccccccccccccccccccccccccccccccccccccccc",
+        parentShas: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+        startingShaIsAncestorOfParent: true
+      })
+    ).toBe("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
+  it("rejects merge commits as ambiguous owner deltas", () => {
+    expect(() =>
+      validateHourlyRunCommitTopology({
+        startingSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        headSha: "cccccccccccccccccccccccccccccccccccccccc",
+        parentShas: [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "dddddddddddddddddddddddddddddddddddddddd"
+        ],
+        startingShaIsAncestorOfParent: true
+      })
+    ).toThrow("one non-merge owner commit");
+  });
+});
+
+describe("automation evidence redaction", () => {
+  it("redacts signed URL and credential variants without removing the route", () => {
+    const evidence = sanitizeAutomationText(
+      "GET https://example.com/private/report?access_token=access-value&api_key=api-value&X-Amz-Signature=aws-value&sig=sas-value then /oauth/callback?code=oauth-value with idempotency-key: idem-value"
+    );
+
+    expect(evidence).toContain("https://example.com/private/report");
+    expect(evidence).not.toMatch(
+      /access-value|api-value|aws-value|sas-value|oauth-value|idem-value/
+    );
+    expect(evidence.match(/redacted/g)?.length).toBeGreaterThanOrEqual(6);
+  });
+});
 
 describe("buildImprovementCheckpoints", () => {
   it("tracks git and production handoff independently from code verification", () => {
@@ -11,20 +80,33 @@ describe("buildImprovementCheckpoints", () => {
         verificationDone: true,
         gitCommitted: true,
         gitPushed: true,
-        productionVerified: false,
-        outcomeRecorded: true
+        productionVerified: false
       })
     ).toEqual({
       queue_confirmed: true,
       candidate_selected: true,
+      provenance_recorded: false,
       tool_research_done: false,
       ui_smoke_done: false,
       verification_done: true,
       git_committed: true,
       git_pushed: true,
       production_verified: false,
-      outcome_recorded: true
+      outcome_recorded: false
     });
+  });
+
+  it("marks outcome_recorded only in the closeout copy", () => {
+    const active = buildImprovementCheckpoints({
+      queueConfirmed: true,
+      candidateSelected: true,
+      provenanceRecorded: true
+    });
+
+    const closed = markImprovementOutcomeRecorded(active);
+
+    expect(active.outcome_recorded).toBe(false);
+    expect(closed.outcome_recorded).toBe(true);
   });
 });
 
@@ -118,7 +200,7 @@ describe("selectImprovementCandidate", () => {
     });
   });
 
-  it("returns no_op when there is no active queue", () => {
+  it("requires broader exploration when there is no active queue", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 0,
       pendingAlerts: [],
@@ -127,9 +209,238 @@ describe("selectImprovementCandidate", () => {
     });
 
     expect(candidate).toEqual({
-      outcome: "no_op",
-      kind: "empty_queue",
-      summary: "No active tee-time searches need polling or improvement work."
+      outcome: "exploration_required",
+      kind: "exploration_required",
+      summary:
+        "Initial queue evidence is empty; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
+      researchDirective:
+        "Rotate to the least-recently covered evidence surfaces. An empty first pass is not a terminal outcome."
     });
+  });
+});
+
+describe("hourly dirty-worktree recovery", () => {
+  const ownerRunId = "run-123";
+  const ownerThreadId = "thread-123";
+  const branch = "automation/hourly-20260713-120000";
+  const headSha = "0123456789abcdef0123456789abcdef01234567";
+  const provenance = buildHourlyImprovementRunProvenance({
+    ownerRunId,
+    ownerThreadId,
+    branch,
+    startingSha: headSha,
+    plannedPaths: [
+      "src/lib/automation/improvement.ts",
+      "src/lib/automation/improvement.test.ts"
+    ]
+  });
+  const checkpoints = buildImprovementCheckpoints({
+    queueConfirmed: true,
+    candidateSelected: true,
+    provenanceRecorded: true
+  });
+
+  it("recognizes complete pre-edit provenance", () => {
+    expect(hasCompletePreEditProvenance(provenance)).toBe(true);
+  });
+
+  it("keeps provenance incomplete until a real owner thread is recorded", () => {
+    expect(
+      hasCompletePreEditProvenance({
+        ...provenance,
+        ownerThreadId: null
+      })
+    ).toBe(false);
+  });
+
+  it("rejects planned paths that escape the repository", () => {
+    expect(
+      hasCompletePreEditProvenance({
+        ...provenance,
+        plannedPaths: ["../other-worktree/file.ts"]
+      })
+    ).toBe(false);
+  });
+
+  it("resumes only the immediately preceding unfinished owned paths", () => {
+    expect(
+      assessDirtyWorktreeRecovery({
+        recoveryOfRunId: ownerRunId,
+        currentOwnerThreadId: ownerThreadId,
+        currentBranch: branch,
+        currentHeadSha: headSha,
+        dirtyPaths: ["src\\lib\\automation\\improvement.ts"],
+        immediatelyPrevious: {
+          isImmediatelyPreceding: true,
+          completedAt: null,
+          provenance,
+          checkpoints
+        }
+      })
+    ).toEqual({
+      action: "resume_owned_work",
+      ownerRunId
+    });
+  });
+
+  it.each([
+    {
+      name: "a different branch",
+      currentBranch: "automation/hourly-20260713-130000",
+      currentHeadSha: headSha,
+      dirtyPaths: ["src/lib/automation/improvement.ts"],
+      recoveryOfRunId: ownerRunId,
+      isImmediatelyPreceding: true
+    },
+    {
+      name: "a different HEAD",
+      currentBranch: branch,
+      currentHeadSha: "abcdef0123456789abcdef0123456789abcdef01",
+      dirtyPaths: ["src/lib/automation/improvement.ts"],
+      recoveryOfRunId: ownerRunId,
+      isImmediatelyPreceding: true
+    },
+    {
+      name: "an unplanned path",
+      currentBranch: branch,
+      currentHeadSha: headSha,
+      dirtyPaths: ["src/app/page.tsx"],
+      recoveryOfRunId: ownerRunId,
+      isImmediatelyPreceding: true
+    },
+    {
+      name: "a non-immediate run",
+      currentBranch: branch,
+      currentHeadSha: headSha,
+      dirtyPaths: ["src/lib/automation/improvement.ts"],
+      recoveryOfRunId: ownerRunId,
+      isImmediatelyPreceding: false
+    },
+    {
+      name: "an unclaimed owner run",
+      currentBranch: branch,
+      currentHeadSha: headSha,
+      dirtyPaths: ["src/lib/automation/improvement.ts"],
+      recoveryOfRunId: "run-other",
+      isImmediatelyPreceding: true
+    },
+    {
+      name: "a different owner thread",
+      currentBranch: branch,
+      currentHeadSha: headSha,
+      dirtyPaths: ["src/lib/automation/improvement.ts"],
+      recoveryOfRunId: ownerRunId,
+      currentOwnerThreadId: "thread-other",
+      isImmediatelyPreceding: true
+    }
+  ])("blocks $name", (input) => {
+    const decision = assessDirtyWorktreeRecovery({
+      recoveryOfRunId: input.recoveryOfRunId,
+      currentOwnerThreadId: input.currentOwnerThreadId ?? ownerThreadId,
+      currentBranch: input.currentBranch,
+      currentHeadSha: input.currentHeadSha,
+      dirtyPaths: input.dirtyPaths,
+      immediatelyPrevious: {
+        isImmediatelyPreceding: input.isImmediatelyPreceding,
+        completedAt: null,
+        provenance,
+        checkpoints
+      }
+    });
+
+    expect(decision.action).toBe("blocked_dirty_worktree");
+  });
+
+  it("blocks a run that already closed", () => {
+    const decision = assessDirtyWorktreeRecovery({
+      recoveryOfRunId: ownerRunId,
+      currentOwnerThreadId: ownerThreadId,
+      currentBranch: branch,
+      currentHeadSha: headSha,
+      dirtyPaths: ["src/lib/automation/improvement.ts"],
+      immediatelyPrevious: {
+        isImmediatelyPreceding: true,
+        completedAt: "2026-07-13T12:30:00.000Z",
+        provenance,
+        checkpoints: markImprovementOutcomeRecorded(checkpoints)
+      }
+    });
+
+    expect(decision).toMatchObject({ action: "blocked_dirty_worktree" });
+  });
+});
+
+describe("hourly closeout audit", () => {
+  const headSha = "0123456789abcdef0123456789abcdef01234567";
+  const completeAudit = {
+    branch: "automation/hourly-20260713-120000",
+    startingSha: "abcdef0123456789abcdef0123456789abcdef01",
+    commitSha: headSha,
+    pushResult: "origin/main parity 0 0",
+    migration: "not required",
+    deploymentId: "dpl_example",
+    productionVerification: "Ready, aliases and production smoke verified",
+    zipLocationsExplored: [],
+    devicesExplored: [],
+    routesExplored: [],
+    scenariosExplored: [],
+    errorLogFindings: [],
+    feedbackDispositions: [],
+    discordCoverage: "invite health only",
+    missingCourseResearch: [],
+    researchSources: [],
+    rejectedCandidates: [],
+    learning: [],
+    changedBehavior: "Example improvement",
+    measuredResult: "Focused verification passed",
+    nextRotationTargets: [],
+    blockers: []
+  };
+
+  it("accepts a complete successful audit", () => {
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: completeAudit,
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).not.toThrow();
+  });
+
+  it("requires every owner-report audit field", () => {
+    const incompleteAudit: Record<string, unknown> = { ...completeAudit };
+    delete incompleteAudit.researchSources;
+
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: incompleteAudit,
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).toThrow("researchSources");
+  });
+
+  it("requires parseable array fields for owner reporting", () => {
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: { ...completeAudit, routesExplored: "search" },
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).toThrow("routesExplored must be an array");
+  });
+
+  it("requires the successful commit to identify HEAD", () => {
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: { ...completeAudit, commitSha: "abcdef0" },
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).toThrow("checked-out HEAD");
   });
 });

@@ -13,6 +13,8 @@ import {
 
 import { discordInviteUrl } from "@/lib/community";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
+import { sanitizePagePath } from "@/lib/engagement/page-path";
+import { detectWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 
 type FeedbackSentiment = "like" | "dislike" | "broken";
 
@@ -80,10 +82,8 @@ export function FeedbackWidget() {
           sentiment,
           message,
           contactEmail,
-          page:
-            typeof window === "undefined"
-              ? undefined
-              : `${window.location.pathname}${window.location.search}${window.location.hash}`
+          page: typeof window === "undefined" ? undefined : sanitizePagePath(window.location.pathname),
+          trafficClass: detectWebsiteTrafficClass()
         })
       });
 

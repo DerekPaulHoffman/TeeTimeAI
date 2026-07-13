@@ -211,23 +211,111 @@ const VERIFIED_NON_COURSE_PLACES = [
 const VERIFIED_NON_COURSE_PLACE_IDS = new Set<string>(
   VERIFIED_NON_COURSE_PLACES.map((place) => place.placeId)
 );
+// Some valid course records carry a generic Google display name even when an official course
+// surface provides a stable identity. Correct only exact place IDs so discovery can recover the
+// official course without applying broad geographic or name guesses.
+const ARIZONA_GRAND_GOLF_IDENTITY = {
+  name: "Arizona Grand Golf Course",
+  address: "8000 S Arizona Grand Pkwy, Phoenix, AZ 85044, USA",
+  websiteUrl: "https://www.arizonagrandgolf.com/",
+  phone: undefined,
+  evidenceUrl: "https://www.arizonagrandresort.com/golf/"
+} as const;
+const AHWATUKEE_GOLF_IDENTITY = {
+  name: "Ahwatukee Golf Club",
+  address: "12432 S 48th St, Phoenix, AZ 85044, USA",
+  websiteUrl: "https://www.ahwatukeegolf.com/",
+  phone: "(480) 893-1161",
+  evidenceUrl: "https://www.ahwatukeegolf.com/"
+} as const;
+const VERIFIED_COURSE_IDENTITY_OVERRIDES = [
+  {
+    placeId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    canonicalPlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    ...ARIZONA_GRAND_GOLF_IDENTITY
+  },
+  {
+    placeId: "ChIJAQAAgewFK4cRxjiU-zozIzs",
+    canonicalPlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    ...ARIZONA_GRAND_GOLF_IDENTITY
+  },
+  {
+    placeId: "ChIJ____iusFK4cReVCFj6EmIBQ",
+    canonicalPlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    ...ARIZONA_GRAND_GOLF_IDENTITY
+  },
+  {
+    placeId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    canonicalPlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    ...AHWATUKEE_GOLF_IDENTITY
+  },
+  {
+    placeId: "ChIJ____G7MFK4cRf2hkJjIoEWo",
+    canonicalPlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    ...AHWATUKEE_GOLF_IDENTITY
+  },
+  {
+    placeId: "ChIJq6qqv7QFK4cRZNsSs47toA8",
+    canonicalPlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    ...AHWATUKEE_GOLF_IDENTITY
+  }
+] as const;
+const VERIFIED_COURSE_IDENTITY_OVERRIDES_BY_PLACE_ID = new Map<
+  string,
+  (typeof VERIFIED_COURSE_IDENTITY_OVERRIDES)[number]
+>(VERIFIED_COURSE_IDENTITY_OVERRIDES.map((course) => [course.placeId, course]));
 // Google can retain multiple place records for one physical course. Exclude only a verified
 // secondary identity when the official course surface names and locates the canonical record.
+// When Google returns aliases without the canonical record, retain one alias so a valid course is
+// not erased merely because provider identity data is incomplete.
 const VERIFIED_DUPLICATE_COURSE_PLACES = [
   {
     placeId: "ChIJj1vnKctZ4IkRr5BY1-F-5AE",
     name: "Stratton Golf Course",
     canonicalPlaceId: "ChIJvbRuDR9Y4IkRe4pD0YaU5fQ",
     evidenceUrl: "https://www.stratton.com/things-to-do/activities/stratton-golf/tour-the-course"
+  },
+  {
+    placeId: "ChIJAQAAgewFK4cRxjiU-zozIzs",
+    name: "Arizona Grand Golf Course",
+    canonicalPlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    retainWhenCanonicalAbsent: true,
+    evidenceUrl: "https://www.arizonagrandresort.com/golf/"
+  },
+  {
+    placeId: "ChIJ____iusFK4cReVCFj6EmIBQ",
+    name: "Arizona Grand Golf Course",
+    canonicalPlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    retainWhenCanonicalAbsent: true,
+    evidenceUrl: "https://www.arizonagrandresort.com/golf/"
+  },
+  {
+    placeId: "ChIJ____G7MFK4cRf2hkJjIoEWo",
+    name: "Ahwatukee Golf Club",
+    canonicalPlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    retainWhenCanonicalAbsent: true,
+    evidenceUrl: "https://www.ahwatukeegolf.com/"
+  },
+  {
+    placeId: "ChIJq6qqv7QFK4cRZNsSs47toA8",
+    name: "Ahwatukee Golf Club",
+    canonicalPlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    retainWhenCanonicalAbsent: true,
+    evidenceUrl: "https://www.ahwatukeegolf.com/"
   }
 ] as const;
-const VERIFIED_DUPLICATE_COURSE_PLACE_IDS = new Set<string>(
-  VERIFIED_DUPLICATE_COURSE_PLACES.map((place) => place.placeId)
+const VERIFIED_DUPLICATE_COURSE_PLACES_BY_PLACE_ID = new Map<
+  string,
+  (typeof VERIFIED_DUPLICATE_COURSE_PLACES)[number]
+>(
+  VERIFIED_DUPLICATE_COURSE_PLACES.map((place) => [place.placeId, place])
 );
 
 export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandidate {
-  const googlePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
-  const name = place.displayName?.text;
+  const sourcePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
+  const identityOverride = VERIFIED_COURSE_IDENTITY_OVERRIDES_BY_PLACE_ID.get(sourcePlaceId);
+  const googlePlaceId = identityOverride?.canonicalPlaceId ?? sourcePlaceId;
+  const name = identityOverride?.name ?? place.displayName?.text;
   const latitude = place.location?.latitude;
   const longitude = place.location?.longitude;
 
@@ -238,13 +326,13 @@ export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandi
   return {
     googlePlaceId,
     name,
-    address: place.formattedAddress,
+    address: identityOverride?.address ?? place.formattedAddress,
     latitude,
     longitude,
     timeZone: getTimeZoneForCoordinates(latitude, longitude),
     rating: place.rating,
-    phone: place.nationalPhoneNumber,
-    website: place.websiteUri,
+    phone: identityOverride?.phone ?? place.nationalPhoneNumber,
+    website: identityOverride?.websiteUrl ?? place.websiteUri,
     photoReference: place.photos?.[0]?.name,
     photoAttributions: place.photos?.[0]?.authorAttributions
   };
@@ -254,23 +342,54 @@ export function filterPublicGolfCoursePlaces(
   places: GooglePlace[],
   options: PublicCourseFilterOptions = {}
 ) {
-  return places.filter((place) => isLikelyPublicGolfCoursePlace(place, options));
+  return filterVerifiedDuplicateCoursePlaces(
+    places.filter((place) => isLikelyPublicGolfCoursePlace(place, options))
+  );
+}
+
+function filterVerifiedDuplicateCoursePlaces(places: GooglePlace[]) {
+  const retainedPlaceIds = new Set(
+    places.map((place) => normalizePlaceId(place.id ?? place.name ?? "")).filter(Boolean)
+  );
+  const preferredAliasesByCanonicalPlaceId = new Map<string, string>();
+  for (const duplicate of VERIFIED_DUPLICATE_COURSE_PLACES) {
+    if (
+      "retainWhenCanonicalAbsent" in duplicate &&
+      duplicate.retainWhenCanonicalAbsent &&
+      retainedPlaceIds.has(duplicate.placeId) &&
+      !preferredAliasesByCanonicalPlaceId.has(duplicate.canonicalPlaceId)
+    ) {
+      preferredAliasesByCanonicalPlaceId.set(duplicate.canonicalPlaceId, duplicate.placeId);
+    }
+  }
+
+  return places.filter((place) => {
+    const placeId = normalizePlaceId(place.id ?? place.name ?? "");
+    const duplicate = VERIFIED_DUPLICATE_COURSE_PLACES_BY_PLACE_ID.get(placeId);
+    if (!duplicate) {
+      return true;
+    }
+    if (retainedPlaceIds.has(duplicate.canonicalPlaceId)) {
+      return false;
+    }
+    return preferredAliasesByCanonicalPlaceId.get(duplicate.canonicalPlaceId) === placeId;
+  });
 }
 
 function isLikelyPublicGolfCoursePlace(
   place: GooglePlace,
   { publicCourseEvidenceIds = new Set<string>() }: PublicCourseFilterOptions
 ) {
-  const name = place.displayName?.text ?? "";
   const placeId = normalizePlaceId(place.id ?? place.name ?? "");
+  const identityOverride = VERIFIED_COURSE_IDENTITY_OVERRIDES_BY_PLACE_ID.get(placeId);
+  const name = identityOverride?.name ?? place.displayName?.text ?? "";
   const placeTypes = place.types ?? [];
   const hasPublicCourseEvidence = publicCourseEvidenceIds.has(placeId);
   const isVerifiedPublicCourse = VERIFIED_PUBLIC_COURSE_PLACE_IDS.has(placeId);
 
   if (
     VERIFIED_PRIVATE_COURSE_PLACE_IDS.has(placeId) ||
-    VERIFIED_NON_COURSE_PLACE_IDS.has(placeId) ||
-    VERIFIED_DUPLICATE_COURSE_PLACE_IDS.has(placeId)
+    VERIFIED_NON_COURSE_PLACE_IDS.has(placeId)
   ) {
     return false;
   }
@@ -719,7 +838,10 @@ export function dedupeGolfCoursePlaces(places: GooglePlace[]) {
 }
 
 function getPlaceCourseIdentity(place: GooglePlace): CourseIdentity | undefined {
-  const name = place.displayName?.text;
+  const sourcePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
+  const identityOverride = VERIFIED_COURSE_IDENTITY_OVERRIDES_BY_PLACE_ID.get(sourcePlaceId);
+  const googlePlaceId = identityOverride?.canonicalPlaceId ?? sourcePlaceId;
+  const name = identityOverride?.name ?? place.displayName?.text;
   const latitude = place.location?.latitude;
   const longitude = place.location?.longitude;
   if (!name || latitude === undefined || longitude === undefined) {
@@ -727,13 +849,13 @@ function getPlaceCourseIdentity(place: GooglePlace): CourseIdentity | undefined 
   }
 
   return {
-    googlePlaceId: normalizePlaceId(place.id ?? place.name ?? ""),
+    googlePlaceId,
     name,
-    address: place.formattedAddress,
+    address: identityOverride?.address ?? place.formattedAddress,
     latitude,
     longitude,
-    website: place.websiteUri,
-    phone: place.nationalPhoneNumber,
+    website: identityOverride?.websiteUrl ?? place.websiteUri,
+    phone: identityOverride?.phone ?? place.nationalPhoneNumber,
     containingPlaceIds: (place.containingPlaces ?? [])
       .map((containingPlace) => normalizePlaceId(containingPlace.id ?? containingPlace.name ?? ""))
       .filter(Boolean)

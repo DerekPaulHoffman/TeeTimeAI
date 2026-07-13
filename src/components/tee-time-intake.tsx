@@ -41,6 +41,7 @@ import {
   type CourseLayoutHoleCount
 } from "@/lib/courses/course-layout";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
+import { detectWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import {
   CURRENT_LOCATION_LABEL,
@@ -62,6 +63,7 @@ import {
   MAX_PLAYERS_PER_SEARCH
 } from "@/lib/validation/search";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
+import { consumeSearchPrefill } from "@/lib/searches/search-prefill";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -256,6 +258,24 @@ function TeeTimeIntakeContent({
   const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
+
+  useEffect(() => {
+    const transferred = consumeSearchPrefill();
+    if (!transferred) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      if (transferred.location !== undefined) setLocationText(transferred.location);
+      if (transferred.radius !== undefined) setSearchRadiusMiles(transferred.radius);
+      if (transferred.date !== undefined) setDate(transferred.date);
+      if (transferred.startTime !== undefined) setStartTime(transferred.startTime);
+      if (transferred.endTime !== undefined) setEndTime(transferred.endTime);
+      if (transferred.players !== undefined) setPlayers(transferred.players);
+      if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
+      if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
+    });
+  }, []);
 
   const minSearchDate = tomorrow();
 
@@ -1222,7 +1242,8 @@ function MissingCourseLookup({
             longitude: origin?.longitude
           })}`,
           page: "/search#missing-course",
-          contactEmail: contactEmail || undefined
+          contactEmail: contactEmail || undefined,
+          trafficClass: detectWebsiteTrafficClass()
         })
       });
 

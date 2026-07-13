@@ -87,6 +87,13 @@ enum FeedbackSentiment {
   BROKEN
 }
 
+enum WebsiteTrafficClass {
+  UNCLASSIFIED
+  PUBLIC
+  AUTOMATION
+  TEST
+}
+
 enum CourseSupportIncidentStatus {
   AUTO_INVESTIGATING
   NEEDS_HUMAN
@@ -315,25 +322,29 @@ model CourseSupportIncident {
 }
 
 model WebsiteEvent {
-  id        String   @id @default(cuid())
-  name      String
-  page      String?
-  metadata  Json?
-  createdAt DateTime @default(now())
+  id           String              @id @default(cuid())
+  name         String
+  page         String?
+  metadata     Json?
+  trafficClass WebsiteTrafficClass @default(UNCLASSIFIED)
+  createdAt    DateTime            @default(now())
 
   @@index([name, createdAt])
+  @@index([trafficClass, createdAt])
   @@index([createdAt])
 }
 
 model WebsiteFeedback {
-  id           String            @id @default(cuid())
+  id           String              @id @default(cuid())
   sentiment    FeedbackSentiment
   message      String?
   page         String?
   contactEmail String?
-  createdAt    DateTime          @default(now())
+  trafficClass WebsiteTrafficClass @default(UNCLASSIFIED)
+  createdAt    DateTime            @default(now())
   resolvedAt   DateTime?
 
   @@index([sentiment, createdAt])
+  @@index([trafficClass, createdAt])
   @@index([createdAt])
 }

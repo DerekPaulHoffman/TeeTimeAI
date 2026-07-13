@@ -3787,7 +3787,7 @@ button {
 }
 
 .home-form-row-primary {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .home-form-row-details {

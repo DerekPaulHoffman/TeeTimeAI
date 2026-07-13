@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { Prisma } from "@prisma/client";
 
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
+import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
@@ -315,24 +316,26 @@ async function main() {
           status: discovery.status,
           platform: discovery.detectedPlatform,
           confidence: discovery.confidence,
-          sourceUrl: discovery.sourceUrl,
-          bookingUrl: discovery.bookingUrl,
-          apiEndpoint: discovery.apiEndpoint,
+          sourceUrl: sanitizeExternalUrl(discovery.sourceUrl),
+          bookingUrl: sanitizeExternalUrl(discovery.bookingUrl),
+          apiEndpoint: sanitizeExternalUrl(discovery.apiEndpoint),
           createdAt: discovery.createdAt
         })),
         recentWebsiteEvents: recentWebsiteEvents.map((event) => ({
           id: event.id,
           name: event.name,
-          page: event.page,
-          metadata: event.metadata,
+          page: sanitizePagePath(event.page),
+          metadata: sanitizeWebsiteEventMetadata(event.metadata),
+          trafficClass: event.trafficClass,
           createdAt: event.createdAt
         })),
         unresolvedWebsiteFeedback: unresolvedWebsiteFeedback.map((feedback) => ({
           id: feedback.id,
           sentiment: feedback.sentiment,
           message: summarize(feedback.message),
-          page: feedback.page,
+          page: sanitizePagePath(feedback.page),
           contactEmail: feedback.contactEmail ? redactEmail(feedback.contactEmail) : null,
+          trafficClass: feedback.trafficClass,
           createdAt: feedback.createdAt
         }))
       },
@@ -344,6 +347,33 @@ async function main() {
 
 function summarize(notes: string | null) {
   return notes?.replace(/\s+/g, " ").trim().slice(0, 300) ?? null;
+}
+
+function sanitizeWebsiteEventMetadata(metadata: Prisma.JsonValue | null) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return metadata;
+  }
+
+  const safeMetadata = { ...metadata };
+  delete safeMetadata.searchId;
+  return safeMetadata;
+}
+
+function sanitizeExternalUrl(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function latestCurrentActionableProbes<

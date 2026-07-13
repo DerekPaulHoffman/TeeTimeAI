@@ -11,6 +11,7 @@ export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
   title: "Manage email alert",
   description: "Stop a Tee Time Spot email alert.",
+  referrer: "no-referrer",
   robots: {
     index: false,
     follow: false

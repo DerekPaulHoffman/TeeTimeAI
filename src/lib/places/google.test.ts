@@ -6,8 +6,36 @@ import {
   getGooglePlacesApiKey,
   mapGooglePlaceToCourseCandidate,
   searchGolfCoursesByName,
-  searchNearbyGolfCourses
+  searchNearbyGolfCourses,
+  type GooglePlace
 } from "./google";
+
+function makeOperationalGolfCoursePlace({
+  id,
+  name,
+  address,
+  latitude,
+  longitude,
+  websiteUri
+}: {
+  id: string;
+  name: string;
+  address: string;
+  latitude: number;
+  longitude: number;
+  websiteUri?: string;
+}): GooglePlace {
+  return {
+    id: `places/${id}`,
+    displayName: { text: name },
+    formattedAddress: address,
+    primaryType: "golf_course",
+    types: ["golf_course"],
+    businessStatus: "OPERATIONAL",
+    websiteUri,
+    location: { latitude, longitude }
+  };
+}
 
 describe("Google Places mapping", () => {
   afterEach(() => {
@@ -493,6 +521,217 @@ describe("Google Places mapping", () => {
       "Hooper Golf Course",
       "Stratton Mountain Golf Course"
     ]);
+  });
+
+  it("keeps canonical Phoenix courses while suppressing their verified aliases", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJAQAAgewFK4cRxjiU-zozIzs",
+        name: "Arizona Grand Golf Course",
+        address: "9433 S 50th St, Phoenix, AZ 85044, USA",
+        latitude: 33.3613688,
+        longitude: -111.9733018
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____iusFK4cReVCFj6EmIBQ",
+        name: "Arizona Grand Golf Course",
+        address: "9201 S 51st St, Phoenix, AZ 85044, USA",
+        latitude: 33.363,
+        longitude: -111.969
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+        name: "Arizona Grand Golf Course",
+        address: "8000 S Arizona Grand Pkwy, Phoenix, AZ 85044, USA",
+        latitude: 33.3732199,
+        longitude: -111.9703264,
+        websiteUri: "https://www.arizonagrandgolf.com/"
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____G7MFK4cRf2hkJjIoEWo",
+        name: "Golf Course",
+        address: "Phoenix, AZ 85044, USA",
+        latitude: 33.334078,
+        longitude: -111.9846664
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJq6qqv7QFK4cRZNsSs47toA8",
+        name: "Golf Course",
+        address: "12000 S 50th Way, Phoenix, AZ 85044, USA",
+        latitude: 33.3343027,
+        longitude: -111.980754
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+        name: "Golf Course",
+        address: "12432 S 48th St, Phoenix, AZ 85044, USA",
+        latitude: 33.3433448,
+        longitude: -111.9751648
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJq6qqBnIGK4cRPpgjylaZoIo",
+        name: "Golf Course",
+        address: "Tempe, AZ 85283, USA",
+        latitude: 33.3568985,
+        longitude: -111.940698
+      })
+    ]);
+
+    expect(places.map((place) => place.id)).toEqual([
+      "places/ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+      "places/ChIJq6qqPcgFK4cRuYv0flb88dY",
+      "places/ChIJq6qqBnIGK4cRPpgjylaZoIo"
+    ]);
+    expect(places.map(mapGooglePlaceToCourseCandidate)).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+        name: "Arizona Grand Golf Course",
+        address: "8000 S Arizona Grand Pkwy, Phoenix, AZ 85044, USA",
+        website: "https://www.arizonagrandgolf.com/"
+      }),
+      expect.objectContaining({
+        googlePlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+        name: "Ahwatukee Golf Club",
+        address: "12432 S 48th St, Phoenix, AZ 85044, USA",
+        phone: "(480) 893-1161",
+        website: "https://www.ahwatukeegolf.com/"
+      }),
+      expect.objectContaining({
+        googlePlaceId: "ChIJq6qqBnIGK4cRPpgjylaZoIo",
+        name: "Golf Course",
+        address: "Tempe, AZ 85283, USA"
+      })
+    ]);
+  });
+
+  it("retains verified Phoenix aliases when their canonical records are absent", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____iusFK4cReVCFj6EmIBQ",
+        name: "Arizona Grand Golf Course",
+        address: "9201 S 51st St, Phoenix, AZ 85044, USA",
+        latitude: 33.363,
+        longitude: -111.969
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____G7MFK4cRf2hkJjIoEWo",
+        name: "Golf Course",
+        address: "Phoenix, AZ 85044, USA",
+        latitude: 33.334078,
+        longitude: -111.9846664
+      })
+    ]).map(mapGooglePlaceToCourseCandidate);
+
+    expect(places).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+        name: "Arizona Grand Golf Course",
+        address: "8000 S Arizona Grand Pkwy, Phoenix, AZ 85044, USA",
+        website: "https://www.arizonagrandgolf.com/"
+      }),
+      expect.objectContaining({
+        googlePlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+        name: "Ahwatukee Golf Club",
+        address: "12432 S 48th St, Phoenix, AZ 85044, USA",
+        phone: "(480) 893-1161",
+        website: "https://www.ahwatukeegolf.com/"
+      })
+    ]);
+  });
+
+  it("retains one official course when Google returns multiple aliases without a canonical", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJAQAAgewFK4cRxjiU-zozIzs",
+        name: "Arizona Grand Golf Course",
+        address: "9433 S 50th St, Phoenix, AZ 85044, USA",
+        latitude: 33.3613688,
+        longitude: -111.9733018
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____iusFK4cReVCFj6EmIBQ",
+        name: "Arizona Grand Golf Course",
+        address: "9201 S 51st St, Phoenix, AZ 85044, USA",
+        latitude: 33.363,
+        longitude: -111.969
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____G7MFK4cRf2hkJjIoEWo",
+        name: "Golf Course",
+        address: "Phoenix, AZ 85044, USA",
+        latitude: 33.334078,
+        longitude: -111.9846664
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJq6qqv7QFK4cRZNsSs47toA8",
+        name: "Golf Course",
+        address: "12000 S 50th Way, Phoenix, AZ 85044, USA",
+        latitude: 33.3343027,
+        longitude: -111.980754
+      })
+    ]).map(mapGooglePlaceToCourseCandidate);
+
+    expect(places).toHaveLength(2);
+    expect(places.map((place) => place.name)).toEqual([
+      "Arizona Grand Golf Course",
+      "Ahwatukee Golf Club"
+    ]);
+  });
+
+  it("chooses stable Phoenix aliases and canonical persisted IDs regardless of provider order", () => {
+    const filtered = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____iusFK4cReVCFj6EmIBQ",
+        name: "Arizona Grand Golf Course",
+        address: "9201 S 51st St, Phoenix, AZ 85044, USA",
+        latitude: 33.363,
+        longitude: -111.969
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJAQAAgewFK4cRxjiU-zozIzs",
+        name: "Arizona Grand Golf Course",
+        address: "9433 S 50th St, Phoenix, AZ 85044, USA",
+        latitude: 33.3613688,
+        longitude: -111.9733018
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJq6qqv7QFK4cRZNsSs47toA8",
+        name: "Golf Course",
+        address: "12000 S 50th Way, Phoenix, AZ 85044, USA",
+        latitude: 33.3343027,
+        longitude: -111.980754
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ____G7MFK4cRf2hkJjIoEWo",
+        name: "Golf Course",
+        address: "Phoenix, AZ 85044, USA",
+        latitude: 33.334078,
+        longitude: -111.9846664
+      })
+    ]);
+
+    expect(filtered.map((place) => place.id)).toEqual([
+      "places/ChIJAQAAgewFK4cRxjiU-zozIzs",
+      "places/ChIJ____G7MFK4cRf2hkJjIoEWo"
+    ]);
+    expect(filtered.map(mapGooglePlaceToCourseCandidate)).toEqual([
+      expect.objectContaining({ googlePlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA" }),
+      expect.objectContaining({ googlePlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY" })
+    ]);
+  });
+
+  it("keeps the verified Stratton secondary identity suppressed when canonical data is absent", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJj1vnKctZ4IkRr5BY1-F-5AE",
+        name: "Stratton Golf Course",
+        address: "Stratton, VT 05155, USA",
+        latitude: 43.114,
+        longitude: -72.908
+      })
+    ]);
+
+    expect(places).toEqual([]);
   });
 
   it("filters verified Miami non-courses and an invitation-only club from live discovery", () => {

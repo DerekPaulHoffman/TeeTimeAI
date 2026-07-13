@@ -308,10 +308,22 @@ Required for live email sending:
 - `ALERT_EMAIL_FROM`
 - `RESEND_EMAIL_DOMAIN`
 - `OPERATOR_ALERT_EMAIL` (receives deduplicated course-monitoring incident, escalation, and resolution emails)
+- `EMAIL_ACTION_SECRET` (signs bounded email alert-control links; keep separate from automation API access)
 
 Required for automation endpoints/scripts:
 
 - `AUTOMATION_API_KEY`
+
+Historical engagement URLs can be reduced to pathnames and legacy `metadata.searchId` fields removed
+with the aggregate-only maintenance utility below. This mutates production data, so run it only with
+explicit approval; the confirmation value is intentionally required and the utility never prints row
+values:
+
+```powershell
+$env:CONFIRM_ENGAGEMENT_PRIVACY_SCRUB = "strip-query-hash-and-search-id"
+npx vercel env run -e production -- npm run maintenance:scrub-engagement-privacy
+Remove-Item Env:\CONFIRM_ENGAGEMENT_PRIVACY_SCRUB
+```
 
 Required for Clerk account mode:
 
