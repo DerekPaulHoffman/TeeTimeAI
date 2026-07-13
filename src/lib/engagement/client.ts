@@ -1,4 +1,5 @@
 import type { WebsiteEventInput } from "./engagement";
+import { detectDiscoverySource } from "./discovery-source";
 import { sanitizePagePath } from "./page-path";
 import { detectWebsiteTrafficClass } from "./traffic-class";
 
@@ -6,6 +7,7 @@ export function trackWebsiteEvent(event: WebsiteEventInput) {
   const payload = JSON.stringify({
     ...event,
     page: sanitizePagePath(event.page) ?? getCurrentPage(),
+    discoverySource: detectDiscoverySource(),
     trafficClass: detectWebsiteTrafficClass()
   });
 

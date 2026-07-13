@@ -4,6 +4,7 @@ import { trackWebsiteEvent } from "./client";
 
 describe("trackWebsiteEvent", () => {
   afterEach(() => {
+    window.sessionStorage.clear();
     Reflect.deleteProperty(navigator, "webdriver");
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -35,6 +36,7 @@ describe("trackWebsiteEvent", () => {
         body: JSON.stringify({
           name: "page_viewed",
           page: "/search",
+          discoverySource: "DIRECT",
           trafficClass: "PUBLIC"
         })
       })

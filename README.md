@@ -334,6 +334,8 @@ Required for Clerk account mode:
 Site metadata:
 
 - `NEXT_PUBLIC_SITE_URL`
+- `GOOGLE_SITE_VERIFICATION` (optional Search Console HTML meta token)
+- `BING_SITE_VERIFICATION` (optional Bing Webmaster Tools HTML meta token)
 
 Never commit secret values. Local env files and `.vercel/` are intentionally ignored.
 
@@ -529,6 +531,7 @@ Treat it as reference material only. The active application is the TypeScript/Ne
 - `docs/codex-automation-loop.md`: loop engineering contract.
 - `docs/deployment-status.md`: provider and deploy status log.
 - `docs/ux-research-notes.md`: UX principles and design-tool guidance.
+- `docs/ai-discovery-baseline.md`: fixed AI/search prompt set, measurement scorecard, and webmaster setup.
 
 ## Future Work
 

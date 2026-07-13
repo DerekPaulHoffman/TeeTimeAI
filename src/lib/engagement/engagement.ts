@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 
 import { sanitizePagePath } from "@/lib/engagement/page-path";
+import { discoverySources } from "@/lib/engagement/discovery-source";
 import { websiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
@@ -17,6 +18,7 @@ export const websiteEventNames = [
 ] as const;
 
 const trafficClassSchema = z.enum(websiteTrafficClasses).optional().default("UNCLASSIFIED");
+const discoverySourceSchema = z.enum(discoverySources).optional();
 const pageSchema = z
   .string()
   .trim()
@@ -38,6 +40,7 @@ const searchMetadataSchema = z
 
 const eventBase = {
   page: pageSchema,
+  discoverySource: discoverySourceSchema,
   trafficClass: trafficClassSchema
 };
 
@@ -102,17 +105,29 @@ export type WebsiteFeedbackInput = z.input<typeof websiteFeedbackInputSchema>;
 
 export async function createWebsiteEvent(input: unknown) {
   const event = websiteEventInputSchema.parse(input);
+  const eventMetadata = getEventMetadata(event);
 
   return prisma.websiteEvent.create({
     data: {
       name: event.name,
       page: event.page,
-      metadata: (
-        "metadata" in event ? event.metadata : undefined
-      ) as Prisma.InputJsonObject | undefined,
+      metadata: eventMetadata as Prisma.InputJsonObject | undefined,
       trafficClass: event.trafficClass
     }
   });
+}
+
+function getEventMetadata(event: z.output<typeof websiteEventInputSchema>) {
+  const metadata = "metadata" in event ? event.metadata : undefined;
+
+  if (!event.discoverySource) {
+    return metadata;
+  }
+
+  return {
+    ...metadata,
+    discoverySource: event.discoverySource
+  };
 }
 
 export async function submitWebsiteFeedback(input: unknown) {

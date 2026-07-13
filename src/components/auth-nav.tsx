@@ -10,7 +10,8 @@ import { discordInviteUrl } from "@/lib/community";
 export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
   if (!clerkEnabled) {
     return (
-      <nav className="nav-actions">
+      <nav aria-label="Primary navigation" className="nav-actions">
+        <InfoNavLinks />
         <DiscordNavLink />
         <Link
           aria-label="My alerts"
@@ -41,11 +42,12 @@ function ConfiguredAuthNav() {
   const { isLoaded, isSignedIn } = useUser();
 
   if (!isLoaded) {
-    return <nav className="nav-actions" />;
+    return <nav aria-label="Primary navigation" className="nav-actions" />;
   }
 
   return (
-    <nav className="nav-actions">
+    <nav aria-label="Primary navigation" className="nav-actions">
+      <InfoNavLinks />
       <DiscordNavLink />
       <Link
         aria-label="My alerts"
@@ -76,6 +78,15 @@ function ConfiguredAuthNav() {
         </SignInButton>
       )}
     </nav>
+  );
+}
+
+function InfoNavLinks() {
+  return (
+    <span className="nav-info-links">
+      <Link href="/how-it-works">How it works</Link>
+      <Link href="/guides">Guides</Link>
+    </span>
   );
 }
 

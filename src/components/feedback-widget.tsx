@@ -15,6 +15,7 @@ import { discordInviteUrl } from "@/lib/community";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { detectWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
+import { OPEN_FEEDBACK_EVENT } from "@/components/open-feedback-button";
 
 type FeedbackSentiment = "like" | "dislike" | "broken";
 
@@ -43,6 +44,16 @@ export function FeedbackWidget() {
       closeButtonRef.current?.focus();
     }
   }, [open]);
+
+  useEffect(() => {
+    function handleOpenRequest() {
+      setOpen(true);
+      trackWebsiteEvent({ name: "feedback_opened" });
+    }
+
+    window.addEventListener(OPEN_FEEDBACK_EVENT, handleOpenRequest);
+    return () => window.removeEventListener(OPEN_FEEDBACK_EVENT, handleOpenRequest);
+  }, []);
 
   useEffect(() => {
     if (!open) return;

@@ -6,12 +6,20 @@ import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
 import { AuthNav } from "@/components/auth-nav";
 import { EngagementTracker } from "@/components/engagement-tracker";
 import { FeedbackWidget } from "@/components/feedback-widget";
+import { SiteFooter } from "@/components/site-footer";
 import { SiteObservability } from "@/components/site-observability";
 import { hasClerkConfig } from "@/lib/env";
-import { absoluteUrl, siteDescription, siteName, siteUrl } from "@/lib/seo";
+import {
+  absoluteUrl,
+  getSiteVerification,
+  siteDescription,
+  siteName,
+  siteUrl
+} from "@/lib/seo";
 import "leaflet/dist/leaflet.css";
 import "./globals.css";
 import "./pricing.css";
+import "./editorial.css";
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,
@@ -64,6 +72,7 @@ export const metadata: Metadata = {
       "max-video-preview": -1
     }
   },
+  verification: getSiteVerification(),
   category: "sports"
 };
 
@@ -87,10 +96,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             <EngagementTracker />
             {children}
             <FeedbackWidget />
-            <footer className="footer">
-              <p>We find the opening. You make the booking.</p>
-              <p>© 2026</p>
-            </footer>
+            <SiteFooter />
           </div>
         </OptionalClerkProvider>
         <SiteObservability enabled={Boolean(process.env.VERCEL_URL)} />

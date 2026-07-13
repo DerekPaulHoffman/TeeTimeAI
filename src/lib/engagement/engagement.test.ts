@@ -81,6 +81,29 @@ describe("websiteEventInputSchema", () => {
       })
     ).toThrow(/unrecognized/i);
   });
+
+  it("accepts only an aggregate discovery source and rejects raw referrer data", () => {
+    expect(
+      websiteEventInputSchema.parse({
+        name: "page_viewed",
+        page: "/guides",
+        discoverySource: "AI_CHATGPT"
+      })
+    ).toEqual({
+      name: "page_viewed",
+      page: "/guides",
+      discoverySource: "AI_CHATGPT",
+      trafficClass: "UNCLASSIFIED"
+    });
+
+    expect(() =>
+      websiteEventInputSchema.parse({
+        name: "page_viewed",
+        discoverySource: "AI_CHATGPT",
+        referrer: "https://chatgpt.com/c/private-prompt"
+      })
+    ).toThrow(/unrecognized/i);
+  });
 });
 
 describe("websiteFeedbackInputSchema", () => {
@@ -136,6 +159,27 @@ describe("engagement persistence", () => {
         metadata: {
           selectedCourseCount: 3,
           players: 4
+        },
+        trafficClass: "UNCLASSIFIED"
+      }
+    });
+  });
+
+  it("stores an aggregate discovery label inside event metadata", async () => {
+    mockedPrisma.websiteEvent.create.mockResolvedValue({ id: "event-source" } as never);
+
+    await createWebsiteEvent({
+      name: "page_viewed",
+      page: "/guides/public-golf-booking-windows",
+      discoverySource: "AI_PERPLEXITY"
+    });
+
+    expect(mockedPrisma.websiteEvent.create).toHaveBeenCalledWith({
+      data: {
+        name: "page_viewed",
+        page: "/guides/public-golf-booking-windows",
+        metadata: {
+          discoverySource: "AI_PERPLEXITY"
         },
         trafficClass: "UNCLASSIFIED"
       }

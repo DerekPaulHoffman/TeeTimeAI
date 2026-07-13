@@ -1,13 +1,17 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { ArrowRight, Bell, Check, MapPin, Search } from "lucide-react";
 
 import { DiscordMark } from "@/components/discord-mark";
 import { HomeSearchForm } from "@/components/home-search-form";
+import { StructuredData } from "@/components/structured-data";
 import { discordInviteUrl } from "@/lib/community";
-import { absoluteUrl, siteDescription, siteName } from "@/lib/seo";
+import { absoluteUrl, siteDefinition, siteDescription, siteName } from "@/lib/seo";
 
 export const metadata: Metadata = {
-  title: "Public Golf Tee Time Alerts",
+  title: {
+    absolute: "Tee Time Spot | Free Public Golf Tee Time Alerts"
+  },
   description: siteDescription,
   alternates: {
     canonical: "/"
@@ -21,7 +25,16 @@ const homeStructuredData = {
       "@type": "Organization",
       "@id": `${absoluteUrl("/")}#organization`,
       name: siteName,
-      url: absoluteUrl("/")
+      url: absoluteUrl("/"),
+      description: siteDescription,
+      logo: absoluteUrl("/icon.svg"),
+      sameAs: [discordInviteUrl],
+      knowsAbout: [
+        "public golf courses",
+        "golf tee time alerts",
+        "public golf booking windows",
+        "tee time cancellations"
+      ]
     },
     {
       "@type": "WebSite",
@@ -35,6 +48,20 @@ const homeStructuredData = {
       inLanguage: "en-US"
     },
     {
+      "@type": "WebPage",
+      "@id": `${absoluteUrl("/")}#webpage`,
+      name: "Tee Time Spot | Free Public Golf Tee Time Alerts",
+      url: absoluteUrl("/"),
+      description: siteDescription,
+      isPartOf: {
+        "@id": `${absoluteUrl("/")}#website`
+      },
+      about: {
+        "@id": `${absoluteUrl("/")}#app`
+      },
+      inLanguage: "en-US"
+    },
+    {
       "@type": "WebApplication",
       "@id": `${absoluteUrl("/")}#app`,
       name: siteName,
@@ -43,6 +70,16 @@ const homeStructuredData = {
       operatingSystem: "Web",
       description: siteDescription,
       isAccessibleForFree: true,
+      featureList: [
+        "Rank one to five preferred public golf courses",
+        "Choose a future date, time window, and group size",
+        "Receive email alerts for matching supported availability",
+        "Open the official course booking link and book directly"
+      ],
+      audience: {
+        "@type": "Audience",
+        audienceType: "Public golf course players"
+      },
       offers: {
         "@type": "Offer",
         price: "0",
@@ -55,22 +92,17 @@ const homeStructuredData = {
 export default function HomePage() {
   return (
     <main>
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify(homeStructuredData).replace(/</g, "\\u003c")
-        }}
-      />
+      <StructuredData data={homeStructuredData} />
       <section className="hero">
         <div className="hero-content">
-          <p className="eyebrow">For public course golfers</p>
+          <p className="eyebrow">Free, alert-only public golf service</p>
           <h1>
-            Stop settling for your backup <br className="mobile-hero-break" />course.
+            Tee Time Spot finds the opening. <br className="mobile-hero-break" />You book direct.
           </h1>
           <p className="hero-copy">
-            Your favorites were full, so you booked your third choice. We watch your top
-            picks around the clock — the moment a spot opens, you get a direct link to grab
-            it and play where you actually wanted.
+            Rank up to five public golf courses and tell us when your group can play. When a
+            matching tee time appears on a supported public booking page, we email the official
+            link. We never book or pay for you.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
@@ -104,7 +136,7 @@ export default function HomePage() {
 
       <section className="scenario-section" aria-labelledby="scenario-heading">
         <div className="scenario-inner">
-          <p className="eyebrow" id="scenario-heading">A real example</p>
+          <p className="eyebrow" id="scenario-heading">An example alert journey</p>
           <div className="scenario-grid">
             <article className="scenario-card scenario-plan">
               <p className="scenario-label">The plan</p>
@@ -129,29 +161,29 @@ export default function HomePage() {
 
             <article className="scenario-card scenario-alert-card">
               <span className="scenario-bell" aria-hidden="true"><Bell size={18} /></span>
-              <p className="scenario-label">We found it — we notified you</p>
+              <p className="scenario-label">A matching public opening appeared</p>
               <h2>New tee time at Ridgecrest Links — your #2 pick just opened up</h2>
-              <p>Sat 2:10 PM · 3 players · Direct booking link below</p>
-              <span className="scenario-book-link">Book now →</span>
+              <p>Sat 2:10 PM · 3 players · Official booking link below</p>
+              <span className="scenario-book-link">Open official booking page →</span>
             </article>
 
             <article className="scenario-card scenario-result">
-              <p className="scenario-label">What the user did</p>
+              <p className="scenario-label">The golfer stayed in control</p>
               <div className="scenario-result-step">
                 <span aria-hidden="true"><Check size={12} /></span>
-                <p>Cancelled their Maplewood Municipal tee time</p>
+                <p>Reviewed the live time, price, holes, and course policy</p>
               </div>
               <div className="scenario-result-step">
                 <span aria-hidden="true"><Check size={12} /></span>
-                <p>Clicked the link we sent and booked Ridgecrest Links</p>
+                <p>Opened the official link and completed the booking directly</p>
               </div>
               <div className="scenario-result-step">
                 <span aria-hidden="true"><Check size={12} /></span>
-                <p>Played their first choice — not the backup</p>
+                <p>Managed any existing plans under the other course&apos;s rules</p>
               </div>
               <div className="scenario-finish">
-                <span aria-hidden="true">🎉</span>
-                <p>We found it. We told them. They switched. That&apos;s the whole thing.</p>
+                <span aria-hidden="true">⛳</span>
+                <p>We found the opening. The golfer made every booking decision.</p>
               </div>
             </article>
           </div>
@@ -165,8 +197,8 @@ export default function HomePage() {
           </p>
           <h2>Tell us where and when you want to play.</h2>
           <p>
-            Pick your courses, set the day and time you&apos;re free, and we&apos;ll send you an
-            email the moment a spot opens up.
+            Pick your courses, set a future day and time range, and we&apos;ll email when supported
+            public availability matches your group.
           </p>
         </div>
         <div className="home-intake-layout">
@@ -177,15 +209,14 @@ export default function HomePage() {
             </span>
             <h3>Your courses</h3>
             <p>
-              Pick up to 5 courses and put your top choice first — that&apos;s where we&apos;ll
-              look hardest.
+              Pick up to 5 courses and put your top choice first so your preferences remain clear.
             </p>
             <div>No courses selected yet</div>
             <a className="button button-primary" href="/search">
               <Search size={15} />
               Find my tee time
             </a>
-            <small>We&apos;ll alert you the moment your first choice opens up.</small>
+            <small>Coverage depends on each course&apos;s public booking setup and access policy.</small>
           </aside>
         </div>
       </section>
@@ -195,7 +226,7 @@ export default function HomePage() {
           <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
             How it works
           </p>
-          <h2>Four steps from backup plan to where you actually wanted.</h2>
+          <h2>Four steps from course preference to official booking page.</h2>
         </div>
         <div className="how-steps-grid">
           <div className="flow-step">
@@ -203,8 +234,8 @@ export default function HomePage() {
             <div>
               <h3>Rank your top 5 courses</h3>
               <p>
-                Search public courses near you. Pick the ones you&apos;d kill to play and
-                order them by preference — #1 is your dream, #5 is fine.
+                Search nearby likely-public courses. Choose one to five and order them by genuine
+                preference.
               </p>
             </div>
           </div>
@@ -212,28 +243,59 @@ export default function HomePage() {
             <span>02</span>
             <div>
               <h3>Tell us your window</h3>
-              <p>Choose the day, your available time range, and how many players. We handle the rest.</p>
+              <p>Choose a future date, your available time range, and one to four players.</p>
             </div>
           </div>
           <div className="flow-step">
             <span>03</span>
             <div>
-              <h3>Book a backup and wait</h3>
+              <h3>We watch supported availability</h3>
               <p>
-                Grab whatever&apos;s available so you have a round. We&apos;ll check your top picks
-                around the clock while you wait.
+                Policy-safe public booking surfaces are checked on your alert&apos;s schedule. Blocked
+                access is never bypassed.
               </p>
             </div>
           </div>
           <div className="flow-step">
             <span>04</span>
             <div>
-              <h3>Switch to your first choice</h3>
+              <h3>You review and book direct</h3>
               <p>
-                When a spot opens up, you get an email with a direct booking link. Cancel
-                the backup, click the link, and play where you actually wanted.
+                A match email opens the official booking surface. Confirm that the time is still
+                available and complete the booking yourself.
               </p>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="home-trust-section" aria-labelledby="home-trust-heading">
+        <div className="home-trust-inner">
+          <div className="home-trust-heading">
+            <div>
+              <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
+                Clear by design
+              </p>
+              <h2 id="home-trust-heading">Know what is watched, what is sent, and who books.</h2>
+            </div>
+            <p>{siteDefinition}</p>
+          </div>
+          <div className="home-trust-links">
+            <Link href="/how-it-works">
+              <strong>How Tee Time Spot works</strong>
+              <span>Follow the path from ranked courses to the official booking page.</span>
+              <ArrowRight aria-hidden="true" size={18} />
+            </Link>
+            <Link href="/methodology">
+              <strong>Monitoring methodology</strong>
+              <span>See how courses, policies, support, and match quality are evaluated.</span>
+              <ArrowRight aria-hidden="true" size={18} />
+            </Link>
+            <Link href="/guides">
+              <strong>Public golf guides</strong>
+              <span>Understand booking windows, cancellation alerts, and booking tools.</span>
+              <ArrowRight aria-hidden="true" size={18} />
+            </Link>
           </div>
         </div>
       </section>

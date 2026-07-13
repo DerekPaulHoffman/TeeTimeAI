@@ -47,7 +47,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.goto("/");
 
     const discordLinks = page.locator('a[href="https://discord.gg/ThexF85xCd"]');
-    await expect(discordLinks).toHaveCount(2);
+    await expect(discordLinks).toHaveCount(3);
     const navDiscordLink = page.locator(
       'a[aria-label="Join Tee Time Spot Discord for feedback and product suggestions"]'
     );
@@ -57,7 +57,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(navDiscordLink).toBeVisible();
     }
     await expect(
-      page.getByRole("heading", { name: "Stop settling for your backup course." })
+      page.getByRole("heading", { name: "Tee Time Spot finds the opening. You book direct." })
     ).toBeVisible();
     const heroCards = page.locator(".hero-strip-item");
     await expect(heroCards).toHaveCount(3);
@@ -141,7 +141,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(feedbackDialog).toBeVisible();
     await expect(page.getByRole("button", { name: "Close feedback" })).toBeFocused();
     await expect(page.getByText("Have a product suggestion?", { exact: true })).toBeVisible();
-    await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(3);
+    await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(4);
     await feedbackDialog.getByRole("button", { name: "Send feedback" }).focus();
     await page.keyboard.press("Tab");
     expect(
@@ -180,6 +180,36 @@ test.describe("Tee Time Spot UI smoke", () => {
     await captureUiScreenshot(page, testInfo, "home", true);
 
     await expectNoHorizontalOverflow(page, testInfo);
+  });
+
+  test("publishes canonical trust and golf guide pages without layout regressions", async ({
+    page
+  }, testInfo) => {
+    const issues = collectPageIssues(page);
+    const publicPages = [
+      ["/how-it-works", "A tee-time alert, not another booking marketplace."],
+      ["/about", "Public golf openings should not require constant refreshing."],
+      ["/methodology", "How Tee Time Spot decides what it can responsibly watch."],
+      ["/guides", "Book smarter. Refresh less."],
+      ["/guides/tee-time-cancellation-alerts", "How public golf tee times come back—and how alerts help."],
+      ["/guides/public-golf-booking-windows", "The release clock matters before the cancellation watch begins."],
+      ["/guides/tee-time-alerts-vs-auto-booking", "Notification and reservation are fundamentally different jobs."],
+      ["/contact", "Questions, corrections, and course tips are welcome."],
+      ["/privacy", "A plain-language privacy notice for Tee Time Spot."],
+      ["/terms", "Terms for an alert service—not a booking transaction."]
+    ] as const;
+
+    for (const [route, heading] of publicPages) {
+      await page.goto(route, { waitUntil: "networkidle" });
+      await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
+      await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+        "href",
+        `https://teetimespot.com${route}`
+      );
+      await expectNoHorizontalOverflow(page, testInfo);
+    }
+
+    await expectNoPageIssues(issues, testInfo);
   });
 
   test("keeps compact navigation accessible and prioritizes the search hero", async ({
@@ -258,7 +288,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       "color",
       "rgb(80, 107, 98)"
     );
-    await expect(page.locator(".footer p").last()).toHaveCSS(
+    await expect(page.locator(".site-footer-bottom p")).toHaveCSS(
       "color",
       "rgba(255, 255, 255, 0.65)"
     );
