@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Bug,
@@ -42,6 +42,21 @@ export function FeedbackWidget() {
     }
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return;
+
+      event.preventDefault();
+      setOpen(false);
+      window.requestAnimationFrame(() => launcherRef.current?.focus());
+    }
+
+    document.addEventListener("keydown", handleDocumentKeyDown);
+    return () => document.removeEventListener("keydown", handleDocumentKeyDown);
+  }, [open]);
+
   function openPanel() {
     setOpen(true);
     trackWebsiteEvent({ name: "feedback_opened" });
@@ -50,13 +65,6 @@ export function FeedbackWidget() {
   function closePanel() {
     setOpen(false);
     window.requestAnimationFrame(() => launcherRef.current?.focus());
-  }
-
-  function handlePanelKeyDown(event: KeyboardEvent<HTMLFormElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closePanel();
-    }
   }
 
   async function submitFeedback(event: FormEvent<HTMLFormElement>) {
@@ -105,7 +113,6 @@ export function FeedbackWidget() {
         <form
           aria-labelledby="feedback-panel-title"
           className="feedback-panel"
-          onKeyDown={handlePanelKeyDown}
           onSubmit={submitFeedback}
           role="dialog"
         >

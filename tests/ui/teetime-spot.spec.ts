@@ -65,6 +65,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByRole("button", { name: "Close feedback" })).toBeFocused();
     await expect(page.getByText("Have a product suggestion?", { exact: true })).toBeVisible();
     await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(3);
+    await feedbackDialog.getByRole("button", { name: "Send feedback" }).focus();
+    await page.keyboard.press("Tab");
+    expect(
+      await feedbackDialog.evaluate((dialog) => dialog.contains(document.activeElement)),
+      "the intentionally non-modal panel should still close after focus moves back to the page"
+    ).toBe(false);
     await page.keyboard.press("Escape");
     await expect(feedbackDialog).toBeHidden();
     await expect(feedbackLauncher).toBeFocused();
