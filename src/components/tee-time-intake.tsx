@@ -749,16 +749,15 @@ function TeeTimeIntakeContent({
               />
             </div>
           </label>
+        </div>
+        <div className="figma-filter-strip">
           <div
             aria-label="Time window"
             aria-describedby="time-window-help"
             className="figma-search-field figma-time-field"
             role="group"
           >
-            <span className="figma-time-label">
-              <span className="figma-desktop-copy">Time window</span>
-              <span className="figma-mobile-copy">Time</span>
-            </span>
+            <span className="figma-time-label">Time</span>
             <div className="figma-search-value">
               <span className="figma-search-value-icon" aria-hidden="true">⏰</span>
               <button
@@ -804,8 +803,6 @@ function TeeTimeIntakeContent({
               Times use each course&apos;s local time zone.
             </span>
           </div>
-        </div>
-        <div className="figma-filter-strip">
           <div className="figma-hole-filter" aria-label="Course layout">
             <strong>
               <span className="figma-desktop-copy">Course layout</span>
@@ -834,10 +831,7 @@ function TeeTimeIntakeContent({
           <span className="figma-filter-divider" aria-hidden="true" />
           <div className="figma-distance-group">
             <div className="figma-distance-heading">
-              <strong className="figma-distance-label">
-                <span className="figma-desktop-copy">Distance</span>
-                <span className="figma-mobile-copy">Within</span>
-              </strong>
+              <strong className="figma-distance-label">Within</strong>
             </div>
             <label className="figma-distance-filter" htmlFor="searchRadius">
               <span>

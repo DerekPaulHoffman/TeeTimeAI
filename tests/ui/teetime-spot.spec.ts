@@ -148,6 +148,17 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(heroImage).toHaveAttribute("loading", "eager");
     await expect(heroImage).toHaveAttribute("sizes", "100vw");
 
+    const headerHeroSeam = await page.evaluate(() => {
+      const topbar = document.querySelector<HTMLElement>(".topbar")?.getBoundingClientRect();
+      const hero = document
+        .querySelector<HTMLElement>(".search-page-header")
+        ?.getBoundingClientRect();
+
+      return topbar && hero ? hero.top - topbar.bottom : null;
+    });
+    expect(headerHeroSeam).not.toBeNull();
+    expect(headerHeroSeam ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1);
+
     if (testInfo.project.name.includes("mobile")) {
       await expect(page.locator(".feedback-widget")).toHaveCSS("position", "static");
     }
@@ -341,58 +352,49 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/search");
 
+    const filterLayout = await page.locator(".figma-search-toolbar").evaluate((toolbar) => {
+      const box = (selector: string) => {
+        const element = toolbar.querySelector<HTMLElement>(selector);
+        const rect = element?.getBoundingClientRect();
+        return rect
+          ? { bottom: rect.bottom, height: rect.height, left: rect.left, top: rect.top, width: rect.width }
+          : null;
+      };
+
+      return {
+        dateField: box('label[for="date"]'),
+        distance: box(".figma-distance-group"),
+        holes: box(".figma-hole-filter"),
+        location: box(".figma-location-field"),
+        players: box('label[for="players"]'),
+        search: box(".figma-search-submit"),
+        time: box(".figma-time-field"),
+        toolbar: toolbar.getBoundingClientRect().toJSON()
+      };
+    });
+
+    expect(filterLayout.location).not.toBeNull();
+    expect(filterLayout.players).not.toBeNull();
+    expect(filterLayout.dateField).not.toBeNull();
+    expect(filterLayout.time).not.toBeNull();
+    expect(filterLayout.holes).not.toBeNull();
+    expect(filterLayout.distance).not.toBeNull();
+    expect(filterLayout.search).not.toBeNull();
+    expect(filterLayout.location!.width).toBeGreaterThan(filterLayout.players!.width * 1.9);
+    expect(Math.abs(filterLayout.players!.top - filterLayout.dateField!.top)).toBeLessThan(2);
+    expect(Math.abs(filterLayout.time!.top - filterLayout.holes!.top)).toBeLessThan(2);
     if (testInfo.project.name.includes("mobile")) {
-      const mobileFilterLayout = await page.locator(".figma-search-toolbar").evaluate((toolbar) => {
-        const box = (selector: string) => {
-          const element = toolbar.querySelector<HTMLElement>(selector);
-          const rect = element?.getBoundingClientRect();
-          return rect
-            ? { bottom: rect.bottom, height: rect.height, left: rect.left, top: rect.top, width: rect.width }
-            : null;
-        };
-
-        return {
-          date: box("#date")?.top,
-          dateField: box('label[for="date"]'),
-          distance: box(".figma-distance-group"),
-          holes: box(".figma-hole-filter"),
-          location: box(".figma-location-field"),
-          players: box('label[for="players"]'),
-          search: box(".figma-search-submit"),
-          time: box(".figma-time-field"),
-          toolbar: toolbar.getBoundingClientRect().toJSON()
-        };
-      });
-
-      expect(mobileFilterLayout.location).not.toBeNull();
-      expect(mobileFilterLayout.players).not.toBeNull();
-      expect(mobileFilterLayout.dateField).not.toBeNull();
-      expect(mobileFilterLayout.time).not.toBeNull();
-      expect(mobileFilterLayout.holes).not.toBeNull();
-      expect(mobileFilterLayout.distance).not.toBeNull();
-      expect(mobileFilterLayout.search).not.toBeNull();
-      expect(mobileFilterLayout.location!.width).toBeGreaterThan(
-        mobileFilterLayout.players!.width * 1.9
-      );
-      expect(Math.abs(mobileFilterLayout.players!.top - mobileFilterLayout.dateField!.top)).toBeLessThan(2);
-      expect(Math.abs(mobileFilterLayout.time!.top - mobileFilterLayout.holes!.top)).toBeLessThan(2);
-      expect(mobileFilterLayout.distance!.top).toBeGreaterThan(mobileFilterLayout.time!.bottom - 2);
-      expect(mobileFilterLayout.search!.top).toBeGreaterThan(mobileFilterLayout.distance!.bottom - 2);
-      expect(mobileFilterLayout.search!.width).toBeGreaterThan(
-        mobileFilterLayout.location!.width * 0.85
-      );
-      await expect(page.locator(".figma-search-submit")).toHaveCSS(
-        "background-color",
-        "rgb(217, 134, 47)"
-      );
-      await expect(page.locator(".figma-search-submit")).toHaveCSS("color", "rgb(255, 255, 255)");
+      expect(filterLayout.distance!.top).toBeGreaterThan(filterLayout.time!.bottom - 2);
     } else {
-      const dateLabel = await page.locator('label[for="date"] > span').boundingBox();
-      const timeLabel = await page.locator(".figma-time-field > .figma-time-label").boundingBox();
-      expect(dateLabel).not.toBeNull();
-      expect(timeLabel).not.toBeNull();
-      expect(Math.abs(dateLabel!.y - timeLabel!.y)).toBeLessThan(1);
+      expect(Math.abs(filterLayout.time!.top - filterLayout.distance!.top)).toBeLessThan(2);
     }
+    expect(filterLayout.search!.top).toBeGreaterThan(filterLayout.distance!.bottom - 2);
+    expect(filterLayout.search!.width).toBeGreaterThan(filterLayout.location!.width * 0.9);
+    await expect(page.locator(".figma-search-submit")).toHaveCSS(
+      "background-color",
+      "rgb(217, 134, 47)"
+    );
+    await expect(page.locator(".figma-search-submit")).toHaveCSS("color", "rgb(255, 255, 255)");
 
     await page.getByRole("button", { name: "Use current location" }).click();
     await page.getByRole("button", { name: /^Search$/i }).click();
@@ -435,9 +437,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       exact: true
     });
     await expect(timeWindowGroup).toBeVisible();
-    await expect(
-      timeWindowGroup.locator(isMobile ? ".figma-mobile-copy" : ".figma-desktop-copy")
-    ).toHaveText(isMobile ? "Time" : "Time window");
+    await expect(timeWindowGroup.locator(".figma-time-label")).toHaveText("Time");
     await expect(page.locator("#time-window-help")).toHaveText(
       "Times use each course's local time zone."
     );
@@ -465,16 +465,14 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator("#startTime")).toHaveValue("09:00");
     await expect(page.locator("#endTime")).toHaveValue("18:00");
     await expect(page.locator("#searchRadius")).toHaveValue("15");
-    if (isMobile) {
-      const timeSummary = page.getByRole("button", { name: "9 AM – 6 PM" });
-      await expect(timeSummary).toBeVisible();
-      await expect(page.locator("#startTime")).toBeHidden();
-      await timeSummary.click();
-      await expect(page.locator("#startTime")).toBeVisible();
-      await expect(page.locator("#endTime")).toBeVisible();
-      await page.getByRole("button", { name: "Done" }).click();
-      await expect(page.locator("#startTime")).toBeHidden();
-    }
+    const timeSummary = page.getByRole("button", { name: "9 AM – 6 PM" });
+    await expect(timeSummary).toBeVisible();
+    await expect(page.locator("#startTime")).toBeHidden();
+    await timeSummary.click();
+    await expect(page.locator("#startTime")).toBeVisible();
+    await expect(page.locator("#endTime")).toBeVisible();
+    await page.getByRole("button", { name: "Done" }).click();
+    await expect(page.locator("#startTime")).toBeHidden();
 
     await locationInput.fill("Trumbull, CT");
     await expect(courseSearchButton).toBeEnabled();
@@ -714,19 +712,15 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
 
-    if (isMobile) {
-      const timeSummary = page.locator(".figma-time-summary");
-      await timeSummary.evaluate((button: HTMLButtonElement) => button.click());
-      await expect(timeSummary).toHaveAttribute("aria-expanded", "true");
-    }
+    const editableTimeSummary = page.locator(".figma-time-summary");
+    await editableTimeSummary.evaluate((button: HTMLButtonElement) => button.click());
+    await expect(editableTimeSummary).toHaveAttribute("aria-expanded", "true");
     await page.getByLabel("End time").fill("08:00");
     await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
     await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("End time").fill("18:00");
-    if (isMobile) {
-      await page.getByRole("button", { name: "Done" }).click({ force: true });
-    }
+    await page.getByRole("button", { name: "Done" }).click({ force: true });
 
     const alertActionText = await alertActionButton.innerText();
     if (/Sign in to start sending alerts/i.test(alertActionText)) {

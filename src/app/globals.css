@@ -2783,7 +2783,7 @@ button {
 /* Figma Make v22: home/search controls and ranked course results. */
 .search-page {
   background: #f4f1e9;
-  padding: 72px 0 80px;
+  padding: 60px 0 80px;
 }
 
 .search-page-header {
@@ -3600,7 +3600,7 @@ button {
 
 @media (max-width: 860px) {
   .search-page {
-    padding-top: 64px;
+    padding-top: 60px;
   }
 
   .search-page-header {
@@ -6549,5 +6549,345 @@ button {
   .figma-hole-filter .figma-hole-options button,
   .figma-hole-filter .figma-hole-options button.is-active {
     padding-inline: 6px;
+  }
+}
+
+/* Figma Make v53 parity: stacked search card with the product's course-layout control intact. */
+.figma-search-experience {
+  max-width: 1400px;
+  padding-inline: 16px;
+}
+
+.figma-search-toolbar {
+  border-color: #d9e3dc;
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(17, 26, 34, 0.07);
+  overflow: visible;
+  position: relative;
+}
+
+.figma-search-primary {
+  border-bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0;
+}
+
+.figma-search-field,
+.figma-search-field:nth-child(2),
+.figma-search-field:nth-child(n + 2) {
+  background: #ffffff;
+  border: 0;
+  border-bottom: 1px solid #f0f4f1;
+  min-height: 68px;
+  padding: 14px 16px;
+}
+
+.figma-search-field:hover,
+.figma-search-field:focus-within {
+  background: #f8faf8;
+}
+
+.figma-location-field {
+  border-radius: 15px 15px 0 0;
+  grid-column: 1 / -1;
+}
+
+.figma-search-primary > .figma-search-field:nth-child(2) {
+  border-right: 1px solid #f0f4f1;
+}
+
+.figma-search-primary > .figma-search-field:nth-child(3) {
+  border-right: 0;
+}
+
+.figma-search-field > span,
+.figma-search-field > label,
+.figma-search-field > legend,
+.figma-distance-label {
+  color: #45675d;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  line-height: 1.2;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+}
+
+.figma-search-field input,
+.figma-search-field select {
+  color: #14231d;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.figma-filter-strip {
+  align-items: stretch;
+  background: #ffffff;
+  border: 0;
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: 0;
+  padding: 0;
+  border-radius: 0 0 15px 15px;
+}
+
+.figma-filter-strip .figma-filter-divider {
+  display: none;
+}
+
+.figma-time-field {
+  border-right: 1px solid #f0f4f1;
+  min-height: 63px;
+  padding: 10px 16px;
+  position: relative;
+}
+
+.figma-time-field .figma-search-value {
+  gap: 7px;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.figma-time-summary {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #14231d;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  min-height: 28px;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.figma-time-field .figma-time-inputs {
+  display: none;
+}
+
+.figma-time-field .figma-time-inputs.is-mobile-open {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #d9e3dc;
+  border-radius: 12px;
+  box-shadow: 0 12px 28px rgba(17, 26, 34, 0.16);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  left: 12px;
+  padding: 12px;
+  position: absolute;
+  top: calc(100% + 8px);
+  width: min(320px, calc(100vw - 56px));
+  z-index: 20;
+}
+
+.figma-time-field .figma-time-inputs.is-mobile-open input {
+  background: #f7f9f7;
+  border: 1px solid #d9e3dc;
+  border-radius: 8px;
+  min-height: 40px;
+  padding: 0 8px;
+}
+
+.figma-time-field .figma-time-inputs.is-mobile-open .figma-time-editor-done {
+  align-items: center;
+  background: #14231d;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 700;
+  grid-column: 1 / -1;
+  justify-content: center;
+  min-height: 40px;
+}
+
+.figma-hole-filter {
+  align-items: center;
+  background: #ffffff;
+  border-bottom: 1px solid #f0f4f1;
+  border-right: 1px solid #f0f4f1;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-start;
+  min-height: 63px;
+  padding: 10px 16px;
+  width: auto;
+}
+
+.figma-hole-filter strong {
+  color: #45675d;
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.figma-distance-group {
+  background: #ffffff;
+  border-bottom: 1px solid #f0f4f1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 63px;
+  padding: 10px 16px;
+  position: relative;
+}
+
+.figma-distance-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.figma-distance-label {
+  margin: 0;
+}
+
+.figma-distance-filter {
+  align-items: center;
+  display: grid;
+  flex: none;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+}
+
+.figma-distance-filter > span {
+  display: contents;
+}
+
+.figma-distance-filter em:first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.figma-distance-filter b {
+  color: #14231d;
+  font-size: 12px;
+  font-weight: 700;
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.figma-distance-filter em {
+  color: #4c6a61;
+  font-size: 11px;
+}
+
+.figma-distance-filter em:last-child,
+.figma-distance-prefix {
+  display: none;
+}
+
+.figma-distance-filter input[type="range"] {
+  grid-column: 2;
+  grid-row: 1;
+  height: 24px;
+}
+
+.figma-reset-filters {
+  min-height: 28px;
+  padding: 0 8px;
+  position: absolute;
+  right: 10px;
+  top: 4px;
+}
+
+.figma-search-submit {
+  align-self: center;
+  background: #d9862f;
+  border-radius: 14px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  grid-column: 1 / -1;
+  height: 40px;
+  justify-content: center;
+  margin: 12px;
+  min-height: 40px;
+  padding: 0 16px;
+  width: auto;
+}
+
+@media (max-width: 620px) {
+  .figma-search-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-inline: 0;
+  }
+
+  .figma-search-primary,
+  .figma-filter-strip {
+    display: contents;
+  }
+
+  .figma-search-field,
+  .figma-search-field:nth-child(2),
+  .figma-search-field:nth-child(n + 2) {
+    min-height: 68px;
+    padding: 14px 16px;
+  }
+
+  .figma-search-field:hover,
+  .figma-search-field:focus-within {
+    background: #ffffff;
+  }
+
+  .figma-location-field {
+    grid-column: 1 / -1;
+  }
+
+  .figma-search-primary > .figma-search-field:nth-child(2) {
+    border-right: 1px solid #f0f4f1;
+  }
+
+  .figma-time-field {
+    border-right: 1px solid #f0f4f1;
+    min-height: 63px;
+    padding: 10px 16px;
+    position: static;
+  }
+
+  .figma-hole-filter {
+    align-items: flex-start;
+    border-right: 0;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    min-height: 63px;
+    padding: 10px 16px;
+  }
+
+  .figma-hole-filter strong {
+    font-size: 9px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+  }
+
+  .figma-distance-group {
+    grid-column: 1 / -1;
+    min-height: 57px;
+  }
+
+  .figma-time-field .figma-time-inputs.is-mobile-open {
+    left: 12px;
+    top: calc(100% + 8px);
+    width: calc(100% - 24px);
+  }
+}
+
+@media (min-width: 1024px) {
+  .figma-search-experience {
+    padding-inline: 32px;
   }
 }
