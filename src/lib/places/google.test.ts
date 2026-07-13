@@ -414,6 +414,95 @@ describe("Google Places mapping", () => {
     expect(places).toEqual([]);
   });
 
+  it("filters verified Miami non-courses and an invitation-only club from live discovery", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJ67JAVPK12YgRnl_JdjR_gFs",
+          displayName: { text: "Green Girls Golf" },
+          formattedAddress: "551 Collins Ave, Miami Beach, FL 33139, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.greengirlsgolf.om/",
+          location: { latitude: 25.773, longitude: -80.134 }
+        },
+        {
+          id: "places/ChIJ6xdB1Jq02YgR4mExla8UqpE",
+          displayName: { text: "South Florida Golf Magazine" },
+          formattedAddress: "326 Lincoln Rd #228, Miami Beach, FL 33139, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          location: { latitude: 25.79, longitude: -80.131 }
+        },
+        {
+          id: "places/ChIJQfF9gY612YgRgEZ2p_DUI0M",
+          displayName: { text: "Celebrity Amputee Golf Classic" },
+          formattedAddress: "6700 Crandon Blvd, Key Biscayne, FL 33149, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          location: { latitude: 25.708, longitude: -80.156 }
+        },
+        {
+          id: "places/ChIJ9zQbdAC72YgRyrZQ5alj1h4",
+          displayName: { text: "PGA TOUR Deliveries" },
+          formattedAddress: "8864 NW 58th St, Doral, FL 33178, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          location: { latitude: 25.827, longitude: -80.339 }
+        },
+        {
+          id: "places/ChIJbV3-V-av2YgRGc2i3GxAjEY",
+          displayName: { text: "Golf Miami 305" },
+          formattedAddress: "19715 NW 37th Ave, Miami Gardens, FL 33056, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.golfmiami305.com/",
+          location: { latitude: 25.954, longitude: -80.263 }
+        },
+        {
+          id: "places/ChIJy0obgpGr2YgR3puygnLMK5M",
+          displayName: { text: "Shell Bay Club" },
+          formattedAddress: "661 Diplomat Pkwy, Hallandale Beach, FL 33009, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://shellbayclub.com/",
+          location: { latitude: 25.994, longitude: -80.138 }
+        },
+        {
+          id: "places/ChIJC_uG9o612YgR4-xHKDaSVBE",
+          displayName: { text: "Crandon Golf at Key Biscayne" },
+          formattedAddress: "6700 Crandon Blvd, Key Biscayne, FL 33149, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "http://golfcrandon.com/",
+          location: { latitude: 25.708, longitude: -80.156 }
+        }
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJ67JAVPK12YgRnl_JdjR_gFs",
+          "ChIJ6xdB1Jq02YgR4mExla8UqpE",
+          "ChIJQfF9gY612YgRgEZ2p_DUI0M",
+          "ChIJ9zQbdAC72YgRyrZQ5alj1h4",
+          "ChIJbV3-V-av2YgRGc2i3GxAjEY",
+          "ChIJy0obgpGr2YgR3puygnLMK5M",
+          "ChIJC_uG9o612YgR4-xHKDaSVBE"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Crandon Golf at Key Biscayne"
+    ]);
+  });
+
   it("dedupes the same logical course without collapsing distinct courses at one venue", () => {
     const places = dedupeGolfCoursePlaces([
       {

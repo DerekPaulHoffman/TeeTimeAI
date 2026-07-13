@@ -147,6 +147,11 @@ const VERIFIED_PRIVATE_COURSES = [
     placeId: "ChIJMXRRcFvo5YkRkNXOrqSfVGM",
     name: "Shelter Harbor Golf Club",
     evidenceUrl: "https://www.shgcri.com/"
+  },
+  {
+    placeId: "ChIJy0obgpGr2YgR3puygnLMK5M",
+    name: "Shell Bay Club",
+    evidenceUrl: "https://shellbayclub.com/"
   }
 ] as const;
 const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
@@ -160,6 +165,32 @@ const VERIFIED_NON_COURSE_PLACES = [
     placeId: "ChIJy4_CTDEtDogR9wxAr-a-VGI",
     name: "Chicago Golf Authority",
     evidenceUrl: "https://chicagogolfauthority.com/pages/how-it-works"
+  },
+  {
+    placeId: "ChIJ67JAVPK12YgRnl_JdjR_gFs",
+    name: "Green Girls Golf",
+    evidenceUrl: "https://www.greengirlsgolf.com/"
+  },
+  {
+    placeId: "ChIJ6xdB1Jq02YgR4mExla8UqpE",
+    name: "South Florida Golf Magazine",
+    evidenceUrl: "https://nextdoor.com/pages/south-florida-golf-magazine-miami-beach-fl/"
+  },
+  {
+    placeId: "ChIJQfF9gY612YgRgEZ2p_DUI0M",
+    name: "Celebrity Amputee Golf Classic",
+    evidenceUrl: "https://projects.propublica.org/nonprofits/organizations/454693128"
+  },
+  {
+    placeId: "ChIJ9zQbdAC72YgRyrZQ5alj1h4",
+    name: "PGA TOUR Deliveries",
+    evidenceUrl:
+      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ9zQbdAC72YgRyrZQ5alj1h4&query=PGA%20TOUR%20Deliveries"
+  },
+  {
+    placeId: "ChIJbV3-V-av2YgRGc2i3GxAjEY",
+    name: "Golf Miami 305",
+    evidenceUrl: "https://www.golfmiami305.com/"
   }
 ] as const;
 const VERIFIED_NON_COURSE_PLACE_IDS = new Set<string>(
