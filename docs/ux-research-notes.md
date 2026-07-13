@@ -27,3 +27,10 @@ Use these as starting points, then refresh before adopting because design toolin
 - Figma AI and Figma Make: useful for alternate visual directions, prototypes, annotations, and design iteration.
 - v0 by Vercel: useful when the desired output is React/Next.js UI code or a live prototype that can be brought back into the repo.
 - Lovable/Replit/Bolt-style app builders: useful for comparing full-app product flows, but generated code must still be reviewed, tested, and adapted to this repo.
+
+## 2026-07-12 Mobile Search Reflow
+
+- Source: [W3C Understanding SC 1.4.10: Reflow](https://www.w3.org/WAI/WCAG21/Understanding/reflow) (accessed 2026-07-12; no page update date shown).
+- Finding: ordinary controls and text should remain readable at a 320 CSS-pixel-equivalent width, and stacking sections into one column is a common responsive approach when the layout does not require two dimensions.
+- Tee Time Spot evidence: a production check at 375 CSS pixels showed the two-column search grid clipping the location and course-local time values even though the document itself did not overflow horizontally.
+- Decision: stack the four primary search fields into full-width mobile rows, keep the desktop grid unchanged, and cover field width plus singular result-count copy in Playwright.

@@ -108,6 +108,50 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(geocodeRequests).toBe(0);
   });
 
+  test("uses singular result copy and keeps mobile search controls readable", async ({
+    context,
+    page
+  }, testInfo) => {
+    await context.grantPermissions(["geolocation"], { origin: smokeOrigin });
+    await context.setGeolocation({ latitude: 43.7667, longitude: -103.5988 });
+    await page.route("**/api/courses/discover?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({
+          courses: [
+            {
+              googlePlaceId: "ui-smoke-single-course",
+              name: "Rocky Knolls Golf Course",
+              address: "25153 Wazi Ln, Custer, SD 57730",
+              latitude: 43.7667,
+              longitude: -103.5988,
+              distanceMeters: 3100,
+              website: "https://example.com/rocky-knolls"
+            }
+          ]
+        }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+
+    await page.goto("/search");
+
+    if (testInfo.project.name.includes("mobile")) {
+      const searchFields = page.locator(".figma-search-primary > .figma-search-field");
+      await expect(searchFields).toHaveCount(4);
+      const fieldWidths = await searchFields.evaluateAll((fields) =>
+        fields.map((field) => field.getBoundingClientRect().width)
+      );
+      expect(fieldWidths.every((width) => width >= 300)).toBe(true);
+    }
+
+    await page.getByRole("button", { name: "Use current location" }).click();
+    await page.getByRole("button", { name: /^Search$/i }).click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "1 course near Current location" })
+    ).toBeVisible();
+  });
+
   test("onboarding discovery, ranking limit, and controls are usable", async ({
     page
   }, testInfo) => {

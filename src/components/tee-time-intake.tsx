@@ -768,7 +768,10 @@ function TeeTimeIntakeContent({
         <div className="figma-results-column">
           {courses.length > 0 ? (
             <div className="figma-results-banner" role="status">
-              <strong>{filteredCourses.length} courses</strong> near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
+              <strong>
+                {filteredCourses.length} {filteredCourses.length === 1 ? "course" : "courses"}
+              </strong>{" "}
+              near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
             </div>
           ) : (
             <Notice notice={notice} />

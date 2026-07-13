@@ -5727,22 +5727,18 @@ button {
   }
 
   .figma-search-primary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .figma-search-field,
   .figma-search-field:nth-child(2) {
-    border-right: 1px solid #f0f4f1;
+    border-right: 0;
     border-top: 0;
     min-height: 62px;
     padding: 12px 16px;
   }
 
-  .figma-search-field:nth-child(even) {
-    border-right: 0;
-  }
-
-  .figma-search-field:nth-child(n + 3) {
+  .figma-search-field:nth-child(n + 2) {
     border-top: 1px solid #f0f4f1;
   }
 
