@@ -380,16 +380,22 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(filterLayout.holes).not.toBeNull();
     expect(filterLayout.distance).not.toBeNull();
     expect(filterLayout.search).not.toBeNull();
-    expect(filterLayout.location!.width).toBeGreaterThan(filterLayout.players!.width * 1.9);
     expect(Math.abs(filterLayout.players!.top - filterLayout.dateField!.top)).toBeLessThan(2);
     expect(Math.abs(filterLayout.time!.top - filterLayout.holes!.top)).toBeLessThan(2);
     if (testInfo.project.name.includes("mobile")) {
+      expect(filterLayout.location!.width).toBeGreaterThan(filterLayout.players!.width * 1.9);
+      expect(filterLayout.players!.top).toBeGreaterThan(filterLayout.location!.bottom - 2);
       expect(filterLayout.distance!.top).toBeGreaterThan(filterLayout.time!.bottom - 2);
+      expect(filterLayout.search!.top).toBeGreaterThan(filterLayout.distance!.bottom - 2);
+      expect(filterLayout.search!.width).toBeGreaterThan(filterLayout.location!.width * 0.9);
     } else {
+      expect(Math.abs(filterLayout.location!.top - filterLayout.players!.top)).toBeLessThan(2);
+      expect(Math.abs(filterLayout.location!.width - filterLayout.players!.width * 2)).toBeLessThan(2);
+      expect(Math.abs(filterLayout.players!.width - filterLayout.dateField!.width)).toBeLessThan(2);
       expect(Math.abs(filterLayout.time!.top - filterLayout.distance!.top)).toBeLessThan(2);
+      expect(filterLayout.search!.top).toBeGreaterThanOrEqual(filterLayout.time!.top);
+      expect(filterLayout.search!.bottom).toBeLessThanOrEqual(filterLayout.distance!.bottom + 2);
     }
-    expect(filterLayout.search!.top).toBeGreaterThan(filterLayout.distance!.bottom - 2);
-    expect(filterLayout.search!.width).toBeGreaterThan(filterLayout.location!.width * 0.9);
     await expect(page.locator(".figma-search-submit")).toHaveCSS(
       "background-color",
       "rgb(217, 134, 47)"

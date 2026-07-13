@@ -6844,7 +6844,13 @@ button {
   }
 
   .figma-location-field {
+    border-radius: 15px 15px 0 0;
+    border-right: 0;
     grid-column: 1 / -1;
+  }
+
+  .figma-search-primary > .figma-search-field:nth-child(3) {
+    border-radius: 0;
   }
 
   .figma-search-primary > .figma-search-field:nth-child(2) {
@@ -6875,8 +6881,13 @@ button {
   }
 
   .figma-distance-group {
+    border-right: 0;
     grid-column: 1 / -1;
     min-height: 57px;
+  }
+
+  .figma-search-submit {
+    grid-column: 1 / -1;
   }
 
   .figma-time-field .figma-time-inputs.is-mobile-open {
@@ -6886,8 +6897,64 @@ button {
   }
 }
 
+@media (min-width: 768px) {
+  .figma-search-primary {
+    grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr));
+  }
+
+  .figma-location-field {
+    border-radius: 15px 0 0;
+    border-right: 1px solid #f0f4f1;
+    grid-column: auto;
+  }
+
+  .figma-search-primary > .figma-search-field:nth-child(3) {
+    border-radius: 0 15px 0 0;
+  }
+
+  .figma-filter-strip {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .figma-distance-group {
+    border-right: 1px solid #f0f4f1;
+  }
+
+  .figma-search-submit {
+    grid-column: auto;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .figma-hole-filter {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+  }
+
+  .figma-hole-options {
+    width: 100%;
+  }
+
+  .figma-hole-filter .figma-hole-options button {
+    flex: 1 1 0;
+    font-size: 11px;
+    padding-inline: 4px;
+    white-space: nowrap;
+  }
+}
+
 @media (min-width: 1024px) {
   .figma-search-experience {
     padding-inline: 32px;
+  }
+
+  .figma-filter-strip {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(0, 1.15fr)
+      minmax(0, 1.15fr)
+      minmax(160px, 0.65fr);
   }
 }
