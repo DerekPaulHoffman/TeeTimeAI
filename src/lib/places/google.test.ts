@@ -523,6 +523,26 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("filters the verified private Hallbrook hole pin despite public-query evidence", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJXdJQJmTpwIcRsoa_jpffsqs",
+          displayName: { text: "18th Hole - Hallbrook CC" },
+          formattedAddress: "Leawood, KS 66211, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.hallbrookcc.org/",
+          location: { latitude: 38.9221969, longitude: -94.6295394 }
+        }
+      ],
+      { publicCourseEvidenceIds: new Set(["ChIJXdJQJmTpwIcRsoa_jpffsqs"]) }
+    );
+
+    expect(places).toEqual([]);
+  });
+
   it("keeps canonical Phoenix courses while suppressing their verified aliases", () => {
     const places = filterPublicGolfCoursePlaces([
       makeOperationalGolfCoursePlace({

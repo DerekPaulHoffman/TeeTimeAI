@@ -162,6 +162,11 @@ const VERIFIED_PRIVATE_COURSES = [
     placeId: "ChIJ-5eDKiZ64YkROEiuRnTjEKw",
     name: "Dublin Lake Club Golf Course",
     evidenceUrl: "https://home.dublinlake.org/default.aspx?E=6&p=home"
+  },
+  {
+    placeId: "ChIJXdJQJmTpwIcRsoa_jpffsqs",
+    name: "18th Hole - Hallbrook CC",
+    evidenceUrl: "https://www.hallbrookcc.org/guest-information"
   }
 ] as const;
 const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
