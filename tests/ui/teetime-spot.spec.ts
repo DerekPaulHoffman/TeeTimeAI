@@ -519,6 +519,28 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
 
     await page.goto("/search");
+    let discoveryAnalyticsPayload: {
+      name?: string;
+      page?: string;
+      trafficClass?: string;
+      metadata?: Record<string, unknown>;
+    } | null = null;
+    await page.route("**/api/analytics/events", async (route) => {
+      const payload = route.request().postDataJSON() as {
+        name?: string;
+        page?: string;
+        trafficClass?: string;
+        metadata?: Record<string, unknown>;
+      };
+      if (payload.name === "course_discovery_completed") {
+        discoveryAnalyticsPayload = payload;
+      }
+      await route.fulfill({
+        body: JSON.stringify({ event: { id: "ui-smoke-event" } }),
+        contentType: "application/json",
+        status: 201
+      });
+    });
 
     await expect(
       page.getByRole("heading", { name: /Tell us where and when you want to play/i })
@@ -573,6 +595,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     await courseSearchButton.click();
     const discoveryUrl = new URL((await discoveryRequest).url());
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
+    await expect.poll(() => discoveryAnalyticsPayload).toMatchObject({
+      name: "course_discovery_completed",
+      page: "/search",
+      trafficClass: "AUTOMATION",
+      metadata: {
+        radiusMiles: 15,
+        resultCount: useMockedSearchProviders ? smokeCourses.length : expect.any(Number),
+        demo: false
+      }
+    });
     const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });
     await expect(discoveryStatus).toContainText(/\d+ courses near Trumbull/i);
     await expect

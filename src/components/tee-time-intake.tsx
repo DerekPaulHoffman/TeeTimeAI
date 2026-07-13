@@ -430,10 +430,12 @@ function TeeTimeIntakeContent({
       return;
     }
 
+    let responseStatus: number | undefined;
     try {
       const geocode = await fetch(
         `/api/location/geocode?q=${encodeURIComponent(locationText.trim())}`
       );
+      responseStatus = geocode.status;
       if (!geocode.ok) {
         throw new Error(
           await readApiError(
@@ -446,6 +448,14 @@ function TeeTimeIntakeContent({
       setLocationInputInvalid(false);
       await discoverCourses(coordinates);
     } catch (error) {
+      trackWebsiteEvent({
+        name: "course_discovery_failed",
+        metadata: {
+          radiusMiles: searchRadiusMiles,
+          stage: "GEOCODE",
+          responseStatus
+        }
+      });
       shouldScrollToResultsRef.current = false;
       setLocationInputInvalid(true);
       setNotice({
@@ -460,6 +470,7 @@ function TeeTimeIntakeContent({
     coordinates: SearchCoordinates,
     radiusMiles = searchRadiusMiles
   ) => {
+    let responseStatus: number | undefined;
     try {
       const params = new URLSearchParams({
         latitude: String(coordinates.latitude),
@@ -467,11 +478,20 @@ function TeeTimeIntakeContent({
         radiusMeters: String(milesToMeters(radiusMiles))
       });
       const response = await fetch(`/api/courses/discover?${params}`);
+      responseStatus = response.status;
       if (!response.ok) {
         throw new Error(await readApiError(response, "Could not load nearby courses."));
       }
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
+      trackWebsiteEvent({
+        name: "course_discovery_completed",
+        metadata: {
+          radiusMiles,
+          resultCount: data.courses.length,
+          demo: data.demo === true
+        }
+      });
       if (data.courses.length === 0) {
         shouldScrollToResultsRef.current = false;
       }
@@ -485,6 +505,14 @@ function TeeTimeIntakeContent({
           : `Found ${data.courses.length} public golf courses within ${radiusMiles} miles.`
       });
     } catch (error) {
+      trackWebsiteEvent({
+        name: "course_discovery_failed",
+        metadata: {
+          radiusMiles,
+          stage: "DISCOVERY",
+          responseStatus
+        }
+      });
       shouldScrollToResultsRef.current = false;
       setNotice({
         type: "error",

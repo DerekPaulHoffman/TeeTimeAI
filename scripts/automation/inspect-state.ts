@@ -8,6 +8,7 @@ import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
+const WEBSITE_FUNNEL_HOURS = 24;
 const activeSearchInspectionQuery = {
   where: {
     status: "ACTIVE"
@@ -25,6 +26,9 @@ const activeSearchInspectionQuery = {
 
 async function main() {
   const recentSince = new Date(Date.now() - RECENT_HOURS * 60 * 60 * 1000);
+  const websiteFunnelSince = new Date(
+    Date.now() - WEBSITE_FUNNEL_HOURS * 60 * 60 * 1000
+  );
 
   const [
     runs,
@@ -36,6 +40,7 @@ async function main() {
     pendingMatches,
     recentBrowserDiscoveries,
     recentWebsiteEvents,
+    websiteEventCounts,
     unresolvedWebsiteFeedback
   ] =
     await Promise.all([
@@ -127,6 +132,17 @@ async function main() {
       prisma.websiteEvent.findMany({
         orderBy: { createdAt: "desc" },
         take: 20
+      }),
+      prisma.websiteEvent.groupBy({
+        by: ["trafficClass", "name"],
+        where: {
+          createdAt: {
+            gte: websiteFunnelSince
+          }
+        },
+        _count: {
+          _all: true
+        }
       }),
       prisma.websiteFeedback.findMany({
         where: { resolvedAt: null },
@@ -329,6 +345,10 @@ async function main() {
           trafficClass: event.trafficClass,
           createdAt: event.createdAt
         })),
+        websiteFunnel: {
+          hours: WEBSITE_FUNNEL_HOURS,
+          byTrafficClass: summarizeWebsiteEventCounts(websiteEventCounts)
+        },
         unresolvedWebsiteFeedback: unresolvedWebsiteFeedback.map((feedback) => ({
           id: feedback.id,
           sentiment: feedback.sentiment,
@@ -403,13 +423,36 @@ function latestCurrentActionableProbes<
   );
 }
 
+function summarizeWebsiteEventCounts<
+  T extends {
+    trafficClass: string;
+    name: string;
+    _count: { _all: number };
+  }
+>(counts: T[]) {
+  const byTrafficClass: Record<string, Record<string, number>> = {};
+
+  for (const count of [...counts].sort((left, right) =>
+    `${left.trafficClass}:${left.name}`.localeCompare(`${right.trafficClass}:${right.name}`)
+  )) {
+    byTrafficClass[count.trafficClass] ??= {};
+    byTrafficClass[count.trafficClass][count.name] = count._count._all;
+  }
+
+  return byTrafficClass;
+}
+
 function redactEmail(email: string) {
   const [localPart, domain = ""] = email.split("@");
   const visible = localPart.slice(0, 2);
   return `${visible}${"*".repeat(Math.max(localPart.length - 2, 1))}@${domain}`;
 }
 
-export { activeSearchInspectionQuery, latestCurrentActionableProbes };
+export {
+  activeSearchInspectionQuery,
+  latestCurrentActionableProbes,
+  summarizeWebsiteEventCounts
+};
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main()

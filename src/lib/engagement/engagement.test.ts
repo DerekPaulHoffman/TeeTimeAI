@@ -69,6 +69,38 @@ describe("websiteEventInputSchema", () => {
     });
   });
 
+  it("accepts aggregate course-discovery outcomes without location data", () => {
+    expect(
+      websiteEventInputSchema.parse({
+        name: "course_discovery_completed",
+        page: "/search",
+        metadata: {
+          radiusMiles: 30,
+          resultCount: 1,
+          demo: false
+        }
+      })
+    ).toMatchObject({
+      name: "course_discovery_completed",
+      metadata: {
+        radiusMiles: 30,
+        resultCount: 1,
+        demo: false
+      }
+    });
+
+    expect(() =>
+      websiteEventInputSchema.parse({
+        name: "course_discovery_failed",
+        metadata: {
+          radiusMiles: 15,
+          stage: "GEOCODE",
+          location: "58401"
+        }
+      })
+    ).toThrow(/unrecognized/i);
+  });
+
   it("rejects metadata fields that are not allowlisted for the event", () => {
     expect(() =>
       websiteEventInputSchema.parse({

@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-13: Course discovery needs privacy-safe outcome evidence
+
+- Sources: [Vercel's custom-event guidance](https://vercel.com/docs/analytics/custom-events), last updated 2025-09-24, recommends tracking meaningful interactions such as form submissions and organizing results by bounded custom properties; [Vercel's analytics privacy guidance](https://vercel.com/docs/analytics/privacy-policy), last updated 2025-03-04, warns against personal information in custom events; and the [W3C Privacy Principles](https://www.w3.org/TR/privacy-principles/), published 2025-05-15, require transferring only the data necessary for the user's goal.
+- Tee Time Spot evidence: the 24-hour public event stream showed page views, one start-search click, and final alert creation, but it could not distinguish course discovery with results, an empty search, or a provider/geocoding failure. The required `58401` rotation returned one course at 30 miles, yet the only analytics event emitted by that browser navigation was a page view. Raw location text, coordinates, Place IDs, and customer identifiers are unnecessary for this funnel question.
+- Decision: record only discovery result count, the bounded 5-to-30-mile radius, demo status, or coarse failure stage/status. Summarize 24-hour event counts by `PUBLIC`, `AUTOMATION`, `TEST`, and `UNCLASSIFIED` traffic class so the hourly loop can evaluate real behavior without persistent visitor identifiers or automation contamination.
+
 ## 2026-07-13: Restrict unused browser capabilities without breaking location search
 
 - Sources: the [Next.js headers reference](https://nextjs.org/docs/app/api-reference/config/next-config-js/headers), last updated 2026-03-03, documents `Permissions-Policy` as a supported response header configured through `next.config`; [MDN's Permissions-Policy reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy), accessed 2026-07-13 America/New_York, documents allowlists for camera, microphone, payment, USB, browsing topics, and geolocation; [MDN's geolocation directive reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy/geolocation), last modified 2026-01-27, confirms that `geolocation=(self)` preserves top-level and same-origin access while excluding cross-origin frames.

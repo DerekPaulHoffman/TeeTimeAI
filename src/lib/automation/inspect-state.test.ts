@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeSearchInspectionQuery,
-  latestCurrentActionableProbes
+  latestCurrentActionableProbes,
+  summarizeWebsiteEventCounts
 } from "../../../scripts/automation/inspect-state";
 
 describe("activeSearchInspectionQuery", () => {
@@ -60,5 +61,37 @@ describe("latestCurrentActionableProbes", () => {
       "NEEDS_ADAPTER",
       "FETCH_FAILED"
     ]);
+  });
+});
+
+describe("summarizeWebsiteEventCounts", () => {
+  it("keeps public funnel evidence separate from automation traffic", () => {
+    expect(
+      summarizeWebsiteEventCounts([
+        {
+          trafficClass: "AUTOMATION",
+          name: "course_discovery_completed",
+          _count: { _all: 8 }
+        },
+        {
+          trafficClass: "PUBLIC",
+          name: "course_discovery_completed",
+          _count: { _all: 2 }
+        },
+        {
+          trafficClass: "PUBLIC",
+          name: "page_viewed",
+          _count: { _all: 12 }
+        }
+      ])
+    ).toEqual({
+      AUTOMATION: {
+        course_discovery_completed: 8
+      },
+      PUBLIC: {
+        course_discovery_completed: 2,
+        page_viewed: 12
+      }
+    });
   });
 });

@@ -11,6 +11,8 @@ export const websiteEventNames = [
   "start_search_clicked",
   "dashboard_opened",
   "email_preview_opened",
+  "course_discovery_completed",
+  "course_discovery_failed",
   "search_submitted",
   "search_submission_failed",
   "feedback_opened",
@@ -37,6 +39,11 @@ const searchMetadataSchema = z
     requestedLayoutHoles: z.union([z.literal(9), z.literal(18), z.null()]).optional()
   })
   .strict();
+const courseDiscoveryMetadataSchema = z
+  .object({
+    radiusMiles: z.number().int().min(5).max(30)
+  })
+  .strict();
 
 const eventBase = {
   page: pageSchema,
@@ -50,6 +57,26 @@ export const websiteEventInputSchema = z.discriminatedUnion("name", [
   z.object({ name: z.literal("start_search_clicked"), ...eventBase, metadata: clickMetadataSchema }).strict(),
   z.object({ name: z.literal("dashboard_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
   z.object({ name: z.literal("email_preview_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
+  z
+    .object({
+      name: z.literal("course_discovery_completed"),
+      ...eventBase,
+      metadata: courseDiscoveryMetadataSchema.extend({
+        resultCount: z.number().int().min(0).max(60),
+        demo: z.boolean()
+      })
+    })
+    .strict(),
+  z
+    .object({
+      name: z.literal("course_discovery_failed"),
+      ...eventBase,
+      metadata: courseDiscoveryMetadataSchema.extend({
+        stage: z.enum(["GEOCODE", "DISCOVERY"]),
+        responseStatus: z.number().int().min(100).max(599).optional()
+      })
+    })
+    .strict(),
   z.object({ name: z.literal("search_submitted"), ...eventBase, metadata: searchMetadataSchema }).strict(),
   z
     .object({
