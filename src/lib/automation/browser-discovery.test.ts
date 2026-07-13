@@ -377,7 +377,7 @@ describe("Chronogolf public profile enrichment", () => {
       ok: true,
       url: "https://www.chronogolf.com/club/pequabuck-golf-club-of-bristol",
       text: vi.fn().mockResolvedValue(
-        chronogolfNextData({ onlineBookingEnabled: false, courses: [] })
+        chronogolfNextData({ id: 3563, onlineBookingEnabled: false, courses: [] })
       )
     });
 
@@ -400,39 +400,58 @@ describe("Chronogolf public profile enrichment", () => {
     expect(enriched.policyNotes).toContain("onlineBookingEnabled=false");
   });
 
-  it("keeps an online-enabled Chronogolf club in human review until an adapter is verified", async () => {
+  it("learns current slug-based Chronogolf marketplace metadata", async () => {
     const discovery = buildBrowserDiscovery({
       courseId: "public-chrono",
       courseName: "Public Chronogolf Course",
       sourceUrl: "https://example.com/",
-      observedUrls: ["https://www.chronogolf.com/club/4444/ping"]
+      observedUrls: ["https://www.chronogolf.com/club/public-chrono"]
     });
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,
       url: "https://www.chronogolf.com/club/public-chrono",
       text: vi.fn().mockResolvedValue(
-        chronogolfNextData({ onlineBookingEnabled: true, courses: [{ id: 1 }] })
+        chronogolfNextData({
+          id: 4444,
+          onlineBookingEnabled: true,
+          courses: [{ uuid: "course-public-uuid" }]
+        })
       )
     });
 
     const enriched = await enrichChronogolfDiscovery(discovery, fetchImpl as typeof fetch);
 
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://www.chronogolf.com/club/public-chrono",
+      expect.objectContaining({ redirect: "follow" })
+    );
     expect(enriched).toEqual(
       expect.objectContaining({
-        status: "INSPECTED",
+        status: "LEARNED",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "NEEDS_REVIEW",
-        automationReason: "UNSUPPORTED_PLATFORM"
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        apiEndpoint: "https://www.chronogolf.com/marketplace/v2/teetimes",
+        apiMetadata: {
+          clubId: 4444,
+          courseIds: ["course-public-uuid"],
+          bookingBaseUrl: "https://www.chronogolf.com/club/public-chrono"
+        }
       })
     );
   });
 });
 
-function chronogolfNextData(input: { onlineBookingEnabled: boolean; courses: unknown[] }) {
+function chronogolfNextData(input: {
+  id: number;
+  onlineBookingEnabled: boolean;
+  courses: Array<{ uuid?: string }>;
+}) {
   return `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
     props: {
       pageProps: {
         club: {
+          id: input.id,
           features: { onlineBookingEnabled: input.onlineBookingEnabled },
           courses: input.courses
         }

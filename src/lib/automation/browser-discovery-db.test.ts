@@ -124,6 +124,48 @@ describe("browser discovery persistence", () => {
     });
   });
 
+  it("applies learned Chronogolf metadata to the reusable course adapter fields", async () => {
+    mockedPrisma.course.update.mockResolvedValue({ id: "blue-rock" } as never);
+
+    await applyBrowserDiscoveryToCourse({
+      courseId: "blue-rock",
+      status: "LEARNED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://bluerockgolfcourse.com/",
+      bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiEndpoint: "https://www.chronogolf.com/marketplace/v2/teetimes",
+      apiMetadata: {
+        clubId: 7221,
+        courseIds: ["7657db51-4e0c-4bc7-8e98-bd0a705370af"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "chronogolf-public-club-profile",
+        observedUrls: []
+      }
+    });
+
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "blue-rock" },
+        data: expect.objectContaining({
+          detectedPlatform: "CHRONOGOLF",
+          automationEligibility: "ALLOWED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: {
+            clubId: 7221,
+            courseIds: ["7657db51-4e0c-4bc7-8e98-bd0a705370af"],
+            bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+          }
+        })
+      })
+    );
+  });
+
   it("applies a high-confidence phone-only finding without adapter metadata", async () => {
     mockedPrisma.course.update.mockResolvedValue({ id: "fairview" } as never);
 

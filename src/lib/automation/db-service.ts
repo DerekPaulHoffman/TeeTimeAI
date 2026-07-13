@@ -262,7 +262,7 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
   const learnedOnlineAdapter =
     input.status === "LEARNED" &&
     Boolean(input.apiMetadata) &&
-    ["FOREUP", "TEEITUP", "CUSTOM"].includes(input.detectedPlatform);
+    ["FOREUP", "TEEITUP", "CHRONOGOLF", "CUSTOM"].includes(input.detectedPlatform);
   const verifiedClassification = Boolean(
     input.bookingMethod &&
     input.bookingMethod !== "UNKNOWN" &&

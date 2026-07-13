@@ -24,7 +24,9 @@ const emailMocks = vi.hoisted(() => ({
 }));
 
 const adapterMocks = vi.hoisted(() => ({
+  fetchChronogolfSlots: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
+  isChronogolfMetadata: vi.fn(),
   isForeupMetadata: vi.fn()
 }));
 
@@ -41,6 +43,7 @@ const monitoringDiscoveryMocks = vi.hoisted(() => ({
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
+vi.mock("@/lib/adapters/chronogolf", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
 
@@ -141,6 +144,8 @@ describe("runSearchCheck email cadence", () => {
       targetDateStatus: "UNKNOWN",
       bookingWindowEvidence: null
     });
+    adapterMocks.isChronogolfMetadata.mockReturnValue(true);
+    adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
     supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
       incidentId: "incident-1",
       status: "AUTO_INVESTIGATING",
@@ -402,5 +407,53 @@ describe("runSearchCheck email cadence", () => {
         exactTime: true
       }
     });
+  });
+
+  it("uses learned Chronogolf metadata for public availability checks", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            id: "blue-rock",
+            name: "Blue Rock Golf Course",
+            detectedPlatform: "CHRONOGOLF",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: "Public Chronogolf marketplace availability.",
+            bookingMetadata: {
+              clubId: 7221,
+              courseIds: ["course-public-uuid"],
+              bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchChronogolfSlots).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "blue-rock",
+        players: 2
+      })
+    );
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "blue-rock",
+        outcome: "NO_MATCH"
+      })
+    );
+    expect(supportIncidentMocks.resolveCourseSupportIncident).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "blue-rock",
+        resolution: "MONITORING_RESTORED"
+      })
+    );
   });
 });

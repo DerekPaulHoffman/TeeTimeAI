@@ -48,6 +48,10 @@ export type BrowserDiscovery = {
     bookingBaseUrl: string;
     defaultHoles?: 9 | 18;
     defaultAddons?: string;
+  } | {
+    clubId: number;
+    courseIds: string[];
+    bookingBaseUrl: string;
   };
   confidence: number;
   evidence: {
@@ -131,6 +135,10 @@ export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
     return false;
   }
 
+  if (course.detectedPlatform === "CHRONOGOLF" && isReusableChronogolfMetadata(course.bookingMetadata)) {
+    return false;
+  }
+
   return Boolean(getBestProbeUrl(course));
 }
 
@@ -189,13 +197,12 @@ export async function enrichChronogolfDiscovery(
     return discovery;
   }
 
-  const clubId = getChronogolfClubId(discovery);
-  if (!clubId) {
+  const profileUrl = getChronogolfProfileUrl(discovery);
+  if (!profileUrl) {
     return discovery;
   }
 
-  const lookupUrl = `https://www.chronogolf.com/club/${clubId}`;
-  const response = await fetchImpl(lookupUrl, {
+  const response = await fetchImpl(profileUrl, {
     headers: { Accept: "text/html" },
     redirect: "follow"
   });
@@ -215,7 +222,7 @@ export async function enrichChronogolfDiscovery(
     return discovery;
   }
 
-  const canonicalUrl = response.url || lookupUrl;
+  const canonicalUrl = response.url || profileUrl;
   const profileSummary = `Chronogolf public club profile ${canonicalUrl} reports onlineBookingEnabled=${String(
     club.onlineBookingEnabled
   )} and ${club.courseCount} public course records.`;
@@ -242,13 +249,19 @@ export async function enrichChronogolfDiscovery(
   if (club.onlineBookingEnabled === true) {
     return {
       ...discovery,
-      status: "INSPECTED",
+      status: "LEARNED",
       bookingUrl: canonicalUrl,
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM",
-      policyNotes: `${profileSummary} A policy-safe public Chronogolf adapter still requires focused endpoint verification.`,
-      confidence: 0.9,
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      policyNotes: `${profileSummary} Tee Time Spot reads the same public marketplace availability endpoint and leaves booking on Chronogolf.`,
+      apiEndpoint: "https://www.chronogolf.com/marketplace/v2/teetimes",
+      apiMetadata: {
+        clubId: club.id,
+        courseIds: club.courseIds,
+        bookingBaseUrl: canonicalUrl
+      },
+      confidence: 0.95,
       evidence: {
         ...discovery.evidence,
         observedUrls: uniqueUrls([...discovery.evidence.observedUrls, canonicalUrl]),
@@ -260,15 +273,27 @@ export async function enrichChronogolfDiscovery(
   return discovery;
 }
 
-function getChronogolfClubId(discovery: BrowserDiscovery) {
-  const urlMatch = discovery.evidence.observedUrls
-    .map((url) => url.match(/chronogolf\.com\/club\/(\d+)(?:\/|$)/i)?.[1])
-    .find(Boolean);
+function getChronogolfProfileUrl(discovery: BrowserDiscovery) {
+  const profileUrl = discovery.evidence.observedUrls
+    .map(parseUrl)
+    .find((url) =>
+      Boolean(
+        url &&
+        /(^|\.)chronogolf\.com$/i.test(url.hostname) &&
+        /^\/club\/[^/]+/i.test(url.pathname)
+      )
+    );
+  if (profileUrl) {
+    return `https://www.chronogolf.com${profileUrl.pathname.match(/^\/club\/[^/]+/i)?.[0]}`;
+  }
+
   const textMatch = discovery.evidence.visibleText?.match(
     /(?:clubId|club_id)["'\s:=]+(\d+)/i
   )?.[1];
-  const clubId = Number(urlMatch ?? textMatch);
-  return Number.isInteger(clubId) && clubId > 0 ? clubId : null;
+  const clubId = Number(textMatch);
+  return Number.isInteger(clubId) && clubId > 0
+    ? `https://www.chronogolf.com/club/${clubId}`
+    : null;
 }
 
 function parseChronogolfClubProfile(html: string) {
@@ -284,8 +309,9 @@ function parseChronogolfClubProfile(html: string) {
       props?: {
         pageProps?: {
           club?: {
+            id?: number;
             features?: { onlineBookingEnabled?: boolean };
-            courses?: unknown[];
+            courses?: Array<{ uuid?: string }>;
           };
         };
       };
@@ -294,9 +320,19 @@ function parseChronogolfClubProfile(html: string) {
     if (!club) {
       return null;
     }
+    const courseIds = Array.isArray(club.courses)
+      ? club.courses.flatMap((course) =>
+          typeof course.uuid === "string" && course.uuid.length > 0 ? [course.uuid] : []
+        )
+      : [];
+    if (!Number.isInteger(club.id) || (club.id ?? 0) <= 0) {
+      return null;
+    }
     return {
+      id: club.id as number,
       onlineBookingEnabled: club.features?.onlineBookingEnabled,
-      courseCount: Array.isArray(club.courses) ? club.courses.length : 0
+      courseCount: courseIds.length,
+      courseIds
     };
   } catch {
     return null;
@@ -684,4 +720,18 @@ function isReusableCpsMetadata(value: unknown) {
 
 function isEditorialContentPath(pathname: string) {
   return /\/(?:events?|news|blog|calendar|posts?)\//i.test(pathname);
+}
+
+function isReusableChronogolfMetadata(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const metadata = value as { clubId?: unknown; courseIds?: unknown; bookingBaseUrl?: unknown };
+  return (
+    typeof metadata.clubId === "number" &&
+    Array.isArray(metadata.courseIds) &&
+    metadata.courseIds.length > 0 &&
+    metadata.courseIds.every((courseId) => typeof courseId === "string") &&
+    typeof metadata.bookingBaseUrl === "string"
+  );
 }

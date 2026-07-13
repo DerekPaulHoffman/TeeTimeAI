@@ -26,6 +26,7 @@ import {
   resolveCourseSupportIncident
 } from "@/lib/automation/support-incidents";
 import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
+import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
@@ -744,6 +745,7 @@ function hasSupportedAdapter(course: AutomationCourse) {
   return (
     (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) ||
     (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) ||
+    (course.detectedPlatform === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) ||
     (course.detectedPlatform === "CUSTOM" &&
       (isCpsMetadata(course.bookingMetadata) || isTeesnapMetadata(course.bookingMetadata)))
   );
@@ -772,6 +774,18 @@ function fetchCourseTeeSheet(
   }
   if (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
     return fetchTeeItUpTeeSheet({ courseId: course.id, date, metadata: course.bookingMetadata });
+  }
+  if (course.detectedPlatform === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) {
+    return fetchChronogolfSlots({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
+    }).then((slots) => ({
+      slots,
+      targetDateStatus: slots.length > 0 ? "OPEN" as const : "UNKNOWN" as const,
+      bookingWindowEvidence: null
+    }));
   }
   if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
     return fetchCpsSlots({

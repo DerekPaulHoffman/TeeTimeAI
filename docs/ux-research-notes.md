@@ -73,6 +73,12 @@
 - Observed gap: a real signed-out `02891` search returned Shelter Harbor from both Google's golf-course data and the semantic `public golf courses` query, so Tee Time Spot labeled it `Public` despite the official access policy.
 - Product decision: stable place-ID exclusions backed by current official access evidence override Google type and text-search corroboration. Name-only `Golf Club` exclusions remain inappropriate because many public facilities use that wording.
 
+## 2026-07-13: Public Chronogolf profiles can restore alert monitoring
+
+- Sources: [Blue Rock Golf Course's official site](https://bluerockgolfcourse.com/) says the course is open to the public and links its [official Chronogolf profile](https://www.chronogolf.com/club/blue-rock-golf-course). The profile's current public page data identifies club `7221`, course `7657db51-4e0c-4bc7-8e98-bd0a705370af`, and online booking as enabled. Chronogolf's read-only public marketplace endpoint returned current tee-time records without an account, checkout, or verification flow. These surfaces were accessed 2026-07-13 America/New_York.
+- Tee Time Spot evidence: the browser-discovery worker recognized the Chronogolf platform but only learned numeric `/club/<id>` URLs. Blue Rock therefore remained `UNKNOWN` with an open support incident even though its current official profile uses a descriptive slug and exposes stable club/course identifiers.
+- Decision: enrich both numeric and slug-form official Chronogolf profiles, store only reusable club/course metadata, and query the public marketplace endpoint for alert matching. Keep the adapter read-only and link golfers back to the official profile to book. Dennis Highland and Dennis Pines remain separate `NEEDS_ADAPTER` work because their Chelsea Reservations surface is account-oriented and was not traversed.
+
 ## Product Shape
 
 Tee Time Spot should behave like a waitlist assistant rather than a booking marketplace. GolfNow/TeeOff-style products emphasize inventory search, deals, and broad marketplace browsing. Noteefy-style flows emphasize preference capture, waitlist matching, and alerts.
