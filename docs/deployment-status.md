@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-10
+Last updated: 2026-07-13
 
 ## Live Vercel Deployment
 
@@ -8,13 +8,17 @@ Last updated: 2026-07-10
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-6757sx528-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_7fvBJ7oBWwGA4hgFHVgXqxkBmocW`
+- Latest verified deployment: `teetimeai-j8eazthys-derekpaulhoffmans-projects.vercel.app`
+- Deployment ID: `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
 
+- 2026-07-13 production release `09841d8` hardened owner analytics and the hourly autonomous-improvement contract. Vercel deployment `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva` reached `Ready` with `teetimespot.com` and `www.teetimespot.com` aliases. Web Analytics and Speed Insights are enabled; first-party events and feedback now carry an explicit public, automation, test, or unclassified traffic class without adding visitor/session identifiers; analytics URLs are query-free; and production email actions use a dedicated encrypted `EMAIL_ACTION_SECRET`.
+- The additive website-traffic migration was applied, then the explicitly approved historical privacy scrub removed query/hash data from 121 event-page values and removed one persisted search identifier from event metadata. Aggregate verification found no remaining affected event pages, feedback pages, or event metadata search identifiers.
+- Phoenix discovery now deterministically keeps the canonical Arizona Grand and Ahwatukee public-course records while suppressing their known aliases. Live 30-mile discovery returned one canonical result for each course; the unrelated generic Tempe result remains intentionally unresolved.
+- Release verification passed 277 unit tests, lint with zero errors, a production build, 24/24 local Playwright checks, 24/24 production Playwright checks, route and analytics-script HTTP checks, clean production error/4xx/5xx log groups, and `git diff --check`.
 - `npm run test:run`
 - `npm run lint`
 - `npm run build`
