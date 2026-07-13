@@ -3,6 +3,25 @@ import { expect, test, type Page, type TestInfo } from "@playwright/test";
 const smokeBaseUrl =
   process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`;
 const smokeOrigin = new URL(smokeBaseUrl).origin;
+const useIsolatedPreviewProviders = process.env.UI_SMOKE_ISOLATED_PROVIDERS === "true";
+
+const isolatedPreviewCourses = [
+  "Tashua Knolls Golf Course",
+  "H. Smith Richardson Golf Course",
+  "Longshore Golf Course",
+  "Sterling Farms Golf Course",
+  "Oak Hills Park Golf Course",
+  "Smithtown Landing Golf Course",
+  "Fairchild Wheeler Golf Course"
+].map((name, index) => ({
+  address: `${100 + index} Public Links Rd, Trumbull, CT`,
+  distanceMeters: 2_000 + index * 800,
+  googlePlaceId: `ui-smoke-isolated-${index + 1}`,
+  latitude: 41.24 + index * 0.002,
+  longitude: -73.2 - index * 0.002,
+  name,
+  website: `https://example.com/course-${index + 1}`
+}));
 
 test.describe("Tee Time Spot UI smoke", () => {
   test.beforeEach(async ({ page }) => {
@@ -319,6 +338,23 @@ test.describe("Tee Time Spot UI smoke", () => {
   }, testInfo) => {
     const issues = collectPageIssues(page);
     const isMobile = testInfo.project.name.includes("mobile");
+
+    if (useIsolatedPreviewProviders) {
+      await page.route("**/api/location/geocode?**", async (route) => {
+        await route.fulfill({
+          body: JSON.stringify({ latitude: 41.242, longitude: -73.209 }),
+          contentType: "application/json",
+          status: 200
+        });
+      });
+      await page.route("**/api/courses/discover?**", async (route) => {
+        await route.fulfill({
+          body: JSON.stringify({ courses: isolatedPreviewCourses }),
+          contentType: "application/json",
+          status: 200
+        });
+      });
+    }
 
     await page.goto("/search");
 

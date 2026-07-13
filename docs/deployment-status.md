@@ -15,6 +15,7 @@ Last updated: 2026-07-13
 
 ## Verified
 
+- 2026-07-13 Vercel release hardening made the Git integration the normal production deployment authority, added native production-alias gates for lint and type checking, and added GitHub `Verify` plus an owner-only manual protected `Preview Smoke`. A real Git preview created Neon branch `preview/chore/vercel-release-hardening` (`br-wandering-night-ategggm2`) from the production database branch. Preview no longer receives production-only Clerk, Google Places, Resend, automation, or email-action credentials; its smoke uses deterministic discovery responses. The automation bypass is scoped only to the same-origin cookie bootstrap/smoke step, and the Vercel Toolbar is disabled for new pre-production deployments.
 - 2026-07-13 production release `09841d8` hardened owner analytics and the hourly autonomous-improvement contract. Vercel deployment `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva` reached `Ready` with `teetimespot.com` and `www.teetimespot.com` aliases. Web Analytics and Speed Insights are enabled; first-party events and feedback now carry an explicit public, automation, test, or unclassified traffic class without adding visitor/session identifiers; analytics URLs are query-free; and production email actions use a dedicated encrypted `EMAIL_ACTION_SECRET`.
 - The additive website-traffic migration was applied, then the explicitly approved historical privacy scrub removed query/hash data from 121 event-page values and removed one persisted search identifier from event metadata. Aggregate verification found no remaining affected event pages, feedback pages, or event metadata search identifiers.
 - Phoenix discovery now deterministically keeps the canonical Arizona Grand and Ahwatukee public-course records while suppressing their known aliases. Live 30-mile discovery returned one canonical result for each course; the unrelated generic Tempe result remains intentionally unresolved.
@@ -28,7 +29,7 @@ Last updated: 2026-07-13
 - `www.teetimespot.com` was attached to the same project and verified.
 - Clerk production instance exists for `teetimespot.com`; DNS, SSL, and Clerk mail DNS are complete.
 - Resend free marketplace resource `teetimespot-alerts` is connected to Vercel. The `teetimespot.com` sending domain is verified with sending enabled.
-- Resend production, preview, and development env vars include `RESEND_API_KEY`, `RESEND_EMAIL_DOMAIN`, and `ALERT_EMAIL_FROM`.
+- Resend production and development env vars include `RESEND_API_KEY`, `RESEND_EMAIL_DOMAIN`, and `ALERT_EMAIL_FROM`; Preview intentionally has no Resend credentials.
 - Resend smoke sent successfully to `delivered@resend.dev` using a restricted sending key and fixed idempotency key.
 - Neon Postgres marketplace resource is connected, migrated, and seeded with the ForeUP demo adapter data.
 - Live `/` returns 200 and renders the Tee Time Spot intake.

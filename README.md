@@ -493,12 +493,17 @@ a same-origin bootstrap request to store the protection-bypass cookie before the
 desktop/mobile Playwright suite starts. Never run the secret-bearing workflow definition or
 test harness from an untrusted ref.
 
+Vercel Preview deployments use a Neon branch created for the Git branch. Production-only
+Clerk, Google Places, Resend, automation, and email-action credentials are not exposed to
+Preview. The trusted Preview Smoke substitutes deterministic discovery responses while still
+exercising the deployed application, isolated database connection, and protected Vercel URL.
+
 Keep `docs/deployment-status.md` current after provider, deployment, auth, domain, or migration changes.
 
 ## Known Provider State
 
 - Vercel project and domain are live.
-- Neon Postgres is connected and migrated.
+- Neon Postgres is connected and migrated; Git previews receive deployment-scoped Neon branches.
 - Google Places API is configured for discovery and photos.
 - Resend is configured for email sending.
 - Clerk production instance exists, but app account mode is gated behind `CLERK_AUTH_READY=true`.

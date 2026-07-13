@@ -42,5 +42,6 @@ jobs:
       - name: Smoke trusted Vercel preview
         env:
           UI_SMOKE_BASE_URL: ${{ inputs.preview_url }}
+          UI_SMOKE_ISOLATED_PROVIDERS: "true"
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: test -n "$VERCEL_AUTOMATION_BYPASS_SECRET" && npm run ui:smoke
