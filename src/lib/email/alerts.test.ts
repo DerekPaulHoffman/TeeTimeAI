@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildContentScopedEmailIdempotencyKey,
+  getMatchAlertSubject,
   normalizeEmailEnvValue,
   renderAlertHtml,
   renderCourseSupportOperatorHtml,
@@ -72,7 +73,7 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("first come");
   });
 
-  it("lists every available time and renders both stop-alert controls", () => {
+  it("keeps separate hourly windows and renders both stop-alert controls", () => {
     const html = renderAlertHtml({
       to: "player@example.com",
       searchId: "search-1",
@@ -104,6 +105,36 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("2 spots");
     expect(html).toContain("I booked — stop these emails");
     expect(html).toContain("Cancel this alert");
+  });
+
+  it("summarizes a dense tee sheet into hourly windows with a bounded list", () => {
+    const matches = Array.from({ length: 54 }, (_, index) => ({
+      courseName: "Blue Rock Golf Course",
+      courseTimeZone: "America/New_York",
+      startsAt: new Date(Date.parse("2026-08-15T13:00:00.000Z") + index * 10 * 60 * 1000),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/blue-rock",
+      priceCents: 7200,
+      holes: 18,
+      isNew: index >= 12
+    }));
+
+    const html = renderAlertHtml({
+      to: "player@example.com",
+      searchId: "search-1",
+      matches
+    });
+
+    expect(getMatchAlertSubject(matches)).toBe(
+      "New tee time windows opened at Blue Rock Golf Course"
+    );
+    expect(html).toContain("9 matching time windows are currently available");
+    expect(html).toContain("9:00 AM-9:50 AM EDT");
+    expect(html.match(/6 tee times/g)).toHaveLength(8);
+    expect(html).toContain("1 more time window is available on the official booking page");
+    expect(html).not.toContain("5:00 PM-5:50 PM EDT");
+    expect(html).not.toContain("42 tee times");
+    expect(html).not.toContain("54 tee times");
   });
 });
 

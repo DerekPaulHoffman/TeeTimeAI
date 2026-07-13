@@ -33,6 +33,14 @@ export type TeeTimeAlertInput = {
   stopUrls?: EmailStopUrls;
 };
 
+type TeeTimeAlertWindow = {
+  matches: TeeTimeAlertMatch[];
+  startsAt: Date;
+  endsAt: Date;
+};
+
+const MAX_ALERT_WINDOWS_PER_COURSE = 8;
+
 export type EmailDelivery =
   | {
       id: string;
@@ -428,13 +436,19 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
   const matches = [...input.matches].sort(
     (left, right) => left.startsAt.getTime() - right.startsAt.getTime()
   );
-  const newMatchCount = matches.filter((match) => match.isNew !== false).length;
+  const newMatches = matches.filter((match) => match.isNew !== false);
+  const newWindowCount = groupAlertMatchesIntoWindows(newMatches).length;
+  const windowCount = groupAlertMatchesIntoWindows(matches).length;
   const courseCount = new Set(matches.map((match) => match.courseName)).size;
-  const heading = newMatchCount === 1 ? "A spot just opened up!" : "New tee times just opened up!";
+  const headingWindowCount = newWindowCount || windowCount;
+  const heading =
+    headingWindowCount === 1
+      ? "A tee time window just opened!"
+      : "New tee time windows just opened!";
   const summary =
     matches.length === 1
       ? "We found a tee time that matches your search. Open the official course page before it is gone."
-      : `${matches.length} matching tee times are currently available across ${courseCount} course${courseCount === 1 ? "" : "s"}.`;
+      : `${windowCount} matching time window${windowCount === 1 ? " is" : "s are"} currently available across ${courseCount} course${courseCount === 1 ? "" : "s"}.`;
   const courseGroups = renderAlertCourseGroups(matches, input.userTimeZone);
   const stopControls = renderEmailStopControls(input.stopUrls);
 
@@ -471,7 +485,11 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
 function renderAlertCourseGroups(matches: TeeTimeAlertMatch[], userTimeZone?: string) {
   const groups = new Map<string, TeeTimeAlertMatch[]>();
   for (const match of matches) {
-    const groupKey = `${match.courseName}:${normalizeTimeZone(match.courseTimeZone)}`;
+    const courseTimeZone = normalizeTimeZone(match.courseTimeZone);
+    const groupKey = `${match.courseName}:${courseTimeZone}:${getCourseLocalDateKey(
+      match.startsAt,
+      courseTimeZone
+    )}`;
     const group = groups.get(groupKey) ?? [];
     group.push(match);
     groups.set(groupKey, group);
@@ -485,6 +503,9 @@ function renderAlertCourseGroups(matches: TeeTimeAlertMatch[], userTimeZone?: st
         DEFAULT_TIME_ZONE
       );
       const bookingUrl = courseMatches[0]?.bookingUrl ?? "";
+      const windows = groupAlertMatchesIntoWindows(courseMatches);
+      const visibleWindows = windows.slice(0, MAX_ALERT_WINDOWS_PER_COURSE);
+      const hiddenWindowCount = windows.length - visibleWindows.length;
       const date = courseMatches[0]
         ? courseMatches[0].startsAt.toLocaleDateString("en-US", {
             weekday: "long",
@@ -493,10 +514,15 @@ function renderAlertCourseGroups(matches: TeeTimeAlertMatch[], userTimeZone?: st
             timeZone: courseTimeZone
           })
         : "";
-      const rows = courseMatches
-        .map((match) => renderAlertMatchRow(match, userTimeZone))
+      const rows = visibleWindows
+        .map((window) => renderAlertWindowRow(window, userTimeZone))
         .join("");
-      const buttonLabel = matches.length === 1 ? "Book this tee time" : "Open official booking page";
+      const buttonLabel =
+        matches.length === 1 ? "Book this tee time" : "Open official booking page";
+      const overflowNote =
+        hiddenWindowCount > 0
+          ? `<p style="color:#5c6c64;font-size:13px;margin:10px 0 0">${hiddenWindowCount} more time window${hiddenWindowCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
+          : "";
 
       return `
         <div style="border:1px solid #d9e3dc;border-radius:10px;padding:18px;margin-bottom:14px">
@@ -506,6 +532,7 @@ function renderAlertCourseGroups(matches: TeeTimeAlertMatch[], userTimeZone?: st
           <table role="presentation" style="border-collapse:collapse;width:100%">
             ${rows}
           </table>
+          ${overflowNote}
           <p style="margin:14px 0 0">
             <a href="${escapeHtml(bookingUrl)}" style="display:block;background:#e28a2f;color:#1d1309;padding:13px 16px;border-radius:999px;text-align:center;text-decoration:none;font-weight:800">
               ${buttonLabel}
@@ -517,31 +544,21 @@ function renderAlertCourseGroups(matches: TeeTimeAlertMatch[], userTimeZone?: st
     .join("");
 }
 
-function renderAlertMatchRow(match: TeeTimeAlertMatch, userTimeZone?: string) {
+function renderAlertWindowRow(window: TeeTimeAlertWindow, userTimeZone?: string) {
+  const matches = window.matches;
+  const match = matches[0];
+  if (!match) {
+    return "";
+  }
   const courseTimeZone = normalizeTimeZone(match.courseTimeZone, DEFAULT_TIME_ZONE);
   const normalizedUserTimeZone = normalizeTimeZone(userTimeZone, courseTimeZone);
-  const time = match.startsAt.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: courseTimeZone,
-    timeZoneName: "short"
-  });
+  const time = formatAlertTimeWindow(window, courseTimeZone);
   const userLocalTime =
     normalizedUserTimeZone === courseTimeZone
       ? null
-      : match.startsAt.toLocaleString("en-US", {
-          weekday: "short",
-          hour: "numeric",
-          minute: "2-digit",
-          timeZone: normalizedUserTimeZone,
-          timeZoneName: "short"
-        });
-  const details = [
-    `${match.availableSpots} spot${match.availableSpots === 1 ? "" : "s"}`,
-    match.priceCents != null ? formatPrice(match.priceCents) : null,
-    match.holes ? `${match.holes} holes` : null
-  ].filter(Boolean);
-  const newBadge = match.isNew === false
+      : formatAlertTimeWindow(window, normalizedUserTimeZone, true);
+  const details = getAlertWindowDetails(window);
+  const newBadge = matches.every((candidate) => candidate.isNew === false)
     ? ""
     : '<span style="background:#e2f1e7;border-radius:999px;color:#105338;font-size:10px;font-weight:800;margin-left:7px;padding:3px 6px;vertical-align:2px">NEW</span>';
 
@@ -553,17 +570,138 @@ function renderAlertMatchRow(match: TeeTimeAlertMatch, userTimeZone?: string) {
   `;
 }
 
-function getMatchAlertSubject(matches: TeeTimeAlertMatch[]) {
+export function getMatchAlertSubject(matches: TeeTimeAlertMatch[]) {
   const newMatches = matches.filter((match) => match.isNew !== false);
   const subjectMatches = newMatches.length > 0 ? newMatches : matches;
   const courseNames = [...new Set(subjectMatches.map((match) => match.courseName))];
-  if (subjectMatches.length === 1) {
-    return `A spot opened up at ${courseNames[0]}`;
+  const windowCount = groupAlertMatchesIntoWindows(subjectMatches).length;
+  if (windowCount === 1) {
+    return `A tee time window opened at ${courseNames[0]}`;
   }
   if (courseNames.length === 1) {
-    return `${subjectMatches.length} tee times opened at ${courseNames[0]}`;
+    return `New tee time windows opened at ${courseNames[0]}`;
   }
-  return `${subjectMatches.length} matching tee times opened up`;
+  return "New matching tee time windows opened up";
+}
+
+function groupAlertMatchesIntoWindows(matches: TeeTimeAlertMatch[]) {
+  const groups = new Map<string, TeeTimeAlertMatch[]>();
+
+  for (const match of [...matches].sort(
+    (left, right) => left.startsAt.getTime() - right.startsAt.getTime()
+  )) {
+    const courseTimeZone = normalizeTimeZone(match.courseTimeZone, DEFAULT_TIME_ZONE);
+    const key = `${match.courseName}:${courseTimeZone}:${getCourseLocalHourKey(
+      match.startsAt,
+      courseTimeZone
+    )}`;
+    const group = groups.get(key) ?? [];
+    group.push(match);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()].map<TeeTimeAlertWindow>((windowMatches) => ({
+    matches: windowMatches,
+    startsAt: windowMatches[0].startsAt,
+    endsAt: windowMatches[windowMatches.length - 1].startsAt
+  }));
+}
+
+function getAlertWindowDetails(window: TeeTimeAlertWindow) {
+  if (window.matches.length === 1) {
+    const match = window.matches[0];
+    return [
+      `${match.availableSpots} spot${match.availableSpots === 1 ? "" : "s"}`,
+      match.priceCents != null ? formatPrice(match.priceCents) : null,
+      match.holes ? `${match.holes} holes` : null
+    ].filter(Boolean);
+  }
+
+  const maxAvailableSpots = Math.max(...window.matches.map((match) => match.availableSpots));
+  const prices = window.matches.flatMap((match) =>
+    match.priceCents == null ? [] : [match.priceCents]
+  );
+  const holes = [
+    ...new Set(window.matches.flatMap((match) => (match.holes ? [match.holes] : [])))
+  ];
+
+  return [
+    `${window.matches.length} tee times`,
+    `up to ${maxAvailableSpots} spot${maxAvailableSpots === 1 ? "" : "s"}`,
+    formatPriceRange(prices),
+    holes.length === 1
+      ? `${holes[0]} holes`
+      : holes.length > 1
+        ? `${holes.sort((a, b) => a - b).join("/")} holes`
+        : null
+  ].filter(Boolean);
+}
+
+function formatAlertTimeWindow(
+  window: TeeTimeAlertWindow,
+  timeZone: string,
+  includeWeekday = false
+) {
+  const sharedOptions = {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone
+  } as const;
+  const startsAt = window.startsAt.toLocaleString("en-US", {
+    ...sharedOptions,
+    ...(includeWeekday ? { weekday: "short" as const } : {})
+  });
+  const endsAt = window.endsAt.toLocaleTimeString("en-US", {
+    ...sharedOptions,
+    timeZoneName: "short"
+  });
+
+  if (window.startsAt.getTime() === window.endsAt.getTime()) {
+    return window.startsAt.toLocaleString("en-US", {
+      ...sharedOptions,
+      ...(includeWeekday ? { weekday: "short" as const } : {}),
+      timeZoneName: "short"
+    });
+  }
+
+  return `${startsAt}-${endsAt}`;
+}
+
+function formatPriceRange(prices: number[]) {
+  if (prices.length === 0) {
+    return null;
+  }
+  const minimum = Math.min(...prices);
+  const maximum = Math.max(...prices);
+  return minimum === maximum
+    ? formatPrice(minimum)
+    : `${formatPrice(minimum)} to ${formatPrice(maximum)}`;
+}
+
+function getCourseLocalDateKey(date: Date, timeZone: string) {
+  return getCourseLocalDateTimeParts(date, timeZone).slice(0, 3).join("-");
+}
+
+function getCourseLocalHourKey(date: Date, timeZone: string) {
+  return getCourseLocalDateTimeParts(date, timeZone).join("-");
+}
+
+function getCourseLocalDateTimeParts(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+    timeZone
+  }).formatToParts(date);
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  return [
+    values.get("year"),
+    values.get("month"),
+    values.get("day"),
+    values.get("hour")
+  ];
 }
 
 function formatPrice(priceCents: number) {

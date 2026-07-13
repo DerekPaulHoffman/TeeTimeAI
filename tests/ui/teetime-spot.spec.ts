@@ -948,8 +948,11 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     const emailFrame = page.frameLocator("iframe[title='Rendered tee time alert email']");
     await expect(emailFrame.locator("body")).toContainText("Tashua Knolls Golf Course");
-    await expect(emailFrame.locator("body")).toContainText("A spot just opened up!");
-    await expect(emailFrame.getByRole("link", { name: "Book this tee time" })).toBeVisible();
+    await expect(emailFrame.locator("body")).toContainText("New tee time windows just opened!");
+    await expect(emailFrame.locator("body")).toContainText("6 tee times");
+    await expect(
+      emailFrame.getByRole("link", { name: "Open official booking page" })
+    ).toBeVisible();
     await expect(emailFrame.locator("body")).toContainText(/first come,\s+first served/i);
     await expect(emailFrame.locator("body")).not.toContainText(/we book/i);
 

@@ -22,17 +22,16 @@ const previewStopUrls = {
 const previewAlert = {
   to: "preview@teetimespot.com",
   searchId: "preview-search",
-  matches: [
-    {
-      courseName: "Tashua Knolls Golf Course",
-      startsAt: new Date("2026-07-15T13:50:00-04:00"),
-      availableSpots: 3,
-      priceCents: 5500,
-      holes: 18,
-      bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431",
-      isNew: true
-    }
-  ],
+  matches: Array.from({ length: 8 }, (_, index) => ({
+    courseName: "Tashua Knolls Golf Course",
+    courseTimeZone: "America/New_York",
+    startsAt: new Date(Date.parse("2026-07-15T13:50:00-04:00") + index * 10 * 60 * 1000),
+    availableSpots: index % 3 === 0 ? 3 : 4,
+    priceCents: 5500,
+    holes: 18,
+    bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431",
+    isNew: true
+  })),
   stopUrls: previewStopUrls
 };
 
@@ -212,10 +211,10 @@ export default function EmailPreviewPage() {
           <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
             Instant match alert
           </p>
-          <h2>A new time opened in your range.</h2>
+          <h2>New time windows opened in your range.</h2>
           <p className="meta">
-            This email is reserved for a genuinely new matching slot and includes the official
-            booking link.
+            Dense tee sheets are grouped into concise hourly windows, with the official booking
+            link one click away.
           </p>
         </div>
       </div>
