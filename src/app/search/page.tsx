@@ -3,6 +3,10 @@ import Image from "next/image";
 
 import { TeeTimeIntake, type TeeTimeIntakeInitialValues } from "@/components/tee-time-intake";
 import { hasClerkConfig } from "@/lib/env";
+import {
+  MAX_COURSE_SEARCH_RADIUS_MILES,
+  MIN_COURSE_SEARCH_RADIUS_MILES
+} from "@/lib/places/radius";
 import { siteDescription } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -34,7 +38,12 @@ export default async function SearchPage({
     startTime: valueOf(params.startTime),
     endTime: valueOf(params.endTime),
     players: Number.isInteger(players) && players >= 1 && players <= 4 ? players : undefined,
-    radius: Number.isFinite(radius) && radius >= 1 && radius <= 50 ? radius : undefined,
+    radius:
+      Number.isFinite(radius) &&
+      radius >= MIN_COURSE_SEARCH_RADIUS_MILES &&
+      radius <= MAX_COURSE_SEARCH_RADIUS_MILES
+        ? radius
+        : undefined,
     holes: holes === "9" || holes === "18" || holes === "any" ? holes : undefined,
     coordinates:
       Number.isFinite(latitude) && Number.isFinite(longitude)

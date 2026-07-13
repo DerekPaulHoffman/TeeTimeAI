@@ -57,9 +57,22 @@ test.describe("Tee Time Spot UI smoke", () => {
       )
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "Open feedback form" }).click();
+    const feedbackLauncher = page.getByRole("button", { name: "Open feedback form" });
+    await feedbackLauncher.focus();
+    await feedbackLauncher.press("Enter");
+    const feedbackDialog = page.getByRole("dialog", { name: "Send feedback" });
+    await expect(feedbackDialog).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close feedback" })).toBeFocused();
     await expect(page.getByText("Have a product suggestion?", { exact: true })).toBeVisible();
     await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(3);
+    await page.keyboard.press("Escape");
+    await expect(feedbackDialog).toBeHidden();
+    await expect(feedbackLauncher).toBeFocused();
+
+    const homeDistance = homeSearchForm.getByRole("slider", { name: "Distance from me" });
+    await expect(homeDistance).toHaveAttribute("min", "5");
+    await expect(homeDistance).toHaveAttribute("max", "30");
+    await expect(homeDistance).toHaveAttribute("step", "5");
   });
 
   test("keeps compact navigation accessible and prioritizes the search hero", async ({
@@ -187,6 +200,48 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(error).not.toContainText('{"error"');
     await expect(locationInput).toHaveAttribute("aria-invalid", "true");
     await expect(locationInput).toHaveAttribute("aria-describedby", "location-search-error");
+  });
+
+  test("turns a zero-result search into a bounded wider search", async ({ page }) => {
+    const requestedRadii: string[] = [];
+    await page.route("**/api/location/geocode?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ latitude: 45.52, longitude: -109.44 }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+    await page.route("**/api/courses/discover?**", async (route) => {
+      requestedRadii.push(new URL(route.request().url()).searchParams.get("radiusMeters") ?? "");
+      await route.fulfill({
+        body: JSON.stringify({ courses: [] }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+
+    await page.goto("/search");
+    const distance = page.getByRole("slider", { name: "Distance from me" });
+    await expect(distance).toHaveAttribute("min", "5");
+    await expect(distance).toHaveAttribute("max", "30");
+    await expect(distance).toHaveAttribute("step", "5");
+    await expect(distance).toHaveValue("15");
+
+    await page.getByRole("textbox", { name: "Location", exact: true }).fill("59001");
+    await page.getByRole("button", { name: /^Search$/i }).click();
+    await expect(
+      page.getByRole("heading", { name: "No public courses found within 15 miles." })
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Search 30 miles" }).click();
+    await expect(distance).toHaveValue("30");
+    await expect(
+      page.getByRole("heading", { name: "No public courses found within 30 miles." })
+    ).toBeVisible();
+    await expect(
+      page.getByText("You searched the full 30-mile range.", { exact: false })
+    ).toBeVisible();
+    expect(requestedRadii).toEqual(["24140", "48280"]);
   });
 
   test("uses singular result copy and keeps mobile search controls readable", async ({

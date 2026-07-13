@@ -14,7 +14,11 @@ import {
   CURRENT_LOCATION_LABEL,
   LOCATION_INPUT_PLACEHOLDER
 } from "@/lib/places/location-input";
-import { DEFAULT_COURSE_SEARCH_RADIUS_MILES } from "@/lib/places/radius";
+import {
+  DEFAULT_COURSE_SEARCH_RADIUS_MILES,
+  MAX_COURSE_SEARCH_RADIUS_MILES,
+  MIN_COURSE_SEARCH_RADIUS_MILES
+} from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
 
 type HoleFilter = "any" | "9" | "18";
@@ -75,7 +79,10 @@ export function HomeSearchForm() {
     );
   }
 
-  const progress = ((radius - 1) / 49) * 100;
+  const progress =
+    ((radius - MIN_COURSE_SEARCH_RADIUS_MILES) /
+      (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) *
+    100;
 
   return (
     <form className="home-search-form" onSubmit={submit}>
@@ -143,12 +150,17 @@ export function HomeSearchForm() {
         <span className="home-filter-divider" aria-hidden="true" />
         <label className="home-distance-filter">
           <strong>Distance from you</strong>
-          <span><em>1 mi</em><b>within {radius} mi</b><em>50 mi</em></span>
+          <span>
+            <em>{MIN_COURSE_SEARCH_RADIUS_MILES} mi</em>
+            <b>within {radius} mi</b>
+            <em>{MAX_COURSE_SEARCH_RADIUS_MILES} mi</em>
+          </span>
           <input
             aria-label="Distance from me"
-            max="50"
-            min="1"
+            max={MAX_COURSE_SEARCH_RADIUS_MILES}
+            min={MIN_COURSE_SEARCH_RADIUS_MILES}
             onChange={(event) => setRadius(Number(event.target.value))}
+            step="5"
             style={{
               background: `linear-gradient(to right, #18332b 0 ${progress}%, #d9e4df ${progress}% 100%)`
             }}

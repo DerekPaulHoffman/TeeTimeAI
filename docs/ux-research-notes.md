@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-13: Empty searches need bounded recovery and feedback needs focus management
+
+- Sources: [W3C WAI-ARIA Dialog (Modal) Pattern](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/) and [W3C Modal Dialog Example](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/examples/dialog/) (last updated 2026-03-04), accessed 2026-07-13 America/New_York.
+- Tee Time Spot evidence: a real signed-out `59001` search returned zero public courses at the default 15 miles on desktop and mobile. The page stated the count but offered no direct next step even though the product contract already defines a 5-to-30-mile discovery range. The live controls had drifted to 1-to-50 miles. Keyboard testing also found that opening the feedback panel left focus on the document body, exposed no dialog landmark, ignored Escape, and returned focus to the body after closing.
+- Decision: restore the documented 5-to-30-mile range on both search entry points, turn zero results into an announced action that can rerun the same coordinates at 30 miles, and keep the course-name lookup as the fallback after the full range is exhausted. Give the non-modal feedback panel a programmatic dialog name, move focus inside when it opens, close it with Escape, and return focus to the launcher when it closes.
+
 ## 2026-07-13: Miami discovery needs stable identity exclusions
 
 - Sources: [Green Girls Golf official site](https://www.greengirlsgolf.com/), [Golf Miami 305 official site](https://www.golfmiami305.com/), [Shell Bay Club official site](https://shellbayclub.com/), [South Florida Golf Magazine business listing](https://nextdoor.com/pages/south-florida-golf-magazine-miami-beach-fl/), and [Celebrity Amputee Golf Classic nonprofit record](https://projects.propublica.org/nonprofits/organizations/454693128), accessed 2026-07-13 America/New_York.

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Bug,
@@ -33,10 +33,30 @@ export function FeedbackWidget() {
   const [contactEmail, setContactEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "saving" | "sent" | "error">("idle");
   const [error, setError] = useState("");
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      closeButtonRef.current?.focus();
+    }
+  }, [open]);
 
   function openPanel() {
     setOpen(true);
     trackWebsiteEvent({ name: "feedback_opened" });
+  }
+
+  function closePanel() {
+    setOpen(false);
+    window.requestAnimationFrame(() => launcherRef.current?.focus());
+  }
+
+  function handlePanelKeyDown(event: KeyboardEvent<HTMLFormElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePanel();
+    }
   }
 
   async function submitFeedback(event: FormEvent<HTMLFormElement>) {
@@ -82,17 +102,24 @@ export function FeedbackWidget() {
   return (
     <div className="feedback-widget">
       {open ? (
-        <form className="feedback-panel" onSubmit={submitFeedback}>
+        <form
+          aria-labelledby="feedback-panel-title"
+          className="feedback-panel"
+          onKeyDown={handlePanelKeyDown}
+          onSubmit={submitFeedback}
+          role="dialog"
+        >
           <div className="feedback-panel-header">
             <div>
-              <strong>Send feedback</strong>
+              <strong id="feedback-panel-title">Send feedback</strong>
               <span>Tell us what is working or what needs fixing.</span>
             </div>
             <button
               aria-label="Close feedback"
               className="button button-ghost icon-button"
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={closePanel}
+              ref={closeButtonRef}
             >
               <X size={17} />
             </button>
@@ -175,6 +202,7 @@ export function FeedbackWidget() {
         <button
           aria-label="Open feedback form"
           className="feedback-launcher"
+          ref={launcherRef}
           title="Open feedback form"
           type="button"
           onClick={openPanel}

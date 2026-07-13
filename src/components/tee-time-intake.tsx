@@ -49,6 +49,8 @@ import {
 import type { CourseCandidate } from "@/lib/places/google";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
+  MAX_COURSE_SEARCH_RADIUS_MILES,
+  MIN_COURSE_SEARCH_RADIUS_MILES,
   milesToMeters
 } from "@/lib/places/radius";
 import {
@@ -411,12 +413,15 @@ function TeeTimeIntakeContent({
     }
   }
 
-  const discoverCourses = useCallback(async (coordinates: SearchCoordinates) => {
+  const discoverCourses = useCallback(async (
+    coordinates: SearchCoordinates,
+    radiusMiles = searchRadiusMiles
+  ) => {
     try {
       const params = new URLSearchParams({
         latitude: String(coordinates.latitude),
         longitude: String(coordinates.longitude),
-        radiusMeters: String(milesToMeters(searchRadiusMiles))
+        radiusMeters: String(milesToMeters(radiusMiles))
       });
       const response = await fetch(`/api/courses/discover?${params}`);
       if (!response.ok) {
@@ -434,7 +439,7 @@ function TeeTimeIntakeContent({
         type: "success",
         message: data.demo
           ? "Loaded demo courses. Add Google Places keys for live discovery."
-          : `Found ${data.courses.length} public golf courses within ${searchRadiusMiles} miles.`
+          : `Found ${data.courses.length} public golf courses within ${radiusMiles} miles.`
       });
     } catch (error) {
       shouldScrollToResultsRef.current = false;
@@ -446,6 +451,16 @@ function TeeTimeIntakeContent({
       setLoading(false);
     }
   }, [searchRadiusMiles]);
+
+  function expandEmptySearch() {
+    if (!searchCoordinates || searchRadiusMiles >= MAX_COURSE_SEARCH_RADIUS_MILES) {
+      return;
+    }
+
+    setSearchRadiusMiles(MAX_COURSE_SEARCH_RADIUS_MILES);
+    setLoading(true);
+    void discoverCourses(searchCoordinates, MAX_COURSE_SEARCH_RADIUS_MILES);
+  }
 
   useEffect(() => {
     if (!shouldScrollToResultsRef.current || courses.length === 0) {
@@ -738,18 +753,23 @@ function TeeTimeIntakeContent({
           <span className="figma-filter-divider" aria-hidden="true" />
           <strong className="figma-distance-label">Distance</strong>
           <label className="figma-distance-filter" htmlFor="searchRadius">
-            <span><em>1 mi</em><b>within {searchRadiusMiles} mi</b><em>50 mi</em></span>
+            <span>
+              <em>{MIN_COURSE_SEARCH_RADIUS_MILES} mi</em>
+              <b>within {searchRadiusMiles} mi</b>
+              <em>{MAX_COURSE_SEARCH_RADIUS_MILES} mi</em>
+            </span>
             <input
               aria-label="Distance from me"
               disabled={loading}
               id="searchRadius"
-              max="50"
-              min="1"
+              max={MAX_COURSE_SEARCH_RADIUS_MILES}
+              min={MIN_COURSE_SEARCH_RADIUS_MILES}
+              step="5"
               type="range"
               value={searchRadiusMiles}
               onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
               style={{
-                background: `linear-gradient(to right, #18332b 0 ${((searchRadiusMiles - 1) / 49) * 100}%, #d9e4df ${((searchRadiusMiles - 1) / 49) * 100}% 100%)`
+                background: `linear-gradient(to right, #18332b 0 ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}%, #d9e4df ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}% 100%)`
               }}
             />
           </label>
@@ -786,6 +806,25 @@ function TeeTimeIntakeContent({
                 {filteredCourses.length} {filteredCourses.length === 1 ? "course" : "courses"}
               </strong>{" "}
               near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
+            </div>
+          ) : notice.type === "success" ? (
+            <div className="figma-empty-results" role="status">
+              <h3>No public courses found within {searchRadiusMiles} miles.</h3>
+              <p>
+                {searchRadiusMiles < MAX_COURSE_SEARCH_RADIUS_MILES
+                  ? `Widen the search to ${MAX_COURSE_SEARCH_RADIUS_MILES} miles, or look up a course by name below.`
+                  : `You searched the full ${MAX_COURSE_SEARCH_RADIUS_MILES}-mile range. Look up a course by name below and we'll review any miss.`}
+              </p>
+              {searchRadiusMiles < MAX_COURSE_SEARCH_RADIUS_MILES ? (
+                <button
+                  className="button button-ghost"
+                  disabled={loading}
+                  onClick={expandEmptySearch}
+                  type="button"
+                >
+                  {loading ? "Searching" : `Search ${MAX_COURSE_SEARCH_RADIUS_MILES} miles`}
+                </button>
+              ) : null}
             </div>
           ) : (
             <Notice
