@@ -139,6 +139,19 @@ const VERIFIED_PUBLIC_COURSES = [
 const VERIFIED_PUBLIC_COURSE_PLACE_IDS = new Set<string>(
   VERIFIED_PUBLIC_COURSES.map((course) => course.placeId)
 );
+// Google can classify invitation-only facilities as golf_course and even return them for a
+// "public golf courses" text search. Keep verified private facilities out by stable place ID
+// when their official site explicitly documents private or member-only access.
+const VERIFIED_PRIVATE_COURSES = [
+  {
+    placeId: "ChIJMXRRcFvo5YkRkNXOrqSfVGM",
+    name: "Shelter Harbor Golf Club",
+    evidenceUrl: "https://www.shgcri.com/"
+  }
+] as const;
+const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
+  VERIFIED_PRIVATE_COURSES.map((course) => course.placeId)
+);
 
 export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandidate {
   const googlePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
@@ -181,6 +194,10 @@ function isLikelyPublicGolfCoursePlace(
   const placeTypes = place.types ?? [];
   const hasPublicCourseEvidence = publicCourseEvidenceIds.has(placeId);
   const isVerifiedPublicCourse = VERIFIED_PUBLIC_COURSE_PLACE_IDS.has(placeId);
+
+  if (VERIFIED_PRIVATE_COURSE_PLACE_IDS.has(placeId)) {
+    return false;
+  }
 
   if (place.businessStatus && place.businessStatus !== "OPERATIONAL") {
     return false;

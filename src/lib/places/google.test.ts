@@ -283,6 +283,15 @@ describe("Google Places mapping", () => {
         location: { latitude: 41.29, longitude: -73.04 }
       },
       {
+        id: "places/ChIJMXRRcFvo5YkRkNXOrqSfVGM",
+        displayName: { text: "Shelter Harbor Golf Club" },
+        primaryType: "golf_course",
+        types: ["golf_course"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "http://www.shgcri.com/",
+        location: { latitude: 41.3564605, longitude: -71.7331924 }
+      },
+      {
         id: "places/presidio-fitting",
         displayName: { text: "Presidio Club Fitting" },
         primaryType: "golf_course",
@@ -372,6 +381,7 @@ describe("Google Places mapping", () => {
       publicCourseEvidenceIds: new Set([
         "monarch",
         "olympic",
+        "ChIJMXRRcFvo5YkRkNXOrqSfVGM",
         "ChIJHRdhRQt16IkRnZxbawELtdM"
       ])
     });

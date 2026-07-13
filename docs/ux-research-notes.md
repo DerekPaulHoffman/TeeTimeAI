@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-12: Official access evidence must override Places public-query recall
+
+- Source: [Shelter Harbor Golf Club official site](https://www.shgcri.com/) and its [official membership page](https://www.shgcri.com/default.aspx?p=dynamicmodule&pageid=407717&ssid=334819&vnf=1), accessed 2026-07-12 America/New_York. The home page identifies the facility as a member-owned private equity club, and the membership page says membership is by invitation.
+- Observed gap: a real signed-out `02891` search returned Shelter Harbor from both Google's golf-course data and the semantic `public golf courses` query, so Tee Time Spot labeled it `Public` despite the official access policy.
+- Product decision: stable place-ID exclusions backed by current official access evidence override Google type and text-search corroboration. Name-only `Golf Club` exclusions remain inappropriate because many public facilities use that wording.
+
 ## Product Shape
 
 Tee Time Spot should behave like a waitlist assistant rather than a booking marketplace. GolfNow/TeeOff-style products emphasize inventory search, deals, and broad marketplace browsing. Noteefy-style flows emphasize preference capture, waitlist matching, and alerts.
