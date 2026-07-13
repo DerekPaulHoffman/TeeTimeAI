@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { browserSecurityHeaders } from "./response-headers";
 
 describe("browser security response headers", () => {
-  it("disables MIME sniffing and cross-origin framing without leaking full paths", () => {
+  it("limits browser capabilities without blocking same-origin geolocation", () => {
     expect(browserSecurityHeaders).toEqual([
       {
         key: "X-Content-Type-Options",
@@ -16,6 +16,10 @@ describe("browser security response headers", () => {
       {
         key: "Referrer-Policy",
         value: "strict-origin-when-cross-origin"
+      },
+      {
+        key: "Permissions-Policy",
+        value: "browsing-topics=(), camera=(), geolocation=(self), microphone=(), payment=(), usb=()"
       }
     ]);
   });

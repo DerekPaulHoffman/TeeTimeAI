@@ -10,5 +10,9 @@ export const browserSecurityHeaders = [
   {
     key: "Referrer-Policy",
     value: "strict-origin-when-cross-origin"
+  },
+  {
+    key: "Permissions-Policy",
+    value: "browsing-topics=(), camera=(), geolocation=(self), microphone=(), payment=(), usb=()"
   }
 ] as const;
