@@ -17,6 +17,7 @@ import {
   isHourlyImprovementClaimWindowOpen,
   parseHourlyImprovementRunRecord,
   sanitizeAutomationText,
+  selectLatestActionableProbes,
   validateAdapterRemediationCloseout,
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology,
@@ -1073,20 +1074,16 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         observedAt: {
           gte: recentSince
         },
-        outcome: {
-          in: [
-            "BLOCKED_POLICY",
-            "BLOCKED_AUTH",
-            "BLOCKED_TOOLING",
-            "FETCH_FAILED",
-            "NEEDS_ADAPTER"
-          ]
+        teeSearch: {
+          status: "ACTIVE",
+          date: {
+            gte: today
+          }
         }
       },
       orderBy: {
         observedAt: "desc"
       },
-      take: 25,
       include: {
         course: true
       }
@@ -1126,12 +1123,11 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
   ]);
 
   const incidentCourseIds = new Set(openSupportIncidents.map((incident) => incident.courseId));
-  const probeCandidates = latestProbePerCourseSearch(probes).flatMap((probe) => {
+  const probeCandidates = selectLatestActionableProbes(probes).flatMap((probe) => {
     const outcome = probe.outcome;
     if (
       incidentCourseIds.has(probe.courseId) ||
-      probe.course.automationEligibility === "BLOCKED" ||
-      !isActionableProbeOutcome(outcome)
+      probe.course.automationEligibility === "BLOCKED"
     ) {
       return [];
     }
@@ -1265,36 +1261,6 @@ function latestIso(current: string | undefined, next: Date) {
   }
 
   return current;
-}
-
-function isActionableProbeOutcome(
-  outcome: string
-): outcome is ImprovementCandidateInput["actionableProbes"][number]["outcome"] {
-  return (
-    outcome === "BLOCKED_POLICY" ||
-    outcome === "BLOCKED_AUTH" ||
-    outcome === "BLOCKED_TOOLING" ||
-    outcome === "FETCH_FAILED" ||
-    outcome === "NEEDS_ADAPTER"
-  );
-}
-
-function latestProbePerCourseSearch<
-  T extends {
-    teeSearchId: string;
-    courseId: string;
-  }
->(probes: T[]) {
-  const latest = new Map<string, T>();
-
-  for (const probe of probes) {
-    const key = `${probe.teeSearchId}:${probe.courseId}`;
-    if (!latest.has(key)) {
-      latest.set(key, probe);
-    }
-  }
-
-  return [...latest.values()];
 }
 
 main()

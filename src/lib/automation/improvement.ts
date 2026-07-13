@@ -97,6 +97,14 @@ export const HOURLY_IMPROVEMENT_AUTOMATION_ID =
   "teetimeai-hourly-product-improvement-loop";
 export const HOURLY_IMPROVEMENT_CLAIM_WINDOW_MS = 40 * 60 * 1000;
 
+const ACTIONABLE_PROBE_OUTCOMES = new Set<ActionableProbeInput["outcome"]>([
+  "BLOCKED_POLICY",
+  "BLOCKED_AUTH",
+  "BLOCKED_TOOLING",
+  "FETCH_FAILED",
+  "NEEDS_ADAPTER"
+]);
+
 const SENSITIVE_QUERY_PARAMETER_NAMES = new Set([
   "access_token",
   "api_key",
@@ -302,6 +310,28 @@ export function selectImprovementCandidate(
     researchDirective:
       "Use current external research only when it can produce a concrete, verifiable repo or provider improvement."
   };
+}
+
+export function selectLatestActionableProbes<
+  T extends {
+    teeSearchId: string;
+    courseId: string;
+    outcome: string;
+  }
+>(probesNewestFirst: readonly T[]): Array<T & { outcome: ActionableProbeInput["outcome"] }> {
+  const latest = new Map<string, T>();
+
+  for (const probe of probesNewestFirst) {
+    const key = `${probe.teeSearchId}:${probe.courseId}`;
+    if (!latest.has(key)) {
+      latest.set(key, probe);
+    }
+  }
+
+  return [...latest.values()].filter(
+    (probe): probe is T & { outcome: ActionableProbeInput["outcome"] } =>
+      ACTIONABLE_PROBE_OUTCOMES.has(probe.outcome as ActionableProbeInput["outcome"])
+  );
 }
 
 export function buildImprovementCheckpoints(input: {

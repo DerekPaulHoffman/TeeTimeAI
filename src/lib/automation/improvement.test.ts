@@ -8,6 +8,7 @@ import {
   isHourlyImprovementClaimWindowOpen,
   markImprovementOutcomeRecorded,
   sanitizeAutomationText,
+  selectLatestActionableProbes,
   selectImprovementCandidate,
   validateAdapterRemediationCloseout,
   validateHourlyCloseoutAudit,
@@ -253,6 +254,33 @@ describe("selectImprovementCandidate", () => {
       researchDirective:
         "Rotate to the least-recently covered evidence surfaces. An empty first pass is not a terminal outcome."
     });
+  });
+});
+
+describe("selectLatestActionableProbes", () => {
+  it("lets a newer successful probe supersede an older failure", () => {
+    const probes = selectLatestActionableProbes([
+      {
+        id: "bayberry-success",
+        teeSearchId: "search-1",
+        courseId: "bayberry",
+        outcome: "MATCH_FOUND"
+      },
+      {
+        id: "other-current-failure",
+        teeSearchId: "search-1",
+        courseId: "other-course",
+        outcome: "FETCH_FAILED"
+      },
+      {
+        id: "bayberry-old-failure",
+        teeSearchId: "search-1",
+        courseId: "bayberry",
+        outcome: "FETCH_FAILED"
+      }
+    ]);
+
+    expect(probes.map((probe) => probe.id)).toEqual(["other-current-failure"]);
   });
 });
 
