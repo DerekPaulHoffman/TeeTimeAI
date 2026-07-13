@@ -12,11 +12,21 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
     return (
       <nav className="nav-actions">
         <DiscordNavLink />
-        <Link className="button button-secondary" href="/dashboard" prefetch={false}>
+        <Link
+          aria-label="My alerts"
+          className="button button-secondary"
+          href="/dashboard"
+          prefetch={false}
+        >
           <Bell size={17} />
           <span className="nav-button-label">My alerts</span>
         </Link>
-        <Link className="button button-primary" href="/search" prefetch={false}>
+        <Link
+          aria-label="Find a tee time"
+          className="button button-primary"
+          href="/search"
+          prefetch={false}
+        >
           <Search size={15} />
           <span className="nav-button-label">Find a tee time</span>
         </Link>
@@ -37,11 +47,21 @@ function ConfiguredAuthNav() {
   return (
     <nav className="nav-actions">
       <DiscordNavLink />
-      <Link className="button button-secondary" href="/dashboard" prefetch={false}>
+      <Link
+        aria-label="My alerts"
+        className="button button-secondary"
+        href="/dashboard"
+        prefetch={false}
+      >
         <Bell size={17} />
         <span className="nav-button-label">My alerts</span>
       </Link>
-      <Link className="button button-primary" href="/search" prefetch={false}>
+      <Link
+        aria-label="Find a tee time"
+        className="button button-primary"
+        href="/search"
+        prefetch={false}
+      >
         <Search size={15} />
         <span className="nav-button-label">Find a tee time</span>
       </Link>

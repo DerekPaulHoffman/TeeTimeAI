@@ -62,6 +62,61 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator('a[href="https://discord.gg/ThexF85xCd"]')).toHaveCount(3);
   });
 
+  test("keeps compact navigation accessible and prioritizes the search hero", async ({
+    page
+  }, testInfo) => {
+    await page.goto("/search");
+
+    const navigation = page.locator(".nav-actions");
+    await expect(navigation.getByRole("link", { name: "My alerts" })).toHaveAttribute(
+      "href",
+      "/dashboard"
+    );
+    await expect(navigation.getByRole("link", { name: "Find a tee time" })).toHaveAttribute(
+      "href",
+      "/search"
+    );
+
+    const heroImage = page.locator(".search-page-header-image");
+    await expect(heroImage).toHaveAttribute("alt", "");
+    await expect(heroImage).toHaveAttribute("fetchpriority", "high");
+    await expect(heroImage).toHaveAttribute("loading", "eager");
+    await expect(heroImage).toHaveAttribute("sizes", "100vw");
+
+    if (testInfo.project.name.includes("mobile")) {
+      await expect(page.locator(".feedback-widget")).toHaveCSS("position", "static");
+    }
+  });
+
+  test("keeps search labels and supporting copy at AA contrast colors", async ({ page }) => {
+    await page.goto("/search");
+
+    await expect(page.locator(".figma-search-field > label").first()).toHaveCSS(
+      "color",
+      "rgb(69, 103, 93)"
+    );
+    await expect(page.locator(".figma-hole-options button").filter({ hasText: "9-hole" })).toHaveCSS(
+      "color",
+      "rgb(69, 103, 93)"
+    );
+    await expect(page.locator(".figma-distance-filter em").first()).toHaveCSS(
+      "color",
+      "rgb(76, 106, 97)"
+    );
+    await expect(page.locator(".missing-course-heading > p")).toHaveCSS(
+      "color",
+      "rgb(83, 109, 101)"
+    );
+    await expect(page.locator(".missing-course-form > label")).toHaveCSS(
+      "color",
+      "rgb(80, 107, 98)"
+    );
+    await expect(page.locator(".footer p").last()).toHaveCSS(
+      "color",
+      "rgba(255, 255, 255, 0.65)"
+    );
+  });
+
   test("shows when the current location has been selected", async ({ context, page }) => {
     await context.grantPermissions(["geolocation"], { origin: smokeOrigin });
     await context.setGeolocation({ latitude: 41.242, longitude: -73.209 });

@@ -2790,13 +2790,33 @@ button {
 }
 
 .search-page-header {
-  background:
-    linear-gradient(90deg, rgba(12, 31, 26, 0.96), rgba(12, 31, 26, 0.58)),
-    url("https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=2400&q=80") center 45% / cover;
+  background: #0c1f1a;
+  isolation: isolate;
   margin: 0;
   max-width: none;
+  overflow: hidden;
   padding: 44px max(24px, calc((100vw - 1360px) / 2 + 24px));
+  position: relative;
   text-align: left;
+}
+
+.search-page-header::after {
+  background: linear-gradient(90deg, rgba(12, 31, 26, 0.96), rgba(12, 31, 26, 0.58));
+  content: "";
+  inset: 0;
+  position: absolute;
+  z-index: 1;
+}
+
+.search-page-header-image {
+  object-fit: cover;
+  object-position: center 45%;
+  z-index: 0;
+}
+
+.search-page-header > :not(.search-page-header-image) {
+  position: relative;
+  z-index: 2;
 }
 
 .search-page-header .eyebrow {
@@ -3024,7 +3044,7 @@ button {
 }
 
 .figma-distance-filter em {
-  color: #9aaca7;
+  color: #4c6a61;
   font-style: normal;
 }
 
@@ -3303,7 +3323,7 @@ button {
 }
 
 .missing-course-heading > p {
-  color: #637a73;
+  color: #536d65;
   font-size: 0.82rem;
   line-height: 1.5;
   margin: 0;
@@ -3314,7 +3334,7 @@ button {
 }
 
 .missing-course-form > label {
-  color: #617a72;
+  color: #506b62;
   display: block;
   font-size: 0.68rem;
   font-weight: 900;
@@ -4001,7 +4021,7 @@ button {
 .figma-search-field > span,
 .figma-search-field > label,
 .figma-search-field > legend {
-  color: #8fa89c;
+  color: #45675d;
   font-size: 0.56rem;
   letter-spacing: 0.12em;
   margin-bottom: 6px;
@@ -4065,7 +4085,7 @@ button {
 
 .figma-hole-filter strong,
 .figma-distance-label {
-  color: #8fa89c;
+  color: #45675d;
   font-size: 0.75rem;
   font-weight: 700;
   white-space: nowrap;
@@ -4082,7 +4102,7 @@ button {
   background: transparent;
   border: 0;
   border-radius: 6px;
-  color: #8fa89c;
+  color: #45675d;
   font-size: 0.75rem;
   font-weight: 600;
   height: 28px;
@@ -4887,7 +4907,7 @@ button {
 }
 
 .footer p:last-child {
-  color: rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.65);
   font-size: 0.75rem;
 }
 
@@ -5135,7 +5155,7 @@ button {
 }
 
 .watch-course-row .watch-course-copy .meta {
-  color: #8fa89c;
+  color: #45675d;
   font-size: 0.69rem;
   margin-top: 2px;
 }
@@ -6033,9 +6053,11 @@ button {
   }
 
   .feedback-widget {
-    bottom: max(16px, env(safe-area-inset-bottom));
-    left: 16px;
-    right: 16px;
+    bottom: auto;
+    left: auto;
+    margin: 0 16px 24px;
+    position: static;
+    right: auto;
   }
 
   .feedback-launcher,
