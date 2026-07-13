@@ -108,6 +108,32 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(geocodeRequests).toBe(0);
   });
 
+  test("describes an invalid location without exposing an API payload", async ({ page }) => {
+    await page.route("**/api/location/geocode?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({
+          error:
+            "We couldn't find that location. Check the city, state, or ZIP code and try again."
+        }),
+        contentType: "application/json",
+        status: 404
+      });
+    });
+
+    await page.goto("/search");
+    const locationInput = page.getByRole("textbox", { name: "Location", exact: true });
+    await locationInput.fill("zzzz invalid location 00000");
+    await page.getByRole("button", { name: /^Search$/i }).click();
+
+    const error = page.locator("#location-search-error");
+    await expect(error).toHaveText(
+      "We couldn't find that location. Check the city, state, or ZIP code and try again."
+    );
+    await expect(error).not.toContainText('{"error"');
+    await expect(locationInput).toHaveAttribute("aria-invalid", "true");
+    await expect(locationInput).toHaveAttribute("aria-describedby", "location-search-error");
+  });
+
   test("uses singular result copy and keeps mobile search controls readable", async ({
     context,
     page

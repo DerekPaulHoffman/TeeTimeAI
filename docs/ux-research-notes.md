@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-13: Invalid locations need descriptive, announced recovery copy
+
+- Sources: [W3C Understanding SC 3.3.1: Error Identification](https://www.w3.org/WAI/WCAG22/Understanding/error-identification) (updated 2026-03-09) and [W3C Understanding SC 4.1.3: Status Messages](https://www.w3.org/WAI/WCAG22/Understanding/status-messages), accessed 2026-07-13 America/New_York.
+- Finding: automatically detected input errors should identify the affected input, describe the problem in text, and expose dynamically inserted error messages through an appropriate alert or live-region role.
+- Tee Time Spot evidence: a signed-out invalid-location search rendered the raw JSON payload `{"error":"No matching location found."}` on desktop and mobile, and the API classified the correctable input miss as a 502.
+- Decision: parse structured API errors into plain recovery copy, mark and associate the location input with the alert, and return 404 for an unmatched location while preserving 502 for genuine provider failures.
+
 ## 2026-07-12: Official access evidence must override Places public-query recall
 
 - Source: [Shelter Harbor Golf Club official site](https://www.shgcri.com/) and its [official membership page](https://www.shgcri.com/default.aspx?p=dynamicmodule&pageid=407717&ssid=334819&vnf=1), accessed 2026-07-12 America/New_York. The home page identifies the facility as a member-owned private equity club, and the membership page says membership is by invitation.

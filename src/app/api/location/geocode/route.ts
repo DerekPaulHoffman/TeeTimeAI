@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { geocodeLocation } from "@/lib/places/geocode";
+import { geocodeLocation, LocationNotFoundError } from "@/lib/places/geocode";
+
+const LOCATION_NOT_FOUND_MESSAGE =
+  "We couldn't find that location. Check the city, state, or ZIP code and try again.";
 
 export async function GET(request: NextRequest) {
   const query = request.nextUrl.searchParams.get("q")?.trim();
@@ -12,9 +15,21 @@ export async function GET(request: NextRequest) {
     const result = await geocodeLocation(query);
     return NextResponse.json(result);
   } catch (error) {
+    const response = getGeocodeErrorResponse(error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Could not geocode location" },
-      { status: 502 }
+      { error: response.message },
+      { status: response.status }
     );
   }
+}
+
+export function getGeocodeErrorResponse(error: unknown) {
+  if (error instanceof LocationNotFoundError) {
+    return { message: LOCATION_NOT_FOUND_MESSAGE, status: 404 };
+  }
+
+  return {
+    message: error instanceof Error ? error.message : "Could not geocode location",
+    status: 502
+  };
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { geocodeLocation } from "./geocode";
+import { geocodeLocation, LocationNotFoundError } from "./geocode";
 
 const originalKey = process.env.GOOGLE_PLACES_API_KEY;
 
@@ -76,6 +76,9 @@ describe("Google Places text geocoding", () => {
       }))
     );
 
-    await expect(geocodeLocation("not a place")).rejects.toThrow("No matching location found.");
+    const error = await geocodeLocation("not a place").catch((reason) => reason);
+
+    expect(error).toBeInstanceOf(LocationNotFoundError);
+    expect(error).toHaveProperty("message", "No matching location found.");
   });
 });

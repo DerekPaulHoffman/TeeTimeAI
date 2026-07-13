@@ -156,6 +156,7 @@ const tomorrow = () => {
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
 const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
+const LOCATION_SEARCH_ERROR_ID = "location-search-error";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
@@ -245,6 +246,7 @@ function TeeTimeIntakeContent({
     type: "info",
     message: "Enter a city and state, ZIP code, or street address, or use your current location."
   });
+  const [locationInputInvalid, setLocationInputInvalid] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
@@ -338,6 +340,7 @@ function TeeTimeIntakeContent({
         : null;
 
   function selectCurrentLocation() {
+    setLocationInputInvalid(false);
     if (!navigator.geolocation) {
       setNotice({ type: "error", message: "This browser does not support geolocation." });
       return;
@@ -377,6 +380,7 @@ function TeeTimeIntakeContent({
     shouldScrollToResultsRef.current = true;
 
     if (locationText.trim() === CURRENT_LOCATION_LABEL && searchCoordinates) {
+      setLocationInputInvalid(false);
       await discoverCourses(searchCoordinates);
       return;
     }
@@ -386,12 +390,19 @@ function TeeTimeIntakeContent({
         `/api/location/geocode?q=${encodeURIComponent(locationText.trim())}`
       );
       if (!geocode.ok) {
-        throw new Error(await geocode.text());
+        throw new Error(
+          await readApiError(
+            geocode,
+            "We couldn't find that location. Check the city, state, or ZIP code and try again."
+          )
+        );
       }
       const coordinates = (await geocode.json()) as { latitude: number; longitude: number };
+      setLocationInputInvalid(false);
       await discoverCourses(coordinates);
     } catch (error) {
       shouldScrollToResultsRef.current = false;
+      setLocationInputInvalid(true);
       setNotice({
         type: "error",
         message: error instanceof Error ? error.message : "Could not geocode that location."
@@ -409,7 +420,7 @@ function TeeTimeIntakeContent({
       });
       const response = await fetch(`/api/courses/discover?${params}`);
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await readApiError(response, "Could not load nearby courses."));
       }
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
@@ -626,11 +637,14 @@ function TeeTimeIntakeContent({
             <div className="figma-search-value">
               <span className="figma-search-value-icon" aria-hidden="true">📍</span>
               <input
+                aria-describedby={locationInputInvalid ? LOCATION_SEARCH_ERROR_ID : undefined}
+                aria-invalid={locationInputInvalid}
                 id="location"
                 value={locationText}
                 onChange={(event) => {
                   setLocationText(event.target.value);
                   setSearchCoordinates(null);
+                  setLocationInputInvalid(false);
                 }}
                 placeholder={LOCATION_INPUT_PLACEHOLDER}
               />
@@ -774,7 +788,10 @@ function TeeTimeIntakeContent({
               near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
             </div>
           ) : (
-            <Notice notice={notice} />
+            <Notice
+              id={locationInputInvalid ? LOCATION_SEARCH_ERROR_ID : undefined}
+              notice={notice}
+            />
           )}
           {courses.length > 0 ? (
             <p className="course-pricing-note">
@@ -790,7 +807,12 @@ function TeeTimeIntakeContent({
               {requestedLayoutHoles}-hole layout. Unverified courses follow verified matches.
             </p>
           ) : null}
-          {courses.length > 0 && notice.type === "error" ? <Notice notice={notice} /> : null}
+          {courses.length > 0 && notice.type === "error" ? (
+            <Notice
+              id={locationInputInvalid ? LOCATION_SEARCH_ERROR_ID : undefined}
+              notice={notice}
+            />
+          ) : null}
           {isCurrentSearchSaved && notice.type === "success" ? <Notice notice={notice} /> : null}
           {courses.length > 0 && filteredCourses.length === 0 ? (
             <div className="figma-empty-results">
@@ -1848,15 +1870,25 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#039;");
 }
 
-function Notice({ notice }: { notice: Notice }) {
+function Notice({ id, notice }: { id?: string; notice: Notice }) {
   return (
     <div
       className={`alert alert-${notice.type}`}
+      id={id}
       role={notice.type === "error" ? "alert" : "status"}
     >
       {notice.message}
     </div>
   );
+}
+
+async function readApiError(response: Response, fallback: string) {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    return typeof body.error === "string" && body.error.trim() ? body.error : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function CoursePriceDisplay({ estimate }: { estimate?: CoursePriceEstimate }) {

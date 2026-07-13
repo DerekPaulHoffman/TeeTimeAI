@@ -1,5 +1,12 @@
 import { getGooglePlacesApiKey } from "@/lib/places/google";
 
+export class LocationNotFoundError extends Error {
+  constructor() {
+    super("No matching location found.");
+    this.name = "LocationNotFoundError";
+  }
+}
+
 export async function geocodeLocation(query: string) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
@@ -39,7 +46,7 @@ export async function geocodeLocation(query: string) {
 
   const location = json.places?.[0]?.location;
   if (location?.latitude === undefined || location.longitude === undefined) {
-    throw new Error("No matching location found.");
+    throw new LocationNotFoundError();
   }
 
   return {
