@@ -179,6 +179,23 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("does not mistake a CPS webstore for a public tee-time reservation surface", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "bayberry-hills",
+      courseName: "Bayberry Hills Golf Course",
+      sourceUrl: "https://www.golfyarmouth.com/",
+      finalUrl: "https://sc.cps.golf/BayberryHillsWebstore/",
+      observedUrls: [
+        "https://www.golfyarmouth.com/contact-us-/book-now",
+        "https://sc.cps.golf/BayberryHillsWebstore/Products/Productlist/GiftCards/1"
+      ],
+      visibleText: "Bayberry Hills online store"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("learns reusable Teesnap metadata from public tee-sheet pages", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-hunter",
@@ -244,6 +261,22 @@ describe("buildBrowserDiscovery", () => {
     const discovery = buildBrowserDiscovery(evidence);
 
     expect(discovery.bookingUrl).toBe("https://www.fairchildwheelergolf.com/tee-times");
+  });
+
+  it("prefers a Chelsea reservation surface over tee-time wording in event URLs", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "dennis-highlands",
+      courseName: "Dennis Highland Course",
+      sourceUrl: "https://www.dennisgolf.com/",
+      finalUrl: "https://dennis.chelseareservations.com/",
+      observedUrls: [
+        "https://www.dennisgolf.com/dennis-golf-event/junior-championship-tee-times-tbd/",
+        "https://dennis.chelseareservations.com/GPInprocess"
+      ],
+      visibleText: "Book tee times"
+    });
+
+    expect(discovery.bookingUrl).toBe("https://dennis.chelseareservations.com/");
   });
 });
 

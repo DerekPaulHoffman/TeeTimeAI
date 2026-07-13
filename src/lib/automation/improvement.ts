@@ -18,6 +18,16 @@ type ActionableProbeInput = {
   message?: string | null;
 };
 
+type SupportIncidentInput = {
+  id: string;
+  status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN";
+  kind: "NEEDS_ADAPTER" | "FETCH_FAILED" | "BLOCKED_AUTH" | "BLOCKED_TOOLING";
+  courseName: string;
+  platform: string;
+  lastSeenAt: string;
+  message?: string | null;
+};
+
 type LearningSignalInput = {
   key: string;
   kind: "adapter_gap" | "ui_smoke" | "provider_config" | "tooling" | "research";
@@ -31,6 +41,7 @@ type LearningSignalInput = {
 export type ImprovementCandidateInput = {
   activeSearchCount: number;
   pendingAlerts: PendingAlertInput[];
+  supportIncidents?: SupportIncidentInput[];
   actionableProbes: ActionableProbeInput[];
   learningSignals?: LearningSignalInput[];
 };
@@ -47,6 +58,7 @@ export type ImprovementCandidate = {
     | "needs_human";
   kind:
     | "pending_alert"
+    | "adapter_remediation"
     | "adapter_gap"
     | "policy_blocker"
     | "auth_blocker"
@@ -58,6 +70,14 @@ export type ImprovementCandidate = {
   summary: string;
   referenceId?: string;
   researchDirective?: string;
+};
+
+export type AdapterRemediationCloseoutEvidence = {
+  incidentId: string;
+  attempts: string[];
+  evidence: string[];
+  result: string;
+  requiredExternalAction: string;
 };
 
 export type ImprovementCheckpoints = {
@@ -239,6 +259,11 @@ export function selectImprovementCandidate(
     };
   }
 
+  const supportIncident = input.supportIncidents?.[0];
+  if (supportIncident) {
+    return candidateFromSupportIncident(supportIncident);
+  }
+
   const probe = selectFreshProbe(input.actionableProbes, input.learningSignals ?? []);
   if (probe) {
     return candidateFromProbe(probe);
@@ -302,6 +327,49 @@ export function buildImprovementCheckpoints(input: {
     production_verified: input.productionVerified ?? false,
     outcome_recorded: false
   };
+}
+
+export function validateAdapterRemediationCloseout(input: {
+  candidate: ImprovementCandidate | undefined;
+  outcome: string;
+  evidence: unknown;
+}) {
+  if (input.candidate?.kind !== "adapter_remediation") {
+    return { escalate: false } as const;
+  }
+  if (input.outcome === "needs_adapter") {
+    throw new Error(
+      "adapter remediation cannot close as needs_adapter; complete the adapter, classify a policy-safe direct-booking outcome, or record a concrete blocker"
+    );
+  }
+  if (input.outcome !== "needs_human") {
+    return { escalate: false } as const;
+  }
+
+  const evidence = input.evidence as Partial<AdapterRemediationCloseoutEvidence> | null;
+  const referenceId = input.candidate.referenceId;
+  if (
+    !evidence ||
+    !referenceId ||
+    evidence.incidentId !== referenceId ||
+    !Array.isArray(evidence.attempts) ||
+    evidence.attempts.filter(isNonEmptyString).length === 0 ||
+    !Array.isArray(evidence.evidence) ||
+    evidence.evidence.filter(isNonEmptyString).length === 0 ||
+    !isNonEmptyString(evidence.result) ||
+    !isNonEmptyString(evidence.requiredExternalAction)
+  ) {
+    throw new Error(
+      "needs_human adapter closeout requires adapterRemediation evidence with the incident id, automated attempts, sources, result, and exact external action"
+    );
+  }
+
+  return {
+    escalate: true,
+    incidentId: referenceId,
+    message: evidence.result.trim(),
+    nextAction: evidence.requiredExternalAction.trim()
+  } as const;
 }
 
 export function markImprovementOutcomeRecorded(
@@ -615,6 +683,31 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
         referenceId: probe.id
       };
   }
+}
+
+function candidateFromSupportIncident(
+  incident: SupportIncidentInput
+): ImprovementCandidate {
+  const action =
+    incident.kind === "FETCH_FAILED"
+      ? "Repair the existing provider integration or replace the failing public endpoint"
+      : incident.kind === "BLOCKED_TOOLING"
+        ? "Repair the automation tooling and complete the provider integration"
+        : incident.kind === "BLOCKED_AUTH"
+          ? "Find a policy-safe public retrieval path or conclusively classify the course for direct booking"
+          : "Build or extend a reusable provider adapter";
+  return {
+    outcome: "needs_adapter",
+    kind: "adapter_remediation",
+    summary: `${action} for ${incident.courseName} (${incident.platform}) and verify the affected active search end to end.`,
+    referenceId: incident.id,
+    researchDirective:
+      "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
+  };
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && Boolean(value.trim());
 }
 
 function selectFreshProbe(

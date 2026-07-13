@@ -1,4 +1,8 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import {
+  parsePublicBookingWindowRule,
+  type BookingWindowEvidence
+} from "@/lib/courses/booking-window";
 
 export type ForeupMetadata = {
   scheduleId: number;
@@ -13,6 +17,12 @@ type ForeupApiSlot = {
   holes?: number | string;
   schedule_id?: number;
   booking_class_id?: number;
+};
+
+export type ForeupTeeSheetResult = {
+  slots: TeeTimeSlot[];
+  targetDateStatus: "OPEN" | "UNKNOWN";
+  bookingWindowEvidence: BookingWindowEvidence | null;
 };
 
 export function isForeupMetadata(value: unknown): value is ForeupMetadata {
@@ -33,6 +43,31 @@ export async function fetchForeupSlots(input: {
   players: number;
   metadata: ForeupMetadata;
 }): Promise<TeeTimeSlot[]> {
+  return (await fetchForeupTeeSheet(input)).slots;
+}
+
+export async function fetchForeupTeeSheet(input: {
+  courseId: string;
+  date: Date;
+  players: number;
+  metadata: ForeupMetadata;
+  discoverBookingWindow?: boolean;
+}): Promise<ForeupTeeSheetResult> {
+  const [availability, bookingWindowEvidence] = await Promise.all([
+    fetchForeupAvailability(input),
+    input.discoverBookingWindow
+      ? fetchForeupBookingWindow(input.metadata)
+      : Promise.resolve(null)
+  ]);
+  return { ...availability, bookingWindowEvidence };
+}
+
+async function fetchForeupAvailability(input: {
+  courseId: string;
+  date: Date;
+  players: number;
+  metadata: ForeupMetadata;
+}): Promise<Pick<ForeupTeeSheetResult, "slots" | "targetDateStatus">> {
   const dateParam = formatForeupDate(input.date);
   const url = new URL("https://foreupsoftware.com/index.php/api/booking/times");
   url.searchParams.set("time", "all");
@@ -56,10 +91,10 @@ export async function fetchForeupSlots(input: {
 
   const slots = (await response.json()) as ForeupApiSlot[] | false;
   if (!Array.isArray(slots)) {
-    return [];
+    return { slots: [], targetDateStatus: "UNKNOWN" };
   }
 
-  return slots
+  const normalizedSlots = slots
     .filter((slot) => slot.time && slot.available_spots)
     .map((slot) => ({
       courseId: input.courseId,
@@ -72,6 +107,27 @@ export async function fetchForeupSlots(input: {
       holes: normalizeForeupHoles(slot.holes),
       evidenceUrl: url.toString()
     }));
+
+  return {
+    slots: normalizedSlots,
+    targetDateStatus: normalizedSlots.length > 0 ? "OPEN" : "UNKNOWN"
+  };
+}
+
+async function fetchForeupBookingWindow(
+  metadata: ForeupMetadata
+): Promise<BookingWindowEvidence | null> {
+  try {
+    const response = await fetch(metadata.bookingBaseUrl, {
+      headers: { accept: "text/html,application/xhtml+xml" }
+    });
+    if (!response.ok) {
+      return null;
+    }
+    return parsePublicBookingWindowRule(await response.text(), metadata.bookingBaseUrl);
+  } catch {
+    return null;
+  }
 }
 
 function formatForeupDate(date: Date) {

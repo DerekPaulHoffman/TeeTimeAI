@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 
+import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import { prisma } from "@/lib/prisma";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
@@ -587,7 +588,14 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
         select: {
           course: {
             select: {
-              timeZone: true
+              timeZone: true,
+              bookingWindowDaysAhead: true,
+              bookingReleaseTimeLocal: true,
+              bookingWindowSource: true,
+              bookingWindowConfidence: true,
+              bookingWindowEvidenceUrl: true,
+              bookingWindowCheckedAt: true,
+              bookingWindowObservedAt: true
             }
           }
         }
@@ -680,6 +688,51 @@ export async function listAvailableMatchAlerts(searchId: string): Promise<Pendin
 export async function startAutomationRun(promptVersion: string) {
   return prisma.automationRun.create({
     data: { promptVersion }
+  });
+}
+
+export async function listRecentCourseAutomationDiscoveries(
+  courseIds: string[],
+  since: Date
+) {
+  if (courseIds.length === 0) {
+    return [];
+  }
+
+  return prisma.courseAutomationDiscovery.findMany({
+    where: {
+      courseId: { in: courseIds },
+      createdAt: { gte: since }
+    },
+    orderBy: { createdAt: "desc" },
+    select: { courseId: true, createdAt: true }
+  });
+}
+
+export async function recordCourseBookingWindowEvidence(input: {
+  courseId: string;
+  evidence: BookingWindowEvidence;
+  observedAt?: Date;
+}) {
+  const observedAt = input.observedAt ?? new Date();
+  return prisma.course.update({
+    where: { id: input.courseId },
+    data: {
+      bookingWindowDaysAhead: input.evidence.daysAhead,
+      bookingReleaseTimeLocal: input.evidence.releaseTimeLocal,
+      bookingWindowSource: input.evidence.source,
+      bookingWindowConfidence: input.evidence.confidence,
+      bookingWindowEvidenceUrl: input.evidence.evidenceUrl,
+      bookingWindowCheckedAt: observedAt,
+      bookingWindowObservedAt: observedAt
+    }
+  });
+}
+
+export async function markCourseBookingWindowChecked(courseId: string, checkedAt = new Date()) {
+  return prisma.course.update({
+    where: { id: courseId },
+    data: { bookingWindowCheckedAt: checkedAt }
   });
 }
 

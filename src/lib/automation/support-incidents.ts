@@ -5,12 +5,13 @@ import type {
   DetectedPlatform
 } from "@prisma/client";
 
-import { sendCourseSupportOperatorEmail } from "@/lib/email/alerts";
+import {
+  sendCourseSupportOperatorEmail,
+  sendCourseSupportOperatorSummaryEmail
+} from "@/lib/email/alerts";
 import { prisma } from "@/lib/prisma";
 
 import { withPostgresAdvisoryTextLease } from "./lease";
-
-const HUMAN_ESCALATION_AFTER_MS = 30 * 60 * 1000;
 
 export type CourseSupportIssueInput = {
   course: {
@@ -31,6 +32,11 @@ export type CourseSupportIssueState = {
   incidentId: string | null;
   status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "UNRECORDED";
   ownerAlerted: boolean;
+};
+
+export type CourseSupportBatchNotificationState = {
+  notifiedIncidentIds: string[];
+  pendingIncidentIds: string[];
 };
 
 export async function reportCourseSupportIssue(
@@ -72,6 +78,69 @@ export async function resolveCourseSupportIncident(input: {
   );
 
   return lease.acquired ? lease.value : null;
+}
+
+export async function notifyCourseSupportIssueBatch(
+  incidentIds: string[],
+  now = new Date()
+): Promise<CourseSupportBatchNotificationState> {
+  const uniqueIncidentIds = [...new Set(incidentIds.filter(Boolean))];
+  if (uniqueIncidentIds.length === 0) {
+    return { notifiedIncidentIds: [], pendingIncidentIds: [] };
+  }
+
+  const lease = await withPostgresAdvisoryTextLease(
+    prisma,
+    "course-support:operator-summary",
+    () => notifyCourseSupportIssueBatchWithLease(uniqueIncidentIds, now)
+  );
+  return lease.acquired
+    ? lease.value
+    : { notifiedIncidentIds: [], pendingIncidentIds: uniqueIncidentIds };
+}
+
+export async function escalateCourseSupportIncident(input: {
+  incidentId: string;
+  message: string;
+  nextAction: string;
+  now?: Date;
+}) {
+  const current = await prisma.courseSupportIncident.findUnique({
+    where: { id: input.incidentId }
+  });
+  if (!current || current.status === "RESOLVED") {
+    return current;
+  }
+
+  const now = input.now ?? new Date();
+  const lease = await withPostgresAdvisoryTextLease(
+    prisma,
+    `course-support:${current.courseId}`,
+    async () => {
+      const latest = await prisma.courseSupportIncident.findUnique({
+        where: { id: input.incidentId }
+      });
+      if (!latest || latest.status === "RESOLVED") {
+        return latest;
+      }
+      return prisma.courseSupportIncident.update({
+        where: { id: latest.id },
+        data: {
+          status: "NEEDS_HUMAN",
+          latestMessage: input.message,
+          nextAction: input.nextAction,
+          escalatedAt: latest.escalatedAt ?? now,
+          lastSeenAt: now
+        }
+      });
+    }
+  );
+  if (!lease.acquired || !lease.value || lease.value.status === "RESOLVED") {
+    return lease.acquired ? lease.value : null;
+  }
+
+  await notifyCourseSupportIssueBatch([lease.value.id], now);
+  return lease.value;
 }
 
 async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
@@ -148,30 +217,70 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     });
   }
 
-  incident = await notifyIncidentEvent(incident, "opened", now);
-
-  if (
-    incident.status === "AUTO_INVESTIGATING" &&
-    shouldEscalateCourseSupportIncident(incident.firstSeenAt, now)
-  ) {
-    incident = await prisma.courseSupportIncident.update({
-      where: { id: incident.id },
-      data: {
-        status: "NEEDS_HUMAN",
-        escalatedAt: incident.escalatedAt ?? now
-      }
-    });
-  }
-
-  if (incident.status === "NEEDS_HUMAN") {
-    incident = await notifyIncidentEvent(incident, "escalated", now);
-  }
-
   return {
     incidentId: incident.id,
     status: incident.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
     ownerAlerted: Boolean(incident.ownerNotifiedAt || incident.escalationNotifiedAt)
   } satisfies CourseSupportIssueState;
+}
+
+async function notifyCourseSupportIssueBatchWithLease(
+  incidentIds: string[],
+  now: Date
+): Promise<CourseSupportBatchNotificationState> {
+  const incidents = await prisma.courseSupportIncident.findMany({
+    where: {
+      id: { in: incidentIds },
+      status: "NEEDS_HUMAN",
+      ownerNotifiedAt: null,
+      escalationNotifiedAt: null
+    },
+    orderBy: [{ platformSnapshot: "asc" }, { courseNameSnapshot: "asc" }]
+  });
+  if (incidents.length === 0) {
+    return { notifiedIncidentIds: [], pendingIncidentIds: [] };
+  }
+
+  try {
+    const delivery = await sendCourseSupportOperatorSummaryEmail({
+      incidents: incidents.map((incident) => ({
+        incidentId: incident.id,
+        cycle: incident.cycle,
+        courseId: incident.courseId,
+        courseName: incident.courseNameSnapshot,
+        platform: incident.platformSnapshot,
+        bookingUrl: incident.bookingUrlSnapshot,
+        firstAffectedSearchId: incident.firstAffectedSearchId,
+        affectedSearchCount: incident.affectedSearchCount,
+        kind: incident.kind,
+        message: incident.latestMessage,
+        nextAction: incident.nextAction,
+        firstSeenAt: incident.firstSeenAt
+      }))
+    });
+    if (delivery.deliveryStatus !== "sent") {
+      return {
+        notifiedIncidentIds: [],
+        pendingIncidentIds: incidents.map((incident) => incident.id)
+      };
+    }
+
+    const notifiedIncidentIds = incidents.map((incident) => incident.id);
+    await prisma.courseSupportIncident.updateMany({
+      where: { id: { in: notifiedIncidentIds } },
+      data: { escalationNotifiedAt: now }
+    });
+    return { notifiedIncidentIds, pendingIncidentIds: [] };
+  } catch (error) {
+    console.error("[email:operator-summary-failed]", {
+      incidents: incidents.map((incident) => incident.id),
+      message: error instanceof Error ? error.message : "Unknown operator summary failure"
+    });
+    return {
+      notifiedIncidentIds: [],
+      pendingIncidentIds: incidents.map((incident) => incident.id)
+    };
+  }
 }
 
 async function resolveCourseSupportIncidentWithLease(input: {
@@ -269,8 +378,4 @@ async function notifyIncidentEvent(
     });
     return incident;
   }
-}
-
-export function shouldEscalateCourseSupportIncident(firstSeenAt: Date, now = new Date()) {
-  return now.getTime() - firstSeenAt.getTime() >= HUMAN_ESCALATION_AFTER_MS;
 }

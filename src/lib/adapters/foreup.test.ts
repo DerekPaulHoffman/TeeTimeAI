@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchForeupSlots } from "./foreup";
+import { fetchForeupSlots, fetchForeupTeeSheet } from "./foreup";
 
 describe("ForeUP adapter", () => {
   afterEach(() => {
@@ -132,5 +132,44 @@ describe("ForeUP adapter", () => {
     });
 
     expect(slots).toEqual([]);
+  });
+
+  it("learns a public-specific release rule from the official booking page", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          `All members can book 9 days in advance starting at 6 am and the public (all non-members) can book 8 days in advance also at 6 am.`,
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchForeupTeeSheet({
+        courseId: "oak-hills",
+        date: new Date("2026-08-10T00:00:00-04:00"),
+        players: 2,
+        discoverBookingWindow: true,
+        metadata: {
+          scheduleId: 11739,
+          bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+        }
+      })
+    ).resolves.toMatchObject({
+      slots: [],
+      bookingWindowEvidence: {
+        daysAhead: 8,
+        releaseTimeLocal: "06:00",
+        source: "OFFICIAL_BOOKING_PAGE",
+        confidence: 0.98
+      }
+    });
   });
 });

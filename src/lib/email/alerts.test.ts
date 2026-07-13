@@ -5,6 +5,7 @@ import {
   normalizeEmailEnvValue,
   renderAlertHtml,
   renderCourseSupportOperatorHtml,
+  renderCourseSupportOperatorSummaryHtml,
   sendSearchStatusEmail,
   sendTeeTimeAlert,
   shouldDryRunRecipient
@@ -129,6 +130,43 @@ describe("renderCourseSupportOperatorHtml", () => {
     expect(html).toContain("Inspect the official public booking surface");
     expect(html).toContain("https://www.chronogolf.com/club/3563");
     expect(html).not.toContain("Pequabuck <Golf Club>");
+  });
+});
+
+describe("renderCourseSupportOperatorSummaryHtml", () => {
+  it("groups concrete external blockers into one provider summary", () => {
+    const html = renderCourseSupportOperatorSummaryHtml({
+      incidents: [
+        {
+          incidentId: "incident-1",
+          cycle: 1,
+          courseId: "highlands",
+          courseName: "Dennis Highlands",
+          platform: "TEEITUP",
+          bookingUrl: "https://dennis.book.teeitup.golf/",
+          affectedSearchCount: 1,
+          kind: "NEEDS_ADAPTER",
+          firstSeenAt: new Date("2026-07-13T20:00:00.000Z")
+        },
+        {
+          incidentId: "incident-2",
+          cycle: 1,
+          courseId: "pines",
+          courseName: "Dennis Pines",
+          platform: "TEEITUP",
+          bookingUrl: "https://dennis.book.teeitup.golf/",
+          affectedSearchCount: 1,
+          kind: "NEEDS_ADAPTER",
+          firstSeenAt: new Date("2026-07-13T20:00:00.000Z")
+        }
+      ]
+    });
+
+    expect(html).toContain("TEEITUP &middot; 2 courses");
+    expect(html).toContain("Dennis Highlands");
+    expect(html).toContain("Dennis Pines");
+    expect(html).toContain("autonomous remediation run");
+    expect(html).toContain("could not continue without the specific external action");
   });
 });
 

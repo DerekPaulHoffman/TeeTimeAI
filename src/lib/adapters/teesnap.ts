@@ -1,4 +1,9 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import {
+  MAX_BOOKING_WINDOW_DAYS_AHEAD,
+  normalizeReleaseTime,
+  type BookingWindowEvidence
+} from "@/lib/courses/booking-window";
 
 export type TeesnapMetadata = {
   provider: "TEESNAP";
@@ -38,6 +43,18 @@ type TeesnapResponse = {
   };
 };
 
+type TeesnapCourseConfig = {
+  id?: number;
+  advance?: number;
+  start_availability_time?: string;
+};
+
+export type TeesnapTeeSheetResult = {
+  slots: TeeTimeSlot[];
+  targetDateStatus: "OPEN" | "NOT_OPEN" | "UNKNOWN";
+  bookingWindowEvidence: BookingWindowEvidence | null;
+};
+
 export function isTeesnapMetadata(value: unknown): value is TeesnapMetadata {
   if (!value || typeof value !== "object") {
     return false;
@@ -59,6 +76,35 @@ export async function fetchTeesnapSlots(input: {
   players: number;
   metadata: TeesnapMetadata;
 }): Promise<TeeTimeSlot[]> {
+  return (await fetchTeesnapTeeSheet(input)).slots;
+}
+
+export async function fetchTeesnapTeeSheet(input: {
+  courseId: string;
+  date: Date;
+  players: number;
+  metadata: TeesnapMetadata;
+  discoverBookingWindow?: boolean;
+}): Promise<TeesnapTeeSheetResult> {
+  const [availability, bookingWindowEvidence] = await Promise.all([
+    fetchTeesnapAvailability(input),
+    input.discoverBookingWindow
+      ? fetchTeesnapBookingWindow(input.metadata)
+      : Promise.resolve(null)
+  ]);
+
+  return {
+    ...availability,
+    bookingWindowEvidence
+  };
+}
+
+async function fetchTeesnapAvailability(input: {
+  courseId: string;
+  date: Date;
+  players: number;
+  metadata: TeesnapMetadata;
+}): Promise<Pick<TeesnapTeeSheetResult, "slots" | "targetDateStatus">> {
   const holes = input.metadata.defaultHoles ?? 18;
   const url = buildTeeTimesUrl(input.metadata, input.date, input.players, holes);
   const response = await fetch(url, {
@@ -68,14 +114,14 @@ export async function fetchTeesnapSlots(input: {
 
   if (!response.ok) {
     if (payload?.errors === "date_not_allowed") {
-      return [];
+      return { slots: [], targetDateStatus: "NOT_OPEN" };
     }
     throw new Error(`Teesnap tee times returned ${response.status}`);
   }
 
   const teeTimes = payload?.teeTimes?.teeTimes;
   if (!Array.isArray(teeTimes)) {
-    return [];
+    return { slots: [], targetDateStatus: "UNKNOWN" };
   }
 
   const bookingSizes = new Map(
@@ -116,7 +162,49 @@ export async function fetchTeesnapSlots(input: {
     }
   }
 
-  return slots;
+  return { slots, targetDateStatus: "OPEN" };
+}
+
+async function fetchTeesnapBookingWindow(
+  metadata: TeesnapMetadata
+): Promise<BookingWindowEvidence | null> {
+  try {
+    const evidenceUrl = new URL("/", metadata.bookingBaseUrl).toString();
+    const response = await fetch(evidenceUrl, {
+      headers: teesnapHeaders(metadata.bookingBaseUrl)
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const html = await response.text();
+    const match = html.match(/window\.courses\s*=\s*(\[[\s\S]*?\]);\s*window\.property/i);
+    if (!match) {
+      return null;
+    }
+
+    const courses = JSON.parse(match[1]) as TeesnapCourseConfig[];
+    const course = courses.find((candidate) => candidate.id === metadata.courseId);
+    if (
+      !course ||
+      !Number.isInteger(course.advance) ||
+      course.advance == null ||
+      course.advance < 0 ||
+      course.advance > MAX_BOOKING_WINDOW_DAYS_AHEAD
+    ) {
+      return null;
+    }
+
+    return {
+      daysAhead: course.advance,
+      releaseTimeLocal: normalizeReleaseTime(course.start_availability_time),
+      source: "PROVIDER_CONFIG",
+      confidence: 1,
+      evidenceUrl
+    };
+  } catch {
+    return null;
+  }
 }
 
 function teesnapHeaders(bookingBaseUrl: string) {

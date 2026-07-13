@@ -33,6 +33,13 @@ export type SearchStatusCourseReport = {
     | "CONTACT_COURSE"
     | "WALK_IN";
   availability?: SearchStatusAvailability;
+  bookingWindow?: {
+    releaseDate: string;
+    releaseTimeLocal?: string;
+    opensAt: string;
+    timeZone: string;
+    exactTime: boolean;
+  };
   matchingTimes?: Array<{
     startsAt: string;
     availableSpots: number;
@@ -173,7 +180,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
       ? hasDirectOnlyCourse
         ? "Your alert is set. We’ll keep checking supported courses; courses marked Official site only or Phone only are not automatically monitored."
         : hasWorkInProgressCourse
-          ? "Your alert is set. We’ll keep checking fully monitored courses. Courses marked Needs support require a direct check until monitoring is verified."
+          ? "Your alert is set. We checked every selected course. Use the official link for courses marked Official site while we continue watching the courses we can monitor automatically."
         : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
@@ -226,7 +233,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
             </tr>
           </table>
           <h2 style="font-size:20px;line-height:1.2;margin:0 0 5px">What we’re watching for you</h2>
-          <p style="color:#53645c;font-size:14px;margin:0 0 18px">Here’s the status of each course on your list. Some we monitor automatically — others need you to check directly.</p>
+          <p style="color:#53645c;font-size:14px;margin:0 0 18px">Here’s what we found at each course. We’ll keep watching supported courses and always link you to the official booking surface.</p>
           ${courseRows}
           <div style="background:#e6f3f7;border-radius:10px;color:#174152;padding:14px 16px;font-size:14px;margin-top:18px">
             We only send an instant email when a newly opened tee time matches your exact date, time window, and player count. Otherwise, you’ll receive at most one morning status update per day.
@@ -312,11 +319,30 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
     };
   }
 
-  if (course.outcome === "NEEDS_ADAPTER") {
-    const teamAlerted = course.supportStatus === "TEAM_ALERTED";
+  if (course.outcome === "NO_MATCH" && course.bookingWindow) {
+    const release = formatBookingWindowRelease(course.bookingWindow);
     return {
-      monitoringLabel: teamAlerted ? "Team alerted" : "Needs support",
-      stateLabel: "Automatic monitoring isn’t available yet",
+      monitoringLabel: "Scheduled",
+      stateLabel: course.bookingWindow.exactTime
+        ? `Booking opens ${release}`
+        : `Booking expected to open ${release}`,
+      icon: "◷",
+      color: "#17647a",
+      badgeBackground: "#e6f3f7",
+      borderColor: "#b8dbe5",
+      calloutBackground: "#eef8fb",
+      calloutBorder: "#c5e2ea",
+      calloutText: "#174152",
+      detail: course.bookingWindow.exactTime
+        ? "The course has not released tee times for your date yet. We’ll start checking at that time and email you when a matching spot appears."
+        : "The course has not published an exact release time. We’ll begin checking that day and email you when a matching spot appears."
+    };
+  }
+
+  if (course.outcome === "NEEDS_ADAPTER") {
+    return {
+      monitoringLabel: "Official site",
+      stateLabel: "Check this course directly for now",
       icon: "↗",
       color: "#c75c0a",
       badgeBackground: "#fff0e4",
@@ -324,20 +350,17 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff8f2",
       calloutBorder: "#f3cfad",
       calloutText: "#713706",
-      detail: `${teamAlerted ? "Our team has been alerted, and this course will stay on the support queue until it is resolved. " : ""}${
-        course.bookingUrl
-          ? "Check the official site directly in the meantime."
-          : course.phone
-            ? "Call the course directly in the meantime."
-            : "Automatic availability checks are not currently available for this course."
-      }`
+      detail: course.bookingUrl
+        ? "We checked this course’s official booking surface. Live availability is not currently available inside Tee Time Spot, so use the official link while we keep working to add monitoring."
+        : course.phone
+          ? "We checked this course’s public booking information. Call the course directly while we keep working to add monitoring."
+          : "We checked the public course information, but no direct availability source was available."
     };
   }
 
   if (course.outcome === "FETCH_FAILED") {
-    const teamAlerted = course.supportStatus === "TEAM_ALERTED";
     return {
-      monitoringLabel: teamAlerted ? "Team alerted · retrying" : "Monitoring retrying",
+      monitoringLabel: "Official site · retry scheduled",
       stateLabel: "Latest check incomplete",
       icon: "↻",
       color: "#a23a32",
@@ -346,7 +369,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff5f3",
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
-      detail: `This course’s latest check did not finish. We’ll retry automatically.${teamAlerted ? " Our team has been alerted, and the issue will remain open until monitoring succeeds or the course is reclassified." : ""} Its official page is available in the meantime.`
+      detail: "This course’s latest availability check did not finish. We’ll retry automatically; its official page is available in the meantime."
     };
   }
 
@@ -528,6 +551,9 @@ function getCourseState(course: SearchStatusCourseReport) {
     ].join(":");
   }
   if (!course.availability || course.availability.visibleSlotCount === 0) {
+    if (course.bookingWindow) {
+      return `NO_MATCH:BOOKING_WINDOW:${course.bookingWindow.opensAt}:${course.bookingWindow.exactTime}`;
+    }
     return "NO_MATCH:DATE_NOT_VISIBLE";
   }
   if (course.availability.playerEligibleSlotCount === 0) {
@@ -538,6 +564,28 @@ function getCourseState(course: SearchStatusCourseReport) {
     course.availability.closestBefore ?? "none",
     course.availability.closestAfter ?? "none"
   ].join(":");
+}
+
+function formatBookingWindowRelease(
+  bookingWindow: NonNullable<SearchStatusCourseReport["bookingWindow"]>
+) {
+  if (!bookingWindow.exactTime) {
+    return new Date(`${bookingWindow.releaseDate}T12:00:00.000Z`).toLocaleDateString("en-US", {
+      weekday: "long",
+      month: "long",
+      day: "numeric"
+    });
+  }
+
+  return new Date(bookingWindow.opensAt).toLocaleString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: normalizeTimeZone(bookingWindow.timeZone, DEFAULT_TIME_ZONE),
+    timeZoneName: "short"
+  });
 }
 
 function parseSearchStatusSnapshot(value: unknown): SearchStatusSnapshot | null {

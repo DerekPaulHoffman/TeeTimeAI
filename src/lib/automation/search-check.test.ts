@@ -5,10 +5,12 @@ const dbMocks = vi.hoisted(() => ({
   getActiveSearchForAutomation: vi.fn(),
   listAvailableMatchAlerts: vi.fn(),
   listPendingMatchAlerts: vi.fn(),
+  markCourseBookingWindowChecked: vi.fn(),
   markMatchAlertSent: vi.fn(),
   markMatchAlertSuppressed: vi.fn(),
   markMissingMatchesUnavailable: vi.fn(),
   markSearchStatusEmailSent: vi.fn(),
+  recordCourseBookingWindowEvidence: vi.fn(),
   recordCourseProbe: vi.fn(),
   recordCourseProbeIfChanged: vi.fn(),
   recordTeeTimeMatch: vi.fn(),
@@ -22,19 +24,25 @@ const emailMocks = vi.hoisted(() => ({
 }));
 
 const adapterMocks = vi.hoisted(() => ({
-  fetchForeupSlots: vi.fn(),
+  fetchForeupTeeSheet: vi.fn(),
   isForeupMetadata: vi.fn()
 }));
 
 const supportIncidentMocks = vi.hoisted(() => ({
+  notifyCourseSupportIssueBatch: vi.fn(),
   reportCourseSupportIssue: vi.fn(),
   resolveCourseSupportIncident: vi.fn()
+}));
+
+const monitoringDiscoveryMocks = vi.hoisted(() => ({
+  prepareSearchMonitoring: vi.fn()
 }));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
+vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
 
 import { runSearchCheck } from "./search-check";
 
@@ -67,6 +75,13 @@ const search = {
         policyNotes: "Automated retrieval is not allowed.",
         detectedPlatform: "UNKNOWN",
         bookingMetadata: null,
+        bookingWindowDaysAhead: null,
+        bookingReleaseTimeLocal: null,
+        bookingWindowSource: null,
+        bookingWindowConfidence: null,
+        bookingWindowEvidenceUrl: null,
+        bookingWindowCheckedAt: null,
+        bookingWindowObservedAt: null,
         layoutHoleCounts: [] as number[],
         layoutHolesVerifiedAt: null as Date | null
       }
@@ -121,13 +136,27 @@ describe("runSearchCheck email cadence", () => {
       deliveryStatus: "sent"
     });
     adapterMocks.isForeupMetadata.mockReturnValue(true);
-    adapterMocks.fetchForeupSlots.mockResolvedValue([]);
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
     supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
       incidentId: "incident-1",
       status: "AUTO_INVESTIGATING",
       ownerAlerted: true
     });
+    supportIncidentMocks.notifyCourseSupportIssueBatch.mockResolvedValue({
+      notifiedIncidentIds: [],
+      pendingIncidentIds: []
+    });
     supportIncidentMocks.resolveCourseSupportIncident.mockResolvedValue(null);
+    monitoringDiscoveryMocks.prepareSearchMonitoring.mockResolvedValue({
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      retryCourseIds: []
+    });
   });
 
   afterEach(() => {
@@ -196,7 +225,7 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({
         courseId: "course-1",
         outcome: "NEEDS_ADAPTER",
-        message: expect.stringContaining("queued for browser probe")
+        message: expect.stringContaining("Official booking surface inspected")
       })
     );
     expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
@@ -228,7 +257,7 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(adapterMocks.fetchForeupSlots).not.toHaveBeenCalled();
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
     expect(dbMocks.recordTeeTimeMatch).not.toHaveBeenCalled();
     expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith({
       searchId: "search-1",
@@ -284,5 +313,94 @@ describe("runSearchCheck email cadence", () => {
         supportStatus: "TEAM_ALERTED"
       })
     );
+    expect(result.supportRetryNeeded).toBe(false);
+  });
+
+  it("runs official-site discovery before classifying an unsupported course", async () => {
+    const unsupportedSearch = {
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue(unsupportedSearch);
+    monitoringDiscoveryMocks.prepareSearchMonitoring.mockResolvedValue({
+      attemptedCourseIds: ["course-1"],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      retryCourseIds: ["course-1"]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(monitoringDiscoveryMocks.prepareSearchMonitoring).toHaveBeenCalledWith(
+      unsupportedSearch
+    );
+    expect(monitoringDiscoveryMocks.prepareSearchMonitoring.mock.invocationCallOrder[0]).toBeLessThan(
+      supportIncidentMocks.reportCourseSupportIssue.mock.invocationCallOrder[0]
+    );
+    expect(result.supportRetryNeeded).toBe(true);
+  });
+
+  it("waits until a fresh course-specific booking release without hitting the tee sheet", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      date: new Date("2026-07-29T00:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Weekend Golf Course",
+            detectedPlatform: "FOREUP",
+            detectedBookingUrl: "https://foreupsoftware.com/booking/weekend",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              scheduleId: 123,
+              bookingBaseUrl: "https://foreupsoftware.com/booking/weekend"
+            },
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "05:00",
+            bookingWindowSource: "PROVIDER_CONFIG",
+            bookingWindowConfidence: 1,
+            bookingWindowEvidenceUrl: "https://foreupsoftware.com/booking/weekend",
+            bookingWindowCheckedAt: new Date("2026-07-10T12:00:00.000Z"),
+            bookingWindowObservedAt: new Date("2026-07-10T12:00:00.000Z")
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "NO_MATCH",
+        message: expect.stringContaining("2026-07-15T09:00:00.000Z")
+      })
+    );
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "NO_MATCH",
+      bookingWindow: {
+        releaseDate: "2026-07-15",
+        releaseTimeLocal: "05:00",
+        opensAt: "2026-07-15T09:00:00.000Z",
+        exactTime: true
+      }
+    });
   });
 });

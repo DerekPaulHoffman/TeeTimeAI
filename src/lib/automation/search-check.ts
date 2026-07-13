@@ -5,10 +5,12 @@ import {
   getActiveSearchForAutomation,
   listAvailableMatchAlerts,
   listPendingMatchAlerts,
+  markCourseBookingWindowChecked,
   markMatchAlertSent,
   markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
   markSearchStatusEmailSent,
+  recordCourseBookingWindowEvidence,
   recordCourseProbe,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
@@ -17,14 +19,25 @@ import {
 } from "@/lib/automation/db-service";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import { evaluateAutomationPolicy } from "@/lib/automation/policy";
+import { prepareSearchMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import {
+  notifyCourseSupportIssueBatch,
   reportCourseSupportIssue,
   resolveCourseSupportIncident
 } from "@/lib/automation/support-incidents";
 import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
-import { fetchForeupSlots, isForeupMetadata } from "@/lib/adapters/foreup";
-import { fetchTeeItUpSlots, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
-import { fetchTeesnapSlots, isTeesnapMetadata } from "@/lib/adapters/teesnap";
+import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
+import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
+import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
+import {
+  getBookingWindowForTargetDate,
+  getBookingWindowFromEvidence,
+  shouldRetryBookingWindowDiscovery,
+  shouldRefreshBookingWindow,
+  type BookingWindowEvidence,
+  type BookingWindowEvidenceSource,
+  type TargetBookingWindow
+} from "@/lib/courses/booking-window";
 import type { AutomationReason, BookingMethod } from "@/lib/courses/intelligence";
 import {
   getCourseLayoutCompatibility,
@@ -44,6 +57,7 @@ import {
   parseCourseLocalDateTime,
   rankMatches
 } from "@/lib/tee-times/matching";
+import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
 
@@ -68,6 +82,13 @@ type AutomationCourse = {
     | "CLUB_CADDIE"
     | "CUSTOM";
   bookingMetadata: unknown;
+  bookingWindowDaysAhead: number | null;
+  bookingReleaseTimeLocal: string | null;
+  bookingWindowSource: BookingWindowEvidenceSource | null;
+  bookingWindowConfidence: number | null;
+  bookingWindowEvidenceUrl: string | null;
+  bookingWindowCheckedAt: Date | null;
+  bookingWindowObservedAt: Date | null;
   layoutHoleCounts: number[];
   layoutHolesVerifiedAt: Date | null;
 };
@@ -80,6 +101,7 @@ export type SearchCheckResult = {
   courseResults: SearchCheckCourseResult[];
   availableMatches: number;
   newlyAlertedMatches: number;
+  supportRetryNeeded: boolean;
   statusEmailOutcome?: "sent" | "dry_run" | "skipped" | "covered_by_match_alert" | "failed";
 };
 
@@ -94,7 +116,8 @@ export async function runSearchCheck(searchId: string, trigger = "scheduled") {
         outcome: "busy",
         courseResults: [],
         availableMatches: 0,
-        newlyAlertedMatches: 0
+        newlyAlertedMatches: 0,
+        supportRetryNeeded: false
       };
       await finishAutomationRun(run.id, {
         outcome: "no_op",
@@ -120,15 +143,30 @@ export async function runSearchCheck(searchId: string, trigger = "scheduled") {
 }
 
 async function checkSearch(searchId: string, automationRunId: string): Promise<SearchCheckResult> {
-  const search = await getActiveSearchForAutomation(searchId);
+  let search = await getActiveSearchForAutomation(searchId);
   if (!search) {
     return {
       searchId,
       outcome: "not_active",
       courseResults: [],
       availableMatches: 0,
-      newlyAlertedMatches: 0
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false
     };
+  }
+
+  let monitoringRetryCourseIds = new Set<string>();
+  try {
+    const preparation = await prepareSearchMonitoring(search);
+    monitoringRetryCourseIds = new Set(preparation.retryCourseIds);
+    if (preparation.appliedCourseIds.length > 0) {
+      search = (await getActiveSearchForAutomation(searchId)) ?? search;
+    }
+  } catch (error) {
+    console.error("[monitoring:discovery-failed]", {
+      searchId,
+      message: error instanceof Error ? error.message : "Unknown discovery preparation failure"
+    });
   }
 
   const searchWindow = {
@@ -142,6 +180,12 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     }))
   };
   const courseResults: SearchCheckCourseResult[] = [];
+  const supportIssues: Array<{
+    courseId: string;
+    incidentId: string | null;
+    status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "UNRECORDED";
+    ownerAlerted: boolean;
+  }> = [];
   let newlyAlertedMatches = 0;
   const requestedLayoutHoles =
     search.requestedLayoutHoles === 9 || search.requestedLayoutHoles === 18
@@ -225,8 +269,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       const browserProbeUrl = getBestProbeUrl(course);
       const browserProbeQueued = shouldQueueBrowserProbe(course);
       const message = browserProbeQueued
-        ? `No supported adapter yet for ${course.detectedPlatform}; queued for browser probe.`
-        : `No supported adapter yet for ${course.detectedPlatform}`;
+        ? "Official booking surface inspected; no reusable policy-safe monitoring connection was confirmed."
+        : "No public booking surface is currently available for automated monitoring.";
       await recordCourseProbeIfChanged({
         searchId: search.id,
         courseId: course.id,
@@ -234,7 +278,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "NEEDS_ADAPTER",
         message,
         rawSummary: {
-          nextAction: browserProbeQueued ? "automation:browser-probe" : "manual_course_setup",
+          nextAction: "automation:adapter-remediation",
           browserProbeUrl
         }
       });
@@ -244,9 +288,10 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         kind: "NEEDS_ADAPTER",
         message,
         nextAction: browserProbeQueued
-          ? `Inspect ${browserProbeUrl} with automation:browser-probe and verify a policy-safe public adapter.`
-          : "Classify the official booking method and determine whether policy-safe monitoring is possible."
+          ? `Build or extend a reusable policy-safe public adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
+          : "Autonomously classify the official booking method, find a policy-safe public retrieval path if one exists, and verify this search."
       });
+      supportIssues.push({ courseId: course.id, ...supportIssue });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -263,8 +308,66 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       continue;
     }
 
+    const checkStartedAt = new Date();
+    const storedBookingWindow = getBookingWindowForTargetDate(search.date, course);
+    const refreshBookingWindow =
+      shouldRefreshBookingWindow(course.bookingWindowObservedAt, checkStartedAt) &&
+      shouldRetryBookingWindowDiscovery(course.bookingWindowCheckedAt, checkStartedAt);
+    if (
+      storedBookingWindow &&
+      storedBookingWindow.opensAt > checkStartedAt &&
+      !refreshBookingWindow
+    ) {
+      await recordBookingWindowWaitingProbe({
+        searchId: search.id,
+        courseId: course.id,
+        automationRunId,
+        targetDate: searchWindow.date,
+        bookingWindow: storedBookingWindow
+      });
+      courseResults.push(buildBookingWindowCourseReport(course, storedBookingWindow));
+      continue;
+    }
+
     try {
-      const rawSlots = await fetchCourseSlots(course, search.date, search.players);
+      const teeSheet = await fetchCourseTeeSheet(
+        course,
+        search.date,
+        search.players,
+        refreshBookingWindow
+      );
+      const rawSlots = teeSheet.slots;
+      let bookingWindow = storedBookingWindow;
+      if (teeSheet.bookingWindowEvidence) {
+        await recordCourseBookingWindowEvidence({
+          courseId: course.id,
+          evidence: teeSheet.bookingWindowEvidence,
+          observedAt: checkStartedAt
+        });
+        bookingWindow = getBookingWindowFromEvidence(
+          search.date,
+          course.timeZone,
+          teeSheet.bookingWindowEvidence
+        );
+      } else if (refreshBookingWindow) {
+        await markCourseBookingWindowChecked(course.id, checkStartedAt);
+      }
+      if (rawSlots.length === 0 && bookingWindow && bookingWindow.opensAt > checkStartedAt) {
+        await recordBookingWindowWaitingProbe({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          targetDate: searchWindow.date,
+          bookingWindow
+        });
+        await resolveCourseSupportIncident({
+          courseId: course.id,
+          resolution: "MONITORING_RESTORED",
+          message: `${course.name} returned a verified booking-window release for ${searchWindow.date}.`
+        });
+        courseResults.push(buildBookingWindowCourseReport(course, bookingWindow));
+        continue;
+      }
       const availability = summarizeSearchStatusAvailability(searchWindow, rawSlots);
       const pricing = summarizeCourseSlotPrices(rawSlots);
       const currentMatches = rankMatches(
@@ -363,6 +466,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         message,
         nextAction: "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
       });
+      supportIssues.push({ courseId: course.id, ...supportIssue });
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -378,6 +482,33 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       });
     }
   }
+
+  let batchNotification = { notifiedIncidentIds: [] as string[] };
+  try {
+    batchNotification = await notifyCourseSupportIssueBatch(
+      supportIssues
+        .map((issue) => issue.incidentId)
+        .filter((incidentId): incidentId is string => Boolean(incidentId))
+    );
+  } catch (error) {
+    console.error("[email:operator-summary-queue-failed]", {
+      searchId,
+      message: error instanceof Error ? error.message : "Unknown operator summary failure"
+    });
+  }
+  const notifiedIncidentIds = new Set(batchNotification.notifiedIncidentIds);
+  for (const issue of supportIssues) {
+    if (!issue.ownerAlerted && issue.incidentId && notifiedIncidentIds.has(issue.incidentId)) {
+      const courseResult = courseResults.find((course) => course.courseId === issue.courseId);
+      if (courseResult) {
+        courseResult.supportStatus = "TEAM_ALERTED";
+      }
+    }
+  }
+  const supportRetryNeeded = supportIssues.some(
+    (issue) =>
+      issue.status === "UNRECORDED" || monitoringRetryCourseIds.has(issue.courseId)
+  );
 
   const checkedAt = new Date();
   const statusEmailKind = getSearchStatusEmailKind(
@@ -442,6 +573,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     courseResults,
     availableMatches: courseResults.reduce((total, course) => total + course.availableMatches, 0),
     newlyAlertedMatches,
+    supportRetryNeeded,
     statusEmailOutcome
   };
 }
@@ -617,12 +749,29 @@ function hasSupportedAdapter(course: AutomationCourse) {
   );
 }
 
-function fetchCourseSlots(course: AutomationCourse, date: Date, players: number) {
+type CourseTeeSheetResult = {
+  slots: TeeTimeSlot[];
+  targetDateStatus: "OPEN" | "NOT_OPEN" | "UNKNOWN";
+  bookingWindowEvidence: BookingWindowEvidence | null;
+};
+
+function fetchCourseTeeSheet(
+  course: AutomationCourse,
+  date: Date,
+  players: number,
+  discoverBookingWindow: boolean
+): Promise<CourseTeeSheetResult> {
   if (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
-    return fetchForeupSlots({ courseId: course.id, date, players, metadata: course.bookingMetadata });
+    return fetchForeupTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
+    });
   }
   if (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
-    return fetchTeeItUpSlots({ courseId: course.id, date, metadata: course.bookingMetadata });
+    return fetchTeeItUpTeeSheet({ courseId: course.id, date, metadata: course.bookingMetadata });
   }
   if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
     return fetchCpsSlots({
@@ -631,10 +780,76 @@ function fetchCourseSlots(course: AutomationCourse, date: Date, players: number)
       players,
       timeZone: course.timeZone,
       metadata: course.bookingMetadata
-    });
+    }).then((slots) => ({
+      slots,
+      targetDateStatus: slots.length > 0 ? "OPEN" as const : "UNKNOWN" as const,
+      bookingWindowEvidence: null
+    }));
   }
   if (course.detectedPlatform === "CUSTOM" && isTeesnapMetadata(course.bookingMetadata)) {
-    return fetchTeesnapSlots({ courseId: course.id, date, players, metadata: course.bookingMetadata });
+    return fetchTeesnapTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
+    });
   }
-  return Promise.resolve([]);
+  return Promise.resolve({
+    slots: [],
+    targetDateStatus: "UNKNOWN",
+    bookingWindowEvidence: null
+  });
+}
+
+async function recordBookingWindowWaitingProbe(input: {
+  searchId: string;
+  courseId: string;
+  automationRunId: string;
+  targetDate: string;
+  bookingWindow: TargetBookingWindow;
+}) {
+  await recordCourseProbeIfChanged({
+    searchId: input.searchId,
+    courseId: input.courseId,
+    automationRunId: input.automationRunId,
+    outcome: "NO_MATCH",
+    message: input.bookingWindow.exactTime
+      ? `Booking for ${input.targetDate} opens at ${input.bookingWindow.opensAt.toISOString()}.`
+      : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
+    rawSummary: {
+      bookingWindow: {
+        releaseDate: input.bookingWindow.releaseDate,
+        releaseTimeLocal: input.bookingWindow.releaseTimeLocal,
+        timeZone: input.bookingWindow.timeZone,
+        source: input.bookingWindow.source,
+        confidence: input.bookingWindow.confidence,
+        evidenceUrl: input.bookingWindow.evidenceUrl
+      }
+    }
+  });
+}
+
+function buildBookingWindowCourseReport(
+  course: AutomationCourse,
+  bookingWindow: TargetBookingWindow
+): SearchCheckCourseResult {
+  return {
+    courseId: course.id,
+    courseName: course.name,
+    timeZone: course.timeZone,
+    outcome: "NO_MATCH",
+    availableMatches: 0,
+    bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+    phone: course.bookingPhone ?? course.phone ?? undefined,
+    bookingMethod: course.bookingMethod,
+    bookingAccess: getCourseBookingAccess(course),
+    bookingWindow: {
+      releaseDate: bookingWindow.releaseDate,
+      releaseTimeLocal: bookingWindow.releaseTimeLocal ?? undefined,
+      opensAt: bookingWindow.opensAt.toISOString(),
+      timeZone: bookingWindow.timeZone,
+      exactTime: bookingWindow.exactTime
+    }
+  };
 }

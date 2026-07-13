@@ -22,6 +22,10 @@ import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
+import {
+  formatBookingWindowRelease,
+  getBookingWindowForTargetDate
+} from "@/lib/courses/booking-window";
 import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
@@ -318,6 +322,12 @@ function DashboardSearchCard({
         <div className="watch-course-list">
           {search.preferences.map((preference) => {
             const alertSupport = getCourseAlertSupport(preference.course);
+            const bookingWindow = getBookingWindowForTargetDate(
+              search.date,
+              preference.course
+            );
+            const upcomingBookingWindow =
+              bookingWindow && bookingWindow.opensAt > new Date() ? bookingWindow : null;
             const usesPhoneBooking = ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(
               preference.course.bookingMethod
             );
@@ -348,6 +358,14 @@ function DashboardSearchCard({
                     <MapPin size={12} />
                     {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
                   </p>
+                  {upcomingBookingWindow ? (
+                    <p className="watch-course-release">
+                      <CalendarClock size={13} />
+                      {upcomingBookingWindow.exactTime ? "Booking opens" : "Expected to open"}{" "}
+                      {formatBookingWindowRelease(upcomingBookingWindow)}
+                      {!upcomingBookingWindow.exactTime ? " (time not published)" : ""}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="watch-course-links">
                   <a

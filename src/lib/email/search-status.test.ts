@@ -92,6 +92,39 @@ describe("search status email cadence", () => {
 });
 
 describe("renderSearchStatusHtml", () => {
+  it("shows the exact provider-confirmed booking release time", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-window",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-29",
+      startTime: "07:30",
+      endTime: "09:00",
+      players: 4,
+      checkedAt: new Date("2026-07-13T19:00:00.000Z"),
+      courses: [
+        {
+          courseId: "course-window",
+          courseName: "Weekend Golf Course",
+          timeZone: "America/New_York",
+          outcome: "NO_MATCH",
+          availableMatches: 0,
+          bookingWindow: {
+            releaseDate: "2026-07-15",
+            releaseTimeLocal: "05:00",
+            opensAt: "2026-07-15T09:00:00.000Z",
+            timeZone: "America/New_York",
+            exactTime: true
+          }
+        }
+      ]
+    });
+
+    expect(html).toContain("Scheduled");
+    expect(html).toContain("Booking opens Wednesday, July 15 at 5:00 AM EDT");
+    expect(html).toContain("start checking at that time");
+  });
+
   it("explains outside-window, not-visible, and work-in-progress course states", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-1",
@@ -109,9 +142,9 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("Needs support");
-    expect(html).toContain("Automatic monitoring isn’t available yet");
-    expect(html).toContain("keep checking fully monitored courses");
+    expect(html).toContain("Official site");
+    expect(html).toContain("Check this course directly for now");
+    expect(html).toContain("We checked every selected course");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we’re watching for you");
     expect(html).toContain("Course layout");
@@ -229,7 +262,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("Open official booking page");
   });
 
-  it("only claims the team was alerted when operator delivery succeeded", () => {
+  it("keeps internal escalation state out of customer-facing course copy", () => {
     const baseInput = {
       searchId: "search-1",
       to: "player@example.com",
@@ -265,11 +298,13 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(pendingHtml).toContain("Needs support");
-    expect(pendingHtml).not.toContain("Our team has been alerted");
-    expect(alertedHtml).toContain("Team alerted");
-    expect(alertedHtml).toContain("Our team has been alerted");
-    expect(alertedHtml).not.toContain("We’re working on it");
+    expect(pendingHtml).toContain("Official site");
+    expect(alertedHtml).toContain("Official site");
+    expect(pendingHtml).toContain("Check this course directly for now");
+    expect(alertedHtml).toContain("Check this course directly for now");
+    expect(pendingHtml).not.toContain("team has been alerted");
+    expect(alertedHtml).not.toContain("team has been alerted");
+    expect(alertedHtml).not.toContain("Automatic monitoring isn’t available yet");
   });
 });
 

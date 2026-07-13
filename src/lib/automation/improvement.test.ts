@@ -9,6 +9,7 @@ import {
   markImprovementOutcomeRecorded,
   sanitizeAutomationText,
   selectImprovementCandidate,
+  validateAdapterRemediationCloseout,
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology
 } from "./improvement";
@@ -157,6 +158,42 @@ describe("selectImprovementCandidate", () => {
     });
   });
 
+  it("prioritizes an open adapter incident even when repeated browser discovery is stale", () => {
+    const candidate = selectImprovementCandidate({
+      activeSearchCount: 2,
+      pendingAlerts: [],
+      supportIncidents: [
+        {
+          id: "incident-1",
+          status: "AUTO_INVESTIGATING",
+          kind: "NEEDS_ADAPTER",
+          courseName: "Dennis Pines",
+          platform: "UNKNOWN",
+          lastSeenAt: "2026-07-13T20:00:00.000Z",
+          message: "Official site discovery did not learn a reusable adapter."
+        }
+      ],
+      actionableProbes: [],
+      learningSignals: [
+        {
+          key: "adapter:Dennis Pines",
+          kind: "adapter_gap",
+          summary: "Dennis Pines was inspected twice with no reusable adapter learned.",
+          lastSeenAt: "2026-07-13T20:00:00.000Z",
+          repeats: 3,
+          status: "stale"
+        }
+      ]
+    });
+
+    expect(candidate).toMatchObject({
+      outcome: "needs_adapter",
+      kind: "adapter_remediation",
+      referenceId: "incident-1",
+      summary: expect.stringContaining("Build or extend a reusable provider adapter")
+    });
+  });
+
   it("skips repeated stale adapter gaps and follows a living learning signal", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 2,
@@ -215,6 +252,63 @@ describe("selectImprovementCandidate", () => {
         "Initial queue evidence is empty; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
       researchDirective:
         "Rotate to the least-recently covered evidence surfaces. An empty first pass is not a terminal outcome."
+    });
+  });
+});
+
+describe("adapter remediation closeout", () => {
+  const candidate = selectImprovementCandidate({
+    activeSearchCount: 1,
+    pendingAlerts: [],
+    supportIncidents: [
+      {
+        id: "incident-1",
+        status: "AUTO_INVESTIGATING",
+        kind: "NEEDS_ADAPTER",
+        courseName: "Dennis Pines",
+        platform: "UNKNOWN",
+        lastSeenAt: "2026-07-13T20:00:00.000Z"
+      }
+    ],
+    actionableProbes: []
+  });
+
+  it("rejects needs_adapter as a terminal result", () => {
+    expect(() =>
+      validateAdapterRemediationCloseout({
+        candidate,
+        outcome: "needs_adapter",
+        evidence: null
+      })
+    ).toThrow("cannot close as needs_adapter");
+  });
+
+  it("allows owner escalation only with concrete automated-attempt evidence", () => {
+    expect(() =>
+      validateAdapterRemediationCloseout({
+        candidate,
+        outcome: "needs_human",
+        evidence: { incidentId: "incident-1" }
+      })
+    ).toThrow("requires adapterRemediation evidence");
+
+    expect(
+      validateAdapterRemediationCloseout({
+        candidate,
+        outcome: "needs_human",
+        evidence: {
+          incidentId: "incident-1",
+          attempts: ["Inspected the public booking flow and provider network requests."],
+          evidence: ["Official provider terms require a signed data-access agreement."],
+          result: "No policy-safe unauthenticated retrieval path exists.",
+          requiredExternalAction: "Approve or decline the provider data-access agreement."
+        }
+      })
+    ).toEqual({
+      escalate: true,
+      incidentId: "incident-1",
+      message: "No policy-safe unauthenticated retrieval path exists.",
+      nextAction: "Approve or decline the provider data-access agreement."
     });
   });
 });

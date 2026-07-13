@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchTeeItUpSlots } from "./teeitup";
+import { fetchTeeItUpSlots, fetchTeeItUpTeeSheet } from "./teeitup";
 
 describe("TeeItUp adapter", () => {
   afterEach(() => {
@@ -133,6 +133,53 @@ describe("TeeItUp adapter", () => {
       headers: {
         origin: "https://richter-park-golf-course.book.teeitup.com",
         referer: "https://richter-park-golf-course.book.teeitup.com/"
+      }
+    });
+  });
+
+  it("learns an exact release date and time from the provider response", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 13427,
+            courseId: "55c2dea0fe00b30300d44121",
+            timeZone: "America/New_York"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            courseId: "55c2dea0fe00b30300d44121",
+            teetimes: [],
+            message:
+              "Tee times will be available to book from Wednesday, July 29, 2026 at 12:00 AM"
+          }
+        ]
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchTeeItUpTeeSheet({
+        courseId: "course-1",
+        date: new Date("2026-08-12T00:00:00-04:00"),
+        metadata: {
+          aliases: ["whitneyfarmsgolfcourse"],
+          bookingBaseUrl: "https://whitneyfarmsgolfcourse.book.teeitup.golf/"
+        }
+      })
+    ).resolves.toMatchObject({
+      slots: [],
+      targetDateStatus: "NOT_OPEN",
+      bookingWindowEvidence: {
+        daysAhead: 14,
+        releaseTimeLocal: "00:00",
+        source: "PROVIDER_MESSAGE",
+        confidence: 1
       }
     });
   });

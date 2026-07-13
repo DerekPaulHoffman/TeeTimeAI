@@ -63,6 +63,95 @@ describe("calculateNextCheckAt", () => {
     );
   });
 
+  it("uses a learned course-local release hour instead of the generic window", () => {
+    const searchDate = new Date("2026-07-29T00:00:00.000Z");
+    const now = new Date("2026-07-01T12:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        5,
+        now,
+        new Date("2026-07-30T00:00:00.000Z"),
+        [
+          {
+            timeZone: "America/New_York",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "05:00"
+          }
+        ]
+      )?.toISOString()
+    ).toBe("2026-07-15T09:00:00.000Z");
+  });
+
+  it("retries an unresolved initial monitoring discovery after thirty minutes", () => {
+    const searchDate = new Date("2026-08-15T00:00:00.000Z");
+    const now = new Date("2026-07-13T20:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        5,
+        now,
+        new Date("2026-08-16T00:00:00.000Z"),
+        [{ timeZone: "America/New_York" }],
+        true
+      )?.toISOString()
+    ).toBe("2026-07-13T20:30:00.000Z");
+  });
+
+  it("wakes for the earliest of several course-specific booking windows", () => {
+    const searchDate = new Date("2026-08-30T00:00:00.000Z");
+    const now = new Date("2026-08-01T12:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        5,
+        now,
+        new Date("2026-08-31T00:00:00.000Z"),
+        [
+          {
+            timeZone: "America/New_York",
+            bookingWindowDaysAhead: 7,
+            bookingReleaseTimeLocal: "06:00"
+          },
+          {
+            timeZone: "America/Los_Angeles",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "05:00"
+          }
+        ]
+      )?.toISOString()
+    ).toBe("2026-08-16T12:00:00.000Z");
+  });
+
+  it("uses the normal cadence once any selected course is open", () => {
+    const searchDate = new Date("2026-08-30T00:00:00.000Z");
+    const now = new Date("2026-08-16T12:01:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        15,
+        now,
+        new Date("2026-08-31T00:00:00.000Z"),
+        [
+          {
+            timeZone: "America/Los_Angeles",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "05:00"
+          },
+          {
+            timeZone: "America/New_York",
+            bookingWindowDaysAhead: 7,
+            bookingReleaseTimeLocal: "06:00"
+          }
+        ]
+      )?.toISOString()
+    ).toBe("2026-08-16T12:16:00.000Z");
+  });
+
   it("uses the search cadence once the booking window is open", () => {
     const searchDate = new Date("2026-08-10T04:00:00.000Z");
     const now = new Date("2026-08-01T12:00:00.000Z");

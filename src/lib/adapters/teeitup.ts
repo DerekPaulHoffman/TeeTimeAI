@@ -1,4 +1,9 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import {
+  getBookingWindowFromEvidence,
+  parseBookingReleaseMessage,
+  type BookingWindowEvidence
+} from "@/lib/courses/booking-window";
 
 const TEEITUP_API_BASE_URL = "https://phx-api-be-east-1b.kenna.io";
 
@@ -29,6 +34,14 @@ type TeeItUpApiSlot = {
 
 type TeeItUpApiDay = {
   teetimes?: TeeItUpApiSlot[];
+  courseId?: string;
+  message?: string;
+};
+
+export type TeeItUpTeeSheetResult = {
+  slots: TeeTimeSlot[];
+  targetDateStatus: "OPEN" | "NOT_OPEN" | "UNKNOWN";
+  bookingWindowEvidence: BookingWindowEvidence | null;
 };
 
 export function isTeeItUpMetadata(value: unknown): value is TeeItUpMetadata {
@@ -50,7 +63,16 @@ export async function fetchTeeItUpSlots(input: {
   date: Date;
   metadata: TeeItUpMetadata;
 }): Promise<TeeTimeSlot[]> {
+  return (await fetchTeeItUpTeeSheet(input)).slots;
+}
+
+export async function fetchTeeItUpTeeSheet(input: {
+  courseId: string;
+  date: Date;
+  metadata: TeeItUpMetadata;
+}): Promise<TeeItUpTeeSheetResult> {
   const slots: TeeTimeSlot[] = [];
+  let bookingWindowEvidence: BookingWindowEvidence | null = null;
 
   for (const alias of input.metadata.aliases) {
     const facilities = await fetchFacilities(alias, input.metadata.bookingBaseUrl);
@@ -79,6 +101,23 @@ export async function fetchTeeItUpSlots(input: {
     const defaultFacility = facilities[0];
 
     for (const day of daySlots) {
+      if (day.message) {
+        const facility =
+          (day.courseId && facilityByCourseId.get(day.courseId)) || defaultFacility;
+        const evidence = parseBookingReleaseMessage({
+          message: day.message,
+          targetDate: input.date,
+          timeZone: facility?.timeZone ?? "America/New_York",
+          evidenceUrl: buildTeeTimesUrl(input.date, facilityIds).toString()
+        });
+        bookingWindowEvidence = pickEarlierBookingWindow(
+          input.date,
+          facility?.timeZone ?? "America/New_York",
+          bookingWindowEvidence,
+          evidence
+        );
+      }
+
       for (const slot of day.teetimes ?? []) {
         if (!slot.teetime) {
           continue;
@@ -110,7 +149,31 @@ export async function fetchTeeItUpSlots(input: {
     }
   }
 
-  return slots;
+  return {
+    slots,
+    targetDateStatus:
+      bookingWindowEvidence ? "NOT_OPEN" : slots.length > 0 ? "OPEN" : "UNKNOWN",
+    bookingWindowEvidence
+  };
+}
+
+function pickEarlierBookingWindow(
+  targetDate: Date,
+  timeZone: string,
+  current: BookingWindowEvidence | null,
+  candidate: BookingWindowEvidence | null
+) {
+  if (!candidate) {
+    return current;
+  }
+  if (!current) {
+    return candidate;
+  }
+  const currentWindow = getBookingWindowFromEvidence(targetDate, timeZone, current);
+  const candidateWindow = getBookingWindowFromEvidence(targetDate, timeZone, candidate);
+  return candidateWindow && currentWindow && candidateWindow.opensAt < currentWindow.opensAt
+    ? candidate
+    : current;
 }
 
 async function fetchFacilities(alias: string, bookingBaseUrl: string) {

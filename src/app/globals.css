@@ -5416,6 +5416,20 @@ button {
   padding: 12px 16px;
 }
 
+.watch-course-release {
+  align-items: center;
+  color: #17647a;
+  display: flex;
+  font-size: 0.76rem;
+  font-weight: 800;
+  gap: 5px;
+  margin: 7px 0 0;
+}
+
+.watch-course-release svg {
+  flex: 0 0 auto;
+}
+
 .watch-course-badges {
   margin-bottom: 6px;
 }

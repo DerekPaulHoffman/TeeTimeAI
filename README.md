@@ -2,7 +2,7 @@
 
 Tee Time Spot is an alert-only tee-time waitlist assistant for public golf courses.
 
-The product helps a golfer answer one practical question: "Where can I play, at the courses I actually like, in the window I am free?" A user enters a location and search distance (15 miles by default), picks nearby public courses, ranks 1 to 5 favorites, chooses a future date, time window, player count, and alert recipients, then receives an email when a matching tee time appears. The user finishes booking directly on the official course website.
+The product helps a golfer answer one practical question: "Where can I play, at the courses I actually like, in the window I am free?" A user enters a location and search distance (15 miles by default), picks nearby public courses, ranks 1 to 5 favorites, chooses a future date, time window, player count, and alert recipients, then receives an email when a matching tee time appears. The first check inspects each official course surface before classifying monitoring coverage. For dates beyond a course's booking window, Tee Time Spot records provider-confirmed release rules when available, tells the golfer when booking opens, and starts checking at that course-local date and time. The user finishes booking directly on the official course website.
 
 Search windows are interpreted in each selected course's IANA timezone. The browser timezone is stored with the search for recipient-facing timestamps; instant alerts show the course-local time as the booking source of truth and also show the golfer's local time when it differs.
 
@@ -172,7 +172,7 @@ Codex automation
 Core models:
 
 - `User`: Clerk user reference; legacy guest-style records are claimed by a matching account when that golfer signs in.
-- `Course`: canonical current course profile, including identity/location, official contact details, typed booking method, booking phone, detected booking URL/platform, automation eligibility/reason, provider metadata, and intelligence verification/review timestamps.
+- `Course`: canonical current course profile, including identity/location, official contact details, typed booking method, booking phone, detected booking URL/platform, automation eligibility/reason, provider metadata, course-specific booking-window intelligence, and intelligence verification/review timestamps.
 - `TeeSearch`: user, date, start/end time, players, cadence, status, and additional alert emails.
 - `CoursePreference`: ranked join from a search to selected courses.
 - `CourseProbe`: per-course automation observation, outcome, message, evidence, raw summary, and optional automation run.

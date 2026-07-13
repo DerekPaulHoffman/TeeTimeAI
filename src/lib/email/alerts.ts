@@ -61,6 +61,23 @@ export type CourseSupportOperatorEmailInput = {
   resolutionMessage?: string | null;
 };
 
+export type CourseSupportOperatorSummaryInput = {
+  incidents: Array<{
+    incidentId: string;
+    cycle: number;
+    courseId: string;
+    courseName: string;
+    platform: string;
+    bookingUrl?: string | null;
+    firstAffectedSearchId?: string | null;
+    affectedSearchCount: number;
+    kind: string;
+    message?: string | null;
+    nextAction?: string | null;
+    firstSeenAt: Date;
+  }>;
+};
+
 export type OperatorEmailDelivery = EmailDelivery | {
   deliveryStatus: "not_configured";
 };
@@ -208,6 +225,52 @@ export async function sendCourseSupportOperatorEmail(
   return { ...result.data, deliveryStatus: "sent" };
 }
 
+export async function sendCourseSupportOperatorSummaryEmail(
+  input: CourseSupportOperatorSummaryInput
+): Promise<OperatorEmailDelivery> {
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
+
+  if (!to) {
+    console.error("[email:operator-summary-not-configured]", {
+      incidents: input.incidents.map((incident) => incident.incidentId)
+    });
+    return { deliveryStatus: "not_configured" };
+  }
+
+  if (!apiKey || !from || shouldDryRunRecipient(to)) {
+    console.warn("[email:operator-summary-dry-run]", {
+      to,
+      incidents: input.incidents.length
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+
+  const sortedIncidents = [...input.incidents].sort((left, right) =>
+    left.incidentId.localeCompare(right.incidentId)
+  );
+  const scope = createHash("sha256")
+    .update(sortedIncidents.map((incident) => `${incident.incidentId}:${incident.cycle}`).join("|"))
+    .digest("hex")
+    .slice(0, 24);
+  const email = {
+    from,
+    to,
+    subject: `${sortedIncidents.length} concrete course blocker${sortedIncidents.length === 1 ? "" : "s"} need your input`,
+    html: renderCourseSupportOperatorSummaryHtml({ incidents: sortedIncidents })
+  };
+  const result = await new Resend(apiKey).emails.send(email, {
+    idempotencyKey: `course-support-summary/${scope}`
+  });
+
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+
+  return { ...result.data, deliveryStatus: "sent" };
+}
+
 export function normalizeEmailEnvValue(value?: string) {
   return value?.replace(/\uFEFF/g, "").trim();
 }
@@ -284,6 +347,71 @@ export function renderCourseSupportOperatorHtml(input: CourseSupportOperatorEmai
       </div>
     </div>
   `;
+}
+
+export function renderCourseSupportOperatorSummaryHtml(
+  input: CourseSupportOperatorSummaryInput
+) {
+  const groups = new Map<string, CourseSupportOperatorSummaryInput["incidents"]>();
+  for (const incident of input.incidents) {
+    const provider = getSupportProviderLabel(incident.platform, incident.bookingUrl);
+    const group = groups.get(provider) ?? [];
+    group.push(incident);
+    groups.set(provider, group);
+  }
+  const sections = [...groups.entries()]
+    .map(([provider, incidents]) => {
+      const rows = incidents
+        .map((incident) => {
+          const bookingLink = incident.bookingUrl
+            ? `<p style="margin:8px 0 0"><a href="${escapeHtml(incident.bookingUrl)}" style="color:#087746;font-weight:800">Inspect official course surface &rarr;</a></p>`
+            : "";
+          return `
+            <div style="border-top:1px solid #e5ebe7;padding:14px 0">
+              <p style="font-size:16px;font-weight:800;margin:0">${escapeHtml(incident.courseName)}</p>
+              <p style="color:#53645c;font-size:13px;margin:4px 0 0">${escapeHtml(incident.kind.replaceAll("_", " ").toLowerCase())} &middot; first seen ${escapeHtml(incident.firstSeenAt.toISOString())}</p>
+              ${incident.message ? `<p style="margin:8px 0 0"><strong>Evidence:</strong> ${escapeHtml(incident.message)}</p>` : ""}
+              ${incident.nextAction ? `<p style="margin:8px 0 0"><strong>Next action:</strong> ${escapeHtml(incident.nextAction)}</p>` : ""}
+              ${bookingLink}
+            </div>
+          `;
+        })
+        .join("");
+      return `
+        <div style="margin-top:18px">
+          <h2 style="font-size:18px;margin:0 0 4px">${escapeHtml(provider)} &middot; ${incidents.length} course${incidents.length === 1 ? "" : "s"}</h2>
+          ${rows}
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
+      <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
+        <div style="background:#111d18;color:#ffffff;padding:18px 22px">
+          <div style="font-weight:800;font-size:18px">Tee Time Spot operations</div>
+          <div style="color:rgba(255,255,255,.68);font-size:13px">Automated adapter remediation reached an external blocker</div>
+        </div>
+        <div style="padding:22px">
+          <h1 style="font-size:24px;line-height:1.15;margin:0 0 10px">A concrete blocker needs your input</h1>
+          <p style="margin:0;color:#53645c">The autonomous remediation run inspected the official provider, attempted the safe public paths available to it, and could not continue without the specific external action below.</p>
+          ${sections}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function getSupportProviderLabel(platform: string, bookingUrl?: string | null) {
+  if (platform !== "UNKNOWN") {
+    return platform;
+  }
+  try {
+    return bookingUrl ? new URL(bookingUrl).hostname : "Unknown provider";
+  } catch {
+    return "Unknown provider";
+  }
 }
 
 function getCourseSupportOperatorSubject(input: CourseSupportOperatorEmailInput) {

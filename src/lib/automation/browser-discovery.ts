@@ -139,7 +139,7 @@ function learnCpsDiscovery(
   observedUrls: string[]
 ): BrowserDiscovery | null {
   const cpsUrl =
-    observedUrls.map(parseUrl).find((url) => url?.hostname.endsWith(".cps.golf")) ??
+    observedUrls.map(parseUrl).find(isCpsReservationUrl) ??
     getCpsWidgetUrl(evidence.visibleText);
 
   if (!cpsUrl) {
@@ -172,6 +172,13 @@ function learnCpsDiscovery(
       learnedFrom: "cps-booking-url"
     }
   };
+}
+
+function isCpsReservationUrl(url: URL | null) {
+  return Boolean(
+    url?.hostname.endsWith(".cps.golf") &&
+      /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/i.test(url.pathname)
+  );
 }
 
 export async function enrichChronogolfDiscovery(
@@ -504,12 +511,21 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
 function pickBookingLikeUrl(urls: string[]) {
   return urls.find((url) => {
     const parsed = parseUrl(url);
-    if (!parsed || isNonBookingHost(parsed.hostname) || isStaticAssetPath(parsed.pathname)) {
+    if (
+      !parsed ||
+      isNonBookingHost(parsed.hostname) ||
+      isStaticAssetPath(parsed.pathname) ||
+      isEditorialContentPath(parsed.pathname)
+    ) {
       return false;
     }
 
+    if (parsed.hostname.endsWith("chelseareservations.com")) {
+      return true;
+    }
+
     const searchable = `${parsed.hostname} ${parsed.pathname} ${parsed.search}`;
-    return /(^|[^a-z])(book|booking|tee.?times?|reservation|reserve|foreup|golfnow|teeitup|chronogolf|clubcaddie)([^a-z]|$)/i.test(
+    return /(^|[^a-z])(book|booking|tee.?times?|reservations?|reserve|foreup|golfnow|teeitup|chronogolf|clubcaddie)([^a-z]|$)/i.test(
       searchable
     );
   });
@@ -664,4 +680,8 @@ function isReusableCpsMetadata(value: unknown) {
       typeof metadata.courseId === "number" &&
       typeof metadata.bookingBaseUrl === "string")
   );
+}
+
+function isEditorialContentPath(pathname: string) {
+  return /\/(?:events?|news|blog|calendar|posts?)\//i.test(pathname);
 }

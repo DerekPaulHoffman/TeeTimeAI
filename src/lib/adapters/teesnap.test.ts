@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchTeesnapSlots, isTeesnapMetadata } from "./teesnap";
+import { fetchTeesnapSlots, fetchTeesnapTeeSheet, isTeesnapMetadata } from "./teesnap";
 
 describe("isTeesnapMetadata", () => {
   it("recognizes reusable Teesnap metadata", () => {
@@ -113,6 +113,43 @@ describe("fetchTeesnapSlots", () => {
         }
       })
     ).resolves.toEqual([]);
+  });
+
+  it("learns the exact booking window from the public TeeSnap course configuration", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({ errors: "date_not_allowed" }, { status: 400 })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          `<script>window.courses = [{"id":1210,"advance":7,"start_availability_time":"5:00 AM"}]; window.property = {};</script>`,
+          { status: 200 }
+        )
+      );
+
+    await expect(
+      fetchTeesnapTeeSheet({
+        courseId: "course-hunter",
+        date: new Date("2026-07-29T00:00:00-04:00"),
+        players: 4,
+        discoverBookingWindow: true,
+        metadata: {
+          provider: "TEESNAP",
+          courseId: 1210,
+          bookingBaseUrl: "https://huntergolfclub.teesnap.net/"
+        }
+      })
+    ).resolves.toMatchObject({
+      slots: [],
+      targetDateStatus: "NOT_OPEN",
+      bookingWindowEvidence: {
+        daysAhead: 7,
+        releaseTimeLocal: "05:00",
+        source: "PROVIDER_CONFIG",
+        confidence: 1,
+        evidenceUrl: "https://huntergolfclub.teesnap.net/"
+      }
+    });
   });
 });
 

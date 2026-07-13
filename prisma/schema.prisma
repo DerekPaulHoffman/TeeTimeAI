@@ -39,6 +39,12 @@ enum BookingMethod {
   WALK_IN
 }
 
+enum BookingWindowSource {
+  PROVIDER_CONFIG
+  PROVIDER_MESSAGE
+  OFFICIAL_BOOKING_PAGE
+}
+
 enum AutomationReason {
   NONE
   NO_ONLINE_BOOKING
@@ -122,39 +128,46 @@ model User {
 }
 
 model Course {
-  id                     String                      @id @default(cuid())
-  googlePlaceId          String?                     @unique
-  name                   String
-  address                String?
-  latitude               Float
-  longitude              Float
-  timeZone               String                      @default("America/New_York")
-  rating                 Float?
-  website                String?
-  phone                  String?
-  isPublic               Boolean                     @default(true)
-  isManual               Boolean                     @default(false)
-  detectedBookingUrl     String?
-  detectedPlatform       DetectedPlatform            @default(UNKNOWN)
-  bookingMethod          BookingMethod               @default(UNKNOWN)
-  bookingPhone           String?
-  automationEligibility  AutomationEligibility       @default(UNKNOWN)
-  automationReason       AutomationReason            @default(NONE)
-  policyNotes            String?
-  bookingMetadata        Json?
-  intelligenceVerifiedAt DateTime?
-  intelligenceReviewAt   DateTime?
-  intelligenceConfidence Float?
-  layoutHoleCounts       Int[]                       @default([])
-  layoutHolesEvidenceUrl String?
-  layoutHolesVerifiedAt  DateTime?
-  createdAt              DateTime                    @default(now())
-  updatedAt              DateTime                    @updatedAt
-  preferences            CoursePreference[]
-  probes                 CourseProbe[]
-  matches                TeeTimeMatch[]
-  automationDiscoveries  CourseAutomationDiscovery[]
-  supportIncident        CourseSupportIncident?
+  id                       String                      @id @default(cuid())
+  googlePlaceId            String?                     @unique
+  name                     String
+  address                  String?
+  latitude                 Float
+  longitude                Float
+  timeZone                 String                      @default("America/New_York")
+  rating                   Float?
+  website                  String?
+  phone                    String?
+  isPublic                 Boolean                     @default(true)
+  isManual                 Boolean                     @default(false)
+  detectedBookingUrl       String?
+  detectedPlatform         DetectedPlatform            @default(UNKNOWN)
+  bookingMethod            BookingMethod               @default(UNKNOWN)
+  bookingPhone             String?
+  bookingWindowDaysAhead   Int?
+  bookingReleaseTimeLocal  String?
+  bookingWindowSource      BookingWindowSource?
+  bookingWindowConfidence  Float?
+  bookingWindowEvidenceUrl String?
+  bookingWindowCheckedAt   DateTime?
+  bookingWindowObservedAt  DateTime?
+  automationEligibility    AutomationEligibility       @default(UNKNOWN)
+  automationReason         AutomationReason            @default(NONE)
+  policyNotes              String?
+  bookingMetadata          Json?
+  intelligenceVerifiedAt   DateTime?
+  intelligenceReviewAt     DateTime?
+  intelligenceConfidence   Float?
+  layoutHoleCounts         Int[]                       @default([])
+  layoutHolesEvidenceUrl   String?
+  layoutHolesVerifiedAt    DateTime?
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+  preferences              CoursePreference[]
+  probes                   CourseProbe[]
+  matches                  TeeTimeMatch[]
+  automationDiscoveries    CourseAutomationDiscovery[]
+  supportIncident          CourseSupportIncident?
 
   @@index([latitude, longitude])
   @@index([detectedPlatform, automationEligibility])
