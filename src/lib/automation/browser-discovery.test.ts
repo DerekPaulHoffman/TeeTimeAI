@@ -276,7 +276,36 @@ describe("buildBrowserDiscovery", () => {
       visibleText: "Book tee times"
     });
 
-    expect(discovery.bookingUrl).toBe("https://dennis.chelseareservations.com/");
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://dennis.chelseareservations.com/",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiMetadata: {
+        provider: "CHELSEA",
+        bookingBaseUrl: "https://dennis.chelseareservations.com/",
+        courseCode: 2,
+        courseLabel: "Highland"
+      }
+    });
+  });
+
+  it("maps Dennis Pines separately on the shared public Chelsea tee sheet", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "dennis-pines",
+      courseName: "Dennis Pines Golf Course",
+      sourceUrl: "https://www.dennisgolf.com/",
+      finalUrl: "https://dennis.chelseareservations.com/",
+      observedUrls: ["https://dennis.chelseareservations.com/GPInprocess"],
+      visibleText: "Non Members Login"
+    });
+
+    expect(discovery.apiMetadata).toMatchObject({
+      provider: "CHELSEA",
+      courseCode: 1,
+      courseLabel: "Pines"
+    });
   });
 });
 
@@ -303,6 +332,21 @@ describe("browser probe target selection", () => {
         bookingMetadata: {
           scheduleId: 2,
           bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/1/2#/teetimes"
+        }
+      })
+    ).toBe(false);
+
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "ALLOWED",
+        website: "https://www.dennisgolf.com/",
+        detectedBookingUrl: "https://dennis.chelseareservations.com/",
+        bookingMetadata: {
+          provider: "CHELSEA",
+          bookingBaseUrl: "https://dennis.chelseareservations.com/",
+          courseCode: 2,
+          courseLabel: "Highland"
         }
       })
     ).toBe(false);

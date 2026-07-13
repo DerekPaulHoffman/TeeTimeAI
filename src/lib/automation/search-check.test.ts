@@ -24,8 +24,10 @@ const emailMocks = vi.hoisted(() => ({
 }));
 
 const adapterMocks = vi.hoisted(() => ({
+  fetchChelseaTeeSheet: vi.fn(),
   fetchChronogolfSlots: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
+  isChelseaMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
   isForeupMetadata: vi.fn()
 }));
@@ -43,6 +45,7 @@ const monitoringDiscoveryMocks = vi.hoisted(() => ({
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
+vi.mock("@/lib/adapters/chelsea", () => adapterMocks);
 vi.mock("@/lib/adapters/chronogolf", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
@@ -146,6 +149,12 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isChronogolfMetadata.mockReturnValue(true);
     adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
+    adapterMocks.isChelseaMetadata.mockReturnValue(true);
+    adapterMocks.fetchChelseaTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
     supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
       incidentId: "incident-1",
       status: "AUTO_INVESTIGATING",
@@ -455,5 +464,74 @@ describe("runSearchCheck email cadence", () => {
         resolution: "MONITORING_RESTORED"
       })
     );
+  });
+
+  it("uses public Chelsea metadata and persists its non-member booking window", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            id: "dennis-highland",
+            name: "Dennis Highland Course",
+            detectedPlatform: "CUSTOM",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: "Public Chelsea non-member availability.",
+            bookingMetadata: {
+              provider: "CHELSEA",
+              bookingBaseUrl: "https://dennis.chelseareservations.com/",
+              courseCode: 2,
+              courseLabel: "Highland",
+              bookingWindowDaysAhead: 7,
+              bookingWindowEvidenceUrl: "https://www.dennisgolf.com/policy.pdf"
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    adapterMocks.fetchChelseaTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "NOT_OPEN",
+      bookingWindowEvidence: {
+        daysAhead: 7,
+        releaseTimeLocal: null,
+        source: "OFFICIAL_BOOKING_PAGE",
+        confidence: 0.98,
+        evidenceUrl: "https://www.dennisgolf.com/policy.pdf"
+      }
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchChelseaTeeSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "dennis-highland",
+        players: 2,
+        timeZone: "America/New_York"
+      })
+    );
+    expect(dbMocks.recordCourseBookingWindowEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "dennis-highland",
+        evidence: expect.objectContaining({ daysAhead: 7 })
+      })
+    );
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "dennis-highland",
+        outcome: "NO_MATCH",
+        message: expect.stringContaining("2026-08-08")
+      })
+    );
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "NO_MATCH",
+      bookingWindow: { releaseDate: "2026-08-08", exactTime: false }
+    });
   });
 });

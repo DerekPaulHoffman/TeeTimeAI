@@ -112,6 +112,89 @@ describe("fetchCpsSlots", () => {
       })
     ]);
   });
+
+  it("uses the provider-published public API key without a token or transaction", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = input.toString();
+
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse({
+          clientId: "onlineresweb",
+          authorityBaseUrl: "https://yarmouthpublic.cps.golf/identityapi",
+          onlineApi:
+            "https://yarmouthpublic.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          websiteId: "00000000-0000-0000-0000-000000000000",
+          siteName: "yarmouthpublic",
+          apiKey: "provider-published-key",
+          buildNumber: "25.2.5.56816\n"
+        });
+      }
+
+      if (url.includes("/GetAllOptions/yarmouthpublic?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["x-apikey"]).toBe("provider-published-key");
+        expect(headers["x-websiteid"]).toBe("00000000-0000-0000-0000-000000000000");
+        expect(new URL(url).searchParams.get("version")).toBe("25.2.5.56816");
+        return jsonResponse({
+          webSiteId: "2907d844-40d7-464a-bd26-08da5b6b6bfb",
+          reservationOptions: { terminalId: 3 }
+        });
+      }
+
+      if (url.includes("/TeeTimes?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers.authorization).toBeUndefined();
+        expect(headers["x-apikey"]).toBe("provider-published-key");
+        expect(headers["x-websiteid"]).toBe("2907d844-40d7-464a-bd26-08da5b6b6bfb");
+        expect(headers["x-terminalid"]).toBe("3");
+        const teeTimesUrl = new URL(url);
+        expect(teeTimesUrl.searchParams.has("transactionId")).toBe(false);
+        expect(teeTimesUrl.searchParams.get("holes")).toBe("0");
+        expect(teeTimesUrl.searchParams.get("numberOfPlayer")).toBe("0");
+        return jsonResponse([
+          {
+            teeSheetId: 456,
+            startTime: "2026-07-18T16:36:00",
+            availableParticipantNo: [1, 2, 3, 4],
+            holes: 18,
+            teeSheetPrice: 50
+          }
+        ]);
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const slots = await fetchCpsSlots({
+      courseId: "bayberry",
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      players: 4,
+      timeZone: "America/New_York",
+      metadata: {
+        provider: "CPS",
+        siteName: "yarmouthpublic",
+        bookingBaseUrl: "https://yarmouthpublic.cps.golf/",
+        courseIds: [2, 4],
+        holes: [18, 9]
+      }
+    });
+
+    expect(fetchMock.mock.calls.some(([input]) => input.toString().includes("token/short"))).toBe(
+      false
+    );
+    expect(
+      fetchMock.mock.calls.some(([input]) => input.toString().includes("RegisterTransactionId"))
+    ).toBe(false);
+    expect(slots).toEqual([
+      expect.objectContaining({
+        courseId: "bayberry",
+        sourceId: "cps-yarmouthpublic-456",
+        availableSpots: 4,
+        priceCents: 5000,
+        holes: 18
+      })
+    ]);
+  });
 });
 
 function jsonResponse(value: unknown) {

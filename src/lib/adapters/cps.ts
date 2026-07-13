@@ -19,16 +19,21 @@ type CpsConfiguration = {
   onlineApi: string;
   websiteId: string;
   siteName: string;
+  apiKey?: string;
+  buildNumber?: string;
+  terminalId?: number;
 };
 
 type CpsTokenResponse = {
   access_token?: string;
 };
 
-type CpsSearchResponse = {
-  transactionId?: string;
-  content?: CpsApiSlot[] | unknown;
-};
+type CpsSearchResponse =
+  | {
+      transactionId?: string;
+      content?: CpsApiSlot[] | unknown;
+    }
+  | CpsApiSlot[];
 
 type CpsApiSlot = {
   teeSheetId?: number;
@@ -75,18 +80,36 @@ export async function fetchCpsSlots(input: {
   timeZone?: string;
   metadata: CpsMetadata;
 }): Promise<TeeTimeSlot[]> {
-  const configuration = await loadConfiguration(input.metadata);
-  const token = await fetchShortLivedToken(configuration);
-  const headers = cpsHeaders(configuration, token, input.timeZone ?? "America/New_York", input.date);
+  let configuration = await loadConfiguration(input.metadata);
+  const credential = configuration.apiKey
+    ? { apiKey: configuration.apiKey }
+    : { token: await fetchShortLivedToken(configuration) };
+  if (credential.apiKey) {
+    configuration = await loadPublicOptions(
+      configuration,
+      credential.apiKey,
+      input.timeZone ?? "America/New_York",
+      input.date
+    );
+  }
+  const headers = cpsHeaders(
+    configuration,
+    credential,
+    input.timeZone ?? "America/New_York",
+    input.date
+  );
   const slots: TeeTimeSlot[] = [];
   const seen = new Set<string>();
 
-  for (const holes of input.metadata.holes ?? [18, 9]) {
-    const transactionId = crypto.randomUUID();
-    await registerTransactionId(configuration.onlineApi, headers, transactionId);
+  const holeSearches = credential.apiKey ? [0] : (input.metadata.holes ?? [18, 9]);
+  for (const holes of holeSearches) {
+    const transactionId = credential.token ? crypto.randomUUID() : undefined;
+    if (transactionId) {
+      await registerTransactionId(configuration.onlineApi, headers, transactionId);
+    }
     const url = buildTeeTimesUrl(configuration.onlineApi, {
       date: input.date,
-      players: input.players,
+      players: credential.apiKey ? 0 : input.players,
       cpsCourseIds: input.metadata.courseIds,
       holes,
       transactionId
@@ -100,11 +123,12 @@ export async function fetchCpsSlots(input: {
     }
 
     const payload = (await response.json()) as CpsSearchResponse;
-    if (!Array.isArray(payload.content)) {
+    const content = Array.isArray(payload) ? payload : payload.content;
+    if (!Array.isArray(content)) {
       continue;
     }
 
-    for (const slot of payload.content) {
+    for (const slot of content) {
       if (!slot.startTime || !slot.teeSheetId) {
         continue;
       }
@@ -120,6 +144,7 @@ export async function fetchCpsSlots(input: {
       }
 
       seen.add(sourceId);
+      const resolvedHoles = slot.holes ?? slot.defaultHoles ?? holes;
       slots.push({
         courseId: input.courseId,
         sourceId,
@@ -127,7 +152,7 @@ export async function fetchCpsSlots(input: {
         availableSpots,
         bookingUrl: withDateParam(input.metadata.bookingBaseUrl, input.date),
         priceCents: getPriceCents(slot),
-        holes: slot.holes ?? slot.defaultHoles ?? holes,
+        ...(resolvedHoles === 9 || resolvedHoles === 18 ? { holes: resolvedHoles } : {}),
         evidenceUrl: url
       });
     }
@@ -181,6 +206,37 @@ async function fetchShortLivedToken(configuration: CpsConfiguration) {
   return token.access_token;
 }
 
+async function loadPublicOptions(
+  configuration: CpsConfiguration,
+  apiKey: string,
+  timeZone: string,
+  date: Date
+) {
+  const url = new URL(`${configuration.onlineApi}/GetAllOptions/${configuration.siteName}`);
+  if (configuration.buildNumber?.trim()) {
+    url.searchParams.set("version", configuration.buildNumber.trim());
+  }
+  url.searchParams.set("product", "3");
+  const response = await fetch(url, {
+    headers: cpsHeaders(configuration, { apiKey }, timeZone, date)
+  });
+  if (!response.ok) {
+    throw new Error(`CPS public options returned ${response.status}`);
+  }
+  const payload = (await response.json()) as {
+    webSiteId?: string;
+    reservationOptions?: { terminalId?: number };
+  };
+  if (!payload.webSiteId) {
+    throw new Error("CPS public options did not include a website id");
+  }
+  return {
+    ...configuration,
+    websiteId: payload.webSiteId,
+    terminalId: payload.reservationOptions?.terminalId ?? configuration.terminalId ?? 1
+  };
+}
+
 async function registerTransactionId(onlineApi: string, headers: Record<string, string>, transactionId: string) {
   const response = await fetch(`${onlineApi}/RegisterTransactionId`, {
     method: "POST",
@@ -206,7 +262,7 @@ function buildTeeTimesUrl(
     players: number;
     cpsCourseIds: number[];
     holes: number;
-    transactionId: string;
+    transactionId?: string;
   }
 ) {
   const url = new URL(`${onlineApi}/TeeTimes`);
@@ -215,7 +271,9 @@ function buildTeeTimesUrl(
   url.searchParams.set("numberOfPlayer", String(input.players));
   url.searchParams.set("courseIds", input.cpsCourseIds.join(","));
   url.searchParams.set("searchTimeType", "0");
-  url.searchParams.set("transactionId", input.transactionId);
+  if (input.transactionId) {
+    url.searchParams.set("transactionId", input.transactionId);
+  }
   url.searchParams.set("teeOffTimeMin", "0");
   url.searchParams.set("teeOffTimeMax", "23");
   url.searchParams.set("isChangeTeeOffTime", "true");
@@ -252,7 +310,7 @@ function formatCpsDate(date: Date) {
 
 function cpsHeaders(
   configuration: CpsConfiguration,
-  token: string,
+  credential: { token?: string; apiKey?: string },
   timeZone: string,
   date: Date
 ) {
@@ -262,9 +320,10 @@ function cpsHeaders(
 
   return {
     accept: "application/json, text/plain, */*",
-    authorization: `Bearer ${token}`,
+    ...(credential.token ? { authorization: `Bearer ${credential.token}` } : {}),
+    ...(credential.apiKey ? { "x-apikey": credential.apiKey } : {}),
     "client-id": configuration.clientId,
-    "x-terminalid": "1",
+    "x-terminalid": String(configuration.terminalId ?? 1),
     "x-requestid": crypto.randomUUID(),
     "x-websiteid": configuration.websiteId,
     "x-ismobile": "false",

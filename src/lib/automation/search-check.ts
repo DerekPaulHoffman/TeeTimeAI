@@ -26,6 +26,7 @@ import {
   resolveCourseSupportIncident
 } from "@/lib/automation/support-incidents";
 import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
+import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
@@ -747,7 +748,9 @@ function hasSupportedAdapter(course: AutomationCourse) {
     (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) ||
     (course.detectedPlatform === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) ||
     (course.detectedPlatform === "CUSTOM" &&
-      (isCpsMetadata(course.bookingMetadata) || isTeesnapMetadata(course.bookingMetadata)))
+      (isCpsMetadata(course.bookingMetadata) ||
+        isChelseaMetadata(course.bookingMetadata) ||
+        isTeesnapMetadata(course.bookingMetadata)))
   );
 }
 
@@ -799,6 +802,15 @@ function fetchCourseTeeSheet(
       targetDateStatus: slots.length > 0 ? "OPEN" as const : "UNKNOWN" as const,
       bookingWindowEvidence: null
     }));
+  }
+  if (course.detectedPlatform === "CUSTOM" && isChelseaMetadata(course.bookingMetadata)) {
+    return fetchChelseaTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      timeZone: course.timeZone,
+      metadata: course.bookingMetadata
+    });
   }
   if (course.detectedPlatform === "CUSTOM" && isTeesnapMetadata(course.bookingMetadata)) {
     return fetchTeesnapTeeSheet({

@@ -49,6 +49,13 @@ export type BrowserDiscovery = {
     defaultHoles?: 9 | 18;
     defaultAddons?: string;
   } | {
+    provider: "CHELSEA";
+    bookingBaseUrl: string;
+    courseCode: number;
+    courseLabel: string;
+    bookingWindowDaysAhead?: number;
+    bookingWindowEvidenceUrl?: string;
+  } | {
     clubId: number;
     courseIds: string[];
     bookingBaseUrl: string;
@@ -86,6 +93,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   if (teeItUpDiscovery) {
     return teeItUpDiscovery;
+  }
+
+  const chelseaDiscovery = learnChelseaDiscovery(evidence, observedUrls);
+
+  if (chelseaDiscovery) {
+    return chelseaDiscovery;
   }
 
   const cpsDiscovery = learnCpsDiscovery(evidence, observedUrls);
@@ -131,7 +144,7 @@ export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
     return false;
   }
 
-  if (course.detectedPlatform === "CUSTOM" && isReusableCpsMetadata(course.bookingMetadata)) {
+  if (course.detectedPlatform === "CUSTOM" && isReusableCustomMetadata(course.bookingMetadata)) {
     return false;
   }
 
@@ -140,6 +153,57 @@ export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
   }
 
   return Boolean(getBestProbeUrl(course));
+}
+
+function learnChelseaDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const chelseaUrl = observedUrls
+    .map(parseUrl)
+    .find((url) => Boolean(url && /(^|\.)chelseareservations\.com$/i.test(url.hostname)));
+  const course = getChelseaCourse(evidence.courseName);
+  if (!chelseaUrl || !course) {
+    return null;
+  }
+
+  const bookingBaseUrl = `${chelseaUrl.origin}/`;
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The official Chelsea Reservations non-member surface exposes public availability without login. Tee Time Spot reads the tee sheet and leaves reservation on the official site.",
+    apiEndpoint: `${chelseaUrl.origin}/GPInprocess/code/Booking/booking1.aspx`,
+    apiMetadata: {
+      provider: "CHELSEA",
+      bookingBaseUrl,
+      courseCode: course.code,
+      courseLabel: course.label
+    },
+    confidence: 0.9,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "chelsea-public-non-member-surface"
+    }
+  };
+}
+
+function getChelseaCourse(courseName: string) {
+  if (/\bhighlands?\b/i.test(courseName)) {
+    return { code: 2, label: "Highland" };
+  }
+  if (/\bpines?\b/i.test(courseName)) {
+    return { code: 1, label: "Pines" };
+  }
+  return null;
 }
 
 function learnCpsDiscovery(
@@ -541,6 +605,13 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
   if (urls.some(isTeesnapBookingUrl)) {
     return "CUSTOM";
   }
+  if (
+    urls.some((url) =>
+      /(^|\.)chelseareservations\.com$/i.test(parseUrl(url)?.hostname ?? "")
+    )
+  ) {
+    return "CUSTOM";
+  }
   return "UNKNOWN";
 }
 
@@ -688,7 +759,7 @@ function isReusableTeeItUpMetadata(value: unknown) {
   );
 }
 
-function isReusableCpsMetadata(value: unknown) {
+function isReusableCustomMetadata(value: unknown) {
   if (!value || typeof value !== "object") {
     return false;
   }
@@ -700,6 +771,8 @@ function isReusableCpsMetadata(value: unknown) {
     courseIds?: unknown;
     holes?: unknown;
     courseId?: unknown;
+    courseCode?: unknown;
+    courseLabel?: unknown;
   };
   return (
     (metadata.provider === "CPS" &&
@@ -714,7 +787,11 @@ function isReusableCpsMetadata(value: unknown) {
           metadata.holes.every((holes) => holes === 9 || holes === 18)))) ||
     (metadata.provider === "TEESNAP" &&
       typeof metadata.courseId === "number" &&
-      typeof metadata.bookingBaseUrl === "string")
+      typeof metadata.bookingBaseUrl === "string") ||
+    (metadata.provider === "CHELSEA" &&
+      typeof metadata.bookingBaseUrl === "string" &&
+      typeof metadata.courseCode === "number" &&
+      typeof metadata.courseLabel === "string")
   );
 }
 
