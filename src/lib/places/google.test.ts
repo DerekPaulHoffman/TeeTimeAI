@@ -394,6 +394,26 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("filters a verified indoor simulator that Google misclassifies as a golf course", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJy4_CTDEtDogR9wxAr-a-VGI",
+          displayName: { text: "Chicago Golf Authority" },
+          formattedAddress: "355 N Laflin St Suite 101, Chicago, IL 60607, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://chicagogolfauthority.com/",
+          location: { latitude: 41.8881627, longitude: -87.664067 }
+        }
+      ],
+      { publicCourseEvidenceIds: new Set(["ChIJy4_CTDEtDogR9wxAr-a-VGI"]) }
+    );
+
+    expect(places).toEqual([]);
+  });
+
   it("dedupes the same logical course without collapsing distinct courses at one venue", () => {
     const places = dedupeGolfCoursePlaces([
       {

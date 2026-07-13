@@ -152,6 +152,19 @@ const VERIFIED_PRIVATE_COURSES = [
 const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
   VERIFIED_PRIVATE_COURSES.map((course) => course.placeId)
 );
+// Some indoor simulator businesses remain misclassified by Google as outdoor golf courses even
+// after indoor_golf_course became a distinct Places type. Exclude only stable place IDs whose
+// official site confirms that the location is a simulator rather than a playable course.
+const VERIFIED_NON_COURSE_PLACES = [
+  {
+    placeId: "ChIJy4_CTDEtDogR9wxAr-a-VGI",
+    name: "Chicago Golf Authority",
+    evidenceUrl: "https://chicagogolfauthority.com/pages/how-it-works"
+  }
+] as const;
+const VERIFIED_NON_COURSE_PLACE_IDS = new Set<string>(
+  VERIFIED_NON_COURSE_PLACES.map((place) => place.placeId)
+);
 
 export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandidate {
   const googlePlaceId = normalizePlaceId(place.id ?? place.name ?? "");
@@ -195,7 +208,10 @@ function isLikelyPublicGolfCoursePlace(
   const hasPublicCourseEvidence = publicCourseEvidenceIds.has(placeId);
   const isVerifiedPublicCourse = VERIFIED_PUBLIC_COURSE_PLACE_IDS.has(placeId);
 
-  if (VERIFIED_PRIVATE_COURSE_PLACE_IDS.has(placeId)) {
+  if (
+    VERIFIED_PRIVATE_COURSE_PLACE_IDS.has(placeId) ||
+    VERIFIED_NON_COURSE_PLACE_IDS.has(placeId)
+  ) {
     return false;
   }
 

@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-13: Verified simulator identity must override a stale golf-course type
+
+- Sources: [Chicago Golf Authority: How It Works](https://chicagogolfauthority.com/pages/how-it-works) and [Google Places API (New) place types](https://developers.google.com/maps/documentation/places/web-service/place-types), accessed 2026-07-13 America/New_York. The official business page identifies the West Loop address as an indoor simulator facility; Google's current type catalog distinguishes `indoor_golf_course` from `golf_course`.
+- Tee Time Spot evidence: a real signed-out `60601` search returned Google place `ChIJy4_CTDEtDogR9wxAr-a-VGI` first and labeled it `Public`, even though it is a suite-based simulator rather than a playable outdoor course. Production still supplies the place through the golf-course query, so type filtering alone does not catch it.
+- Decision: exclude this verified non-course by stable Google place ID before accepting type or semantic-public corroboration. Do not add a broad `Authority` or suite-address heuristic; ambiguous generic Chicago course pins remain visible until their identities can be resolved safely.
+
 ## 2026-07-13: Sitemaps should cover canonical public routes with trustworthy fields
 
 - Sources: [Google Search Central: Build and submit a sitemap](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap) (last updated 2025-12-10 UTC) and [Next.js sitemap file convention](https://nextjs.org/docs/app/api-reference/file-conventions/metadata/sitemap) (last updated 2026-03-25), accessed 2026-07-13 America/New_York.
