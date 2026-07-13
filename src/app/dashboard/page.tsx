@@ -88,6 +88,12 @@ function DashboardView({
   const alertStatusCopy = `${activeCount} ${
     activeCount === 1 ? "alert" : "alerts"
   } running. We'll email you when a spot opens at a supported course.`;
+  const readyMessage =
+    activeCount > 0
+      ? "You’re all set — we’re checking supported courses and will email you when a matching spot opens."
+      : searches.length > 0
+        ? "You don’t have an active alert right now. Resume a previous search or start a new one."
+        : "No alerts yet. Find a tee time to start watching your preferred public courses.";
   const inactiveHeading = inactiveSearches.every((search) => search.status === "CANCELLED")
     ? "Cancelled"
     : "Paused and completed";
@@ -108,9 +114,7 @@ function DashboardView({
       </div>
 
       <div className="alert alert-info dashboard-alert dashboard-ready-message">
-        <p>
-          You&apos;re all set — we&apos;re checking supported courses and will email you when a matching spot opens.
-        </p>
+        <p>{readyMessage}</p>
         {notice ? <small>{notice}</small> : null}
       </div>
 

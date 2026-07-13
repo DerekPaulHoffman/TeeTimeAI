@@ -198,24 +198,28 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
           <p style="margin:0;color:rgba(255,255,255,.82)">${escapeHtml(intro)}</p>
         </div>
         <div style="padding:22px">
-          <table role="presentation" style="width:100%;border-collapse:collapse;margin-bottom:20px">
+          <table role="presentation" style="width:100%;border-collapse:collapse;table-layout:fixed;margin-bottom:20px">
             <tr>
-              <td style="background:#f5f7f2;border-radius:8px;padding:12px">
+              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
                 <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Date</div>
                 <div style="font-weight:800">${escapeHtml(targetDate)}</div>
               </td>
               <td style="width:8px"></td>
-              <td style="background:#f5f7f2;border-radius:8px;padding:12px">
+              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
                 <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Window</div>
                 <div style="font-weight:800">${escapeHtml(window)}</div>
               </td>
-              <td style="width:8px"></td>
-              <td style="background:#f5f7f2;border-radius:8px;padding:12px">
+            </tr>
+            <tr>
+              <td colspan="3" style="height:8px;font-size:0;line-height:0">&nbsp;</td>
+            </tr>
+            <tr>
+              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
                 <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Course layout</div>
                 <div style="font-weight:800">${escapeHtml(courseLayout)}</div>
               </td>
               <td style="width:8px"></td>
-              <td style="background:#f5f7f2;border-radius:8px;padding:12px">
+              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
                 <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Golfers</div>
                 <div style="font-weight:800">${input.players}</div>
               </td>

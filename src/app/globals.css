@@ -1402,7 +1402,8 @@ button {
 .email-browser-card .email-frame {
   border: 0;
   border-radius: 0;
-  height: 880px;
+  display: block;
+  width: 100%;
 }
 
 .preview-sidebar {
@@ -2330,7 +2331,7 @@ button {
   color: #ffffff;
   display: grid;
   gap: 10px;
-  grid-template-columns: auto auto 34px minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   min-height: 62px;
   padding: 9px 10px;
 }
@@ -2357,10 +2358,7 @@ button {
 }
 
 .search-page .figma-selected-panel .figma-selected-card .course-thumbnail {
-  border-radius: 999px;
-  grid-area: auto;
-  height: 34px;
-  width: 34px;
+  display: none;
 }
 
 .search-page .figma-selected-panel .figma-selected-card h3 {
@@ -2368,9 +2366,8 @@ button {
   font-size: 0.82rem;
   line-height: 1.2;
   margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .figma-reorder-controls {
@@ -2386,12 +2383,12 @@ button {
   border: 0;
   color: rgba(255, 255, 255, 0.68);
   display: inline-flex;
-  height: 28px;
+  height: 36px;
   justify-content: center;
-  min-height: 28px;
-  min-width: 28px;
+  min-height: 36px;
+  min-width: 36px;
   padding: 0;
-  width: 28px;
+  width: 36px;
 }
 
 .figma-reorder-controls button:disabled {
@@ -2487,7 +2484,7 @@ button {
   }
 
   .figma-selected-card {
-    grid-template-columns: auto auto 34px minmax(0, 1fr) auto auto;
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   }
 
   .mobile-selection-bar {
@@ -2503,7 +2500,7 @@ button {
 }
 
 .email-browser-card .email-status-frame {
-  height: 1220px;
+  min-height: 1220px;
 }
 
 .preview-section-header {
@@ -3999,7 +3996,11 @@ button {
 /* Figma Make v33: field grid and filtering row. */
 .figma-search-primary {
   border-bottom: 1px solid #f0f4f1;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns:
+    minmax(220px, 1.25fr)
+    minmax(120px, 0.65fr)
+    minmax(142px, 0.75fr)
+    minmax(260px, 1.35fr);
   min-height: 64px;
 }
 
@@ -4025,6 +4026,20 @@ button {
   font-size: 0.56rem;
   letter-spacing: 0.12em;
   margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.sr-only {
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 
 .figma-search-value {
@@ -5463,6 +5478,10 @@ button {
     display: none;
   }
 
+  .search-page .figma-results-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .search-page .figma-selected-panel.is-mobile-open {
     bottom: 72px;
     box-shadow: 0 -8px 32px rgba(17, 26, 34, 0.3);
@@ -5686,13 +5705,14 @@ button {
   .home-form-actions {
     display: grid;
     gap: 8px;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   }
 
   .home-form-actions .button {
+    justify-content: center;
     min-width: 0;
     padding-inline: 14px;
-    width: auto;
+    width: 100%;
   }
 
   .home-form-actions .button-dark {
@@ -5835,6 +5855,27 @@ button {
     flex: 0 0 auto;
   }
 
+  .search-page .figma-course-list .course-actions .button-ghost,
+  .search-page .figma-course-list .figma-add-button,
+  .missing-course-result .figma-add-button,
+  .figma-hole-options button,
+  .figma-reset-filters {
+    min-height: 44px;
+  }
+
+  .figma-use-location {
+    height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+    right: 6px;
+    top: 9px;
+    width: 44px;
+  }
+
+  .figma-location-field input {
+    padding-right: 44px;
+  }
+
   .search-page .figma-course-list .figma-add-button {
     flex: 1;
   }
@@ -5897,18 +5938,52 @@ button {
   }
 
   .watch-course-row {
-    grid-template-columns: 96px minmax(0, 1fr) auto;
+    grid-template-columns: 96px minmax(0, 1fr);
   }
 
   .dashboard-course-image {
-    grid-row: auto;
+    grid-row: 1 / span 2;
   }
 
   .watch-course-links {
-    align-items: end;
-    grid-column: auto;
-    justify-items: end;
-    padding: 8px 12px 8px 0;
+    align-items: center;
+    column-gap: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    grid-column: 2;
+    justify-content: flex-start;
+    padding: 0 12px 8px;
+    row-gap: 2px;
+  }
+
+  .watch-course-row a {
+    min-height: 44px;
+  }
+
+  .dashboard-action-row .button,
+  .dashboard-icon-button,
+  .dashboard-edit-button,
+  .dashboard-check-button {
+    min-height: 44px;
+  }
+
+  .dashboard-icon-button {
+    min-width: 44px;
+    width: 44px;
+  }
+
+  .figma-reorder-controls button,
+  .figma-remove-course {
+    height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+    width: 44px;
+  }
+
+  .topbar .button,
+  .topbar .cl-userButtonTrigger {
+    min-height: 44px;
+    min-width: 44px;
   }
 
   .preview-page {
@@ -5948,6 +6023,48 @@ button {
 
   .email-browser-card .email-frame {
     min-width: 0;
+  }
+}
+
+@media (min-width: 621px) and (max-width: 1024px) {
+  .figma-search-primary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .figma-search-field:nth-child(2) {
+    border-right: 0;
+  }
+
+  .figma-search-field:nth-child(n + 3) {
+    border-top: 1px solid #f0f4f1;
+  }
+}
+
+@media (max-width: 380px) {
+  .topbar {
+    max-width: 100vw;
+    overflow-x: clip;
+    width: 100%;
+  }
+
+  .topbar .nav-actions > .button:not(.nav-sign-in) {
+    flex: 0 0 44px;
+    max-width: 44px;
+    min-width: 44px;
+    overflow: hidden;
+    padding: 0;
+    width: 44px;
+  }
+
+  .hero-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .hero-actions .button {
+    justify-content: center;
+    width: 100%;
   }
 }
 
@@ -6077,5 +6194,360 @@ button {
 
   .feedback-launcher span {
     display: inline;
+  }
+}
+
+/* Figma Make v53: compact search filters and orange primary action. */
+.figma-mobile-copy,
+.figma-time-summary,
+.figma-time-editor-done {
+  display: none;
+}
+
+.figma-distance-group,
+.figma-distance-heading {
+  display: contents;
+}
+
+.figma-search-submit {
+  background: #d9862f;
+  color: #ffffff;
+}
+
+.figma-search-submit:hover:not(:disabled) {
+  background: #c87929;
+}
+
+@media (min-width: 621px) {
+  .figma-time-field .figma-search-value {
+    grid-template-columns: auto max-content;
+    justify-content: start;
+  }
+
+  .figma-time-field .figma-time-inputs {
+    gap: 8px;
+    grid-template-columns: 88px auto 88px;
+    justify-content: start;
+    width: max-content;
+  }
+
+  .figma-time-field .figma-time-inputs input {
+    width: 88px;
+  }
+}
+
+@media (max-width: 620px) {
+  .figma-search-toolbar {
+    border-color: #d9e3dc;
+    box-shadow: 0 4px 20px rgba(17, 26, 34, 0.07);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-inline: 10px;
+    overflow: visible;
+    position: relative;
+  }
+
+  .figma-search-primary,
+  .figma-filter-strip {
+    display: contents;
+  }
+
+  .figma-search-field,
+  .figma-search-field:nth-child(2),
+  .figma-search-field:nth-child(n + 2) {
+    background: #ffffff;
+    border: 0;
+    border-bottom: 1px solid #e2eae5;
+    min-height: 66px;
+    padding: 14px 16px;
+  }
+
+  .figma-search-field:hover,
+  .figma-search-field:focus-within {
+    background: #ffffff;
+  }
+
+  .figma-search-field > span,
+  .figma-search-field > label,
+  .figma-search-field > legend,
+  .figma-hole-filter strong,
+  .figma-distance-label {
+    color: #45675d;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    line-height: 1.2;
+    margin: 0 0 4px;
+    text-transform: uppercase;
+  }
+
+  .figma-search-field input,
+  .figma-search-field select {
+    color: #14231d;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .figma-location-field {
+    grid-column: 1 / -1;
+    min-height: 68px;
+  }
+
+  .figma-location-field input {
+    padding-right: 34px;
+  }
+
+  .figma-use-location {
+    color: #8fa89c;
+    display: inline-flex;
+    height: 32px;
+    min-height: 32px;
+    min-width: 32px;
+    right: 8px;
+    top: 20px;
+    width: 32px;
+  }
+
+  .figma-search-primary > .figma-search-field:nth-child(2) {
+    border-right: 1px solid #e2eae5;
+  }
+
+  .figma-time-field {
+    border-right: 1px solid #e2eae5;
+    min-height: 61px;
+    overflow: visible;
+    padding-block: 10px;
+    position: static;
+  }
+
+  .figma-time-field .figma-search-value {
+    gap: 7px;
+  }
+
+  .figma-desktop-copy {
+    display: none;
+  }
+
+  .figma-mobile-copy,
+  .figma-time-summary {
+    display: inline;
+  }
+
+  .figma-time-summary {
+    background: transparent;
+    border: 0;
+    color: #14231d;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    min-height: 28px;
+    overflow: hidden;
+    padding: 0;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .figma-time-field .figma-time-inputs {
+    display: none;
+  }
+
+  .figma-time-field .figma-time-inputs.is-mobile-open {
+    align-items: center;
+    background: #ffffff;
+    border: 1px solid #d9e3dc;
+    border-radius: 12px;
+    box-shadow: 0 12px 28px rgba(17, 26, 34, 0.16);
+    display: grid;
+    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    bottom: auto;
+    left: 12px;
+    max-width: none;
+    padding: 12px;
+    position: absolute;
+    top: calc(100% + 8px);
+    transform: none;
+    width: calc(100% - 24px);
+    z-index: 20;
+  }
+
+  .figma-time-field .figma-time-inputs.is-mobile-open input {
+    background: #f7f9f7;
+    border: 1px solid #d9e3dc;
+    border-radius: 8px;
+    min-height: 40px;
+    padding: 0 8px;
+  }
+
+  .figma-time-field .figma-time-inputs.is-mobile-open .figma-time-editor-done {
+    align-items: center;
+    background: #14231d;
+    border: 0;
+    border-radius: 8px;
+    color: #ffffff;
+    display: inline-flex;
+    font-size: 13px;
+    font-weight: 700;
+    grid-column: 1 / -1;
+    justify-content: center;
+    min-height: 40px;
+  }
+
+  .figma-hole-filter {
+    align-items: flex-start;
+    background: #ffffff;
+    border-bottom: 1px solid #e2eae5;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    min-height: 61px;
+    padding: 10px 16px;
+    width: auto;
+  }
+
+  .figma-hole-filter strong {
+    margin: 0;
+  }
+
+  .figma-hole-options {
+    background: transparent;
+    gap: 4px;
+    padding: 0;
+  }
+
+  .figma-hole-filter .figma-hole-options button,
+  .figma-hole-filter .figma-hole-options button.is-active {
+    border: 1px solid #e2eae5;
+    border-radius: 999px;
+    box-shadow: none;
+    font-size: 11px;
+    font-weight: 700;
+    height: 28px;
+    min-height: 28px;
+    padding: 0 8px;
+  }
+
+  .figma-hole-filter .figma-hole-options button {
+    background: #f0f4f1;
+    color: #45675d;
+  }
+
+  .figma-hole-filter .figma-hole-options button.is-active {
+    background: #14231d;
+    border-color: #14231d;
+    color: #ffffff;
+  }
+
+  .figma-filter-strip .figma-filter-divider {
+    display: none;
+  }
+
+  .figma-distance-group {
+    background: #ffffff;
+    border-bottom: 1px solid #e2eae5;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    grid-column: 1 / -1;
+    min-height: 57px;
+    padding: 10px 16px;
+    position: relative;
+  }
+
+  .figma-distance-heading {
+    align-items: center;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .figma-distance-label {
+    margin: 0;
+    width: auto;
+  }
+
+  .figma-distance-filter {
+    align-items: center;
+    display: grid;
+    flex: none;
+    gap: 8px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .figma-distance-filter > span {
+    display: contents;
+  }
+
+  .figma-distance-filter em:first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .figma-distance-filter b {
+    color: #14231d;
+    font-size: 12px;
+    font-weight: 700;
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .figma-distance-filter em {
+    color: #4c6a61;
+    font-size: 11px;
+  }
+
+  .figma-distance-filter em:last-child,
+  .figma-distance-prefix {
+    display: none;
+  }
+
+  .figma-distance-filter input[type="range"] {
+    grid-column: 2;
+    grid-row: 1;
+    height: 24px;
+  }
+
+  .figma-reset-filters {
+    min-height: 28px;
+    padding: 0 8px;
+    position: absolute;
+    right: 10px;
+    top: 4px;
+  }
+
+  .figma-search-submit {
+    align-self: center;
+    background: #d9862f;
+    border-radius: 14px;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 700;
+    grid-column: 1 / -1;
+    height: 40px;
+    justify-content: center;
+    margin: 12px;
+    min-height: 40px;
+    padding: 0 16px;
+    width: auto;
+  }
+}
+
+@media (max-width: 350px) {
+  .figma-search-toolbar {
+    margin-inline: 0;
+  }
+
+  .figma-hole-filter,
+  .figma-time-field {
+    padding-inline: 10px;
+  }
+
+  .figma-hole-filter .figma-hole-options button,
+  .figma-hole-filter .figma-hole-options button.is-active {
+    padding-inline: 6px;
   }
 }

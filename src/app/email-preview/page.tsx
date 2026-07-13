@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Bell, CalendarCheck2, Clock3, ExternalLink, Mail, Search } from "lucide-react";
 
+import { EmailPreviewFrame } from "@/components/email-preview-frame";
 import { renderAlertHtml } from "@/lib/email/alerts";
 import { renderSearchStatusHtml } from "@/lib/email/search-status";
 
@@ -14,8 +15,8 @@ export const metadata: Metadata = {
 };
 
 const previewStopUrls = {
-  booked: "https://teetimespot.com/alerts/stop?token=preview-booked",
-  cancelled: "https://teetimespot.com/alerts/stop?token=preview-cancelled"
+  booked: "/alerts/stop?token=preview-booked",
+  cancelled: "/alerts/stop?token=preview-cancelled"
 };
 
 const previewAlert = {
@@ -162,10 +163,11 @@ export default function EmailPreviewPage() {
             <span />
             <strong>Search update from Tee Time Spot - preview@teetimespot.com</strong>
           </div>
-          <iframe
+          <EmailPreviewFrame
             className="email-frame email-status-frame"
-            title="Rendered search status email"
+            initialHeight={1220}
             srcDoc={statusHtml}
+            title="Rendered search status email"
           />
         </div>
 
@@ -226,10 +228,10 @@ export default function EmailPreviewPage() {
             <span />
             <strong>Match alert from Tee Time Spot - preview@teetimespot.com</strong>
           </div>
-          <iframe
+          <EmailPreviewFrame
             className="email-frame"
-            title="Rendered tee time alert email"
             srcDoc={alertHtml}
+            title="Rendered tee time alert email"
           />
         </div>
 

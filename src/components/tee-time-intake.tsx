@@ -157,6 +157,28 @@ const tomorrow = () => {
   return formatDateInputValue(addLocalDays(new Date(), 1));
 };
 
+function formatCompactTimeWindow(startTime: string, endTime: string) {
+  const parseTime = (value: string) => {
+    const [hoursText = "0", minutes = "00"] = value.split(":");
+    const hours = Number(hoursText);
+    return {
+      hours: hours % 12 || 12,
+      minutes,
+      period: hours >= 12 ? "PM" : "AM"
+    };
+  };
+  const start = parseTime(startTime);
+  const end = parseTime(endTime);
+
+  if (start.period === end.period) {
+    return `${start.hours}:${start.minutes} – ${end.hours}:${end.minutes} ${end.period}`;
+  }
+
+  const startLabel = start.minutes === "00" ? `${start.hours}` : `${start.hours}:${start.minutes}`;
+  const endLabel = end.minutes === "00" ? `${end.hours}` : `${end.hours}:${end.minutes}`;
+  return `${startLabel} ${start.period} – ${endLabel} ${end.period}`;
+}
+
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
 const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
@@ -255,6 +277,7 @@ function TeeTimeIntakeContent({
   const [saving, setSaving] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
+  const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
   const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
@@ -489,8 +512,7 @@ function TeeTimeIntakeContent({
 
     shouldScrollToResultsRef.current = false;
     const animationFrame = window.requestAnimationFrame(() => {
-      const firstCourse = resultsRef.current?.querySelector<HTMLElement>(".course-row");
-      firstCourse?.scrollIntoView({
+      resultsRef.current?.scrollIntoView({
         behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
           ? "auto"
           : "smooth",
@@ -727,11 +749,31 @@ function TeeTimeIntakeContent({
               />
             </div>
           </label>
-          <fieldset className="figma-search-field figma-time-field">
-            <legend>Window (course-local time)</legend>
+          <div
+            aria-label="Time window"
+            aria-describedby="time-window-help"
+            className="figma-search-field figma-time-field"
+            role="group"
+          >
+            <span className="figma-time-label">
+              <span className="figma-desktop-copy">Time window</span>
+              <span className="figma-mobile-copy">Time</span>
+            </span>
             <div className="figma-search-value">
               <span className="figma-search-value-icon" aria-hidden="true">⏰</span>
-              <div className="figma-time-inputs">
+              <button
+                aria-controls="mobile-time-editor"
+                aria-expanded={mobileTimeEditorOpen}
+                className="figma-time-summary"
+                onClick={() => setMobileTimeEditorOpen((open) => !open)}
+                type="button"
+              >
+                {formatCompactTimeWindow(startTime, endTime)}
+              </button>
+              <div
+                className={`figma-time-inputs${mobileTimeEditorOpen ? " is-mobile-open" : ""}`}
+                id="mobile-time-editor"
+              >
                 <input
                   aria-label="Start time"
                   id="startTime"
@@ -749,63 +791,89 @@ function TeeTimeIntakeContent({
                   value={endTime}
                   onChange={(event) => setEndTime(event.target.value)}
                 />
+                <button
+                  className="figma-time-editor-done"
+                  onClick={() => setMobileTimeEditorOpen(false)}
+                  type="button"
+                >
+                  Done
+                </button>
               </div>
             </div>
-          </fieldset>
+            <span className="sr-only" id="time-window-help">
+              Times use each course&apos;s local time zone.
+            </span>
+          </div>
         </div>
         <div className="figma-filter-strip">
           <div className="figma-hole-filter" aria-label="Course layout">
-            <strong>Course layout</strong>
+            <strong>
+              <span className="figma-desktop-copy">Course layout</span>
+              <span className="figma-mobile-copy">Holes</span>
+            </strong>
             <div className="figma-hole-options">
               {(["any", "9", "18"] as const).map((value) => (
                 <button
+                  aria-label={value === "any" ? "Any" : `${value}-hole`}
                   aria-pressed={holeFilter === value}
                   className={holeFilter === value ? "is-active" : ""}
                   key={value}
                   onClick={() => setHoleFilter(value)}
                   type="button"
                 >
-                  {value === "any" ? "Any" : `${value}-hole`}
+                  {value === "any" ? "Any" : (
+                    <>
+                      <span className="figma-desktop-copy">{value}-hole</span>
+                      <span className="figma-mobile-copy">{value}H</span>
+                    </>
+                  )}
                 </button>
               ))}
             </div>
           </div>
           <span className="figma-filter-divider" aria-hidden="true" />
-          <strong className="figma-distance-label">Distance</strong>
-          <label className="figma-distance-filter" htmlFor="searchRadius">
-            <span>
-              <em>{MIN_COURSE_SEARCH_RADIUS_MILES} mi</em>
-              <b>within {searchRadiusMiles} mi</b>
-              <em>{MAX_COURSE_SEARCH_RADIUS_MILES} mi</em>
-            </span>
-            <input
-              aria-label="Distance from me"
-              disabled={loading}
-              id="searchRadius"
-              max={MAX_COURSE_SEARCH_RADIUS_MILES}
-              min={MIN_COURSE_SEARCH_RADIUS_MILES}
-              step="5"
-              type="range"
-              value={searchRadiusMiles}
-              onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
-              style={{
-                background: `linear-gradient(to right, #18332b 0 ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}%, #d9e4df ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}% 100%)`
-              }}
-            />
-          </label>
-          {holeFilter !== "any" || searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
-            <button
-              className="figma-reset-filters"
-              onClick={() => {
-                setHoleFilter("any");
-                setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
-              }}
-              type="button"
-            >
-              <X size={10} />
-              Clear
-            </button>
-          ) : null}
+          <div className="figma-distance-group">
+            <div className="figma-distance-heading">
+              <strong className="figma-distance-label">
+                <span className="figma-desktop-copy">Distance</span>
+                <span className="figma-mobile-copy">Within</span>
+              </strong>
+            </div>
+            <label className="figma-distance-filter" htmlFor="searchRadius">
+              <span>
+                <em>{MIN_COURSE_SEARCH_RADIUS_MILES} mi</em>
+                <b><span className="figma-distance-prefix">within </span>{searchRadiusMiles} mi</b>
+                <em>{MAX_COURSE_SEARCH_RADIUS_MILES} mi</em>
+              </span>
+              <input
+                aria-label="Distance from me"
+                disabled={loading}
+                id="searchRadius"
+                max={MAX_COURSE_SEARCH_RADIUS_MILES}
+                min={MIN_COURSE_SEARCH_RADIUS_MILES}
+                step="5"
+                type="range"
+                value={searchRadiusMiles}
+                onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
+                style={{
+                  background: `linear-gradient(to right, #18332b 0 ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}%, #d9e4df ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}% 100%)`
+                }}
+              />
+            </label>
+            {holeFilter !== "any" || searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
+              <button
+                className="figma-reset-filters"
+                onClick={() => {
+                  setHoleFilter("any");
+                  setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
+                }}
+                type="button"
+              >
+                <X size={10} />
+                Clear
+              </button>
+            ) : null}
+          </div>
           <button
             className="figma-search-submit"
             type="button"

@@ -33,6 +33,11 @@ export default async function StopAlertPage({ searchParams }: StopAlertPageProps
     return <StoppedState reason={params.done} />;
   }
 
+  const previewReason = getPreviewReason(params.token);
+  if (previewReason) {
+    return <PreviewConfirmationState reason={previewReason} />;
+  }
+
   const action = params.token ? safelyVerifyToken(params.token) : null;
   if (!action || params.invalid) {
     return <InvalidState />;
@@ -109,6 +114,43 @@ export default async function StopAlertPage({ searchParams }: StopAlertPageProps
   );
 }
 
+function PreviewConfirmationState({ reason }: { reason: "booked" | "cancelled" }) {
+  const booked = reason === "booked";
+
+  return (
+    <main className="email-action-page">
+      <section className="email-action-panel" aria-labelledby="preview-stop-alert-heading">
+        <div className={`email-action-icon ${booked ? "is-booked" : "is-cancelled"}`}>
+          {booked ? <Flag size={26} /> : <CircleOff size={26} />}
+        </div>
+        <p className="eyebrow email-action-eyebrow">Confirmation page preview</p>
+        <h1 id="preview-stop-alert-heading">
+          {booked ? "Nice—did you book a tee time?" : "Cancel this tee-time alert?"}
+        </h1>
+        <p className="email-action-copy">
+          This is a safe preview of the confirmation step. No alert will be changed from this page.
+        </p>
+
+        <div className="email-action-summary">
+          <div>
+            <CalendarDays size={18} />
+            <span>Wednesday, July 15, 2026</span>
+          </div>
+          <div>
+            <Users size={18} />
+            <span>2 golfers · 7:30–9:00 AM course local time</span>
+          </div>
+          <p>Fairview Farm Golf Course, Fairchild Wheeler Golf Course, Tashua Knolls Golf Course</p>
+        </div>
+
+        <Link className="button button-dark email-action-button" href="/email-preview">
+          Back to email preview
+        </Link>
+      </section>
+    </main>
+  );
+}
+
 function StoppedState({ reason }: { reason: "booked" | "cancelled" }) {
   return (
     <main className="email-action-page">
@@ -159,6 +201,16 @@ function safelyVerifyToken(token: string) {
   } catch {
     return null;
   }
+}
+
+function getPreviewReason(token?: string) {
+  if (token === "preview-booked") {
+    return "booked" as const;
+  }
+  if (token === "preview-cancelled") {
+    return "cancelled" as const;
+  }
+  return null;
 }
 
 function formatSearchDate(date: Date) {

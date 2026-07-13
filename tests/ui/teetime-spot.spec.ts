@@ -1,11 +1,15 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import path from "node:path";
 
 const smokeBaseUrl =
   process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`;
 const smokeOrigin = new URL(smokeBaseUrl).origin;
 const useIsolatedPreviewProviders = process.env.UI_SMOKE_ISOLATED_PROVIDERS === "true";
+const smokeHostname = new URL(smokeBaseUrl).hostname;
+const useMockedSearchProviders =
+  useIsolatedPreviewProviders || smokeHostname === "127.0.0.1" || smokeHostname === "localhost";
 
-const isolatedPreviewCourses = [
+const smokeCourses = [
   "Tashua Knolls Golf Course",
   "H. Smith Richardson Golf Course",
   "Longshore Golf Course",
@@ -16,7 +20,7 @@ const isolatedPreviewCourses = [
 ].map((name, index) => ({
   address: `${100 + index} Public Links Rd, Trumbull, CT`,
   distanceMeters: 2_000 + index * 800,
-  googlePlaceId: `ui-smoke-isolated-${index + 1}`,
+  googlePlaceId: `ui-smoke-course-${index + 1}`,
   latitude: 41.24 + index * 0.002,
   longitude: -73.2 - index * 0.002,
   name,
@@ -63,7 +67,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(homeLocation).toHaveValue("");
     await expect(homeLocation).toHaveAttribute(
       "placeholder",
-      "City and state, ZIP code, or street address"
+      "City, state, ZIP, or address"
     );
     await expect(homeLocation).toHaveAttribute("required", "");
     await expect(homeSearchForm.locator("select")).toHaveValue("4");
@@ -101,6 +105,26 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(homeDistance).toHaveAttribute("min", "5");
     await expect(homeDistance).toHaveAttribute("max", "30");
     await expect(homeDistance).toHaveAttribute("step", "5");
+
+    if (testInfo.project.name.includes("mobile")) {
+      const actionMetrics = await homeSearchForm.locator(".home-form-actions .button").evaluateAll(
+        (buttons) =>
+          buttons.map((button) => ({
+            clientWidth: button.clientWidth,
+            right: button.getBoundingClientRect().right,
+            scrollWidth: button.scrollWidth
+          }))
+      );
+      const viewportWidth = page.viewportSize()?.width ?? 0;
+      expect(actionMetrics.every((button) => button.scrollWidth <= button.clientWidth + 1)).toBe(
+        true
+      );
+      expect(actionMetrics.every((button) => button.right <= viewportWidth + 1)).toBe(true);
+    }
+
+    await captureUiScreenshot(page, testInfo, "home", true);
+
+    await expectNoHorizontalOverflow(page, testInfo);
   });
 
   test("keeps compact navigation accessible and prioritizes the search hero", async ({
@@ -318,12 +342,56 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.goto("/search");
 
     if (testInfo.project.name.includes("mobile")) {
-      const searchFields = page.locator(".figma-search-primary > .figma-search-field");
-      await expect(searchFields).toHaveCount(4);
-      const fieldWidths = await searchFields.evaluateAll((fields) =>
-        fields.map((field) => field.getBoundingClientRect().width)
+      const mobileFilterLayout = await page.locator(".figma-search-toolbar").evaluate((toolbar) => {
+        const box = (selector: string) => {
+          const element = toolbar.querySelector<HTMLElement>(selector);
+          const rect = element?.getBoundingClientRect();
+          return rect
+            ? { bottom: rect.bottom, height: rect.height, left: rect.left, top: rect.top, width: rect.width }
+            : null;
+        };
+
+        return {
+          date: box("#date")?.top,
+          dateField: box('label[for="date"]'),
+          distance: box(".figma-distance-group"),
+          holes: box(".figma-hole-filter"),
+          location: box(".figma-location-field"),
+          players: box('label[for="players"]'),
+          search: box(".figma-search-submit"),
+          time: box(".figma-time-field"),
+          toolbar: toolbar.getBoundingClientRect().toJSON()
+        };
+      });
+
+      expect(mobileFilterLayout.location).not.toBeNull();
+      expect(mobileFilterLayout.players).not.toBeNull();
+      expect(mobileFilterLayout.dateField).not.toBeNull();
+      expect(mobileFilterLayout.time).not.toBeNull();
+      expect(mobileFilterLayout.holes).not.toBeNull();
+      expect(mobileFilterLayout.distance).not.toBeNull();
+      expect(mobileFilterLayout.search).not.toBeNull();
+      expect(mobileFilterLayout.location!.width).toBeGreaterThan(
+        mobileFilterLayout.players!.width * 1.9
       );
-      expect(fieldWidths.every((width) => width >= 300)).toBe(true);
+      expect(Math.abs(mobileFilterLayout.players!.top - mobileFilterLayout.dateField!.top)).toBeLessThan(2);
+      expect(Math.abs(mobileFilterLayout.time!.top - mobileFilterLayout.holes!.top)).toBeLessThan(2);
+      expect(mobileFilterLayout.distance!.top).toBeGreaterThan(mobileFilterLayout.time!.bottom - 2);
+      expect(mobileFilterLayout.search!.top).toBeGreaterThan(mobileFilterLayout.distance!.bottom - 2);
+      expect(mobileFilterLayout.search!.width).toBeGreaterThan(
+        mobileFilterLayout.location!.width * 0.85
+      );
+      await expect(page.locator(".figma-search-submit")).toHaveCSS(
+        "background-color",
+        "rgb(217, 134, 47)"
+      );
+      await expect(page.locator(".figma-search-submit")).toHaveCSS("color", "rgb(255, 255, 255)");
+    } else {
+      const dateLabel = await page.locator('label[for="date"] > span').boundingBox();
+      const timeLabel = await page.locator(".figma-time-field > .figma-time-label").boundingBox();
+      expect(dateLabel).not.toBeNull();
+      expect(timeLabel).not.toBeNull();
+      expect(Math.abs(dateLabel!.y - timeLabel!.y)).toBeLessThan(1);
     }
 
     await page.getByRole("button", { name: "Use current location" }).click();
@@ -338,8 +406,9 @@ test.describe("Tee Time Spot UI smoke", () => {
   }, testInfo) => {
     const issues = collectPageIssues(page);
     const isMobile = testInfo.project.name.includes("mobile");
+    const usesSelectionDrawer = (page.viewportSize()?.width ?? 1440) <= 920;
 
-    if (useIsolatedPreviewProviders) {
+    if (useMockedSearchProviders) {
       await page.route("**/api/location/geocode?**", async (route) => {
         await route.fulfill({
           body: JSON.stringify({ latitude: 41.242, longitude: -73.209 }),
@@ -349,7 +418,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       });
       await page.route("**/api/courses/discover?**", async (route) => {
         await route.fulfill({
-          body: JSON.stringify({ courses: isolatedPreviewCourses }),
+          body: JSON.stringify({ courses: smokeCourses }),
           contentType: "application/json",
           status: 200
         });
@@ -361,11 +430,22 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(
       page.getByRole("heading", { name: /Tell us where and when you want to play/i })
     ).toBeVisible();
+    const timeWindowGroup = page.getByRole("group", {
+      name: "Time window",
+      exact: true
+    });
+    await expect(timeWindowGroup).toBeVisible();
+    await expect(
+      timeWindowGroup.locator(isMobile ? ".figma-mobile-copy" : ".figma-desktop-copy")
+    ).toHaveText(isMobile ? "Time" : "Time window");
+    await expect(page.locator("#time-window-help")).toHaveText(
+      "Times use each course's local time zone."
+    );
     const alertActionButton = page.locator(".summary-panel > .button-primary");
     await expect(alertActionButton).toContainText(
       /Start getting alerts|Sign in to start sending alerts|Account access unavailable|Checking your account/i
     );
-    if (isMobile) {
+    if (usesSelectionDrawer) {
       await expect(alertActionButton).toBeHidden();
     } else {
       await expect(alertActionButton).toBeVisible();
@@ -376,7 +456,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(locationInput).toHaveValue("");
     await expect(locationInput).toHaveAttribute(
       "placeholder",
-      "City and state, ZIP code, or street address"
+      "City, state, ZIP, or address"
     );
     const courseSearchButton = page.getByRole("button", { name: /^Search$/i });
     await expect(courseSearchButton).toBeDisabled();
@@ -385,6 +465,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator("#startTime")).toHaveValue("09:00");
     await expect(page.locator("#endTime")).toHaveValue("18:00");
     await expect(page.locator("#searchRadius")).toHaveValue("15");
+    if (isMobile) {
+      const timeSummary = page.getByRole("button", { name: "9 AM – 6 PM" });
+      await expect(timeSummary).toBeVisible();
+      await expect(page.locator("#startTime")).toBeHidden();
+      await timeSummary.click();
+      await expect(page.locator("#startTime")).toBeVisible();
+      await expect(page.locator("#endTime")).toBeVisible();
+      await page.getByRole("button", { name: "Done" }).click();
+      await expect(page.locator("#startTime")).toBeHidden();
+    }
 
     await locationInput.fill("Trumbull, CT");
     await expect(courseSearchButton).toBeEnabled();
@@ -396,11 +486,36 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
     const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });
     await expect(discoveryStatus).toContainText(/\d+ courses near Trumbull/i);
+    await expect
+      .poll(async () => {
+        const statusBox = await discoveryStatus.boundingBox();
+        const topbarBox = await page.locator(".topbar").boundingBox();
+        if (!statusBox || !topbarBox) {
+          return -1;
+        }
+        return Math.round(statusBox.y - (topbarBox.y + topbarBox.height));
+      })
+      .toBeGreaterThanOrEqual(0);
     const firstCourse = page.locator(".course-row").first();
     await expect(firstCourse).toBeVisible();
-    await expect
-      .poll(async () => (await firstCourse.boundingBox())?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(isMobile ? 180 : 220);
+    const resultsLayout = await page.locator(".figma-results-column").evaluate((column) => {
+      const status = column.querySelector<HTMLElement>(".figma-results-banner");
+      const course = column.querySelector<HTMLElement>(".course-row");
+      const statusBox = status?.getBoundingClientRect();
+      const courseBox = course?.getBoundingClientRect();
+      return {
+        courseTop: courseBox?.top ?? -1,
+        statusBottom: statusBox?.bottom ?? -1
+      };
+    });
+    expect(resultsLayout.courseTop).toBeGreaterThanOrEqual(resultsLayout.statusBottom);
+    expect(resultsLayout.courseTop - resultsLayout.statusBottom).toBeLessThan(120);
+    if (usesSelectionDrawer) {
+      const firstCourseBox = await page.locator(".course-row").first().boundingBox();
+      expect(firstCourseBox).not.toBeNull();
+      expect(firstCourseBox!.width).toBeGreaterThan((page.viewportSize()?.width ?? 910) * 0.8);
+    }
+    await captureUiScreenshot(page, testInfo, "search-results");
 
     const courseRows = page.locator(".course-row");
     const courseCount = await courseRows.count();
@@ -411,6 +526,14 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
     await expect(courseRows.nth(0).getByRole("link", { name: "Google Maps" })).toHaveCount(0);
     await expect(page.getByText(/^Photo:/)).toHaveCount(0);
+    if (isMobile) {
+      const courseActionHeights = await courseRows
+        .first()
+        .locator(".course-actions a, .course-actions button")
+        .evaluateAll((actions) => actions.map((action) => action.getBoundingClientRect().height));
+      expect(courseActionHeights.length).toBeGreaterThan(0);
+      expect(courseActionHeights.every((height) => height >= 44)).toBe(true);
+    }
     const seeMoreLocations = page.getByRole("button", { name: /See more locations/i });
     if ((await seeMoreLocations.count()) > 0) {
       await expect(page.getByText(/Showing \d+ of \d+ locations/i)).toBeVisible();
@@ -422,7 +545,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     const laterCourse = courseRows.nth(4);
     await laterCourse.getByRole("button", { name: /Add/i }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
-    if (isMobile) {
+    if (!usesSelectionDrawer) {
+      const selectedName = page.locator(".selected-list .selected-row h3");
+      await expect(selectedName).toBeVisible();
+      expect(
+        await selectedName.evaluate(
+          (heading) => heading.scrollWidth <= heading.clientWidth + 1
+        )
+      ).toBe(true);
+    }
+    if (usesSelectionDrawer) {
       const mobileSelectionBar = page.locator(".mobile-selection-bar");
       await expect(mobileSelectionBar).toBeVisible();
       const mobileBarStyles = await mobileSelectionBar.evaluate((element) => {
@@ -497,11 +629,11 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(Math.abs(thumbnailBox!.y - resultBox!.y)).toBeLessThan(2);
     }
     await blockedCourseResult.getByRole("button", { name: "Add Fairview Farm Golf Course" }).click();
-    if (isMobile) {
+    if (usesSelectionDrawer) {
       await page.locator(".mobile-selection-toggle").click();
     }
     await expect(page.getByText("Choose at least one course Tee Time Spot can monitor automatically.")).toBeVisible();
-    if (isMobile) {
+    if (usesSelectionDrawer) {
       await page.locator(".selected-list").getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
     } else {
       await blockedCourseResult.getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
@@ -558,12 +690,13 @@ test.describe("Tee Time Spot UI smoke", () => {
       "You can prioritize up to 5 courses."
     );
 
-    if (isMobile) {
+    if (usesSelectionDrawer) {
       const selectionToggle = page.locator(".mobile-selection-toggle");
       await expect(selectionToggle).toContainText("5 courses selected");
       await selectionToggle.click();
       await expect(page.locator(".figma-selected-panel.is-mobile-open")).toBeVisible();
     }
+    await captureUiScreenshot(page, testInfo, "search-five-selected");
 
     let saveRequestCount = 0;
     await page.route("**/api/searches", async (route) => {
@@ -581,11 +714,19 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
 
+    if (isMobile) {
+      const timeSummary = page.locator(".figma-time-summary");
+      await timeSummary.evaluate((button: HTMLButtonElement) => button.click());
+      await expect(timeSummary).toHaveAttribute("aria-expanded", "true");
+    }
     await page.getByLabel("End time").fill("08:00");
     await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
     await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("End time").fill("18:00");
+    if (isMobile) {
+      await page.getByRole("button", { name: "Done" }).click({ force: true });
+    }
 
     const alertActionText = await alertActionButton.innerText();
     if (/Sign in to start sending alerts/i.test(alertActionText)) {
@@ -647,12 +788,12 @@ test.describe("Tee Time Spot UI smoke", () => {
         page.getByRole("main").getByRole("link", { name: "Back to search" })
       ).toBeVisible();
 
-      if (testInfo.project.name === "chromium-mobile") {
+      if (testInfo.project.name.includes("mobile")) {
         await expect(page.locator(".topbar").getByRole("button", { name: "Sign in" })).toBeVisible();
       }
     }
 
-    if (testInfo.project.name === "chromium-mobile") {
+    if (testInfo.project.name.includes("mobile")) {
       await expect(
         page.getByRole("button", { name: "Open feedback form" }).getByText("Feedback")
       ).toBeVisible();
@@ -708,9 +849,41 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(emailFrame.locator("body")).toContainText(/first come,\s+first served/i);
     await expect(emailFrame.locator("body")).not.toContainText(/we book/i);
 
+    for (const title of ["Rendered search status email", "Rendered tee time alert email"]) {
+      const frameMetrics = await page.locator(`iframe[title='${title}']`).evaluate((element) => {
+        const frame = element as HTMLIFrameElement;
+        const document = frame.contentDocument;
+        return {
+          contentHeight: Math.max(
+            document?.documentElement.scrollHeight ?? 0,
+            document?.body?.scrollHeight ?? 0
+          ),
+          contentWidth: document?.documentElement.scrollWidth ?? 0,
+          frameHeight: frame.getBoundingClientRect().height,
+          viewportWidth: document?.documentElement.clientWidth ?? 0
+        };
+      });
+      expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.contentHeight - 2);
+      expect(frameMetrics.contentWidth).toBeLessThanOrEqual(frameMetrics.viewportWidth + 2);
+    }
+
+    await captureUiScreenshot(page, testInfo, "email-preview");
+
     await expectNoHorizontalOverflow(page, testInfo);
     await expectInteractiveElementsAreUsable(page, testInfo);
     await expectNoPageIssues(issues, testInfo);
+
+    await page.goto("/alerts/stop?token=preview-booked");
+    await expect(page.getByRole("heading", { name: "Nice—did you book a tee time?" })).toBeVisible();
+    await expect(page.getByText(/No alert will be changed from this page/i)).toBeVisible();
+    await expect(page.getByRole("link", { name: "Back to email preview" })).toBeVisible();
+
+    await page.goto("/alerts/stop?token=preview-cancelled");
+    await expect(page.getByRole("heading", { name: "Cancel this tee-time alert?" })).toBeVisible();
+    await expect(page.getByText(/No alert will be changed from this page/i)).toBeVisible();
+
+    await expectNoHorizontalOverflow(page, testInfo);
+    await expectInteractiveElementsAreUsable(page, testInfo);
   });
 });
 
@@ -722,6 +895,23 @@ function nextSaturdayDateInputValue(from = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+async function captureUiScreenshot(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  fullPage = false
+) {
+  const outputDirectory = process.env.UI_CAPTURE_SCREENSHOTS_DIR;
+  if (!outputDirectory) {
+    return;
+  }
+
+  await page.screenshot({
+    fullPage,
+    path: path.join(outputDirectory, `${name}-${testInfo.project.name}.png`)
+  });
 }
 
 function collectPageIssues(page: Page) {
