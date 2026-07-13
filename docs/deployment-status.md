@@ -8,8 +8,8 @@ Last updated: 2026-07-13
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified deployment: `teetimeai-j8eazthys-derekpaulhoffmans-projects.vercel.app`
-- Deployment ID: `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva`
+- Latest verified application release: `teetimeai-j8eazthys-derekpaulhoffmans-projects.vercel.app`
+- Application release deployment ID: `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
