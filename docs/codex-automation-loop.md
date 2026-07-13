@@ -71,7 +71,7 @@ The hourly loop is authorized to commit, push, and deploy its own verified work.
 - Do not commit until focused tests, `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check` pass for a code change.
 - Create a clear imperative or Conventional Commit on the run's task branch, record its SHA, fetch and rebase onto current `origin/main` when needed, rerun affected verification, and use the preflight command `git push origin HEAD:main`. If the push is rejected or the remote moved, stop with `blocked_git`; do not force-push or rewrite history.
 - For an additive, backward-compatible Prisma migration, run production migration status/deploy with the Vercel production environment before the app deployment. Destructive migrations, irreversible data changes, or broad backfills require fresh user approval.
-- Deploy with `npx vercel --prod --yes` when the commit affects the live app, production workflow, adapter runtime, or provider configuration. Docs-only and local-operator-only changes still require a commit and push but not a Vercel deployment.
+- For live-impacting commits, use `git push origin HEAD:main` as the only normal production deployment trigger, then run `npm run deployment:wait -- --sha <commitSha>` to require the Git integration deployment for that exact commit, `Ready`, and both production aliases. Do not follow a normal Git push with `npx vercel --prod --yes`; reserve direct CLI production deployment for an explicitly chosen recovery action. Docs-only and local-operator-only changes still require a commit and push but do not need deployment verification.
 - After deployment, require `Ready`, the `teetimespot.com` and `www.teetimespot.com` aliases, production UI smoke, key route/API checks, recent error-log inspection, and confirmation that the deployed behavior corresponds to the pushed commit.
 - If production verification fails because of the new release, stop further improvement work and report `incident`. Prefer a safe rollback to the previous verified deployment only when no incompatible migration or irreversible state change is involved; otherwise require human intervention.
 - Terminal exceptions must atomically close the owned `AutomationRun` with a redacted error, concrete blocker, `completedAt`, terminal outcome, and `outcome_recorded=true`. If no database write is possible, the external automation task must report that evidence gap explicitly.
@@ -104,8 +104,8 @@ Each automation run should:
 15. Enter closeout under the 40-minute/20-minute budget and start no new exploration or edits.
 16. Run focused verification plus `npm run test:run`, `npm run lint`, `npm run build`, `npm run ui:smoke`, and `git diff --check`.
 17. Inspect the final diff, stage only intended files, create coherent commits, and run the push command reported by preflight without force.
-18. Apply only safe additive production migrations, then deploy live-impacting work to Vercel.
-19. Verify the production deployment, aliases, routes/APIs, desktop/mobile smoke, logs, and expected behavior, then confirm the task branch is clean and checked-out `HEAD` matches `origin/main` after the push.
+18. Apply only safe additive production migrations, push live-impacting work to `origin/main`, and wait for the exact Git-created Vercel deployment with `npm run deployment:wait -- --sha <commitSha>`.
+19. Verify the production deployment source, aliases, routes/APIs, desktop/mobile smoke, logs, and expected behavior, then confirm the task branch is clean and checked-out `HEAD` matches `origin/main` after the push.
 20. Atomically finish the owner `AutomationRun` and automation memory with outcome, evidence, checkpoints, commit SHA, deployment ID, changed files, verification, learning signals, changed assumptions, blockers, `completedAt`, and `outcome_recorded=true`.
 
 The repo exposes durable state transitions through the improvement command:

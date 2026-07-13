@@ -365,15 +365,24 @@ Playwright smoke expectations:
 
 ## Deployment Rules
 
-Production deploy command:
+Normal production deployments are owned by the Vercel Git integration. After the verified
+task branch is fast-forwarded to `main`, wait for the Git-created deployment for that exact
+commit:
 
 ```powershell
-npx vercel --prod --yes
+git push origin HEAD:main
+npm run deployment:wait -- --sha <commit-sha>
 ```
+
+Do not run `npx vercel --prod --yes` after a normal Git push. That creates a duplicate
+deployment for the same commit and can move the production aliases away from the Git
+deployment. A direct CLI production deployment is recovery-only and must be an explicit
+choice with its reason recorded.
 
 After deploy:
 
 - Verify Vercel reports `Ready`.
+- Verify the selected deployment source is Git and its commit matches the pushed SHA.
 - Verify aliases include `teetimespot.com` and `www.teetimespot.com`.
 - Smoke production with `UI_SMOKE_BASE_URL`.
 - Check main routes return 200.
@@ -433,7 +442,7 @@ npm run ui:smoke
 npm run automation:poll
 npm run automation:inspect
 npm run automation:improve
-npx vercel --prod --yes
+npm run deployment:wait -- --sha <commit-sha>
 ```
 
 Use `npx vercel env run -- <command>` when a local automation command needs provider env vars.

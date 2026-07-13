@@ -461,11 +461,17 @@ The Playwright smoke covers:
 
 ## Deployment
 
-Production deploy:
+Normal production deploys are owned by the Vercel Git integration. Push the verified
+task-branch commit to `main`, then wait for the Git-created deployment for that exact SHA:
 
 ```powershell
-npx vercel --prod --yes
+git push origin HEAD:main
+npm run deployment:wait -- --sha <commit-sha>
 ```
+
+Do not follow a normal Git push with `npx vercel --prod --yes`; that creates a second
+deployment for the same commit and can move the production aliases to the CLI deployment.
+Use a direct CLI production deployment only as an explicit recovery action.
 
 Post-deploy checks:
 
@@ -476,9 +482,16 @@ Invoke-WebRequest -Uri "https://teetimespot.com/email-preview" -UseBasicParsing
 $env:UI_SMOKE_BASE_URL = "https://teetimespot.com"
 npm run ui:smoke
 Remove-Item Env:\UI_SMOKE_BASE_URL
-npx vercel inspect <deployment-url>
+npx vercel inspect teetimespot.com --format json
 npx vercel logs <deployment-url> --since 30m --level error
 ```
+
+GitHub's `Verify` workflow runs tests, lint, type checking, and the production build on
+pushes and pull requests. For a reviewed same-repository preview, the repository owner can
+manually run `Preview Smoke` from `main`; it validates the expected Vercel hostname and uses
+a same-origin bootstrap request to store the protection-bypass cookie before the
+desktop/mobile Playwright suite starts. Never run the secret-bearing workflow definition or
+test harness from an untrusted ref.
 
 Keep `docs/deployment-status.md` current after provider, deployment, auth, domain, or migration changes.
 

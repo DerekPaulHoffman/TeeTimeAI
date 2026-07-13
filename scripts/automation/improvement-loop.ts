@@ -26,7 +26,7 @@ import {
 import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v8";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v9";
 const PROMPT_VERSION_PREFIX = "tee-time-spot-improvement-loop-v";
 const ACTIVE_RUN_STALE_AFTER_MS = 55 * 60 * 1000;
 
@@ -48,7 +48,7 @@ Every run:
 12. Run focused verification plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, \`npm run ui:smoke\`, and \`git diff --check\` for code changes.
 13. Inspect the final diff, stage only files owned by this run, create one clear commit on the run's task branch, record its SHA, fetch and rebase onto current \`origin/main\` when needed, rerun affected verification, and fast-forward main with \`git push origin HEAD:main\`. Never check out or commit on \`main\`, force-push, or absorb unrelated changes.
 14. For safe additive Prisma migrations, apply production migrations before the app deploy. Destructive or irreversible data work requires fresh user approval.
-15. For live-impacting commits, run \`npx vercel --prod --yes\`, wait for Ready and production aliases, then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\`, targeted route/API checks, and recent Vercel error-log inspection.
+15. For live-impacting commits, let the verified \`git push origin HEAD:main\` trigger the only normal production deployment. Run \`npm run deployment:wait -- --sha <commitSha>\` to require the Git integration deployment for that exact commit, Ready state, and both production aliases; never follow a normal Git push with \`npx vercel --prod --yes\` because that creates a duplicate deployment. Then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\`, targeted route/API checks, and recent Vercel error-log inspection. Use a direct CLI production deploy only as an explicitly chosen recovery action.
 16. If production verification fails because of this release, stop with incident. Roll back only when it is safe and no incompatible migration or irreversible state change exists.
 17. Confirm the working tree is clean and the checked-out \`HEAD\` matches \`origin/main\` after the push.
 18. Atomically close this exact AutomationRun with evidence, decision, changed files, tests, commit SHA, deployment ID, production verification, learning, blockers, terminal outcome, completedAt, and outcome_recorded=true. Update repo deployment notes only for material changes or deployments.
