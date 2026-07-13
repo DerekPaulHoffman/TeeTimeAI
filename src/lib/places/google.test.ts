@@ -414,6 +414,87 @@ describe("Google Places mapping", () => {
     expect(places).toEqual([]);
   });
 
+  it("filters verified private, non-course, and duplicate state-border results", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJ_XcwMtag4YkRTZLeHPhjYdg",
+          displayName: { text: "Hooper Golf Course" },
+          formattedAddress: "166 Prospect Hill Rd, Walpole, NH 03608, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "http://www.hoopergolfcourse.com/",
+          location: { latitude: 43.0655468, longitude: -72.4168696 }
+        },
+        {
+          id: "places/ChIJw4LoQ3TL4YkR--PVXKkrk7I",
+          displayName: { text: "The Barn At Fox Run" },
+          formattedAddress: "89 Fox Ln Ext, Ludlow, VT 05149, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.thebarnatfoxrunvt.com/the-barn",
+          location: { latitude: 43.39, longitude: -72.69 }
+        },
+        {
+          id: "places/ChIJvbRuDR9Y4IkRe4pD0YaU5fQ",
+          displayName: { text: "Stratton Mountain Golf Course" },
+          formattedAddress: "251 Stratton Mountain Rd, Stratton Mountain, VT 05155, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.stratton.com/things-to-do/activities/stratton-golf",
+          location: { latitude: 43.1250868, longitude: -72.9046048 }
+        },
+        {
+          id: "places/ChIJj1vnKctZ4IkRr5BY1-F-5AE",
+          displayName: { text: "Stratton Golf Course" },
+          formattedAddress: "South Londonderry, VT 05155, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.stratton.com/things-to-do/activities/stratton-golf",
+          location: { latitude: 43.122, longitude: -72.905 }
+        },
+        {
+          id: "places/ChIJ-5eDKiZ64YkROEiuRnTjEKw",
+          displayName: { text: "Dublin Lake Club Golf Course" },
+          formattedAddress: "180 Old Marlborough Rd, Dublin, NH 03444, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          location: { latitude: 42.91, longitude: -72.08 }
+        },
+        {
+          id: "places/ChIJ0fUoNOn24YkRd7n-n1PQsls",
+          displayName: { text: "Baker Hill Golf Club" },
+          formattedAddress: "101 Baker Hill Rd, Newbury, NH 03255, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.bakerhill.org/",
+          location: { latitude: 43.35, longitude: -72.0 }
+        }
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJ_XcwMtag4YkRTZLeHPhjYdg",
+          "ChIJw4LoQ3TL4YkR--PVXKkrk7I",
+          "ChIJvbRuDR9Y4IkRe4pD0YaU5fQ",
+          "ChIJj1vnKctZ4IkRr5BY1-F-5AE",
+          "ChIJ-5eDKiZ64YkROEiuRnTjEKw",
+          "ChIJ0fUoNOn24YkRd7n-n1PQsls"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Hooper Golf Course",
+      "Stratton Mountain Golf Course"
+    ]);
+  });
+
   it("filters verified Miami non-courses and an invitation-only club from live discovery", () => {
     const places = filterPublicGolfCoursePlaces(
       [

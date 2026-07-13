@@ -152,6 +152,16 @@ const VERIFIED_PRIVATE_COURSES = [
     placeId: "ChIJy0obgpGr2YgR3puygnLMK5M",
     name: "Shell Bay Club",
     evidenceUrl: "https://shellbayclub.com/"
+  },
+  {
+    placeId: "ChIJ0fUoNOn24YkRd7n-n1PQsls",
+    name: "Baker Hill Golf Club",
+    evidenceUrl: "https://www.bakerhill.org/guest-information/frequently-asked-questions"
+  },
+  {
+    placeId: "ChIJ-5eDKiZ64YkROEiuRnTjEKw",
+    name: "Dublin Lake Club Golf Course",
+    evidenceUrl: "https://home.dublinlake.org/default.aspx?E=6&p=home"
   }
 ] as const;
 const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
@@ -191,10 +201,28 @@ const VERIFIED_NON_COURSE_PLACES = [
     placeId: "ChIJbV3-V-av2YgRGc2i3GxAjEY",
     name: "Golf Miami 305",
     evidenceUrl: "https://www.golfmiami305.com/"
+  },
+  {
+    placeId: "ChIJw4LoQ3TL4YkR--PVXKkrk7I",
+    name: "The Barn At Fox Run",
+    evidenceUrl: "https://www.thebarnatfoxrunvt.com/"
   }
 ] as const;
 const VERIFIED_NON_COURSE_PLACE_IDS = new Set<string>(
   VERIFIED_NON_COURSE_PLACES.map((place) => place.placeId)
+);
+// Google can retain multiple place records for one physical course. Exclude only a verified
+// secondary identity when the official course surface names and locates the canonical record.
+const VERIFIED_DUPLICATE_COURSE_PLACES = [
+  {
+    placeId: "ChIJj1vnKctZ4IkRr5BY1-F-5AE",
+    name: "Stratton Golf Course",
+    canonicalPlaceId: "ChIJvbRuDR9Y4IkRe4pD0YaU5fQ",
+    evidenceUrl: "https://www.stratton.com/things-to-do/activities/stratton-golf/tour-the-course"
+  }
+] as const;
+const VERIFIED_DUPLICATE_COURSE_PLACE_IDS = new Set<string>(
+  VERIFIED_DUPLICATE_COURSE_PLACES.map((place) => place.placeId)
 );
 
 export function mapGooglePlaceToCourseCandidate(place: GooglePlace): CourseCandidate {
@@ -241,7 +269,8 @@ function isLikelyPublicGolfCoursePlace(
 
   if (
     VERIFIED_PRIVATE_COURSE_PLACE_IDS.has(placeId) ||
-    VERIFIED_NON_COURSE_PLACE_IDS.has(placeId)
+    VERIFIED_NON_COURSE_PLACE_IDS.has(placeId) ||
+    VERIFIED_DUPLICATE_COURSE_PLACE_IDS.has(placeId)
   ) {
     return false;
   }
