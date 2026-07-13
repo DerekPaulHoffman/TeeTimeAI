@@ -8,13 +8,14 @@ Last updated: 2026-07-13
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified application release: `teetimeai-j8eazthys-derekpaulhoffmans-projects.vercel.app`
-- Application release deployment ID: `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva`
+- Latest verified application release: `teetimeai-r58i9l50b-derekpaulhoffmans-projects.vercel.app`
+- Application release deployment ID: `dpl_6szXxz5jXkacK2mgjrNRpyF6tv7f`
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
 
+- 2026-07-13 SEO and AI-discovery foundation release deployed commit `f17d8ff` as `dpl_6szXxz5jXkacK2mgjrNRpyF6tv7f` (`teetimeai-r58i9l50b-derekpaulhoffmans-projects.vercel.app`). The release added entity-first homepage copy, canonical metadata and structured data, crawlable trust and methodology pages, a public-golf guide hub with three source-backed guides, expanded sitemap and robots coverage, webmaster-verification hooks, and aggregate privacy-safe AI/search discovery attribution. Verification passed 59 test files / 307 tests, lint with zero errors and only the existing generated Workflow route warning, a production build, local and production Playwright smoke 52/52 across four viewports, 16 live route checks, exact canonical/JSON-LD/sitemap/robots assertions, both production aliases, and empty error, fatal, and 5xx log queries for the checked deployment window.
 - 2026-07-13 Vercel release hardening made the Git integration the normal production deployment authority, added native production-alias gates for lint and type checking, and added GitHub `Verify` plus an owner-only manual protected `Preview Smoke`. A real Git preview created Neon branch `preview/chore/vercel-release-hardening` (`br-wandering-night-ategggm2`) from the production database branch. Preview no longer receives production-only Clerk, Google Places, Resend, automation, or email-action credentials; its smoke uses deterministic discovery responses. The automation bypass is scoped only to the same-origin cookie bootstrap/smoke step, and the Vercel Toolbar is disabled for new pre-production deployments.
 - 2026-07-13 production release `09841d8` hardened owner analytics and the hourly autonomous-improvement contract. Vercel deployment `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva` reached `Ready` with `teetimespot.com` and `www.teetimespot.com` aliases. Web Analytics and Speed Insights are enabled; first-party events and feedback now carry an explicit public, automation, test, or unclassified traffic class without adding visitor/session identifiers; analytics URLs are query-free; and production email actions use a dedicated encrypted `EMAIL_ACTION_SECRET`.
 - The additive website-traffic migration was applied, then the explicitly approved historical privacy scrub removed query/hash data from 121 event-page values and removed one persisted search identifier from event metadata. Aggregate verification found no remaining affected event pages, feedback pages, or event metadata search identifiers.
