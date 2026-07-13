@@ -1,4 +1,4 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import path from "node:path";
 
 const smokeBaseUrl =
@@ -59,6 +59,57 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(
       page.getByRole("heading", { name: "Stop settling for your backup course." })
     ).toBeVisible();
+    const heroCards = page.locator(".hero-strip-item");
+    await expect(heroCards).toHaveCount(3);
+    await expect(page.getByText("Tell us your courses", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText(
+        "Pick the public courses you want to play and rank them by priority.",
+        { exact: true }
+      )
+    ).toBeVisible();
+    await expect(page.getByText("Book what you can now", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText(
+        "See what's currently available and grab a tee time to hold your day.",
+        { exact: true }
+      )
+    ).toBeVisible();
+    await expect(
+      page.getByText("We'll alert you when a priority opens", { exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "If your top picks are full, we watch them around the clock and notify you the moment a spot becomes available.",
+        { exact: true }
+      )
+    ).toBeVisible();
+    if (testInfo.project.name.includes("mobile")) {
+      const [topbarBox, heroHeadingBox] = await Promise.all([
+        page.locator(".topbar").boundingBox(),
+        page.locator(".hero h1").boundingBox()
+      ]);
+      expect(topbarBox).not.toBeNull();
+      expect(heroHeadingBox).not.toBeNull();
+      expect(heroHeadingBox!.y).toBeGreaterThan(
+        topbarBox!.y + topbarBox!.height + 24
+      );
+
+      const cardRects = await heroCards.evaluateAll((cards) =>
+        cards.map((card) => {
+          const rect = card.getBoundingClientRect();
+          return {
+            bottom: rect.bottom,
+            top: rect.top,
+            width: rect.width
+          };
+        })
+      );
+      expect(Math.abs(cardRects[0].top - cardRects[1].top)).toBeLessThanOrEqual(1);
+      expect(cardRects[2].top).toBeGreaterThan(cardRects[0].bottom);
+      expect(cardRects[2].width).toBeGreaterThan(cardRects[0].width * 1.9);
+    }
+    await captureUiScreenshot(page, testInfo, "home-viewport");
     await expect(
       page.getByRole("heading", { name: "Built with golfers, not just for them." })
     ).toBeVisible();
@@ -122,6 +173,10 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(actionMetrics.every((button) => button.right <= viewportWidth + 1)).toBe(true);
     }
 
+    await page.evaluate(() => {
+      document.documentElement.style.scrollBehavior = "auto";
+      window.scrollTo(0, 0);
+    });
     await captureUiScreenshot(page, testInfo, "home", true);
 
     await expectNoHorizontalOverflow(page, testInfo);
@@ -561,6 +616,20 @@ test.describe("Tee Time Spot UI smoke", () => {
     if (usesSelectionDrawer) {
       const mobileSelectionBar = page.locator(".mobile-selection-bar");
       await expect(mobileSelectionBar).toBeVisible();
+      await expect(mobileSelectionBar).toHaveCSS("background-color", "rgb(17, 26, 34)");
+      await expect(page.locator(".mobile-selection-toggle")).toContainText("1 course picked");
+      await expect(page.locator(".mobile-selection-toggle")).toContainText("Reorder priority");
+      const submitCoursesButton = mobileSelectionBar.getByRole("button", {
+        name: "Submit my courses"
+      });
+      await expect(submitCoursesButton).toBeVisible();
+      await expect(submitCoursesButton).toHaveCSS("background-color", "rgb(255, 205, 77)");
+      expect((await submitCoursesButton.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+      await captureUiElementScreenshot(
+        mobileSelectionBar,
+        testInfo,
+        "mobile-selection-bar"
+      );
       const mobileBarStyles = await mobileSelectionBar.evaluate((element) => {
         const styles = window.getComputedStyle(element);
         return {
@@ -694,13 +763,14 @@ test.describe("Tee Time Spot UI smoke", () => {
       "You can prioritize up to 5 courses."
     );
 
+    await captureUiScreenshot(page, testInfo, "search-five-selected");
     if (usesSelectionDrawer) {
       const selectionToggle = page.locator(".mobile-selection-toggle");
-      await expect(selectionToggle).toContainText("5 courses selected");
-      await selectionToggle.click();
+      await expect(selectionToggle).toContainText("5 courses picked");
+      await expect(selectionToggle).toContainText("Reorder priority");
+      await page.getByRole("button", { name: "Submit my courses" }).click();
       await expect(page.locator(".figma-selected-panel.is-mobile-open")).toBeVisible();
     }
-    await captureUiScreenshot(page, testInfo, "search-five-selected");
 
     let saveRequestCount = 0;
     await page.route("**/api/searches", async (route) => {
@@ -910,6 +980,21 @@ async function captureUiScreenshot(
 
   await page.screenshot({
     fullPage,
+    path: path.join(outputDirectory, `${name}-${testInfo.project.name}.png`)
+  });
+}
+
+async function captureUiElementScreenshot(
+  locator: Locator,
+  testInfo: TestInfo,
+  name: string
+) {
+  const outputDirectory = process.env.UI_CAPTURE_SCREENSHOTS_DIR;
+  if (!outputDirectory) {
+    return;
+  }
+
+  await locator.screenshot({
     path: path.join(outputDirectory, `${name}-${testInfo.project.name}.png`)
   });
 }

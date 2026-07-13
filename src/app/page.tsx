@@ -65,10 +65,7 @@ export default function HomePage() {
         <div className="hero-content">
           <p className="eyebrow">For public course golfers</p>
           <h1>
-            Stop settling
-            <br className="mobile-hero-break" /> for
-            <br />
-            your backup course.
+            Stop settling for your backup <br className="mobile-hero-break" />course.
           </h1>
           <p className="hero-copy">
             Your favorites were full, so you booked your third choice. We watch your top
@@ -88,16 +85,19 @@ export default function HomePage() {
         </div>
         <div className="hero-strip" aria-label="How Tee Time Spot works">
           <div className="hero-strip-item">
-            <strong>Rank your top 5 courses</strong>
-            <span>Tell us where you&apos;d rather play — #1 gets watched hardest</span>
+            <strong>Tell us your courses</strong>
+            <span>Pick the public courses you want to play and rank them by priority.</span>
           </div>
           <div className="hero-strip-item">
-            <strong>Book a backup, wait for us</strong>
-            <span>We check every few minutes so you don&apos;t have to keep refreshing</span>
+            <strong>Book what you can now</strong>
+            <span>See what&apos;s currently available and grab a tee time to hold your day.</span>
           </div>
           <div className="hero-strip-item">
-            <strong>Switch to your first choice</strong>
-            <span>Cancel the backup, click the link in your email, and play where you wanted</span>
+            <strong>We&apos;ll alert you when a priority opens</strong>
+            <span>
+              If your top picks are full, we watch them around the clock and notify you the
+              moment a spot becomes available.
+            </span>
           </div>
         </div>
       </section>

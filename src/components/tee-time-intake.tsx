@@ -1241,18 +1241,27 @@ function TeeTimeIntakeContent({
           >
             <span className="mobile-selection-summary">
               <span className="mobile-selection-ranks" aria-hidden="true">
-                {selected.map((course, index) => (
-                  <span key={course.googlePlaceId}>{index + 1}</span>
-                ))}
+                <span>{selected.length}</span>
               </span>
-              <strong>
-                {selected.length} {selected.length === 1 ? "course" : "courses"} selected
-              </strong>
+              <span className="mobile-selection-copy">
+                <strong>
+                  {selected.length} {selected.length === 1 ? "course" : "courses"} picked
+                </strong>
+                <span className="mobile-selection-view">
+                  Reorder priority
+                  <ChevronDown className={mobileSelectionOpen ? "is-open" : ""} size={15} />
+                </span>
+              </span>
             </span>
-            <span className="mobile-selection-view">
-              {mobileSelectionOpen ? "Close" : "View & reorder"}
-              <ChevronDown className={mobileSelectionOpen ? "is-open" : ""} size={15} />
-            </span>
+          </button>
+          <button
+            aria-controls="mobile-watchlist-panel"
+            aria-expanded={mobileSelectionOpen}
+            className="mobile-selection-submit"
+            type="button"
+            onClick={() => setMobileSelectionOpen(true)}
+          >
+            Submit my courses <span aria-hidden="true">→</span>
           </button>
         </div>
       ) : null}
