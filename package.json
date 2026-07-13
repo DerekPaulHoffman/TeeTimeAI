@@ -8,7 +8,7 @@
     "start": "next start",
     "test": "vitest",
     "test:run": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.ci.json",
+    "typecheck": "prisma generate && tsc --noEmit -p tsconfig.ci.json",
     "ui:smoke": "playwright test",
     "lint": "eslint .",
     "prisma:generate": "prisma generate",
