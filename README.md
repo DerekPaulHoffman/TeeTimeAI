@@ -13,7 +13,7 @@ Tee Time Spot does not book, hold, reserve, pay for, bypass controls, or enter a
 - Product name: `Tee Time Spot`
 - Domain: `https://teetimespot.com`
 - Vercel project: `teetimeai`
-- Latest verified production deployment: `dpl_AhXpEZKxiNfsBffmfc5bR33kHKkX`
+- Production release record: see `docs/deployment-status.md`; deployment IDs there are point-in-time audit evidence, while the current alias must be verified against the intended Git commit with `npm run deployment:wait -- --sha <commit-sha>`
 - Production aliases: `https://teetimespot.com`, `https://www.teetimespot.com`, `https://teetimeai.vercel.app`
 - App runtime: Next.js on Vercel with Neon Postgres
 - Worker runtime: local or scheduled Codex automation using repo scripts and Postgres state

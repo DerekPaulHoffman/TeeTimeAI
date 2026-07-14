@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 ## Live Vercel Deployment
 
@@ -8,13 +8,15 @@ Last updated: 2026-07-13
 - Production URL: `https://teetimespot.com`
 - Alternate domain: `https://www.teetimespot.com`
 - Previous Vercel domain: `https://teetimeai.vercel.app`
-- Latest verified application release: `teetimeai-r58i9l50b-derekpaulhoffmans-projects.vercel.app`
-- Application release deployment ID: `dpl_6szXxz5jXkacK2mgjrNRpyF6tv7f`
+- Latest verified application release at the 2026-07-14 persistence-cleanup checkpoint: commit `cfed56d0753c3452840b6d502d9c80b5033fc705` at `teetimeai-au67ojszo-derekpaulhoffmans-projects.vercel.app`
+- Application release deployment ID at that checkpoint: `dpl_8LcGV1YxH4XnZoyNj7eTRKZmdaW5`
+- Deployment pointers in this file are timestamped audit evidence, not self-updating aliases. Verify the current production alias against the intended Git SHA with `npm run deployment:wait -- --sha <commit-sha>`.
 - Vercel project ID: `prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y`
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
 
+- 2026-07-14 focused persistence-cleanup release deployed Git commit `cfed56d0753c3452840b6d502d9c80b5033fc705` as `dpl_8LcGV1YxH4XnZoyNj7eTRKZmdaW5` (`teetimeai-au67ojszo-derekpaulhoffmans-projects.vercel.app`) after applying migration `20260714180000_add_google_place_reviews` with the direct Neon connection. The release moved 30 unique Google Place access/identity/alias reviews from runtime registries into `GooglePlaceReview`, retained generic filtering in code, added the protected dry-run-first `automation:place-review` operator command, removed the Woodhaven runtime layout fallback, preserved Woodhaven's verified nine-hole `Course` evidence, added the requested review/history indexes, and made hosted database/provider failures fail closed. The final migration was first applied and read back on an isolated Neon branch, then removed; production readback found 30 active/distinct reviews, the expected access and alias counts, all eight migration indexes, and Woodhaven `[9]` evidence. Verification passed 73 test files / 405 tests, lint with zero errors and one existing generated warning, build, local and production Playwright smoke 60/60, exact Git deployment/alias verification, live verified-public/private/non-course/canonical-alias and ordinary-public controls, `automation:inspect`, core route checks, Git parity, and an empty error/fatal log query for the audited production window.
 - 2026-07-13 SEO and AI-discovery foundation release deployed commit `f17d8ff` as `dpl_6szXxz5jXkacK2mgjrNRpyF6tv7f` (`teetimeai-r58i9l50b-derekpaulhoffmans-projects.vercel.app`). The release added entity-first homepage copy, canonical metadata and structured data, crawlable trust and methodology pages, a public-golf guide hub with three source-backed guides, expanded sitemap and robots coverage, webmaster-verification hooks, and aggregate privacy-safe AI/search discovery attribution. Verification passed 59 test files / 307 tests, lint with zero errors and only the existing generated Workflow route warning, a production build, local and production Playwright smoke 52/52 across four viewports, 16 live route checks, exact canonical/JSON-LD/sitemap/robots assertions, both production aliases, and empty error, fatal, and 5xx log queries for the checked deployment window.
 - 2026-07-13 Vercel release hardening made the Git integration the normal production deployment authority, added native production-alias gates for lint and type checking, and added GitHub `Verify` plus an owner-only manual protected `Preview Smoke`. A real Git preview created Neon branch `preview/chore/vercel-release-hardening` (`br-wandering-night-ategggm2`) from the production database branch. Preview no longer receives production-only Clerk, Google Places, Resend, automation, or email-action credentials; its smoke uses deterministic discovery responses. The automation bypass is scoped only to the same-origin cookie bootstrap/smoke step, and the Vercel Toolbar is disabled for new pre-production deployments.
 - 2026-07-13 production release `09841d8` hardened owner analytics and the hourly autonomous-improvement contract. Vercel deployment `dpl_BZoWhMqR9uaUvrW88bYA3XKN1Pva` reached `Ready` with `teetimespot.com` and `www.teetimespot.com` aliases. Web Analytics and Speed Insights are enabled; first-party events and feedback now carry an explicit public, automation, test, or unclassified traffic class without adding visitor/session identifiers; analytics URLs are query-free; and production email actions use a dedicated encrypted `EMAIL_ACTION_SECRET`.

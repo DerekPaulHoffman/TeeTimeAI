@@ -46,6 +46,73 @@ The app must not:
 
 Use copy such as "official site", "official booking page", "direct link", and "you book direct". Avoid copy such as "we book", "Tee Time Spot books", or anything implying guaranteed availability.
 
+## Product Mental Model
+
+The product is a saved-demand and notification system, not a live tee-time marketplace. A golfer tells Tee Time Spot where and when they want to play; the app persists that intent, monitors only policy-safe public booking surfaces, and sends the golfer back to the course to finish the booking.
+
+There are five important actors:
+
+- **Visitor:** can search locations, discover public courses, inspect official links, and rank courses without signing in.
+- **Alert owner:** a signed-in golfer whose Clerk account owns saved searches, dashboard controls, and the primary alert email.
+- **Additional recipient:** receives the same search emails but does not own the dashboard search merely because their email is listed. Anyone holding a valid signed stop link from an alert email can still complete/cancel that alert without Clerk, so treat those links as bounded bearer credentials.
+- **Course/provider:** owns the official course identity, booking policy, booking window, tee sheet, and final booking transaction.
+- **Operator/engineering loop:** reviews evidence, fixes provider coverage, resolves durable incidents, and improves the product; it does not impersonate the golfer or enter checkout.
+
+Keep the value proposition legible in every change:
+
+```text
+discover public courses -> save ranked demand -> check official availability
+-> email matching openings -> golfer books on the official site
+```
+
+## Customer Journeys
+
+### 1. Browse And Build A Shortlist
+
+1. A visitor opens `/` or `/search`, uses browser location or enters a city/ZIP, and chooses a 5-to-30-mile radius; 15 miles is the default.
+2. The app geocodes the location, discovers likely-public courses, applies exact reviewed exceptions plus generic safety filters, deduplicates provider aliases, and enriches results with available photos and recent price evidence.
+3. The visitor may filter for a verified physical 9-hole or 18-hole course layout. Physical layout is independent from whether a provider sells a 9-hole or 18-hole round.
+4. The visitor selects and ranks 1 to 5 courses. Rank and selection must remain stable while browsing; selecting a course must not unexpectedly reshuffle the discovery list.
+5. If a course is missing, the visitor can search by course name and town. A zero-result direct lookup is a recovery signal, not proof that the course does not exist; persist a `[COURSE_LOOKUP_MISS]` feedback record with bounded context for investigation.
+
+### 2. Create An Alert
+
+1. The golfer chooses a future date, start/end window, 1 to 4 players, and an optional verified course-layout preference.
+2. Signed-out golfers are asked to sign in. The server derives the owner and primary email from Clerk; never trust a client-supplied owner ID or primary email. The owner may later add up to 3 normalized additional recipients from the dashboard.
+3. A user may have at most 3 `ACTIVE` plus `PAUSED` searches. Search creation resolves selected provider candidates into reusable `Course` rows, persists `TeeSearch` plus ranked `CoursePreference` rows, and then requests that search's durable workflow immediately.
+4. Persisted demand and scheduler launch are separate facts: the API can keep the saved search when the initial Workflow start fails so recovery can restart it. Never delete or duplicate customer demand merely because `workflowRunId` is temporarily absent.
+5. The first check evaluates every selected course, records evidence, and sends the appropriate setup/status communication. A search beyond a provider's booking window should explain when booking is expected to open and sleep until the next useful course-local check rather than busy-polling.
+
+### 3. Monitor And Notify
+
+1. The per-search workflow wakes at `nextCheckAt` and runs against the latest deployment.
+2. Each selected course is checked independently. Its course-local timezone, policy, automation eligibility, booking method, provider metadata, and requested physical layout determine what can run.
+3. Every course gets a check result; material observation changes and adapter attempts produce durable `CourseProbe` evidence, while unchanged unsupported facts may reuse the latest row. Supported availability becomes an idempotent `TeeTimeMatch`; one course's failure must not suppress another course's success.
+4. New matching openings send email to the Clerk account email plus normalized additional recipients. Emails show course-local time as the booking source of truth and the golfer's timezone when it differs.
+5. The email links to the official booking page. Availability is first come, first served, and the golfer completes the booking.
+
+### 4. Manage Or Finish An Alert
+
+- The owner-scoped dashboard shows saved searches, ranked courses, scheduler state, current matches, recipients, booking-window guidance, and management actions.
+- Editing or resuming an active search increments its schedule version and starts a fresh workflow; stale workflow executions must not overwrite the newer schedule.
+- Pause stops useful checks until resumed. `Check now` queues an immediate owner-authorized check without reviving a global poller.
+- Removing a search deletes its `CoursePreference`, `CourseProbe`, and `TeeTimeMatch` rows but preserves reusable `Course` knowledge. A signed email stop marks it `COMPLETED` or `CANCELLED` and suppresses pending matches. Both paths must prevent future sends.
+- `TeeTimeMatch.availabilityStatus` and `alertStatus` are separate: an emailed time may remain visible while still available, and a vanished unsent time should not be emailed later.
+
+### 5. Recover From Missing Or Unsupported Coverage
+
+- A missing discovery result goes through exact provider-shape inspection, direct lookup, official-site corroboration, and, when justified, a `GooglePlaceReview` correction.
+- A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Policy-safe reusable provider support belongs in an adapter; phone-only, account-required, prohibited, captcha/queue, or otherwise unsafe access is classified honestly.
+- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. These are internal engineering work first: the hourly loop should attempt discovery, implementation, and verification before asking the owner for one concrete unavoidable external action.
+- Customer copy should say what Tee Time Spot can do now and offer the official site; do not expose terms such as adapter, probe, queue, Prisma, Neon, Codex, or automation incident.
+
+### 6. Learn From Real Use
+
+- `WebsiteEvent`, `WebsiteFeedback`, lookup misses, support incidents, probes, matches, and automation runs are the product-learning surfaces.
+- Analytics are aggregate and traffic-classed as `PUBLIC`, `AUTOMATION`, `TEST`, or `UNCLASSIFIED`. Never add a persistent visitor/session identifier just to improve reporting.
+- Automated and test browsers must identify their traffic so they do not masquerade as customer demand.
+- Treat feedback as an input to diagnosis and prioritization, not as permission to bypass product safety or provider policy.
+
 ## Canonical Decisions
 
 - Canonical product name: `Tee Time Spot`.
@@ -56,9 +123,13 @@ Use copy such as "official site", "official booking page", "direct link", and "y
 - No payments or marketplace checkout in the POC.
 - Clerk is the account system, but `CLERK_AUTH_READY` gates production account mode.
 - Signed-out visitors may browse courses, but creating, changing, pausing, or stopping alerts requires a Clerk account.
+- The authenticated Clerk account email is always the primary recipient; a search may add up to 3 deduplicated additional recipients.
 - Google Places is used for course discovery and photos.
 - Course discovery defaults to a 15-mile radius and offers 5 to 30 mile choices.
 - Discovery should prefer public golf courses and filter stores, simulators, private clubs, and likely non-course results.
+- Exact Google Place review facts live in Neon and can take effect without a code deployment; reusable generic filtering rules remain code.
+- A physical 9-hole/18-hole course layout is different from a purchasable round length. Use verified `Course.layoutHoleCounts` evidence and never infer physical layout from tee-sheet products alone.
+- Search windows are evaluated in each course's IANA timezone. `TeeSearch.userTimeZone` is for recipient-facing context, not for redefining a course-local booking window.
 - Extra recipients are part of the product: do not remove `TeeSearch.additionalEmails` or dashboard recipient UI.
 - Feedback is part of the product-learning loop: do not remove `WebsiteEvent`, `WebsiteFeedback`, or the feedback widget.
 - The automation should improve the product over time using evidence, not just rerun the same prompt.
@@ -92,14 +163,73 @@ Core folders:
 Core data:
 
 - `User`: Clerk account owner; legacy guest-style rows may remain only for sign-in migration.
-- `Course`: discovered/supported course plus automation metadata.
-- `TeeSearch`: saved demand.
+- `Course`: canonical reusable course snapshot, including identity, location/timezone, physical layout evidence, booking method/window, provider metadata, policy, and automation eligibility.
+- `GooglePlaceReview`: exact-ID, evidence-backed provider access/identity/alias review; it is not a playable course catalog row.
+- `TeeSearch`: owner-scoped saved demand plus scheduler state.
 - `CoursePreference`: ranked course list.
 - `CourseProbe`: per-course automation observation.
 - `TeeTimeMatch`: normalized matching slot.
 - `AutomationRun`: durable poll/improvement run record.
+- `CourseAutomationDiscovery`: append-only provider/booking discovery evidence; an accepted finding can update the reusable `Course` snapshot.
+- `CourseSupportIncident`: one deduplicated unresolved monitoring incident per course, with escalation and resolution history.
 - `WebsiteEvent`: engagement event.
 - `WebsiteFeedback`: user feedback.
+
+### System Ownership Boundaries
+
+- **Clerk owns authentication and account identity.** Neon stores the app's `User` mapping and product state. Never expose another owner's search when Clerk is unavailable, and never fall back to a global recent-search dashboard.
+- **Google Places owns transient place data.** The app owns conservative filtering, exact reviewed corrections, deduplication, and the choice to present a result as likely public.
+- **Neon Postgres is the durable source of truth.** Dashboard/search state, schedules, provider reviews, probes, matches, incidents, analytics, and automation history must survive process restarts and deploys.
+- **Vercel Workflow owns per-search scheduling.** It orchestrates sleep/wake/check behavior; Postgres schedule version/state prevents stale workflow work from winning.
+- **Course adapters read policy-safe public availability.** The official provider remains authoritative for current availability, price, rules, and booking.
+- **Resend transports email.** A local `SENT` record means the send path completed/provider accepted it; it is not proof of inbox placement or an open.
+- **Vercel Git deployments own production runtime.** A successful local build or database write is not proof that the matching application commit is live.
+- **The hourly Codex loop owns product engineering improvement.** It is separate from customer search workflows and must not be used as the scheduler.
+
+### Application Surfaces And API Boundaries
+
+- `/` and `/search`: public intake/discovery and ranked shortlist; authentication is required only when saving.
+- `/dashboard`: authenticated, owner-scoped alert management. When account/database setup is unavailable, render a safe setup/signed-out state with no cross-owner fallback data.
+- `/email-preview`: side-effect-free sample rendering of the real alert design.
+- `/guides/public-golf-booking-windows`: customer explanation of provider booking-window behavior.
+- `/alerts/stop`: confirmation surface for signed bounded email actions.
+- `/api/location/geocode`, `/api/courses/discover`, `/api/courses/lookup`, and `/api/courses/photo`: public provider-backed reads with bounded inputs and safe failure responses.
+- `/api/searches` and its item/check actions: authenticated and owner-scoped. Creation, edit, pause/resume, explicit check, and delete must enforce the same ownership server-side.
+- `/api/feedback` and `/api/analytics/events`: public, validated product-learning writes; traffic class is aggregate metadata, not identity.
+- Automation mutation routes require `AUTOMATION_API_KEY`; recovery cron requires `CRON_SECRET`; email actions use `EMAIL_ACTION_SECRET`. These authorities are separate and must not be interchangeable.
+
+Keep public discovery and lookup response shapes backward compatible unless the task explicitly calls for an API change. Provider or review implementation details belong behind those contracts.
+
+### Persistence Boundary
+
+There is no active SQLite or file-backed application database. Keep these in Neon:
+
+- Accounts and customer demand: `User`, `TeeSearch`, `CoursePreference`.
+- Course/provider knowledge: `Course`, `GooglePlaceReview`, `CourseAutomationDiscovery`, `CourseSupportIncident`.
+- Monitoring and delivery state: `CourseProbe`, `TeeTimeMatch`, `AutomationRun`.
+- Product learning: `WebsiteEvent`, `WebsiteFeedback`.
+
+These are intentionally temporary and should not become database projects without a demonstrated need:
+
+- Search-form URL/session prefill.
+- Aggregate traffic/source markers.
+- Provider cookies or request sessions.
+- Request-local maps, review indexes, caches, and dedupe sets.
+- Demo fixtures used outside production.
+- Ignored local environment and provider-link files.
+
+Do not add Redis, a warehouse, a read replica, a separate queue, or a full course-catalog cache for hypothetical scale. The current architecture is one app, one durable Postgres source of truth, per-search Workflows, and bounded external integrations.
+
+### Database Connection And Migration Rules
+
+- Application/runtime traffic uses pooled `DATABASE_URL`.
+- Prisma migrations prefer direct `DATABASE_URL_UNPOOLED`; on Windows, explicitly map it to `DATABASE_URL` for `prisma migrate deploy` when the CLI does not load the env file automatically.
+- `npm run prisma:migrate` uses `prisma migrate dev` and is local-development-only. The production shape is `npx vercel env run -e production -- npx prisma migrate deploy`, after confirming that the command resolves the direct Neon URL.
+- Missing database configuration may use localhost fallback only off Vercel. Never make a hosted deployment silently connect to localhost.
+- In production, dependent discovery/geocode/search APIs and actions must fail closed, normally with a generic `503`, when required database or Google configuration is missing. The dashboard may render a safe setup state, and the photo proxy may return `404` when no provider photo can be served. Development and preview may use explicit demo fixtures.
+- During Vercel build, Prisma client generation may use an inert placeholder only for generation. Runtime and migration commands must still require real configuration.
+- Apply backward-compatible additive migrations before publishing application code that depends on them. Validate first on an isolated preview database when the change is material.
+- Preserve query-aligned indexes for global history reads, including `AutomationRun.startedAt`, `(promptVersion, startedAt)`, `CourseProbe.observedAt`, `CourseAutomationDiscovery.createdAt`, and `TeeTimeMatch.firstSeenAt`.
 
 ## Environment And Secrets
 
@@ -108,15 +238,21 @@ Expected env names:
 - `DATABASE_URL`
 - `DATABASE_URL_UNPOOLED`
 - `GOOGLE_PLACES_API_KEY`
+- `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY`
+- `NEXT_PUBLIC_GOOGLE_MAPS_MAP_ID`
 - `RESEND_API_KEY`
 - `RESEND_EMAIL_DOMAIN`
 - `ALERT_EMAIL_FROM`
+- `OPERATOR_ALERT_EMAIL`
 - `AUTOMATION_API_KEY`
+- `CRON_SECRET`
 - `EMAIL_ACTION_SECRET`
 - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
 - `CLERK_SECRET_KEY`
 - `CLERK_AUTH_READY`
 - `NEXT_PUBLIC_SITE_URL`
+- `VERCEL_AUTOMATION_BYPASS_SECRET` (protected preview smoke only)
+- `GOOGLE_SITE_VERIFICATION` / `BING_SITE_VERIFICATION` (optional metadata tokens)
 
 Rules:
 
@@ -125,6 +261,8 @@ Rules:
 - Redact keys in docs and `AutomationRun.notes`.
 - Normalize copied env values when code reads provider keys because copied values have previously included BOM/whitespace.
 - Prefer provider dashboards, Vercel env vars, or ignored local env files for credentials.
+- Keep the browser Maps key referrer-restricted and separate from the server Places key. Never expose a server key through `NEXT_PUBLIC_*`.
+- Treat `CLERK_AUTH_READY` as a deliberate safety gate even when valid-looking keys exist; production account APIs should not partially enable themselves.
 - If a setup action needs billing, payment methods, ownership transfer, legal acceptance, or domain purchase, get fresh explicit approval.
 
 ## Google Places Rules
@@ -132,21 +270,54 @@ Rules:
 Current nearby search:
 
 - Uses Places API (New) `places:searchNearby`.
-- Sends `includedTypes: ["golf_course"]`.
+- Sends `includedPrimaryTypes: ["golf_course"]` for the typed nearby passes.
 - Requests only needed fields.
 - Uses `places:searchText` style geocoding for typed location fallback.
 - Uses `/api/courses/photo` as a proxy/redirect for transient Places photo references.
 
 Filtering expectations:
 
-- Require `primaryType` to be `golf_course`.
-- Require `types` to include `golf_course`.
+- Normally require `primaryType` to be `golf_course` and `types` to include `golf_course`.
+- Permit only the documented narrow exceptions: an active exact-ID `VERIFIED_PUBLIC` review or a strongly corroborated bounded public-course text result.
 - Exclude non-operational places.
 - Exclude known non-course primary types such as stores, indoor/simulator surfaces, sports clubs, and associations.
 - Exclude known private/non-course name patterns.
 - When the user reports a bad result, add focused tests around the real shape rather than broad string hacks.
 
 Do not over-request fields. Keep field masks tight.
+
+### Reviewed Place Facts
+
+`GooglePlaceReview` is the durable source for evidence-backed facts about one exact Google Place ID:
+
+- `accessOverride` may be `VERIFIED_PUBLIC`, `VERIFIED_PRIVATE`, `VERIFIED_NON_COURSE`, or null when the review only corrects identity/alias behavior.
+- `name`, `classification`, `evidenceUrl`, and `reviewedAt` explain what was reviewed and why.
+- `active=false` preserves history while removing the review from runtime behavior.
+- `canonicalPlaceId` plus canonical name/address/site/phone can collapse an alias into the real place and correct provider identity. Review coordinates support radius targeting for verified-public recovery; ordinary candidate mapping still uses current Google coordinates.
+- `retainWhenCanonicalAbsent` keeps a reviewed alias only when the canonical result is not present in that provider response.
+
+Runtime rules:
+
+- Load all active place reviews once per discovery or lookup request and reuse the in-memory index for that request.
+- Exact-ID access reviews control recovery/exclusion before generic heuristics. Identity corrections and alias collapse happen without changing the public API response shape.
+- A review-read failure must return a generic `503`; never bypass known private/non-course exclusions because Neon is unavailable.
+- Generic, reusable classification and distance rules remain code. Do not migrate every heuristic into rows.
+- `Course.isPublic` remains a course snapshot field. Provider review rows must not masquerade as playable `Course` records.
+- The old hardcoded public/private/non-course/identity/alias registries must not return. Add or correct evidence through the operator command.
+- Woodhaven's verified nine-hole layout belongs on its existing `Course` row. Do not reintroduce a runtime `CURATED_COURSE_LAYOUTS` fallback.
+
+Operator command:
+
+```powershell
+npm run automation:place-review -- upsert --place-id <place-id> --name <review-name> --classification <classification> --evidence-url <https-url> --reviewed-at <YYYY-MM-DD> [options]
+npm run automation:place-review -- upsert --place-id <place-id> --inactive [--apply]
+```
+
+- The command is dry-run by default; `--apply` is required for writes.
+- `--apply` writes to whichever database environment is loaded. Confirm the target explicitly and inspect the dry-run output before touching production.
+- Use it for upsert and deactivation. This is operator-only by current design; do not add a public write API or admin UI without an explicit new product/security decision.
+- Validate an HTTP(S) evidence URL with no embedded credentials, date, paired coordinates, canonical alias requirements, and retention requirements before applying.
+- Review changes must include focused tests for verified-public recovery, private/non-course exclusion, identity correction, canonical alias collapse, retained alias behavior, inactive rows, and ordinary positive public-course controls.
 
 ## Automation Loop Contract
 
@@ -168,8 +339,14 @@ Important behavior:
 - `automation:poll` is a manual recovery command, not a recurring 15-minute production scheduler.
 - A daily recovery cron performs only a lightweight database query for overdue/stuck schedules and starts work only when needed.
 - `TeeSearch.checkStatus`, `nextCheckAt`, `lastCheckedAt`, `lastCheckOutcome`, and `workflowRunId` describe scheduler state.
+- `TeeSearch.scheduleVersion` invalidates older workflow executions after edit, pause, resume, cancellation, or an explicit new schedule.
+- `TeeSearch.status` is the customer lifecycle (`ACTIVE`, `PAUSED`, `COMPLETED`, `CANCELLED`); `checkStatus` is execution state (`IDLE`, `QUEUED`, `CHECKING`, `WAITING`, `FAILED`, `STOPPED`). Do not collapse them into one field.
+- Valid base cadence values are 5, 15, 30, 60, and 120 minutes. Booking-window scheduling may sleep longer until the next useful release event.
+- A search expires at the latest absolute end of its selected courses' local requested windows, not at arbitrary server midnight.
+- Booking-window intelligence may defer a course until its provider-confirmed release time. The workflow should wake at the next useful course event while still allowing other selected courses to run.
 - `TeeTimeMatch.availabilityStatus` is independent from email `alertStatus`; emailed matches remain visible while they are still confirmed available.
-- The truth is in Postgres: `AutomationRun`, `CourseProbe`, `TeeTimeMatch`, and pending alerts.
+- The truth is in Postgres: the `TeeSearch` schedule row, `AutomationRun`, newest per-course `CourseProbe`, `TeeTimeMatch`, `CourseSupportIncident`, and pending alerts.
+- Use the newest observation for each course/search when classifying current health. A later `NO_MATCH` or success supersedes an older failure even though history remains valuable.
 - Use `automation:inspect` to classify the result.
 - Report normalized outcomes such as `success`, `no new matches`, `alerts sent/dry-run`, `blocked_env`, `needs_adapter`, or `blocked_policy`.
 - Do not revive the retired 15-minute Codex poller.
@@ -224,6 +401,7 @@ Before fetching a tee sheet:
 
 - Check `Course.automationEligibility`.
 - Check `Course.policyNotes`.
+- Check the requested physical layout against verified `Course.layoutHoleCounts`; skip a known mismatch before provider retrieval.
 - Evaluate policy text if available.
 - Skip `BLOCKED` courses.
 - Record `BLOCKED_POLICY` if terms appear to prohibit automated retrieval.
@@ -234,11 +412,26 @@ Before fetching a tee sheet:
 Adapter behavior:
 
 - Use public tee-sheet endpoints only.
+- Run official-site/provider discovery before declaring a new course unsupported, and append evidence to `CourseAutomationDiscovery`.
 - Prefer stable source IDs to dedupe matches.
 - Do not alert duplicate matches.
 - Do not suppress successful probes for one course because another course failed.
 - Keep per-course evidence and failure notes.
+- Reconcile availability separately from delivery. Mark missing observed slots `GONE` only under the reconciliation rules, and suppress vanished unsent matches.
+- Treat recurring unsupported/fetch failures as one durable course incident rather than writing or emailing the same unresolved fact every five minutes.
+- Resolve a course incident only after monitoring succeeds or a source-backed direct-booking classification is verified. Notify resolution only when a prior owner escalation was actually sent.
 - Use transaction-scoped Postgres advisory leases for poller mutation; session-level locks are risky with pooled Neon connections.
+
+## Current Adapter Map
+
+Do not assume every `DetectedPlatform` enum has a runnable adapter.
+
+- Runnable families: `FOREUP`, `TEEITUP`, and `CHRONOGOLF`.
+- Runnable `CUSTOM` metadata paths: CPS, Chelsea, and TeeSnap-compatible public surfaces.
+- Classification-only today: `GOLFNOW` and `CLUB_CADDIE`; finding one is not evidence that monitoring is implemented.
+- `UNKNOWN` means provider discovery is still needed, not that the course is unsupported forever.
+
+Before adding an adapter, search existing provider dispatch, metadata parsers, seeds, and tests. Extend a reusable family when the public endpoint contract matches; do not create course-name-specific fetch code.
 
 ## ForeUP Decisions
 
@@ -264,6 +457,66 @@ If adding a ForeUP course:
 - Set automation eligibility only when retrieval is allowed.
 - Add or update focused tests.
 - Run `automation:inspect` after poll verification.
+
+## Diagnosis And Repair Playbook
+
+Fix the smallest authoritative layer that is wrong. Do not start with a broad refactor or a one-off database edit just because the symptom is visible there.
+
+### Establish The Real Symptom
+
+1. Reproduce the exact customer route, account/search, location, course, date, viewport, email type, or workflow named in the report.
+2. Decide whether the request is diagnosis-only or authorizes a change. Read-only investigation must not mutate alerts, provider state, Git, or production data.
+3. Check current source-of-truth state before relying on screenshots, old probes, or memory. Mask customer identifiers in normal reporting.
+4. Preserve at least one known-good control near the failure. A precision fix that removes valid courses or a scheduler fix that stops healthy searches is not complete.
+
+### Isolate The Layer
+
+- **UI/layout:** inspect the live DOM, computed styles, accessible names, viewport geometry, console, and same-origin failures. Confirm data is present before changing queries or Postgres.
+- **Authentication/ownership:** verify Clerk readiness, authenticated identity, `User.clerkUserId`, owner-scoped query, and API status. Never repair privacy failures with client-only hiding.
+- **Discovery:** compare raw Google shape, active `GooglePlaceReview`, generic classifier output, dedupe result, API response, and rendered list. Use stable exact Place IDs for exceptions and test nearby public controls.
+- **Saved search:** inspect the authenticated API result and `User`/`TeeSearch`/`CoursePreference` transaction. Confirm primary email came from Clerk, ranks are unique, and selected course candidates resolved to the intended canonical `Course` rows.
+- **Scheduling:** inspect `TeeSearch.status`, `checkStatus`, `scheduleVersion`, `workflowRunId`, `nextCheckAt`, recent Workflow/`AutomationRun` outcomes, and the newest probe per course. Do not diagnose from one old failure row.
+- **Provider monitoring:** inspect `Course` eligibility/reason/policy/booking metadata, newest probe, append-only discovery evidence, and open support incident. Confirm the official booking surface and policy before changing an adapter.
+- **Matches/email:** inspect current matches, availability vs alert state, status snapshot, recipients, idempotency behavior, and provider send result. "Sent" does not prove inbox delivery; never promise open/delivery proof the available evidence cannot provide.
+- **Deployment/configuration:** verify the exact Git SHA, applied migrations, Vercel deployment source/aliases, environment presence without printing values, live routes, and logs. Local success is not production proof.
+- **Quick route probes:** use the real contracts: geocode takes `q`; discover takes `latitude`, `longitude`, and `radiusMeters`; lookup takes `q` plus either both coordinates or neither. Wrong probe shapes create false failures.
+
+### Choose The Durable Fix
+
+- Put reusable rules in typed domain code with focused tests.
+- Put exact evidence-backed Google place facts in `GooglePlaceReview` through the protected operator command.
+- Put canonical supported-course and automation facts on `Course`; preserve how they were learned in `CourseAutomationDiscovery`.
+- Put customer intent and lifecycle on `TeeSearch`; do not infer it later from analytics or email history.
+- Put recurring monitoring failures in `CourseSupportIncident`; keep individual observations in `CourseProbe`.
+- Keep UI state local when it is merely presentation/prefill. Do not create database models for transient form state.
+- Prefer additive schema changes and backward-compatible rollouts. Do not combine a migration with unrelated UI redesign.
+- When correcting live data, also fix the path that produced the bad data and add a regression test; otherwise the next discovery or workflow can recreate it.
+
+### Common Failure Patterns To Avoid
+
+- Broad name substrings for one bad Google result; they produce false positives in other markets.
+- Treating a missing Google result as nonexistence instead of a provider-recall problem.
+- Letting database/review failures bypass private or non-course exclusions.
+- Creating duplicate `Course` rows for alternate provider IDs and losing existing adapter metadata.
+- Inferring physical course layout from a purchasable round length.
+- Showing another user's search when account mode or Clerk is unavailable.
+- Re-running the manual poller to hide a broken per-search Workflow.
+- Counting automation/test traffic as customer conversion.
+- Hiding an unsupported course without giving the golfer an official direct-booking path.
+- Running build and Playwright concurrently against the same `.next` directory; missing-manifest errors from that race are not product defects.
+- Updating production aliases with a second CLI deployment after a normal Git release.
+
+### Repair Completion Criteria
+
+A repair is complete only when:
+
+- The named failing case passes at the layer where it broke.
+- Relevant positive controls still pass.
+- Durable state and user-visible state agree.
+- Tests cover the actual provider/data shape, not a simplified guess.
+- Schema changes are migrated and read back.
+- Production work verifies the exact deployed commit, routes, workflow/data outcome where relevant, and recent error logs.
+- Unrelated work remains untouched and Git parity is reported accurately.
 
 ## Figma And Design Workflow
 
@@ -332,6 +585,15 @@ npm run ui:smoke
 git diff --check
 ```
 
+Add focused verification for the layer changed:
+
+- Google review changes: dry run, apply/upsert, deactivation, invalid input, active/inactive runtime behavior, private/non-course exclusions, verified-public recovery, identity correction, alias collapse/retention, and unrelated public controls.
+- Persistence migrations: apply to an isolated database, verify backfilled uniqueness/counts/classifications/indexes, and read back protected canonical rows such as Woodhaven before production rollout.
+- Search/scheduler changes: verify create/edit/pause/resume/check/delete ownership, schedule-version invalidation, recovery behavior, newest probe state, pending alerts, and at least one real Workflow cycle when production behavior changed.
+- Email changes: render preview plus setup/status/instant/stop-action cases, recipient dedupe, idempotency/retry behavior, and safety copy.
+- Discovery fixes: use the exact reported provider payload and location plus multiple positive/negative controls in different markets.
+- UI fixes: verify the exact reported viewport and interaction first, then the desktop/mobile smoke matrix; inspect screenshots when layout was the problem.
+
 For production verification:
 
 ```powershell
@@ -364,6 +626,8 @@ Playwright smoke expectations:
 - Interactive elements are usable.
 
 ## Deployment Rules
+
+For a backward-compatible schema-dependent release, apply and verify the reviewed additive migration first using the direct Neon URL, then publish the application commit that depends on it. Never deploy code that queries a not-yet-applied schema. Use a staged compatibility plan when a change cannot be safely additive.
 
 Normal production deployments are owned by the Vercel Git integration. After the verified
 task branch is fast-forwarded to `main`, wait for the Git-created deployment for that exact
@@ -416,15 +680,17 @@ Update docs when decisions change. Do not let old TeeTimeAI branding creep back 
 - After pushing to `main`, require `git rev-list --left-right --count HEAD...origin/main` to report `0 0` before deployment or completion.
 - Push only when the user has asked for or clearly authorized end-to-end implementation/deploy work.
 
-## Current Known Gaps
+## Current State And Known Gaps
 
 Provider/setup gaps can drift, so verify before acting. Last known items:
 
-- Clerk account mode is gated until production auth is fully ready.
-- Google OAuth for Clerk was the last known auth blocker.
+- Clerk account mode is active in production with owner-scoped dashboards and email/password plus Google sign-in. `CLERK_AUTH_READY` remains the required safety gate; verify live provider state before changing it.
 - Google Places key should remain restricted and should be rotated after confirming healthy production behavior.
+- Google place corrections are operator-command-only by design; there is no public/admin review editor.
 - Adapter coverage is intentionally narrow; add adapters only with policy-safe public retrieval evidence.
+- Resend/provider acceptance is recorded, but the current architecture has no separate inbox-delivery/open ledger.
 - Admin/reporting for feedback, events, probes, and adapter gaps can be improved.
+- No Redis, warehouse, read replica, separate queue, or full course-catalog cache is currently justified.
 
 ## Useful Commands
 
@@ -442,6 +708,7 @@ npm run ui:smoke
 npm run automation:poll
 npm run automation:inspect
 npm run automation:improve
+npm run automation:place-review -- upsert --help
 npm run deployment:wait -- --sha <commit-sha>
 ```
 
