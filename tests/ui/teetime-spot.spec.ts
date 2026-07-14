@@ -335,6 +335,51 @@ test.describe("Tee Time Spot UI smoke", () => {
     );
   });
 
+  test("keeps homepage supporting text at AA contrast colors", async ({ page }) => {
+    await page.goto("/");
+
+    await expect(page.locator(".scenario-section .eyebrow")).toHaveCSS(
+      "color",
+      "rgb(109, 191, 156)"
+    );
+    await expect(page.locator(".scenario-plan > .scenario-label")).toHaveCSS(
+      "color",
+      "rgb(163, 170, 167)"
+    );
+    await expect(page.locator(".scenario-result > .scenario-label")).toHaveCSS(
+      "color",
+      "rgb(109, 191, 156)"
+    );
+    await expect(page.locator(".home-form-row-primary label > span")).toHaveCSS(
+      "color",
+      "rgb(85, 113, 106)"
+    );
+    await expect(page.locator(".home-distance-filter em").first()).toHaveCSS(
+      "color",
+      "rgb(95, 116, 110)"
+    );
+    await expect(page.getByRole("button", { name: "9-hole" })).toHaveCSS(
+      "color",
+      "rgb(95, 116, 110)"
+    );
+    await expect(page.locator(".home-course-summary > div")).toHaveCSS(
+      "color",
+      "rgb(149, 160, 166)"
+    );
+    await expect(page.locator(".home-course-summary > small")).toHaveCSS(
+      "color",
+      "rgb(149, 160, 166)"
+    );
+    await expect(page.locator(".community-eyebrow > p")).toHaveCSS(
+      "color",
+      "rgb(255, 255, 255)"
+    );
+    await expect(page.locator(".community-action > span")).toHaveCSS(
+      "color",
+      "rgb(255, 255, 255)"
+    );
+  });
+
   test("shows when the current location has been selected", async ({ context, page }) => {
     await context.grantPermissions(["geolocation"], { origin: smokeOrigin });
     await context.setGeolocation({ latitude: 41.242, longitude: -73.209 });

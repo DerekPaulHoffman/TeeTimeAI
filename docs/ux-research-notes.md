@@ -115,6 +115,12 @@
 - Tee Time Spot evidence: signed-out provider-backed discovery returned `TPGC Maintenance Area` and `Carson Valley Golf Course Maintenance` around `96120`, plus `Winton Woods Operations` around `41011`, all as operational primary `golf_course` records. The same snapshots separately returned the playable Tahoe Paradise, Lake Tahoe, Carson Valley, Winton Woods, and Mill courses. Current Places detail reads still label each facility as a golf course, so provider type, semantic public-query corroboration, and the new `googleMapsTypeLabel` field do not distinguish them. The official course sites identify different playable-course names and addresses.
 - Decision: filter explicit `maintenance`, `maintenance area/facility/shop`, and `operations` facility names using a two-market corpus, not stable-ID registry growth. Preserve seven similarly named public-course, resort, multi-use, and facility controls in focused coverage. Leave `Madden Memorial Fund` visible for now: it is a separate nonprofit-identity failure that needs structured official-access evidence rather than a one-example `Fund` name rule.
 
+## 2026-07-14: Homepage supporting text must meet minimum contrast
+
+- Source: [WCAG 2.2 Success Criterion 1.4.3: Contrast (Minimum)](https://www.w3.org/TR/WCAG22/#contrast-minimum), accessed 2026-07-14 America/New_York. Normal text requires at least 4.5:1 contrast; the 3:1 exception applies only to large text.
+- Tee Time Spot evidence: a fresh production mobile Lighthouse run scored 96 for accessibility and identified homepage labels and supporting copy between 2.30:1 and 4.46:1. The affected text included scenario labels, form labels, distance endpoints, empty selected-course guidance, and Discord community copy. The same run scored 81 for performance with a 4.5-second text LCP, while image delivery reported no savings, so the measured accessibility defect outranked a speculative image change.
+- Decision: raise only the affected foreground colors while preserving the current layout, backgrounds, hierarchy, and alert-only copy. Add four-viewport Playwright assertions for the corrected color tokens and require a post-change Lighthouse accessibility score of 100.
+
 ## Product Shape
 
 Tee Time Spot should behave like a waitlist assistant rather than a booking marketplace. GolfNow/TeeOff-style products emphasize inventory search, deals, and broad marketplace browsing. Noteefy-style flows emphasize preference capture, waitlist matching, and alerts.
