@@ -414,6 +414,47 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies explicit official first-come golf access as walk-in only", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "goose-run",
+      courseName: "Goose Run Golf Course",
+      sourceUrl:
+        "https://www.navymwrnewlondon.com/programs/493b6c83-491b-4243-b9a1-f0090f288fb2",
+      finalUrl:
+        "https://www.navymwrnewlondon.com/programs/493b6c83-491b-4243-b9a1-f0090f288fb2",
+      observedUrls: [
+        "https://www.navymwrnewlondon.com/programs/493b6c83-491b-4243-b9a1-f0090f288fb2"
+      ],
+      visibleText:
+        "Tee times are not neccessary at Goose Run, golf is on a first come, first serve basis. Online Golf Round Payment."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-walk-in-access" }
+    });
+  });
+
+  it("does not mistake first-come practice facilities for walk-in course access", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-course-with-range",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://example.com/book-a-tee-time"],
+      visibleText:
+        "Tee times are not required for the driving range, which is first come, first served. Book a tee time online for the golf course."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it("preserves public courses that merely mention private events", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "public-course",
@@ -421,6 +462,40 @@ describe("buildBrowserDiscovery", () => {
       sourceUrl: "https://example.com/",
       observedUrls: ["https://example.com/"],
       visibleText: "An 18-hole public golf course with private event and outing packages."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("classifies an official resident social-club course as member access", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "oswegatchie-hills",
+      courseName: "Oswegatchie Hills Golf Course",
+      sourceUrl: "https://ohcniantic.org/",
+      observedUrls: ["https://ohcniantic.org/membership-information/"],
+      visibleText:
+        "The Oswegatchie Hills Club is a neighborhood social club for residents of The Point and offers its members the use of clay tennis courts, a beach, and a 6 hole golf course."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-resident-member-access" }
+    });
+  });
+
+  it("preserves public neighborhood courses that merely offer member benefits", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-neighborhood-course",
+      courseName: "Example Municipal Golf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://example.com/tee-times"],
+      visibleText:
+        "A public neighborhood golf course open to everyone. Members receive early booking benefits, and public tee times are available online."
     });
 
     expect(discovery.status).toBe("INSPECTED");

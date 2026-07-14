@@ -146,12 +146,35 @@ async function collectBrowserEvidence(
     waitUntil: "domcontentloaded",
     timeout: NAVIGATION_TIMEOUT_MS
   });
+  await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+  const landingPageEvidence = await collectPageEvidence(page);
 
   await clickLikelyBookingLink(page);
   await trySelectSearchDate(page);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+  const destinationPageEvidence = await collectPageEvidence(page);
 
-  const pageEvidence = await page.evaluate(() => {
+  for (const url of [
+    ...landingPageEvidence.anchors,
+    ...landingPageEvidence.scripts,
+    ...destinationPageEvidence.anchors,
+    ...destinationPageEvidence.scripts
+  ]) {
+    observedUrls.add(url);
+  }
+
+  return {
+    ...input,
+    finalUrl: page.url(),
+    observedUrls: [...observedUrls],
+    visibleText: [landingPageEvidence.visibleText, destinationPageEvidence.visibleText]
+      .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
+      .join("\n")
+  };
+}
+
+async function collectPageEvidence(page: Page) {
+  return page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
       .map((anchor) => anchor.href)
       .filter(Boolean)
@@ -183,7 +206,7 @@ async function collectBrowserEvidence(
       anchors,
       scripts,
       visibleText: [
-        document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 2000),
+        document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 4000),
         inlineCourseData,
         widgetConfigs
       ]
@@ -191,17 +214,6 @@ async function collectBrowserEvidence(
         .join("\n")
     };
   });
-
-  for (const url of [...pageEvidence.anchors, ...pageEvidence.scripts]) {
-    observedUrls.add(url);
-  }
-
-  return {
-    ...input,
-    finalUrl: page.url(),
-    observedUrls: [...observedUrls],
-    visibleText: pageEvidence.visibleText
-  };
 }
 
 async function clickLikelyBookingLink(page: Page) {

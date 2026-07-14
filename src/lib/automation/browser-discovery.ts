@@ -89,6 +89,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return privateClubClassification;
   }
 
+  const walkInClassification = learnWalkInClassification(evidence, observedUrls);
+
+  if (walkInClassification) {
+    return walkInClassification;
+  }
+
   const foreupDiscovery = learnForeupDiscovery(evidence, observedUrls);
 
   if (foreupDiscovery) {
@@ -137,6 +143,62 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   };
 }
 
+function learnWalkInClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const noReservationMatch = /\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b/i.exec(
+    visibleText
+  );
+
+  if (!noReservationMatch) {
+    return null;
+  }
+
+  const statementStart = Math.max(0, visibleText.lastIndexOf(".", noReservationMatch.index) + 1);
+  const nextPeriod = visibleText.indexOf(
+    ".",
+    noReservationMatch.index + noReservationMatch[0].length
+  );
+  const statementEnd = nextPeriod === -1
+    ? Math.min(visibleText.length, noReservationMatch.index + 320)
+    : Math.min(visibleText.length, nextPeriod + 1);
+  const statement = visibleText.slice(statementStart, statementEnd);
+  const explicitlyFirstCome = /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
+    statement
+  );
+  const scopedToNonCourseFacility =
+    /\b(?:driving|practice)\s+(?:range|facility|stalls?)\b/i.test(statement);
+  const contradictsWalkInOnly =
+    /\b(?:book|reserve)\s+(?:a\s+)?tee times?\s+(?:online|now)\b/i.test(statement);
+
+  if (!explicitlyFirstCome || scopedToNonCourseFacility || contradictsWalkInOnly) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: evidence.finalUrl ?? evidence.sourceUrl,
+    bookingMethod: "WALK_IN",
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    policyNotes:
+      "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-walk-in-access"
+    }
+  };
+}
+
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
   if (course.automationEligibility === "BLOCKED") {
     return false;
@@ -166,12 +228,15 @@ function learnPrivateClubClassification(
   observedUrls: string[]
 ): BrowserDiscovery | null {
   const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
-  const explicitlyPrivate =
+  const privateMemberGuestClub =
     /\bis a private club available to\b/i.test(visibleText) ||
     (/\bprivate (?:golf )?club\b/i.test(visibleText) &&
       /\bmembers? and (?:their )?guests?\b/i.test(visibleText));
+  const residentMemberClub =
+    /\bneighborhood (?:social )?club for residents?\b/i.test(visibleText) &&
+    /\boffers? (?:its )?members? the use of\b[^.]{0,220}\bgolf course\b/i.test(visibleText);
 
-  if (!explicitlyPrivate) {
+  if (!privateMemberGuestClub && !residentMemberClub) {
     return null;
   }
 
@@ -184,15 +249,18 @@ function learnPrivateClubClassification(
     bookingMethod: "CONTACT_COURSE",
     automationEligibility: "BLOCKED",
     automationReason: "OTHER",
-    policyNotes:
-      "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course.",
+    policyNotes: residentMemberClub
+      ? "The official site identifies this as a neighborhood social club for residents and says the golf course is a member amenity. Tee Time Spot must not present automated public tee-time monitoring for this course."
+      : "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course.",
     intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
     confidence: 0.98,
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "official-private-club-access"
+      learnedFrom: residentMemberClub
+        ? "official-resident-member-access"
+        : "official-private-club-access"
     }
   };
 }
