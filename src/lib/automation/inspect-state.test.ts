@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeSearchInspectionQuery,
   latestCurrentActionableProbes,
+  summarizeCourseDiscoveryOutcomes,
   summarizeWebsiteEventCounts
 } from "../../../scripts/automation/inspect-state";
 
@@ -91,6 +92,87 @@ describe("summarizeWebsiteEventCounts", () => {
       PUBLIC: {
         course_discovery_completed: 2,
         page_viewed: 12
+      }
+    });
+  });
+});
+
+describe("summarizeCourseDiscoveryOutcomes", () => {
+  it("turns discovery parameters into traffic-class-separated outcome buckets", () => {
+    expect(
+      summarizeCourseDiscoveryOutcomes([
+        {
+          trafficClass: "PUBLIC",
+          name: "course_discovery_completed",
+          metadata: { resultCount: 5, demo: false }
+        },
+        {
+          trafficClass: "PUBLIC",
+          name: "course_discovery_completed",
+          metadata: { resultCount: 0, demo: false }
+        },
+        {
+          trafficClass: "PUBLIC",
+          name: "course_discovery_failed",
+          metadata: { stage: "GEOCODE", responseStatus: 404 }
+        },
+        {
+          trafficClass: "AUTOMATION",
+          name: "course_discovery_completed",
+          metadata: { resultCount: 3, demo: true }
+        },
+        {
+          trafficClass: "AUTOMATION",
+          name: "course_discovery_failed",
+          metadata: { stage: "DISCOVERY" }
+        }
+      ])
+    ).toEqual({
+      AUTOMATION: {
+        completedWithResults: 1,
+        completedEmpty: 0,
+        demoCompletions: 1,
+        failedGeocode: 0,
+        failedDiscovery: 1,
+        failureStatuses: {
+          "DISCOVERY:unknown": 1
+        }
+      },
+      PUBLIC: {
+        completedWithResults: 1,
+        completedEmpty: 1,
+        demoCompletions: 0,
+        failedGeocode: 1,
+        failedDiscovery: 0,
+        failureStatuses: {
+          "GEOCODE:404": 1
+        }
+      }
+    });
+  });
+
+  it("ignores malformed discovery metadata", () => {
+    expect(
+      summarizeCourseDiscoveryOutcomes([
+        {
+          trafficClass: "PUBLIC",
+          name: "course_discovery_completed",
+          metadata: null
+        },
+        {
+          trafficClass: "PUBLIC",
+          name: "course_discovery_failed",
+          metadata: { stage: "UNKNOWN", responseStatus: 500 }
+        }
+      ])
+    ).toEqual({
+      PUBLIC: {
+        completedWithResults: 0,
+        completedEmpty: 0,
+        demoCompletions: 0,
+        failedGeocode: 0,
+        failedDiscovery: 0,
+        failureStatuses: {}
       }
     });
   });

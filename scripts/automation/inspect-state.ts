@@ -41,6 +41,7 @@ async function main() {
     recentBrowserDiscoveries,
     recentWebsiteEvents,
     websiteEventCounts,
+    courseDiscoveryEvents,
     unresolvedWebsiteFeedback
   ] =
     await Promise.all([
@@ -142,6 +143,21 @@ async function main() {
         },
         _count: {
           _all: true
+        }
+      }),
+      prisma.websiteEvent.findMany({
+        where: {
+          createdAt: {
+            gte: websiteFunnelSince
+          },
+          name: {
+            in: ["course_discovery_completed", "course_discovery_failed"]
+          }
+        },
+        select: {
+          trafficClass: true,
+          name: true,
+          metadata: true
         }
       }),
       prisma.websiteFeedback.findMany({
@@ -347,7 +363,9 @@ async function main() {
         })),
         websiteFunnel: {
           hours: WEBSITE_FUNNEL_HOURS,
-          byTrafficClass: summarizeWebsiteEventCounts(websiteEventCounts)
+          byTrafficClass: summarizeWebsiteEventCounts(websiteEventCounts),
+          courseDiscoveryOutcomes:
+            summarizeCourseDiscoveryOutcomes(courseDiscoveryEvents)
         },
         unresolvedWebsiteFeedback: unresolvedWebsiteFeedback.map((feedback) => ({
           id: feedback.id,
@@ -442,6 +460,94 @@ function summarizeWebsiteEventCounts<
   return byTrafficClass;
 }
 
+function summarizeCourseDiscoveryOutcomes<
+  T extends {
+    trafficClass: string;
+    name: string;
+    metadata: Prisma.JsonValue | null;
+  }
+>(events: T[]) {
+  type Summary = {
+    completedWithResults: number;
+    completedEmpty: number;
+    demoCompletions: number;
+    failedGeocode: number;
+    failedDiscovery: number;
+    failureStatuses: Record<string, number>;
+  };
+
+  const byTrafficClass: Record<string, Summary> = {};
+
+  for (const event of events) {
+    if (!event.metadata || typeof event.metadata !== "object" || Array.isArray(event.metadata)) {
+      continue;
+    }
+
+    const summary = (byTrafficClass[event.trafficClass] ??= {
+      completedWithResults: 0,
+      completedEmpty: 0,
+      demoCompletions: 0,
+      failedGeocode: 0,
+      failedDiscovery: 0,
+      failureStatuses: {}
+    });
+
+    if (event.name === "course_discovery_completed") {
+      if (event.metadata.resultCount === 0) {
+        summary.completedEmpty += 1;
+      } else if (
+        typeof event.metadata.resultCount === "number" &&
+        event.metadata.resultCount > 0
+      ) {
+        summary.completedWithResults += 1;
+      }
+
+      if (event.metadata.demo === true) {
+        summary.demoCompletions += 1;
+      }
+      continue;
+    }
+
+    if (event.name !== "course_discovery_failed") {
+      continue;
+    }
+
+    const stage = event.metadata.stage;
+    if (stage === "GEOCODE") {
+      summary.failedGeocode += 1;
+    } else if (stage === "DISCOVERY") {
+      summary.failedDiscovery += 1;
+    } else {
+      continue;
+    }
+
+    const status =
+      typeof event.metadata.responseStatus === "number" &&
+      Number.isInteger(event.metadata.responseStatus)
+        ? event.metadata.responseStatus
+        : "unknown";
+    const statusKey = `${stage}:${status}`;
+    summary.failureStatuses[statusKey] =
+      (summary.failureStatuses[statusKey] ?? 0) + 1;
+  }
+
+  return Object.fromEntries(
+    Object.entries(byTrafficClass)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([trafficClass, summary]) => [
+        trafficClass,
+        {
+          ...summary,
+          failureStatuses: Object.fromEntries(
+            Object.entries(summary.failureStatuses).sort(([left], [right]) =>
+              left.localeCompare(right)
+            )
+          )
+        }
+      ])
+  );
+}
+
 function redactEmail(email: string) {
   const [localPart, domain = ""] = email.split("@");
   const visible = localPart.slice(0, 2);
@@ -451,6 +557,7 @@ function redactEmail(email: string) {
 export {
   activeSearchInspectionQuery,
   latestCurrentActionableProbes,
+  summarizeCourseDiscoveryOutcomes,
   summarizeWebsiteEventCounts
 };
 
