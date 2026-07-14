@@ -153,20 +153,25 @@ export async function collectOfficialSiteEvidence(
   const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
-    const currentPage = pages.at(-1)!;
+    const linkCandidates = pages.flatMap((page) => page.evidence.linkCandidates);
+    const unvisitedCandidates = linkCandidates.filter(
+      (candidate) => !visited.has(normalizeSourceKey(candidate.url))
+    );
     const followupCandidate =
+      pickOfficialPolicyCandidate(unvisitedCandidates, firstPage.finalUrl) ??
       pickLikelyBookingCandidate(
-        currentPage.evidence.linkCandidates,
-        currentPage.finalUrl
+        unvisitedCandidates,
+        firstPage.finalUrl
       ) ??
       pickPrivateClubInformationCandidate(
-        currentPage.evidence.linkCandidates,
-        currentPage.evidence.visibleText,
-        currentPage.finalUrl
+        unvisitedCandidates,
+        pages.map((page) => page.evidence.visibleText).join(" "),
+        firstPage.finalUrl
       );
-    if (!followupCandidate || visited.has(normalizeSourceKey(followupCandidate))) {
+    if (!followupCandidate) {
       break;
     }
+    visited.add(normalizeSourceKey(followupCandidate));
 
     try {
       const fetched = await fetchPublicHtml(followupCandidate, fetchImpl);
@@ -177,8 +182,8 @@ export async function collectOfficialSiteEvidence(
       pages.push(page);
       visited.add(normalizeSourceKey(page.finalUrl));
     } catch {
-      // The official page itself is still useful evidence when its booking link cannot be loaded.
-      break;
+      // A failed PDF or booking shell must not prevent inspection of another official policy page.
+      continue;
     }
   }
 
@@ -189,7 +194,7 @@ export async function collectOfficialSiteEvidence(
     observedUrls: uniqueStrings(
       pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls])
     ),
-    visibleText: pages.map((page) => page.evidence.visibleText)
+    visibleText: pages.slice().reverse().map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
       .slice(0, 12_000)
@@ -269,6 +274,17 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     }
   }
 
+  for (const match of decodedHtml.matchAll(
+    /"title"\s*:\s*"([^"]{1,160})"[\s\S]{0,600}?"url"\s*:\s*"([^"]+)"/gi
+  )) {
+    const url = resolveHttpUrl(match[2], pageUrl);
+    if (!url) {
+      continue;
+    }
+    observedUrls.push(url);
+    linkCandidates.push({ url, label: match[1] });
+  }
+
   for (const match of decodedHtml.matchAll(/https?:\\?\/\\?\/[A-Za-z0-9][^\s"'<>]+/gi)) {
     const url = resolveHttpUrl(match[0].replaceAll("\\/", "/"), pageUrl);
     if (url) {
@@ -288,7 +304,11 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     .join("\n")
     .slice(0, 8_000);
   const visibleText = [
-    stripHtml(decodedHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")),
+    stripHtml(
+      decodedHtml
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+        .replace(/<(?:style|nav|header)\b[^>]*>[\s\S]*?<\/(?:style|nav|header)>/gi, " ")
+    ),
     relevantScripts,
     widgetConfigs
   ]
@@ -314,6 +334,37 @@ function pickLikelyBookingCandidate(
       ...candidate,
       score: scoreBookingCandidate(candidate, currentUrl)
     }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score)[0]?.url;
+}
+
+function pickOfficialPolicyCandidate(
+  candidates: Array<{ url: string; label: string }>,
+  officialUrl: string
+) {
+  const officialOrigin = new URL(officialUrl).origin;
+  return candidates
+    .map((candidate) => {
+      const parsed = new URL(candidate.url);
+      const searchable = `${candidate.label} ${parsed.pathname}`;
+      let score = 0;
+      if (parsed.origin !== officialOrigin) {
+        return { ...candidate, score: -1 };
+      }
+      if (/\bfaqs?\b/i.test(searchable)) {
+        score += 50;
+      }
+      if (/\bterms? and conditions?\b|terms-and-conditions/i.test(searchable)) {
+        score += 30;
+      }
+      if (/\b(?:registration|booking) instructions?\b/i.test(searchable)) {
+        score += 20;
+      }
+      if (/\.(?:pdf|docx?)(?:$|[?#])/i.test(parsed.pathname)) {
+        score -= 100;
+      }
+      return { ...candidate, score };
+    })
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score)[0]?.url;
 }

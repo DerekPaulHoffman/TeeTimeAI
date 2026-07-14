@@ -1,5 +1,13 @@
 # UX Research Notes
 
+## 2026-07-14: Account-gated Whoosh availability needs an official-site handoff
+
+- Sources: Yale Golf Course's [official 2026 FAQ](https://yalebulldogs.com/sports/2026/2/27/faqs.aspx), published 2026-02-27 and accessed 2026-07-14, says the course is public but requires Whoosh registration to be confirmed before tee-time availability can be viewed; its [official terms](https://yalebulldogs.com/sports/2026/2/27/terms-and-conditions.aspx), last updated 2026-02, require all tee times to be made online and a credit card to be held for booking.
+- Tee Time Spot evidence: the affected active search stored Yale as `UNKNOWN` / `NEEDS_ADAPTER` because official-site discovery followed the Whoosh client shell before the same official site's FAQ. The unauthenticated Whoosh URLs returned only the application shell, while the official FAQ conclusively put availability behind confirmed golfer registration. The alert-only POC does not use course accounts, payment details, or account-specific sessions.
+- Decision: inspect same-origin FAQ, terms, and registration guidance before following a booking shell; classify Whoosh as account-required only when the official evidence explicitly says registration confirmation gates availability. Preserve courses whose public availability is visible before registration, keep the official booking link, and resolve the support incident as a direct-booking classification.
+
+- Rotation evidence: signed-out production ZIP `83854` returned 15 provider-backed courses on 1440px desktop and 327px mobile. The visible first six remained stable through add/remove, screenshots showed no clipping or horizontal overflow, browser checks had no console, page, or same-origin request failures, the session marker remained `AUTOMATION`, and no TeeSearch demand was saved. `Birdies at the High` shares the Highlands address but lacks current official identity evidence, so it remains an explicit structured-review follow-up rather than motivating a broad proximity or name rule.
+
 ## 2026-07-14: Cache successful typed-location geocodes at the edge
 
 - Sources: [Vercel's Cache-Control header reference](https://vercel.com/docs/caching/cache-control-headers), last updated 2026-07-01, documents the default uncached Function response, recommends CDN caching for responses that are the same for every visitor, gives `Vercel-CDN-Cache-Control` top priority for Vercel-only caching, and consumes that header before forwarding the response to browsers. The current [Next.js caching guide](https://nextjs.org/docs/app/getting-started/caching), reviewed against version 16.2.10 on 2026-07-14, keeps Route Handler responses uncached unless the application opts into a cache policy.

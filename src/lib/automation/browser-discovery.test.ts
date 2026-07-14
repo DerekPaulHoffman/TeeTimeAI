@@ -439,6 +439,47 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies official Whoosh availability that requires confirmed registration", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "yale",
+      courseName: "Yale University Golf Course",
+      sourceUrl: "https://yalebulldogs.com/sports/2026/2/24/yale-golf-course.aspx",
+      finalUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
+      observedUrls: [
+        "https://yalebulldogs.com/sports/2026/2/27/faqs.aspx",
+        "https://app.whoosh.io/patron/club/yale-golf-course"
+      ],
+      visibleText:
+        "Players must register in Whoosh before booking. Once a player’s registration is confirmed, availability of tee times through Whoosh can be viewed once booking windows open."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-account-required-booking" }
+    });
+  });
+
+  it("preserves public Whoosh availability when registration is needed only to book", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-whoosh",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://app.whoosh.io/patron/club/example-public-course"],
+      visibleText:
+        "Public tee-time availability is visible to everyone. Players must register in Whoosh before booking."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.automationEligibility).toBeUndefined();
+    expect(discovery.automationReason).toBeUndefined();
+  });
+
   it("classifies explicit official first-come golf access as walk-in only", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "goose-run",

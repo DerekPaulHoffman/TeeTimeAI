@@ -95,6 +95,15 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return walkInClassification;
   }
 
+  const accountRequiredClassification = learnAccountRequiredClassification(
+    evidence,
+    observedUrls
+  );
+
+  if (accountRequiredClassification) {
+    return accountRequiredClassification;
+  }
+
   const foreupDiscovery = learnForeupDiscovery(evidence, observedUrls);
 
   if (foreupDiscovery) {
@@ -139,6 +148,53 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "browser-visible-links"
+    }
+  };
+}
+
+function learnAccountRequiredClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const whooshBookingUrl = observedUrls
+    .map(parseUrl)
+    .find((url) =>
+      Boolean(
+        url &&
+        /(^|\.)app\.whoosh\.io$/i.test(url.hostname) &&
+        /^\/patron\/club\/[^/]+/i.test(url.pathname)
+      )
+    );
+  const registrationRequired =
+    /\bplayers? must register(?: in whoosh)? before booking\b/i.test(visibleText);
+  const availabilityRequiresConfirmation =
+    /\bonce (?:a )?players?[’']s registration is confirmed,? availability of tee times? through whoosh can be viewed\b/i.test(
+      visibleText
+    );
+
+  if (!whooshBookingUrl || !registrationRequired || !availabilityRequiresConfirmation) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: whooshBookingUrl.toString(),
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "BLOCKED",
+    automationReason: "ACCOUNT_REQUIRED",
+    policyNotes:
+      "The course's official booking guidance says registration must be confirmed before tee-time availability can be viewed in Whoosh. Tee Time Spot does not use golfer accounts or account-specific sessions, so golfers must check the official booking page directly.",
+    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-account-required-booking"
     }
   };
 }
