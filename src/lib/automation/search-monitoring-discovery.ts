@@ -72,6 +72,7 @@ export async function prepareSearchMonitoring(
     shouldAttemptMonitoringDiscovery(discoveriesByCourse.get(course.id) ?? [], now)
   );
   const evidenceBySource = new Map<string, Promise<CollectedPageEvidence>>();
+  const pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>();
   const attemptedCourseIds: string[] = [];
   const appliedCourseIds: string[] = [];
   const failedCourseIds: string[] = [];
@@ -79,10 +80,15 @@ export async function prepareSearchMonitoring(
   for (const { course, sourceUrl } of dueCandidates) {
     attemptedCourseIds.push(course.id);
     try {
-      const sourceKey = normalizeSourceKey(sourceUrl);
+      const sourceKey = `${normalizeSourceKey(sourceUrl)}|${normalizeCourseLinkName(course.name)}`;
       let evidencePromise = evidenceBySource.get(sourceKey);
       if (!evidencePromise) {
-        evidencePromise = collectOfficialSiteEvidence(sourceUrl, fetchImpl);
+        evidencePromise = collectOfficialSiteEvidence(
+          sourceUrl,
+          fetchImpl,
+          course.name,
+          pageFetches
+        );
         evidenceBySource.set(sourceKey, evidencePromise);
       }
       const collected = await evidencePromise;
@@ -143,9 +149,20 @@ export function shouldAttemptMonitoringDiscovery(attempts: Date[], now = new Dat
 
 export async function collectOfficialSiteEvidence(
   sourceUrl: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  courseName?: string,
+  pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>()
 ): Promise<CollectedPageEvidence> {
-  const firstPage = await fetchPublicHtml(sourceUrl, fetchImpl);
+  const fetchPage = (url: string) => {
+    const key = normalizeSourceKey(url);
+    let page = pageFetches.get(key);
+    if (!page) {
+      page = fetchPublicHtml(url, fetchImpl);
+      pageFetches.set(key, page);
+    }
+    return page;
+  };
+  const firstPage = await fetchPage(sourceUrl);
   const pages = [{
     ...firstPage,
     evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl)
@@ -159,6 +176,11 @@ export async function collectOfficialSiteEvidence(
     );
     const followupCandidate =
       pickOfficialPolicyCandidate(unvisitedCandidates, firstPage.finalUrl) ??
+      pickOfficialCourseDetailCandidate(
+        unvisitedCandidates,
+        courseName,
+        firstPage.finalUrl
+      ) ??
       pickLikelyBookingCandidate(
         unvisitedCandidates,
         firstPage.finalUrl
@@ -174,7 +196,7 @@ export async function collectOfficialSiteEvidence(
     visited.add(normalizeSourceKey(followupCandidate));
 
     try {
-      const fetched = await fetchPublicHtml(followupCandidate, fetchImpl);
+      const fetched = await fetchPage(followupCandidate);
       const page = {
         ...fetched,
         evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
@@ -337,6 +359,38 @@ function pickLikelyBookingCandidate(
     }))
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score)[0]?.url;
+}
+
+function pickOfficialCourseDetailCandidate(
+  candidates: Array<{ url: string; label: string }>,
+  courseName: string | undefined,
+  officialUrl: string
+) {
+  if (!courseName) {
+    return undefined;
+  }
+
+  const officialOrigin = new URL(officialUrl).origin;
+  const normalizedTarget = normalizeCourseLinkName(courseName);
+  return candidates.find((candidate) => {
+    const parsed = new URL(candidate.url);
+    if (parsed.origin !== officialOrigin) {
+      return false;
+    }
+
+    const normalizedLabel = normalizeCourseLinkName(
+      candidate.label.replace(/\s*\([^)]*\)\s*$/u, "")
+    );
+    const pathSegment = parsed.pathname.split("/").filter(Boolean).at(-1) ?? "";
+    return (
+      normalizedLabel === normalizedTarget ||
+      normalizeCourseLinkName(pathSegment) === normalizedTarget
+    );
+  })?.url;
+}
+
+function normalizeCourseLinkName(value: string) {
+  return value.normalize("NFKD").replace(/[^a-z0-9]+/gi, "").toLowerCase();
 }
 
 function pickOfficialPolicyCandidate(

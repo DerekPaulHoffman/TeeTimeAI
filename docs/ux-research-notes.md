@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-14: Legacy municipal links need identity-aware course handoffs
+
+- Sources: the [City of Winter Park's official WP9 page](https://cityofwinterpark.org/departments/parks-recreation/golf-courses/winter-park-golf-course/), accessed 2026-07-14 America/New_York, identifies Winter Park Golf Course as a public nine-hole course, says public tee times can be made three days ahead, and links `https://winter-park-country-club.book.teeitup.com/` as its official booking surface.
+- Tee Time Spot evidence: the saved course still held the former `/golf-course/` URL, which redirects to a municipal index containing both Winter Park Golf Course (WP9) and Winter Park Pines Golf Club (WP18). Monitoring followed neither course detail because the index links contain course identity rather than booking keywords, leaving WP9 `UNKNOWN` through 11 incident observations even though the reusable TeeItUp adapter already exists.
+- Decision: after policy links, follow an exact same-origin course-detail label or final path segment before generic booking links. Strip only a trailing parenthetical such as `(WP9)`, require the remaining normalized identity to equal the saved course name, and share fetched pages across courses without sharing identity-specific decisions. This reaches WP9's official TeeItUp link without crossing into the similarly named WP18 sibling.
+- Rotation evidence: signed-out production ZIP `83854` returned 15 provider-backed Idaho/Washington-border courses on 1440x1000 desktop and 320x800 mobile. Both `AUTOMATION` sessions showed six initial cards plus a clear expansion control, zero horizontal overflow, no console/page/same-origin request failures, and clean screenshots; no TeeSearch demand was saved.
+
 ## 2026-07-14: Embedded municipal content should expose reusable booking links
 
 - Sources: the [Town of Stratford's official Short Beach Golf Course page](https://www.stratfordct.gov/o/stratford/page/short-beach-golf-course), accessed 2026-07-14 America/New_York, says the course is open for the 2026 season, its ForeUp tee sheet is active, and tee times may be booked six days ahead. The page links its public online action to `https://foreupsoftware.com/index.php/booking/19333/145#teetimes`.

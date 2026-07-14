@@ -135,6 +135,84 @@ describe("search monitoring discovery", () => {
     ).toBe(false);
   });
 
+  it("follows the exact course detail after a legacy URL redirects to a multi-course index", async () => {
+    const legacyUrl = "https://city.example/departments/golf-course/";
+    const indexUrl = "https://city.example/departments/golf-courses/";
+    const detailUrl =
+      "https://city.example/departments/golf-courses/winter-park-golf-course/";
+    const siblingUrl =
+      "https://city.example/departments/golf-courses/winter-park-pines-golf-club/";
+    const bookingUrl = "https://winter-park-country-club.book.teeitup.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === legacyUrl) {
+        return new Response(null, {
+          status: 301,
+          headers: { location: indexUrl }
+        });
+      }
+      if (value === indexUrl) {
+        return new Response(
+          `<html><a href="${detailUrl}">Winter Park Golf Course (WP9)</a><a href="${siblingUrl}">Winter Park Pines Golf Club (WP18)</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === detailUrl) {
+        return new Response(
+          `<html><p>Public tee times can be made three days ahead.</p><a href="${bookingUrl}">Book a Tee Time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === bookingUrl) {
+        return new Response("<html><body>Public tee sheet</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "winter-park",
+            name: "Winter Park Golf Course",
+            website: legacyUrl,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      legacyUrl,
+      indexUrl,
+      detailUrl,
+      bookingUrl
+    ]);
+    expect(fetchImpl).not.toHaveBeenCalledWith(siblingUrl, expect.anything());
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        detectedPlatform: "TEEITUP",
+        bookingUrl,
+        apiMetadata: expect.objectContaining({
+          aliases: ["winter-park-country-club"],
+          bookingBaseUrl: bookingUrl
+        }),
+        evidence: expect.objectContaining({
+          observedUrls: expect.arrayContaining([detailUrl, bookingUrl])
+        })
+      })
+    );
+  });
+
   it("follows an official intermediate tee-time page to reusable Teesnap metadata", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();
