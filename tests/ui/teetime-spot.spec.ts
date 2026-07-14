@@ -265,6 +265,47 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByLabel("Players")).toHaveValue("2");
   });
 
+  test("restores validated direct-link search details on the static route", async ({ page }) => {
+    await page.route("**/api/location/geocode?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ latitude: 38.9399, longitude: -119.9772 }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+    await page.route("**/api/courses/discover?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ courses: smokeCourses }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+
+    const date = nextSaturdayDateInputValue();
+    await page.goto(
+      `/search?location=South%20Lake%20Tahoe%2C%20CA&players=2&date=${date}&startTime=08%3A30&endTime=12%3A00&holes=18&radius=25&latitude=38.9399&longitude=-119.9772`
+    );
+
+    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
+      "South Lake Tahoe, CA"
+    );
+    await expect(page.locator("#players")).toHaveValue("2");
+    await expect(page.locator("#date")).toHaveValue(date);
+    await expect(page.locator("#startTime")).toHaveValue("08:30");
+    await expect(page.locator("#endTime")).toHaveValue("12:00");
+    await expect(page.locator("#searchRadius")).toHaveValue("25");
+    await expect(page.getByRole("button", { name: "18-hole" })).toHaveClass(/is-active/);
+
+    const discoveryRequest = page.waitForRequest((request) =>
+      request.url().includes("/api/courses/discover?")
+    );
+    await page.getByRole("button", { name: /^Search$/i }).click();
+    const discoveryUrl = new URL((await discoveryRequest).url());
+    expect(discoveryUrl.searchParams.get("latitude")).toBe("38.9399");
+    expect(discoveryUrl.searchParams.get("longitude")).toBe("-119.9772");
+    expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("40234");
+  });
+
   test("keeps search labels and supporting copy at AA contrast colors", async ({ page }) => {
     await page.goto("/search");
 

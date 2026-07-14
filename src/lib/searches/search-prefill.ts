@@ -61,6 +61,46 @@ export function consumeSearchPrefill() {
   }
 }
 
+export function readSearchPrefillFromUrl(search?: string) {
+  const query = search ?? (typeof window === "undefined" ? "" : window.location.search);
+  if (!query) {
+    return undefined;
+  }
+
+  const params = new URLSearchParams(query);
+  const supportedKeys = [
+    "location",
+    "players",
+    "date",
+    "startTime",
+    "endTime",
+    "holes",
+    "radius",
+    "latitude",
+    "longitude"
+  ];
+  if (!supportedKeys.some((key) => params.has(key))) {
+    return undefined;
+  }
+
+  const latitude = numberParam(params, "latitude");
+  const longitude = numberParam(params, "longitude");
+
+  return sanitizeSearchPrefill({
+    location: params.get("location") ?? undefined,
+    players: numberParam(params, "players"),
+    date: params.get("date") ?? undefined,
+    startTime: params.get("startTime") ?? undefined,
+    endTime: params.get("endTime") ?? undefined,
+    holes: params.get("holes") ?? undefined,
+    radius: numberParam(params, "radius"),
+    coordinates:
+      latitude === undefined || longitude === undefined
+        ? undefined
+        : { latitude, longitude }
+  });
+}
+
 export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
   if (!isRecord(value)) {
     return {};
@@ -135,6 +175,16 @@ function safeInteger(value: unknown, minimum: number, maximum: number) {
     value <= maximum
     ? value
     : undefined;
+}
+
+function numberParam(params: URLSearchParams, key: string) {
+  const value = params.get(key);
+  if (value === null || value.trim() === "") {
+    return undefined;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

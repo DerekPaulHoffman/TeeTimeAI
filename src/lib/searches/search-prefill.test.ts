@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   consumeSearchPrefill,
+  readSearchPrefillFromUrl,
   SEARCH_PREFILL_STORAGE_KEY,
   sanitizeSearchPrefill,
   storeSearchPrefill
@@ -42,6 +43,41 @@ describe("search prefill transfer", () => {
       })
     ).toEqual({
       location: "06825",
+      date: undefined,
+      startTime: undefined,
+      endTime: undefined,
+      players: undefined,
+      radius: 15,
+      holes: undefined,
+      coordinates: undefined
+    });
+  });
+
+  it("reads validated direct-link values without requiring a server render", () => {
+    expect(
+      readSearchPrefillFromUrl(
+        "?location=South%20Lake%20Tahoe%2C%20CA&players=2&date=2026-07-18&startTime=08%3A30&endTime=12%3A00&holes=18&radius=25&latitude=38.9399&longitude=-119.9772"
+      )
+    ).toEqual({
+      location: "South Lake Tahoe, CA",
+      players: 2,
+      date: "2026-07-18",
+      startTime: "08:30",
+      endTime: "12:00",
+      holes: "18",
+      radius: 25,
+      coordinates: { latitude: 38.9399, longitude: -119.9772 }
+    });
+  });
+
+  it("drops malformed direct-link fields and ignores unrelated query strings", () => {
+    expect(readSearchPrefillFromUrl("?utm_source=guide")).toBeUndefined();
+    expect(
+      readSearchPrefillFromUrl(
+        "?players=20&radius=100&holes=36&latitude=200&longitude=not-a-number"
+      )
+    ).toEqual({
+      location: undefined,
       date: undefined,
       startTime: undefined,
       endTime: undefined,

@@ -63,7 +63,10 @@ import {
   MAX_PLAYERS_PER_SEARCH
 } from "@/lib/validation/search";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
-import { consumeSearchPrefill } from "@/lib/searches/search-prefill";
+import {
+  consumeSearchPrefill,
+  readSearchPrefillFromUrl
+} from "@/lib/searches/search-prefill";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -283,7 +286,7 @@ function TeeTimeIntakeContent({
   const shouldScrollToResultsRef = useRef(false);
 
   useEffect(() => {
-    const transferred = consumeSearchPrefill();
+    const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
     if (!transferred) {
       return;
     }
