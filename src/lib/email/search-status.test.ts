@@ -39,8 +39,8 @@ const courses: SearchStatusCourseReport[] = [
 ];
 
 describe("search status email cadence", () => {
-  it("sends setup once and waits until 8 AM on a new local day for the morning report", () => {
-    const lastSentAt = new Date("2026-07-10T03:00:00.000Z"); // Jul 9, 11 PM EDT
+  it("sends setup once and waits until the next weekly morning reminder", () => {
+    const lastSentAt = new Date("2026-07-03T03:00:00.000Z"); // Jul 2, 11 PM EDT
 
     expect(getSearchStatusEmailKind(null, new Date("2026-07-10T12:00:00.000Z"))).toBe(
       "setup"
@@ -58,7 +58,7 @@ describe("search status email cadence", () => {
         new Date("2026-07-10T12:00:00.000Z"),
         "America/New_York"
       )
-    ).toBe("daily");
+    ).toBe("weekly");
   });
 
   it("does not send a second morning report on the same local day", () => {
@@ -72,7 +72,7 @@ describe("search status email cadence", () => {
   });
 
   it("uses the golfer timezone when deciding whether morning has started", () => {
-    const lastSentAt = new Date("2026-07-10T05:00:00.000Z"); // Jul 9, 10 PM PDT
+    const lastSentAt = new Date("2026-07-03T05:00:00.000Z"); // Jul 2, 10 PM PDT
 
     expect(
       getSearchStatusEmailKind(
@@ -87,7 +87,7 @@ describe("search status email cadence", () => {
         new Date("2026-07-10T15:00:00.000Z"),
         "America/Los_Angeles"
       )
-    ).toBe("daily");
+    ).toBe("weekly");
   });
 });
 
@@ -160,7 +160,7 @@ describe("renderSearchStatusHtml", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-1",
       to: "player@example.com",
-      kind: "daily",
+      kind: "weekly",
       targetDate: "2026-07-11",
       startTime: "07:30",
       endTime: "09:00",
@@ -266,7 +266,7 @@ describe("renderSearchStatusHtml", () => {
     const baseInput = {
       searchId: "search-1",
       to: "player@example.com",
-      kind: "daily" as const,
+      kind: "weekly" as const,
       targetDate: "2026-07-12",
       startTime: "13:40",
       endTime: "16:00",

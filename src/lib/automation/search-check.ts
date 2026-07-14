@@ -543,14 +543,21 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
   } else {
     newlyAlertedMatches = await sendPendingMatchAlerts(searchId);
 
-    if (statusEmailKind === "daily" && newlyAlertedMatches > 0) {
+    const allCoursesWaitingForRelease = courseResults.length > 0 && courseResults.every(
+      (course) =>
+        course.availableMatches === 0 &&
+        course.bookingWindow &&
+        new Date(course.bookingWindow.opensAt) > checkedAt
+    );
+
+    if (statusEmailKind === "weekly" && newlyAlertedMatches > 0) {
       await markSearchStatusReportSatisfied({
         searchId: search.id,
         checkedAt,
         courseResults
       });
       statusEmailOutcome = "covered_by_match_alert";
-    } else if (statusEmailKind === "daily") {
+    } else if (statusEmailKind === "weekly" && allCoursesWaitingForRelease) {
       try {
         statusEmailOutcome = await deliverSearchStatusReport({
           search,
@@ -611,7 +618,7 @@ async function deliverSearchStatusReport(input: {
   };
   courseResults: SearchCheckCourseResult[];
   checkedAt: Date;
-  kind: "setup" | "daily";
+  kind: "setup" | "weekly";
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
   const snapshot = buildSearchStatusSnapshot(input.courseResults);
   const recipients = getAlertRecipients(
@@ -621,7 +628,7 @@ async function deliverSearchStatusReport(input: {
   const periodKey =
     input.kind === "setup"
       ? "setup"
-      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}`;
+      : `weekly-${input.search.statusEmailSentAt?.getTime() ?? "initial"}`;
   const deliveries = await Promise.all(
     recipients.map((recipient) =>
       sendSearchStatusEmail({

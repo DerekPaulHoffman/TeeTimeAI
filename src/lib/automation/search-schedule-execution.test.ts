@@ -54,13 +54,11 @@ describe("executeScheduledSearchCheck", () => {
 });
 
 describe("calculateNextCheckAt", () => {
-  it("sleeps until the booking window when a search is far in the future", () => {
+  it("wakes weekly before a far-future booking window", () => {
     const searchDate = new Date("2026-08-30T04:00:00.000Z");
     const now = new Date("2026-08-01T12:00:00.000Z");
 
-    expect(calculateNextCheckAt(searchDate, 15, now)?.getTime()).toBe(
-      searchDate.getTime() - 14 * 24 * 60 * 60 * 1000
-    );
+    expect(calculateNextCheckAt(searchDate, 15, now)?.toISOString()).toBe("2026-08-08T12:00:00.000Z");
   });
 
   it("uses a learned course-local release hour instead of the generic window", () => {
@@ -81,7 +79,7 @@ describe("calculateNextCheckAt", () => {
           }
         ]
       )?.toISOString()
-    ).toBe("2026-07-15T09:00:00.000Z");
+    ).toBe("2026-07-08T12:00:00.000Z");
   });
 
   it("retries an unresolved initial monitoring discovery after thirty minutes", () => {
@@ -123,7 +121,7 @@ describe("calculateNextCheckAt", () => {
           }
         ]
       )?.toISOString()
-    ).toBe("2026-08-16T12:00:00.000Z");
+    ).toBe("2026-08-08T12:00:00.000Z");
   });
 
   it("uses the normal cadence once any selected course is open", () => {

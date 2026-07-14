@@ -6,7 +6,7 @@ import {
   zonedDateTimeToDate
 } from "@/lib/timezones";
 
-export type SearchStatusEmailKind = "setup" | "daily";
+export type SearchStatusEmailKind = "setup" | "weekly";
 
 export type SearchStatusAvailability = {
   visibleSlotCount: number;
@@ -72,6 +72,7 @@ export type SearchStatusEmailInput = {
 };
 
 export const MORNING_STATUS_EMAIL_HOUR = 8;
+export const WEEKLY_STATUS_EMAIL_INTERVAL_DAYS = 7;
 
 export function summarizeSearchStatusAvailability(
   search: {
@@ -114,14 +115,16 @@ export function getSearchStatusEmailKind(
   const currentLocalTime = getLocalDateAndHour(now, normalizedTimeZone);
   const lastSentLocalTime = getLocalDateAndHour(lastSentAt, normalizedTimeZone);
 
-  if (
-    currentLocalTime.date <= lastSentLocalTime.date ||
-    currentLocalTime.hour < MORNING_STATUS_EMAIL_HOUR
-  ) {
+  if (currentLocalTime.hour < MORNING_STATUS_EMAIL_HOUR) {
     return null;
   }
 
-  return "daily";
+  const localDaysSinceLastEmail = Math.floor(
+    (Date.parse(`${currentLocalTime.date}T00:00:00Z`) -
+      Date.parse(`${lastSentLocalTime.date}T00:00:00Z`)) /
+      (24 * 60 * 60 * 1000)
+  );
+  return localDaysSinceLastEmail >= WEEKLY_STATUS_EMAIL_INTERVAL_DAYS ? "weekly" : null;
 }
 
 export function buildSearchStatusSnapshot(
@@ -167,8 +170,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     timeZone: normalizeTimeZone(input.userTimeZone, DEFAULT_TIME_ZONE),
     timeZoneName: "short"
   });
-  const heading = input.kind === "setup" ? "Your tee-time alert is active" : "Your morning tee-time update";
-  const badge = input.kind === "setup" ? "Search is active" : "Morning update";
+  const heading = input.kind === "setup" ? "Your tee-time alert is active" : "Your weekly tee-time update";
+  const badge = input.kind === "setup" ? "Search is active" : "Weekly update";
   const hasDirectOnlyCourse = input.courses.some(
     (course) => course.outcome === "BLOCKED_POLICY"
   );

@@ -14,6 +14,7 @@ import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
 const FALLBACK_BOOKING_WINDOW_LEAD_DAYS = 14;
 const FAILED_CHECK_RETRY_MINUTES = 5;
 const SUPPORT_DISCOVERY_RETRY_MINUTES = 30;
+const WEEKLY_REMINDER_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function executeScheduledSearchCheck(searchId: string, scheduleVersion: number) {
   const claimed = await claimScheduledSearchCheck(searchId, scheduleVersion);
@@ -118,8 +119,11 @@ export function calculateNextCheckAt(
   );
   const hasCourseReadyToCheck = bookingWindowOpenings.some((opensAt) => opensAt <= now);
   if (!hasCourseReadyToCheck && Number.isFinite(nextBookingWindowOpening)) {
+    const weeklyReminderAt = new Date(now.getTime() + WEEKLY_REMINDER_INTERVAL_MS);
     return applySupportDiscoveryRetry(
-      new Date(Math.min(nextBookingWindowOpening, searchExpiresAt.getTime())),
+      new Date(
+        Math.min(nextBookingWindowOpening, weeklyReminderAt.getTime(), searchExpiresAt.getTime())
+      ),
       supportRetryNeeded,
       now,
       searchExpiresAt

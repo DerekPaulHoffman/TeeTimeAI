@@ -163,7 +163,7 @@ export async function sendSearchStatusEmail(
     subject:
       input.kind === "setup"
         ? "Your Tee Time Spot search is active"
-        : "Your morning Tee Time Spot update",
+        : "Your weekly Tee Time Spot update",
     html: renderSearchStatusHtml({
       ...input,
       stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)

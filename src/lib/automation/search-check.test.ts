@@ -195,10 +195,10 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {
+  it("lets a new-opening email satisfy the weekly reminder instead of sending twice", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
-      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z")
+      statusEmailSentAt: new Date("2026-07-04T13:00:00.000Z")
     });
 
     const result = await runSearchCheck("search-1", "test");
