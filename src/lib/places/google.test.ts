@@ -422,6 +422,107 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("filters maintenance and operations facilities without hiding their playable courses", () => {
+    const places = filterPublicGolfCoursePlaces([
+      {
+        id: "ChIJfcMHKwCNmYARqWlJL4cM8LE",
+        displayName: { text: "TPGC Maintenance Area" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 38.916, longitude: -119.996 }
+      },
+      {
+        id: "ChIJoclV4c-NmYARi9m23CSEr8A",
+        displayName: { text: "Tahoe Paradise Golf Course" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.tahoeparadisegc.com/",
+        location: { latitude: 38.921, longitude: -120.036 }
+      },
+      {
+        id: "ChIJR6sij3COmYAR8Qc4BobIN7o",
+        displayName: { text: "Lake Tahoe Golf Course" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.laketahoegc.com/",
+        location: { latitude: 38.925, longitude: -120.05 }
+      },
+      {
+        id: "ChIJ_0OyqiG_mYARnWg5NLnXnuM",
+        displayName: { text: "Carson Valley Golf Course Maintenance" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 38.949, longitude: -119.748 }
+      },
+      {
+        id: "ChIJu8a6OOe-mYARUSzEeY_FMSI",
+        displayName: { text: "Carson Valley Golf Course" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.carsonvalleygolf.com/",
+        location: { latitude: 38.95, longitude: -119.746 }
+      },
+      {
+        id: "ChIJVwdGqOVLQIgRpEvBKvmw344",
+        displayName: { text: "Winton Woods Operations" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 39.252, longitude: -84.514 }
+      },
+      {
+        id: "ChIJ64HnP-FLQIgRJNKKarwJo4Y",
+        displayName: { text: "Winton Woods Golf Course" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.greatparks.org/recreation/golf/the-mill-course",
+        location: { latitude: 39.272, longitude: -84.505 }
+      },
+      {
+        id: "ChIJs9q-WF9JQIgRvJ2cRnefLSw",
+        displayName: { text: "The Mill Course" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.greatparks.org/parks/winton-woods/the-mill-course",
+        location: { latitude: 39.272, longitude: -84.505 }
+      },
+      {
+        id: "ChIJpUnXVcO2QYgRRq54lylTTlo",
+        displayName: { text: "Devou Park Golf & Event Center" },
+        primaryType: "golf_course",
+        types: ["golf_course", "event_venue", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.devouparkgolf.com/",
+        location: { latitude: 39.076, longitude: -84.532 }
+      },
+      {
+        id: "ChIJtwfFyOS4QYgRgwxug_LedR4",
+        displayName: { text: "The Golf Courses Of Kenton County" },
+        primaryType: "golf_course",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 38.978, longitude: -84.536 }
+      }
+    ]);
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Tahoe Paradise Golf Course",
+      "Lake Tahoe Golf Course",
+      "Carson Valley Golf Course",
+      "Winton Woods Golf Course",
+      "The Mill Course",
+      "Devou Park Golf & Event Center",
+      "The Golf Courses Of Kenton County"
+    ]);
+  });
+
   it("filters a verified indoor simulator that Google misclassifies as a golf course", () => {
     const places = filterPublicGolfCoursePlaces(
       [

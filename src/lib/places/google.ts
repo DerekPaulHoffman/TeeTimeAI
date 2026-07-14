@@ -101,6 +101,8 @@ const EXPLICIT_PRIVATE_NAME_PATTERNS = [
 const AMBIGUOUS_COUNTRY_CLUB_NAME_PATTERN = /\bcountry\s+club\b/i;
 
 const NON_COURSE_NAME_PATTERNS = [
+  /\bmaintenance(?:\s+(?:area|facility|shop))?\b/i,
+  /\boperations\b/i,
   /\bclub\s*fitting\b/i,
   /\bpro\s*shop\b/i,
   /\bgeneral\s+store\b/i,
