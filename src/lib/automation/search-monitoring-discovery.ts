@@ -253,6 +253,7 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
   const observedUrls: string[] = [];
   const linkCandidates: Array<{ url: string; label: string }> = [];
   const decodedHtml = decodeHtmlEntities(html);
+  const embeddedContent = decodeEmbeddedContent(decodedHtml);
 
   for (const match of decodedHtml.matchAll(
     /<a\b[^>]*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi
@@ -274,8 +275,8 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     }
   }
 
-  for (const match of decodedHtml.matchAll(
-    /"title"\s*:\s*"([^"]{1,160})"[\s\S]{0,600}?"url"\s*:\s*"([^"]+)"/gi
+  for (const match of embeddedContent.matchAll(
+    /"title"\s*:\s*"([^"]{1,160})"[\s\S]{0,600}?"(?:url|link)"\s*:\s*"([^"]+)"/gi
   )) {
     const url = resolveHttpUrl(match[2], pageUrl);
     if (!url) {
@@ -285,8 +286,8 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     linkCandidates.push({ url, label: match[1] });
   }
 
-  for (const match of decodedHtml.matchAll(/https?:\\?\/\\?\/[A-Za-z0-9][^\s"'<>]+/gi)) {
-    const url = resolveHttpUrl(match[0].replaceAll("\\/", "/"), pageUrl);
+  for (const match of embeddedContent.matchAll(/https?:\/\/[^\s"'<>\\]+/gi)) {
+    const url = resolveHttpUrl(match[0], pageUrl);
     if (url) {
       observedUrls.push(url);
     }
@@ -459,11 +460,23 @@ function isPrivateHostname(hostname: string) {
 }
 
 function resolveHttpUrl(value: string | undefined, baseUrl: string) {
-  if (!value || value.startsWith("#") || value.startsWith("mailto:") || value.startsWith("tel:")) {
+  const normalized = value?.trim();
+  if (
+    !normalized ||
+    normalized.startsWith("#") ||
+    normalized.startsWith("mailto:") ||
+    normalized.startsWith("tel:") ||
+    normalized.includes("\\") ||
+    /(?:%22|<%|%3c%25)/i.test(normalized)
+  ) {
     return null;
   }
   try {
-    return parseSafePublicUrl(new URL(value.trim(), baseUrl).toString()).toString();
+    const resolved = new URL(normalized, baseUrl).toString();
+    if (/(?:%22|%3c%25)/i.test(resolved)) {
+      return null;
+    }
+    return parseSafePublicUrl(resolved).toString();
   } catch {
     return null;
   }
@@ -514,6 +527,17 @@ function decodeHtmlEntities(value: string) {
     .replaceAll("&#39;", "'")
     .replaceAll("&lt;", "<")
     .replaceAll("&gt;", ">");
+}
+
+function decodeEmbeddedContent(value: string) {
+  return value
+    .replace(/\\u003c/gi, "<")
+    .replace(/\\u003e/gi, ">")
+    .replace(/\\u003a/gi, ":")
+    .replace(/\\u002f/gi, "/")
+    .replace(/\\u0026/gi, "&")
+    .replaceAll("\\/", "/")
+    .replaceAll('\\"', '"');
 }
 
 function stripHtml(value: string) {

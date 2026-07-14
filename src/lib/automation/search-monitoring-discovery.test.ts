@@ -72,6 +72,69 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("learns ForeUp metadata from Apptegy embedded content links", async () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/19333/145#teetimes";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://www.stratfordct.gov/short-beach") {
+        return new Response(
+          String.raw`<html><script>window.page = JSON.parse("{\"content\":{\"buttons\":[{\"title\":\"Book Your Tee Time Online\",\"link\":\"https://foreupsoftware.com/index.php/booking/19333/145#teetimes\"}]}}")</script></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      expect(value).toBe(bookingUrl);
+      return new Response("<html><body>Public ForeUp tee sheet</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "short-beach",
+            name: "Short Beach Golf Course",
+            website: "https://www.stratfordct.gov/short-beach",
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      "https://www.stratfordct.gov/short-beach",
+      bookingUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        detectedPlatform: "FOREUP",
+        bookingUrl,
+        apiMetadata: {
+          scheduleId: 145,
+          bookingBaseUrl: bookingUrl
+        },
+        evidence: expect.objectContaining({
+          learnedFrom: "foreup-booking-url",
+          observedUrls: expect.arrayContaining([bookingUrl])
+        })
+      })
+    );
+    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    expect(
+      discovery.evidence.observedUrls.some(
+        (url: string) => url.includes('\\"') || url.includes("%22")
+      )
+    ).toBe(false);
+  });
+
   it("follows an official intermediate tee-time page to reusable Teesnap metadata", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();

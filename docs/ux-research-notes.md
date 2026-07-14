@@ -1,5 +1,13 @@
 # UX Research Notes
 
+## 2026-07-14: Embedded municipal content should expose reusable booking links
+
+- Sources: the [Town of Stratford's official Short Beach Golf Course page](https://www.stratfordct.gov/o/stratford/page/short-beach-golf-course), accessed 2026-07-14 America/New_York, says the course is open for the 2026 season, its ForeUp tee sheet is active, and tee times may be booked six days ahead. The page links its public online action to `https://foreupsoftware.com/index.php/booking/19333/145#teetimes`.
+- Tee Time Spot evidence: the two affected active searches repeatedly classified Short Beach as `UNKNOWN` / `NEEDS_ADAPTER` even though the official booking link is present in Apptegy's server-rendered page state. The monitoring collector recognized ordinary anchors and embedded navigation `url` fields, but not Apptegy content-button `link` fields; its generic escaped-URL scan also emitted malformed same-origin pseudo-URLs.
+- Decision: normalize bounded escaped page-state markup before extracting absolute URLs, recognize paired embedded `title` plus `link` fields alongside existing `title` plus `url` navigation, and feed the resulting official ForeUp URL through the existing reusable adapter. Preserve ordinary HTML anchors, policy-page priority, private/account-required classifications, and all existing provider controls.
+
+- Rotation evidence: signed-out production ZIP `92328` returned Furnace Creek Ranch Golf Course at 6.4 miles on 1440px desktop and 320px mobile. Both marked `AUTOMATION` sessions rendered the same public course without horizontal overflow, console errors, page errors, or failed same-origin requests; screenshots were inspected and no TeeSearch demand was saved.
+
 ## 2026-07-14: Account-gated Whoosh availability needs an official-site handoff
 
 - Sources: Yale Golf Course's [official 2026 FAQ](https://yalebulldogs.com/sports/2026/2/27/faqs.aspx), published 2026-02-27 and accessed 2026-07-14, says the course is public but requires Whoosh registration to be confirmed before tee-time availability can be viewed; its [official terms](https://yalebulldogs.com/sports/2026/2/27/terms-and-conditions.aspx), last updated 2026-02, require all tee times to be made online and a credit card to be held for booking.
