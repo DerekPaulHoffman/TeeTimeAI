@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
+import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 
 const MIN_QUERY_LENGTH = 2;
@@ -68,9 +69,10 @@ export async function GET(request: NextRequest) {
       "Course lookup failed",
       error instanceof Error ? error.message : "Unknown course lookup error"
     );
+    const status = error instanceof GooglePlaceReviewsUnavailableError ? 503 : 502;
     return NextResponse.json(
       { error: "Course lookup is temporarily unavailable. Try again in a moment." },
-      { status: 502 }
+      { status }
     );
   }
 }

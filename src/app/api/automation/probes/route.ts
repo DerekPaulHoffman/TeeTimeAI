@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 
 import { assertAutomationRequest } from "@/lib/api/automation-auth";
 import { recordCourseProbe } from "@/lib/automation/db-service";
+import { hasDatabaseConfig } from "@/lib/env";
 
 const probeSchema = z.object({
   searchId: z.string().min(1),
@@ -27,6 +28,13 @@ export async function POST(request: NextRequest) {
   const authError = assertAutomationRequest(request);
   if (authError) {
     return authError;
+  }
+
+  if (!hasDatabaseConfig()) {
+    return NextResponse.json(
+      { error: "Automation probe recording is temporarily unavailable." },
+      { status: 503 }
+    );
   }
 
   const input = probeSchema.parse(await request.json());

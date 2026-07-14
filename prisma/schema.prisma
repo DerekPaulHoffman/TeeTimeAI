@@ -100,6 +100,12 @@ enum WebsiteTrafficClass {
   TEST
 }
 
+enum GooglePlaceAccessOverride {
+  VERIFIED_PUBLIC
+  VERIFIED_PRIVATE
+  VERIFIED_NON_COURSE
+}
+
 enum CourseSupportIncidentStatus {
   AUTO_INVESTIGATING
   NEEDS_HUMAN
@@ -175,6 +181,30 @@ model Course {
   @@index([intelligenceReviewAt])
 }
 
+model GooglePlaceReview {
+  id                        String                     @id @default(cuid())
+  googlePlaceId             String                     @unique
+  accessOverride            GooglePlaceAccessOverride?
+  name                      String
+  classification            String
+  evidenceUrl               String
+  reviewedAt                DateTime
+  active                    Boolean                    @default(true)
+  canonicalPlaceId          String?
+  canonicalName             String?
+  canonicalAddress          String?
+  canonicalWebsiteUrl       String?
+  canonicalPhone            String?
+  latitude                  Float?
+  longitude                 Float?
+  retainWhenCanonicalAbsent Boolean                    @default(false)
+  createdAt                 DateTime                   @default(now())
+  updatedAt                 DateTime                   @updatedAt
+
+  @@index([active, accessOverride])
+  @@index([canonicalPlaceId])
+}
+
 model TeeSearch {
   id                   String             @id @default(cuid())
   userId               String
@@ -237,6 +267,7 @@ model CourseProbe {
 
   @@index([teeSearchId, observedAt])
   @@index([courseId, observedAt])
+  @@index([observedAt])
 }
 
 model TeeTimeMatch {
@@ -263,6 +294,7 @@ model TeeTimeMatch {
   @@unique([teeSearchId, courseId, sourceId, startsAt])
   @@index([alertStatus, firstSeenAt])
   @@index([teeSearchId, availabilityStatus, startsAt])
+  @@index([firstSeenAt])
 }
 
 model AutomationRun {
@@ -275,6 +307,9 @@ model AutomationRun {
   changedFiles  Json?
   notes         String?
   probes        CourseProbe[]
+
+  @@index([startedAt])
+  @@index([promptVersion, startedAt])
 }
 
 model CourseAutomationDiscovery {
@@ -299,6 +334,7 @@ model CourseAutomationDiscovery {
   @@index([status, createdAt])
   @@index([detectedPlatform, createdAt])
   @@index([bookingMethod, createdAt])
+  @@index([createdAt])
 }
 
 model CourseSupportIncident {

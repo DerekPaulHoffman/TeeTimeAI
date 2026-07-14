@@ -6,7 +6,6 @@ import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
 
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.02;
-const WOODHAVEN_LAYOUT_VERIFIED_AT = new Date("2026-07-11T00:00:00.000Z");
 const COURSE_NAME_STOP_WORDS = new Set([
   "and",
   "club",
@@ -26,25 +25,13 @@ export type CourseLayoutRecord = {
   layoutHolesVerifiedAt: Date | null;
 };
 
-const CURATED_COURSE_LAYOUTS: readonly CourseLayoutRecord[] = [
-  {
-    googlePlaceId: "ChIJUypX_OHc54kRkpGKTvmSvSA",
-    name: "Woodhaven Golf Course",
-    latitude: 41.415596,
-    longitude: -73.039627,
-    layoutHoleCounts: [9],
-    layoutHolesEvidenceUrl: "https://www.woodhavenctgolf.com/",
-    layoutHolesVerifiedAt: WOODHAVEN_LAYOUT_VERIFIED_AT
-  }
-];
-
 export async function enrichCoursesWithHoleLayouts(candidates: CourseCandidate[]) {
   if (candidates.length === 0) {
     return candidates;
   }
 
   const persistedCourses = await findPersistedLayoutCourses(candidates);
-  const layoutCourses = [...persistedCourses, ...CURATED_COURSE_LAYOUTS].filter(
+  const layoutCourses = persistedCourses.filter(
     (course) =>
       course.layoutHolesVerifiedAt !== null &&
       normalizeLayoutHoleCounts(course.layoutHoleCounts).length > 0

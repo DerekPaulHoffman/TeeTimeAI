@@ -1,8 +1,8 @@
 import { defineConfig } from "prisma/config";
 
-const databaseUrl =
-  process.env.DATABASE_URL ??
-  "postgresql://teetimespot:teetimespot@localhost:5432/teetimespot?schema=public";
+import { resolvePrismaCliDatabaseUrl } from "./src/lib/database-url";
+
+const isGenerateCommand = process.argv.includes("generate");
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
@@ -10,6 +10,8 @@ export default defineConfig({
     path: "prisma/migrations"
   },
   datasource: {
-    url: databaseUrl
+    url: resolvePrismaCliDatabaseUrl(process.env, {
+      allowVercelGeneratePlaceholder: isGenerateCommand
+    })
   }
 });

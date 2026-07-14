@@ -18,7 +18,15 @@ export function hasClerkConfig() {
 }
 
 export function hasDatabaseConfig() {
-  return Boolean(process.env.DATABASE_URL);
+  return Boolean(normalizeEnvValue(process.env.DATABASE_URL));
+}
+
+export function hasGooglePlacesConfig() {
+  return Boolean(normalizeEnvValue(process.env.GOOGLE_PLACES_API_KEY));
+}
+
+export function isVercelProduction() {
+  return normalizeEnvValue(process.env.VERCEL_ENV) === "production";
 }
 
 export function hasAutomationApiKey() {

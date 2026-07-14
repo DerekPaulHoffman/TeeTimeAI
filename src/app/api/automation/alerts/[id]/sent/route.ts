@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { assertAutomationRequest } from "@/lib/api/automation-auth";
 import { markMatchAlertSent } from "@/lib/automation/db-service";
+import { hasDatabaseConfig } from "@/lib/env";
 
 export async function POST(
   request: NextRequest,
@@ -10,6 +11,13 @@ export async function POST(
   const authError = assertAutomationRequest(request);
   if (authError) {
     return authError;
+  }
+
+  if (!hasDatabaseConfig()) {
+    return NextResponse.json(
+      { error: "Alert status updates are temporarily unavailable." },
+      { status: 503 }
+    );
   }
 
   const { id } = await context.params;

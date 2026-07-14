@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
+
 import { GET } from "./route";
 
 const mocks = vi.hoisted(() => ({
@@ -92,6 +94,19 @@ describe("GET /api/courses/lookup", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
       error: "Course lookup is temporarily unavailable. Try the nearby search instead."
+    });
+  });
+
+  it("returns a generic 503 when durable place reviews cannot be read", async () => {
+    mocks.searchGolfCoursesByName.mockRejectedValue(
+      new GooglePlaceReviewsUnavailableError(new Error("database unavailable"))
+    );
+
+    const response = await GET(request("?q=Bethpage%20Black"));
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Course lookup is temporarily unavailable. Try again in a moment."
     });
   });
 });

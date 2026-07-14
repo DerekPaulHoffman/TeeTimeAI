@@ -18,7 +18,11 @@ describe("course hole-layout enrichment", () => {
     mockedPrisma.course.findMany.mockResolvedValue([]);
   });
 
-  it("marks Woodhaven as a verified physical 9-hole course from official evidence", async () => {
+  it("marks Woodhaven as a verified physical 9-hole course from its persisted record", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      layoutCourse({ layoutHolesVerifiedAt: new Date("2026-07-11T00:00:00.000Z") })
+    ] as never);
+
     const [course] = await enrichCoursesWithHoleLayouts([woodhavenCandidate()]);
 
     expect(course).toEqual(
@@ -31,7 +35,7 @@ describe("course hole-layout enrichment", () => {
     );
   });
 
-  it("uses persisted verified layout data before the curated fallback", async () => {
+  it("uses persisted verified layout data", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       layoutCourse({
         googlePlaceId: "persisted-course",

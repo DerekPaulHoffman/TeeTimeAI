@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { hasGooglePlacesConfig, isVercelProduction } from "@/lib/env";
 import { demoCourses } from "@/lib/places/demo-courses";
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
+import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { enrichCoursesWithPriceEstimates } from "@/lib/pricing/course-price-enrichment";
@@ -18,7 +20,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Latitude and longitude are required" }, { status: 400 });
   }
 
-  if (!process.env.GOOGLE_PLACES_API_KEY) {
+  if (!hasGooglePlacesConfig() && isVercelProduction()) {
+    return NextResponse.json(
+      { error: "Course discovery is temporarily unavailable. Try again in a moment." },
+      { status: 503 }
+    );
+  }
+
+  if (!hasGooglePlacesConfig()) {
     return NextResponse.json({ courses: demoCourses, demo: true });
   }
 
@@ -49,6 +58,13 @@ export async function GET(request: NextRequest) {
     });
     return NextResponse.json({ courses: coursesWithPrices, demo: false });
   } catch (error) {
+    if (error instanceof GooglePlaceReviewsUnavailableError) {
+      return NextResponse.json(
+        { error: "Course discovery is temporarily unavailable. Try again in a moment." },
+        { status: 503 }
+      );
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not discover courses" },
       { status: 502 }

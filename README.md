@@ -73,6 +73,12 @@ The app currently filters likely non-public or non-course results because Google
 
 This is intentionally conservative. False positives, such as stores or private clubs, should be filtered before they reach the ranking UX. False negatives should be fixed carefully with evidence from the real Places result and the official course website.
 
+Evidence-backed exceptions and identity corrections live in `GooglePlaceReview` in Neon, keyed by exact Google Place ID. Active reviews can recover a verified public course, exclude a verified private or non-course result, correct canonical identity fields, or collapse provider aliases without a code deployment. Operators manage these records with the dry-run-first command below; add `--apply` only after reviewing the normalized output:
+
+```powershell
+npm run automation:place-review -- upsert --place-id <place-id> --name <review-name> --classification <classification> --evidence-url <https-url> --reviewed-at <YYYY-MM-DD> [options]
+```
+
 ### One Group, Not an Outing
 
 Searches are capped to `1` through `4` players. This keeps the POC focused on a normal tee-time group and avoids implying large-group or event handling.

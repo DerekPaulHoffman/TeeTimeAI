@@ -2,13 +2,180 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   dedupeGolfCoursePlaces,
-  filterPublicGolfCoursePlaces,
+  filterPublicGolfCoursePlaces as filterPublicGolfCoursePlacesWithReviews,
   getGooglePlacesApiKey,
-  mapGooglePlaceToCourseCandidate,
-  searchGolfCoursesByName,
-  searchNearbyGolfCourses,
+  mapGooglePlaceToCourseCandidate as mapGooglePlaceToCourseCandidateWithReviews,
+  searchGolfCoursesByName as searchGolfCoursesByNameWithReviews,
+  searchNearbyGolfCourses as searchNearbyGolfCoursesWithReviews,
   type GooglePlace
 } from "./google";
+import {
+  buildGooglePlaceReviewIndex,
+  type GooglePlaceReviewRecord
+} from "./google-place-reviews";
+
+const TEST_REVIEW_INDEX = buildGooglePlaceReviewIndex([
+  testReview({
+    googlePlaceId: "ChIJHRdhRQt16IkRnZxbawELtdM",
+    name: "Grassy Hill Country Club",
+    accessOverride: "VERIFIED_PUBLIC",
+    latitude: 41.2675142,
+    longitude: -73.044987
+  }),
+  ...[
+    ["ChIJUTDSFL-w5IkRtjT_2vg_TJM", "Old Sandwich Golf Club"],
+    ["ChIJa0Z9c_5QwokR83AzfcoIODI", "Liberty National Golf Club"],
+    ["ChIJ7cBXOMNRwokREKeDC0xNIrY", "Bayonne Golf Club"],
+    ["ChIJwYHDYQ5VwokRfkjeAFO-rcY", "Forest Hill Field Club"],
+    ["ChIJmYaOBZeqw4kR8uLQ3-n-ies", "Montclair Golf Club"],
+    ["ChIJMXRRcFvo5YkRkNXOrqSfVGM", "Shelter Harbor Golf Club"],
+    ["ChIJy0obgpGr2YgR3puygnLMK5M", "Shell Bay Club"],
+    ["ChIJ0fUoNOn24YkRd7n-n1PQsls", "Baker Hill Golf Club"],
+    ["ChIJ-5eDKiZ64YkROEiuRnTjEKw", "Dublin Lake Club Golf Course"],
+    ["ChIJXdJQJmTpwIcRsoa_jpffsqs", "18th Hole - Hallbrook CC"],
+    ["ChIJtVWUTNtX0VQR4I_SquYKOr4", "Baywood Golf & Country Club"]
+  ].map(([googlePlaceId, name]) =>
+    testReview({
+      googlePlaceId,
+      name,
+      accessOverride: "VERIFIED_PRIVATE",
+      classification: "PRIVATE_MEMBER_CONTROLLED"
+    })
+  ),
+  ...[
+    ["ChIJaWYTRqBbwokRONcYEIxCk1k", "NEXUS Golf Club", "INDOOR_SIMULATOR"],
+    ["ChIJ7dQcqrv5wokRIats-Rg1dZo", "BackyardSwingsStudio", "NON_COURSE_BUSINESS"],
+    ["ChIJdZB9I4hhwokRFfvXRLrWvi8", "Q5C9+8VQ New York", "NON_COURSE_BUSINESS"],
+    ["ChIJy4_CTDEtDogR9wxAr-a-VGI", "Chicago Golf Authority", "INDOOR_SIMULATOR"],
+    ["ChIJ67JAVPK12YgRnl_JdjR_gFs", "Green Girls Golf", "SERVICE_OR_MEDIA"],
+    ["ChIJ6xdB1Jq02YgR4mExla8UqpE", "South Florida Golf Magazine", "SERVICE_OR_MEDIA"],
+    ["ChIJQfF9gY612YgRgEZ2p_DUI0M", "Celebrity Amputee Golf Classic", "EVENT_ORGANIZATION"],
+    ["ChIJ9zQbdAC72YgRyrZQ5alj1h4", "PGA TOUR Deliveries", "RETAIL_OR_DELIVERY"],
+    ["ChIJbV3-V-av2YgRGc2i3GxAjEY", "Golf Miami 305", "INDOOR_SIMULATOR"],
+    ["ChIJw4LoQ3TL4YkR--PVXKkrk7I", "The Barn At Fox Run", "NON_COURSE_VENUE"],
+    ["ChIJu4ODUC01oFQRrHyJkM_URz4", "PARTEE GOLF AND GAMES, LLC", "INDOOR_SIMULATOR"]
+  ].map(([googlePlaceId, name, classification]) =>
+    testReview({
+      googlePlaceId,
+      name,
+      accessOverride: "VERIFIED_NON_COURSE",
+      classification
+    })
+  ),
+  ...courseIdentityReviews({
+    canonicalPlaceId: "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+    placeIds: [
+      "ChIJL7Z5avQFK4cRO4PIpaKi9iA",
+      "ChIJAQAAgewFK4cRxjiU-zozIzs",
+      "ChIJ____iusFK4cReVCFj6EmIBQ"
+    ],
+    name: "Arizona Grand Golf Course",
+    address: "8000 S Arizona Grand Pkwy, Phoenix, AZ 85044, USA",
+    websiteUrl: "https://www.arizonagrandgolf.com/"
+  }),
+  ...courseIdentityReviews({
+    canonicalPlaceId: "ChIJq6qqPcgFK4cRuYv0flb88dY",
+    placeIds: [
+      "ChIJq6qqPcgFK4cRuYv0flb88dY",
+      "ChIJ____G7MFK4cRf2hkJjIoEWo",
+      "ChIJq6qqv7QFK4cRZNsSs47toA8"
+    ],
+    name: "Ahwatukee Golf Club",
+    address: "12432 S 48th St, Phoenix, AZ 85044, USA",
+    websiteUrl: "https://www.ahwatukeegolf.com/",
+    phone: "(480) 893-1161"
+  }),
+  testReview({
+    googlePlaceId: "ChIJj1vnKctZ4IkRr5BY1-F-5AE",
+    name: "Stratton Golf Course",
+    canonicalPlaceId: "ChIJvbRuDR9Y4IkRe4pD0YaU5fQ"
+  }),
+  testReview({
+    googlePlaceId: "inactive-private-review",
+    name: "Inactive Private Review",
+    accessOverride: "VERIFIED_PRIVATE",
+    active: false
+  })
+]);
+
+function filterPublicGolfCoursePlaces(
+  places: Parameters<typeof filterPublicGolfCoursePlacesWithReviews>[0],
+  options: NonNullable<Parameters<typeof filterPublicGolfCoursePlacesWithReviews>[1]> = {}
+) {
+  return filterPublicGolfCoursePlacesWithReviews(places, {
+    ...options,
+    reviewIndex: TEST_REVIEW_INDEX
+  });
+}
+
+function mapGooglePlaceToCourseCandidate(place: GooglePlace) {
+  return mapGooglePlaceToCourseCandidateWithReviews(place, TEST_REVIEW_INDEX);
+}
+
+function searchGolfCoursesByName(
+  input: Parameters<typeof searchGolfCoursesByNameWithReviews>[0]
+) {
+  return searchGolfCoursesByNameWithReviews(input, TEST_REVIEW_INDEX);
+}
+
+function searchNearbyGolfCourses(
+  input: Parameters<typeof searchNearbyGolfCoursesWithReviews>[0]
+) {
+  return searchNearbyGolfCoursesWithReviews(input, TEST_REVIEW_INDEX);
+}
+
+function testReview(
+  overrides: Pick<GooglePlaceReviewRecord, "googlePlaceId" | "name"> &
+    Partial<GooglePlaceReviewRecord>
+): GooglePlaceReviewRecord {
+  return {
+    googlePlaceId: overrides.googlePlaceId,
+    accessOverride: null,
+    name: overrides.name,
+    classification: "COURSE_REVIEW",
+    evidenceUrl: "https://example.com/google-place-review",
+    reviewedAt: new Date("2026-07-14T00:00:00.000Z"),
+    active: true,
+    canonicalPlaceId: null,
+    canonicalName: null,
+    canonicalAddress: null,
+    canonicalWebsiteUrl: null,
+    canonicalPhone: null,
+    latitude: null,
+    longitude: null,
+    retainWhenCanonicalAbsent: false,
+    ...overrides
+  };
+}
+
+function courseIdentityReviews({
+  canonicalPlaceId,
+  placeIds,
+  name,
+  address,
+  websiteUrl,
+  phone = null
+}: {
+  canonicalPlaceId: string;
+  placeIds: readonly [string, string, string];
+  name: string;
+  address: string;
+  websiteUrl: string;
+  phone?: string | null;
+}) {
+  return placeIds.map((googlePlaceId, index) =>
+    testReview({
+      googlePlaceId,
+      name,
+      canonicalPlaceId,
+      canonicalName: name,
+      canonicalAddress: address,
+      canonicalWebsiteUrl: websiteUrl,
+      canonicalPhone: phone,
+      retainWhenCanonicalAbsent: index > 0
+    })
+  );
+}
 
 function makeOperationalGolfCoursePlace({
   id,
@@ -245,6 +412,35 @@ describe("Google Places mapping", () => {
       "Tashua Knolls & Tashua Glen Golf Course",
       "Fairchild Wheeler Golf Course"
     ]);
+  });
+
+  it("ignores inactive exact-ID access reviews", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "inactive-private-review",
+        name: "Inactive Review Golf Course",
+        address: "1 Public Way, Example, CT",
+        latitude: 41.2,
+        longitude: -73.2
+      })
+    ]);
+
+    expect(places).toHaveLength(1);
+  });
+
+  it("recovers an operational exact-ID verified public course despite weak provider typing", () => {
+    const places = filterPublicGolfCoursePlaces([
+      {
+        id: "places/ChIJHRdhRQt16IkRnZxbawELtdM",
+        displayName: { text: "Grassy Hill Country Club" },
+        primaryType: "association_or_organization",
+        types: ["association_or_organization", "point_of_interest"],
+        businessStatus: "OPERATIONAL",
+        location: { latitude: 41.2675142, longitude: -73.044987 }
+      }
+    ]);
+
+    expect(places).toHaveLength(1);
   });
 
   it("keeps a semantically corroborated public course when Google omits its golf type", () => {

@@ -1,22 +1,31 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { hasClerkConfig } from "./env";
+import {
+  hasClerkConfig,
+  hasDatabaseConfig,
+  hasGooglePlacesConfig,
+  isVercelProduction
+} from "./env";
 
 const originalEnv = {
   VERCEL_ENV: process.env.VERCEL_ENV,
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
   CLERK_SECRET_KEY: process.env.CLERK_SECRET_KEY,
-  CLERK_AUTH_READY: process.env.CLERK_AUTH_READY
+  CLERK_AUTH_READY: process.env.CLERK_AUTH_READY,
+  DATABASE_URL: process.env.DATABASE_URL,
+  GOOGLE_PLACES_API_KEY: process.env.GOOGLE_PLACES_API_KEY
 };
 
-describe("hasClerkConfig", () => {
-  afterEach(() => {
-    restoreEnv("VERCEL_ENV", originalEnv.VERCEL_ENV);
-    restoreEnv("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", originalEnv.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
-    restoreEnv("CLERK_SECRET_KEY", originalEnv.CLERK_SECRET_KEY);
-    restoreEnv("CLERK_AUTH_READY", originalEnv.CLERK_AUTH_READY);
-  });
+afterEach(() => {
+  restoreEnv("VERCEL_ENV", originalEnv.VERCEL_ENV);
+  restoreEnv("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY", originalEnv.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+  restoreEnv("CLERK_SECRET_KEY", originalEnv.CLERK_SECRET_KEY);
+  restoreEnv("CLERK_AUTH_READY", originalEnv.CLERK_AUTH_READY);
+  restoreEnv("DATABASE_URL", originalEnv.DATABASE_URL);
+  restoreEnv("GOOGLE_PLACES_API_KEY", originalEnv.GOOGLE_PLACES_API_KEY);
+});
 
+describe("hasClerkConfig", () => {
   it("rejects Clerk test keys in Vercel production", () => {
     process.env.VERCEL_ENV = "production";
     process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_demo";
@@ -57,6 +66,32 @@ describe("hasClerkConfig", () => {
     process.env.CLERK_AUTH_READY = " true ";
 
     expect(hasClerkConfig()).toBe(true);
+  });
+});
+
+describe("server configuration", () => {
+  it("normalizes database and Google Places configuration values", () => {
+    process.env.DATABASE_URL = "\uFEFF postgresql://example.test/teetimespot ";
+    process.env.GOOGLE_PLACES_API_KEY = "\uFEFF copied-key \n";
+
+    expect(hasDatabaseConfig()).toBe(true);
+    expect(hasGooglePlacesConfig()).toBe(true);
+  });
+
+  it("treats blank configuration values as missing", () => {
+    process.env.DATABASE_URL = " \n";
+    process.env.GOOGLE_PLACES_API_KEY = "\uFEFF  ";
+
+    expect(hasDatabaseConfig()).toBe(false);
+    expect(hasGooglePlacesConfig()).toBe(false);
+  });
+
+  it("distinguishes Vercel production from preview", () => {
+    process.env.VERCEL_ENV = "preview";
+    expect(isVercelProduction()).toBe(false);
+
+    process.env.VERCEL_ENV = "production";
+    expect(isVercelProduction()).toBe(true);
   });
 });
 
