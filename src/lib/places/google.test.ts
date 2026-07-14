@@ -722,6 +722,59 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("filters the verified member-only Baywood record while preserving public 95501 controls", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        makeOperationalGolfCoursePlace({
+          id: "ChIJweiRhX0A1FQRCXE20jewqVQ",
+          name: "Eureka Municipal Golf Course",
+          address: "4750 Fairway Dr, Eureka, CA 95503, USA",
+          latitude: 40.773,
+          longitude: -124.171,
+          websiteUri: "https://www.eurekagolfcourse.com/"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "ChIJtVWUTNtX0VQR4I_SquYKOr4",
+          name: "Baywood Golf & Country Club",
+          address: "3600 Buttermilk Ln, Arcata, CA 95521, USA",
+          latitude: 40.886,
+          longitude: -124.083,
+          websiteUri: "https://baywoodgcc.com/"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "ChIJwWPQgChb0VQRKYvyfu16ypM",
+          name: "Beau Pre Golf Course",
+          address: "1777 Norton Rd, McKinleyville, CA 95519, USA",
+          latitude: 40.94,
+          longitude: -124.111,
+          websiteUri: "https://beaupre.golf/"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "ChIJHRdhRQt16IkRnZxbawELtdM",
+          name: "Grassy Hill Country Club",
+          address: "441 Clark Ln, Orange, CT 06477, USA",
+          latitude: 41.268,
+          longitude: -73.045,
+          websiteUri: "https://grassyhillcountryclub.com/"
+        })
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJweiRhX0A1FQRCXE20jewqVQ",
+          "ChIJtVWUTNtX0VQR4I_SquYKOr4",
+          "ChIJwWPQgChb0VQRKYvyfu16ypM",
+          "ChIJHRdhRQt16IkRnZxbawELtdM"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Eureka Municipal Golf Course",
+      "Beau Pre Golf Course",
+      "Grassy Hill Country Club"
+    ]);
+  });
+
   it("filters the verified private Hallbrook hole pin despite public-query evidence", () => {
     const places = filterPublicGolfCoursePlaces(
       [

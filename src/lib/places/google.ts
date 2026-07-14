@@ -144,55 +144,91 @@ const VERIFIED_PUBLIC_COURSE_PLACE_IDS = new Set<string>(
 // Google can classify invitation-only facilities as golf_course and even return them for a
 // "public golf courses" text search. Keep verified private facilities out by stable place ID
 // when their official site explicitly documents private or member-only access.
+type VerifiedPrivateCourseAccessReview = {
+  placeId: string;
+  name: string;
+  evidenceUrl: string;
+  reviewedAt: `${number}-${number}-${number}`;
+  access: "PRIVATE_MEMBER_CONTROLLED";
+};
+
 const VERIFIED_PRIVATE_COURSES = [
   {
     placeId: "ChIJa0Z9c_5QwokR83AzfcoIODI",
     name: "Liberty National Golf Club",
-    evidenceUrl: "https://www.libertynationalgc.com/public-golf"
+    evidenceUrl: "https://www.libertynationalgc.com/public-golf",
+    reviewedAt: "2026-07-14",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJ7cBXOMNRwokREKeDC0xNIrY",
     name: "Bayonne Golf Club",
-    evidenceUrl: "https://www.bayonnegolfclub.com/Membership"
+    evidenceUrl: "https://www.bayonnegolfclub.com/Membership",
+    reviewedAt: "2026-07-14",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJwYHDYQ5VwokRfkjeAFO-rcY",
     name: "Forest Hill Field Club",
-    evidenceUrl: "https://foresthillfc.com/about"
+    evidenceUrl: "https://foresthillfc.com/about",
+    reviewedAt: "2026-07-14",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJmYaOBZeqw4kR8uLQ3-n-ies",
     name: "Montclair Golf Club",
-    evidenceUrl: "https://www.montclairgolfclub.org/"
+    evidenceUrl: "https://www.montclairgolfclub.org/",
+    reviewedAt: "2026-07-14",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJMXRRcFvo5YkRkNXOrqSfVGM",
     name: "Shelter Harbor Golf Club",
-    evidenceUrl: "https://www.shgcri.com/"
+    evidenceUrl: "https://www.shgcri.com/",
+    reviewedAt: "2026-07-12",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJy0obgpGr2YgR3puygnLMK5M",
     name: "Shell Bay Club",
-    evidenceUrl: "https://shellbayclub.com/"
+    evidenceUrl: "https://shellbayclub.com/",
+    reviewedAt: "2026-07-13",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJ0fUoNOn24YkRd7n-n1PQsls",
     name: "Baker Hill Golf Club",
-    evidenceUrl: "https://www.bakerhill.org/guest-information/frequently-asked-questions"
+    evidenceUrl: "https://www.bakerhill.org/guest-information/frequently-asked-questions",
+    reviewedAt: "2026-07-13",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJ-5eDKiZ64YkROEiuRnTjEKw",
     name: "Dublin Lake Club Golf Course",
-    evidenceUrl: "https://home.dublinlake.org/default.aspx?E=6&p=home"
+    evidenceUrl: "https://home.dublinlake.org/default.aspx?E=6&p=home",
+    reviewedAt: "2026-07-13",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   },
   {
     placeId: "ChIJXdJQJmTpwIcRsoa_jpffsqs",
     name: "18th Hole - Hallbrook CC",
-    evidenceUrl: "https://www.hallbrookcc.org/guest-information"
+    evidenceUrl: "https://www.hallbrookcc.org/guest-information",
+    reviewedAt: "2026-07-13",
+    access: "PRIVATE_MEMBER_CONTROLLED"
+  },
+  {
+    placeId: "ChIJtVWUTNtX0VQR4I_SquYKOr4",
+    name: "Baywood Golf & Country Club",
+    evidenceUrl: "https://baywoodgcc.com/membership/",
+    reviewedAt: "2026-07-14",
+    access: "PRIVATE_MEMBER_CONTROLLED"
   }
-] as const;
-const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
-  VERIFIED_PRIVATE_COURSES.map((course) => course.placeId)
+] as const satisfies readonly VerifiedPrivateCourseAccessReview[];
+const VERIFIED_PRIVATE_COURSE_ACCESS_BY_PLACE_ID = new Map<
+  string,
+  VerifiedPrivateCourseAccessReview
+>(
+  VERIFIED_PRIVATE_COURSES.map((course) => [course.placeId, course])
 );
 // Some indoor simulator businesses remain misclassified by Google as outdoor golf courses even
 // after indoor_golf_course became a distinct Places type. Exclude only stable place IDs whose
@@ -432,7 +468,7 @@ function isLikelyPublicGolfCoursePlace(
   const isVerifiedPublicCourse = VERIFIED_PUBLIC_COURSE_PLACE_IDS.has(placeId);
 
   if (
-    VERIFIED_PRIVATE_COURSE_PLACE_IDS.has(placeId) ||
+    VERIFIED_PRIVATE_COURSE_ACCESS_BY_PLACE_ID.has(placeId) ||
     VERIFIED_NON_COURSE_PLACE_IDS.has(placeId)
   ) {
     return false;
