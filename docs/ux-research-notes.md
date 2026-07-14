@@ -103,6 +103,12 @@
 - Tee Time Spot evidence: a real signed-out `10001` search returned 31 records. NEXUS, Liberty National, BackyardSwingsStudio, and Bayonne occupied four of the first six positions; Forest Hill, Montclair, and the apartment-address `Q5C9+8VQ New York` record also appeared. Current Google detail responses identify all seven as operational primary `golf_course` records even though the official sites identify NEXUS as an indoor membership facility and the four named clubs as private or member-and-guest access.
 - Decision: exclude the seven exact stable Google identities before type or semantic-public corroboration. Preserve Skyway, Forest Park, and the similarly named verified-public Chris Bargas Golf Club as positive controls. Do not infer access from `Golf Club`, `Field Club`, an apartment address, or membership-related Places types alone. Because exact registries now span repeated failure families, the next systemic learning target is a reviewable structured access-evidence pipeline that captures official public/private/indoor proof without turning one market into a broad name heuristic.
 
+## 2026-07-14: Search progress must replace stale result announcements
+
+- Source: [W3C ARIA22: Using `role=status` to present status messages](https://www.w3.org/WAI/WCAG21/Techniques/aria/ARIA22), accessed 2026-07-14 America/New_York. The current technique uses search-result updates as its primary example, notes that `status` is a polite live region, and recommends explicit `aria-atomic="true"` when the entire message should be announced consistently.
+- Tee Time Spot evidence: a signed-out `70358` search on 1440px desktop and 320px mobile correctly broadened from 15 to 30 miles, but the existing 15-mile empty state was immediately relabeled as the final 30-mile no-result message while the wider provider request was still pending. That could announce a false zero-result outcome before a late result arrived.
+- Decision: replace stale result or empty-state copy with one atomic `Searching public courses within …` status for every discovery request, then render and announce the final result only after the response completes. Keep the current search controls and bounded 30-mile recovery behavior.
+
 ## Product Shape
 
 Tee Time Spot should behave like a waitlist assistant rather than a booking marketplace. GolfNow/TeeOff-style products emphasize inventory search, deals, and broad marketplace browsing. Noteefy-style flows emphasize preference capture, waitlist matching, and alerts.

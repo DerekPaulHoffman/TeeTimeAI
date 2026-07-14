@@ -410,6 +410,10 @@ test.describe("Tee Time Spot UI smoke", () => {
 
   test("turns a zero-result search into a bounded wider search", async ({ page }) => {
     const requestedRadii: string[] = [];
+    let releaseWiderSearch!: () => void;
+    const widerSearchRelease = new Promise<void>((resolve) => {
+      releaseWiderSearch = resolve;
+    });
     await page.route("**/api/location/geocode?**", async (route) => {
       await route.fulfill({
         body: JSON.stringify({ latitude: 45.52, longitude: -109.44 }),
@@ -418,7 +422,11 @@ test.describe("Tee Time Spot UI smoke", () => {
       });
     });
     await page.route("**/api/courses/discover?**", async (route) => {
-      requestedRadii.push(new URL(route.request().url()).searchParams.get("radiusMeters") ?? "");
+      const requestedRadius = new URL(route.request().url()).searchParams.get("radiusMeters") ?? "";
+      requestedRadii.push(requestedRadius);
+      if (requestedRadius === "48280") {
+        await widerSearchRelease;
+      }
       await route.fulfill({
         body: JSON.stringify({ courses: [] }),
         contentType: "application/json",
@@ -441,12 +449,21 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.getByRole("button", { name: "Search 30 miles" }).click();
     await expect(distance).toHaveValue("30");
+    await expect(page.getByRole("status")).toHaveText(
+      "Searching public courses within 30 miles…"
+    );
+    await expect(
+      page.getByRole("heading", { name: "No public courses found within 30 miles." })
+    ).toHaveCount(0);
+
+    releaseWiderSearch();
     await expect(
       page.getByRole("heading", { name: "No public courses found within 30 miles." })
     ).toBeVisible();
     await expect(
       page.getByText("You searched the full 30-mile range.", { exact: false })
     ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Search", exact: true })).toBeEnabled();
     expect(requestedRadii).toEqual(["24140", "48280"]);
   });
 

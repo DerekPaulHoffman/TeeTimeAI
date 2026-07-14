@@ -913,15 +913,19 @@ function TeeTimeIntakeContent({
 
       <div className="figma-results-layout" ref={resultsRef}>
         <div className="figma-results-column">
-          {courses.length > 0 ? (
-            <div className="figma-results-banner" role="status">
+          {loading ? (
+            <div className="figma-results-banner" role="status" aria-atomic="true">
+              <strong>Searching public courses</strong> within {searchRadiusMiles} miles…
+            </div>
+          ) : courses.length > 0 ? (
+            <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>
                 {filteredCourses.length} {filteredCourses.length === 1 ? "course" : "courses"}
               </strong>{" "}
               near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
             </div>
           ) : notice.type === "success" ? (
-            <div className="figma-empty-results" role="status">
+            <div className="figma-empty-results" role="status" aria-atomic="true">
               <h3>No public courses found within {searchRadiusMiles} miles.</h3>
               <p>
                 {searchRadiusMiles < MAX_COURSE_SEARCH_RADIUS_MILES
