@@ -1464,7 +1464,11 @@ function MissingCourseLookup({
             const isIncompatible = layoutCompatibility === "incompatible";
             return (
               <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
-                <CourseThumbnail course={course} variant="compact" />
+                <CourseThumbnail
+                  course={course}
+                  emptyLabel="Photo unavailable"
+                  variant="compact"
+                />
                 <div className="missing-course-copy">
                   <div className="figma-course-badges missing-course-badges">
                     <span className="figma-course-pill is-public">
@@ -1526,9 +1530,11 @@ function MissingCourseLookup({
 
 function CourseThumbnail({
   course,
+  emptyLabel,
   variant = "default"
 }: {
   course: CourseCandidate;
+  emptyLabel?: string;
   variant?: "default" | "compact";
 }) {
   const className =
@@ -1538,6 +1544,7 @@ function CourseThumbnail({
     return (
       <div className={`${className} course-thumbnail-empty`} aria-hidden="true">
         <MapPinned size={22} />
+        {emptyLabel ? <span className="course-thumbnail-empty-label">{emptyLabel}</span> : null}
       </div>
     );
   }

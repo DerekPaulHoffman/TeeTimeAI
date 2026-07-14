@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-14: Photo-less recovery results should look intentional
+
+- Sources: the [W3C WAI Images Tutorial](https://www.w3.org/WAI/tutorials/images/), updated 2026-04-08, says image alternatives depend on purpose and decorative media should use a null alternative; the current [Next.js Image reference](https://nextjs.org/docs/app/api-reference/components/image) likewise requires `alt` text that can replace an informative image without changing the page meaning.
+- Tee Time Spot evidence: signed-out ZIP `63501` returned one valid public course on 1440px desktop and 320px mobile, then keyboard Enter lookup returned Bethpage Black. Production screenshots showed photo-less lookup data beside an unexplained pale strip on desktop and a 128px empty media block on mobile, even though the adjacent heading and address already identify the course. Both viewports had zero horizontal overflow, console errors, or page errors and used the `AUTOMATION` session marker.
+- Decision: keep the missing photo decorative for assistive technology because the adjacent course text already supplies the identity, but add visible icon-and-text placeholder treatment so sighted golfers can distinguish unavailable media from a broken card. Preserve the compact recovery layout and cover the photo-less result in the four-viewport smoke.
+
 ## 2026-07-13: Course discovery needs privacy-safe outcome evidence
 
 - Sources: [Vercel's custom-event guidance](https://vercel.com/docs/analytics/custom-events), last updated 2025-09-24, recommends tracking meaningful interactions such as form submissions and organizing results by bounded custom properties; [Vercel's analytics privacy guidance](https://vercel.com/docs/analytics/privacy-policy), last updated 2025-03-04, warns against personal information in custom events; and the [W3C Privacy Principles](https://www.w3.org/TR/privacy-principles/), published 2025-05-15, require transferring only the data necessary for the user's goal.

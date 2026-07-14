@@ -493,8 +493,20 @@ button {
 
 .course-thumbnail-empty {
   align-items: center;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: center;
+}
+
+.course-thumbnail-empty-label {
+  font-size: 0.6rem;
+  font-weight: 750;
+  letter-spacing: 0.03em;
+  line-height: 1.15;
+  max-width: 8ch;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 .course-copy {

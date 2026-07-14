@@ -849,6 +849,10 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.getByRole("button", { name: "Find course" }).click();
     await expect(page.getByRole("status").filter({ hasText: "2 matches found" })).toBeVisible();
     const missingCourseResults = page.locator(".missing-course-result");
+    await expect(
+      missingCourseResults.getByText("Photo unavailable"),
+      "photo-less lookup results should show an intentional placeholder instead of an empty media block"
+    ).toHaveCount(2);
     const blockedCourseResult = missingCourseResults.filter({
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });
