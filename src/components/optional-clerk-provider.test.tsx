@@ -8,12 +8,12 @@ const clerkProviderMock = vi.hoisted(() => vi.fn());
 vi.mock("@clerk/nextjs", () => ({
   ClerkProvider: ({
     children,
-    prefetchUI
+    telemetry
   }: {
     children: React.ReactNode;
-    prefetchUI?: boolean;
+    telemetry?: false;
   }) => {
-    clerkProviderMock({ prefetchUI });
+    clerkProviderMock({ telemetry });
     return <div data-testid="clerk-provider">{children}</div>;
   }
 }));
@@ -31,7 +31,7 @@ describe("OptionalClerkProvider", () => {
     expect(clerkProviderMock).not.toHaveBeenCalled();
   });
 
-  it("defers Clerk UI downloads while preserving the auth provider", () => {
+  it("disables optional Clerk telemetry while preserving the auth provider", () => {
     render(
       <OptionalClerkProvider enabled>
         <span>Search content</span>
@@ -39,6 +39,6 @@ describe("OptionalClerkProvider", () => {
     );
 
     expect(screen.getByTestId("clerk-provider")).toBeTruthy();
-    expect(clerkProviderMock).toHaveBeenCalledWith({ prefetchUI: false });
+    expect(clerkProviderMock).toHaveBeenCalledWith({ telemetry: false });
   });
 });
