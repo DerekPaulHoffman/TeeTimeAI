@@ -868,6 +868,43 @@ describe("Google Places mapping", () => {
     expect(places).toEqual([]);
   });
 
+  it("filters verified private Old Sandwich while preserving nearby public Waverly Oaks", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJUTDSFL-w5IkRtjT_2vg_TJM",
+          displayName: { text: "Old Sandwich Golf Club" },
+          formattedAddress: "247 Old Sandwich Rd, Plymouth, MA 02360, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "http://www.osgolfclub.com/",
+          location: { latitude: 41.9069709, longitude: -70.6042556 }
+        },
+        {
+          id: "places/ChIJQxFz-eK55IkRdhhkVf6ox7M",
+          displayName: { text: "Waverly Oaks Golf Club" },
+          formattedAddress: "444 Long Pond Rd, Plymouth, MA 02360, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "http://www.waverlyoaksgc.com/",
+          location: { latitude: 41.8896675, longitude: -70.6190414 }
+        }
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJUTDSFL-w5IkRtjT_2vg_TJM",
+          "ChIJQxFz-eK55IkRdhhkVf6ox7M"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.id)).toEqual([
+      "places/ChIJQxFz-eK55IkRdhhkVf6ox7M"
+    ]);
+  });
+
   it("keeps canonical Phoenix courses while suppressing their verified aliases", () => {
     const places = filterPublicGolfCoursePlaces([
       makeOperationalGolfCoursePlace({

@@ -154,6 +154,13 @@ type VerifiedPrivateCourseAccessReview = {
 
 const VERIFIED_PRIVATE_COURSES = [
   {
+    placeId: "ChIJUTDSFL-w5IkRtjT_2vg_TJM",
+    name: "Old Sandwich Golf Club",
+    evidenceUrl: "https://www.osgolfclub.com/public",
+    reviewedAt: "2026-07-14",
+    access: "PRIVATE_MEMBER_CONTROLLED"
+  },
+  {
     placeId: "ChIJa0Z9c_5QwokR83AzfcoIODI",
     name: "Liberty National Golf Club",
     evidenceUrl: "https://www.libertynationalgc.com/public-golf",
