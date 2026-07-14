@@ -8,7 +8,7 @@ import { EngagementTracker } from "@/components/engagement-tracker";
 import { FeedbackWidget } from "@/components/feedback-widget";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteObservability } from "@/components/site-observability";
-import { hasClerkConfig } from "@/lib/env";
+import { getClerkPublishableKey } from "@/lib/env";
 import {
   absoluteUrl,
   getSiteVerification,
@@ -77,12 +77,13 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  const clerkEnabled = hasClerkConfig();
+  const clerkPublishableKey = getClerkPublishableKey();
+  const clerkEnabled = Boolean(clerkPublishableKey);
 
   return (
     <html lang="en">
       <body>
-        <OptionalClerkProvider enabled={clerkEnabled}>
+        <OptionalClerkProvider publishableKey={clerkPublishableKey}>
           <div className="site-shell">
             <header className="topbar">
               <Link className="brand" href="/" aria-label="Tee Time Spot home">

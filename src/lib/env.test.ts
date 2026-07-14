@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  getClerkPublishableKey,
   hasClerkConfig,
   hasDatabaseConfig,
   hasGooglePlacesConfig,
@@ -28,7 +29,7 @@ afterEach(() => {
 describe("hasClerkConfig", () => {
   it("rejects Clerk test keys in Vercel production", () => {
     process.env.VERCEL_ENV = "production";
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_demo";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = clerkPublishableKey("test");
     process.env.CLERK_SECRET_KEY = "sk_test_demo";
 
     expect(hasClerkConfig()).toBe(false);
@@ -36,15 +37,33 @@ describe("hasClerkConfig", () => {
 
   it("allows Clerk test keys outside Vercel production", () => {
     process.env.VERCEL_ENV = "preview";
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_demo";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = clerkPublishableKey("test");
     process.env.CLERK_SECRET_KEY = "sk_test_demo";
 
     expect(hasClerkConfig()).toBe(true);
+    expect(getClerkPublishableKey()).toBe(clerkPublishableKey("test"));
+  });
+
+  it("rejects prefix-only placeholder keys before Clerk can render", () => {
+    process.env.VERCEL_ENV = "preview";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_demo";
+    process.env.CLERK_SECRET_KEY = "sk_test_demo";
+
+    expect(hasClerkConfig()).toBe(false);
+    expect(getClerkPublishableKey()).toBeUndefined();
+  });
+
+  it("rejects Clerk keys from different instances", () => {
+    process.env.VERCEL_ENV = "preview";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = clerkPublishableKey("test");
+    process.env.CLERK_SECRET_KEY = "sk_live_demo";
+
+    expect(hasClerkConfig()).toBe(false);
   });
 
   it("rejects Clerk live keys in Vercel production until auth is marked ready", () => {
     process.env.VERCEL_ENV = "production";
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_demo";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = clerkPublishableKey("live");
     process.env.CLERK_SECRET_KEY = "sk_live_demo";
 
     expect(hasClerkConfig()).toBe(false);
@@ -52,7 +71,7 @@ describe("hasClerkConfig", () => {
 
   it("allows Clerk live keys in Vercel production when auth is marked ready", () => {
     process.env.VERCEL_ENV = "production";
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_demo";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = clerkPublishableKey("live");
     process.env.CLERK_SECRET_KEY = "sk_live_demo";
     process.env.CLERK_AUTH_READY = "true";
 
@@ -61,11 +80,12 @@ describe("hasClerkConfig", () => {
 
   it("normalizes copied Clerk values before validating production auth", () => {
     process.env.VERCEL_ENV = "production";
-    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "\uFEFF pk_live_demo ";
+    process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = `\uFEFF ${clerkPublishableKey("live")} `;
     process.env.CLERK_SECRET_KEY = "\uFEFFsk_live_demo\n";
     process.env.CLERK_AUTH_READY = " true ";
 
     expect(hasClerkConfig()).toBe(true);
+    expect(getClerkPublishableKey()).toBe(clerkPublishableKey("live"));
   });
 });
 
@@ -102,4 +122,9 @@ function restoreEnv(key: keyof typeof originalEnv, value: string | undefined) {
   }
 
   process.env[key] = value;
+}
+
+function clerkPublishableKey(environment: "test" | "live") {
+  const encodedFrontendApi = Buffer.from("clerk.example.test$").toString("base64url");
+  return `pk_${environment}_${encodedFrontendApi}`;
 }

@@ -8,12 +8,14 @@ const clerkProviderMock = vi.hoisted(() => vi.fn());
 vi.mock("@clerk/nextjs", () => ({
   ClerkProvider: ({
     children,
+    publishableKey,
     telemetry
   }: {
     children: React.ReactNode;
+    publishableKey?: string;
     telemetry?: false;
   }) => {
-    clerkProviderMock({ telemetry });
+    clerkProviderMock({ publishableKey, telemetry });
     return <div data-testid="clerk-provider">{children}</div>;
   }
 }));
@@ -21,7 +23,7 @@ vi.mock("@clerk/nextjs", () => ({
 describe("OptionalClerkProvider", () => {
   it("renders without Clerk when account mode is disabled", () => {
     render(
-      <OptionalClerkProvider enabled={false}>
+      <OptionalClerkProvider>
         <span>Search content</span>
       </OptionalClerkProvider>
     );
@@ -33,12 +35,15 @@ describe("OptionalClerkProvider", () => {
 
   it("disables optional Clerk telemetry while preserving the auth provider", () => {
     render(
-      <OptionalClerkProvider enabled>
+      <OptionalClerkProvider publishableKey="pk_test_example">
         <span>Search content</span>
       </OptionalClerkProvider>
     );
 
     expect(screen.getByTestId("clerk-provider")).toBeTruthy();
-    expect(clerkProviderMock).toHaveBeenCalledWith({ telemetry: false });
+    expect(clerkProviderMock).toHaveBeenCalledWith({
+      publishableKey: "pk_test_example",
+      telemetry: false
+    });
   });
 });
