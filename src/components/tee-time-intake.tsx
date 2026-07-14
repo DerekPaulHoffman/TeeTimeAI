@@ -308,6 +308,7 @@ function TeeTimeIntakeContent({
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
   const nextAdditionalEmailIdRef = useRef(1);
+  const hasTrackedCourseSelectionRef = useRef(false);
 
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
@@ -619,6 +620,18 @@ function TeeTimeIntakeContent({
 
     if (selectedIds.has(course.googlePlaceId)) {
       return;
+    }
+
+    if (!hasTrackedCourseSelectionRef.current) {
+      hasTrackedCourseSelectionRef.current = true;
+      trackWebsiteEvent({
+        name: "course_selection_started",
+        metadata: {
+          selectedCourseCount: 1,
+          players,
+          requestedLayoutHoles
+        }
+      });
     }
 
     setSelected((current) => [...current, course]);
@@ -1356,6 +1369,16 @@ function TeeTimeIntakeContent({
             <button
               className="button button-primary"
               disabled={Boolean(saveBlocker) || selected.length === 0}
+              onClick={() => {
+                trackWebsiteEvent({
+                  name: "alert_sign_in_clicked",
+                  metadata: {
+                    selectedCourseCount: selected.length,
+                    players,
+                    requestedLayoutHoles
+                  }
+                });
+              }}
               style={{ marginTop: 18, width: "100%" }}
               type="button"
             >

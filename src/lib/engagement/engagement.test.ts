@@ -69,6 +69,38 @@ describe("websiteEventInputSchema", () => {
     });
   });
 
+  it("accepts aggregate selection and sign-in funnel milestones without course identity", () => {
+    for (const name of ["course_selection_started", "alert_sign_in_clicked"] as const) {
+      expect(
+        websiteEventInputSchema.parse({
+          name,
+          page: "/search",
+          trafficClass: "PUBLIC",
+          metadata: {
+            selectedCourseCount: name === "course_selection_started" ? 1 : 3,
+            players: 4,
+            requestedLayoutHoles: null
+          }
+        })
+      ).toMatchObject({
+        name,
+        page: "/search",
+        trafficClass: "PUBLIC"
+      });
+    }
+
+    expect(() =>
+      websiteEventInputSchema.parse({
+        name: "course_selection_started",
+        metadata: {
+          selectedCourseCount: 1,
+          players: 4,
+          courseId: "must-not-be-stored"
+        }
+      })
+    ).toThrow(/unrecognized/i);
+  });
+
   it("accepts aggregate course-discovery outcomes without location data", () => {
     expect(
       websiteEventInputSchema.parse({

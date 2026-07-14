@@ -13,6 +13,8 @@ export const websiteEventNames = [
   "email_preview_opened",
   "course_discovery_completed",
   "course_discovery_failed",
+  "course_selection_started",
+  "alert_sign_in_clicked",
   "search_submitted",
   "search_submission_failed",
   "feedback_opened",
@@ -77,6 +79,8 @@ export const websiteEventInputSchema = z.discriminatedUnion("name", [
       })
     })
     .strict(),
+  z.object({ name: z.literal("course_selection_started"), ...eventBase, metadata: searchMetadataSchema }).strict(),
+  z.object({ name: z.literal("alert_sign_in_clicked"), ...eventBase, metadata: searchMetadataSchema }).strict(),
   z.object({ name: z.literal("search_submitted"), ...eventBase, metadata: searchMetadataSchema }).strict(),
   z
     .object({

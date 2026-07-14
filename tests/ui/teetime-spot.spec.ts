@@ -628,6 +628,18 @@ test.describe("Tee Time Spot UI smoke", () => {
       trafficClass?: string;
       metadata?: Record<string, unknown>;
     } | null = null;
+    let selectionStartedAnalyticsPayload: {
+      name?: string;
+      page?: string;
+      trafficClass?: string;
+      metadata?: Record<string, unknown>;
+    } | null = null;
+    let signInAnalyticsPayload: {
+      name?: string;
+      page?: string;
+      trafficClass?: string;
+      metadata?: Record<string, unknown>;
+    } | null = null;
     await page.route("**/api/analytics/events", async (route) => {
       const payload = route.request().postDataJSON() as {
         name?: string;
@@ -637,6 +649,10 @@ test.describe("Tee Time Spot UI smoke", () => {
       };
       if (payload.name === "course_discovery_completed") {
         discoveryAnalyticsPayload = payload;
+      } else if (payload.name === "course_selection_started") {
+        selectionStartedAnalyticsPayload = payload;
+      } else if (payload.name === "alert_sign_in_clicked") {
+        signInAnalyticsPayload = payload;
       }
       await route.fulfill({
         body: JSON.stringify({ event: { id: "ui-smoke-event" } }),
@@ -786,6 +802,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     const laterCourse = courseRows.nth(4);
     await laterCourse.getByRole("button", { name: /Add/i }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
+    await expect.poll(() => selectionStartedAnalyticsPayload).toMatchObject({
+      name: "course_selection_started",
+      page: "/search",
+      trafficClass: "AUTOMATION",
+      metadata: {
+        selectedCourseCount: 1,
+        players: 4,
+        requestedLayoutHoles: null
+      }
+    });
     if (!usesSelectionDrawer) {
       const selectedName = page.locator(".selected-list .selected-row h3");
       await expect(selectedName).toBeVisible();
@@ -1013,6 +1039,16 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(alertActionButton).toBeEnabled();
       await alertActionButton.click();
       await expect(page.getByRole("heading", { name: "Sign in to Tee Time Spot" })).toBeVisible();
+      await expect.poll(() => signInAnalyticsPayload).toMatchObject({
+        name: "alert_sign_in_clicked",
+        page: "/search",
+        trafficClass: "AUTOMATION",
+        metadata: {
+          selectedCourseCount: 5,
+          players: 4,
+          requestedLayoutHoles: null
+        }
+      });
       await page.getByRole("button", { name: "Close modal" }).click();
       expect(saveRequestCount, "signed-out visitors must not submit alert searches").toBe(0);
     } else if (/Start getting alerts/i.test(alertActionText)) {
