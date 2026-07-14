@@ -144,6 +144,26 @@ const VERIFIED_PUBLIC_COURSE_PLACE_IDS = new Set<string>(
 // when their official site explicitly documents private or member-only access.
 const VERIFIED_PRIVATE_COURSES = [
   {
+    placeId: "ChIJa0Z9c_5QwokR83AzfcoIODI",
+    name: "Liberty National Golf Club",
+    evidenceUrl: "https://www.libertynationalgc.com/public-golf"
+  },
+  {
+    placeId: "ChIJ7cBXOMNRwokREKeDC0xNIrY",
+    name: "Bayonne Golf Club",
+    evidenceUrl: "https://www.bayonnegolfclub.com/Membership"
+  },
+  {
+    placeId: "ChIJwYHDYQ5VwokRfkjeAFO-rcY",
+    name: "Forest Hill Field Club",
+    evidenceUrl: "https://foresthillfc.com/about"
+  },
+  {
+    placeId: "ChIJmYaOBZeqw4kR8uLQ3-n-ies",
+    name: "Montclair Golf Club",
+    evidenceUrl: "https://www.montclairgolfclub.org/"
+  },
+  {
     placeId: "ChIJMXRRcFvo5YkRkNXOrqSfVGM",
     name: "Shelter Harbor Golf Club",
     evidenceUrl: "https://www.shgcri.com/"
@@ -176,6 +196,23 @@ const VERIFIED_PRIVATE_COURSE_PLACE_IDS = new Set<string>(
 // after indoor_golf_course became a distinct Places type. Exclude only stable place IDs whose
 // official site confirms that the location is a simulator rather than a playable course.
 const VERIFIED_NON_COURSE_PLACES = [
+  {
+    placeId: "ChIJaWYTRqBbwokRONcYEIxCk1k",
+    name: "NEXUS Golf Club",
+    evidenceUrl: "https://www.nexusgolf.com/contact"
+  },
+  {
+    placeId: "ChIJ7dQcqrv5wokRIats-Rg1dZo",
+    name: "BackyardSwingsStudio",
+    evidenceUrl:
+      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ7dQcqrv5wokRIats-Rg1dZo&query=BackyardSwingsStudio"
+  },
+  {
+    placeId: "ChIJdZB9I4hhwokRFfvXRLrWvi8",
+    name: "Q5C9+8VQ New York",
+    evidenceUrl:
+      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJdZB9I4hhwokRFfvXRLrWvi8&query=Q5C9%2B8VQ%20New%20York"
+  },
   {
     placeId: "ChIJy4_CTDEtDogR9wxAr-a-VGI",
     name: "Chicago Golf Authority",

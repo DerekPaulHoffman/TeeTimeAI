@@ -523,6 +523,104 @@ describe("Google Places mapping", () => {
     ]);
   });
 
+  it("filters verified NYC private and non-course records while preserving public golf-club controls", () => {
+    const places = [
+      {
+        id: "ChIJaWYTRqBbwokRONcYEIxCk1k",
+        displayName: { text: "NEXUS Golf Club" },
+        formattedAddress: "100 Church St Basement, New York, NY 10007, USA",
+        websiteUri: "https://www.nexusgolf.com/",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.7133174, longitude: -74.0101115 }
+      },
+      {
+        id: "ChIJa0Z9c_5QwokR83AzfcoIODI",
+        displayName: { text: "Liberty National Golf Club" },
+        formattedAddress: "100 Caven Point Rd, Jersey City, NJ 07305, USA",
+        websiteUri: "http://www.libertynationalgc.com/",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.6941222, longitude: -74.0740038 }
+      },
+      {
+        id: "ChIJ7dQcqrv5wokRIats-Rg1dZo",
+        displayName: { text: "BackyardSwingsStudio" },
+        formattedAddress: "31 Roosevelt St, Little Ferry, NJ 07643, USA",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.8498815, longitude: -74.0469424 }
+      },
+      {
+        id: "ChIJ7cBXOMNRwokREKeDC0xNIrY",
+        displayName: { text: "Bayonne Golf Club" },
+        formattedAddress: "1 Lefante Way, Bayonne, NJ 07002, USA",
+        websiteUri: "http://www.bayonnegolfclub.com/",
+        types: ["golf_course", "sports_club", "association_or_organization"],
+        location: { latitude: 40.6628266, longitude: -74.0965313 }
+      },
+      {
+        id: "ChIJwYHDYQ5VwokRfkjeAFO-rcY",
+        displayName: { text: "Forest Hill Field Club" },
+        formattedAddress: "Forest Hill Field Club, 9 Belleville Ave, Bloomfield, NJ 07003, USA",
+        websiteUri: "http://www.foresthillfc.com/",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.7991535, longitude: -74.1792906 }
+      },
+      {
+        id: "ChIJmYaOBZeqw4kR8uLQ3-n-ies",
+        displayName: { text: "Montclair Golf Club" },
+        formattedAddress: "25 Prospect Ave, West Orange, NJ 07052, USA",
+        websiteUri: "http://www.montclairgolfclub.org/",
+        types: ["golf_course", "sports_club", "association_or_organization"],
+        location: { latitude: 40.817941, longitude: -74.240543 }
+      },
+      {
+        id: "ChIJdZB9I4hhwokRFfvXRLrWvi8",
+        displayName: { text: "Q5C9+8VQ New York" },
+        formattedAddress: "138-12 28th Rd apt 5E 5E, Flushing, NY 11354, USA",
+        websiteUri: "https://github.com/makesdiff-web/Q5C9-8VQ-New-York/issues/2",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.7722206, longitude: -73.8303981 }
+      },
+      {
+        id: "ChIJuaPE_8xWwokRusP2aevpDu8",
+        displayName: { text: "Skyway Golf Course" },
+        formattedAddress: "515 Duncan Ave, Jersey City, NJ 07306, USA",
+        websiteUri: "http://www.skywaygolfcourse.com/",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.7301, longitude: -74.0877 }
+      },
+      {
+        id: "ChIJR9a-vwpewokR-SW471X22V8",
+        displayName: { text: "Forest Park Golf Course" },
+        formattedAddress: "1-01 Forest Park Dr, Woodhaven, NY 11421, USA",
+        websiteUri: "http://www.golfnyc.com/forest-park-course/",
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        location: { latitude: 40.7018, longitude: -73.8575 }
+      },
+      {
+        id: "places/whitney-farms",
+        displayName: { text: "Chris Bargas Golf Club at Whitney Farms" },
+        formattedAddress: "175 Shelton Rd, Monroe, CT 06468, USA",
+        websiteUri: "https://www.chrisbargasgolf.com/",
+        types: ["golf_course", "sports_club", "association_or_organization"],
+        location: { latitude: 41.304, longitude: -73.213 }
+      }
+    ].map((place) => ({
+      ...place,
+      primaryType: "golf_course",
+      businessStatus: "OPERATIONAL" as const
+    }));
+
+    const filtered = filterPublicGolfCoursePlaces(places, {
+      publicCourseEvidenceIds: new Set(places.map((place) => place.id.replace(/^places\//, "")))
+    });
+
+    expect(filtered.map((place) => place.displayName?.text)).toEqual([
+      "Skyway Golf Course",
+      "Forest Park Golf Course",
+      "Chris Bargas Golf Club at Whitney Farms"
+    ]);
+  });
+
   it("filters the verified private Hallbrook hole pin despite public-query evidence", () => {
     const places = filterPublicGolfCoursePlaces(
       [
