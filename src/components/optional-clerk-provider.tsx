@@ -13,5 +13,5 @@ export function OptionalClerkProvider({
     return <>{children}</>;
   }
 
-  return <ClerkProvider>{children}</ClerkProvider>;
+  return <ClerkProvider prefetchUI={false}>{children}</ClerkProvider>;
 }

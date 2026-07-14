@@ -131,3 +131,10 @@ Use these as starting points, then refresh before adopting because design toolin
 - Finding: ordinary controls and text should remain readable at a 320 CSS-pixel-equivalent width, and stacking sections into one column is a common responsive approach when the layout does not require two dimensions.
 - Tee Time Spot evidence: a production check at 375 CSS pixels showed the two-column search grid clipping the location and course-local time values even though the document itself did not overflow horizontally.
 - Decision: stack the four primary search fields into full-width mobile rows, keep the desktop grid unchanged, and cover field width plus singular result-count copy in Playwright.
+
+## 2026-07-13: Defer prebuilt auth UI until a golfer asks for it
+
+- Sources: [Clerk `<ClerkProvider>` reference](https://clerk.com/docs/reference/components/clerk-provider) (published 2026-07-08; accessed 2026-07-13 America/New_York) and [Clerk Next.js rendering modes](https://clerk.com/docs/guides/development/rendering-modes) (published 2026-07-08; accessed 2026-07-13 America/New_York).
+- Finding: Clerk supports `prefetchUI={false}` to skip the prebuilt UI preload while retaining the provider and core auth state. Clerk also recommends placing auth context only as broadly as the application needs; Tee Time Spot needs account state globally, but signed-out discovery does not need the sign-in modal implementation before interaction.
+- Tee Time Spot evidence: a fresh mobile Lighthouse run against production `/search` scored 83 for performance with 4.1-second LCP and an estimated 361 KiB of unused JavaScript. Clerk UI and vendor bundles accounted for about 183 KiB of that estimated waste before a golfer opened any account surface; accessibility, best practices, and SEO each scored 100.
+- Decision: keep the root Clerk provider so signed-in state, `UserButton`, dashboard ownership, and alert creation continue to work, but disable prefetching of the optional prebuilt UI bundle. Verify signed-out browsing plus sign-in modal behavior in the existing local and production browser smoke, and compare a post-deploy Lighthouse run against the same `/search` route.
