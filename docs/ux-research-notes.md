@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-14: Cache successful typed-location geocodes at the edge
+
+- Sources: [Vercel's Cache-Control header reference](https://vercel.com/docs/caching/cache-control-headers), last updated 2026-07-01, documents the default uncached Function response, recommends CDN caching for responses that are the same for every visitor, gives `Vercel-CDN-Cache-Control` top priority for Vercel-only caching, and consumes that header before forwarding the response to browsers. The current [Next.js caching guide](https://nextjs.org/docs/app/getting-started/caching), reviewed against version 16.2.10 on 2026-07-14, keeps Route Handler responses uncached unless the application opts into a cache policy.
+- Tee Time Spot evidence: three consecutive production requests for ZIP `49908` all returned `x-vercel-cache: MISS`, `public, max-age=0, must-revalidate`, and the same provider-backed coordinates in 174 to 295 milliseconds. The signed-out follow-through returned no courses at 15 miles and exactly Wyandotte Golf Course and Resort plus Portage Lake Golf Course at 30 miles on 1440px desktop and 320px mobile, with `AUTOMATION` session traffic, zero horizontal overflow, and no console, page, or same-origin request failures.
+- Decision: cache only successful typed-location geocode responses at Vercel's edge for 24 hours, allow asynchronous stale revalidation for seven days, and permit one day of stale-if-error resilience while keeping browsers at `max-age=0`. Leave invalid-location and provider-error responses uncached. Do not cache course discovery because its monitoring-support, hole-layout, and recent-price enrichment changes independently of the stable coordinates.
+
 ## 2026-07-14: Photo-less recovery results should look intentional
 
 - Sources: the [W3C WAI Images Tutorial](https://www.w3.org/WAI/tutorials/images/), updated 2026-04-08, says image alternatives depend on purpose and decorative media should use a null alternative; the current [Next.js Image reference](https://nextjs.org/docs/app/api-reference/components/image) likewise requires `alt` text that can replace an informative image without changing the page meaning.
