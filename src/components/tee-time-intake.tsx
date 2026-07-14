@@ -794,7 +794,14 @@ function TeeTimeIntakeContent({
 
   return (
     <div className="figma-search-experience">
-      <section className="figma-search-toolbar" aria-label="Course search filters">
+      <form
+        aria-label="Course search filters"
+        className="figma-search-toolbar"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void discoverFromSearchControls();
+        }}
+      >
         <div className="figma-search-primary">
           <div className="figma-search-field figma-location-field">
             <label htmlFor="location">Location</label>
@@ -977,15 +984,14 @@ function TeeTimeIntakeContent({
           </div>
           <button
             className="figma-search-submit"
-            type="button"
-            onClick={discoverFromSearchControls}
             disabled={loading || locationText.trim().length === 0}
+            type="submit"
           >
             <Search size={15} />
             {loading ? "Searching" : "Search"}
           </button>
         </div>
-      </section>
+      </form>
 
       <div className="figma-results-layout" ref={resultsRef}>
         <div className="figma-results-column">

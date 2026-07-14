@@ -695,7 +695,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     const discoveryRequest = page.waitForRequest((request) =>
       request.url().includes("/api/courses/discover?")
     );
-    await courseSearchButton.click();
+    await locationInput.press("Enter");
     const discoveryUrl = new URL((await discoveryRequest).url());
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
     await expect.poll(() => discoveryAnalyticsPayload).toMatchObject({
