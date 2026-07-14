@@ -414,6 +414,31 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official private golf course limited to members and guests", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "great-neck",
+      courseName: "New London Golf Course",
+      sourceUrl: "https://www.greatneckgolf.com/",
+      observedUrls: [
+        "https://www.greatneckgolf.com/",
+        "https://www.greatneckgolf.com/golf/membership",
+        "https://www.greatneckgolf.com/golf/guests"
+      ],
+      visibleText:
+        "Great Neck Country Club is an award-winning private 18 hole golf course. Our restaurant is open to the public. The golf course is open to our members and their guests."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-private-club-access" }
+    });
+  });
+
   it("classifies explicit official first-come golf access as walk-in only", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "goose-run",
@@ -462,6 +487,20 @@ describe("buildBrowserDiscovery", () => {
       sourceUrl: "https://example.com/",
       observedUrls: ["https://example.com/"],
       visibleText: "An 18-hole public golf course with private event and outing packages."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("preserves public courses that offer benefits to members and guests", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-membership-course",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://example.com/tee-times"],
+      visibleText:
+        "An 18-hole public golf course open to everyone. Members and their guests receive loyalty discounts, and public tee times are available online."
     });
 
     expect(discovery.status).toBe("INSPECTED");

@@ -228,9 +228,14 @@ function learnPrivateClubClassification(
   observedUrls: string[]
 ): BrowserDiscovery | null {
   const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const explicitlyPrivateGolfAccess =
+    /\bprivate (?:golf )?club\b/i.test(visibleText) ||
+    /\bprivate(?:[\s,-]+(?:award-winning|challenging|championship|\d{1,2}[- ]hole))*[\s,-]+golf course\b/i.test(
+      visibleText
+    );
   const privateMemberGuestClub =
     /\bis a private club available to\b/i.test(visibleText) ||
-    (/\bprivate (?:golf )?club\b/i.test(visibleText) &&
+    (explicitlyPrivateGolfAccess &&
       /\bmembers? and (?:their )?guests?\b/i.test(visibleText));
   const residentMemberClub =
     /\bneighborhood (?:social )?club for residents?\b/i.test(visibleText) &&
