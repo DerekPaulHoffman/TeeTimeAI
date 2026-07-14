@@ -9,6 +9,8 @@ import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
 const WEBSITE_FUNNEL_HOURS = 24;
+const IMPROVEMENT_MEMORY_HOURS = 24;
+const IMPROVEMENT_PROMPT_PREFIX = "tee-time-spot-improvement-loop-";
 const activeSearchInspectionQuery = {
   where: {
     status: "ACTIVE"
@@ -29,9 +31,13 @@ async function main() {
   const websiteFunnelSince = new Date(
     Date.now() - WEBSITE_FUNNEL_HOURS * 60 * 60 * 1000
   );
+  const improvementMemorySince = new Date(
+    Date.now() - IMPROVEMENT_MEMORY_HOURS * 60 * 60 * 1000
+  );
 
   const [
     runs,
+    improvementRuns,
     activeSearches,
     probeCounts,
     recentNotableProbes,
@@ -48,6 +54,25 @@ async function main() {
       prisma.automationRun.findMany({
         orderBy: { startedAt: "desc" },
         take: 8
+      }),
+      prisma.automationRun.findMany({
+        where: {
+          promptVersion: {
+            startsWith: IMPROVEMENT_PROMPT_PREFIX
+          },
+          startedAt: {
+            gte: improvementMemorySince
+          }
+        },
+        orderBy: { startedAt: "desc" },
+        select: {
+          id: true,
+          startedAt: true,
+          completedAt: true,
+          outcome: true,
+          notes: true,
+          changedFiles: true
+        }
       }),
       prisma.teeSearch.findMany(activeSearchInspectionQuery),
       prisma.courseProbe.groupBy({
@@ -232,6 +257,17 @@ async function main() {
           notes: summarize(run.notes),
           changedFiles: run.changedFiles
         })),
+        recentImprovementRuns: {
+          hours: IMPROVEMENT_MEMORY_HOURS,
+          runs: improvementRuns.map((run) => ({
+            id: run.id,
+            startedAt: run.startedAt,
+            completedAt: run.completedAt,
+            outcome: run.outcome,
+            changedFiles: run.changedFiles,
+            memory: extractImprovementRunMemory(run.notes)
+          }))
+        },
         activeSearches: activeSearches.map((search) => ({
           id: search.id,
           user: redactEmail(search.user.email),
@@ -385,6 +421,72 @@ async function main() {
 
 function summarize(notes: string | null) {
   return notes?.replace(/\s+/g, " ").trim().slice(0, 300) ?? null;
+}
+
+function extractImprovementRunMemory(notes: string | null) {
+  const fallback = {
+    lifecycle: null,
+    branch: null,
+    candidateSummary: null,
+    commitSha: null,
+    deploymentId: null,
+    changedBehavior: null,
+    measuredResult: null,
+    learning: [] as string[],
+    blockers: [] as string[],
+    nextRotationTargets: [] as string[],
+    fallbackSummary: summarize(notes)
+  };
+
+  if (!notes) {
+    return fallback;
+  }
+
+  try {
+    const record = JSON.parse(notes) as unknown;
+    if (!isRecord(record)) {
+      return fallback;
+    }
+
+    const audit = isRecord(record.audit) ? record.audit : {};
+    const provenance = isRecord(record.provenance) ? record.provenance : {};
+    const candidate = isRecord(record.candidate) ? record.candidate : {};
+
+    return {
+      lifecycle: boundedString(record.lifecycle),
+      branch: boundedString(provenance.branch),
+      candidateSummary: boundedString(candidate.summary),
+      commitSha: boundedString(audit.commitSha),
+      deploymentId: boundedString(audit.deploymentId),
+      changedBehavior: boundedString(audit.changedBehavior),
+      measuredResult: boundedString(audit.measuredResult),
+      learning: boundedStringArray(audit.learning),
+      blockers: boundedStringArray(audit.blockers),
+      nextRotationTargets: boundedStringArray(audit.nextRotationTargets),
+      fallbackSummary: null
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedString(value: unknown) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 1200) : null;
+}
+
+function boundedStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => boundedString(item))
+    .filter((item): item is string => Boolean(item))
+    .slice(0, 20);
 }
 
 function sanitizeWebsiteEventMetadata(metadata: Prisma.JsonValue | null) {
@@ -556,6 +658,7 @@ function redactEmail(email: string) {
 
 export {
   activeSearchInspectionQuery,
+  extractImprovementRunMemory,
   latestCurrentActionableProbes,
   summarizeCourseDiscoveryOutcomes,
   summarizeWebsiteEventCounts

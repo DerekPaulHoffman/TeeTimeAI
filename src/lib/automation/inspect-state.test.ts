@@ -2,10 +2,56 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeSearchInspectionQuery,
+  extractImprovementRunMemory,
   latestCurrentActionableProbes,
   summarizeCourseDiscoveryOutcomes,
   summarizeWebsiteEventCounts
 } from "../../../scripts/automation/inspect-state";
+
+describe("extractImprovementRunMemory", () => {
+  it("keeps the hourly decision trail without repeating the embedded prompt", () => {
+    expect(
+      extractImprovementRunMemory(
+        JSON.stringify({
+          lifecycle: "closeout",
+          provenance: { branch: "automation/hourly-example" },
+          candidate: { summary: "Expose durable hourly memory." },
+          nextPrompt: "Very large repeated operating prompt",
+          audit: {
+            commitSha: "abc123",
+            deploymentId: "dpl_example",
+            changedBehavior: "Inspector exposes prior hourly decisions.",
+            measuredResult: "Three hourly runs are visible.",
+            learning: ["Frequent workflow checks crowd the global recent window."],
+            blockers: [],
+            nextRotationTargets: ["Rotate to dashboard keyboard coverage."]
+          }
+        })
+      )
+    ).toEqual({
+      lifecycle: "closeout",
+      branch: "automation/hourly-example",
+      candidateSummary: "Expose durable hourly memory.",
+      commitSha: "abc123",
+      deploymentId: "dpl_example",
+      changedBehavior: "Inspector exposes prior hourly decisions.",
+      measuredResult: "Three hourly runs are visible.",
+      learning: ["Frequent workflow checks crowd the global recent window."],
+      blockers: [],
+      nextRotationTargets: ["Rotate to dashboard keyboard coverage."],
+      fallbackSummary: null
+    });
+  });
+
+  it("falls back safely for older unstructured notes", () => {
+    expect(extractImprovementRunMemory("older plain-text run note")).toMatchObject({
+      candidateSummary: null,
+      learning: [],
+      nextRotationTargets: [],
+      fallbackSummary: "older plain-text run note"
+    });
+  });
+});
 
 describe("activeSearchInspectionQuery", () => {
   it("keeps same-day and stale active searches visible", () => {
