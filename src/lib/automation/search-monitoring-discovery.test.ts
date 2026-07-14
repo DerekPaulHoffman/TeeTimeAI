@@ -72,6 +72,106 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("follows an official intermediate tee-time page to reusable Teesnap metadata", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://southersmarsh.com/") {
+        return new Response(
+          '<html><a href="/teetimes/">Tee Times and Barn Reservations</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === "https://southersmarsh.com/teetimes/") {
+        return new Response(
+          '<html><a href="https://southersmarsh.teesnap.net/">Continue to tee times</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response(
+        '<html><script>window.courses = [{"id":1196,"name":"Top Tracer Range","core_id":1301},{"id":655,"name":"Southers Marsh Golf Club","core_id":761,"holes_default":18,"addons_default":"on"}]; window.property = {"id":599};</script></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "southers-marsh",
+            name: "Southers Marsh Golf Club",
+            website: "https://southersmarsh.com/",
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        detectedPlatform: "CUSTOM",
+        apiMetadata: {
+          provider: "TEESNAP",
+          courseId: 655,
+          bookingBaseUrl: "https://southersmarsh.teesnap.net/",
+          defaultHoles: 18,
+          defaultAddons: "on"
+        }
+      })
+    );
+  });
+
+  it("follows the official club overview when a private-club shell hides access details", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://www.osgolfclub.com/") {
+        return new Response(
+          '<html><body><a href="/public">The Club</a><footer>Private Golf Club sites by MembersFirst</footer></body></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response(
+        '<html><body>Old Sandwich Golf Club is a private club available to Local and National members.</body></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "old-sandwich",
+            name: "Old Sandwich Golf Club",
+            website: "https://www.osgolfclub.com/",
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "VERIFIED",
+        bookingMethod: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        evidence: expect.objectContaining({ learnedFrom: "official-private-club-access" })
+      })
+    );
+  });
+
   it("stops fast search retries after the second persisted discovery attempt", async () => {
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
       { courseId: "course-1", createdAt: new Date("2026-07-13T19:00:00.000Z") }

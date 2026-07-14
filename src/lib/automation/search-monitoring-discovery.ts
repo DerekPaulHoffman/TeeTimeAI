@@ -7,6 +7,7 @@ import {
 import {
   buildBrowserDiscovery,
   enrichChronogolfDiscovery,
+  enrichTeesnapDiscovery,
   getBestProbeUrl,
   shouldQueueBrowserProbe,
   type BrowserDiscovery,
@@ -18,6 +19,7 @@ const DISCOVERY_RETRY_DELAY_MS = 30 * 60 * 1000;
 const MAX_DISCOVERY_ATTEMPTS_PER_DAY = 2;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 4;
+const MAX_BOOKING_LINK_FOLLOWUPS = 2;
 const MAX_HTML_BYTES = 1_500_000;
 
 type CollectedPageEvidence = Pick<
@@ -84,12 +86,17 @@ export async function prepareSearchMonitoring(
         evidenceBySource.set(sourceKey, evidencePromise);
       }
       const collected = await evidencePromise;
-      const discovery = await enrichChronogolfDiscovery(
+      const chronogolfDiscovery = await enrichChronogolfDiscovery(
         buildBrowserDiscovery({
           ...collected,
           courseId: course.id,
           courseName: course.name
         }),
+        fetchImpl
+      );
+      const discovery = await enrichTeesnapDiscovery(
+        chronogolfDiscovery,
+        course.name,
         fetchImpl
       );
       await recordBrowserDiscovery(discovery);
@@ -139,38 +146,50 @@ export async function collectOfficialSiteEvidence(
   fetchImpl: typeof fetch = fetch
 ): Promise<CollectedPageEvidence> {
   const firstPage = await fetchPublicHtml(sourceUrl, fetchImpl);
-  const firstEvidence = extractHtmlEvidence(firstPage.html, firstPage.finalUrl);
-  const bookingCandidate = pickLikelyBookingCandidate(
-    firstEvidence.linkCandidates,
-    firstPage.finalUrl
-  );
-  let secondPage:
-    | { finalUrl: string; html: string; evidence: ReturnType<typeof extractHtmlEvidence> }
-    | undefined;
+  const pages = [{
+    ...firstPage,
+    evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl)
+  }];
+  const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
 
-  if (bookingCandidate && normalizeSourceKey(bookingCandidate) !== normalizeSourceKey(firstPage.finalUrl)) {
+  for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
+    const currentPage = pages.at(-1)!;
+    const followupCandidate =
+      pickLikelyBookingCandidate(
+        currentPage.evidence.linkCandidates,
+        currentPage.finalUrl
+      ) ??
+      pickPrivateClubInformationCandidate(
+        currentPage.evidence.linkCandidates,
+        currentPage.evidence.visibleText,
+        currentPage.finalUrl
+      );
+    if (!followupCandidate || visited.has(normalizeSourceKey(followupCandidate))) {
+      break;
+    }
+
     try {
-      const fetched = await fetchPublicHtml(bookingCandidate, fetchImpl);
-      secondPage = {
+      const fetched = await fetchPublicHtml(followupCandidate, fetchImpl);
+      const page = {
         ...fetched,
         evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
       };
+      pages.push(page);
+      visited.add(normalizeSourceKey(page.finalUrl));
     } catch {
       // The official page itself is still useful evidence when its booking link cannot be loaded.
+      break;
     }
   }
 
+  const finalPage = pages.at(-1)!;
   return {
     sourceUrl,
-    finalUrl: secondPage?.finalUrl ?? firstPage.finalUrl,
-    observedUrls: uniqueStrings([
-      firstPage.finalUrl,
-      ...firstEvidence.observedUrls,
-      bookingCandidate,
-      secondPage?.finalUrl,
-      ...(secondPage?.evidence.observedUrls ?? [])
-    ]),
-    visibleText: [firstEvidence.visibleText, secondPage?.evidence.visibleText]
+    finalUrl: finalPage.finalUrl,
+    observedUrls: uniqueStrings(
+      pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls])
+    ),
+    visibleText: pages.map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
       .slice(0, 12_000)
@@ -297,6 +316,25 @@ function pickLikelyBookingCandidate(
     }))
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score)[0]?.url;
+}
+
+function pickPrivateClubInformationCandidate(
+  candidates: Array<{ url: string; label: string }>,
+  visibleText: string,
+  currentUrl: string
+) {
+  if (!/\bPrivate Golf Club sites by MembersFirst\b/i.test(visibleText)) {
+    return undefined;
+  }
+
+  const currentOrigin = new URL(currentUrl).origin;
+  return candidates.find((candidate) => {
+    const parsed = new URL(candidate.url);
+    return (
+      parsed.origin === currentOrigin &&
+      (/^The Club$/i.test(candidate.label.trim()) || /\/public\/?$/i.test(parsed.pathname))
+    );
+  })?.url;
 }
 
 function scoreBookingCandidate(candidate: { url: string; label: string }, currentUrl: string) {

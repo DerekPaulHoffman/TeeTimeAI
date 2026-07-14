@@ -5,6 +5,7 @@ import { chromium, type Page } from "playwright";
 import {
   buildBrowserDiscovery,
   enrichChronogolfDiscovery,
+  enrichTeesnapDiscovery,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
 import {
@@ -46,7 +47,13 @@ async function main() {
             courseName: target.course.name,
             sourceUrl: target.probeUrl
           });
-          const discovery = await enrichChronogolfDiscovery(buildBrowserDiscovery(evidence));
+          const chronogolfDiscovery = await enrichChronogolfDiscovery(
+            buildBrowserDiscovery(evidence)
+          );
+          const discovery = await enrichTeesnapDiscovery(
+            chronogolfDiscovery,
+            target.course.name
+          );
 
           await recordBrowserDiscovery(discovery);
           const appliedCourse = await applyBrowserDiscoveryToCourse(discovery);

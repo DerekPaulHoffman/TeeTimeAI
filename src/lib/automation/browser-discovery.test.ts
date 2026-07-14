@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildBrowserDiscovery,
   enrichChronogolfDiscovery,
+  enrichTeesnapDiscovery,
   getBestProbeUrl,
   shouldQueueBrowserProbe,
   type BrowserDiscoveryEvidence
@@ -124,6 +125,30 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).toEqual({
       aliases: ["richter-park-golf-course"],
       bookingBaseUrl: "https://richter-park-golf-course.book.teeitup.com/"
+    });
+  });
+
+  it("canonicalizes TeeItUp store links to the provider booking root", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "little-harbor",
+      courseName: "Little Harbor Golf Course",
+      sourceUrl: "https://littleharborgolf.com/",
+      finalUrl:
+        "https://little-harbor-country-club.book.teeitup.com/store/gift-certificates",
+      observedUrls: [
+        "https://little-harbor-country-club.book.teeitup.com/store/gift-certificates"
+      ],
+      visibleText: "Book tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: "https://little-harbor-country-club.book.teeitup.com/",
+      apiMetadata: {
+        aliases: ["little-harbor-country-club"],
+        bookingBaseUrl: "https://little-harbor-country-club.book.teeitup.com/"
+      }
     });
   });
 
@@ -289,6 +314,117 @@ describe("buildBrowserDiscovery", () => {
         courseLabel: "Highland"
       }
     });
+  });
+
+  it("matches the named golf course instead of colocated Teesnap range inventory", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-southers-marsh",
+      courseName: "Southers Marsh Golf Club",
+      sourceUrl: "https://southersmarsh.com/",
+      finalUrl: "https://southersmarsh.teesnap.net/",
+      observedUrls: [
+        "https://southersmarsh.com/teetimes/",
+        "https://southersmarsh.teesnap.net/"
+      ],
+      visibleText:
+        'window.courses = [{"id":1196,"name":"Top Tracer Range","core_id":1301,"holes_default":18,"addons_default":"off"},{"id":655,"name":"Southers Marsh Golf Club","core_id":761,"holes_default":18,"addons_default":"on"}]; window.property = {"id":599}'
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      apiMetadata: {
+        provider: "TEESNAP",
+        courseId: 655,
+        bookingBaseUrl: "https://southersmarsh.teesnap.net/",
+        defaultHoles: 18,
+        defaultAddons: "on"
+      }
+    });
+  });
+
+  it("enriches a public Teesnap page when the initial site crawl only found its URL", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-southers-marsh",
+      courseName: "Southers Marsh Golf Club",
+      sourceUrl: "https://southersmarsh.com/",
+      observedUrls: ["https://southersmarsh.teesnap.net/"],
+      visibleText: "Public tee times"
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        '<script>window.courses = [{"id":1196,"name":"Top Tracer Range","core_id":1301},{"id":655,"name":"Southers Marsh Golf Club","core_id":761,"holes_default":18,"addons_default":"on"}]; window.property = {"id":599};</script>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    const enriched = await enrichTeesnapDiscovery(
+      discovery,
+      "Southers Marsh Golf Club",
+      fetchImpl as typeof fetch
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://southersmarsh.teesnap.net/",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Accept: "text/html,application/xhtml+xml;q=0.9",
+          "User-Agent": expect.stringContaining("Mozilla/5.0")
+        }),
+        redirect: "follow"
+      })
+    );
+    expect(enriched).toMatchObject({
+      status: "LEARNED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiMetadata: {
+        provider: "TEESNAP",
+        courseId: 655,
+        bookingBaseUrl: "https://southersmarsh.teesnap.net/",
+        defaultHoles: 18,
+        defaultAddons: "on"
+      },
+      evidence: { learnedFrom: "teesnap-public-course-config" }
+    });
+  });
+
+  it("classifies explicit official private-club access without a public adapter", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "old-sandwich",
+      courseName: "Old Sandwich Golf Club",
+      sourceUrl: "https://www.osgolfclub.com/public",
+      finalUrl: "https://www.osgolfclub.com/public/guest-information",
+      observedUrls: [
+        "https://www.osgolfclub.com/public",
+        "https://www.osgolfclub.com/public/guest-information"
+      ],
+      visibleText:
+        "Old Sandwich Golf Club is a private club available to Local and National members. Club property is accessible to members and their guests, and guests may not remain without a member."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-private-club-access" }
+    });
+  });
+
+  it("preserves public courses that merely mention private events", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-course",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://example.com/"],
+      visibleText: "An 18-hole public golf course with private event and outing packages."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.automationEligibility).toBeUndefined();
   });
 
   it("maps Dennis Pines separately on the shared public Chelsea tee sheet", () => {

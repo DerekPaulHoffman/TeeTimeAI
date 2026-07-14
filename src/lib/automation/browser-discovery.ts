@@ -83,6 +83,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     evidence.sourceUrl,
     ...evidence.observedUrls
   ]);
+  const privateClubClassification = learnPrivateClubClassification(evidence, observedUrls);
+
+  if (privateClubClassification) {
+    return privateClubClassification;
+  }
+
   const foreupDiscovery = learnForeupDiscovery(evidence, observedUrls);
 
   if (foreupDiscovery) {
@@ -153,6 +159,42 @@ export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
   }
 
   return Boolean(getBestProbeUrl(course));
+}
+
+function learnPrivateClubClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const explicitlyPrivate =
+    /\bis a private club available to\b/i.test(visibleText) ||
+    (/\bprivate (?:golf )?club\b/i.test(visibleText) &&
+      /\bmembers? and (?:their )?guests?\b/i.test(visibleText));
+
+  if (!explicitlyPrivate) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: evidence.finalUrl ?? evidence.sourceUrl,
+    bookingMethod: "CONTACT_COURSE",
+    automationEligibility: "BLOCKED",
+    automationReason: "OTHER",
+    policyNotes:
+      "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course.",
+    intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-private-club-access"
+    }
+  };
 }
 
 function learnChelseaDiscovery(
@@ -337,6 +379,76 @@ export async function enrichChronogolfDiscovery(
   return discovery;
 }
 
+export async function enrichTeesnapDiscovery(
+  discovery: BrowserDiscovery,
+  courseName: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscovery> {
+  if (
+    discovery.detectedPlatform !== "CUSTOM" ||
+    discovery.evidence.learnedFrom !== "teesnap-url-without-course-id" ||
+    !discovery.bookingUrl ||
+    !isTeesnapBookingUrl(discovery.bookingUrl)
+  ) {
+    return discovery;
+  }
+
+  const bookingBaseUrl = new URL("/", discovery.bookingUrl).toString();
+  const response = await fetchImpl(bookingBaseUrl, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml;q=0.9",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+    },
+    redirect: "follow"
+  });
+  if (!response.ok) {
+    return {
+      ...discovery,
+      evidence: {
+        ...discovery.evidence,
+        learnedFrom: "teesnap-public-config-unavailable"
+      }
+    };
+  }
+
+  const html = await response.text();
+  const courseMetadata = getTeesnapCourseMetadata(
+    discovery.evidence.observedUrls,
+    html,
+    courseName
+  );
+  if (!courseMetadata) {
+    return discovery;
+  }
+
+  const canonicalUrl = response.url || bookingBaseUrl;
+  return {
+    ...discovery,
+    status: "LEARNED",
+    bookingUrl: canonicalUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The official public TeeSnap page exposes course-specific availability without login. Tee Time Spot reads that tee sheet and leaves booking on the official provider page.",
+    apiEndpoint: new URL("/customer-api/teetimes-day", canonicalUrl).toString(),
+    apiMetadata: {
+      provider: "TEESNAP",
+      courseId: courseMetadata.courseId,
+      bookingBaseUrl: canonicalUrl,
+      defaultHoles: courseMetadata.defaultHoles ?? 18,
+      defaultAddons: courseMetadata.defaultAddons ?? "off"
+    },
+    confidence: 0.95,
+    evidence: {
+      ...discovery.evidence,
+      observedUrls: uniqueUrls([...discovery.evidence.observedUrls, canonicalUrl]),
+      learnedFrom: "teesnap-public-course-config"
+    }
+  };
+}
+
 function getChronogolfProfileUrl(discovery: BrowserDiscovery) {
   const profileUrl = discovery.evidence.observedUrls
     .map(parseUrl)
@@ -438,8 +550,12 @@ function learnTeesnapDiscovery(
     return null;
   }
 
-  const courseId = getTeesnapCourseId(observedUrls, evidence.visibleText);
-  if (!courseId) {
+  const courseMetadata = getTeesnapCourseMetadata(
+    observedUrls,
+    evidence.visibleText,
+    evidence.courseName
+  );
+  if (!courseMetadata) {
     return {
       courseId: evidence.courseId,
       status: "INSPECTED",
@@ -466,10 +582,10 @@ function learnTeesnapDiscovery(
     apiEndpoint: new URL("/customer-api/teetimes-day", bookingUrl).toString(),
     apiMetadata: {
       provider: "TEESNAP",
-      courseId,
+      courseId: courseMetadata.courseId,
       bookingBaseUrl: bookingUrl,
-      defaultHoles: 18,
-      defaultAddons: "off"
+      defaultHoles: courseMetadata.defaultHoles ?? 18,
+      defaultAddons: courseMetadata.defaultAddons ?? "off"
     },
     confidence: 0.85,
     evidence: {
@@ -497,8 +613,10 @@ function learnTeeItUpDiscovery(
     return null;
   }
 
-  const bookingUrl =
-    observedUrls.find(isTeeItUpBookingUrl) ?? `https://${aliases[0]}.book.teeitup.golf/`;
+  const observedBookingUrl = observedUrls.find(isTeeItUpBookingUrl);
+  const bookingUrl = observedBookingUrl
+    ? `${new URL(observedBookingUrl).origin}/`
+    : `https://${aliases[0]}.book.teeitup.golf/`;
 
   return {
     courseId: evidence.courseId,
@@ -710,16 +828,85 @@ function isTeesnapBookingUrl(value: string) {
   return Boolean(url?.hostname.endsWith(".teesnap.net"));
 }
 
-function getTeesnapCourseId(urls: string[], text?: string) {
+type TeesnapDiscoveryCourseConfig = {
+  id?: unknown;
+  name?: unknown;
+  core_id?: unknown;
+  course_type?: unknown;
+  enabled?: unknown;
+  customer_enabled?: unknown;
+  holes_default?: unknown;
+  addons_default?: unknown;
+};
+
+function getTeesnapCourseMetadata(urls: string[], text: string | undefined, courseName: string) {
+  const configs = parseTeesnapCourseConfigs(text);
+
   for (const url of urls.map(parseUrl)) {
     const courseId = getNumericSearchParam(url, "course");
     if (courseId) {
-      return courseId;
+      return buildTeesnapCourseMetadata(
+        configs.find((candidate) => candidate.id === courseId),
+        courseId
+      );
     }
   }
 
-  const match = text?.match(/"id"\s*:\s*(\d+)[\s\S]{0,500}?"core_id"\s*:\s*\d+/);
-  return match ? Number(match[1]) : undefined;
+  const normalizedTarget = normalizeCourseName(courseName);
+  const eligibleConfigs = configs.filter((candidate) => {
+    const name = typeof candidate.name === "string" ? candidate.name : "";
+    return (
+      Number.isInteger(candidate.id) &&
+      candidate.enabled !== false &&
+      candidate.customer_enabled !== false &&
+      candidate.course_type !== "simulator" &&
+      !/\b(?:simulator|top\s*tracer|toptracer|driving range)\b/i.test(name)
+    );
+  });
+  const exactMatch = eligibleConfigs.find(
+    (candidate) => normalizeCourseName(String(candidate.name ?? "")) === normalizedTarget
+  );
+  const selected = exactMatch ?? (eligibleConfigs.length === 1 ? eligibleConfigs[0] : undefined);
+  return selected && typeof selected.id === "number"
+    ? buildTeesnapCourseMetadata(selected, selected.id)
+    : undefined;
+}
+
+function parseTeesnapCourseConfigs(text?: string): TeesnapDiscoveryCourseConfig[] {
+  const match = text?.match(/window\.courses\s*=\s*(\[[\s\S]*?\])\s*;?\s*window\.property/i);
+  if (!match) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(match[1]);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildTeesnapCourseMetadata(
+  config: TeesnapDiscoveryCourseConfig | undefined,
+  courseId: number
+) {
+  const holes = Number(config?.holes_default);
+  const defaultAddons =
+    typeof config?.addons_default === "string" ? config.addons_default : undefined;
+  return {
+    courseId,
+    ...(holes === 9 || holes === 18 ? { defaultHoles: holes as 9 | 18 } : {}),
+    ...(defaultAddons ? { defaultAddons } : {})
+  };
+}
+
+function normalizeCourseName(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isNonBookingHost(hostname: string) {
