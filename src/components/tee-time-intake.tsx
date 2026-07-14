@@ -25,6 +25,7 @@ import {
   X
 } from "lucide-react";
 
+import { openFeedback } from "@/components/open-feedback-button";
 import {
   addLocalDays,
   formatDateInputValue,
@@ -60,9 +61,14 @@ import {
 } from "@/lib/pricing/course-prices";
 import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
+  MAX_ADDITIONAL_ALERT_EMAILS,
   MAX_PLAYERS_PER_SEARCH
 } from "@/lib/validation/search";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
+import {
+  isAdditionalAlertEmailValid,
+  normalizeAdditionalAlertEmails
+} from "@/lib/searches/additional-emails";
 import {
   consumeSearchPrefill,
   readSearchPrefillFromUrl
@@ -182,6 +188,19 @@ function formatCompactTimeWindow(startTime: string, endTime: string) {
   return `${startLabel} ${start.period} – ${endLabel} ${end.period}`;
 }
 
+function formatAlertDate(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) {
+    return "your selected date";
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }).format(new Date(year, month - 1, day, 12));
+}
+
 const INITIAL_VISIBLE_COURSE_COUNT = 6;
 const COURSE_REVEAL_INCREMENT = 6;
 const GOOGLE_MAPS_SCRIPT_CALLBACK = "initTeeTimeSpotGoogleMaps";
@@ -190,6 +209,7 @@ let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
 type CourseLayoutFilter = "any" | "9" | "18";
+type AdditionalEmailField = { id: string; value: string };
 
 export type TeeTimeIntakeInitialValues = {
   location?: string;
@@ -262,6 +282,9 @@ function TeeTimeIntakeContent({
   const [startTime, setStartTime] = useState(initialValues.startTime ?? "09:00");
   const [endTime, setEndTime] = useState(initialValues.endTime ?? "18:00");
   const [players, setPlayers] = useState(initialValues.players ?? 4);
+  const [additionalEmailFields, setAdditionalEmailFields] = useState<AdditionalEmailField[]>([
+    { id: "additional-recipient-1", value: "" }
+  ]);
   const [holeFilter, setHoleFilter] = useState<CourseLayoutFilter>(
     initialValues.holes ?? "any"
   );
@@ -284,6 +307,7 @@ function TeeTimeIntakeContent({
   const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
+  const nextAdditionalEmailIdRef = useRef(1);
 
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
@@ -308,6 +332,16 @@ function TeeTimeIntakeContent({
   const selectedIds = useMemo(
     () => new Set(selected.map((course) => course.googlePlaceId)),
     [selected]
+  );
+  const normalizedAdditionalEmails = useMemo(
+    () => normalizeAdditionalAlertEmails(
+      additionalEmailFields.map((field) => field.value),
+      alertEmail
+    ),
+    [additionalEmailFields, alertEmail]
+  );
+  const hasInvalidAdditionalEmail = additionalEmailFields.some(
+    (field) => !isAdditionalAlertEmailValid(field.value)
   );
   const requestedLayoutHoles: CourseLayoutHoleCount | null =
     holeFilter === "9" ? 9 : holeFilter === "18" ? 18 : null;
@@ -358,13 +392,23 @@ function TeeTimeIntakeContent({
         startTime,
         endTime,
         players,
+        additionalEmails: normalizedAdditionalEmails,
         requestedLayoutHoles,
         courses: selected.map((course, index) => ({
           placeId: course.googlePlaceId,
           rank: index + 1
         }))
       }),
-    [alertEmail, date, endTime, players, requestedLayoutHoles, selected, startTime]
+    [
+      alertEmail,
+      date,
+      endTime,
+      normalizedAdditionalEmails,
+      players,
+      requestedLayoutHoles,
+      selected,
+      startTime
+    ]
   );
   const isCurrentSearchSaved = savedSignature === searchSignature;
   const isDateFuture = date >= minSearchDate;
@@ -381,6 +425,8 @@ function TeeTimeIntakeContent({
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
       ? "Choose an end time after the start time."
+      : hasInvalidAdditionalEmail
+        ? "Enter a valid email for each additional recipient."
       : incompatibleSelectedCourse && requestedLayoutHoles
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : selected.length > 0 && !hasMonitorableCourse
@@ -635,6 +681,35 @@ function TeeTimeIntakeContent({
     );
   }
 
+  function updateAdditionalEmail(id: string, value: string) {
+    setAdditionalEmailFields((current) =>
+      current.map((field) => (field.id === id ? { ...field, value } : field))
+    );
+  }
+
+  function addAdditionalEmailField() {
+    setAdditionalEmailFields((current) => {
+      if (current.length >= MAX_ADDITIONAL_ALERT_EMAILS) {
+        return current;
+      }
+
+      nextAdditionalEmailIdRef.current += 1;
+      return [
+        ...current,
+        { id: `additional-recipient-${nextAdditionalEmailIdRef.current}`, value: "" }
+      ];
+    });
+  }
+
+  function removeAdditionalEmailField(id: string) {
+    setAdditionalEmailFields((current) => {
+      const next = current.filter((field) => field.id !== id);
+      return next.length > 0
+        ? next
+        : [{ id: `additional-recipient-${nextAdditionalEmailIdRef.current}`, value: "" }];
+    });
+  }
+
   async function saveSearch() {
     if (accountState.status !== "signed-in") {
       setNotice({
@@ -667,6 +742,7 @@ function TeeTimeIntakeContent({
           endTime,
           userTimeZone,
           players,
+          additionalEmails: normalizedAdditionalEmails,
           requestedLayoutHoles,
           cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES,
           courses: selected.map((course, index) => ({
@@ -992,7 +1068,6 @@ function TeeTimeIntakeContent({
               (selectedCourse) => selectedCourse.googlePlaceId === course.googlePlaceId
             );
             const isSelected = selectedIndex >= 0;
-            const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
             const layoutCompatibility = getCourseLayoutCompatibility(
               course.layoutHoleCounts,
               requestedLayoutHoles
@@ -1017,11 +1092,6 @@ function TeeTimeIntakeContent({
                     {course.distanceMeters !== undefined ? (
                       <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
                     ) : null}
-                    {isManualOnly && course.alertSupport ? (
-                      <span className="figma-course-pill is-official-site-only">
-                        <CircleOff size={11} /> {getAlertSupportLabel(course.alertSupport)}
-                      </span>
-                    ) : null}
                     {course.layoutHoleCounts?.length ? (
                       <span className="figma-course-pill">
                         <Flag size={11} /> {getCourseLayoutLabel(course.layoutHoleCounts)} course
@@ -1034,24 +1104,29 @@ function TeeTimeIntakeContent({
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
-                  {isManualOnly && course.alertSupport ? (
-                    <p className="course-alert-support-note">
-                      {getAlertSupportDescription(course.alertSupport)} Tee Time Spot cannot
-                      monitor it automatically.
-                    </p>
-                  ) : null}
+                  <CourseMonitoringStatus course={course} />
                   <CoursePriceDisplay estimate={course.priceEstimate} />
+                  <button
+                    aria-label={`Report incorrect information for ${course.name}`}
+                    className="course-report-button"
+                    onClick={() => reportCourseIssue(course)}
+                    type="button"
+                  >
+                    <Flag size={13} />
+                    Report incorrect info
+                  </button>
                 </div>
                 <div className="course-actions">
                   {course.website ? (
                     <a
                       className="button button-ghost"
                       href={course.website}
+                      aria-label={`Open official site for ${course.name}`}
                       rel="noreferrer"
                       target="_blank"
                     >
                       <ExternalLink size={16} />
-                      Site
+                      Official site
                     </a>
                   ) : null}
                   <button
@@ -1186,6 +1261,25 @@ function TeeTimeIntakeContent({
           )}
         </div>
         {selected.length > 0 ? (
+          <section className="figma-alert-preview" aria-labelledby="alert-preview-title">
+            <div className="figma-alert-preview-heading">
+              <Bell aria-hidden="true" size={16} />
+              <strong id="alert-preview-title">Your alert</strong>
+            </div>
+            <p>
+              We&apos;ll check {selected.length} ranked {selected.length === 1 ? "course" : "courses"}
+              {" "}for {formatAlertDate(date)}, {formatCompactTimeWindow(startTime, endTime)}, for{" "}
+              {players} {players === 1 ? "player" : "players"}.
+            </p>
+            <span className="figma-alert-preview-recipients">
+              {normalizedAdditionalEmails.length > 0
+                ? `Your account email + ${normalizedAdditionalEmails.length} ${normalizedAdditionalEmails.length === 1 ? "other" : "others"}`
+                : "Your account email"}
+            </span>
+            <small>Matching openings link to the official site. You book direct.</small>
+          </section>
+        ) : null}
+        {selected.length > 0 ? (
           <label className="figma-alert-email" htmlFor="alertEmail">
             <span>Alert email from your account</span>
             <input
@@ -1202,6 +1296,54 @@ function TeeTimeIntakeContent({
               }
             />
           </label>
+        ) : null}
+        {selected.length > 0 ? (
+          <fieldset className="figma-group-recipients">
+            <legend>Alert your group too</legend>
+            <p id="additional-recipient-help">
+              Add up to 3 people. Everyone gets the same opening, but only you manage the alert.
+            </p>
+            <div className="figma-recipient-fields">
+              {additionalEmailFields.map((field, index) => (
+                <div className="figma-recipient-row" key={field.id}>
+                  <input
+                    aria-describedby="additional-recipient-help"
+                    aria-invalid={!isAdditionalAlertEmailValid(field.value)}
+                    aria-label={`Additional recipient ${index + 1}`}
+                    autoComplete="email"
+                    onChange={(event) => updateAdditionalEmail(field.id, event.target.value)}
+                    placeholder="friend@example.com"
+                    type="email"
+                    value={field.value}
+                  />
+                  {(additionalEmailFields.length > 1 || field.value.trim()) ? (
+                    <button
+                      aria-label={`Remove additional recipient ${index + 1}`}
+                      onClick={() => removeAdditionalEmailField(field.id)}
+                      type="button"
+                    >
+                      <X size={15} />
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <div className="figma-recipient-footer">
+              {additionalEmailFields.length < MAX_ADDITIONAL_ALERT_EMAILS ? (
+                <button
+                  className="figma-add-recipient"
+                  onClick={addAdditionalEmailField}
+                  type="button"
+                >
+                  <Plus size={14} />
+                  Add another recipient
+                </button>
+              ) : null}
+              <span>
+                {normalizedAdditionalEmails.length}/{MAX_ADDITIONAL_ALERT_EMAILS} added
+              </span>
+            </div>
+          </fieldset>
         ) : null}
         {accountState.status === "signed-out" ? (
           <SignInButton mode="modal">
@@ -1296,7 +1438,7 @@ function TeeTimeIntakeContent({
             type="button"
             onClick={() => setMobileSelectionOpen(true)}
           >
-            Submit my courses <span aria-hidden="true">→</span>
+            Review alert <span aria-hidden="true">→</span>
           </button>
         </div>
       ) : null}
@@ -1456,7 +1598,6 @@ function MissingCourseLookup({
         <div className="missing-course-results" role="list" aria-label="Course name matches">
           {results.map((course) => {
             const isSelected = selectedIds.has(course.googlePlaceId);
-            const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
             const layoutCompatibility = getCourseLayoutCompatibility(
               course.layoutHoleCounts,
               requestedLayoutHoles
@@ -1474,11 +1615,6 @@ function MissingCourseLookup({
                     <span className="figma-course-pill is-public">
                       <Trees size={11} /> Public
                     </span>
-                    {isManualOnly && course.alertSupport ? (
-                      <span className="figma-course-pill is-official-site-only">
-                        <CircleOff size={11} /> {getAlertSupportLabel(course.alertSupport)}
-                      </span>
-                    ) : null}
                     {course.layoutHoleCounts?.length ? (
                       <span className="figma-course-pill">
                         <Flag size={11} /> {getCourseLayoutLabel(course.layoutHoleCounts)} course
@@ -1496,16 +1632,34 @@ function MissingCourseLookup({
                       {formatDistance(course.distanceMeters)} away
                     </span>
                   ) : null}
-                  {isManualOnly && course.alertSupport ? (
-                    <span className="missing-course-support">
-                      Not checked automatically
-                    </span>
-                  ) : null}
+                  <CourseMonitoringStatus compact course={course} />
                   {isIncompatible && requestedLayoutHoles ? (
                     <span className="missing-course-support">
                       Does not match an {requestedLayoutHoles}-hole course search
                     </span>
                   ) : null}
+                  <div className="missing-course-secondary-actions">
+                    {course.website ? (
+                      <a
+                        aria-label={`Open official site for ${course.name}`}
+                        href={course.website}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <ExternalLink size={13} />
+                        Official site
+                      </a>
+                    ) : null}
+                    <button
+                      aria-label={`Report incorrect information for ${course.name}`}
+                      className="course-report-button"
+                      onClick={() => reportCourseIssue(course)}
+                      type="button"
+                    >
+                      <Flag size={13} />
+                      Report incorrect info
+                    </button>
+                  </div>
                 </div>
                 <button
                   aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
@@ -1586,6 +1740,46 @@ function CourseAddressLink({
       </a>
     </p>
   );
+}
+
+function CourseMonitoringStatus({
+  course,
+  compact = false
+}: {
+  course: CourseCandidate;
+  compact?: boolean;
+}) {
+  const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
+
+  return (
+    <p
+      className={`course-monitoring-status${isManualOnly ? " is-manual" : ""}${compact ? " is-compact" : ""}`}
+    >
+      {isManualOnly ? <CircleOff aria-hidden="true" size={14} /> : <Bell aria-hidden="true" size={14} />}
+      <span>
+        <strong>
+          {isManualOnly && course.alertSupport
+            ? getAlertSupportLabel(course.alertSupport)
+            : "Automatic availability alerts"}
+        </strong>
+        {!compact ? (
+          <small>
+            {isManualOnly && course.alertSupport
+              ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
+              : "Tee Time Spot checks policy-safe public booking availability."}
+          </small>
+        ) : null}
+      </span>
+    </p>
+  );
+}
+
+function reportCourseIssue(course: CourseCandidate) {
+  const location = course.address ? ` at ${course.address}` : "";
+  openFeedback({
+    sentiment: "broken",
+    message: `Please review ${course.name}${location}. What looks incorrect: `
+  });
 }
 
 function CourseResultsMap({

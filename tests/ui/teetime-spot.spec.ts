@@ -722,6 +722,23 @@ test.describe("Tee Time Spot UI smoke", () => {
       .toBeGreaterThanOrEqual(0);
     const firstCourse = page.locator(".course-row").first();
     await expect(firstCourse).toBeVisible();
+    await expect(firstCourse.locator(".course-monitoring-status")).toBeVisible();
+    if (useMockedSearchProviders) {
+      await expect(firstCourse.getByText("Automatic availability alerts", { exact: true })).toBeVisible();
+      await expect(
+        firstCourse.getByRole("link", { name: /Open official site for/i })
+      ).toBeVisible();
+    }
+    const firstCourseName = await firstCourse.locator("h3").innerText();
+    await firstCourse
+      .getByRole("button", { name: /Report incorrect information for/i })
+      .click();
+    const courseReportDialog = page.getByRole("dialog", { name: "Send feedback" });
+    await expect(courseReportDialog).toBeVisible();
+    expect(await courseReportDialog.getByLabel("Details").inputValue()).toContain(firstCourseName);
+    await expect(courseReportDialog.getByRole("button", { name: "Broken" })).toHaveClass(/active/);
+    await page.getByRole("button", { name: "Close feedback" }).click();
+    await expect(courseReportDialog).toBeHidden();
     const resultsLayout = await page.locator(".figma-results-column").evaluate((column) => {
       const status = column.querySelector<HTMLElement>(".figma-results-banner");
       const course = column.querySelector<HTMLElement>(".course-row");
@@ -785,7 +802,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(page.locator(".mobile-selection-toggle")).toContainText("1 course picked");
       await expect(page.locator(".mobile-selection-toggle")).toContainText("Reorder priority");
       const submitCoursesButton = mobileSelectionBar.getByRole("button", {
-        name: "Submit my courses"
+        name: "Review alert"
       });
       await expect(submitCoursesButton).toBeVisible();
       await expect(submitCoursesButton).toHaveCSS("background-color", "rgb(255, 205, 77)");
@@ -856,10 +873,10 @@ test.describe("Tee Time Spot UI smoke", () => {
     const blockedCourseResult = missingCourseResults.filter({
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });
-    await expect(blockedCourseResult).toContainText(
-      "Phone only"
-    );
-    await expect(blockedCourseResult).toContainText("Not checked automatically");
+    await expect(blockedCourseResult).toContainText("Phone only");
+    await expect(
+      blockedCourseResult.getByRole("link", { name: /Open official site for Fairview Farm/i })
+    ).toBeVisible();
     await expect(blockedCourseResult.locator(".figma-course-pill.is-public")).toHaveText("Public");
     if (isMobile) {
       const resultBox = await blockedCourseResult.boundingBox();
@@ -937,13 +954,37 @@ test.describe("Tee Time Spot UI smoke", () => {
       const selectionToggle = page.locator(".mobile-selection-toggle");
       await expect(selectionToggle).toContainText("5 courses picked");
       await expect(selectionToggle).toContainText("Reorder priority");
-      await page.getByRole("button", { name: "Submit my courses" }).click();
+      await page.getByRole("button", { name: "Review alert" }).click();
       await expect(page.locator(".figma-selected-panel.is-mobile-open")).toBeVisible();
     }
 
+    const alertPreview = page.locator(".figma-alert-preview");
+    await expect(alertPreview.getByText("Your alert", { exact: true })).toBeVisible();
+    await expect(alertPreview).toContainText("We'll check 5 ranked courses");
+    await expect(alertPreview).toContainText("for 4 players");
+    await expect(alertPreview).toContainText("You book direct");
+
+    const groupRecipients = page.getByRole("group", { name: "Alert your group too" });
+    await expect(groupRecipients).toContainText(
+      "Everyone gets the same opening, but only you manage the alert."
+    );
+    await groupRecipients.getByLabel("Additional recipient 1").fill("friend@example.com");
+    await groupRecipients.getByRole("button", { name: "Add another recipient" }).click();
+    const secondRecipient = groupRecipients.getByRole("textbox", {
+      name: "Additional recipient 2",
+      exact: true
+    });
+    await secondRecipient.fill("not-an-email");
+    await expect(page.getByText("Enter a valid email for each additional recipient.")).toBeVisible();
+    await expect(alertActionButton).toBeDisabled();
+    await secondRecipient.fill("teammate@example.com");
+    await expect(alertPreview).toContainText("Your account email + 2 others");
+
     let saveRequestCount = 0;
+    let lastSavePayload: Record<string, unknown> | null = null;
     await page.route("**/api/searches", async (route) => {
       saveRequestCount += 1;
+      lastSavePayload = route.request().postDataJSON() as Record<string, unknown>;
       await route.fulfill({
         contentType: "application/json",
         status: 201,
@@ -983,6 +1024,11 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(alertActionButton).toBeDisabled();
       await alertActionButton.click({ force: true });
       expect(saveRequestCount, "unchanged saved searches should not submit more than once").toBe(1);
+      expect(lastSavePayload).toEqual(
+        expect.objectContaining({
+          additionalEmails: ["friend@example.com", "teammate@example.com"]
+        })
+      );
     } else {
       await expect(alertActionButton).toBeDisabled();
       await expect(

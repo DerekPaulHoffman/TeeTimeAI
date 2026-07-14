@@ -3247,6 +3247,71 @@ button {
   margin: 5px 0 0;
 }
 
+.course-monitoring-status {
+  align-items: flex-start;
+  color: #087446;
+  display: flex;
+  font-size: 0.7rem;
+  gap: 6px;
+  line-height: 1.35;
+  margin: 7px 0 0;
+}
+
+.course-monitoring-status > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.course-monitoring-status > span {
+  display: grid;
+  gap: 1px;
+}
+
+.course-monitoring-status strong {
+  font-weight: 850;
+}
+
+.course-monitoring-status small {
+  color: #5e766e;
+  font-size: 0.68rem;
+}
+
+.course-monitoring-status.is-manual,
+.course-monitoring-status.is-manual small {
+  color: #8a4f19;
+}
+
+.course-monitoring-status.is-compact {
+  margin-top: 5px;
+}
+
+.course-report-button {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: #6d817a;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 750;
+  gap: 4px;
+  justify-content: flex-start;
+  margin-top: 5px;
+  min-height: 30px;
+  padding: 3px 0;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+
+.course-report-button:hover,
+.course-report-button:focus-visible {
+  color: #183d32;
+  text-decoration-color: currentColor;
+}
+
 .search-page .figma-course-list .course-actions {
   align-items: center;
   align-self: stretch;
@@ -3482,6 +3547,28 @@ button {
   margin-top: 4px;
 }
 
+.missing-course-secondary-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 3px;
+}
+
+.missing-course-secondary-actions > a {
+  align-items: center;
+  color: #355f52;
+  display: inline-flex;
+  font-size: 0.68rem;
+  font-weight: 800;
+  gap: 4px;
+  min-height: 30px;
+}
+
+.missing-course-secondary-actions .course-report-button {
+  margin-top: 0;
+}
+
 .selected-course-support {
   color: #f2bb7f;
   display: block;
@@ -3521,6 +3608,9 @@ button {
   min-height: 0;
   padding: 20px;
   position: sticky;
+  max-height: calc(100svh - 104px);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   top: 84px;
 }
 
@@ -3574,6 +3664,140 @@ button {
   min-height: 42px;
   padding: 0 12px;
   width: 100%;
+}
+
+.figma-alert-preview {
+  border-bottom: 1px solid #34454f;
+  border-top: 1px solid #34454f;
+  margin-top: 16px;
+  padding: 15px 0;
+}
+
+.figma-alert-preview-heading {
+  align-items: center;
+  color: #ffffff;
+  display: flex;
+  font-size: 0.78rem;
+  gap: 7px;
+}
+
+.figma-alert-preview-heading svg {
+  color: #f2bb7f;
+}
+
+.search-page .figma-selected-panel .figma-alert-preview > p {
+  color: #d6e0e5;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin: 8px 0;
+}
+
+.figma-alert-preview-recipients {
+  color: #f2bb7f;
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.figma-alert-preview > small {
+  color: #8fa4ae;
+  display: block;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  margin-top: 5px;
+}
+
+.figma-group-recipients {
+  border: 0;
+  border-top: 1px solid #34454f;
+  margin: 16px 0 0;
+  min-width: 0;
+  padding: 15px 0 0;
+}
+
+.figma-group-recipients legend {
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 850;
+  padding: 0 8px 0 0;
+}
+
+.search-page .figma-selected-panel .figma-group-recipients > p {
+  color: #9fb0b9;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  margin: 4px 0 10px;
+}
+
+.figma-recipient-fields {
+  display: grid;
+  gap: 7px;
+}
+
+.figma-recipient-row {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.figma-recipient-row input {
+  background: #ffffff;
+  border: 1px solid #dce4df;
+  border-radius: 9px;
+  color: #10222d;
+  font: inherit;
+  min-height: 42px;
+  min-width: 0;
+  padding: 0 12px;
+  width: 100%;
+}
+
+.figma-recipient-row input[aria-invalid="true"] {
+  border-color: #e38d82;
+  box-shadow: 0 0 0 2px rgba(227, 141, 130, 0.18);
+}
+
+.figma-recipient-row > button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid #4b5e68;
+  border-radius: 9px;
+  color: #c0ced4;
+  cursor: pointer;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 42px;
+  min-width: 42px;
+}
+
+.figma-recipient-footer {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.figma-add-recipient {
+  align-items: center;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: #f2bb7f;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 800;
+  gap: 5px;
+  min-height: 32px;
+  padding: 2px 0;
+}
+
+.figma-recipient-footer > span {
+  color: #71858f;
+  font-size: 0.67rem;
+  white-space: nowrap;
 }
 
 .search-page .figma-selected-panel .button-primary {
@@ -3762,8 +3986,8 @@ button {
   .missing-course-result .course-thumbnail,
   .missing-course-result .course-thumbnail-compact {
     border-radius: 13px 13px 0 0;
-    height: 128px;
-    min-height: 128px;
+    height: 112px;
+    min-height: 112px;
     width: 100%;
   }
 
@@ -6654,6 +6878,15 @@ button {
   .figma-hole-filter .figma-hole-options button,
   .figma-hole-filter .figma-hole-options button.is-active {
     padding-inline: 6px;
+  }
+}
+
+@media (max-width: 700px) {
+  .course-report-button,
+  .missing-course-secondary-actions > a,
+  .figma-add-recipient,
+  .figma-recipient-row > button {
+    min-height: 44px;
   }
 }
 

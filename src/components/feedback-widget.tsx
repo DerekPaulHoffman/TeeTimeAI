@@ -15,9 +15,11 @@ import { discordInviteUrl } from "@/lib/community";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { detectWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
-import { OPEN_FEEDBACK_EVENT } from "@/components/open-feedback-button";
-
-type FeedbackSentiment = "like" | "dislike" | "broken";
+import {
+  OPEN_FEEDBACK_EVENT,
+  type FeedbackSentiment,
+  type OpenFeedbackDetail
+} from "@/components/open-feedback-button";
 
 const sentimentOptions: Array<{
   value: FeedbackSentiment;
@@ -46,7 +48,16 @@ export function FeedbackWidget() {
   }, [open]);
 
   useEffect(() => {
-    function handleOpenRequest() {
+    function handleOpenRequest(event: Event) {
+      const detail = (event as CustomEvent<OpenFeedbackDetail>).detail;
+      if (detail?.sentiment) {
+        setSentiment(detail.sentiment);
+      }
+      if (detail?.message !== undefined) {
+        setMessage(detail.message);
+      }
+      setStatus("idle");
+      setError("");
       setOpen(true);
       trackWebsiteEvent({ name: "feedback_opened" });
     }
@@ -71,6 +82,8 @@ export function FeedbackWidget() {
   }, [open]);
 
   function openPanel() {
+    setStatus("idle");
+    setError("");
     setOpen(true);
     trackWebsiteEvent({ name: "feedback_opened" });
   }
