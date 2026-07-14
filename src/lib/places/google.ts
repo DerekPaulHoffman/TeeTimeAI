@@ -233,61 +233,102 @@ const VERIFIED_PRIVATE_COURSE_ACCESS_BY_PLACE_ID = new Map<
 // Some indoor simulator businesses remain misclassified by Google as outdoor golf courses even
 // after indoor_golf_course became a distinct Places type. Exclude only stable place IDs whose
 // official site confirms that the location is a simulator rather than a playable course.
+type VerifiedNonCoursePlaceReview = {
+  placeId: string;
+  name: string;
+  evidenceUrl: string;
+  reviewedAt: `${number}-${number}-${number}`;
+  classification:
+    | "INDOOR_SIMULATOR"
+    | "NON_COURSE_BUSINESS"
+    | "NON_COURSE_VENUE"
+    | "SERVICE_OR_MEDIA"
+    | "EVENT_ORGANIZATION"
+    | "RETAIL_OR_DELIVERY";
+};
+
 const VERIFIED_NON_COURSE_PLACES = [
   {
     placeId: "ChIJaWYTRqBbwokRONcYEIxCk1k",
     name: "NEXUS Golf Club",
-    evidenceUrl: "https://www.nexusgolf.com/contact"
+    evidenceUrl: "https://www.nexusgolf.com/contact",
+    reviewedAt: "2026-07-14",
+    classification: "INDOOR_SIMULATOR"
   },
   {
     placeId: "ChIJ7dQcqrv5wokRIats-Rg1dZo",
     name: "BackyardSwingsStudio",
     evidenceUrl:
-      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ7dQcqrv5wokRIats-Rg1dZo&query=BackyardSwingsStudio"
+      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ7dQcqrv5wokRIats-Rg1dZo&query=BackyardSwingsStudio",
+    reviewedAt: "2026-07-14",
+    classification: "NON_COURSE_BUSINESS"
   },
   {
     placeId: "ChIJdZB9I4hhwokRFfvXRLrWvi8",
     name: "Q5C9+8VQ New York",
     evidenceUrl:
-      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJdZB9I4hhwokRFfvXRLrWvi8&query=Q5C9%2B8VQ%20New%20York"
+      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJdZB9I4hhwokRFfvXRLrWvi8&query=Q5C9%2B8VQ%20New%20York",
+    reviewedAt: "2026-07-14",
+    classification: "NON_COURSE_BUSINESS"
   },
   {
     placeId: "ChIJy4_CTDEtDogR9wxAr-a-VGI",
     name: "Chicago Golf Authority",
-    evidenceUrl: "https://chicagogolfauthority.com/pages/how-it-works"
+    evidenceUrl: "https://chicagogolfauthority.com/pages/how-it-works",
+    reviewedAt: "2026-07-13",
+    classification: "INDOOR_SIMULATOR"
   },
   {
     placeId: "ChIJ67JAVPK12YgRnl_JdjR_gFs",
     name: "Green Girls Golf",
-    evidenceUrl: "https://www.greengirlsgolf.com/"
+    evidenceUrl: "https://www.greengirlsgolf.com/",
+    reviewedAt: "2026-07-13",
+    classification: "SERVICE_OR_MEDIA"
   },
   {
     placeId: "ChIJ6xdB1Jq02YgR4mExla8UqpE",
     name: "South Florida Golf Magazine",
-    evidenceUrl: "https://nextdoor.com/pages/south-florida-golf-magazine-miami-beach-fl/"
+    evidenceUrl: "https://nextdoor.com/pages/south-florida-golf-magazine-miami-beach-fl/",
+    reviewedAt: "2026-07-13",
+    classification: "SERVICE_OR_MEDIA"
   },
   {
     placeId: "ChIJQfF9gY612YgRgEZ2p_DUI0M",
     name: "Celebrity Amputee Golf Classic",
-    evidenceUrl: "https://projects.propublica.org/nonprofits/organizations/454693128"
+    evidenceUrl: "https://projects.propublica.org/nonprofits/organizations/454693128",
+    reviewedAt: "2026-07-13",
+    classification: "EVENT_ORGANIZATION"
   },
   {
     placeId: "ChIJ9zQbdAC72YgRyrZQ5alj1h4",
     name: "PGA TOUR Deliveries",
     evidenceUrl:
-      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ9zQbdAC72YgRyrZQ5alj1h4&query=PGA%20TOUR%20Deliveries"
+      "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ9zQbdAC72YgRyrZQ5alj1h4&query=PGA%20TOUR%20Deliveries",
+    reviewedAt: "2026-07-13",
+    classification: "RETAIL_OR_DELIVERY"
   },
   {
     placeId: "ChIJbV3-V-av2YgRGc2i3GxAjEY",
     name: "Golf Miami 305",
-    evidenceUrl: "https://www.golfmiami305.com/"
+    evidenceUrl: "https://www.golfmiami305.com/",
+    reviewedAt: "2026-07-13",
+    classification: "INDOOR_SIMULATOR"
   },
   {
     placeId: "ChIJw4LoQ3TL4YkR--PVXKkrk7I",
     name: "The Barn At Fox Run",
-    evidenceUrl: "https://www.thebarnatfoxrunvt.com/"
+    evidenceUrl: "https://www.thebarnatfoxrunvt.com/",
+    reviewedAt: "2026-07-13",
+    classification: "NON_COURSE_VENUE"
+  },
+  {
+    placeId: "ChIJu4ODUC01oFQRrHyJkM_URz4",
+    name: "PARTEE GOLF AND GAMES, LLC",
+    evidenceUrl: "https://parteegolfgame.com/contact",
+    reviewedAt: "2026-07-14",
+    classification: "INDOOR_SIMULATOR"
   }
-] as const;
+] as const satisfies readonly VerifiedNonCoursePlaceReview[];
 const VERIFIED_NON_COURSE_PLACE_IDS = new Set<string>(
   VERIFIED_NON_COURSE_PLACES.map((place) => place.placeId)
 );

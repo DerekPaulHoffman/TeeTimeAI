@@ -543,6 +543,79 @@ describe("Google Places mapping", () => {
     expect(places).toEqual([]);
   });
 
+  it("filters the verified ParTee simulator while preserving state-border public-course controls", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        makeOperationalGolfCoursePlace({
+          id: "ChIJu4ODUC01oFQRrHyJkM_URz4",
+          name: "PARTEE GOLF AND GAMES, LLC",
+          address: "714 Main St, Lewiston, ID 83501, USA",
+          latitude: 46.42,
+          longitude: -117.024,
+          websiteUri: "https://parteegolfgame.com/"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "ChIJD4ko7ZS1oVQRrdP69CGMukM",
+          name: "Quail Ridge Golf Course",
+          address: "3600 Swallows Nest Loop, Clarkston, WA 99403, USA",
+          latitude: 46.368,
+          longitude: -117.081,
+          websiteUri: "http://www.golfquailridge.com/"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "ChIJ_dxXZWu1oVQRAmPX0GvVV_E",
+          name: "Bryden Canyon Public Golf Course",
+          address: "445 O'Connor Rd, Lewiston, ID 83501, USA",
+          latitude: 46.379,
+          longitude: -117.026,
+          websiteUri: "https://www.playbrydencanyon.com/"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "similar-par-tee-public-course",
+          name: "Par Tee Golf Course",
+          address: "100 Fairway Dr, Example, WA 99000, USA",
+          latitude: 46.5,
+          longitude: -117.1,
+          websiteUri: "https://example.com/par-tee-golf-course"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "resort-public-course",
+          name: "Mountain Resort Golf Course",
+          address: "200 Resort Way, Example, ID 83000, USA",
+          latitude: 43.5,
+          longitude: -111.1,
+          websiteUri: "https://example.com/resort-golf"
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "ChIJHRdhRQt16IkRnZxbawELtdM",
+          name: "Grassy Hill Country Club",
+          address: "441 Clark Ln, Orange, CT 06477, USA",
+          latitude: 41.268,
+          longitude: -73.045,
+          websiteUri: "https://grassyhillcountryclub.com/"
+        })
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJu4ODUC01oFQRrHyJkM_URz4",
+          "ChIJD4ko7ZS1oVQRrdP69CGMukM",
+          "ChIJ_dxXZWu1oVQRAmPX0GvVV_E",
+          "similar-par-tee-public-course",
+          "resort-public-course",
+          "ChIJHRdhRQt16IkRnZxbawELtdM"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Quail Ridge Golf Course",
+      "Bryden Canyon Public Golf Course",
+      "Par Tee Golf Course",
+      "Mountain Resort Golf Course",
+      "Grassy Hill Country Club"
+    ]);
+  });
+
   it("filters verified private, non-course, and duplicate state-border results", () => {
     const places = filterPublicGolfCoursePlaces(
       [
