@@ -458,6 +458,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           availableSpots: match.availableSpots,
           priceCents: match.priceCents,
           holes: match.holes,
+          bookableHoleCounts: match.bookableHoleCounts,
           isNew: persistedPendingStates[index] === true
         }))
       });
@@ -772,6 +773,13 @@ async function sendPendingMatchAlerts(
           bookingUrl: match.bookingUrl,
           priceCents: match.priceCents,
           holes: match.holes,
+          bookableHoleCounts: courseContext
+            .get(match.course.id)
+            ?.matchingTimes?.find(
+              (time) =>
+                parseCourseLocalDateTime(time.startsAt, match.course.timeZone).getTime() ===
+                match.startsAt.getTime()
+            )?.bookableHoleCounts,
           isNew: pendingIds.has(match.id)
         })),
         userTimeZone: search.userTimeZone,

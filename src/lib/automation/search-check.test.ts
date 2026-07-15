@@ -225,7 +225,7 @@ describe("runSearchCheck email cadence", () => {
           availableSpots: 4,
           bookingUrl: "https://example.com/book",
           priceCents: 6200,
-          holes: 18
+          bookableHoleCounts: [9, 18]
         }
       ],
       targetDateStatus: "OPEN",
@@ -248,6 +248,7 @@ describe("runSearchCheck email cadence", () => {
             matchingTimes: [
               expect.objectContaining({
                 startsAt: "2026-07-12T08:10:00-04:00",
+                bookableHoleCounts: [9, 18],
                 isNew: true
               })
             ]
@@ -261,7 +262,36 @@ describe("runSearchCheck email cadence", () => {
   it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
-      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z")
+      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Available Course",
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "slot-1",
+          courseId: "course-1",
+          startsAt: "2026-07-12T08:00:00-04:00",
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          priceCents: 6100,
+          bookableHoleCounts: [9, 18]
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
     });
 
     const result = await runSearchCheck("search-1", "test");
@@ -278,6 +308,7 @@ describe("runSearchCheck email cadence", () => {
             courseId: "course-1",
             courseRank: 1,
             courseAddress: "1 Main Street, Glastonbury, CT 06033",
+            bookableHoleCounts: [9, 18],
             isNew: true
           })
         ]

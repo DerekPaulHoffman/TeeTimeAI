@@ -193,6 +193,51 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain(">Unsubscribe</a>");
   });
 
+  it("keeps available courses out of the monitoring list and shows every bookable hole count", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-1",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-18",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 4,
+      checkedAt: new Date("2026-07-15T17:41:00.000Z"),
+      courses: [
+        {
+          courseId: "tashua",
+          courseName: "Tashua Knolls Golf Course",
+          rank: 1,
+          outcome: "MATCH_FOUND",
+          availableMatches: 1,
+          bookingUrl: "https://example.com/tashua",
+          matchingTimes: [
+            {
+              startsAt: "2026-07-18T16:20:00-04:00",
+              availableSpots: 4,
+              priceCents: 6100,
+              bookableHoleCounts: [9, 18],
+              isNew: true
+            }
+          ]
+        },
+        {
+          courseId: "gainfield",
+          courseName: "Gainfield Farms Golf Course",
+          rank: 2,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://example.com/gainfield"
+        }
+      ]
+    });
+
+    expect(html).toContain("9H/18H");
+    expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
+    expect(html).toContain("What we're watching for you");
+    expect(html).toContain("PRIORITY 2 &middot; ADDING MONITORING");
+  });
+
   it("does not claim an official-site-only course is monitored automatically", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-1",

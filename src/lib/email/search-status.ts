@@ -51,6 +51,7 @@ export type SearchStatusCourseReport = {
     availableSpots: number;
     priceCents?: number;
     holes?: number;
+    bookableHoleCounts?: Array<9 | 18>;
     isNew?: boolean;
   }>;
 };
@@ -199,9 +200,15 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
       bookingUrl: course.bookingUrl,
       times: course.matchingTimes ?? []
     }));
-  const monitoringCourses = input.courses.map((course, index) =>
-    toMonitoringCourse(course, input.players, course.rank ?? index + 1)
+  const availabilityCourseIds = new Set(
+    availabilityCourses.map((course) => course.courseId)
   );
+  const monitoringCourses = input.courses
+    .map((course, index) => ({ course, fallbackRank: index + 1 }))
+    .filter(({ course }) => !availabilityCourseIds.has(course.courseId))
+    .map(({ course, fallbackRank }) =>
+      toMonitoringCourse(course, input.players, course.rank ?? fallbackRank)
+    );
 
   return renderCustomerEmail({
     variant: input.kind === "setup" ? "setup" : "morning",

@@ -24,6 +24,7 @@ export type TeeTimeAlertMatch = {
   bookingUrl: string;
   priceCents?: number | null;
   holes?: number | null;
+  bookableHoleCounts?: Array<9 | 18>;
   isNew?: boolean;
 };
 
@@ -467,6 +468,7 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
           availableSpots: match.availableSpots,
           priceCents: match.priceCents,
           holes: match.holes,
+          bookableHoleCounts: match.bookableHoleCounts,
           isNew: match.isNew === true
         }))
       };

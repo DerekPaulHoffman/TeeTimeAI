@@ -73,6 +73,25 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("first come");
   });
 
+  it("shows all bookable hole counts in instant alerts", () => {
+    const html = renderAlertHtml({
+      to: "player@example.com",
+      searchId: "search-1",
+      matches: [
+        {
+          courseName: "Tashua Knolls Golf Course",
+          courseTimeZone: "America/New_York",
+          startsAt: new Date("2026-07-18T20:20:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          bookableHoleCounts: [9, 18]
+        }
+      ]
+    });
+
+    expect(html).toContain("9H/18H");
+  });
+
   it("keeps separate hourly windows and renders both stop-alert controls", () => {
     const html = renderAlertHtml({
       to: "player@example.com",

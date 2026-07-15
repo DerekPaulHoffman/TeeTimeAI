@@ -54,8 +54,16 @@ export function filterSlotsForSearch(search: SearchWindow, slots: TeeTimeSlot[])
 }
 
 export function dedupeMatches(slots: TeeTimeSlot[], existingMatches: ExistingMatchKey[]) {
-  const existingKeys = new Set(existingMatches.map(matchKey));
-  return slots.filter((slot) => !existingKeys.has(matchKey(slot)));
+  const observedKeys = new Set(existingMatches.map(matchKey));
+  return slots.filter((slot) => {
+    const key = matchKey(slot);
+    if (observedKeys.has(key)) {
+      return false;
+    }
+
+    observedKeys.add(key);
+    return true;
+  });
 }
 
 export function rankMatches(search: SearchWindow, slots: TeeTimeSlot[]) {

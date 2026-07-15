@@ -56,7 +56,7 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
         startsAt: "2026-07-18T07:42:00-04:00",
         availableSpots: 4,
         priceCents: 5800,
-        holes: 18,
+        bookableHoleCounts: [9, 18],
         isNew: true
       },
       {
@@ -183,6 +183,7 @@ const previewAlert: TeeTimeAlertInput = {
       bookingUrl: course.bookingUrl ?? "https://teetimespot.com",
       priceCents: match.priceCents,
       holes: match.holes,
+      bookableHoleCounts: match.bookableHoleCounts,
       isNew: match.isNew
     }))
   ),

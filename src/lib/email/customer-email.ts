@@ -23,6 +23,7 @@ export type CustomerEmailAvailabilityTime = {
   availableSpots: number;
   priceCents?: number | null;
   holes?: number | null;
+  bookableHoleCounts?: Array<9 | 18>;
   isNew?: boolean;
 };
 
@@ -374,7 +375,10 @@ function renderAvailabilityRow(
   const price = formatPriceRange(
     window.matches.flatMap((match) => match.priceCents == null ? [] : [match.priceCents])
   ) ?? "&mdash;";
-  const holes = [...new Set(window.matches.flatMap((match) => match.holes ? [match.holes] : []))];
+  const holes = [...new Set(window.matches.flatMap((match) => [
+    ...(match.bookableHoleCounts ?? []),
+    ...(match.holes ? [match.holes] : [])
+  ]))].filter((value): value is 9 | 18 => value === 9 || value === 18);
   const holesLabel = holes.length === 1 ? `${holes[0]}H` : holes.length > 1 ? holes.sort((a, b) => a - b).map((value) => `${value}H`).join("/") : "&mdash;";
 
   return `

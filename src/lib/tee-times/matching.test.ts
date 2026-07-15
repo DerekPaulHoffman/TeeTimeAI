@@ -124,6 +124,22 @@ describe("tee time matching", () => {
     expect(matches).toEqual([]);
   });
 
+  it("dedupes repeated provider slots within the same response", () => {
+    const repeatedSlot = {
+      sourceId: "foreup-6654-2026-07-18 16:40",
+      courseId: "course-a",
+      startsAt: "2026-07-18T16:40",
+      availableSpots: 4,
+      bookingUrl: "https://example.com/a",
+      priceCents: 6100,
+      bookableHoleCounts: [9, 18] as Array<9 | 18>
+    };
+
+    expect(dedupeMatches([repeatedSlot, { ...repeatedSlot }], [])).toEqual([
+      repeatedSlot
+    ]);
+  });
+
   it("orders matches by course priority and then tee time", () => {
     const ranked = rankMatches(search, [
       {
