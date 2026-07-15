@@ -9,6 +9,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  CircleHelp,
   CircleOff,
   CircleDollarSign,
   ExternalLink,
@@ -1252,6 +1253,8 @@ function TeeTimeIntakeContent({
                     <span className="selected-course-support">
                       {getAlertSupportLabel(course.alertSupport)}
                     </span>
+                  ) : course.monitoringSupport !== "AUTOMATIC" ? (
+                    <span className="selected-course-support">Alerts not yet confirmed</span>
                   ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
@@ -1785,23 +1788,35 @@ function CourseMonitoringStatus({
   compact?: boolean;
 }) {
   const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
+  const isAutomatic = course.monitoringSupport === "AUTOMATIC";
+  const isUnconfirmed = !isManualOnly && !isAutomatic;
 
   return (
     <p
-      className={`course-monitoring-status${isManualOnly ? " is-manual" : ""}${compact ? " is-compact" : ""}`}
+      className={`course-monitoring-status${isManualOnly ? " is-manual" : ""}${isUnconfirmed ? " is-unconfirmed" : ""}${compact ? " is-compact" : ""}`}
     >
-      {isManualOnly ? <CircleOff aria-hidden="true" size={14} /> : <Bell aria-hidden="true" size={14} />}
+      {isManualOnly ? (
+        <CircleOff aria-hidden="true" size={14} />
+      ) : isAutomatic ? (
+        <Bell aria-hidden="true" size={14} />
+      ) : (
+        <CircleHelp aria-hidden="true" size={14} />
+      )}
       <span>
         <strong>
           {isManualOnly && course.alertSupport
             ? getAlertSupportLabel(course.alertSupport)
-            : "Automatic availability alerts"}
+            : isAutomatic
+              ? "Automatic availability alerts"
+              : "Automatic alerts not yet confirmed"}
         </strong>
         {!compact ? (
           <small>
             {isManualOnly && course.alertSupport
               ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
-              : "Tee Time Spot checks policy-safe public booking availability."}
+              : isAutomatic
+                ? "Tee Time Spot checks policy-safe public booking availability."
+                : "We'll verify whether this course can be checked automatically when your alert starts."}
           </small>
         ) : null}
       </span>

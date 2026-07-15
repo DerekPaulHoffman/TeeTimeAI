@@ -24,6 +24,7 @@ const smokeCourses = [
   latitude: 41.24 + index * 0.002,
   longitude: -73.2 - index * 0.002,
   name,
+  monitoringSupport: index === 0 ? "AUTOMATIC" : "UNCONFIRMED",
   website: `https://example.com/course-${index + 1}`
 }));
 
@@ -741,6 +742,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(firstCourse.locator(".course-monitoring-status")).toBeVisible();
     if (useMockedSearchProviders) {
       await expect(firstCourse.getByText("Automatic availability alerts", { exact: true })).toBeVisible();
+      await expect(
+        page.locator(".course-row").nth(1).getByText("Automatic alerts not yet confirmed", {
+          exact: true
+        })
+      ).toBeVisible();
       await expect(
         firstCourse.getByRole("link", { name: /Open official site for/i })
       ).toBeVisible();

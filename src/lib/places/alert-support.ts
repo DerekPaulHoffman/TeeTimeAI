@@ -1,4 +1,8 @@
-import { getCourseAlertSupport, type BookingMethod } from "@/lib/courses/intelligence";
+import {
+  getCourseAlertSupport,
+  getCourseMonitoringSupport,
+  type BookingMethod
+} from "@/lib/courses/intelligence";
 import {
   findUniqueGenericCourseMatch,
   getCourseDistanceMeters,
@@ -11,7 +15,7 @@ import { prisma } from "@/lib/prisma";
 
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
-type BlockedCourseRecord = CourseIdentity & {
+type KnownCourseRecord = CourseIdentity & {
   bookingMethod: BookingMethod;
   automationEligibility: string;
 };
@@ -23,9 +27,8 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
 
   const latitudes = candidates.map((course) => course.latitude);
   const longitudes = candidates.map((course) => course.longitude);
-  const blockedCourses = await prisma.course.findMany({
+  const knownCourses = await prisma.course.findMany({
     where: {
-      automationEligibility: "BLOCKED",
       latitude: {
         gte: Math.min(...latitudes) - COURSE_MATCH_COORDINATE_TOLERANCE,
         lte: Math.max(...latitudes) + COURSE_MATCH_COORDINATE_TOLERANCE
@@ -50,25 +53,28 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
   });
 
   return candidates.map((candidate) =>
-    mapCourseAlertSupport(candidate, findBlockedCourse(candidate, blockedCourses))
+    mapCourseAlertSupport(candidate, findKnownCourse(candidate, knownCourses))
   );
 }
 
 function mapCourseAlertSupport(
   candidate: CourseCandidate,
-  course: BlockedCourseRecord | undefined
+  course: KnownCourseRecord | undefined
 ) {
+  const monitoringSupport = getCourseMonitoringSupport(course);
   if (!course) {
-    return candidate;
+    return { ...candidate, monitoringSupport };
   }
 
   const alertSupport = getCourseAlertSupport(course);
-  return alertSupport ? { ...candidate, alertSupport } : candidate;
+  return alertSupport
+    ? { ...candidate, alertSupport, monitoringSupport }
+    : { ...candidate, monitoringSupport };
 }
 
-export function findBlockedCourse(
+export function findKnownCourse(
   candidate: Pick<CourseCandidate, "googlePlaceId" | "name" | "latitude" | "longitude">,
-  courses: BlockedCourseRecord[]
+  courses: KnownCourseRecord[]
 ) {
   const exact = courses.find((course) => course.googlePlaceId === candidate.googlePlaceId);
   if (exact) {

@@ -4,6 +4,7 @@ import {
   getAlertSupportDescription,
   getAlertSupportLabel,
   getCourseAlertSupport,
+  getCourseMonitoringSupport,
   isCourseIntelligenceReviewDue,
   isManualOnlyAlertSupport
 } from "./intelligence";
@@ -50,6 +51,19 @@ describe("course intelligence", () => {
     ).toBeUndefined();
     expect(isManualOnlyAlertSupport(undefined)).toBe(false);
     expect(isManualOnlyAlertSupport("PHONE_ONLY")).toBe(true);
+  });
+
+  it("only presents automatic monitoring after support is confirmed", () => {
+    expect(getCourseMonitoringSupport({ automationEligibility: "ALLOWED" })).toBe(
+      "AUTOMATIC"
+    );
+    expect(getCourseMonitoringSupport({ automationEligibility: "BLOCKED" })).toBe(
+      "MANUAL_ONLY"
+    );
+    expect(getCourseMonitoringSupport({ automationEligibility: "UNKNOWN" })).toBe(
+      "UNCONFIRMED"
+    );
+    expect(getCourseMonitoringSupport()).toBe("UNCONFIRMED");
   });
 
   it("surfaces stale intelligence for review without returning it to normal probing", () => {
