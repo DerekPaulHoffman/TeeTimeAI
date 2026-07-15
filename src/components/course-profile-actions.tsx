@@ -11,13 +11,15 @@ export function CourseProfileActions({
   supported,
   selectedCourse,
   website,
-  bookingUrl
+  bookingUrl,
+  showAlert = true
 }: {
   slug: string;
   supported: boolean;
   selectedCourse: NonNullable<SearchPrefill["selectedCourse"]>;
   website: string | null;
   bookingUrl: string | null;
+  showAlert?: boolean;
 }) {
   const router = useRouter();
   const officialLinks = [...new Map(
@@ -39,7 +41,7 @@ export function CourseProfileActions({
 
   return (
     <div className="knowledge-actions">
-      {supported ? (
+      {supported && showAlert ? (
         <button className="button button-primary" onClick={startAlert} type="button">
           <Bell aria-hidden="true" size={17} />
           Create an alert here

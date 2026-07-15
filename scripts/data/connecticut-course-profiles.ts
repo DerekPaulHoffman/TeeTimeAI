@@ -102,7 +102,7 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     accessSummary: "A public eighteen-hole executive course in East Lyme that accepts online tee times.",
     overview: "Cedar Ridge is an eighteen-hole executive course near Interstate 95 in East Lyme, built around a shorter par-three-oriented round.",
     courseCharacter: "Its compact routing is intended to fit a round into roughly a few hours while still asking experienced golfers to control distance and direction on longer par threes.",
-    notableFacts: ["The official site describes the course as an eighteen-hole par-three facility."],
+    notableFacts: ["The course is an eighteen-hole par-three facility."],
     sources: [source("https://www.cedarridgegolfcourse.com/about", "About Cedar Ridge Golf Course", "Cedar Ridge Golf Course", "OFFICIAL_COURSE")]
   }),
   profile({
@@ -138,7 +138,7 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     accessSummary: "A public, daily-fee nine-hole course operated in the Borough of Fenwick, with some seasonal access restrictions.",
     overview: "Fenwick Golf Course opened in 1896 where the Connecticut River meets Long Island Sound and remains a compact public coastal course.",
     courseCharacter: "The flat, walkable routing has an old-style links character shaped by small greens, open water views, and changing coastal wind rather than sheer length.",
-    notableFacts: ["Fenwick identifies itself as Connecticut’s oldest public golf course.", "The facility also has a five-hole Ryder Cup course with separate seasonal rules."],
+    notableFacts: ["The course opened in 1896.", "The facility also has a five-hole Ryder Cup course with separate seasonal rules."],
     sources: [source("https://www.fenwickgolfcourse.com/", "Fenwick Golf Course", "Fenwick Golf Course", "OFFICIAL_COURSE")]
   }),
   profile({
@@ -150,7 +150,7 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     accessSummary: "A City of Hartford public golf facility with an eighteen-hole South Course and a nine-hole North Course.",
     overview: "Goodwin Park combines two public layouts, practice facilities, and a driving range at the city park on Maple Avenue.",
     courseCharacter: "The par-70 South Course asks golfers to control ball flight and choose risk carefully, while the shorter North Course provides another way to play the property.",
-    notableFacts: ["Hartford and Wethersfield residents can qualify for resident rates.", "The official policy says tee times are generally available seven days ahead."],
+    notableFacts: ["Hartford and Wethersfield residents can qualify for resident rates.", "Tee times are generally available seven days ahead."],
     sources: [source("https://www.goodwinparkgolfcourse.com/index.php", "Goodwin Park Golf Course", "Goodwin Park Golf Course", "OFFICIAL_COURSE")]
   }),
   profile({
@@ -258,7 +258,7 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     accessSummary: "A public eighteen-hole daily-fee course in Portland with online reservations and cart-inclusive in-season play.",
     overview: "Quarry Ridge crosses rolling hills and granite outcroppings above views toward Meshomasic State Forest and the Connecticut River.",
     courseCharacter: "The Al Zikorus and Joe Kelley design uses pronounced elevation changes and exposed rock to create an eighteen-hole round with a distinct central Connecticut setting.",
-    notableFacts: ["The course opened with nine holes in 1993 and later expanded to eighteen.", "The official course policy describes in-season play as riding only."],
+    notableFacts: ["The course opened with nine holes in 1993 and later expanded to eighteen.", "In-season play is riding only."],
     sources: [
       source("https://www.quarryridge.com/", "Quarry Ridge Golf Course", "Quarry Ridge Golf Course", "OFFICIAL_COURSE", ["access", "course_type", "notable_fact_1"]),
       source("https://ctvisit.com/listings/quarry-ridge-golf-course", "Quarry Ridge Golf Course", "Connecticut Office of Tourism", "GOVERNMENT_TOURISM", ["overview", "course_character", "notable_fact_0"]),
@@ -298,7 +298,7 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     accessSummary: "A seasonal Town of Stratford public par-three course with resident and non-resident rates.",
     overview: "Short Beach Golf Course is Stratford’s compact municipal course at the town’s multi-use waterfront recreation area on Dorne Drive.",
     courseCharacter: "The nine-hole par-three layout offers a shorter round shaped by ponds, bunkers, and views near the mouth of the Housatonic River.",
-    notableFacts: ["The town supports online and pro-shop reservations.", "The official page says tee times may generally be reserved six days ahead."],
+    notableFacts: ["The town supports online and pro-shop reservations.", "Tee times may generally be reserved six days ahead."],
     sources: [source("https://www.stratfordct.gov/o/stratford/page/short-beach-golf-course", "Short Beach Golf Course", "Town of Stratford", "MUNICIPAL_GOVERNMENT")]
   }),
   profile({
@@ -394,7 +394,7 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     accessSummary: "A family-owned and operated public nine-hole course in Bethany with online tee times.",
     overview: "Woodhaven is a compact nine-hole public course set in the wooded landscape around Miller Road in Bethany.",
     courseCharacter: "The small, independently operated property offers a straightforward local round with a forested setting and the option to reserve through its public booking page.",
-    notableFacts: ["The course describes itself as family owned and operated."],
+    notableFacts: ["The course is family owned and operated."],
     sources: [source("https://www.woodhavenctgolf.com/", "Woodhaven", "Woodhaven Country Club", "OFFICIAL_COURSE")]
   })
 ];

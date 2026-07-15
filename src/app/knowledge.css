@@ -64,6 +64,8 @@
   max-width: 800px;
 }
 
+.course-hero .knowledge-hero-copy { grid-column: 1 / -1; }
+
 .knowledge-hero h1 {
   color: #fff;
   font-size: clamp(3.1rem, 7vw, 6.4rem);
@@ -206,11 +208,11 @@
 .knowledge-callout a { align-items: center; display: inline-flex; gap: 5px; margin-top: 12px; }
 .knowledge-date { font-size: 0.78rem !important; }
 
-.knowledge-sources { display: grid; gap: 24px; list-style: none; margin: 30px 0 0; padding: 0; }
-.knowledge-sources li { border-top: 1px solid #d4dfd8; padding-top: 22px; }
-.knowledge-sources a { align-items: center; display: inline-flex; gap: 7px; }
-.knowledge-sources span { color: #75847c; display: block; font-size: 0.74rem; font-weight: 700; margin-top: 6px; text-transform: uppercase; }
-.knowledge-sources p { font-size: 0.88rem; line-height: 1.6; margin: 10px 0 0; }
+.knowledge-references h2 { font-size: clamp(1.55rem, 3vw, 2.15rem); margin-bottom: 20px; }
+.knowledge-reference-list { border-top: 1px solid #d4dfd8; display: grid; gap: 0; list-style: none; margin: 0 0 20px; padding: 0; }
+.knowledge-reference-list li { align-items: baseline; border-bottom: 1px solid #d4dfd8; display: flex; flex-wrap: wrap; gap: 5px 12px; padding: 14px 0; }
+.knowledge-reference-list a { align-items: center; display: inline-flex; font-size: 0.84rem; gap: 7px; }
+.knowledge-reference-list span { color: #75847c; font-size: 0.75rem; font-weight: 700; }
 
 .knowledge-aside {
   border-top: 3px solid #14231d;
@@ -218,12 +220,14 @@
   top: 92px;
 }
 
-.knowledge-aside > strong { display: block; font-size: 0.75rem; letter-spacing: 0.12em; padding: 18px 0; text-transform: uppercase; }
+.knowledge-aside > h2 { display: block; font-size: 0.75rem; letter-spacing: 0.12em; margin: 0; padding: 18px 0; text-transform: uppercase; }
 .knowledge-aside dl { margin: 0; }
 .knowledge-aside dl div { border-top: 1px solid #d4dfd8; padding: 15px 0; }
 .knowledge-aside dt { color: #75847c; font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
 .knowledge-aside dd { color: #14231d; font-size: 0.88rem; font-weight: 750; margin: 6px 0 0; }
-.knowledge-aside > a { align-items: center; color: #105338; display: inline-flex; font-size: 0.82rem; font-weight: 850; gap: 8px; margin-top: 22px; }
+.knowledge-aside-links { display: grid; gap: 12px; margin-top: 22px; }
+.knowledge-aside-links a { align-items: center; color: #105338; display: inline-flex; font-size: 0.82rem; font-weight: 850; gap: 8px; }
+.knowledge-inline-action { display: inline-flex; margin-top: 26px; }
 
 .knowledge-related,
 .location-course-section,

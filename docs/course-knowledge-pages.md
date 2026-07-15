@@ -40,6 +40,8 @@ npm run automation:course-profile -- upsert --file <draft.json> --apply
 
 Validation requires authoritative sources, claim keys for every notable fact, original wording, and a current verification date. Failed applied drafts become `BLOCKED_EVIDENCE`; published profiles are refreshed after 180 days. A material change to course identity, access, support, official website, or booking URL immediately marks the profile stale and removes it from public routes until it is revalidated.
 
+Write every public profile as a confident facility guide. State supported facts directly and focus on the course layouts, setting, amenities, ownership, public access, and playing experience. Keep claim keys, evidence summaries, authority checks, and uncertainty about the research process internal. Public prose must not say “what Tee Time Spot understands,” “what we know,” “our research found,” “not enough evidence,” or similar editorial-process language. When one fact is unavailable, describe only that field conservatively and direct the golfer to the official course or booking page.
+
 When an older course URL must redirect to a replacement profile, add the stored alias only after a dry run:
 
 ```powershell

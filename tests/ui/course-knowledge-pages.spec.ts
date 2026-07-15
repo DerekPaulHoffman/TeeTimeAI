@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const coursePath = "/courses/tashua-knolls-golf-course-trumbull-ct";
+const knownBookingWindowCoursePath = "/courses/cedar-ridge-golf-course-east-lyme-ct";
 const locationPaths = [
   "/locations/connecticut",
   "/locations/connecticut/fairfield-county",
@@ -13,16 +14,30 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("renders a source-backed supported course profile without browser errors", async ({ page }, testInfo) => {
+test("renders a facility-first supported course guide without browser errors", async ({ page }, testInfo) => {
   const errors = watchForBrowserErrors(page);
   const response = await page.goto(coursePath, { waitUntil: "networkidle" });
 
   expect(response?.status()).toBe(200);
   await expect(page.getByRole("heading", { level: 1, name: "Tashua Knolls Golf Course" })).toBeVisible();
-  await expect(page.getByText("Source-backed profile")).toBeVisible();
-  await expect(page.getByText("Alerts supported", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("heading", { name: /What Tee Time Spot understands/ })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Where these course facts come from" })).toBeVisible();
+  await expect(page.getByText("Golf course guide", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "About Tashua Knolls Golf Course" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Facility highlights" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Booking at Tashua Knolls Golf Course" })).toBeVisible();
+  await expect(page.getByText("Advance booking schedule", { exact: true })).toBeVisible();
+  await expect(page.getByText("Confirm on the official booking page.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tee time alerts for Tashua Knolls Golf Course" })).toBeVisible();
+  await expect(page.getByText("Get notified when a public tee time matches your date, time, group size, and course preference.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "References" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "At a glance" })).toBeVisible();
+  await expect(page.locator(".course-hero").getByRole("link", { name: "Official course website" })).toBeVisible();
+  await expect(page.locator(".course-hero").getByRole("button", { name: "Create an alert here" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Tee time alerts for Tashua Knolls Golf Course" }).locator("xpath=ancestor::section").getByRole("button", { name: "Create an alert here" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /About Tashua Knolls/ }).last()).toBeVisible();
+  const publicCopy = await page.locator("main").innerText();
+  for (const forbidden of ["Source-backed profile", "supporting source", "What Tee Time Spot understands", "Where these course facts come from", "supports these profile claims", "accessed Jul", "not enough evidence"]) {
+    expect(publicCopy).not.toContain(forbidden);
+  }
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", new RegExp(`${coursePath}$`));
   expect(await structuredDataTypes(page)).toEqual(expect.arrayContaining(["GolfCourse", "WebPage", "BreadcrumbList"]));
   await expectNoOverflowOrOverlay(page);
@@ -40,6 +55,18 @@ test("course CTA transfers the selected course through session storage", async (
   await expect(page.getByRole("heading", { level: 3, name: "Tashua Knolls Golf Course" }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Remove Tashua Knolls Golf Course" }).first()).toBeVisible();
   expect(new URL(page.url()).searchParams.has("course")).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+test("renders a verified booking window as a direct course fact", async ({ page }) => {
+  const errors = watchForBrowserErrors(page);
+  const response = await page.goto(knownBookingWindowCoursePath, { waitUntil: "networkidle" });
+
+  expect(response?.status()).toBe(200);
+  await expect(page.getByRole("heading", { level: 1, name: "Cedar Ridge Golf Course" })).toBeVisible();
+  await expect(page.getByText("14-day booking window", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Public tee times open up to 14 days ahead/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open the official booking page" })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

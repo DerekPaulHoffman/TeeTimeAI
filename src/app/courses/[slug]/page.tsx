@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
-import { ArrowRight, Bell, CalendarClock, CheckCircle2, ExternalLink, MapPin, ShieldCheck } from "lucide-react";
+import { ArrowRight, Bell, CalendarClock, CheckCircle2, ExternalLink, MapPin } from "lucide-react";
 
 import { CourseProfileActions } from "@/components/course-profile-actions";
 import { KnowledgePageTracker } from "@/components/knowledge-page-tracker";
 import { StructuredData } from "@/components/structured-data";
+import { getBookingWindowPresentation, getPublicFacilityFacts, getUnsupportedAlertCopy } from "@/lib/course-profiles/presentation";
 import { getPublishedCourseProfile, getRelatedSupportedCourses } from "@/lib/course-profiles/service";
 import { absoluteUrl, buildPageMetadata } from "@/lib/seo";
 
@@ -40,8 +41,17 @@ export default async function CourseProfilePage({ params }: PageProps) {
   const location = [course.city, course.stateCode].filter(Boolean).join(", ");
   const hasConnecticutHub = course.stateCode === "CT";
   const verifiedLabel = formatDate(profile.profileVerifiedAt);
-  const bookingWindow = getBookingWindowCopy(course);
+  const bookingWindow = getBookingWindowPresentation(course);
   const courseType = formatCourseType(profile.courseType);
+  const publicNotableFacts = getPublicFacilityFacts(profile.notableFacts);
+  const officialLinks = [...new Map(
+    [
+      course.website ? { href: course.website, label: "Official course website" } : null,
+      course.detectedBookingUrl ? { href: course.detectedBookingUrl, label: "Official booking page" } : null
+    ]
+      .filter((link): link is { href: string; label: string } => Boolean(link))
+      .map((link) => [link.href, link])
+  ).values()];
   const selectedCourse = {
     courseId: course.id,
     googlePlaceId: course.googlePlaceId ?? course.id,
@@ -107,72 +117,73 @@ export default async function CourseProfilePage({ params }: PageProps) {
     <main className="knowledge-page">
       <KnowledgePageTracker kind="course" slug={profile.canonicalSlug} />
       <StructuredData data={structuredData} />
-      <section className="knowledge-hero">
+      <section className="knowledge-hero course-hero">
         <div className="knowledge-hero-inner">
           <nav aria-label="Breadcrumb" className="knowledge-breadcrumbs">
             <Link href="/">Home</Link><span>/</span>{hasConnecticutHub ? <><Link href="/locations/connecticut">Connecticut</Link><span>/</span></> : null}<span>{course.name}</span>
           </nav>
           <div className="knowledge-hero-copy">
-            <p className="eyebrow">Public golf course profile</p>
+            <p className="eyebrow">Golf course guide</p>
             <h1>{course.name}</h1>
             <p className="knowledge-location"><MapPin aria-hidden="true" size={17} />{location}</p>
             <p className="knowledge-lede">{profile.accessSummary}</p>
             <div className="knowledge-pills">
               <span>{courseType}</span>
               <span>{course.isPublic ? "Public access" : "Access restricted"}</span>
-              <span className={supported ? "is-supported" : "is-limited"}>{supported ? "Alerts supported" : "Alerts not currently supported"}</span>
             </div>
-            <CourseProfileActions slug={profile.canonicalSlug} supported={supported} selectedCourse={selectedCourse} website={course.website} bookingUrl={course.detectedBookingUrl} />
+            <CourseProfileActions slug={profile.canonicalSlug} supported={supported} selectedCourse={selectedCourse} website={course.website} bookingUrl={course.detectedBookingUrl} showAlert={false} />
           </div>
-          <aside className="knowledge-verification" aria-label="Profile verification">
-            <ShieldCheck aria-hidden="true" size={25} />
-            <strong>Source-backed profile</strong>
-            <span>Last verified {verifiedLabel}</span>
-            <span>{profile.sources.length} supporting {profile.sources.length === 1 ? "source" : "sources"}</span>
-          </aside>
         </div>
       </section>
 
       <div className="knowledge-layout">
         <article className="knowledge-article">
           <section>
-            <p className="knowledge-kicker">About the course</p>
-            <h2>What Tee Time Spot understands about {course.name}</h2>
+            <p className="knowledge-kicker">Course overview</p>
+            <h2>About {course.name}</h2>
             <p>{profile.overview}</p>
             <p>{profile.courseCharacter}</p>
-            {profile.notableFacts.length > 0 ? <ul className="knowledge-facts">{profile.notableFacts.map((fact) => <li key={fact}><CheckCircle2 aria-hidden="true" size={18} />{fact}</li>)}</ul> : null}
-            <SourceRefs sources={profile.sources} claims={["access", "overview", "course_character", "course_type", ...profile.notableFacts.map((_, index) => `notable_fact_${index}`)]} />
+            <SourceRefs sources={profile.sources} claims={["access", "overview", "course_character", "course_type"]} />
+          </section>
+
+          {publicNotableFacts.length > 0 ? <section>
+            <p className="knowledge-kicker">At the facility</p>
+            <h2>Facility highlights</h2>
+            <ul className="knowledge-facts">{publicNotableFacts.map((fact) => <li key={fact}><CheckCircle2 aria-hidden="true" size={18} />{fact}</li>)}</ul>
+            <SourceRefs sources={profile.sources} claims={profile.notableFacts.map((_, index) => `notable_fact_${index}`)} />
+          </section> : null}
+
+          <section>
+            <p className="knowledge-kicker">Tee time booking</p>
+            <h2>Booking at {course.name}</h2>
+            <div className="knowledge-callout"><CalendarClock aria-hidden="true" size={24} /><div><strong>{bookingWindow.title}</strong><p>{bookingWindow.copy}</p>{bookingWindow.sourceUrl && bookingWindow.sourceLabel ? <a href={bookingWindow.sourceUrl} rel="noreferrer" target="_blank">{bookingWindow.sourceLabel} <ExternalLink aria-hidden="true" size={14} /></a> : null}</div></div>
+            <p className="knowledge-date">Booking details reviewed {formatDate(course.bookingWindowCheckedAt ?? course.bookingWindowObservedAt ?? profile.profileVerifiedAt)}.</p>
           </section>
 
           <section>
-            <p className="knowledge-kicker">Booking window</p>
-            <h2>When tee times are released</h2>
-            <div className="knowledge-callout"><CalendarClock aria-hidden="true" size={24} /><div><strong>{bookingWindow.title}</strong><p>{bookingWindow.copy}</p>{bookingWindow.sourceUrl ? <a href={bookingWindow.sourceUrl} rel="noreferrer" target="_blank">View the official evidence <ExternalLink aria-hidden="true" size={14} /></a> : null}</div></div>
-            <p className="knowledge-date">Booking information last checked {formatDate(course.bookingWindowCheckedAt ?? course.bookingWindowObservedAt)}.</p>
-          </section>
-
-          <section>
-            <p className="knowledge-kicker">Alert coverage</p>
-            <h2>{supported ? "What Tee Time Spot checks here" : "Why alerts are limited here"}</h2>
-            <p>{supported ? "Tee Time Spot can check the course’s policy-safe public booking surface for openings that match a saved date, time window, player count, and verified course-layout preference." : getUnsupportedCopy(course.automationReason)}</p>
-            <p className="knowledge-date">Alert support last checked {formatDate(course.intelligenceVerifiedAt ?? profile.profileVerifiedAt)}.</p>
+            <p className="knowledge-kicker">Tee Time Spot alerts</p>
+            <h2>Tee time alerts for {course.name}</h2>
+            <p>{supported ? "Get notified when a public tee time matches your date, time, group size, and course preference." : getUnsupportedAlertCopy(course.automationReason)}</p>
+            <p className="knowledge-date">Alert coverage reviewed {formatDate(course.intelligenceVerifiedAt ?? profile.profileVerifiedAt)}.</p>
+            {supported ? <CourseProfileActions slug={profile.canonicalSlug} supported selectedCourse={selectedCourse} website={null} bookingUrl={null} /> : <Link className="button button-primary knowledge-inline-action" href="/search">Browse supported courses <ArrowRight size={16} /></Link>}
             <div className="knowledge-boundary">
               <Bell aria-hidden="true" size={22} />
-              <div><strong>We find the opening. You book directly.</strong><p>Tee Time Spot never reserves, pays, enters checkout, uses verification codes, bypasses captchas or queues, or guarantees that a tee time will still be available.</p></div>
+              <div><strong>You book directly with the course.</strong><p>Tee Time Spot sends you to the official booking page; it does not reserve or book the tee time.</p></div>
             </div>
           </section>
 
-          <section>
-            <p className="knowledge-kicker">Sources</p>
-            <h2>Where these course facts come from</h2>
-            <ol className="knowledge-sources">{profile.sources.map((source) => <li key={source.id}><a href={source.url} rel="noreferrer" target="_blank">{source.title}<ExternalLink aria-hidden="true" size={13} /></a><span>{source.publisher} · accessed {formatDate(source.accessedAt)}</span><p>{source.evidenceSummary}</p></li>)}</ol>
+          <section className="knowledge-references">
+            <p className="knowledge-kicker">Course information</p>
+            <h2>References</h2>
+            <ul className="knowledge-reference-list">{profile.sources.map((source) => <li key={source.id}><a href={source.url} rel="noreferrer" target="_blank">{source.title}<ExternalLink aria-hidden="true" size={13} /></a><span>{source.publisher}</span></li>)}</ul>
+            <p className="knowledge-date">Course information reviewed {verifiedLabel}.</p>
           </section>
         </article>
 
         <aside className="knowledge-aside">
-          <strong>Course facts</strong>
-          <dl><div><dt>Location</dt><dd>{location}</dd></div><div><dt>Access</dt><dd>{course.isPublic ? "Public" : "Restricted"}</dd></div><div><dt>Course type</dt><dd>{courseType}</dd></div><div><dt>Alerts</dt><dd>{supported ? "Supported" : "Not currently supported"}</dd></div><div><dt>Profile verified</dt><dd>{verifiedLabel}</dd></div></dl>
-          {course.website ? <a href={course.website} rel="noreferrer" target="_blank">Official website <ArrowRight aria-hidden="true" size={14} /></a> : null}
+          <h2>At a glance</h2>
+          <dl><div><dt>Location</dt><dd>{location}</dd></div><div><dt>Access</dt><dd>{course.isPublic ? "Public" : "Restricted"}</dd></div><div><dt>Course type</dt><dd>{courseType}</dd></div><div><dt>Tee time alerts</dt><dd>{supported ? "Available" : "Not currently available"}</dd></div></dl>
+          <div className="knowledge-aside-links">{officialLinks.map((link) => <a href={link.href} key={link.href} rel="noreferrer" target="_blank">{link.label}<ArrowRight aria-hidden="true" size={14} /></a>)}</div>
         </aside>
       </div>
 
@@ -183,25 +194,9 @@ export default async function CourseProfilePage({ params }: PageProps) {
   );
 }
 
-function SourceRefs({ sources, claims }: { sources: Array<{ id: string; url: string; publisher: string; claimKeys: string[] }>; claims: string[] }) {
+function SourceRefs({ sources, claims }: { sources: Array<{ id: string; url: string; title: string; claimKeys: string[] }>; claims: string[] }) {
   const matching = sources.filter((source) => source.claimKeys.some((claim) => claims.includes(claim)));
-  return matching.length > 0 ? <p className="knowledge-source-refs">Sources: {matching.map((source, index) => <span key={source.id}>{index > 0 ? ", " : ""}<a href={source.url} rel="noreferrer" target="_blank">{source.publisher}</a></span>)}</p> : null;
-}
-
-function getBookingWindowCopy(course: { bookingWindowDaysAhead: number | null; bookingReleaseTimeLocal: string | null; bookingWindowEvidenceUrl: string | null }) {
-  if (course.bookingWindowDaysAhead === null) return { title: "Release rule not yet verified", copy: "Tee Time Spot has not found enough official evidence to state a dependable booking window for this course. Check the official site before planning around a release time.", sourceUrl: null };
-  const time = course.bookingReleaseTimeLocal ? ` at ${course.bookingReleaseTimeLocal} course-local time` : "";
-  return { title: `${course.bookingWindowDaysAhead}-day booking window`, copy: `The currently verified rule indicates that public inventory can open ${course.bookingWindowDaysAhead} days ahead${time}. Rules can change, and the official booking page remains authoritative.`, sourceUrl: course.bookingWindowEvidenceUrl };
-}
-
-function getUnsupportedCopy(reason: string) {
-  const copy: Record<string, string> = {
-    NO_ONLINE_BOOKING: "The course does not currently expose a supported public online tee-time surface.",
-    ACCOUNT_REQUIRED: "The available booking flow requires an account-specific session, which Tee Time Spot does not use.",
-    AUTOMATION_PROHIBITED: "The course or provider does not permit the kind of automated public checking Tee Time Spot uses.",
-    CAPTCHA_OR_QUEUE: "The booking flow uses an access control, captcha, or queue that Tee Time Spot will not bypass."
-  };
-  return copy[reason] ?? "Tee Time Spot has not verified a policy-safe public availability source for automatic alerts at this course.";
+  return matching.length > 0 ? <p className="knowledge-source-refs">Course details: {matching.map((source, index) => <span key={source.id}>{index > 0 ? ", " : ""}<a href={source.url} rel="noreferrer" target="_blank">{source.title}</a></span>)}</p> : null;
 }
 
 function formatCourseType(value: string | null) {
