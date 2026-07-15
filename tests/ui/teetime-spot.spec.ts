@@ -1274,6 +1274,8 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(statusFrame.getByRole("link", { name: "Call (860) 689-1000" })).toBeVisible();
     await expect(statusFrame.locator("body")).toContainText("No time in your window");
     await expect(statusFrame.locator("body")).toContainText("Nothing visible for this date yet");
+    await expect(statusFrame.locator("body")).toContainText("Priority 5");
+    await expect(statusFrame.locator("body")).not.toContainText(/Priority [6-9]/);
     await expect(statusFrame.locator("body")).toContainText("Official site");
     await expect(statusFrame.locator("body")).toContainText(
       "Check this course directly for now"

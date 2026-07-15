@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-15 - Keep the public email preview inside the five-course contract
+
+- Source: the official [React Email CLI documentation](https://react.email/docs/cli), accessed July 15, 2026, describes previewing templates locally while recommending the same prop-driven render utility used at send time. Tee Time Spot already follows that pattern, so the preview data should remain a valid product example rather than a separate fictional shape.
+- Tee Time Spot evidence: the live `/email-preview` status report rendered priorities 1 through 7 even though the product and save API allow at most five ranked courses. The same renderer correctly displayed the outcomes, but priorities 6 and 7 could never appear in a customer email.
+- Decision: keep five representative courses in the public status preview and add a browser regression proving that Priority 5 is present while priorities 6 through 9 are absent. Focused email unit tests continue to cover the omitted before-window and insufficient-capacity outcome variants.
+- Rotation evidence: signed-out production ZIP `97814` returned Quail Ridge Golf Course on 1440x1000 desktop and 320x800 mobile. Add/rank behavior, screenshots, images, and horizontal-overflow checks were clean with `AUTOMATION` traffic and no saved demand. Quail Ridge's official site confirms public online reservations, but monitoring support requires separate provider and policy evidence.
+
 ## 2026-07-15 - Keep public search social metadata self-consistent
 
 - Source: the [Next.js `generateMetadata` reference](https://nextjs.org/docs/app/api-reference/functions/generate-metadata), updated March 25, 2026, documents that metadata is shallowly merged by route segment and that a child page inherits the full parent `openGraph` object when it does not define one.

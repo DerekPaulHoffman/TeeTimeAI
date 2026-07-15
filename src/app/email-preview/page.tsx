@@ -102,25 +102,6 @@ const previewStatus = {
       }
     },
     {
-      courseId: "richter",
-      courseName: "Richter Park Golf Course",
-      outcome: "NO_MATCH" as const,
-      availableMatches: 0,
-      bookingUrl: "https://richterpark.cps.golf/",
-      availability: {
-        visibleSlotCount: 9,
-        playerEligibleSlotCount: 9,
-        closestBefore: "2026-07-15T07:10"
-      }
-    },
-    {
-      courseId: "whitney",
-      courseName: "Whitney Farms Golf Course",
-      outcome: "NO_MATCH" as const,
-      availableMatches: 0,
-      availability: { visibleSlotCount: 4, playerEligibleSlotCount: 0 }
-    },
-    {
       courseId: "vue",
       courseName: "The VUE CT",
       outcome: "NO_MATCH" as const,
