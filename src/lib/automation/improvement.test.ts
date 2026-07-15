@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   assessDirtyWorktreeRecovery,
+  buildFeedbackPortfolioCandidates,
+  buildFunnelPortfolioCandidates,
   buildHourlyImprovementRunProvenance,
   buildImprovementCheckpoints,
+  buildRepeatedCoveragePortfolioCandidates,
   hasCompletePreEditProvenance,
   isHourlyImprovementClaimWindowOpen,
   markImprovementOutcomeRecorded,
+  rankPortfolioCandidates,
   sanitizeAutomationText,
   selectLatestActionableProbes,
   selectImprovementCandidate,
@@ -14,6 +18,31 @@ import {
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology
 } from "./improvement";
+
+function portfolioRunNotes(blockers: string[]) {
+  return JSON.stringify({
+    schemaVersion: 1,
+    automationId: "teetimeai-hourly-product-improvement-loop",
+    promptVersion: "tee-time-spot-improvement-loop-v11",
+    lifecycle: "closeout",
+    owner: { runId: "run-1", threadId: "thread-1" },
+    provenance: {
+      automationId: "teetimeai-hourly-product-improvement-loop",
+      ownerRunId: "run-1",
+      ownerThreadId: "thread-1",
+      branch: "automation/hourly-20260715-000000",
+      startingSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      expectedHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      plannedPaths: ["src/lib/automation/improvement.ts"]
+    },
+    checkpoints: buildImprovementCheckpoints({
+      queueConfirmed: true,
+      candidateSelected: true,
+      provenanceRecorded: true
+    }),
+    audit: { blockers }
+  });
+}
 
 describe("hourly closeout boundaries", () => {
   it("allows claims before minute 40 and rejects them at the boundary", () => {
@@ -131,8 +160,79 @@ describe("selectImprovementCandidate", () => {
       outcome: "success",
       kind: "pending_alert",
       summary: "Drain 1 pending tee-time alert before selecting new product work.",
-      referenceId: "match-1"
+      referenceId: "match-1",
+      category: "email_alerts",
+      priority: 120,
+      selectionReason: "Pending customer delivery work has absolute priority."
     });
+  });
+
+  it("lets real BROKEN feedback outrank a fresh discretionary adapter gap", () => {
+    const portfolioCandidates = buildFeedbackPortfolioCandidates([
+      {
+        id: "feedback-1",
+        sentiment: "BROKEN",
+        message: "Pause does not update the dashboard.",
+        page: "/dashboard",
+        trafficClass: "PUBLIC",
+        createdAt: "2026-07-15T00:00:00.000Z"
+      }
+    ]);
+
+    const candidate = selectImprovementCandidate({
+      activeSearchCount: 1,
+      pendingAlerts: [],
+      actionableProbes: [
+        {
+          id: "probe-1",
+          outcome: "NEEDS_ADAPTER",
+          courseName: "Example Golf",
+          platform: "UNKNOWN",
+          observedAt: "2026-07-15T00:00:00.000Z"
+        }
+      ],
+      portfolioCandidates,
+      categoryHistory: []
+    });
+
+    expect(candidate).toMatchObject({
+      kind: "portfolio_signal",
+      referenceId: "feedback:feedback-1",
+      category: "dashboard_auth",
+      outcome: "success"
+    });
+  });
+
+  it("blocks a third discretionary search selection and rotates to a due category", () => {
+    const ranked = rankPortfolioCandidates(
+      [
+        {
+          id: "search-1",
+          category: "search_discovery",
+          source: "research",
+          summary: "Exclude another ambiguous course result.",
+          observedAt: "2026-07-15T00:00:00.000Z",
+          priority: 90,
+          evidence: ["provider snapshot"]
+        },
+        {
+          id: "dashboard-1",
+          category: "dashboard_auth",
+          source: "browser",
+          summary: "Repair the authenticated pause flow.",
+          observedAt: "2026-07-15T00:00:00.000Z",
+          priority: 70,
+          evidence: ["reserved TEST trace"]
+        }
+      ],
+      [
+        { category: "search_discovery", selectedAt: "2026-07-14T23:00:00.000Z" },
+        { category: "search_discovery", selectedAt: "2026-07-14T22:00:00.000Z" }
+      ]
+    );
+
+    expect(ranked.map((candidate) => candidate.id)).toEqual(["dashboard-1"]);
+    expect(ranked[0].selectionReason).toContain("least-recently shipped");
   });
 
   it("maps adapter probes to a needs_adapter terminal outcome", () => {
@@ -254,6 +354,59 @@ describe("selectImprovementCandidate", () => {
       researchDirective:
         "Rotate to the least-recently covered evidence surfaces. An empty first pass is not a terminal outcome."
     });
+  });
+});
+
+describe("portfolio evidence collectors", () => {
+  it("waits for a meaningful aggregate funnel sample before creating work", () => {
+    expect(
+      buildFunnelPortfolioCandidates(
+        [
+          { name: "page_viewed", count: 38 },
+          { name: "start_search_clicked", count: 2 }
+        ],
+        "2026-07-15T00:00:00.000Z"
+      )
+    ).toEqual([]);
+
+    expect(
+      buildFunnelPortfolioCandidates(
+        [
+          { name: "page_viewed", count: 100 },
+          { name: "start_search_clicked", count: 1 }
+        ],
+        "2026-07-15T00:00:00.000Z"
+      )
+    ).toMatchObject([
+      {
+        id: "funnel:homepage-to-search",
+        category: "ui_ux",
+        source: "funnel"
+      }
+    ]);
+  });
+
+  it("turns a repeated authenticated coverage gap into a durable blocker candidate", () => {
+    const candidates = buildRepeatedCoveragePortfolioCandidates(
+      [0, 1, 2, 3].map((hour) => ({
+        outcome: hour === 0 ? "blocked_auth" : "success",
+        completedAt: `2026-07-15T0${hour}:00:00.000Z`,
+        notes: portfolioRunNotes([
+          "Reserved synthetic dashboard credentials unavailable; no customer mutation attempted."
+        ])
+      }))
+    );
+
+    expect(candidates).toMatchObject([
+      {
+        id: "coverage:dashboard-auth-test",
+        category: "dashboard_auth",
+        source: "coverage",
+        outcome: "needs_human",
+        priority: 55
+      }
+    ]);
+    expect(candidates[0].evidence).toHaveLength(3);
   });
 });
 
@@ -512,6 +665,19 @@ describe("hourly closeout audit", () => {
     missingCourseResearch: [],
     researchSources: [],
     rejectedCandidates: [],
+    selectedCategory: "test_developer_tooling",
+    candidateRanking: [
+      "1. test_developer_tooling: expose structured portfolio evidence"
+    ],
+    evidenceTrackResults: {
+      operations_errors: "No credible production errors.",
+      browser_location: "Desktop and mobile smoke passed.",
+      feedback_discord_behavior: "No unresolved feedback; Discord invite only.",
+      missing_course_search: "No current non-synthetic course incident.",
+      current_practice_research: "Not due; prior daily research remains current.",
+      product_quality: "Automation portfolio coverage gap reproduced."
+    },
+    coverageBlockers: ["Authenticated Discord history unavailable."],
     learning: [],
     changedBehavior: "Example improvement",
     measuredResult: "Focused verification passed",
@@ -553,6 +719,48 @@ describe("hourly closeout audit", () => {
         currentHeadSha: headSha
       })
     ).toThrow("routesExplored must be an array");
+  });
+
+  it("requires a ranked portfolio decision and every evidence-track result", () => {
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: { ...completeAudit, candidateRanking: [] },
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).toThrow("non-empty candidateRanking");
+
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: {
+          ...completeAudit,
+          evidenceTrackResults: {
+            ...completeAudit.evidenceTrackResults,
+            performance: "not a canonical evidence track"
+          }
+        },
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).not.toThrow();
+
+    const missingTrackAudit = {
+      ...completeAudit,
+      evidenceTrackResults: { ...completeAudit.evidenceTrackResults }
+    };
+    delete (missingTrackAudit.evidenceTrackResults as Partial<
+      typeof completeAudit.evidenceTrackResults
+    >).product_quality;
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: missingTrackAudit,
+        outcome: "success",
+        deploymentRequired: true,
+        currentHeadSha: headSha
+      })
+    ).toThrow("product_quality");
   });
 
   it("requires the successful commit to identify HEAD", () => {

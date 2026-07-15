@@ -3,6 +3,10 @@ import "./load-local-env";
 import { pathToFileURL } from "node:url";
 import type { Prisma } from "@prisma/client";
 
+import {
+  buildPortfolioCategoryHistory,
+  buildRepeatedCoveragePortfolioCandidates
+} from "@/lib/automation/improvement";
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
@@ -205,6 +209,8 @@ async function main() {
     ]);
 
   const activeSearchIds = activeSearches.map((search) => search.id);
+  const improvementPortfolioHistory = buildPortfolioCategoryHistory(improvementRuns);
+  const repeatedCoverageBlockers = buildRepeatedCoveragePortfolioCandidates(improvementRuns);
   const activePreferenceCourseIds = new Set(
     activeSearches.flatMap((search) =>
       search.preferences.map((preference) => preference.courseId)
@@ -280,6 +286,17 @@ async function main() {
             outcome: run.outcome,
             changedFiles: run.changedFiles,
             memory: extractImprovementRunMemory(run.notes)
+          }))
+        },
+        improvementPortfolio: {
+          hours: IMPROVEMENT_MEMORY_HOURS,
+          recentSelections: improvementPortfolioHistory,
+          repeatedCoverageBlockers: repeatedCoverageBlockers.map((candidate) => ({
+            id: candidate.id,
+            category: candidate.category,
+            summary: candidate.summary,
+            observedAt: candidate.observedAt,
+            evidenceCount: candidate.evidence.length
           }))
         },
         activeSearches: activeSearches.map((search) => ({
@@ -452,6 +469,10 @@ function extractImprovementRunMemory(notes: string | null) {
     lifecycle: null,
     branch: null,
     candidateSummary: null,
+    selectedCategory: null,
+    candidateRanking: [] as string[],
+    evidenceTrackResults: {} as Record<string, string>,
+    coverageBlockers: [] as string[],
     commitSha: null,
     deploymentId: null,
     changedBehavior: null,
@@ -480,6 +501,10 @@ function extractImprovementRunMemory(notes: string | null) {
       lifecycle: boundedString(record.lifecycle),
       branch: boundedString(provenance.branch),
       candidateSummary: boundedString(candidate.summary),
+      selectedCategory: boundedString(audit.selectedCategory),
+      candidateRanking: boundedStringArray(audit.candidateRanking),
+      evidenceTrackResults: boundedStringRecord(audit.evidenceTrackResults),
+      coverageBlockers: boundedStringArray(audit.coverageBlockers),
       commitSha: boundedString(audit.commitSha),
       deploymentId: boundedString(audit.deploymentId),
       changedBehavior: boundedString(audit.changedBehavior),
@@ -511,6 +536,18 @@ function boundedStringArray(value: unknown) {
     .map((item) => boundedString(item))
     .filter((item): item is string => Boolean(item))
     .slice(0, 20);
+}
+
+function boundedStringRecord(value: unknown) {
+  if (!isRecord(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, item]) => [key, boundedString(item)] as const)
+      .filter((entry): entry is [string, string] => Boolean(entry[1]))
+      .slice(0, 20)
+  );
 }
 
 function sanitizeWebsiteEventMetadata(metadata: Prisma.JsonValue | null) {

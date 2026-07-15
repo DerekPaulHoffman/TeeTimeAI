@@ -11,17 +11,25 @@ import {
 } from "@/lib/automation/db-service";
 import {
   assessDirtyWorktreeRecovery,
+  buildFeedbackPortfolioCandidates,
+  buildFunnelPortfolioCandidates,
   buildImprovementCheckpoints,
   buildHourlyImprovementRunProvenance,
+  buildPortfolioCategoryHistory,
+  buildRepeatedCoveragePortfolioCandidates,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
+  IMPROVEMENT_CATEGORIES,
   isHourlyImprovementClaimWindowOpen,
   parseHourlyImprovementRunRecord,
+  rankPortfolioCandidates,
   sanitizeAutomationText,
+  selectDuePortfolioCategory,
   selectLatestActionableProbes,
   validateAdapterRemediationCloseout,
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology,
   type HourlyImprovementRunRecord,
+  type ImprovementCategory,
   type ImprovementCandidateInput,
   selectImprovementCandidate
 } from "@/lib/automation/improvement";
@@ -30,9 +38,11 @@ import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v10";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v11";
 const PROMPT_VERSION_PREFIX = "tee-time-spot-improvement-loop-v";
 const ACTIVE_RUN_STALE_AFTER_MS = 55 * 60 * 1000;
+const PORTFOLIO_HISTORY_HOURS = 24;
+const PUBLIC_FUNNEL_HOURS = 24;
 
 const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
@@ -44,9 +54,9 @@ Every run:
 4. Before browser exploration, set sessionStorage key \`tee-time-spot:traffic-class\` to \`AUTOMATION\` (or \`TEST\` only for an explicit manual test). Confirm analytics requests carry that aggregate marker. Never create a persistent visitor/session identifier, and never let unmarked automation traffic persist as public funnel activity.
 5. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
 6. Confirm checkpoints: queue_confirmed, candidate_selected, provenance_recorded, tool_research_done, ui_smoke_done, verification_done, git_committed, git_pushed, production_verified, outcome_recorded. Keep outcome_recorded false until the same database write that sets completedAt and the terminal outcome.
-7. Rank the highest-leverage evidence-backed improvements. Drain already-found pending alerts first, then treat every open CourseSupportIncident affecting an active search as urgent autonomous remediation ahead of exploratory product work. Prefer real-user blockers, alert failures, adapter gaps, funnel regressions, repeated feedback, and verified UI/access failures after those incidents. An empty initial queue is the nonterminal state exploration_required: broaden least-recently tested ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice evidence until at least one safe valuable improvement or a concrete blocker is found. no_op is not an hourly outcome.
+7. Rank the highest-leverage evidence-backed improvements. Drain already-found pending alerts first, then treat every open CourseSupportIncident affecting non-synthetic active demand as urgent autonomous remediation ahead of exploratory product work. After those incidents, rank structured feedback, funnel, browser, email, performance, metadata, security, coverage, actionable-probe, and learning signals together. Record the selected category and ranked alternatives. Apply the diversity bonus to the least-recently shipped eligible category; discretionary search_discovery may not win after two consecutive successful selections unless current real-user BROKEN feedback or an incident overrides the cap. An empty initial queue is the nonterminal state exploration_required: broaden least-recently tested ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice evidence until at least one safe valuable improvement or a concrete blocker is found. no_op is not an hourly outcome.
 8. Before the first file edit, update this exact AutomationRun with the owner run/thread, branch, starting and expected HEAD SHA, exact planned paths, and provenance_recorded=true. If the plan expands, persist the added paths before editing them.
-9. Implement every compatible selected improvement that can be completed safely as one coherent batch. An adapter-remediation candidate must be carried through provider discovery, reusable adapter implementation or conclusive direct-booking classification, focused tests, and an affected-search verification; do not stop at another unsupported observation. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
+9. Implement every compatible selected improvement in the chosen category that can be completed safely as one coherent batch. Do not piggyback a discretionary course/search correction onto a non-search release; record it as a ranked follow-up unless it is a current production incident or real BROKEN feedback. An adapter-remediation candidate must be carried through provider discovery, reusable adapter implementation or conclusive direct-booking classification, focused tests, and an affected-search verification; do not stop at another unsupported observation. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
 10. Use current official research or stronger design tools only when they materially change the selected implementation; do not perform generic hourly research.
 11. Enter closeout no later than 40 minutes after the run starts or whenever only 20 minutes remain before the next scheduled launch. Start no new exploration or file edits after that point; reserve the closeout budget for verification, diff review, commit, rebase, push, deployment, production verification, and the durable final record. Never exit with unexplained residue.
 12. Run focused verification plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, \`npm run ui:smoke\`, and \`git diff --check\` for code changes.
@@ -55,7 +65,7 @@ Every run:
 15. For live-impacting commits, let the verified \`git push origin HEAD:main\` trigger the only normal production deployment. Run \`npm run deployment:wait -- --sha <commitSha>\` to require the Git integration deployment for that exact commit, Ready state, and both production aliases; never follow a normal Git push with \`npx vercel --prod --yes\` because that creates a duplicate deployment. Then run \`$env:UI_SMOKE_BASE_URL="https://teetimespot.com"; npm run ui:smoke; Remove-Item Env:\\UI_SMOKE_BASE_URL\`, targeted route/API checks, and recent Vercel error-log inspection. Use a direct CLI production deploy only as an explicitly chosen recovery action.
 16. If production verification fails because of this release, stop with incident. Roll back only when it is safe and no incompatible migration or irreversible state change exists.
 17. Confirm the working tree is clean and the checked-out \`HEAD\` matches \`origin/main\` after the push.
-18. Atomically close this exact AutomationRun with evidence, decision, changed files, tests, commit SHA, deployment ID, production verification, learning, blockers, terminal outcome, completedAt, and outcome_recorded=true. Update repo deployment notes only for material changes or deployments.
+18. Atomically close this exact AutomationRun with selectedCategory, non-empty candidateRanking, a non-empty result for every required evidence track, coverageBlockers, decision, changed files, tests, commit SHA, deployment ID, production verification, learning, blockers, terminal outcome, completedAt, and outcome_recorded=true. Update repo deployment notes only for material changes or deployments.
 
 UI smoke expectations:
 - The smoke must cover desktop and mobile.
@@ -85,6 +95,8 @@ Loop engineering requirements:
 - Never start implementation in a dirty or diverged checkout, never stage another task's files, and never force-push.
 - Resume owned dirty work only under the exact immediately-preceding same-automation branch, owner-run, owner-thread, expected-HEAD, and planned-path provenance contract. Any mismatch is blocked_dirty_worktree.
 - Maintain a living learning ledger in AutomationRun notes: open signals, stale repeated work, successful patterns, failed assumptions, research links, and next action.
+- Maintain machine-readable portfolio history in AutomationRun audit fields. Treat operations_incidents, search_discovery, ui_ux, accessibility, dashboard_auth, email_alerts, reliability_security, performance, metadata_seo, analytics_observability, and test_developer_tooling as the canonical categories.
+- A required evidence track may report healthy, empty with sample counts, unavailable with the exact blocker, or actionable; it may not be omitted. After the same access gap appears in three successful runs, surface it as a durable coverage blocker instead of repeating a harmless note forever.
 - If the same non-incident course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement. Never stale or rotate away from an open adapter-remediation incident; resolve it, classify it, or prove a concrete blocker.
 - Stop with a normalized terminal outcome: success, incident, needs_adapter, blocked_policy, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. exploration_required is nonterminal, and no_op is prohibited for this hourly workflow.
 
@@ -183,11 +195,24 @@ async function claimImprovementRun() {
   const candidateSummary = sanitizeAutomationString(
     readOption(args, "--candidate-summary") ?? ""
   );
+  const requestedCategory = readOption(args, "--candidate-category");
+  const candidateCategory = requestedCategory
+    ? parseImprovementCategory(requestedCategory)
+    : record.candidate?.category;
+  if (candidateSummary && !candidateCategory) {
+    throw new Error(
+      "an exploratory --candidate-summary also requires --candidate-category"
+    );
+  }
   const candidate = candidateSummary
     ? {
         outcome: "success" as const,
-        kind: "learning_followup" as const,
-        summary: candidateSummary
+        kind: "portfolio_signal" as const,
+        summary: candidateSummary,
+        category: candidateCategory,
+        priority: 70,
+        selectionReason:
+          "Selected from structured evidence gathered after exploration_required."
       }
     : record.candidate;
   if (!candidate || candidate.kind === "exploration_required") {
@@ -230,6 +255,7 @@ async function claimImprovementRun() {
     state: "claimed",
     ownerThreadId,
     plannedPaths: provenance.plannedPaths,
+    selectedCategory: candidate.category,
     checkpoints: claimedRecord.checkpoints
   });
 }
@@ -425,7 +451,8 @@ async function closeoutImprovementRun() {
     audit,
     outcome: payload.outcome,
     deploymentRequired: payload.deploymentRequired ?? true,
-    currentHeadSha: git.headSha
+    currentHeadSha: git.headSha,
+    candidateCategory: record.candidate?.category
   });
 
   const closeoutRecord: HourlyImprovementRunRecord = {
@@ -727,6 +754,20 @@ async function prepareImprovementRun() {
   try {
     const snapshot = await loadImprovementSnapshot();
     const candidate = selectImprovementCandidate(snapshot);
+    const lastSelectedAt = new Map<ImprovementCategory, string>();
+    for (const entry of snapshot.categoryHistory ?? []) {
+      if (!lastSelectedAt.has(entry.category)) {
+        lastSelectedAt.set(entry.category, entry.selectedAt);
+      }
+    }
+    const rankedPortfolioSignals = rankPortfolioCandidates(
+      snapshot.portfolioCandidates ?? [],
+      snapshot.categoryHistory ?? []
+    );
+    const dueCategory = selectDuePortfolioCategory(
+      rankedPortfolioSignals.map((item) => item.category),
+      lastSelectedAt
+    );
     const checkpoints = buildImprovementCheckpoints({
       queueConfirmed: true,
       candidateSelected: candidate.kind !== "exploration_required"
@@ -744,7 +785,12 @@ async function prepareImprovementRun() {
         pendingAlertCount: snapshot.pendingAlerts.length,
         actionableProbeCount:
           snapshot.actionableProbes.length + (snapshot.supportIncidents?.length ?? 0),
-        learningSignalCount: snapshot.learningSignals?.length ?? 0
+        learningSignalCount: snapshot.learningSignals?.length ?? 0,
+        portfolioCandidateCount: snapshot.portfolioCandidates?.length ?? 0,
+        dueCategory,
+        recentCategories: (snapshot.categoryHistory ?? [])
+          .slice(0, 6)
+          .map((entry) => entry.category)
       },
       nextPrompt: buildNextPrompt(run.id)
     };
@@ -754,6 +800,19 @@ async function prepareImprovementRun() {
       state: candidate.outcome,
       checkpoints,
       candidate,
+      portfolio: {
+        dueCategory,
+        recentCategories: (snapshot.categoryHistory ?? [])
+          .slice(0, 6)
+          .map((entry) => entry.category),
+        rankedSignals: rankedPortfolioSignals.map((item) => ({
+          id: item.id,
+          category: item.category,
+          priority: item.adjustedPriority,
+          summary: item.summary,
+          selectionReason: item.selectionReason
+        }))
+      },
       nextPrompt: record.nextPrompt
     });
   } catch (error) {
@@ -853,10 +912,19 @@ function runGit(args: string[]) {
 function buildNextPrompt(runId: string) {
   return [
     `Use AutomationRun ${runId} as the sole durable owner/lease for this hourly run.`,
-    `Before editing, claim exact paths with: npm run automation:improve -- claim --run-id ${runId} --path <repo-relative-path> [--path <another-path>] [--candidate-summary "<selected evidence-backed candidate>"] [--owner-thread <CODEX thread id>].`,
+    `Before editing, claim exact paths with: npm run automation:improve -- claim --run-id ${runId} --path <repo-relative-path> [--path <another-path>] [--candidate-summary "<selected evidence-backed candidate>" --candidate-category <portfolio category>] [--owner-thread <CODEX thread id>]. Exploratory candidates must use one of: ${IMPROVEMENT_CATEGORIES.join(", ")}.`,
     `At terminal closeout, pipe one JSON object to: npm run automation:improve -- closeout --run-id ${runId} [--owner-thread <CODEX thread id>]. The JSON must contain outcome, boolean checkpoints, changedFiles, deploymentRequired, blockerReasons/errors when blocked, and the full structured owner-audit fields listed in docs/codex-automation-loop.md. The command derives committed/dirty paths from Git, redacts and bounds audit/error values, adds branch/start SHA, and atomically writes completedAt and outcome_recorded=true.`,
     loopPrompt.trim()
   ].join("\n\n");
+}
+
+function parseImprovementCategory(value: string): ImprovementCategory {
+  if (IMPROVEMENT_CATEGORIES.includes(value as ImprovementCategory)) {
+    return value as ImprovementCategory;
+  }
+  throw new Error(
+    `--candidate-category must be one of: ${IMPROVEMENT_CATEGORIES.join(", ")}`
+  );
 }
 
 function readOption(args: string[], name: string) {
@@ -944,6 +1012,10 @@ const CLOSEOUT_AUDIT_FIELDS = new Set([
   "missingCourseResearch",
   "researchSources",
   "rejectedCandidates",
+  "selectedCategory",
+  "candidateRanking",
+  "evidenceTrackResults",
+  "coverageBlockers",
   "learning",
   "blockers",
   "changedBehavior",
@@ -1037,6 +1109,12 @@ function writeHandoff(value: object) {
 
 async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
   const recentSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const portfolioSince = new Date(
+    Date.now() - PORTFOLIO_HISTORY_HOURS * 60 * 60 * 1000
+  );
+  const publicFunnelSince = new Date(
+    Date.now() - PUBLIC_FUNNEL_HOURS * 60 * 60 * 1000
+  );
   const today = startOfUtcCalendarDay();
 
   const [
@@ -1045,7 +1123,9 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     probes,
     openSupportIncidents,
     recentRuns,
-    recentDiscoveries
+    recentDiscoveries,
+    unresolvedFeedback,
+    publicFunnelCounts
   ] = await Promise.all([
     prisma.teeSearch.count({
       where: {
@@ -1111,10 +1191,20 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       include: { course: true }
     }),
     prisma.automationRun.findMany({
+      where: {
+        promptVersion: { startsWith: PROMPT_VERSION_PREFIX },
+        startedAt: { gte: portfolioSince }
+      },
       orderBy: {
         startedAt: "desc"
       },
-      take: 12
+      take: 48,
+      select: {
+        outcome: true,
+        notes: true,
+        startedAt: true,
+        completedAt: true
+      }
     }),
     prisma.courseAutomationDiscovery.findMany({
       orderBy: {
@@ -1124,6 +1214,30 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       include: {
         course: true
       }
+    }),
+    prisma.websiteFeedback.findMany({
+      where: {
+        resolvedAt: null,
+        trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+      select: {
+        id: true,
+        sentiment: true,
+        message: true,
+        page: true,
+        trafficClass: true,
+        createdAt: true
+      }
+    }),
+    prisma.websiteEvent.groupBy({
+      by: ["name"],
+      where: {
+        trafficClass: "PUBLIC",
+        createdAt: { gte: publicFunnelSince }
+      },
+      _count: { _all: true }
     })
   ]);
 
@@ -1149,6 +1263,19 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     ];
   });
 
+  const categoryHistory = buildPortfolioCategoryHistory(recentRuns);
+  const portfolioCandidates = [
+    ...buildFeedbackPortfolioCandidates(unresolvedFeedback),
+    ...buildFunnelPortfolioCandidates(
+      publicFunnelCounts.map((entry) => ({
+        name: entry.name,
+        count: entry._count._all
+      })),
+      new Date()
+    ),
+    ...buildRepeatedCoveragePortfolioCandidates(recentRuns)
+  ];
+
   return {
     activeSearchCount,
     pendingAlerts: pendingAlerts.map((alert) => ({
@@ -1170,7 +1297,9 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         "Course monitoring incident remains unresolved."
     })),
     actionableProbes: probeCandidates,
-    learningSignals: buildLearningSignals(recentRuns, recentDiscoveries)
+    learningSignals: buildLearningSignals(recentRuns, recentDiscoveries),
+    portfolioCandidates,
+    categoryHistory
   };
 }
 

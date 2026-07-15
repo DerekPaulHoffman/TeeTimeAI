@@ -31,11 +31,86 @@ type SupportIncidentInput = {
 type LearningSignalInput = {
   key: string;
   kind: "adapter_gap" | "ui_smoke" | "provider_config" | "tooling" | "research";
+  category?: ImprovementCategory;
   summary: string;
   lastSeenAt: string;
   repeats: number;
   nextAction?: string;
   status?: "open" | "learned" | "blocked" | "stale";
+};
+
+export const IMPROVEMENT_CATEGORIES = [
+  "operations_incidents",
+  "search_discovery",
+  "ui_ux",
+  "accessibility",
+  "dashboard_auth",
+  "email_alerts",
+  "reliability_security",
+  "performance",
+  "metadata_seo",
+  "analytics_observability",
+  "test_developer_tooling"
+] as const;
+
+export type ImprovementCategory = (typeof IMPROVEMENT_CATEGORIES)[number];
+
+export const IMPROVEMENT_EVIDENCE_TRACKS = [
+  "operations_errors",
+  "browser_location",
+  "feedback_discord_behavior",
+  "missing_course_search",
+  "current_practice_research",
+  "product_quality"
+] as const;
+
+export type ImprovementEvidenceTrack = (typeof IMPROVEMENT_EVIDENCE_TRACKS)[number];
+
+export type PortfolioCandidateInput = {
+  id: string;
+  category: ImprovementCategory;
+  source:
+    | "feedback"
+    | "funnel"
+    | "browser"
+    | "email"
+    | "performance"
+    | "metadata"
+    | "security"
+    | "coverage"
+    | "research";
+  summary: string;
+  observedAt: string;
+  priority: number;
+  evidence: string[];
+  outcome?: "success" | "blocked_auth" | "blocked_tooling" | "needs_human";
+  diversityOverride?: boolean;
+};
+
+export type ImprovementCategoryHistoryInput = {
+  category: ImprovementCategory;
+  selectedAt: string;
+  incidentOverride?: boolean;
+};
+
+type PortfolioRunInput = {
+  outcome: string | null;
+  completedAt: Date | string | null;
+  notes: string | null;
+};
+
+type FeedbackPortfolioInput = {
+  id: string;
+  sentiment: "LIKE" | "DISLIKE" | "BROKEN";
+  message: string | null;
+  page: string | null;
+  trafficClass: string;
+  createdAt: Date | string;
+};
+
+type FunnelEventCountInput = {
+  name: string;
+  count: number;
 };
 
 export type ImprovementCandidateInput = {
@@ -44,6 +119,8 @@ export type ImprovementCandidateInput = {
   supportIncidents?: SupportIncidentInput[];
   actionableProbes: ActionableProbeInput[];
   learningSignals?: LearningSignalInput[];
+  portfolioCandidates?: PortfolioCandidateInput[];
+  categoryHistory?: ImprovementCategoryHistoryInput[];
 };
 
 export type ImprovementCandidate = {
@@ -66,10 +143,16 @@ export type ImprovementCandidate = {
     | "fetch_failure"
     | "ui_smoke"
     | "learning_followup"
+    | "portfolio_signal"
+    | "coverage_blocker"
     | "exploration_required";
   summary: string;
   referenceId?: string;
   researchDirective?: string;
+  category?: ImprovementCategory;
+  priority?: number;
+  selectionReason?: string;
+  evidence?: string[];
 };
 
 export type AdapterRemediationCloseoutEvidence = {
@@ -167,6 +250,9 @@ export type HourlyImprovementRunRecord = {
     pendingAlertCount: number;
     actionableProbeCount: number;
     learningSignalCount: number;
+    portfolioCandidateCount?: number;
+    dueCategory?: ImprovementCategory | null;
+    recentCategories?: ImprovementCategory[];
   };
   nextPrompt?: string;
   blocker?: {
@@ -263,7 +349,10 @@ export function selectImprovementCandidate(
       outcome: "success",
       kind: "pending_alert",
       summary: `Drain ${input.pendingAlerts.length} pending tee-time alert before selecting new product work.`,
-      referenceId: oldestAlert.id
+      referenceId: oldestAlert.id,
+      category: "email_alerts",
+      priority: 120,
+      selectionReason: "Pending customer delivery work has absolute priority."
     };
   }
 
@@ -272,9 +361,25 @@ export function selectImprovementCandidate(
     return candidateFromSupportIncident(supportIncident);
   }
 
+  const rankedPortfolio = rankPortfolioCandidates(
+    input.portfolioCandidates ?? [],
+    input.categoryHistory ?? []
+  );
+  const urgentPortfolioCandidate = rankedPortfolio.find(
+    (candidate) => candidate.adjustedPriority >= 95
+  );
+  if (urgentPortfolioCandidate) {
+    return candidateFromPortfolioSignal(urgentPortfolioCandidate);
+  }
+
   const probe = selectFreshProbe(input.actionableProbes, input.learningSignals ?? []);
   if (probe) {
     return candidateFromProbe(probe);
+  }
+
+  const portfolioCandidate = rankedPortfolio[0];
+  if (portfolioCandidate) {
+    return candidateFromPortfolioSignal(portfolioCandidate);
   }
 
   const learningFollowup = selectLearningFollowup(input.learningSignals ?? []);
@@ -286,6 +391,9 @@ export function selectImprovementCandidate(
         ? `${learningFollowup.summary} Next: ${learningFollowup.nextAction}`
         : learningFollowup.summary,
       referenceId: learningFollowup.key,
+      category: learningFollowup.category ?? categoryFromLearningKind(learningFollowup.kind),
+      priority: 55,
+      selectionReason: "No fresher operational or portfolio signal outranked this living follow-up.",
       researchDirective:
         "Refresh current product/tooling research before changing strategy, then record whether the follow-up learned, shipped, blocked, or went stale."
     };
@@ -307,9 +415,320 @@ export function selectImprovementCandidate(
     kind: "ui_smoke",
     summary:
       "Active searches have no fresh adapter or alert blockers; run UI smoke, compare current product/tooling best practices, and select the strongest verified UX or access issue.",
+    category: "ui_ux",
+    priority: 50,
+    selectionReason:
+      "No durable portfolio signal exists yet; browser evidence must confirm or replace this fallback.",
     researchDirective:
       "Use current external research only when it can produce a concrete, verifiable repo or provider improvement."
   };
+}
+
+type RankedPortfolioCandidate = PortfolioCandidateInput & {
+  adjustedPriority: number;
+  selectionReason: string;
+};
+
+export function rankPortfolioCandidates(
+  candidates: PortfolioCandidateInput[],
+  categoryHistory: ImprovementCategoryHistoryInput[]
+): RankedPortfolioCandidate[] {
+  const normalizedHistory = [...categoryHistory].sort((left, right) =>
+    right.selectedAt.localeCompare(left.selectedAt)
+  );
+  const recentCategories = normalizedHistory.slice(0, 3).map((entry) => entry.category);
+  const searchStreak = countLeadingCategory(normalizedHistory, "search_discovery");
+  const latestCategory = normalizedHistory[0]?.category;
+  const latestCategoryStreak = latestCategory
+    ? countLeadingCategory(normalizedHistory, latestCategory)
+    : 0;
+  const lastSelectedAt = new Map<ImprovementCategory, string>();
+  for (const entry of normalizedHistory) {
+    if (!lastSelectedAt.has(entry.category)) {
+      lastSelectedAt.set(entry.category, entry.selectedAt);
+    }
+  }
+
+  const eligible = candidates.filter(
+    (candidate) =>
+      candidate.evidence.some((item) => item.trim()) &&
+      candidate.summary.trim() &&
+      !(
+        candidate.category === "search_discovery" &&
+        searchStreak >= 2 &&
+        !candidate.diversityOverride
+      )
+  );
+  const dueCategory = selectDuePortfolioCategory(
+    eligible.map((candidate) => candidate.category),
+    lastSelectedAt
+  );
+
+  return eligible
+    .map((candidate) => {
+      let adjustedPriority = candidate.priority;
+      const reasons = [`base priority ${candidate.priority}`];
+      if (candidate.category === dueCategory) {
+        adjustedPriority += 25;
+        reasons.push("least-recently shipped eligible category +25");
+      }
+      if (!recentCategories.includes(candidate.category)) {
+        adjustedPriority += 10;
+        reasons.push("absent from the last three successful selections +10");
+      }
+      if (candidate.category === latestCategory && latestCategoryStreak > 0) {
+        const repetitionPenalty = Math.min(latestCategoryStreak * 12, 36);
+        adjustedPriority -= repetitionPenalty;
+        reasons.push(`repeated-category penalty -${repetitionPenalty}`);
+      }
+      if (candidate.diversityOverride) {
+        reasons.push("real-user or incident evidence overrides the discretionary cap");
+      }
+
+      return {
+        ...candidate,
+        adjustedPriority,
+        selectionReason: reasons.join("; ")
+      };
+    })
+    .sort((left, right) => {
+      if (left.adjustedPriority !== right.adjustedPriority) {
+        return right.adjustedPriority - left.adjustedPriority;
+      }
+      return right.observedAt.localeCompare(left.observedAt);
+    });
+}
+
+export function selectDuePortfolioCategory(
+  categories: ImprovementCategory[],
+  lastSelectedAt: ReadonlyMap<ImprovementCategory, string>
+): ImprovementCategory | null {
+  const diversityOrder: ImprovementCategory[] = [
+    "dashboard_auth",
+    "email_alerts",
+    "analytics_observability",
+    "performance",
+    "metadata_seo",
+    "accessibility",
+    "ui_ux",
+    "reliability_security",
+    "test_developer_tooling",
+    "search_discovery",
+    "operations_incidents"
+  ];
+  const uniqueCategories = [...new Set(categories)];
+  if (uniqueCategories.length === 0) {
+    return null;
+  }
+
+  return uniqueCategories.sort((left, right) => {
+    const leftDate = lastSelectedAt.get(left);
+    const rightDate = lastSelectedAt.get(right);
+    if (!leftDate && rightDate) {
+      return -1;
+    }
+    if (leftDate && !rightDate) {
+      return 1;
+    }
+    if (leftDate && rightDate && leftDate !== rightDate) {
+      return leftDate.localeCompare(rightDate);
+    }
+    return diversityOrder.indexOf(left) - diversityOrder.indexOf(right);
+  })[0];
+}
+
+export function buildFeedbackPortfolioCandidates(
+  feedback: FeedbackPortfolioInput[]
+): PortfolioCandidateInput[] {
+  return feedback.flatMap((item) => {
+    if (
+      item.sentiment === "LIKE" ||
+      (item.trafficClass !== "PUBLIC" && item.trafficClass !== "UNCLASSIFIED")
+    ) {
+      return [];
+    }
+    const category = categoryFromFeedback(item.page, item.message);
+    const page = item.page?.trim() || "unknown page";
+    const detail = item.message?.replace(/\s+/g, " ").trim().slice(0, 240);
+    const broken = item.sentiment === "BROKEN";
+    return [
+      {
+        id: `feedback:${item.id}`,
+        category,
+        source: "feedback" as const,
+        summary: `${broken ? "Reproduce and resolve" : "Investigate repeated friction from"} ${item.sentiment} feedback on ${page}${detail ? `: ${detail}` : "."}`,
+        observedAt: toIsoString(item.createdAt),
+        priority: broken ? 100 : 82,
+        diversityOverride: broken,
+        evidence: [
+          `WebsiteFeedback ${item.id}`,
+          `sentiment=${item.sentiment}`,
+          `page=${page}`
+        ]
+      }
+    ];
+  });
+}
+
+export function buildFunnelPortfolioCandidates(
+  counts: FunnelEventCountInput[],
+  observedAt: Date | string
+): PortfolioCandidateInput[] {
+  const eventCounts = new Map(counts.map((entry) => [entry.name, entry.count]));
+  const pageViews = eventCounts.get("page_viewed") ?? 0;
+  const starts = eventCounts.get("start_search_clicked") ?? 0;
+  const discoveries = eventCounts.get("course_discovery_completed") ?? 0;
+  const selections = eventCounts.get("course_selection_started") ?? 0;
+  const signIns = eventCounts.get("alert_sign_in_clicked") ?? 0;
+  const submissions = eventCounts.get("search_submitted") ?? 0;
+  const candidates: PortfolioCandidateInput[] = [];
+  const createdAt = toIsoString(observedAt);
+
+  if (pageViews >= 50 && starts / pageViews < 0.02) {
+    candidates.push({
+      id: "funnel:homepage-to-search",
+      category: "ui_ux",
+      source: "funnel",
+      summary: "Investigate a low PUBLIC start-search rate before changing discovery behavior.",
+      observedAt: createdAt,
+      priority: 70,
+      evidence: [`PUBLIC page_viewed=${pageViews}`, `PUBLIC start_search_clicked=${starts}`]
+    });
+  }
+  if (starts >= 20 && discoveries / starts < 0.6) {
+    candidates.push({
+      id: "funnel:search-to-discovery",
+      category: "reliability_security",
+      source: "funnel",
+      summary: "Investigate a material PUBLIC drop between starting search and completing discovery.",
+      observedAt: createdAt,
+      priority: 80,
+      evidence: [
+        `PUBLIC start_search_clicked=${starts}`,
+        `PUBLIC course_discovery_completed=${discoveries}`
+      ]
+    });
+  }
+  if (selections >= 20 && signIns / selections < 0.25) {
+    candidates.push({
+      id: "funnel:selection-to-sign-in",
+      category: "analytics_observability",
+      source: "funnel",
+      summary: "Investigate measurable PUBLIC abandonment between course selection and alert sign-in.",
+      observedAt: createdAt,
+      priority: 76,
+      evidence: [
+        `PUBLIC course_selection_started=${selections}`,
+        `PUBLIC alert_sign_in_clicked=${signIns}`
+      ]
+    });
+  }
+  if (signIns >= 20 && submissions / signIns < 0.4) {
+    candidates.push({
+      id: "funnel:sign-in-to-submit",
+      category: "dashboard_auth",
+      source: "funnel",
+      summary: "Investigate measurable PUBLIC loss between alert sign-in and saved-search submission.",
+      observedAt: createdAt,
+      priority: 88,
+      evidence: [
+        `PUBLIC alert_sign_in_clicked=${signIns}`,
+        `PUBLIC search_submitted=${submissions}`
+      ]
+    });
+  }
+
+  return candidates;
+}
+
+export function buildPortfolioCategoryHistory(
+  runs: PortfolioRunInput[]
+): ImprovementCategoryHistoryInput[] {
+  return runs.flatMap((run) => {
+    if (run.outcome !== "success" || !run.completedAt) {
+      return [];
+    }
+    const record = parseHourlyImprovementRunRecord(run.notes);
+    if (!record) {
+      return [];
+    }
+    const category = readImprovementCategory(record.audit?.selectedCategory) ??
+      record.candidate?.category ??
+      inferHistoricalCategory(record);
+    if (!category) {
+      return [];
+    }
+    return [
+      {
+        category,
+        selectedAt: toIsoString(run.completedAt),
+        incidentOverride: record.candidate?.kind === "adapter_remediation"
+      }
+    ];
+  });
+}
+
+export function buildRepeatedCoveragePortfolioCandidates(
+  runs: PortfolioRunInput[]
+): PortfolioCandidateInput[] {
+  const grouped = new Map<
+    string,
+    {
+      category: ImprovementCategory;
+      label: string;
+      action: string;
+      observedAt: string;
+      evidence: string[];
+    }
+  >();
+
+  for (const run of runs) {
+    if (run.outcome !== "success" || !run.completedAt) {
+      continue;
+    }
+    const record = parseHourlyImprovementRunRecord(run.notes);
+    if (!record?.audit) {
+      continue;
+    }
+    const blockers = [
+      ...readStringArray(record.audit.blockers),
+      ...readStringArray(record.audit.coverageBlockers)
+    ];
+    const seenInRun = new Set<string>();
+    for (const blocker of blockers) {
+      const classification = classifyCoverageBlocker(blocker);
+      if (!classification || seenInRun.has(classification.key)) {
+        continue;
+      }
+      seenInRun.add(classification.key);
+      const observedAt = toIsoString(run.completedAt);
+      const existing = grouped.get(classification.key);
+      grouped.set(classification.key, {
+        ...classification,
+        observedAt:
+          existing && existing.observedAt > observedAt ? existing.observedAt : observedAt,
+        evidence: [...(existing?.evidence ?? []), blocker].slice(-6)
+      });
+    }
+  }
+
+  return [...grouped.entries()].flatMap(([key, value]) => {
+    if (value.evidence.length < 3) {
+      return [];
+    }
+    return [
+      {
+        id: `coverage:${key}`,
+        category: value.category,
+        source: "coverage" as const,
+        summary: `${value.label} has been unavailable in ${value.evidence.length} recent successful runs. ${value.action}`,
+        observedAt: value.observedAt,
+        priority: 55,
+        outcome: "needs_human" as const,
+        evidence: value.evidence
+      }
+    ];
+  });
 }
 
 export function selectLatestActionableProbes<
@@ -560,6 +979,7 @@ export function validateHourlyCloseoutAudit(input: {
   outcome: string;
   deploymentRequired: boolean;
   currentHeadSha: string;
+  candidateCategory?: ImprovementCategory;
 }) {
   const requiredFields = [
     "branch",
@@ -579,6 +999,10 @@ export function validateHourlyCloseoutAudit(input: {
     "missingCourseResearch",
     "researchSources",
     "rejectedCandidates",
+    "selectedCategory",
+    "candidateRanking",
+    "evidenceTrackResults",
+    "coverageBlockers",
     "learning",
     "blockers",
     "changedBehavior",
@@ -603,6 +1027,8 @@ export function validateHourlyCloseoutAudit(input: {
     "missingCourseResearch",
     "researchSources",
     "rejectedCandidates",
+    "candidateRanking",
+    "coverageBlockers",
     "learning",
     "blockers",
     "nextRotationTargets"
@@ -630,6 +1056,37 @@ export function validateHourlyCloseoutAudit(input: {
 
   if (input.outcome !== "success") {
     return;
+  }
+
+  const selectedCategory = readImprovementCategory(input.audit.selectedCategory);
+  if (!selectedCategory) {
+    throw new Error("successful closeout requires a valid selectedCategory");
+  }
+  if (input.candidateCategory && selectedCategory !== input.candidateCategory) {
+    throw new Error(
+      `successful closeout selectedCategory must match the claimed candidate category ${input.candidateCategory}`
+    );
+  }
+  if (readStringArray(input.audit.candidateRanking).length === 0) {
+    throw new Error("successful closeout requires a non-empty candidateRanking");
+  }
+  const evidenceTrackResults = input.audit.evidenceTrackResults;
+  if (!isRecordObject(evidenceTrackResults)) {
+    throw new Error("successful closeout evidenceTrackResults must be an object");
+  }
+  const missingEvidenceTracks = IMPROVEMENT_EVIDENCE_TRACKS.filter(
+    (track) => !isNonEmptyString(evidenceTrackResults[track])
+  );
+  if (missingEvidenceTracks.length > 0) {
+    throw new Error(
+      `successful closeout is missing evidence-track results: ${missingEvidenceTracks.join(", ")}`
+    );
+  }
+  if (!isNonEmptyString(input.audit.changedBehavior)) {
+    throw new Error("successful closeout requires non-empty changedBehavior evidence");
+  }
+  if (!isNonEmptyString(input.audit.measuredResult)) {
+    throw new Error("successful closeout requires non-empty measuredResult evidence");
   }
 
   const commitSha =
@@ -681,6 +1138,9 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
         kind: "adapter_gap",
         summary: `${probe.courseName} needs a ${probe.platform} adapter before it can be polled.`,
         referenceId: probe.id,
+        category: "search_discovery",
+        priority: 84,
+        selectionReason: "Fresh non-synthetic adapter evidence outranks discretionary work.",
         researchDirective:
           "Inspect current official booking surface and policy evidence before implementing; if unsupported after repeated inspection, record a blocked or stale learning instead of repeating the same probe."
       };
@@ -689,28 +1149,40 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
         outcome: "blocked_policy",
         kind: "policy_blocker",
         summary: `${probe.courseName} is blocked by policy review or terms.`,
-        referenceId: probe.id
+        referenceId: probe.id,
+        category: "operations_incidents",
+        priority: 90,
+        selectionReason: "A current policy blocker on real demand requires disposition."
       };
     case "BLOCKED_AUTH":
       return {
         outcome: "blocked_auth",
         kind: "auth_blocker",
         summary: `${probe.courseName} requires auth or human account setup before automation can proceed.`,
-        referenceId: probe.id
+        referenceId: probe.id,
+        category: "operations_incidents",
+        priority: 90,
+        selectionReason: "A current authentication blocker on real demand requires disposition."
       };
     case "BLOCKED_TOOLING":
       return {
         outcome: "blocked_tooling",
         kind: "tooling_blocker",
         summary: `${probe.courseName} is blocked by missing or failing automation tooling.`,
-        referenceId: probe.id
+        referenceId: probe.id,
+        category: "operations_incidents",
+        priority: 90,
+        selectionReason: "A current tooling blocker on real demand requires disposition."
       };
     case "FETCH_FAILED":
       return {
         outcome: "needs_human",
         kind: "fetch_failure",
         summary: `${probe.courseName} fetch failed and needs adapter or endpoint diagnosis.`,
-        referenceId: probe.id
+        referenceId: probe.id,
+        category: "operations_incidents",
+        priority: 92,
+        selectionReason: "A fresh provider failure on real demand outranks discretionary work."
       };
   }
 }
@@ -731,9 +1203,61 @@ function candidateFromSupportIncident(
     kind: "adapter_remediation",
     summary: `${action} for ${incident.courseName} (${incident.platform}) and verify the affected active search end to end.`,
     referenceId: incident.id,
+    category: "operations_incidents",
+    priority: 110,
+    selectionReason: "An open support incident affecting non-synthetic active demand has priority.",
     researchDirective:
       "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
   };
+}
+
+function isRecordObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function candidateFromPortfolioSignal(
+  candidate: RankedPortfolioCandidate
+): ImprovementCandidate {
+  return {
+    outcome: candidate.outcome ?? "success",
+    kind: candidate.source === "coverage" ? "coverage_blocker" : "portfolio_signal",
+    summary: candidate.summary,
+    referenceId: candidate.id,
+    category: candidate.category,
+    priority: candidate.adjustedPriority,
+    selectionReason: candidate.selectionReason,
+    evidence: candidate.evidence
+  };
+}
+
+function countLeadingCategory(
+  history: ImprovementCategoryHistoryInput[],
+  category: ImprovementCategory
+) {
+  let count = 0;
+  for (const entry of history) {
+    if (entry.category !== category || entry.incidentOverride) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function categoryFromLearningKind(
+  kind: LearningSignalInput["kind"]
+): ImprovementCategory {
+  switch (kind) {
+    case "adapter_gap":
+    case "provider_config":
+      return "search_discovery";
+    case "ui_smoke":
+      return "ui_ux";
+    case "tooling":
+      return "test_developer_tooling";
+    case "research":
+      return "metadata_seo";
+  }
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -791,6 +1315,125 @@ function learningStatusScore(status: LearningSignalInput["status"]) {
     default:
       return 0;
   }
+}
+
+function categoryFromFeedback(
+  page: string | null,
+  message: string | null
+): ImprovementCategory {
+  const haystack = `${page ?? ""} ${message ?? ""}`.toLowerCase();
+  if (/dashboard|pause|resume|recipient|check now|sign[ -]?in|account/.test(haystack)) {
+    return "dashboard_auth";
+  }
+  if (/email|alert|stop link|unsubscribe/.test(haystack)) {
+    return "email_alerts";
+  }
+  if (/missing course|course result|private course|duplicate course|search result/.test(haystack)) {
+    return "search_discovery";
+  }
+  if (/keyboard|screen reader|contrast|focus|accessible|accessibility/.test(haystack)) {
+    return "accessibility";
+  }
+  return "ui_ux";
+}
+
+function inferHistoricalCategory(
+  record: HourlyImprovementRunRecord
+): ImprovementCategory | null {
+  switch (record.candidate?.kind) {
+    case "pending_alert":
+      return "email_alerts";
+    case "adapter_remediation":
+      return "operations_incidents";
+    case "adapter_gap":
+    case "policy_blocker":
+    case "fetch_failure":
+      return "search_discovery";
+    case "auth_blocker":
+      return "dashboard_auth";
+    case "tooling_blocker":
+      return "test_developer_tooling";
+    case "ui_smoke":
+      return "ui_ux";
+  }
+
+  const learning = readStringArray(record.audit?.learning).join(" ");
+  const changedBehavior =
+    typeof record.audit?.changedBehavior === "string"
+      ? record.audit.changedBehavior
+      : "";
+  const text = `${record.candidate?.summary ?? ""} ${learning} ${changedBehavior}`.toLowerCase();
+  const patterns: Array<[RegExp, ImprovementCategory]> = [
+    [/operations?\/incidents?|active incident|support incident/, "operations_incidents"],
+    [/clerk|dashboard|authentication|auth management/, "dashboard_auth"],
+    [/email|deliverability|recipient|alert rendering/, "email_alerts"],
+    [/accessibility|wcag|contrast|screen reader|keyboard/, "accessibility"],
+    [/analytics|observability|traffic provenance|funnel/, "analytics_observability"],
+    [/performance|cache|core web vital|lcp|speed insights/, "performance"],
+    [/metadata|seo|canonical|structured data|social preview/, "metadata_seo"],
+    [/security|reliability|workflow lifetime|synthetic search/, "reliability_security"],
+    [/developer tooling|inspector|test tooling/, "test_developer_tooling"],
+    [/search\/discovery|course identity|place id|registry|course filter/, "search_discovery"],
+    [/ui\/ux|loading status|placeholder|copy/, "ui_ux"]
+  ];
+  return patterns.find(([pattern]) => pattern.test(text))?.[1] ?? null;
+}
+
+function classifyCoverageBlocker(value: string) {
+  const normalized = value.toLowerCase();
+  if (normalized.includes("discord") && /unavailable|without.*session|member session/.test(normalized)) {
+    return {
+      key: "discord-history",
+      category: "test_developer_tooling" as const,
+      label: "Authenticated Discord feedback coverage",
+      action: "Provide or reconnect a read-only server-member session, then advance the durable cursor."
+    };
+  }
+  if (
+    /dashboard|clerk/.test(normalized) &&
+    /credential|matched pair|test identity|reserved synthetic/.test(normalized)
+  ) {
+    return {
+      key: "dashboard-auth-test",
+      category: "dashboard_auth" as const,
+      label: "Authenticated synthetic dashboard coverage",
+      action: "Configure a matched reserved Clerk test identity before repeating signed-out-only checks."
+    };
+  }
+  if (/speed insights|core web vitals|field data/.test(normalized) && /unavailable|insufficient|blocked/.test(normalized)) {
+    return {
+      key: "field-performance",
+      category: "performance" as const,
+      label: "Field performance evidence",
+      action: "Restore read access or wait for the documented minimum PUBLIC sample before another field-vitals audit."
+    };
+  }
+  if (/mailbox|inbox|email delivery/.test(normalized) && /unavailable|credential|blocked/.test(normalized)) {
+    return {
+      key: "email-inbox",
+      category: "email_alerts" as const,
+      label: "Test-inbox delivery evidence",
+      action: "Configure a reserved test mailbox or provider delivery-event read path."
+    };
+  }
+  return null;
+}
+
+function readImprovementCategory(value: unknown): ImprovementCategory | null {
+  return typeof value === "string" &&
+    IMPROVEMENT_CATEGORIES.includes(value as ImprovementCategory)
+    ? (value as ImprovementCategory)
+    : null;
+}
+
+function readStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    : [];
+}
+
+function toIsoString(value: Date | string) {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 function normalizeKey(value: string) {

@@ -18,6 +18,13 @@ describe("extractImprovementRunMemory", () => {
           candidate: { summary: "Expose durable hourly memory." },
           nextPrompt: "Very large repeated operating prompt",
           audit: {
+            selectedCategory: "test_developer_tooling",
+            candidateRanking: ["1. test_developer_tooling: durable memory"],
+            evidenceTrackResults: {
+              operations_errors: "healthy",
+              product_quality: "inspector gap reproduced"
+            },
+            coverageBlockers: ["Discord history unavailable"],
             commitSha: "abc123",
             deploymentId: "dpl_example",
             changedBehavior: "Inspector exposes prior hourly decisions.",
@@ -32,6 +39,13 @@ describe("extractImprovementRunMemory", () => {
       lifecycle: "closeout",
       branch: "automation/hourly-example",
       candidateSummary: "Expose durable hourly memory.",
+      selectedCategory: "test_developer_tooling",
+      candidateRanking: ["1. test_developer_tooling: durable memory"],
+      evidenceTrackResults: {
+        operations_errors: "healthy",
+        product_quality: "inspector gap reproduced"
+      },
+      coverageBlockers: ["Discord history unavailable"],
       commitSha: "abc123",
       deploymentId: "dpl_example",
       changedBehavior: "Inspector exposes prior hourly decisions.",
