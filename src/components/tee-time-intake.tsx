@@ -1810,7 +1810,7 @@ function CourseMonitoringStatus({
               ? "Automatic availability alerts"
               : "Automatic alerts not yet confirmed"}
         </strong>
-        {!compact ? (
+        {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
             {isManualOnly && course.alertSupport
               ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
