@@ -71,6 +71,8 @@ export type CourseCandidate = {
   distanceMeters?: number;
   rating?: number;
   par?: number;
+  parEvidenceUrl?: string;
+  parVerifiedAt?: string;
   phone?: string;
   website?: string;
   photoReference?: string;

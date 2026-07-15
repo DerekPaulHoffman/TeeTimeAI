@@ -38,6 +38,7 @@ import {
   isManualOnlyAlertSupport
 } from "@/lib/courses/intelligence";
 import {
+  getCourseHeadlineHoleCount,
   getCourseLayoutCompatibility,
   getCourseLayoutLabel,
   type CourseLayoutHoleCount
@@ -60,7 +61,6 @@ import {
   milesToMeters
 } from "@/lib/places/radius";
 import {
-  getHeadlineBookableHoleCount,
   getHeadlineCoursePrice,
   type CoursePriceEstimate,
   type CoursePriceRange
@@ -1100,7 +1100,10 @@ function TeeTimeIntakeContent({
               course.layoutHoleCounts,
               requestedLayoutHoles
             );
-            const cardHoleCount = getHeadlineBookableHoleCount(course.bookableHoleCounts);
+            const cardHoleCount = getCourseHeadlineHoleCount(
+              course.layoutHoleCounts,
+              course.bookableHoleCounts
+            );
 
             return (
               <div

@@ -19,7 +19,7 @@ const smokeCourses = [
   "Fairchild Wheeler Golf Course"
 ].map((name, index) => ({
   address: `${100 + index} Public Links Rd, Trumbull, CT`,
-  bookableHoleCounts: index === 0 ? [9, 18] : [18],
+  bookableHoleCounts: index === 1 ? [9] : index === 0 ? [9, 18] : [18],
   distanceMeters: [3.2, 5.1, 6.4, 8.9, 11.2, 12.7, 14.3][index] * 1_609.344,
   googlePlaceId: `ui-smoke-course-${index + 1}`,
   layoutHoleCounts: [18],
@@ -31,11 +31,21 @@ const smokeCourses = [
   photoReference: `ui-smoke-photo-${index + 1}`,
   priceEstimate: {
     currency: "USD",
-    eighteenHoles: {
-      maxPriceCents: [4800, 6200, 4400, 5100, 5700, 4900, 5400][index],
-      minPriceCents: [4800, 6200, 4400, 5100, 5700, 4900, 5400][index],
-      sampleSize: 1
-    },
+    ...(index === 1
+      ? {
+          nineHoles: {
+            maxPriceCents: 2500,
+            minPriceCents: 2500,
+            sampleSize: 1
+          }
+        }
+      : {
+          eighteenHoles: {
+            maxPriceCents: [4800, 6200, 4400, 5100, 5700, 4900, 5400][index],
+            minPriceCents: [4800, 6200, 4400, 5100, 5700, 4900, 5400][index],
+            sampleSize: 1
+          }
+        }),
     observedAt: "2026-07-15T12:00:00.000Z"
   },
   rating: [4.3, 4.5, 4.1, 4.2, 4.0, 3.9, 4.2][index],
@@ -649,6 +659,13 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(await firstCourse.evaluate((card) => window.getComputedStyle(card).fontFamily)).toMatch(
       /Inter/i
     );
+    const verifiedEighteenHoleCourse = page.locator(".course-row").filter({
+      hasText: "H. Smith Richardson Golf Course"
+    });
+    await expect(verifiedEighteenHoleCourse.getByText(/18H/)).toBeVisible();
+    await expect(verifiedEighteenHoleCourse.getByText(/9H/)).toHaveCount(0);
+    await expect(verifiedEighteenHoleCourse.getByText(/Par 72/)).toBeVisible();
+    await expect(verifiedEighteenHoleCourse.locator(".figma-course-pill.is-price")).toHaveCount(0);
     await expectNoPageIssues(issues, testInfo);
   });
 

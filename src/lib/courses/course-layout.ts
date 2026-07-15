@@ -47,6 +47,26 @@ export function getCourseLayoutLabel(
   return normalizedCounts.map((holes) => `${holes}-hole`).join(" and ");
 }
 
+export function getCourseHeadlineHoleCount(
+  layoutHoleCounts: readonly unknown[] | null | undefined,
+  bookableHoleCounts: readonly unknown[] | null | undefined
+): CourseLayoutHoleCount | undefined {
+  const verifiedLayouts = normalizeLayoutHoleCounts(layoutHoleCounts);
+  if (verifiedLayouts.includes(18)) return 18;
+  if (verifiedLayouts.includes(9)) return 9;
+
+  const observedBookingOptions = normalizeLayoutHoleCounts(bookableHoleCounts);
+  if (observedBookingOptions.includes(18)) return 18;
+  if (observedBookingOptions.includes(9)) return 9;
+  return undefined;
+}
+
+export function normalizeCoursePar(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 27 && value <= 90
+    ? value
+    : undefined;
+}
+
 function isCourseLayoutHoleCount(value: unknown): value is CourseLayoutHoleCount {
   return value === 9 || value === 18;
 }

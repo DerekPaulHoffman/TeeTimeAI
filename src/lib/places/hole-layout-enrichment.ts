@@ -1,4 +1,5 @@
 import {
+  normalizeCoursePar,
   normalizeLayoutHoleCounts,
   type CourseLayoutHoleCount
 } from "@/lib/courses/course-layout";
@@ -23,6 +24,9 @@ export type CourseLayoutRecord = {
   layoutHoleCounts: number[];
   layoutHolesEvidenceUrl: string | null;
   layoutHolesVerifiedAt: Date | null;
+  par: number | null;
+  parEvidenceUrl: string | null;
+  parVerifiedAt: Date | null;
 };
 
 export async function enrichCoursesWithHoleLayouts(candidates: CourseCandidate[]) {
@@ -31,28 +35,37 @@ export async function enrichCoursesWithHoleLayouts(candidates: CourseCandidate[]
   }
 
   const persistedCourses = await findPersistedLayoutCourses(candidates);
-  const layoutCourses = persistedCourses.filter(
-    (course) =>
-      course.layoutHolesVerifiedAt !== null &&
-      normalizeLayoutHoleCounts(course.layoutHoleCounts).length > 0
-  );
 
   return candidates.map((candidate) => {
-    const layoutCourse = findCourseLayout(candidate, layoutCourses);
-    if (!layoutCourse) {
+    const persistedCourse = findCourseLayout(candidate, persistedCourses);
+    if (!persistedCourse) {
       return { ...candidate, layoutHolesStatus: "UNVERIFIED" as const };
     }
 
-    const layoutHoleCounts = normalizeLayoutHoleCounts(layoutCourse.layoutHoleCounts);
+    const layoutHoleCounts = persistedCourse.layoutHolesVerifiedAt
+      ? normalizeLayoutHoleCounts(persistedCourse.layoutHoleCounts)
+      : [];
+    const par = persistedCourse.parVerifiedAt
+      ? normalizeCoursePar(persistedCourse.par)
+      : undefined;
     return {
       ...candidate,
-      layoutHoleCounts,
-      layoutHolesStatus: "VERIFIED" as const,
-      ...(layoutCourse.layoutHolesEvidenceUrl
-        ? { layoutHolesEvidenceUrl: layoutCourse.layoutHolesEvidenceUrl }
+      layoutHolesStatus: layoutHoleCounts.length > 0
+        ? "VERIFIED" as const
+        : "UNVERIFIED" as const,
+      ...(layoutHoleCounts.length > 0 ? { layoutHoleCounts } : {}),
+      ...(layoutHoleCounts.length > 0 && persistedCourse.layoutHolesEvidenceUrl
+        ? { layoutHolesEvidenceUrl: persistedCourse.layoutHolesEvidenceUrl }
         : {}),
-      ...(layoutCourse.layoutHolesVerifiedAt
-        ? { layoutHolesVerifiedAt: layoutCourse.layoutHolesVerifiedAt.toISOString() }
+      ...(layoutHoleCounts.length > 0 && persistedCourse.layoutHolesVerifiedAt
+        ? { layoutHolesVerifiedAt: persistedCourse.layoutHolesVerifiedAt.toISOString() }
+        : {}),
+      ...(par !== undefined ? { par } : {}),
+      ...(par !== undefined && persistedCourse.parEvidenceUrl
+        ? { parEvidenceUrl: persistedCourse.parEvidenceUrl }
+        : {}),
+      ...(par !== undefined && persistedCourse.parVerifiedAt
+        ? { parVerifiedAt: persistedCourse.parVerifiedAt.toISOString() }
         : {})
     };
   });
@@ -114,7 +127,10 @@ async function findPersistedLayoutCourses(candidates: CourseCandidate[]) {
       longitude: true,
       layoutHoleCounts: true,
       layoutHolesEvidenceUrl: true,
-      layoutHolesVerifiedAt: true
+      layoutHolesVerifiedAt: true,
+      par: true,
+      parEvidenceUrl: true,
+      parVerifiedAt: true
     }
   });
 }

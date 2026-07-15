@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getCourseHeadlineHoleCount,
   getCourseLayoutCompatibility,
   getCourseLayoutLabel,
+  normalizeCoursePar,
   normalizeLayoutHoleCounts,
   normalizeRequestedLayoutHoles
 } from "./course-layout";
@@ -31,5 +33,20 @@ describe("course layout helpers", () => {
   it("builds concise verified and unverified labels", () => {
     expect(getCourseLayoutLabel([18, 9])).toBe("9-hole and 18-hole");
     expect(getCourseLayoutLabel([])).toBe("Hole count unverified");
+  });
+
+  it("prefers verified physical layout over transient booking products", () => {
+    expect(getCourseHeadlineHoleCount([18], [9])).toBe(18);
+    expect(getCourseHeadlineHoleCount([9], [18])).toBe(9);
+    expect(getCourseHeadlineHoleCount([], [9, 18])).toBe(18);
+    expect(getCourseHeadlineHoleCount(undefined, [9])).toBe(9);
+    expect(getCourseHeadlineHoleCount(undefined, undefined)).toBeUndefined();
+  });
+
+  it("normalizes plausible verified course par values", () => {
+    expect(normalizeCoursePar(72)).toBe(72);
+    expect(normalizeCoursePar(27)).toBe(27);
+    expect(normalizeCoursePar(91)).toBeUndefined();
+    expect(normalizeCoursePar("72")).toBeUndefined();
   });
 });

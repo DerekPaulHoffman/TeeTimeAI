@@ -167,6 +167,9 @@ model Course {
   layoutHoleCounts         Int[]                       @default([])
   layoutHolesEvidenceUrl   String?
   layoutHolesVerifiedAt    DateTime?
+  par                      Int?
+  parEvidenceUrl           String?
+  parVerifiedAt            DateTime?
   createdAt                DateTime                    @default(now())
   updatedAt                DateTime                    @updatedAt
   preferences              CoursePreference[]

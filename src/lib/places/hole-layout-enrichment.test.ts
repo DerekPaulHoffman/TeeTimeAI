@@ -64,6 +64,26 @@ describe("course hole-layout enrichment", () => {
     );
   });
 
+  it("adds independently verified par evidence to a discovered course", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      layoutCourse({
+        layoutHoleCounts: [18],
+        layoutHolesVerifiedAt: new Date("2026-07-15T16:00:00Z"),
+        par: 72,
+        parEvidenceUrl: "https://example.com/scorecard",
+        parVerifiedAt: new Date("2026-07-15T16:00:00Z")
+      })
+    ] as never);
+
+    const [course] = await enrichCoursesWithHoleLayouts([woodhavenCandidate()]);
+
+    expect(course).toEqual(expect.objectContaining({
+      par: 72,
+      parEvidenceUrl: "https://example.com/scorecard",
+      parVerifiedAt: "2026-07-15T16:00:00.000Z"
+    }));
+  });
+
   it("matches an alternate place id only when name and coordinates agree", () => {
     const woodhaven = layoutCourse();
 
@@ -131,6 +151,17 @@ describe("course hole-layout enrichment", () => {
     expect(course.layoutHolesStatus).toBe("UNVERIFIED");
     expect(course.layoutHoleCounts).toBeUndefined();
   });
+
+  it("does not expose persisted par without a verification timestamp", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      layoutCourse({ par: 72, parVerifiedAt: null })
+    ] as never);
+
+    const [course] = await enrichCoursesWithHoleLayouts([woodhavenCandidate()]);
+
+    expect(course.par).toBeUndefined();
+    expect(course.parEvidenceUrl).toBeUndefined();
+  });
 });
 
 function woodhavenCandidate() {
@@ -152,6 +183,9 @@ function layoutCourse(overrides: Partial<CourseLayoutRecord> = {}): CourseLayout
     layoutHoleCounts: [9],
     layoutHolesEvidenceUrl: "https://www.woodhavenctgolf.com/",
     layoutHolesVerifiedAt: null,
+    par: null,
+    parEvidenceUrl: null,
+    parVerifiedAt: null,
     ...overrides
   };
 }

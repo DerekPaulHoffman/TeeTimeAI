@@ -84,11 +84,12 @@ test.describe("physical course layout filtering", () => {
     const woodhavenRow = page.locator(".course-row").filter({ hasText: "Woodhaven Golf Course" });
     await expect(woodhavenRow).toBeVisible();
     await expect(page.getByText("Verified Eighteen Golf Course", { exact: true })).toHaveCount(0);
-    await expect(woodhavenRow.getByText(/18H/)).toBeVisible();
-    await expect(woodhavenRow.getByText(/9H/)).toHaveCount(0);
+    await expect(woodhavenRow.getByText(/9H/)).toBeVisible();
+    await expect(woodhavenRow.getByText(/18H/)).toHaveCount(0);
 
     await page.getByRole("button", { name: "Any", exact: true }).click();
     await expect(page.getByText("Woodhaven Golf Course", { exact: true })).toBeVisible();
     await expect(page.getByText("Verified Eighteen Golf Course", { exact: true })).toBeVisible();
+    await expect(woodhavenRow.getByText(/9H/)).toBeVisible();
   });
 });
