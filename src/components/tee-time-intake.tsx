@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Leaflet from "leaflet";
 import {
   Bell,
+  BookOpenText,
   Check,
   ChevronDown,
   ChevronUp,
@@ -1176,6 +1177,16 @@ function TeeTimeIntakeContent({
                   </h3>
                   <CourseAddressLink course={course} />
                   <CourseMonitoringStatus course={course} />
+                  {course.profileUrl ? (
+                    <Link
+                      aria-label={`View course guide for ${course.name}`}
+                      className="course-profile-link"
+                      href={course.profileUrl as `/courses/${string}`}
+                    >
+                      <BookOpenText aria-hidden="true" size={12} />
+                      Course guide
+                    </Link>
+                  ) : null}
                 </div>
                 <div className="course-actions">
                   {course.website ? (
@@ -1718,6 +1729,16 @@ function MissingCourseLookup({
                     </span>
                   ) : null}
                   <div className="missing-course-secondary-actions">
+                    {course.profileUrl ? (
+                      <Link
+                        aria-label={`View course guide for ${course.name}`}
+                        className="course-profile-link"
+                        href={course.profileUrl as `/courses/${string}`}
+                      >
+                        <BookOpenText aria-hidden="true" size={13} />
+                        Course guide
+                      </Link>
+                    ) : null}
                     {course.website ? (
                       <a
                         aria-label={`Open official site for ${course.name}`}

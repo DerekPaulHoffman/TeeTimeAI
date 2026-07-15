@@ -29,6 +29,9 @@ const smokeCourses = [
   monitoringSupport: index === 0 ? "AUTOMATIC" : "UNCONFIRMED",
   par: [72, 72, 71, 70, 71, 72, 72][index],
   photoReference: `ui-smoke-photo-${index + 1}`,
+  ...(index === 0
+    ? { profileUrl: "/courses/tashua-knolls-golf-course-trumbull-ct" }
+    : {}),
   priceEstimate: {
     currency: "USD",
     ...(index === 1
@@ -821,6 +824,14 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(
         firstCourse.getByRole("link", { name: /Open official site for/i })
       ).toBeVisible();
+      await expect(
+        firstCourse.getByRole("link", {
+          name: "View course guide for Tashua Knolls Golf Course"
+        })
+      ).toHaveAttribute("href", "/courses/tashua-knolls-golf-course-trumbull-ct");
+      await expect(
+        page.locator(".course-row").nth(1).getByRole("link", { name: /View course guide for/i })
+      ).toHaveCount(0);
     }
     const firstCourseCardLayout = await firstCourse.evaluate((card) => {
       const thumbnail = card.querySelector<HTMLElement>(".course-thumbnail");
@@ -965,6 +976,7 @@ test.describe("Tee Time Spot UI smoke", () => {
               latitude: 40.744,
               longitude: -73.456,
               distanceMeters: 78000,
+              profileUrl: "/courses/bethpage-black-course-farmingdale-ny",
               website: "https://parks.ny.gov/golf/11/details.aspx"
             },
             {
@@ -1000,6 +1012,11 @@ test.describe("Tee Time Spot UI smoke", () => {
       missingCourseResults.getByText("Photo unavailable"),
       "photo-less lookup results should show an intentional placeholder instead of an empty media block"
     ).toHaveCount(3);
+    await expect(
+      missingCourseResults
+        .filter({ has: page.getByRole("heading", { name: "Bethpage Black Course" }) })
+        .getByRole("link", { name: "View course guide for Bethpage Black Course" })
+    ).toHaveAttribute("href", "/courses/bethpage-black-course-farmingdale-ny");
     const blockedCourseResult = missingCourseResults.filter({
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });

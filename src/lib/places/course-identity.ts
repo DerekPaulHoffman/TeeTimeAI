@@ -103,7 +103,7 @@ export function findUniqueGenericCourseMatch<T extends CourseIdentity>(
   }
 
   const stronglyLinkedCandidates = nearbyCandidates.filter((candidate) =>
-    haveStrongIdentityLink(genericCourse, candidate)
+    haveStrongCourseIdentityLink(genericCourse, candidate)
   );
   return stronglyLinkedCandidates.length === 1 ? stronglyLinkedCandidates[0] : undefined;
 }
@@ -142,7 +142,7 @@ function isLayoutDistinguishingToken(token: string) {
   return LAYOUT_DISTINGUISHING_TOKENS.has(token) || /^\d+$/.test(token);
 }
 
-function haveStrongIdentityLink(left: CourseIdentity, right: CourseIdentity) {
+export function haveStrongCourseIdentityLink(left: CourseIdentity, right: CourseIdentity) {
   return (
     haveSameWebsiteHost(left.website, right.website) ||
     haveSamePhone(left.phone, right.phone) ||

@@ -134,6 +134,96 @@ describe("course alert support enrichment", () => {
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
   });
 
+  it("uses a uniquely linked confirmed facility instead of an unreviewed exact-id duplicate", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-tashua-confirmed",
+        googlePlaceId: "demo-tashua-knolls",
+        name: "Tashua Knolls Golf Course",
+        address: "40 Tashua Knolls Ln, Trumbull, CT",
+        latitude: 41.242,
+        longitude: -73.209,
+        website: "https://www.tashuaknolls.com/",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+        profile: {
+          canonicalSlug: "tashua-knolls-golf-course-trumbull-ct",
+          status: "PUBLISHED"
+        }
+      },
+      {
+        id: "course-tashua-unreviewed",
+        googlePlaceId: "google-tashua-facility",
+        name: "Tashua Knolls & Tashua Glen Golf Course",
+        address: "40 Tashua Knolls Ln, Trumbull, CT 06611, USA",
+        latitude: 41.2888889,
+        longitude: -73.2494444,
+        website: "http://www.tashuaknolls.com/",
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN"
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "google-tashua-facility",
+        name: "Tashua Knolls & Tashua Glen Golf Course",
+        address: "40 Tashua Knolls Ln, Trumbull, CT 06611, USA",
+        latitude: 41.2888889,
+        longitude: -73.2494444,
+        timeZone: "America/New_York",
+        website: "http://www.tashuaknolls.com/"
+      }
+    ]);
+
+    expect(course.courseId).toBe("course-tashua-confirmed");
+    expect(course.monitoringSupport).toBe("AUTOMATIC");
+    expect(course.website).toBe(
+      "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
+    );
+    expect(course.profileUrl).toBe("/courses/tashua-knolls-golf-course-trumbull-ct");
+  });
+
+  it("does not bypass an explicitly blocked exact course", () => {
+    const blockedExact = {
+      id: "blocked-exact",
+      googlePlaceId: "blocked-place",
+      name: "Example Golf Course",
+      address: "1 Clubhouse Rd, Example, CT",
+      latitude: 41.5,
+      longitude: -73.2,
+      website: "https://example-golf.test/",
+      bookingMethod: "OFFICIAL_SITE" as const,
+      automationEligibility: "BLOCKED"
+    };
+    const nearbyAllowed = {
+      id: "nearby-allowed",
+      googlePlaceId: "allowed-place",
+      name: "Example Golf Course",
+      address: "1 Clubhouse Rd, Example, CT",
+      latitude: 41.5,
+      longitude: -73.2,
+      website: "https://example-golf.test/",
+      bookingMethod: "PUBLIC_ONLINE" as const,
+      automationEligibility: "ALLOWED"
+    };
+
+    expect(
+      findKnownCourse(
+        {
+          googlePlaceId: "blocked-place",
+          name: "Example Golf Course",
+          address: "1 Clubhouse Rd, Example, CT",
+          latitude: 41.5,
+          longitude: -73.2,
+          website: "https://example-golf.test/"
+        },
+        [blockedExact, nearbyAllowed]
+      )
+    ).toBe(blockedExact);
+  });
+
   it("matches an alternate place id only when name and coordinates agree", () => {
     const blocked = {
       googlePlaceId: "fairview-farm",

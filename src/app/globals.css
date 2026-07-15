@@ -3280,6 +3280,25 @@ button {
   text-underline-offset: 3px;
 }
 
+.search-page .figma-course-list .course-profile-link {
+  align-items: center;
+  color: #1f7a4d;
+  display: inline-flex;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  gap: 4px;
+  min-height: 28px;
+  text-decoration: none;
+  width: max-content;
+}
+
+.search-page .figma-course-list .course-profile-link:hover,
+.search-page .figma-course-list .course-profile-link:focus-visible {
+  color: #105338;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .search-page .figma-course-list .course-address-link,
 .search-page .figma-course-list .course-copy > .meta {
   color: #8fa89c;
@@ -3649,6 +3668,10 @@ button {
   font-weight: 800;
   gap: 4px;
   min-height: 30px;
+}
+
+.missing-course-secondary-actions > .course-profile-link {
+  color: #1f7a4d;
 }
 
 .missing-course-secondary-actions .course-report-button {
@@ -6262,6 +6285,7 @@ button {
 
   .search-page .figma-course-list .course-actions .button-ghost,
   .search-page .figma-course-list .figma-add-button,
+  .search-page .figma-course-list .course-profile-link,
   .missing-course-result .figma-add-button,
   .figma-hole-options button,
   .figma-reset-filters {

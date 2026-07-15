@@ -7,6 +7,7 @@ import {
   findUniqueGenericCourseMatch,
   getCourseDistanceMeters,
   haveCompatibleCourseNames,
+  haveStrongCourseIdentityLink,
   isGenericCourseName,
   type CourseIdentity
 } from "@/lib/places/course-identity";
@@ -90,11 +91,20 @@ function mapCourseAlertSupport(
 }
 
 export function findKnownCourse(
-  candidate: Pick<CourseCandidate, "googlePlaceId" | "name" | "latitude" | "longitude">,
+  candidate: Pick<
+    CourseCandidate,
+    | "googlePlaceId"
+    | "name"
+    | "address"
+    | "latitude"
+    | "longitude"
+    | "website"
+    | "phone"
+  >,
   courses: KnownCourseRecord[]
 ) {
   const exact = courses.find((course) => course.googlePlaceId === candidate.googlePlaceId);
-  if (exact) {
+  if (exact?.automationEligibility === "ALLOWED" || exact?.automationEligibility === "BLOCKED") {
     return exact;
   }
 
@@ -103,6 +113,18 @@ export function findKnownCourse(
       Math.abs(course.latitude - candidate.latitude) <= COURSE_MATCH_COORDINATE_TOLERANCE &&
       Math.abs(course.longitude - candidate.longitude) <= COURSE_MATCH_COORDINATE_TOLERANCE
   );
+  const linkedAllowedCourses = nearbyCourses.filter(
+    (course) =>
+      course.automationEligibility === "ALLOWED" &&
+      haveCompatibleCourseNames(candidate.name, course.name) &&
+      haveStrongCourseIdentityLink(candidate, course)
+  );
+  if (linkedAllowedCourses.length === 1) {
+    return linkedAllowedCourses[0];
+  }
+  if (exact) {
+    return exact;
+  }
   if (isGenericCourseName(candidate.name)) {
     return findUniqueGenericCourseMatch(candidate, nearbyCourses);
   }
