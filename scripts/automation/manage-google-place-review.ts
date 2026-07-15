@@ -3,6 +3,7 @@ import "./load-local-env";
 import { pathToFileURL } from "node:url";
 
 import { prisma } from "@/lib/prisma";
+import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import type {
   GooglePlaceAccessOverrideValue,
   GooglePlaceReviewRecord
@@ -67,6 +68,7 @@ export type GooglePlaceReviewCommandResult =
       mode: "applied";
       action: "upsert" | "deactivate";
       googlePlaceId: string;
+      reconciledCourseIds?: string[];
     };
 
 export function parseGooglePlaceReviewCommand(
@@ -191,6 +193,37 @@ export async function executeGooglePlaceReviewCommand(
     create: command.review,
     update: reviewData
   });
+
+  if (command.review.accessOverride === "VERIFIED_NON_COURSE") {
+    const course = await prisma.course.findUnique({
+      where: { googlePlaceId },
+      select: { id: true, name: true }
+    });
+    if (course) {
+      await prisma.course.update({
+        where: { id: course.id },
+        data: {
+          isPublic: false,
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          policyNotes: `Verified non-course Google Place review: ${command.review.classification}. Evidence: ${command.review.evidenceUrl}`,
+          intelligenceVerifiedAt: command.review.reviewedAt,
+          intelligenceConfidence: 1
+        }
+      });
+      await resolveCourseSupportIncident({
+        courseId: course.id,
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        message: `${course.name} was verified as a non-course listing (${command.review.classification}).`
+      });
+      return {
+        mode: "applied",
+        action: "upsert",
+        googlePlaceId,
+        reconciledCourseIds: [course.id]
+      };
+    }
+  }
 
   return { mode: "applied", action: "upsert", googlePlaceId };
 }

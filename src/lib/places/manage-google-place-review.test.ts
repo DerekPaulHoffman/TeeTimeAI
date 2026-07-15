@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
+import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 
 import {
   executeGooglePlaceReviewCommand,
@@ -13,11 +14,19 @@ vi.mock("@/lib/prisma", () => ({
       upsert: vi.fn(),
       updateMany: vi.fn()
     },
+    course: {
+      findUnique: vi.fn(),
+      update: vi.fn()
+    },
     $disconnect: vi.fn()
   }
 }));
+vi.mock("@/lib/automation/support-incidents", () => ({
+  resolveCourseSupportIncident: vi.fn()
+}));
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
+const mockedResolveCourseSupportIncident = vi.mocked(resolveCourseSupportIncident);
 
 describe("Google Place review operator command", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -111,6 +120,53 @@ describe("Google Place review operator command", () => {
         create: expect.objectContaining({ active: true })
       })
     );
+  });
+
+  it("reconciles a verified non-course review into persisted course and incident state", async () => {
+    mockedPrisma.googlePlaceReview.upsert.mockResolvedValue({} as never);
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "harmony-course",
+      name: "The Harmony Golf Club"
+    } as never);
+    mockedPrisma.course.update.mockResolvedValue({} as never);
+    mockedResolveCourseSupportIncident.mockResolvedValue(null);
+    const command = parseGooglePlaceReviewCommand([
+      "upsert",
+      "--place-id",
+      "ChIJV_YX1RG11okRxSmNMNmBRrY",
+      "--access-override",
+      "VERIFIED_NON_COURSE",
+      "--name",
+      "The Harmony Golf Club",
+      "--classification",
+      "INDOOR_SIMULATOR",
+      "--evidence-url",
+      "https://theharmonygolfclub.com/",
+      "--reviewed-at",
+      "2026-07-15",
+      "--apply"
+    ]);
+
+    await expect(executeGooglePlaceReviewCommand(command)).resolves.toEqual({
+      mode: "applied",
+      action: "upsert",
+      googlePlaceId: "ChIJV_YX1RG11okRxSmNMNmBRrY",
+      reconciledCourseIds: ["harmony-course"]
+    });
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith({
+      where: { id: "harmony-course" },
+      data: expect.objectContaining({
+        isPublic: false,
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        intelligenceConfidence: 1
+      })
+    });
+    expect(mockedResolveCourseSupportIncident).toHaveBeenCalledWith({
+      courseId: "harmony-course",
+      resolution: "DIRECT_BOOKING_CLASSIFIED",
+      message: "The Harmony Golf Club was verified as a non-course listing (INDOOR_SIMULATOR)."
+    });
   });
 
   it("deactivates an existing review only when applied", async () => {

@@ -44,6 +44,11 @@ const TEST_REVIEW_INDEX = buildGooglePlaceReviewIndex([
   ),
   ...[
     ["ChIJaWYTRqBbwokRONcYEIxCk1k", "NEXUS Golf Club", "INDOOR_SIMULATOR"],
+    [
+      "ChIJV_YX1RG11okRxSmNMNmBRrY",
+      "The Harmony Golf Club",
+      "INDOOR_SIMULATOR"
+    ],
     ["ChIJ7dQcqrv5wokRIats-Rg1dZo", "BackyardSwingsStudio", "NON_COURSE_BUSINESS"],
     ["ChIJdZB9I4hhwokRFfvXRLrWvi8", "Q5C9+8VQ New York", "NON_COURSE_BUSINESS"],
     ["ChIJy4_CTDEtDogR9wxAr-a-VGI", "Chicago Golf Authority", "INDOOR_SIMULATOR"],
@@ -755,6 +760,63 @@ describe("Google Places mapping", () => {
     );
 
     expect(places).toEqual([]);
+  });
+
+  it("filters Harmony's exact Rochester simulator while preserving nearby public courses", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJV_YX1RG11okRxSmNMNmBRrY",
+          displayName: { text: "The Harmony Golf Club" },
+          formattedAddress: "274 N Goodman St Ste D308, Rochester, NY 14610, USA",
+          primaryType: "golf_course",
+          types: [
+            "golf_course",
+            "sports_club",
+            "association_or_organization",
+            "athletic_field",
+            "sports_activity_location"
+          ],
+          businessStatus: "OPERATIONAL",
+          location: { latitude: 43.1586496, longitude: -77.5853794 }
+        },
+        makeOperationalGolfCoursePlace({
+          id: "genesee-valley",
+          name: "Genesee Valley Golf Course",
+          address: "1000 E River Rd, Rochester, NY 14623, USA",
+          latitude: 43.112,
+          longitude: -77.655
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "durand-eastman",
+          name: "Durand Eastman Golf Course",
+          address: "1200 Kings Hwy N, Rochester, NY 14617, USA",
+          latitude: 43.233,
+          longitude: -77.558
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "eagle-vale",
+          name: "Eagle Vale Golf Club",
+          address: "4344 Fairport Nine Mile Point Rd, Fairport, NY 14450, USA",
+          latitude: 43.071,
+          longitude: -77.442
+        })
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJV_YX1RG11okRxSmNMNmBRrY",
+          "genesee-valley",
+          "durand-eastman",
+          "eagle-vale"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Genesee Valley Golf Course",
+      "Durand Eastman Golf Course",
+      "Eagle Vale Golf Club"
+    ]);
   });
 
   it("filters provider-labeled private courses while preserving public and verified controls", () => {

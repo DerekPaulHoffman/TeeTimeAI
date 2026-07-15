@@ -1,5 +1,13 @@
 # UX Research Notes
 
+## 2026-07-15 - Exact non-course reviews must reconcile saved course state
+
+- Sources: [The Harmony Golf Club's official site](https://theharmonygolfclub.com/), accessed July 15, 2026, calls the Rochester venue a private indoor golf simulator at 274 N Goodman Street, Suite D308. The [New York State Golf Association indoor-facilities directory](https://nysga.org/competitions-where-to-play-indoor-facilities), accessed the same day, independently lists The Harmony Golf Club under Rochester indoor facilities.
+- Tee Time Spot evidence: Google Places currently labels the exact Rochester place `ChIJV_YX1RG11okRxSmNMNmBRrY` as `primaryType: golf_course`, so it survived typed discovery, became ranked synthetic demand, and opened an adapter incident despite not being a physical course. Production Rochester discovery returned 19 results before review, including the simulator.
+- Decision: keep exact evidence-backed non-course corrections in `GooglePlaceReview`, and make the dry-run-first operator command reconcile any already-persisted `Course` row to non-public, blocked state while resolving its support incident. Do not add a broad name, club, address, or suite-number heuristic from one example.
+- Preservation: after the review, Rochester discovery returned 18 results; only Harmony disappeared. Genesee Valley, Durand Eastman, Shore Acres, Eagle Vale, resort/multi-layout results, and all other prior results stayed present. A focused search check recorded Harmony as `BLOCKED_POLICY`, retained four supported physical controls, sent no alert, and left zero pending alerts.
+- Rotation evidence: signed-out production ZIP `87901` returned two New Mexico results on desktop and 320px mobile. Both sessions retained the `AUTOMATION` marker; screenshots, add/remove ranking, images, console/network state, and horizontal overflow were clean. The generic `Golf Course` result is a ranked follow-up requiring separate identity evidence.
+
 ## 2026-07-15 - Keep TenFore booking public without bypassing captcha protection
 
 - Source: Gainfield Farms Golf Course's official site, accessed July 15, 2026, links `https://fox.tenfore.golf/gainfieldfarms` as “Book Tee Time.” The signed-out TenFore page visibly returned dated tee times, player capacity, hole counts, and online-booking cards without requiring an account.
