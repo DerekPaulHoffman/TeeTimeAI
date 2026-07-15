@@ -63,6 +63,37 @@ describe("course alert support enrichment", () => {
     expect(course.monitoringSupport).toBe("MANUAL_ONLY");
   });
 
+  it("keeps an unconfirmed Whoosh course selectable while linking its verified booking page", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        googlePlaceId: "yale-golf",
+        name: "Yale University Golf Course",
+        latitude: 41.3187,
+        longitude: -72.9854,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        detectedBookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course"
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "yale-golf",
+        name: "Yale University Golf Course",
+        latitude: 41.3187,
+        longitude: -72.9854,
+        timeZone: "America/New_York",
+        website: "http://yalegolf.yale.edu/"
+      }
+    ]);
+
+    expect(course.website).toBe(
+      "https://app.whoosh.io/patron/club/yale-golf-course"
+    );
+    expect(course.monitoringSupport).toBe("UNCONFIRMED");
+    expect(course.alertSupport).toBeUndefined();
+  });
+
   it("only claims automatic monitoring for a known allowed course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

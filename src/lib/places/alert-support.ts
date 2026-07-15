@@ -18,6 +18,7 @@ const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 type KnownCourseRecord = CourseIdentity & {
   bookingMethod: BookingMethod;
   automationEligibility: string;
+  detectedBookingUrl?: string | null;
 };
 
 export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[]) {
@@ -48,7 +49,8 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
       website: true,
       phone: true,
       bookingMethod: true,
-      automationEligibility: true
+      automationEligibility: true,
+      detectedBookingUrl: true
     }
   });
 
@@ -66,10 +68,14 @@ function mapCourseAlertSupport(
     return { ...candidate, monitoringSupport };
   }
 
+  const candidateWithOfficialBooking =
+    course.bookingMethod === "PUBLIC_ONLINE" && course.detectedBookingUrl
+      ? { ...candidate, website: course.detectedBookingUrl }
+      : candidate;
   const alertSupport = getCourseAlertSupport(course);
   return alertSupport
-    ? { ...candidate, alertSupport, monitoringSupport }
-    : { ...candidate, monitoringSupport };
+    ? { ...candidateWithOfficialBooking, alertSupport, monitoringSupport }
+    : { ...candidateWithOfficialBooking, monitoringSupport };
 }
 
 export function findKnownCourse(
