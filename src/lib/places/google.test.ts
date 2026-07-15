@@ -53,7 +53,8 @@ const TEST_REVIEW_INDEX = buildGooglePlaceReviewIndex([
     ["ChIJ9zQbdAC72YgRyrZQ5alj1h4", "PGA TOUR Deliveries", "RETAIL_OR_DELIVERY"],
     ["ChIJbV3-V-av2YgRGc2i3GxAjEY", "Golf Miami 305", "INDOOR_SIMULATOR"],
     ["ChIJw4LoQ3TL4YkR--PVXKkrk7I", "The Barn At Fox Run", "NON_COURSE_VENUE"],
-    ["ChIJu4ODUC01oFQRrHyJkM_URz4", "PARTEE GOLF AND GAMES, LLC", "INDOOR_SIMULATOR"]
+    ["ChIJu4ODUC01oFQRrHyJkM_URz4", "PARTEE GOLF AND GAMES, LLC", "INDOOR_SIMULATOR"],
+    ["ChIJa52pBnx754gRry26du_jGzo", "BagBoyz2", "NON_COURSE_USER_PLACE"]
   ].map(([googlePlaceId, name, classification]) =>
     testReview({
       googlePlaceId,
@@ -737,6 +738,66 @@ describe("Google Places mapping", () => {
     );
 
     expect(places).toEqual([]);
+  });
+
+  it("filters the exact BagBoyz2 non-course while preserving Orlando public-course controls", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJa52pBnx754gRry26du_jGzo",
+        name: "BagBoyz2",
+        address: "401 Golfview St, Orlando, FL 32804, USA",
+        latitude: 28.5638655,
+        longitude: -81.389342
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJLT54-35654gRFv8axnThb4w",
+        name: "Dubsdread Golf Course",
+        address: "549 W Par St, Orlando, FL 32804, USA",
+        latitude: 28.5827337,
+        longitude: -81.3870569,
+        websiteUri: "https://www.historicaldubsdread.com/"
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJZbxj1RVw54gRaBEj0ep2cgA",
+        name: "Winter Park Golf Course",
+        address: "761 Old England Ave, Winter Park, FL 32789, USA",
+        latitude: 28.6036803,
+        longitude: -81.3485347,
+        websiteUri: "https://cityofwinterpark.org/departments/parks-recreation/golf-course/"
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJ44Xwt6qA3YgRdgyVqjRvKiE",
+        name: "The Ritz-Carlton Golf Club, Orlando, Grande Lakes",
+        address: "4040 Central Florida Pkwy, Orlando, FL 32837, USA",
+        latitude: 28.4109,
+        longitude: -81.432,
+        websiteUri: "https://www.ritzcarlton.com/en/hotels/mcorz-the-ritz-carlton-orlando-grande-lakes/golf/"
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "similar-bag-boyz-public-course",
+        name: "Bag Boyz Golf Course",
+        address: "100 Public Links Dr, Orlando, FL 32801, USA",
+        latitude: 28.54,
+        longitude: -81.38,
+        websiteUri: "https://example.com/bag-boyz-golf-course"
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJHRdhRQt16IkRnZxbawELtdM",
+        name: "Grassy Hill Country Club",
+        address: "441 Clark Ln, Orange, CT 06477, USA",
+        latitude: 41.2675142,
+        longitude: -73.044987,
+        websiteUri: "https://grassyhillcountryclub.com/"
+      })
+    ]);
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Dubsdread Golf Course",
+      "Winter Park Golf Course",
+      "The Ritz-Carlton Golf Club, Orlando, Grande Lakes",
+      "Bag Boyz Golf Course",
+      "Grassy Hill Country Club"
+    ]);
   });
 
   it("filters the verified ParTee simulator while preserving state-border public-course controls", () => {
