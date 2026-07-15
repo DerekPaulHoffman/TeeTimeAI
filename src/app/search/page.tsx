@@ -1,17 +1,15 @@
-import type { Metadata } from "next";
 import Image from "next/image";
 
 import { TeeTimeIntake } from "@/components/tee-time-intake";
 import { hasClerkConfig } from "@/lib/env";
-import { siteDescription } from "@/lib/seo";
+import { buildPageMetadata } from "@/lib/seo";
 
-export const metadata: Metadata = {
+export const metadata = buildPageMetadata({
   title: "Search Tee Times",
-  description: siteDescription,
-  alternates: {
-    canonical: "/search"
-  }
-};
+  description:
+    "Search nearby public golf courses, rank up to five, and set a free email alert for the date, time window, and group size you want.",
+  path: "/search"
+});
 
 export default function SearchPage() {
   return (

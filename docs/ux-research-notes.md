@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-15 - Keep public search social metadata self-consistent
+
+- Source: the [Next.js `generateMetadata` reference](https://nextjs.org/docs/app/api-reference/functions/generate-metadata), updated March 25, 2026, documents that metadata is shallowly merged by route segment and that a child page inherits the full parent `openGraph` object when it does not define one.
+- Tee Time Spot evidence: production `/search` had the correct document title and canonical URL, but its Open Graph and Twitter title remained `Tee Time Spot | Public Golf Tee Time Alerts` and `og:url` remained the homepage. A shared high-intent search link therefore described a different page even though the repository already had a page-metadata helper used by the other public routes.
+- Decision: build `/search` metadata through the shared helper so canonical, Open Graph, and Twitter fields all identify `https://teetimespot.com/search`, retain the shared 1200x630 image, and use search-specific alert-setup copy.
+- Rotation evidence: signed-out production ZIP `96134` returned no courses at 15 miles and Indian Camp Golf Course at 30 miles on 1440x1000 desktop and 320x800 mobile. The marked `AUTOMATION` sessions showed a clear widen-search recovery, stable add/rank behavior, zero horizontal overflow, no broken images or same-origin HTTP failures, and no saved demand.
+
 ## 2026-07-15 - Distinguish direct online booking from automatic monitoring
 
 - Evidence: public `BROKEN` feedback on Yale University Golf Course said the "Official site only" status was incorrect because the linked course flow supports booking. Production reproduction showed the card linking to Yale's official course site while using the generic manual-only label.

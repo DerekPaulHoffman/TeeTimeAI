@@ -16,6 +16,8 @@ Last updated: 2026-07-14
 
 ## Verified
 
+- 2026-07-15 hourly product loop made the public `/search` route self-consistent across document, canonical, Open Graph, and Twitter metadata. Production evidence showed the route previously inherited the homepage social title and `og:url` because Next.js shallowly merges nested metadata; the route now uses the shared page-metadata helper with search-specific alert-setup copy and a focused regression test.
+
 - 2026-07-15 hourly product loop hardened portfolio preparation so repeated authenticated-coverage gaps remain ranked with concrete unblock actions without terminally preempting the required evidence rotation. Coverage-only and otherwise healthy first passes now return nonterminal `exploration_required`; pending alerts, real-demand support incidents, actionable probes, and shippable feedback/browser/email/performance/metadata/security/research candidates keep their existing priority. Focused tests cover empty and healthy active queues, coverage-only ranking, and selection of a lower-priority shippable signal while the coverage gap remains visible.
 
 - 2026-07-15 hourly product loop closes the bounded legacy residue left when default one-check synthetic scheduling shipped. A targeted migration completes only pre-deployment `TEST`/`AUTOMATION` searches that did not opt into multi-cycle mode and already have durable `CourseProbe` evidence; it does not touch `PUBLIC`/`UNCLASSIFIED` demand, explicit multi-cycle tests, or synthetic rows without check evidence. Pre-migration production readback found ten eligible TEST searches waiting as late as July 30 with five to seven probes each.
