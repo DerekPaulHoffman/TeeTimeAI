@@ -3200,7 +3200,7 @@ button {
 }
 
 .search-page .figma-course-list .course-copy {
-  align-self: center;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
   gap: 4px;
