@@ -17,6 +17,7 @@ export type AutomationReason =
   | "OTHER";
 
 export type CourseAlertSupport =
+  | "DIRECT_ONLINE"
   | "OFFICIAL_SITE_ONLY"
   | "PHONE_ONLY"
   | "CONTACT_COURSE"
@@ -50,6 +51,9 @@ export function getCourseAlertSupport(input: {
   }
 
   switch (input.bookingMethod) {
+    case "PUBLIC_ONLINE":
+    case "ONLINE_OR_PHONE":
+      return "DIRECT_ONLINE";
     case "PHONE_ONLY":
       return "PHONE_ONLY";
     case "CONTACT_COURSE":
@@ -69,6 +73,8 @@ export function isManualOnlyAlertSupport(
 
 export function getAlertSupportLabel(alertSupport: CourseAlertSupport) {
   switch (alertSupport) {
+    case "DIRECT_ONLINE":
+      return "Book online directly";
     case "PHONE_ONLY":
       return "Phone only";
     case "CONTACT_COURSE":
@@ -82,6 +88,8 @@ export function getAlertSupportLabel(alertSupport: CourseAlertSupport) {
 
 export function getAlertSupportDescription(alertSupport: CourseAlertSupport) {
   switch (alertSupport) {
+    case "DIRECT_ONLINE":
+      return "Use the course's official booking page to check availability and book.";
     case "PHONE_ONLY":
       return "Call the course directly to check availability and book.";
     case "CONTACT_COURSE":

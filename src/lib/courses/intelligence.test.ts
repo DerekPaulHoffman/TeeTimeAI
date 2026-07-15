@@ -39,6 +39,22 @@ describe("course intelligence", () => {
         automationEligibility: "BLOCKED",
         bookingMethod: "PUBLIC_ONLINE"
       })
+    ).toBe("DIRECT_ONLINE");
+    expect(
+      getCourseAlertSupport({
+        automationEligibility: "BLOCKED",
+        bookingMethod: "ONLINE_OR_PHONE"
+      })
+    ).toBe("DIRECT_ONLINE");
+    expect(getAlertSupportLabel("DIRECT_ONLINE")).toBe("Book online directly");
+    expect(getAlertSupportDescription("DIRECT_ONLINE")).toContain(
+      "official booking page"
+    );
+    expect(
+      getCourseAlertSupport({
+        automationEligibility: "BLOCKED",
+        bookingMethod: "UNKNOWN"
+      })
     ).toBe("OFFICIAL_SITE_ONLY");
   });
 

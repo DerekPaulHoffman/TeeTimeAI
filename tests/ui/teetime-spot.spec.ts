@@ -888,6 +888,16 @@ test.describe("Tee Time Spot UI smoke", () => {
               distanceMeters: 44000,
               website: "https://fairviewfarmgc.com/",
               alertSupport: "PHONE_ONLY"
+            },
+            {
+              googlePlaceId: "ui-smoke-direct-online",
+              name: "Yale University Golf Course",
+              address: "200 Conrad Dr, New Haven, CT",
+              latitude: 41.3187,
+              longitude: -72.9854,
+              distanceMeters: 32000,
+              website: "https://app.whoosh.io/patron/club/yale-golf-course",
+              alertSupport: "DIRECT_ONLINE"
             }
           ]
         })
@@ -896,12 +906,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     const missingCourseInput = page.getByRole("searchbox", { name: "Course name", exact: true });
     await missingCourseInput.fill("Bethpage Black, Farmingdale NY");
     await page.getByRole("button", { name: "Find course" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "2 matches found" })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "3 matches found" })).toBeVisible();
     const missingCourseResults = page.locator(".missing-course-result");
     await expect(
       missingCourseResults.getByText("Photo unavailable"),
       "photo-less lookup results should show an intentional placeholder instead of an empty media block"
-    ).toHaveCount(2);
+    ).toHaveCount(3);
     const blockedCourseResult = missingCourseResults.filter({
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });
@@ -910,6 +920,18 @@ test.describe("Tee Time Spot UI smoke", () => {
       blockedCourseResult.getByRole("link", { name: /Open official site for Fairview Farm/i })
     ).toBeVisible();
     await expect(blockedCourseResult.locator(".figma-course-pill.is-public")).toHaveText("Public");
+    const directOnlineCourseResult = missingCourseResults.filter({
+      has: page.getByRole("heading", { name: "Yale University Golf Course" })
+    });
+    await expect(directOnlineCourseResult).toContainText("Book online directly");
+    await expect(directOnlineCourseResult).toContainText(
+      "official booking page to check availability and book"
+    );
+    await expect(
+      directOnlineCourseResult.getByRole("link", {
+        name: /Open official site for Yale University Golf Course/i
+      })
+    ).toHaveAttribute("href", "https://app.whoosh.io/patron/club/yale-golf-course");
     if (isMobile) {
       const resultBox = await blockedCourseResult.boundingBox();
       const thumbnailBox = await blockedCourseResult.locator(".course-thumbnail").boundingBox();

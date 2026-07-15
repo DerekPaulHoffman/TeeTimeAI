@@ -178,7 +178,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const intro =
     input.kind === "setup"
       ? hasDirectOnlyCourse
-        ? "Your alert is set. We’ll keep checking supported courses; courses marked Official site only or Phone only are not automatically monitored."
+        ? "Your alert is set. We’ll keep checking supported courses; courses marked Book online directly, Official site only, or Phone only are not automatically monitored."
         : hasWorkInProgressCourse
           ? "Your alert is set. We checked every selected course. Use the official link for courses marked Official site while we continue watching the courses we can monitor automatically."
         : "Your alert is set. We checked every selected course and will keep watching automatically."
@@ -381,14 +381,18 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
         ? "Contact course"
         : bookingAccess === "WALK_IN"
           ? "Walk-in only"
-          : "Official site only";
+          : bookingAccess === "BOOKING_PAGE"
+            ? "Book online directly"
+            : "Official site only";
     const detail = bookingAccess === "PHONE_ONLY"
       ? "We can’t automatically monitor this course. Call the course to check availability and book directly."
       : bookingAccess === "CONTACT_COURSE"
         ? "We can’t automatically monitor this course. Contact the course directly to check availability and book."
         : bookingAccess === "WALK_IN"
           ? "We can’t automatically monitor this course. Check with the course in person for availability and booking."
-          : `We can’t automatically monitor this course and won’t bypass its restrictions. Check the official site${course.phone ? " or call the course" : ""} to book directly.`;
+          : bookingAccess === "BOOKING_PAGE"
+            ? "We can’t automatically monitor this course and won’t bypass its account or access requirements. Use the official booking page to book directly."
+            : `We can’t automatically monitor this course and won’t bypass its restrictions. Check the official site${course.phone ? " or call the course" : ""} to book directly.`;
     return {
       monitoringLabel,
       stateLabel: "Direct booking required",

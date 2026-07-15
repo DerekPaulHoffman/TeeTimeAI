@@ -37,6 +37,32 @@ describe("course alert support enrichment", () => {
     expect(course.monitoringSupport).toBe("MANUAL_ONLY");
   });
 
+  it("distinguishes blocked online booking from courses without a direct booking mode", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        googlePlaceId: "yale-golf",
+        name: "Yale University Golf Course",
+        latitude: 41.3187,
+        longitude: -72.9854,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED"
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "yale-golf",
+        name: "Yale University Golf Course",
+        latitude: 41.3187,
+        longitude: -72.9854,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.alertSupport).toBe("DIRECT_ONLINE");
+    expect(course.monitoringSupport).toBe("MANUAL_ONLY");
+  });
+
   it("only claims automatic monitoring for a known allowed course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

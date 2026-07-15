@@ -41,4 +41,15 @@ describe("buildSearchSavedMessage", () => {
     expect(message).toContain("Walk-in Course is walk-in only");
     expect(message).toContain("They won't be checked automatically");
   });
+
+  it("tells golfers when online booking remains available without automatic monitoring", () => {
+    const message = buildSearchSavedMessage([
+      { name: "Yale University Golf Course", alertSupport: "DIRECT_ONLINE" }
+    ]);
+
+    expect(message).toContain(
+      "Yale University Golf Course can be booked online directly"
+    );
+    expect(message).toContain("won't be checked automatically");
+  });
 });

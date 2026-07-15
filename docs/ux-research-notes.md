@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-15 - Distinguish direct online booking from automatic monitoring
+
+- Evidence: public `BROKEN` feedback on Yale University Golf Course said the "Official site only" status was incorrect because the linked course flow supports booking. Production reproduction showed the card linking to Yale's official course site while using the generic manual-only label.
+- Current source check: Yale's official [2026 course page](https://yalebulldogs.com/sports/2026/2/24/yale-golf-course.aspx), published February 24, 2026, links to Whoosh for registration and booking. Yale's [2026 FAQ](https://yalebulldogs.com/sports/2026/2/27/faqs.aspx), published February 27, 2026, says all tee times must be booked online after registration. The account requirement remains a valid reason for Tee Time Spot not to automate retrieval.
+- Accessibility guidance: W3C's [WCAG 2.2 Headings and Labels guidance](https://www.w3.org/WAI/WCAG22/Understanding/headings-and-labels), updated March 9, 2026, says labels should describe their purpose; a generic site-only label did not communicate the available booking action.
+- Decision: classify blocked `PUBLIC_ONLINE` and `ONLINE_OR_PHONE` courses as `DIRECT_ONLINE`, present "Book online directly," and keep the explicit no-automatic-monitoring explanation. Preserve `OFFICIAL_SITE_ONLY` for blocked courses whose booking mode is unknown.
+
 ## 2026-07-15: Coverage blockers should inform exploration, not preempt it
 
 - Sources: [Vercel Runtime Logs](https://vercel.com/docs/logs/runtime), published 2026-02 and accessed 2026-07-15 America/New_York, documents environment, status-code, and branch filters for separating production incidents from expected traffic. [Prisma aggregation and grouping](https://www.prisma.io/docs/orm/prisma-client/queries/aggregation-grouping-summarizing), accessed 2026-07-15, recommends filtering records before grouping so the database returns only the evidence needed for a summary.

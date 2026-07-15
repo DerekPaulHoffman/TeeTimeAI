@@ -230,6 +230,35 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("keep watching automatically");
   });
 
+  it("separates direct online booking from automatic monitoring", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-1",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-18",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 4,
+      checkedAt: new Date("2026-07-15T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "yale-golf",
+          courseName: "Yale University Golf Course",
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 0,
+          bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingAccess: "BOOKING_PAGE"
+        }
+      ]
+    });
+
+    expect(html).toContain("Priority 1 · Book online directly");
+    expect(html).toContain("Use the official booking page to book directly");
+    expect(html).toContain("Open official booking page →");
+    expect(html).toContain("not automatically monitored");
+  });
+
   it("gives phone-only courses a clear direct-booking action", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-1",
