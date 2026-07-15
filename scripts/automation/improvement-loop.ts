@@ -27,6 +27,7 @@ import {
 } from "@/lib/automation/improvement";
 import { escalateCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
+import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 const PROMPT_VERSION = "tee-time-spot-improvement-loop-v10";
@@ -1049,6 +1050,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     prisma.teeSearch.count({
       where: {
         status: "ACTIVE",
+        trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
         date: {
           gte: today
         }
@@ -1058,7 +1060,8 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       where: {
         alertStatus: "PENDING",
         teeSearch: {
-          status: "ACTIVE"
+          status: "ACTIVE",
+          trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
         }
       },
       orderBy: {
@@ -1076,6 +1079,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         },
         teeSearch: {
           status: "ACTIVE",
+          trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
           date: {
             gte: today
           }
@@ -1096,6 +1100,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
             some: {
               teeSearch: {
                 status: "ACTIVE",
+                trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
                 date: { gte: today }
               }
             }

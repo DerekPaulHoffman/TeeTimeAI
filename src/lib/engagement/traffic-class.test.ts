@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   detectWebsiteTrafficClass,
+  isSyntheticWebsiteTrafficClass,
+  parseWebsiteTrafficClass,
   WEBSITE_TRAFFIC_CLASS_STORAGE_KEY
 } from "./traffic-class";
 
@@ -26,6 +28,22 @@ describe("detectWebsiteTrafficClass", () => {
     setWebdriver(true);
     window.sessionStorage.setItem(WEBSITE_TRAFFIC_CLASS_STORAGE_KEY, "TEST");
     expect(detectWebsiteTrafficClass()).toBe("TEST");
+  });
+});
+
+describe("traffic-class persistence", () => {
+  it("accepts only the bounded aggregate labels", () => {
+    expect(parseWebsiteTrafficClass("TEST")).toBe("TEST");
+    expect(parseWebsiteTrafficClass("AUTOMATION")).toBe("AUTOMATION");
+    expect(parseWebsiteTrafficClass("customer-123")).toBe("UNCLASSIFIED");
+    expect(parseWebsiteTrafficClass(null)).toBe("UNCLASSIFIED");
+  });
+
+  it("separates synthetic demand without treating unclassified demand as synthetic", () => {
+    expect(isSyntheticWebsiteTrafficClass("AUTOMATION")).toBe(true);
+    expect(isSyntheticWebsiteTrafficClass("TEST")).toBe(true);
+    expect(isSyntheticWebsiteTrafficClass("PUBLIC")).toBe(false);
+    expect(isSyntheticWebsiteTrafficClass("UNCLASSIFIED")).toBe(false);
   });
 });
 

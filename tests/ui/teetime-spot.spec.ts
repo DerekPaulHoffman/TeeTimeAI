@@ -1008,9 +1008,11 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     let saveRequestCount = 0;
     let lastSavePayload: Record<string, unknown> | null = null;
+    let lastSaveTrafficClass: string | undefined;
     await page.route("**/api/searches", async (route) => {
       saveRequestCount += 1;
       lastSavePayload = route.request().postDataJSON() as Record<string, unknown>;
+      lastSaveTrafficClass = route.request().headers()["x-tee-time-spot-traffic-class"];
       await route.fulfill({
         contentType: "application/json",
         status: 201,
@@ -1065,6 +1067,7 @@ test.describe("Tee Time Spot UI smoke", () => {
           additionalEmails: ["friend@example.com", "teammate@example.com"]
         })
       );
+      expect(lastSaveTrafficClass).toBe("AUTOMATION");
     } else {
       await expect(alertActionButton).toBeDisabled();
       await expect(

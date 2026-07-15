@@ -216,6 +216,7 @@ model TeeSearch {
   requestedLayoutHoles Int?
   cadenceMinutes       Int                @default(5)
   additionalEmails     String[]           @default([])
+  trafficClass         WebsiteTrafficClass @default(UNCLASSIFIED)
   status               SearchStatus       @default(ACTIVE)
   checkStatus          SearchCheckStatus  @default(IDLE)
   scheduleVersion      Int                @default(0)
@@ -235,6 +236,7 @@ model TeeSearch {
   @@index([status, date])
   @@index([status, nextCheckAt])
   @@index([userId, status])
+  @@index([trafficClass, status, date])
 }
 
 model CoursePreference {

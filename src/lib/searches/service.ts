@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, type WebsiteTrafficClass } from "@prisma/client";
 
 import {
   getCourseLayoutCompatibility,
@@ -35,7 +35,11 @@ export type TeeSearchUpdateInput = Partial<TeeSearchDetailsInput> & {
   status?: SearchStatus;
 };
 
-export async function createTeeSearchForUser(userId: string, input: TeeSearchInput) {
+export async function createTeeSearchForUser(
+  userId: string,
+  input: TeeSearchInput,
+  trafficClass: WebsiteTrafficClass = "UNCLASSIFIED"
+) {
   await assertQueueCapacity(userId);
 
   const sortedCourses = [...input.courses].sort((a, b) => a.rank - b.rank);
@@ -59,6 +63,7 @@ export async function createTeeSearchForUser(userId: string, input: TeeSearchInp
       requestedLayoutHoles: input.requestedLayoutHoles ?? null,
       cadenceMinutes: input.cadenceMinutes,
       additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
+      trafficClass,
       preferences: {
         create: coursePreferences
       }

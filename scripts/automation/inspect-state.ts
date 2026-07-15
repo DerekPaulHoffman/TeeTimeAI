@@ -5,6 +5,7 @@ import type { Prisma } from "@prisma/client";
 
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
+import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
@@ -117,7 +118,18 @@ async function main() {
           status: { not: "RESOLVED" }
         },
         orderBy: [{ status: "desc" }, { firstSeenAt: "asc" }],
-        include: { course: true }
+        include: {
+          course: {
+            include: {
+              preferences: {
+                where: { teeSearch: { status: "ACTIVE" } },
+                select: {
+                  teeSearch: { select: { trafficClass: true } }
+                }
+              }
+            }
+          }
+        }
       }),
       prisma.teeTimeMatch.findMany({
         orderBy: { firstSeenAt: "desc" },
@@ -226,7 +238,9 @@ async function main() {
           }
         })
       : [];
-  const currentActionableProbes = latestCurrentActionableProbes(recentActiveProbes);
+  const currentActionableProbes = latestCurrentActionableProbes(recentActiveProbes).filter(
+    (probe) => !isSyntheticWebsiteTrafficClass(probe.teeSearch.trafficClass)
+  );
   const courseIntelligenceReviews = [
     ...new Map(
       activeSearches
@@ -270,6 +284,7 @@ async function main() {
         },
         activeSearches: activeSearches.map((search) => ({
           id: search.id,
+          trafficClass: search.trafficClass,
           user: redactEmail(search.user.email),
           date: search.date.toISOString().slice(0, 10),
           window: `${search.startTime}-${search.endTime}`,
@@ -323,6 +338,7 @@ async function main() {
           automationReason: probe.course.automationReason,
           user: redactEmail(probe.teeSearch.user.email),
           searchId: probe.teeSearchId,
+          trafficClass: probe.teeSearch.trafficClass,
           automationRunId: probe.automationRunId,
           automationRunOutcome: probe.automationRun?.outcome ?? null,
           message: summarize(probe.message)
@@ -342,7 +358,14 @@ async function main() {
           ownerNotifiedAt: incident.ownerNotifiedAt,
           escalatedAt: incident.escalatedAt,
           latestMessage: summarize(incident.latestMessage),
-          nextAction: summarize(incident.nextAction)
+          nextAction: summarize(incident.nextAction),
+          activeDemandTrafficClasses: [
+            ...new Set(
+              incident.course.preferences.map(
+                (preference) => preference.teeSearch.trafficClass
+              )
+            )
+          ].sort()
         })),
         recentNotableProbes: recentNotableProbes.map((probe) => ({
           id: probe.id,
@@ -355,6 +378,7 @@ async function main() {
           automationReason: probe.course.automationReason,
           user: redactEmail(probe.teeSearch.user.email),
           searchId: probe.teeSearchId,
+          trafficClass: probe.teeSearch.trafficClass,
           automationRunId: probe.automationRunId,
           automationRunOutcome: probe.automationRun?.outcome ?? null,
           message: summarize(probe.message)

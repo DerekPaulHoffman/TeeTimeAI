@@ -68,21 +68,44 @@ describe("POST /api/searches", () => {
     mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1" });
     mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
 
-    const response = await POST(searchRequest("different-person@example.com"));
+    const response = await POST(searchRequest("different-person@example.com", "TEST"));
 
     expect(response.status).toBe(201);
     expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
       "app-user-1",
-      expect.objectContaining({ alertEmail: "owner@example.com" })
+      expect.objectContaining({ alertEmail: "owner@example.com" }),
+      "TEST"
     );
     expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
   });
+
+  it("fails closed to unclassified provenance for an unknown traffic label", async () => {
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({
+      id: "app-user-1",
+      email: "owner@example.com"
+    });
+    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1" });
+    mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
+
+    const response = await POST(searchRequest("owner@example.com", "visitor-123"));
+
+    expect(response.status).toBe(201);
+    expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
+      "app-user-1",
+      expect.any(Object),
+      "UNCLASSIFIED"
+    );
+  });
 });
 
-function searchRequest(alertEmail = "golfer@example.com") {
+function searchRequest(alertEmail = "golfer@example.com", trafficClass?: string) {
   return new NextRequest("http://localhost/api/searches", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(trafficClass ? { "x-tee-time-spot-traffic-class": trafficClass } : {})
+    },
     body: JSON.stringify({
       date: futureDate(),
       startTime: "09:00",

@@ -3,6 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
+import {
+  parseWebsiteTrafficClass,
+  WEBSITE_TRAFFIC_CLASS_HEADER
+} from "@/lib/engagement/traffic-class";
 import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/service";
 import { teeSearchInputSchema } from "@/lib/validation/search";
 
@@ -64,7 +68,10 @@ export async function POST(request: NextRequest) {
     const user = await getRequiredAppUser();
     const submittedInput = teeSearchInputSchema.parse(await request.json());
     const input = { ...submittedInput, alertEmail: user.email };
-    const search = await createTeeSearchForUser(user.id, input);
+    const trafficClass = parseWebsiteTrafficClass(
+      request.headers.get(WEBSITE_TRAFFIC_CLASS_HEADER)
+    );
+    const search = await createTeeSearchForUser(user.id, input, trafficClass);
     let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
     try {
       schedule = await startSearchSchedule(search.id);

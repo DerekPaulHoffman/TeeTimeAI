@@ -42,7 +42,10 @@ import {
   type CourseLayoutHoleCount
 } from "@/lib/courses/course-layout";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
-import { detectWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
+import {
+  detectWebsiteTrafficClass,
+  WEBSITE_TRAFFIC_CLASS_HEADER
+} from "@/lib/engagement/traffic-class";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import {
   CURRENT_LOCATION_LABEL,
@@ -748,7 +751,10 @@ function TeeTimeIntakeContent({
         Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York";
       const response = await fetch("/api/searches", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          [WEBSITE_TRAFFIC_CLASS_HEADER]: detectWebsiteTrafficClass()
+        },
         body: JSON.stringify({
           date,
           startTime,
