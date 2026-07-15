@@ -9,6 +9,10 @@ import {
   sendCourseSupportOperatorEmail,
   sendCourseSupportOperatorSummaryEmail
 } from "@/lib/email/alerts";
+import {
+  isSyntheticWebsiteTrafficClass,
+  syntheticWebsiteTrafficClasses
+} from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 import { withPostgresAdvisoryTextLease } from "./lease";
@@ -145,17 +149,54 @@ export async function escalateCourseSupportIncident(input: {
 
 async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
   const now = input.now ?? new Date();
-  const affectedSearchCount = await prisma.teeSearch.count({
-    where: {
-      status: "ACTIVE",
-      preferences: {
-        some: { courseId: input.course.id }
+  const [sourceSearch, affectedSearchCount, existing] = await Promise.all([
+    prisma.teeSearch.findUnique({
+      where: { id: input.searchId },
+      select: { trafficClass: true }
+    }),
+    prisma.teeSearch.count({
+      where: {
+        status: "ACTIVE",
+        trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+        preferences: {
+          some: { courseId: input.course.id }
+        }
       }
+    }),
+    prisma.courseSupportIncident.findUnique({
+      where: { courseId: input.course.id }
+    })
+  ]);
+
+  if (sourceSearch && isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass)) {
+    if (
+      existing &&
+      existing.status !== "RESOLVED" &&
+      affectedSearchCount === 0 &&
+      !existing.ownerNotifiedAt &&
+      !existing.escalationNotifiedAt
+    ) {
+      await prisma.courseSupportIncident.update({
+        where: { id: existing.id },
+        data: {
+          status: "RESOLVED",
+          resolvedAt: now,
+          resolution: null,
+          resolutionMessage:
+            "Closed because this course has only synthetic test demand.",
+          nextAction: null,
+          lastSeenAt: now
+        }
+      });
     }
-  });
-  const existing = await prisma.courseSupportIncident.findUnique({
-    where: { courseId: input.course.id }
-  });
+
+    return {
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    } satisfies CourseSupportIssueState;
+  }
+
   const bookingUrl = input.course.detectedBookingUrl ?? input.course.website;
   let incident: CourseSupportIncident;
 

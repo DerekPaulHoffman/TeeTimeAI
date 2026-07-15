@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
   $transaction: vi.fn(),
-  teeSearch: { count: vi.fn() },
+  teeSearch: { count: vi.fn(), findUnique: vi.fn() },
   courseSupportIncident: {
     findUnique: vi.fn(),
     findMany: vi.fn(),
@@ -67,6 +67,7 @@ describe("course support incidents", () => {
       worker({ $queryRawUnsafe: vi.fn().mockResolvedValue([{ locked: true }]) })
     );
     prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({ trafficClass: "UNCLASSIFIED" });
     emailMocks.sendCourseSupportOperatorEmail.mockResolvedValue({
       id: "email-1",
       deliveryStatus: "sent"
@@ -104,6 +105,105 @@ describe("course support incidents", () => {
       status: "AUTO_INVESTIGATING",
       ownerAlerted: false
     });
+    expect(prismaMocks.teeSearch.count).toHaveBeenCalledWith({
+      where: {
+        status: "ACTIVE",
+        trafficClass: { notIn: ["AUTOMATION", "TEST"] },
+        preferences: { some: { courseId: "course-1" } }
+      }
+    });
+  });
+
+  it("does not open support incidents for synthetic searches", async () => {
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({ trafficClass: "TEST" });
+    prismaMocks.teeSearch.count.mockResolvedValue(0);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Synthetic Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://example.com/"
+        },
+        searchId: "search-test",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.create).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+  });
+
+  it("closes an unnotified synthetic-only incident without hiding real demand", async () => {
+    const existing = incident();
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({ trafficClass: "AUTOMATION" });
+    prismaMocks.teeSearch.count.mockResolvedValue(0);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue({
+      ...existing,
+      status: "RESOLVED",
+      resolvedAt: now
+    });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Synthetic Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://example.com/"
+        },
+        searchId: "search-automation",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: {
+        status: "RESOLVED",
+        resolvedAt: now,
+        resolution: null,
+        resolutionMessage: "Closed because this course has only synthetic test demand.",
+        nextAction: null,
+        lastSeenAt: now
+      }
+    });
+  });
+
+  it("leaves a shared real-demand incident open during a synthetic check", async () => {
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({ trafficClass: "TEST" });
+    prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(incident());
+
+    await reportCourseSupportIssue({
+      course: {
+        id: "course-1",
+        name: "Shared Course",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://example.com/"
+      },
+      searchId: "search-test",
+      kind: "NEEDS_ADAPTER",
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
   });
 
   it("keeps an old unresolved incident in autonomous remediation", async () => {
