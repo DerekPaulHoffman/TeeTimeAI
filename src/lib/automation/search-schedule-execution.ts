@@ -9,6 +9,7 @@ import {
   getBookingWindowForTargetDate,
   type CourseBookingWindowFields
 } from "@/lib/courses/booking-window";
+import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
 
 const FALLBACK_BOOKING_WINDOW_LEAD_DAYS = 14;
@@ -52,20 +53,29 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
 
     const result = await runSearchCheck(searchId, "workflow");
     const refreshedTiming = await getSearchScheduleTiming(searchId, scheduleVersion);
-    const nextCheckAt = calculateNextCheckAt(
-      timing.date,
-      timing.cadenceMinutes,
-      new Date(),
-      searchExpiresAt,
-      refreshedTiming?.preferences.map((preference) => preference.course) ??
-        timing.preferences.map((preference) => preference.course),
-      result.supportRetryNeeded
-    );
+    const completeSyntheticSearch =
+      result.outcome === "success" &&
+      isSyntheticWebsiteTrafficClass(timing.trafficClass) &&
+      !timing.syntheticMultiCycle;
+    const nextCheckAt = completeSyntheticSearch
+      ? null
+      : calculateNextCheckAt(
+          timing.date,
+          timing.cadenceMinutes,
+          new Date(),
+          searchExpiresAt,
+          refreshedTiming?.preferences.map((preference) => preference.course) ??
+            timing.preferences.map((preference) => preference.course),
+          result.supportRetryNeeded
+        );
     await completeScheduledSearchCheck({
       searchId,
       scheduleVersion,
-      outcome: summarizeCheckOutcome(result),
-      nextCheckAt
+      outcome: completeSyntheticSearch
+        ? `${summarizeCheckOutcome(result)}; synthetic one-check complete`
+        : summarizeCheckOutcome(result),
+      nextCheckAt,
+      ...(completeSyntheticSearch ? { completeSearch: true } : {})
     });
     return {
       outcome: result.outcome,

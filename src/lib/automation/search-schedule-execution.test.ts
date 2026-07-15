@@ -35,6 +35,8 @@ describe("executeScheduledSearchCheck", () => {
       endTime: "09:00",
       userTimeZone: "America/New_York",
       cadenceMinutes: 5,
+      trafficClass: "UNCLASSIFIED",
+      syntheticMultiCycle: false,
       preferences: [{ course: { timeZone: "America/New_York" } }]
     });
 
@@ -49,6 +51,73 @@ describe("executeScheduledSearchCheck", () => {
       outcome: "search window ended",
       nextCheckAt: null,
       completeSearch: true
+    });
+  });
+
+  it("completes a synthetic search after one successful check by default", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
+    dbMocks.claimScheduledSearchCheck.mockResolvedValue(true);
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 5,
+      trafficClass: "TEST",
+      syntheticMultiCycle: false,
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 2,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: null
+    });
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith({
+      searchId: "search-1",
+      scheduleVersion: 3,
+      outcome: expect.stringContaining("synthetic one-check complete"),
+      nextCheckAt: null,
+      completeSearch: true
+    });
+  });
+
+  it("keeps an explicitly multi-cycle synthetic search on its normal cadence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
+    dbMocks.claimScheduledSearchCheck.mockResolvedValue(true);
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "AUTOMATION",
+      syntheticMultiCycle: true,
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-07-15T12:15:00.000Z"
+    });
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith({
+      searchId: "search-1",
+      scheduleVersion: 3,
+      outcome: expect.any(String),
+      nextCheckAt: new Date("2026-07-15T12:15:00.000Z")
     });
   });
 });

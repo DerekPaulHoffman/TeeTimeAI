@@ -74,7 +74,8 @@ describe("POST /api/searches", () => {
     expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
       "app-user-1",
       expect.objectContaining({ alertEmail: "owner@example.com" }),
-      "TEST"
+      "TEST",
+      false
     );
     expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
   });
@@ -94,17 +95,53 @@ describe("POST /api/searches", () => {
     expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
       "app-user-1",
       expect.any(Object),
-      "UNCLASSIFIED"
+      "UNCLASSIFIED",
+      false
+    );
+  });
+
+  it("allows only synthetic searches to opt into recurring checks", async () => {
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({
+      id: "app-user-1",
+      email: "owner@example.com"
+    });
+    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1" });
+    mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
+
+    await POST(searchRequest("owner@example.com", "TEST", true));
+    await POST(searchRequest("owner@example.com", "PUBLIC", true));
+
+    expect(mocks.createTeeSearchForUser).toHaveBeenNthCalledWith(
+      1,
+      "app-user-1",
+      expect.any(Object),
+      "TEST",
+      true
+    );
+    expect(mocks.createTeeSearchForUser).toHaveBeenNthCalledWith(
+      2,
+      "app-user-1",
+      expect.any(Object),
+      "PUBLIC",
+      false
     );
   });
 });
 
-function searchRequest(alertEmail = "golfer@example.com", trafficClass?: string) {
+function searchRequest(
+  alertEmail = "golfer@example.com",
+  trafficClass?: string,
+  syntheticMultiCycle = false
+) {
   return new NextRequest("http://localhost/api/searches", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(trafficClass ? { "x-tee-time-spot-traffic-class": trafficClass } : {})
+      ...(trafficClass ? { "x-tee-time-spot-traffic-class": trafficClass } : {}),
+      ...(syntheticMultiCycle
+        ? { "x-tee-time-spot-synthetic-multi-cycle": "true" }
+        : {})
     },
     body: JSON.stringify({
       date: futureDate(),

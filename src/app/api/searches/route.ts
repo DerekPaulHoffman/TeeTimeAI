@@ -4,7 +4,9 @@ import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import {
+  parseSyntheticMultiCycle,
   parseWebsiteTrafficClass,
+  WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER,
   WEBSITE_TRAFFIC_CLASS_HEADER
 } from "@/lib/engagement/traffic-class";
 import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/service";
@@ -71,7 +73,16 @@ export async function POST(request: NextRequest) {
     const trafficClass = parseWebsiteTrafficClass(
       request.headers.get(WEBSITE_TRAFFIC_CLASS_HEADER)
     );
-    const search = await createTeeSearchForUser(user.id, input, trafficClass);
+    const syntheticMultiCycle = parseSyntheticMultiCycle(
+      request.headers.get(WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER),
+      trafficClass
+    );
+    const search = await createTeeSearchForUser(
+      user.id,
+      input,
+      trafficClass,
+      syntheticMultiCycle
+    );
     let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
     try {
       schedule = await startSearchSchedule(search.id);

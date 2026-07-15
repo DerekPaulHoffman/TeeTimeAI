@@ -584,6 +584,8 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
       userTimeZone: true,
       cadenceMinutes: true,
       scheduleVersion: true,
+      trafficClass: true,
+      syntheticMultiCycle: true,
       preferences: {
         select: {
           course: {

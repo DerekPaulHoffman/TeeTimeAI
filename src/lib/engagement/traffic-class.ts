@@ -1,5 +1,7 @@
 export const WEBSITE_TRAFFIC_CLASS_STORAGE_KEY = "tee-time-spot:traffic-class";
 export const WEBSITE_TRAFFIC_CLASS_HEADER = "x-tee-time-spot-traffic-class";
+export const WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER =
+  "x-tee-time-spot-synthetic-multi-cycle";
 
 export const websiteTrafficClasses = [
   "UNCLASSIFIED",
@@ -25,6 +27,13 @@ export function isSyntheticWebsiteTrafficClass(
   return syntheticWebsiteTrafficClasses.includes(
     value as (typeof syntheticWebsiteTrafficClasses)[number]
   );
+}
+
+export function parseSyntheticMultiCycle(
+  value: string | null | undefined,
+  trafficClass: WebsiteTrafficClassValue
+) {
+  return isSyntheticWebsiteTrafficClass(trafficClass) && value === "true";
 }
 
 /**

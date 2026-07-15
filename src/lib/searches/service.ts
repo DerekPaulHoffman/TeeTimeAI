@@ -38,7 +38,8 @@ export type TeeSearchUpdateInput = Partial<TeeSearchDetailsInput> & {
 export async function createTeeSearchForUser(
   userId: string,
   input: TeeSearchInput,
-  trafficClass: WebsiteTrafficClass = "UNCLASSIFIED"
+  trafficClass: WebsiteTrafficClass = "UNCLASSIFIED",
+  syntheticMultiCycle = false
 ) {
   await assertQueueCapacity(userId);
 
@@ -64,6 +65,7 @@ export async function createTeeSearchForUser(
       cadenceMinutes: input.cadenceMinutes,
       additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
       trafficClass,
+      syntheticMultiCycle,
       preferences: {
         create: coursePreferences
       }

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   detectWebsiteTrafficClass,
   isSyntheticWebsiteTrafficClass,
+  parseSyntheticMultiCycle,
   parseWebsiteTrafficClass,
   WEBSITE_TRAFFIC_CLASS_STORAGE_KEY
 } from "./traffic-class";
@@ -44,6 +45,14 @@ describe("traffic-class persistence", () => {
     expect(isSyntheticWebsiteTrafficClass("TEST")).toBe(true);
     expect(isSyntheticWebsiteTrafficClass("PUBLIC")).toBe(false);
     expect(isSyntheticWebsiteTrafficClass("UNCLASSIFIED")).toBe(false);
+  });
+
+  it("requires an explicit bounded opt-in for recurring synthetic checks", () => {
+    expect(parseSyntheticMultiCycle("true", "TEST")).toBe(true);
+    expect(parseSyntheticMultiCycle("true", "AUTOMATION")).toBe(true);
+    expect(parseSyntheticMultiCycle("false", "TEST")).toBe(false);
+    expect(parseSyntheticMultiCycle("true", "PUBLIC")).toBe(false);
+    expect(parseSyntheticMultiCycle("true", "UNCLASSIFIED")).toBe(false);
   });
 });
 

@@ -54,7 +54,12 @@ const TEST_REVIEW_INDEX = buildGooglePlaceReviewIndex([
     ["ChIJbV3-V-av2YgRGc2i3GxAjEY", "Golf Miami 305", "INDOOR_SIMULATOR"],
     ["ChIJw4LoQ3TL4YkR--PVXKkrk7I", "The Barn At Fox Run", "NON_COURSE_VENUE"],
     ["ChIJu4ODUC01oFQRrHyJkM_URz4", "PARTEE GOLF AND GAMES, LLC", "INDOOR_SIMULATOR"],
-    ["ChIJa52pBnx754gRry26du_jGzo", "BagBoyz2", "NON_COURSE_USER_PLACE"]
+    ["ChIJa52pBnx754gRry26du_jGzo", "BagBoyz2", "NON_COURSE_USER_PLACE"],
+    [
+      "ChIJOQuc9RPtMIgR33aMCl2HdBA",
+      "Big Met Golf Course Parking",
+      "NON_COURSE_PARKING"
+    ]
   ].map(([googlePlaceId, name, classification]) =>
     testReview({
       googlePlaceId,
@@ -892,6 +897,53 @@ describe("Google Places mapping", () => {
       "The Ritz-Carlton Golf Club, Orlando, Grande Lakes",
       "Bag Boyz Golf Course",
       "Grassy Hill Country Club"
+    ]);
+  });
+
+  it("filters the exact Big Met parking place while preserving public-course controls", () => {
+    const places = filterPublicGolfCoursePlaces([
+      makeOperationalGolfCoursePlace({
+        id: "ChIJOQuc9RPtMIgR33aMCl2HdBA",
+        name: "Big Met Golf Course Parking",
+        address: "Cleveland, OH 44135, USA",
+        latitude: 41.4472838,
+        longitude: -81.8387709
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJIddckhHtMIgRSZrZkh6uwkY",
+        name: "Big Met Golf Course",
+        address: "4811 Valley Pkwy, Fairview Park, OH 44126, USA",
+        latitude: 41.451927,
+        longitude: -81.848156
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "ChIJRa-DdAztMIgRG3quwtOychI",
+        name: "Little Met Golf Course",
+        address: "18599 Old Lorain Rd, Cleveland, OH 44111, USA",
+        latitude: 41.451423,
+        longitude: -81.832236
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "resort-control",
+        name: "The Coeur d'Alene Resort Golf Course",
+        address: "900 S Floating Green Dr, Coeur d'Alene, ID 83814, USA",
+        latitude: 47.6721,
+        longitude: -116.7608
+      }),
+      makeOperationalGolfCoursePlace({
+        id: "multi-layout-control",
+        name: "Pinehurst No. 2",
+        address: "1 Carolina Vista Dr, Pinehurst, NC 28374, USA",
+        latitude: 35.1955,
+        longitude: -79.4734
+      })
+    ]);
+
+    expect(places.map((place) => place.id)).toEqual([
+      "places/ChIJIddckhHtMIgRSZrZkh6uwkY",
+      "places/ChIJRa-DdAztMIgRG3quwtOychI",
+      "places/resort-control",
+      "places/multi-layout-control"
     ]);
   });
 
