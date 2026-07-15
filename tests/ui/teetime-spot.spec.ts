@@ -52,6 +52,7 @@ const smokeCourses = [
     observedAt: "2026-07-15T12:00:00.000Z"
   },
   rating: [4.3, 4.5, 4.1, 4.2, 4.0, 3.9, 4.2][index],
+  timeZone: "America/New_York",
   website: `https://example.com/course-${index + 1}`
 }));
 
@@ -291,6 +292,58 @@ test.describe("Tee Time Spot UI smoke", () => {
       "06825"
     );
     await expect(page.getByLabel("Players")).toHaveValue("2");
+  });
+
+  test("restores an unfinished course search after navigation and refresh", async ({ page }) => {
+    test.skip(!useMockedSearchProviders, "This persistence check uses deterministic course fixtures.");
+    await page.route("**/api/location/geocode?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ latitude: 41.24, longitude: -73.2 }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+    await page.route("**/api/courses/discover?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ courses: smokeCourses }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+    await mockSmokeCoursePhotos(page);
+
+    await page.goto("/search");
+    await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
+    await page.getByRole("button", { name: /^Search$/i }).click();
+    await expect(page.getByRole("heading", { name: smokeCourses[0].name }).first()).toBeVisible();
+    await page.getByRole("button", { name: `Add ${smokeCourses[0].name}` }).click();
+    await page.getByRole("button", { name: `Add ${smokeCourses[1].name}` }).click();
+    const moveSecondCourseUp = page.locator(
+      `button[aria-label="Move ${smokeCourses[1].name} up"]`
+    );
+    if (!(await moveSecondCourseUp.isVisible())) {
+      await page.locator(".mobile-selection-toggle").click();
+    }
+    await moveSecondCourseUp.click();
+
+    const selectedCourseNames = page.locator(".selected-list .selected-row h3");
+    await expect(selectedCourseNames).toHaveText([smokeCourses[1].name, smokeCourses[0].name]);
+    await expect.poll(() =>
+      page.evaluate(() => window.sessionStorage.getItem("tee-time-spot:search-draft:v1"))
+    ).toContain("ui-smoke-course-2");
+
+    await page.goto("/about");
+    await page.goto("/search");
+    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
+      "Trumbull, CT"
+    );
+    await expect(selectedCourseNames).toHaveText([smokeCourses[1].name, smokeCourses[0].name]);
+
+    await page.reload();
+    await expect(selectedCourseNames).toHaveText([smokeCourses[1].name, smokeCourses[0].name]);
+    await expect(
+      page.locator(`button[aria-label="Move ${smokeCourses[1].name} up"]`)
+    ).toBeDisabled();
   });
 
   test("restores validated direct-link search details on the static route", async ({ page }) => {

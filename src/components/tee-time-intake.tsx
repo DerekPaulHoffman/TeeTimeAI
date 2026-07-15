@@ -79,6 +79,11 @@ import {
   normalizeAdditionalAlertEmails
 } from "@/lib/searches/additional-emails";
 import {
+  clearSearchDraft,
+  readSearchDraft,
+  storeSearchDraft
+} from "@/lib/searches/search-draft";
+import {
   consumeSearchPrefill,
   readSearchPrefillFromUrl
 } from "@/lib/searches/search-prefill";
@@ -315,6 +320,7 @@ function TeeTimeIntakeContent({
   const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
   const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
   const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
+  const [draftReady, setDraftReady] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
   const nextAdditionalEmailIdRef = useRef(1);
@@ -322,25 +328,72 @@ function TeeTimeIntakeContent({
 
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
-    if (!transferred) {
+    const draft = transferred ? undefined : readSearchDraft();
+    const animationFrame = window.requestAnimationFrame(() => {
+      if (transferred) {
+        if (transferred.location !== undefined) setLocationText(transferred.location);
+        if (transferred.radius !== undefined) setSearchRadiusMiles(transferred.radius);
+        if (transferred.date !== undefined) setDate(transferred.date);
+        if (transferred.startTime !== undefined) setStartTime(transferred.startTime);
+        if (transferred.endTime !== undefined) setEndTime(transferred.endTime);
+        if (transferred.players !== undefined) setPlayers(transferred.players);
+        if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
+        if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
+        if (transferred.selectedCourse !== undefined) {
+          setSelected([transferred.selectedCourse]);
+          setCourses([transferred.selectedCourse]);
+          hasTrackedCourseSelectionRef.current = true;
+        }
+      } else if (draft) {
+        if (draft.location !== undefined) setLocationText(draft.location);
+        if (draft.radius !== undefined) setSearchRadiusMiles(draft.radius);
+        if (draft.date !== undefined) setDate(draft.date);
+        if (draft.startTime !== undefined) setStartTime(draft.startTime);
+        if (draft.endTime !== undefined) setEndTime(draft.endTime);
+        if (draft.players !== undefined) setPlayers(draft.players);
+        if (draft.holes !== undefined) setHoleFilter(draft.holes);
+        if (draft.coordinates !== undefined) setSearchCoordinates(draft.coordinates);
+        setCourses(draft.courses);
+        setSelected(draft.selectedCourses);
+        hasTrackedCourseSelectionRef.current = draft.selectedCourses.length > 0;
+      }
+
+      setDraftReady(true);
+    });
+
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) {
       return;
     }
 
-    window.requestAnimationFrame(() => {
-      if (transferred.location !== undefined) setLocationText(transferred.location);
-      if (transferred.radius !== undefined) setSearchRadiusMiles(transferred.radius);
-      if (transferred.date !== undefined) setDate(transferred.date);
-      if (transferred.startTime !== undefined) setStartTime(transferred.startTime);
-      if (transferred.endTime !== undefined) setEndTime(transferred.endTime);
-      if (transferred.players !== undefined) setPlayers(transferred.players);
-      if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
-      if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
-      if (transferred.selectedCourse !== undefined) {
-        setSelected([transferred.selectedCourse]);
-        setCourses([transferred.selectedCourse]);
-      }
+    storeSearchDraft({
+      location: locationText,
+      radius: searchRadiusMiles,
+      date,
+      startTime,
+      endTime,
+      players,
+      holes: holeFilter,
+      coordinates: searchCoordinates ?? undefined,
+      courses,
+      selectedCourses: selected
     });
-  }, []);
+  }, [
+    courses,
+    date,
+    draftReady,
+    endTime,
+    holeFilter,
+    locationText,
+    players,
+    searchCoordinates,
+    searchRadiusMiles,
+    selected,
+    startTime
+  ]);
 
   const minSearchDate = tomorrow();
 
@@ -813,6 +866,7 @@ function TeeTimeIntakeContent({
         search?: { id?: string };
       } | null;
       const createdSearchId = responseBody?.search?.id;
+      clearSearchDraft();
       router.push(
         createdSearchId
           ? `/dashboard?created=${encodeURIComponent(createdSearchId)}`
