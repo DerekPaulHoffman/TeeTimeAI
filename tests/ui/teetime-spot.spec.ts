@@ -291,6 +291,7 @@ test.describe("Tee Time Spot UI smoke", () => {
   });
 
   test("restores validated direct-link search details on the static route", async ({ page }) => {
+    const issues = collectPageIssues(page);
     await page.route("**/api/location/geocode?**", async (route) => {
       await route.fulfill({
         body: JSON.stringify({ latitude: 38.9399, longitude: -119.9772 }),
@@ -298,6 +299,7 @@ test.describe("Tee Time Spot UI smoke", () => {
         status: 200
       });
     });
+    await mockSmokeCoursePhotos(page);
     await page.route("**/api/courses/discover?**", async (route) => {
       await route.fulfill({
         body: JSON.stringify({ courses: smokeCourses }),
@@ -329,6 +331,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(discoveryUrl.searchParams.get("latitude")).toBe("38.9399");
     expect(discoveryUrl.searchParams.get("longitude")).toBe("-119.9772");
     expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("40234");
+    await expectNoPageIssues(issues, test.info());
   });
 
   test("keeps search labels and supporting copy at AA contrast colors", async ({ page }) => {
@@ -1390,6 +1393,10 @@ async function mockSmokeCourseSearch(page: Page) {
       status: 200
     });
   });
+  await mockSmokeCoursePhotos(page);
+}
+
+async function mockSmokeCoursePhotos(page: Page) {
   await page.route("**/api/courses/photo?**", async (route) => {
     const photoReference = new URL(route.request().url()).searchParams.get("ref") ?? "";
     const photoIndex = Number(photoReference.match(/ui-smoke-photo-(\d+)/)?.[1] ?? "1") - 1;
