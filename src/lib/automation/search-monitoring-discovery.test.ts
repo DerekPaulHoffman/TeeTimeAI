@@ -268,7 +268,7 @@ describe("search monitoring discovery", () => {
     );
   });
 
-  it("inspects an official FAQ before the Whoosh shell and classifies account-required availability", async () => {
+  it("does not let auxiliary FAQ wording override an ungated Whoosh booking surface", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();
       if (value === "https://yalebulldogs.com/golf") {
@@ -317,9 +317,10 @@ describe("search monitoring discovery", () => {
         status: "VERIFIED",
         detectedPlatform: "CUSTOM",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "BLOCKED",
-        automationReason: "ACCOUNT_REQUIRED",
-        evidence: expect.objectContaining({ learnedFrom: "official-account-required-booking" })
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "UNSUPPORTED_PLATFORM",
+        bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
+        evidence: expect.objectContaining({ learnedFrom: "official-whoosh-booking" })
       })
     );
   });

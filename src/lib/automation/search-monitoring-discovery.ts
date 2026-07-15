@@ -24,7 +24,7 @@ const MAX_HTML_BYTES = 1_500_000;
 
 type CollectedPageEvidence = Pick<
   BrowserDiscoveryEvidence,
-  "sourceUrl" | "finalUrl" | "observedUrls" | "visibleText"
+  "sourceUrl" | "finalUrl" | "observedUrls" | "visibleText" | "bookingSurfaceText"
 >;
 
 export type SearchMonitoringDiscoveryResult = {
@@ -219,7 +219,13 @@ export async function collectOfficialSiteEvidence(
     visibleText: pages.slice().reverse().map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
-      .slice(0, 12_000)
+      .slice(0, 12_000),
+    bookingSurfaceText: pages
+      .filter((page) => /(^|\.)app\.whoosh\.io$/i.test(new URL(page.finalUrl).hostname))
+      .map((page) => page.evidence.visibleText)
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 4_000)
   };
 }
 

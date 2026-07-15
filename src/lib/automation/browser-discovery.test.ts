@@ -439,7 +439,7 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("classifies official Whoosh availability that requires confirmed registration", () => {
+  it("does not treat stale auxiliary registration guidance as proof that Whoosh availability is gated", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "yale",
       courseName: "Yale University Golf Course",
@@ -457,10 +457,31 @@ describe("buildBrowserDiscovery", () => {
       status: "VERIFIED",
       detectedPlatform: "CUSTOM",
       bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
+      confidence: 0.9,
+      evidence: { learnedFrom: "official-whoosh-booking" }
+    });
+  });
+
+  it("classifies Whoosh as account-required when the booking surface itself gates availability", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "gated-whoosh",
+      courseName: "Gated Whoosh Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://app.whoosh.io/patron/club/gated-course"],
+      visibleText: "Register and book online with Whoosh.",
+      bookingSurfaceText:
+        "Players must register in Whoosh before booking. Once a player's registration is confirmed, availability of tee times through Whoosh can be viewed."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "ACCOUNT_REQUIRED",
-      bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
-      confidence: 0.98,
       evidence: { learnedFrom: "official-account-required-booking" }
     });
   });
@@ -475,9 +496,13 @@ describe("buildBrowserDiscovery", () => {
         "Public tee-time availability is visible to everyone. Players must register in Whoosh before booking."
     });
 
-    expect(discovery.status).toBe("INSPECTED");
-    expect(discovery.automationEligibility).toBeUndefined();
-    expect(discovery.automationReason).toBeUndefined();
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      evidence: { learnedFrom: "official-whoosh-booking" }
+    });
   });
 
   it("classifies explicit official first-come golf access as walk-in only", () => {

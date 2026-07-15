@@ -10,6 +10,7 @@ export type BrowserDiscoveryEvidence = {
   finalUrl?: string;
   observedUrls: string[];
   visibleText?: string;
+  bookingSurfaceText?: string;
 };
 
 export type BrowserDiscovery = {
@@ -104,6 +105,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return accountRequiredClassification;
   }
 
+  const whooshDiscovery = learnWhooshBookingClassification(evidence, observedUrls);
+
+  if (whooshDiscovery) {
+    return whooshDiscovery;
+  }
+
   const foreupDiscovery = learnForeupDiscovery(evidence, observedUrls);
 
   if (foreupDiscovery) {
@@ -156,7 +163,7 @@ function learnAccountRequiredClassification(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const bookingSurfaceText = evidence.bookingSurfaceText?.replace(/\s+/g, " ").trim() ?? "";
   const whooshBookingUrl = observedUrls
     .map(parseUrl)
     .find((url) =>
@@ -167,13 +174,21 @@ function learnAccountRequiredClassification(
       )
     );
   const registrationRequired =
-    /\bplayers? must register(?: in whoosh)? before booking\b/i.test(visibleText);
+    /\bplayers? must register(?: in whoosh)? before booking\b/i.test(bookingSurfaceText);
   const availabilityRequiresConfirmation =
     /\bonce (?:a )?players?[’']s registration is confirmed,? availability of tee times? through whoosh can be viewed\b/i.test(
-      visibleText
+      bookingSurfaceText
+    );
+  const signInRequiredToViewAvailability =
+    /\b(?:sign|log) in\b[^.]{0,120}\b(?:view|see|access)\b[^.]{0,80}\b(?:tee[ -]?time )?availability\b/i.test(
+      bookingSurfaceText
     );
 
-  if (!whooshBookingUrl || !registrationRequired || !availabilityRequiresConfirmation) {
+  if (
+    !whooshBookingUrl ||
+    (!signInRequiredToViewAvailability &&
+      !(registrationRequired && availabilityRequiresConfirmation))
+  ) {
     return null;
   }
 
@@ -193,8 +208,48 @@ function learnAccountRequiredClassification(
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
-      visibleText: summarizeVisibleText(evidence.visibleText),
+      visibleText: summarizeVisibleText(evidence.bookingSurfaceText),
       learnedFrom: "official-account-required-booking"
+    }
+  };
+}
+
+function learnWhooshBookingClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const whooshBookingUrl = observedUrls
+    .map(parseUrl)
+    .find((url) =>
+      Boolean(
+        url &&
+        /(^|\.)app\.whoosh\.io$/i.test(url.hostname) &&
+        /^\/patron\/club\/[^/]+/i.test(url.pathname)
+      )
+    );
+
+  if (!whooshBookingUrl) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: whooshBookingUrl.toString(),
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "UNSUPPORTED_PLATFORM",
+    policyNotes:
+      "The course links to an official Whoosh online booking page. Golfers can use that page directly; Tee Time Spot has not yet confirmed policy-safe automatic monitoring for this Whoosh surface.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: 0.9,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-whoosh-booking"
     }
   };
 }
