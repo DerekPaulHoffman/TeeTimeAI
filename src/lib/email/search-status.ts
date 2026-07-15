@@ -1,4 +1,8 @@
 import type { BookingMethod } from "@/lib/courses/intelligence";
+import {
+  renderCustomerEmail,
+  type CustomerEmailMonitoringCourse
+} from "@/lib/email/customer-email";
 import type { EmailStopUrls } from "@/lib/email/search-actions";
 import {
   DEFAULT_TIME_ZONE,
@@ -18,6 +22,8 @@ export type SearchStatusAvailability = {
 export type SearchStatusCourseReport = {
   courseId: string;
   courseName: string;
+  rank?: number;
+  courseAddress?: string;
   timeZone?: string;
   outcome: "MATCH_FOUND" | "NO_MATCH" | "BLOCKED_POLICY" | "NEEDS_ADAPTER" | "FETCH_FAILED";
   availableMatches: number;
@@ -45,6 +51,7 @@ export type SearchStatusCourseReport = {
     availableSpots: number;
     priceCents?: number;
     holes?: number;
+    isNew?: boolean;
   }>;
 };
 
@@ -69,6 +76,7 @@ export type SearchStatusEmailInput = {
   previousSnapshot?: unknown;
   idempotencyKey?: string;
   stopUrls?: EmailStopUrls;
+  assetBaseUrl?: string;
 };
 
 export const MORNING_STATUS_EMAIL_HOUR = 8;
@@ -154,99 +162,127 @@ export function getChangedCourseNames(
 export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const currentSnapshot = buildSearchStatusSnapshot(input.courses);
   const changedCourses = getChangedCourseNames(currentSnapshot, input.previousSnapshot);
-  const targetDate = formatDate(input.targetDate);
-  const window = `${formatTime(input.startTime)}–${formatTime(input.endTime)} course local`;
-  const courseLayout = input.requestedLayoutHoles
-    ? `${input.requestedLayoutHoles}-hole`
-    : "Any layout";
-  const checkedAt = input.checkedAt.toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: normalizeTimeZone(input.userTimeZone, DEFAULT_TIME_ZONE),
-    timeZoneName: "short"
-  });
-  const heading = input.kind === "setup" ? "Your tee-time alert is active" : "Your morning tee-time update";
-  const badge = input.kind === "setup" ? "Search is active" : "Morning update";
+  const hasAvailability = input.courses.some(
+    (course) => (course.matchingTimes?.length ?? 0) > 0
+  );
   const hasDirectOnlyCourse = input.courses.some(
     (course) => course.outcome === "BLOCKED_POLICY"
   );
   const hasWorkInProgressCourse = input.courses.some(
     (course) => course.outcome === "NEEDS_ADAPTER"
   );
-  const intro =
-    input.kind === "setup"
+  const heading = input.kind === "setup"
+    ? "Your tee-time alert is active"
+    : "Your morning tee-time update";
+  const intro = hasAvailability
+    ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
+    : input.kind === "setup"
       ? hasDirectOnlyCourse
-        ? "Your alert is set. We’ll keep checking supported courses; courses marked Book online directly, Official site only, or Phone only are not automatically monitored."
+        ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
         : hasWorkInProgressCourse
-          ? "Your alert is set. We checked every selected course. Use the official link for courses marked Official site while we continue watching the courses we can monitor automatically."
-        : "Your alert is set. We checked every selected course and will keep watching automatically."
+          ? "Your alert is set. We checked every selected course. Use the official link where monitoring is still being added."
+          : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
         : hasDirectOnlyCourse
-          ? "No course status changed since your last email. We’re still checking supported courses."
-          : "No course status changed since your last email. We’re still checking.";
-  const courseRows = input.courses
-    .map((course, index) => renderCourseReport(course, input.players, index + 1))
-    .join("");
-  const stopControls = renderEmailStopControls(input.stopUrls);
+          ? "No course status changed since your last email. We're still checking supported courses."
+          : "No course status changed since your last email. We're still checking.";
+  const availabilityCourses = input.courses
+    .map((course, index) => ({ course, fallbackRank: index + 1 }))
+    .filter(({ course }) => (course.matchingTimes?.length ?? 0) > 0)
+    .map(({ course, fallbackRank }) => ({
+      courseId: course.courseId,
+      courseName: course.courseName,
+      rank: course.rank ?? fallbackRank,
+      courseAddress: course.courseAddress,
+      courseTimeZone: course.timeZone,
+      bookingUrl: course.bookingUrl,
+      times: course.matchingTimes ?? []
+    }));
+  const monitoringCourses = input.courses.map((course, index) =>
+    toMonitoringCourse(course, input.players, course.rank ?? index + 1)
+  );
 
-  return `
-    <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
-      <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
-        <div style="background:#111d18;color:#ffffff;padding:18px 22px">
-          <div style="font-weight:800;font-size:18px">Tee Time Spot</div>
-          <div style="color:rgba(255,255,255,.68);font-size:13px">teetimespot.com</div>
-        </div>
-        <div style="background:#19372b;color:#ffffff;padding:30px 22px">
-          <div style="display:inline-block;background:#e28a2f;color:#1d1309;border-radius:999px;padding:7px 11px;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">${badge}</div>
-          <h1 style="font-size:29px;line-height:1.1;margin:16px 0 10px">${heading}</h1>
-          <p style="margin:0;color:rgba(255,255,255,.82)">${escapeHtml(intro)}</p>
-        </div>
-        <div style="padding:22px">
-          <table role="presentation" style="width:100%;border-collapse:collapse;table-layout:fixed;margin-bottom:20px">
-            <tr>
-              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Date</div>
-                <div style="font-weight:800">${escapeHtml(targetDate)}</div>
-              </td>
-              <td style="width:8px"></td>
-              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Window</div>
-                <div style="font-weight:800">${escapeHtml(window)}</div>
-              </td>
-            </tr>
-            <tr>
-              <td colspan="3" style="height:8px;font-size:0;line-height:0">&nbsp;</td>
-            </tr>
-            <tr>
-              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Course layout</div>
-                <div style="font-weight:800">${escapeHtml(courseLayout)}</div>
-              </td>
-              <td style="width:8px"></td>
-              <td style="width:50%;background:#f5f7f2;border-radius:8px;padding:12px;vertical-align:top">
-                <div style="font-size:11px;font-weight:800;text-transform:uppercase;color:#5c6c64">Golfers</div>
-                <div style="font-weight:800">${input.players}</div>
-              </td>
-            </tr>
-          </table>
-          <h2 style="font-size:20px;line-height:1.2;margin:0 0 5px">What we’re watching for you</h2>
-          <p style="color:#53645c;font-size:14px;margin:0 0 18px">Here’s what we found at each course. We’ll keep watching supported courses and always link you to the official booking surface.</p>
-          ${courseRows}
-          <div style="background:#e6f3f7;border-radius:10px;color:#174152;padding:14px 16px;font-size:14px;margin-top:18px">
-            We only send an instant email when a newly opened tee time matches your exact date, time window, and player count. Otherwise, you’ll receive at most one morning status update per day.
-          </div>
-          <p style="color:#5c6c64;font-size:13px;margin:16px 0 0">Last checked ${escapeHtml(checkedAt)}.</p>
-          ${stopControls}
-        </div>
-        <div style="background:#111d18;color:rgba(255,255,255,.72);padding:18px 22px;font-size:13px">
-          Tee Time Spot sends you to the course’s official booking page. We never book, hold, or pay for tee times.
-        </div>
-      </div>
-    </div>
-  `;
+  return renderCustomerEmail({
+    variant: input.kind === "setup" ? "setup" : "morning",
+    heading,
+    intro,
+    preheader: input.kind === "setup"
+      ? "Your Tee Time Spot alert is active."
+      : "Your morning Tee Time Spot search update is ready.",
+    summary: {
+      targetDate: input.targetDate,
+      startTime: input.startTime,
+      endTime: input.endTime,
+      players: input.players,
+      requestedLayoutHoles: input.requestedLayoutHoles
+    },
+    availabilityCourses,
+    monitoringCourses,
+    checkedAt: input.checkedAt,
+    userTimeZone: input.userTimeZone,
+    stopUrls: input.stopUrls,
+    assetBaseUrl: input.assetBaseUrl
+  });
+}
+
+function toMonitoringCourse(
+  course: SearchStatusCourseReport,
+  players: number,
+  rank: number
+): CustomerEmailMonitoringCourse {
+  const description = describeCourse(course, players);
+  const bookingAccess = getBookingAccess(course);
+  const presentation = course.outcome === "MATCH_FOUND"
+    ? {
+        badgeLabel: "FULLY MONITORED",
+        tone: "monitored" as const,
+        detail: `We're checking this course automatically. ${description.detail}`
+      }
+    : course.outcome === "NO_MATCH" && course.bookingWindow
+      ? {
+          badgeLabel: "SCHEDULED",
+          tone: "scheduled" as const,
+          detail: `${description.stateLabel}. ${description.detail}`
+        }
+      : course.outcome === "NO_MATCH"
+        ? {
+            badgeLabel: "FULLY MONITORED",
+            tone: "monitored" as const,
+            detail: `${description.stateLabel}. ${description.detail}`
+          }
+        : course.outcome === "NEEDS_ADAPTER"
+          ? {
+              badgeLabel: "ADDING MONITORING",
+              tone: "adding" as const,
+              detail: `${description.stateLabel}. ${description.detail}`
+            }
+          : course.outcome === "FETCH_FAILED"
+            ? {
+                badgeLabel: "CHECK RETRYING",
+                tone: "retrying" as const,
+                detail: `${description.stateLabel}. ${description.detail}`
+              }
+            : {
+                badgeLabel: description.monitoringLabel.toUpperCase(),
+                tone: "direct" as const,
+                detail: `${description.stateLabel}. ${description.detail}`
+              };
+  const bookingLinkLabel = bookingAccess === "BOOKING_PAGE"
+    ? "Open official booking page"
+    : "Open official site";
+
+  return {
+    courseName: course.courseName,
+    rank,
+    courseAddress: course.courseAddress,
+    badgeLabel: presentation.badgeLabel,
+    detail: presentation.detail,
+    tone: presentation.tone,
+    bookingUrl: course.bookingUrl,
+    bookingLinkLabel,
+    phone: course.phone
+  };
 }
 
 function getLocalDateAndHour(date: Date, timeZone: string) {
@@ -268,39 +304,6 @@ function getLocalDateAndHour(date: Date, timeZone: string) {
     date: `${year}-${month}-${day}`,
     hour: hour === 24 ? 0 : hour
   };
-}
-
-function renderCourseReport(course: SearchStatusCourseReport, players: number, rank: number) {
-  const description = describeCourse(course, players);
-  const timeZone = normalizeTimeZone(course.timeZone, DEFAULT_TIME_ZONE);
-  const matchingTimes = renderMatchingTimes(course.matchingTimes, timeZone);
-  const bookingAccess = getBookingAccess(course);
-  const bookingLinkLabel = bookingAccess === "BOOKING_PAGE"
-    ? "Open official booking page"
-    : "Open official site";
-  const bookingLink = course.bookingUrl
-    ? `<a href="${escapeHtml(course.bookingUrl)}" style="color:#087746;display:inline-block;font-size:14px;font-weight:800;margin:0 18px 0 0;text-decoration:none">${bookingLinkLabel} →</a>`
-    : "";
-  const phoneHref = course.phone ? formatTelephoneHref(course.phone) : "";
-  const phoneLink = phoneHref
-    ? `<a href="${escapeHtml(phoneHref)}" style="color:#087746;display:inline-block;font-size:14px;font-weight:800;margin:0;text-decoration:none">Call ${escapeHtml(course.phone ?? "the course")} →</a>`
-    : "";
-  const actions = bookingLink || phoneLink
-    ? `<p style="margin:18px 0 0">${bookingLink}${phoneLink}</p>`
-    : "";
-
-  return `
-    <div style="background:#fbfaf4;border:1px solid ${description.borderColor};border-left:4px solid ${description.color};border-radius:14px;padding:17px 17px 18px;margin-bottom:12px">
-      <p style="margin:0 0 9px"><span style="background:${description.badgeBackground};border-radius:999px;color:${description.color};display:inline-block;font-size:10px;font-weight:800;letter-spacing:.08em;padding:5px 8px;text-transform:uppercase">Priority ${rank} · ${escapeHtml(description.monitoringLabel)}</span></p>
-      <p style="color:#10231b;font-size:16px;font-weight:800;margin:0 0 3px">${escapeHtml(course.courseName)}</p>
-      <p style="color:#829087;font-size:12px;margin:0 0 11px">Times use the course timezone: ${escapeHtml(timeZone)}</p>
-      <div style="background:${description.calloutBackground};border:1px solid ${description.calloutBorder};border-radius:10px;color:${description.calloutText};font-size:14px;line-height:1.45;padding:11px 13px">
-        <strong>${description.icon} ${escapeHtml(description.stateLabel)}.</strong> ${escapeHtml(description.detail)}
-      </div>
-      ${matchingTimes}
-      ${actions}
-    </div>
-  `;
 }
 
 function describeCourse(course: SearchStatusCourseReport, players: number) {
@@ -483,67 +486,6 @@ function getBookingAccess(course: SearchStatusCourseReport) {
   return course.phone ? "PHONE_ONLY" : undefined;
 }
 
-function formatTelephoneHref(phone: string) {
-  const normalized = phone.trim().replace(/(?!^\+)[^\d]/g, "");
-  return normalized ? `tel:${normalized}` : "";
-}
-
-function renderMatchingTimes(
-  times: SearchStatusCourseReport["matchingTimes"],
-  timeZone: string
-) {
-  if (!times?.length) {
-    return "";
-  }
-
-  const rows = [...times]
-    .sort((left, right) => left.startsAt.localeCompare(right.startsAt))
-    .map((time) => {
-      const details = [
-        `${time.availableSpots} spot${time.availableSpots === 1 ? "" : "s"}`,
-        time.priceCents != null ? formatPrice(time.priceCents) : null,
-        time.holes ? `${time.holes} holes` : null
-      ].filter(Boolean);
-
-      return `
-        <tr>
-          <td style="border-top:1px solid #d9e3dc;padding:10px 0;font-size:18px;font-weight:800;color:#14231d">${escapeHtml(formatStartsAtTime(time.startsAt, timeZone))}</td>
-          <td style="border-top:1px solid #d9e3dc;padding:10px 0;text-align:right;color:#4e5d56;font-size:13px">${escapeHtml(details.join(" · "))}</td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  return `
-    <div style="margin-top:13px">
-      <p style="font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#147a52;margin:0 0 4px">Available now</p>
-      <table role="presentation" style="border-collapse:collapse;width:100%">
-        ${rows}
-      </table>
-    </div>
-  `;
-}
-
-export function renderEmailStopControls(stopUrls?: EmailStopUrls) {
-  if (!stopUrls) {
-    return "";
-  }
-
-  return `
-    <div style="border-top:1px solid #d9e3dc;margin-top:22px;padding-top:20px">
-      <p style="font-size:16px;font-weight:800;margin:0 0 4px">Done with this alert?</p>
-      <p style="color:#5c6c64;font-size:13px;margin:0 0 12px">Turn it off and we’ll stop checking and emailing for this search.</p>
-      <p style="margin:0 0 8px">
-        <a href="${escapeHtml(stopUrls.booked)}" style="background:#147a52;border-radius:999px;color:#ffffff;display:block;font-weight:800;padding:12px 16px;text-align:center;text-decoration:none">I booked — stop these emails</a>
-      </p>
-      <p style="margin:0">
-        <a href="${escapeHtml(stopUrls.cancelled)}" style="border:1px solid #d9e3dc;border-radius:999px;color:#a33b35;display:block;font-weight:800;padding:11px 16px;text-align:center;text-decoration:none">Cancel this alert</a>
-      </p>
-      <p style="color:#6b766f;font-size:11px;margin:9px 0 0;text-align:center">Each button opens a confirmation page before anything is turned off.</p>
-    </div>
-  `;
-}
-
 function getCourseState(course: SearchStatusCourseReport) {
   if (course.outcome !== "NO_MATCH") {
     if (course.outcome === "MATCH_FOUND") {
@@ -609,16 +551,6 @@ function parseSearchStatusSnapshot(value: unknown): SearchStatusSnapshot | null 
   return snapshot.length === value.length ? snapshot : null;
 }
 
-function formatDate(value: string) {
-  return new Date(`${value}T12:00:00.000Z`).toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC"
-  });
-}
-
 function formatStartsAtTime(value: string, timeZone: string) {
   return zonedDateTimeToDate(value, timeZone).toLocaleTimeString("en-US", {
     hour: "numeric",
@@ -628,36 +560,4 @@ function formatStartsAtTime(value: string, timeZone: string) {
   });
 }
 
-function formatTime(value: string) {
-  const [hours = 0, minutes = 0] = value.split(":").map(Number);
-  const suffix = hours >= 12 ? "PM" : "AM";
-  const displayHour = hours % 12 || 12;
-  return `${displayHour}:${String(minutes).padStart(2, "0")} ${suffix}`;
-}
-
-function formatPrice(priceCents: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: priceCents % 100 === 0 ? 0 : 2
-  }).format(priceCents / 100);
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => {
-    switch (character) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      case "'":
-        return "&#39;";
-      default:
-        return character;
-    }
-  });
-}
+export { renderEmailStopControls } from "@/lib/email/customer-email";

@@ -101,9 +101,7 @@ describe("renderAlertHtml", () => {
 
     expect(html).toContain("7:40 AM");
     expect(html).toContain("8:10 AM");
-    expect(html).toContain("4 spots");
-    expect(html).toContain("2 spots");
-    expect(html).toContain("I booked — stop these emails");
+    expect(html).toContain("I booked &mdash; stop these results");
     expect(html).toContain("Cancel this alert");
   });
 
@@ -128,13 +126,11 @@ describe("renderAlertHtml", () => {
     expect(getMatchAlertSubject(matches)).toBe(
       "New tee time windows opened at Blue Rock Golf Course"
     );
-    expect(html).toContain("9 matching time windows are currently available");
-    expect(html).toContain("9:00 AM-9:50 AM EDT");
-    expect(html.match(/6 tee times/g)).toHaveLength(8);
-    expect(html).toContain("1 more time window is available on the official booking page");
-    expect(html).not.toContain("5:00 PM-5:50 PM EDT");
-    expect(html).not.toContain("42 tee times");
-    expect(html).not.toContain("54 tee times");
+    expect(html).toContain("9:00 AM EDT – 9:50 AM EDT");
+    expect(html.match(/6 time slots available/g)).toHaveLength(2);
+    expect(html.match(/>NEW<\/span>/g)).toHaveLength(6);
+    expect(html).toContain("36 more time windows are available on the official booking page");
+    expect(html).not.toContain("12:00 PM EDT");
   });
 });
 

@@ -69,6 +69,7 @@ const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
 type AutomationCourse = {
   id: string;
   name: string;
+  address: string | null;
   timeZone: string;
   phone: string | null;
   bookingPhone: string | null;
@@ -384,9 +385,10 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         match,
         startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone)
       }));
+      const persistedPendingStates: boolean[] = [];
 
       for (const { match, startsAt } of normalizedCurrentMatches) {
-        await recordTeeTimeMatch({
+        const persistedMatch = await recordTeeTimeMatch({
           searchId: search.id,
           courseId: course.id,
           sourceId: match.sourceId,
@@ -397,6 +399,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           holes: match.holes,
           evidenceUrl: match.evidenceUrl
         });
+        persistedPendingStates.push(persistedMatch?.alertStatus === "PENDING");
       }
 
       await markMissingMatchesUnavailable({
@@ -450,11 +453,12 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           ? "BOOKING_PAGE"
           : getCourseBookingAccess(course),
         availability,
-        matchingTimes: currentMatches.map((match) => ({
+        matchingTimes: currentMatches.map((match, index) => ({
           startsAt: match.startsAt,
           availableSpots: match.availableSpots,
           priceCents: match.priceCents,
-          holes: match.holes
+          holes: match.holes,
+          isNew: persistedPendingStates[index] === true
         }))
       });
     } catch (error) {
@@ -488,6 +492,21 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
     }
+  }
+
+  const preferenceContext = new Map(
+    search.preferences.map((preference) => [
+      preference.course.id,
+      {
+        rank: preference.rank,
+        courseAddress: preference.course.address ?? undefined
+      }
+    ])
+  );
+  for (const courseResult of courseResults) {
+    const context = preferenceContext.get(courseResult.courseId);
+    courseResult.rank = context?.rank;
+    courseResult.courseAddress = context?.courseAddress;
   }
 
   let batchNotification = { notifiedIncidentIds: [] as string[] };
@@ -546,7 +565,12 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       });
     }
   } else {
-    newlyAlertedMatches = await sendPendingMatchAlerts(searchId);
+    newlyAlertedMatches = await sendPendingMatchAlerts(searchId, {
+      searchWindow,
+      courseResults,
+      checkedAt,
+      requestedLayoutHoles
+    });
 
     if (statusEmailKind === "daily" && newlyAlertedMatches > 0) {
       await markSearchStatusReportSatisfied({
@@ -694,7 +718,20 @@ async function settlePendingMatchesCoveredByStatusReport(
   return pendingMatches.length;
 }
 
-async function sendPendingMatchAlerts(searchId: string) {
+async function sendPendingMatchAlerts(
+  searchId: string,
+  input: {
+    searchWindow: {
+      date: string;
+      startTime: string;
+      endTime: string;
+      players: number;
+    };
+    courseResults: SearchCheckCourseResult[];
+    checkedAt: Date;
+    requestedLayoutHoles: 9 | 18 | null;
+  }
+) {
   const pendingMatches = await listPendingMatchAlerts(searchId);
   if (pendingMatches.length === 0) {
     return 0;
@@ -708,6 +745,9 @@ async function sendPendingMatchAlerts(searchId: string) {
 
   const pendingIds = new Set(pendingMatches.map((match) => match.id));
   const search = pendingMatches[0].teeSearch;
+  const courseContext = new Map(
+    input.courseResults.map((course) => [course.courseId, course])
+  );
   const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
   const batchKey = createHash("sha256")
     .update(pendingMatches.map((match) => match.id).sort().join(":"))
@@ -719,7 +759,13 @@ async function sendPendingMatchAlerts(searchId: string) {
         searchId,
         to: recipient,
         matches: availableMatches.map((match) => ({
+          courseId: match.course.id,
           courseName: match.course.name,
+          courseRank: courseContext.get(match.course.id)?.rank,
+          courseAddress:
+            courseContext.get(match.course.id)?.courseAddress ??
+            match.course.address ??
+            undefined,
           courseTimeZone: match.course.timeZone,
           startsAt: match.startsAt,
           availableSpots: match.availableSpots,
@@ -729,6 +775,12 @@ async function sendPendingMatchAlerts(searchId: string) {
           isNew: pendingIds.has(match.id)
         })),
         userTimeZone: search.userTimeZone,
+        targetDate: input.searchWindow.date,
+        startTime: input.searchWindow.startTime,
+        endTime: input.searchWindow.endTime,
+        players: input.searchWindow.players,
+        requestedLayoutHoles: input.requestedLayoutHoles,
+        checkedAt: input.checkedAt,
         idempotencyKey: `tee-time-match-batch-${batchKey}-${recipient}`
       })
     )

@@ -1,272 +1,302 @@
 import type { Metadata } from "next";
-import { Bell, CalendarCheck2, Clock3, ExternalLink, Mail, Search } from "lucide-react";
+import { Bell, ExternalLink, Mail } from "lucide-react";
 
 import { EmailPreviewFrame } from "@/components/email-preview-frame";
-import { renderAlertHtml } from "@/lib/email/alerts";
-import { renderSearchStatusHtml } from "@/lib/email/search-status";
+import {
+  renderAlertHtml,
+  type TeeTimeAlertInput
+} from "@/lib/email/alerts";
+import {
+  renderSearchStatusHtml,
+  type SearchStatusEmailInput
+} from "@/lib/email/search-status";
 
 export const metadata: Metadata = {
   title: "Email Preview",
-  description: "Preview Tee Time Spot search updates and match alerts.",
+  description: "Preview one complete Tee Time Spot customer email.",
   robots: {
     index: false,
     follow: false
   }
 };
 
+type EmailPreviewPageProps = {
+  searchParams: Promise<{
+    variant?: string;
+  }>;
+};
+
+type PreviewVariant = "morning" | "setup" | "instant";
+
+const previewVariants = ["morning", "setup", "instant"] as const;
+
 const previewStopUrls = {
   booked: "/alerts/stop?token=preview-booked",
   cancelled: "/alerts/stop?token=preview-cancelled"
 };
 
-const previewAlert = {
-  to: "preview@teetimespot.com",
-  searchId: "preview-search",
-  matches: Array.from({ length: 8 }, (_, index) => ({
-    courseName: "Tashua Knolls Golf Course",
-    courseTimeZone: "America/New_York",
-    startsAt: new Date(Date.parse("2026-07-15T13:50:00-04:00") + index * 10 * 60 * 1000),
-    availableSpots: index % 3 === 0 ? 3 : 4,
-    priceCents: 5500,
-    holes: 18,
-    bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431",
-    isNew: true
-  })),
-  stopUrls: previewStopUrls
-};
+const previewCourses: SearchStatusEmailInput["courses"] = [
+  {
+    courseId: "pinebrook",
+    courseName: "Pinebrook Golf Club",
+    rank: 1,
+    courseAddress: "1 Pinebrook Drive, Glastonbury, CT 06033, United States",
+    timeZone: "America/New_York",
+    outcome: "MATCH_FOUND",
+    availableMatches: 3,
+    bookingUrl: "https://example.com/pinebrook-booking",
+    bookingMethod: "PUBLIC_ONLINE",
+    bookingAccess: "BOOKING_PAGE",
+    availability: {
+      visibleSlotCount: 14,
+      playerEligibleSlotCount: 12
+    },
+    matchingTimes: [
+      {
+        startsAt: "2026-07-18T07:42:00-04:00",
+        availableSpots: 4,
+        priceCents: 5800,
+        holes: 18,
+        isNew: true
+      },
+      {
+        startsAt: "2026-07-18T08:05:00-04:00",
+        availableSpots: 3,
+        priceCents: 6200,
+        holes: 18,
+        isNew: false
+      },
+      {
+        startsAt: "2026-07-18T08:20:00-04:00",
+        availableSpots: 4,
+        priceCents: 6200,
+        holes: 18,
+        isNew: false
+      }
+    ]
+  },
+  {
+    courseId: "ridgecrest",
+    courseName: "Ridgecrest Golf Course",
+    rank: 2,
+    courseAddress: "220 Ridge Road, Orange, CT 06477, USA",
+    timeZone: "America/New_York",
+    outcome: "MATCH_FOUND",
+    availableMatches: 2,
+    bookingUrl: "https://example.com/ridgecrest-booking",
+    bookingMethod: "PUBLIC_ONLINE",
+    bookingAccess: "BOOKING_PAGE",
+    availability: {
+      visibleSlotCount: 10,
+      playerEligibleSlotCount: 8
+    },
+    matchingTimes: [
+      {
+        startsAt: "2026-07-18T08:12:00-04:00",
+        availableSpots: 2,
+        priceCents: 5400,
+        holes: 18,
+        isNew: true
+      },
+      {
+        startsAt: "2026-07-18T08:36:00-04:00",
+        availableSpots: 4,
+        priceCents: 5400,
+        holes: 18,
+        isNew: false
+      }
+    ]
+  },
+  {
+    courseId: "cedar-valley",
+    courseName: "Cedar Valley Golf Course",
+    rank: 3,
+    courseAddress: "95 Cedar Lane, New Haven, CT 06511",
+    timeZone: "America/New_York",
+    outcome: "NO_MATCH",
+    availableMatches: 0,
+    bookingUrl: "https://example.com/cedar-valley",
+    bookingMethod: "PUBLIC_ONLINE",
+    bookingAccess: "BOOKING_PAGE",
+    availability: {
+      visibleSlotCount: 18,
+      playerEligibleSlotCount: 18,
+      closestAfter: "2026-07-18T11:10:00-04:00"
+    }
+  },
+  {
+    courseId: "lakeview",
+    courseName: "Lakeview Municipal Golf Course",
+    rank: 4,
+    courseAddress: "16 Lakeview Road, Hartford, CT 06106",
+    timeZone: "America/New_York",
+    outcome: "NO_MATCH",
+    availableMatches: 0,
+    bookingUrl: "https://example.com/lakeview",
+    bookingWindow: {
+      releaseDate: "2026-07-11",
+      releaseTimeLocal: "07:00",
+      opensAt: "2026-07-11T07:00:00-04:00",
+      timeZone: "America/New_York",
+      exactTime: true
+    }
+  },
+  {
+    courseId: "meadow-hills",
+    courseName: "Meadow Hills Golf Course",
+    rank: 5,
+    courseAddress: "400 Meadow Street, Branford, CT 06405",
+    timeZone: "America/New_York",
+    outcome: "NEEDS_ADAPTER",
+    availableMatches: 0,
+    bookingUrl: "https://example.com/meadow-hills"
+  }
+];
 
-const previewStatus = {
+const baseStatusPreview = {
   searchId: "preview-search",
   to: "preview@teetimespot.com",
-  kind: "setup" as const,
-  targetDate: "2026-07-15",
+  targetDate: "2026-07-18",
   startTime: "07:30",
   endTime: "09:00",
   players: 2,
   requestedLayoutHoles: 18 as const,
-  checkedAt: new Date("2026-07-10T08:15:00-04:00"),
-  courses: [
-    {
-      courseId: "fairview-farm",
-      courseName: "Fairview Farm Golf Course",
-      outcome: "BLOCKED_POLICY" as const,
-      availableMatches: 0,
-      bookingUrl: "https://fairviewfarmgc.com/",
-      phone: "(860) 689-1000",
-      bookingMethod: "PHONE_ONLY" as const,
-      bookingAccess: "OFFICIAL_SITE" as const
-    },
-    {
-      courseId: "oak-lane",
-      courseName: "Oak Lane Country Club",
-      outcome: "NEEDS_ADAPTER" as const,
-      availableMatches: 0,
-      bookingUrl: "https://example.com/oak-lane"
-    },
-    {
-      courseId: "fairchild",
-      courseName: "Fairchild Wheeler Golf Course",
-      outcome: "MATCH_FOUND" as const,
-      availableMatches: 2,
-      bookingUrl:
-        "https://fairchild-wheeler-red-course.book.teeitup.golf/?date=2026-07-15",
-      availability: {
-        visibleSlotCount: 12,
-        playerEligibleSlotCount: 10
-      },
-      matchingTimes: [
-        {
-          startsAt: "2026-07-15T07:40:00-04:00",
-          availableSpots: 4,
-          priceCents: 6700,
-          holes: 18
-        },
-        {
-          startsAt: "2026-07-15T08:10:00-04:00",
-          availableSpots: 2,
-          priceCents: 6700,
-          holes: 18
-        }
-      ]
-    },
-    {
-      courseId: "tashua",
-      courseName: "Tashua Knolls Golf Course",
-      outcome: "NO_MATCH" as const,
-      availableMatches: 0,
-      bookingUrl: "https://foreupsoftware.com/index.php/booking/19765/2431",
-      availability: {
-        visibleSlotCount: 18,
-        playerEligibleSlotCount: 18,
-        closestAfter: "2026-07-15T16:50"
-      }
-    },
-    {
-      courseId: "vue",
-      courseName: "The VUE CT",
-      outcome: "NO_MATCH" as const,
-      availableMatches: 0,
-      availability: { visibleSlotCount: 0, playerEligibleSlotCount: 0 }
-    }
-  ],
-  stopUrls: previewStopUrls
+  userTimeZone: "America/New_York",
+  checkedAt: new Date("2026-07-15T08:15:00-04:00"),
+  courses: previewCourses,
+  stopUrls: previewStopUrls,
+  assetBaseUrl: ""
 };
 
-export default function EmailPreviewPage() {
-  const statusHtml = renderSearchStatusHtml(previewStatus);
-  const alertHtml = renderAlertHtml(previewAlert);
+const previewAlert: TeeTimeAlertInput = {
+  to: "preview@teetimespot.com",
+  searchId: "preview-search",
+  matches: previewCourses.flatMap((course) =>
+    (course.matchingTimes ?? []).map((match) => ({
+      courseId: course.courseId,
+      courseName: course.courseName,
+      courseRank: course.rank,
+      courseAddress: course.courseAddress,
+      courseTimeZone: course.timeZone,
+      startsAt: new Date(match.startsAt),
+      availableSpots: match.availableSpots,
+      bookingUrl: course.bookingUrl ?? "https://teetimespot.com",
+      priceCents: match.priceCents,
+      holes: match.holes,
+      isNew: match.isNew
+    }))
+  ),
+  targetDate: baseStatusPreview.targetDate,
+  startTime: baseStatusPreview.startTime,
+  endTime: baseStatusPreview.endTime,
+  players: baseStatusPreview.players,
+  requestedLayoutHoles: baseStatusPreview.requestedLayoutHoles,
+  userTimeZone: baseStatusPreview.userTimeZone,
+  checkedAt: baseStatusPreview.checkedAt,
+  stopUrls: previewStopUrls,
+  assetBaseUrl: ""
+};
+
+export default async function EmailPreviewPage({
+  searchParams
+}: EmailPreviewPageProps) {
+  const requestedVariant = (await searchParams).variant;
+  const variant: PreviewVariant =
+    requestedVariant === "setup" || requestedVariant === "instant"
+      ? requestedVariant
+      : "morning";
+  const isInstant = variant === "instant";
+  const statusPreview: SearchStatusEmailInput = {
+    ...baseStatusPreview,
+    kind: variant === "setup" ? "setup" : "daily"
+  };
+  const emailHtml = isInstant
+    ? renderAlertHtml(previewAlert)
+    : renderSearchStatusHtml(statusPreview);
+  const title = variant === "setup"
+    ? "Setup report"
+    : variant === "instant"
+      ? "Instant alert"
+      : "Morning update";
+  const subject = variant === "setup"
+    ? "Your Tee Time Spot search is active"
+    : variant === "instant"
+      ? "New tee times opened at your priority courses"
+      : "Your morning Tee Time Spot update";
 
   return (
     <main className="preview-page">
       <div className="preview-header">
         <div>
           <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-            What your emails look like
+            Full customer email
           </p>
-          <h1>Useful updates, without inbox noise.</h1>
+          <h1>{title}</h1>
           <p className="meta">
-            We send one setup report with the results of your first check, one morning update, and
-            an instant email only when a new time opens inside your exact range.
+            This is the complete email body, rendered with the same HTML and data shape used for
+            production delivery.
           </p>
         </div>
-        <a className="button button-secondary" href={previewAlert.matches[0].bookingUrl}>
+        <a className="button button-secondary" href={previewAlert.matches[0]?.bookingUrl}>
           Official booking page
           <ExternalLink size={18} />
         </a>
       </div>
 
-      <section className="preview-grid email-preview-layout" aria-label="Search status email preview">
+      <nav aria-label="Email variants" className="email-preview-tabs">
+        {previewVariants.map((option) => (
+          <a
+            aria-current={variant === option ? "page" : undefined}
+            className={variant === option ? "button button-dark" : "button button-secondary"}
+            href={option === "morning" ? "/email-preview" : `/email-preview?variant=${option}`}
+            key={option}
+          >
+            {option === "morning" ? "Morning" : option === "setup" ? "Setup" : "Instant"}
+          </a>
+        ))}
+      </nav>
+
+      <section className="preview-grid email-preview-layout" aria-label={`${title} email preview`}>
         <div className="preview-card email-browser-card">
           <div className="email-browser-chrome">
             <span />
             <span />
             <span />
-            <strong>Search update from Tee Time Spot - preview@teetimespot.com</strong>
+            <strong>{subject} — preview@teetimespot.com</strong>
           </div>
           <EmailPreviewFrame
             className="email-frame email-status-frame"
-            initialHeight={1220}
-            srcDoc={statusHtml}
-            title="Rendered search status email"
+            initialHeight={isInstant ? 1320 : 2480}
+            key={variant}
+            srcDoc={emailHtml}
+            title={`Rendered ${title.toLowerCase()} email`}
           />
         </div>
 
         <aside className="preview-card preview-sidebar">
-          <h2>What the status report tells you</h2>
+          <h2>Production behavior</h2>
           <div className="delivery-step">
-            <CalendarCheck2 size={18} />
+            <Mail size={18} />
             <div>
-              <strong>One report when your search starts</strong>
-              <p className="meta">It confirms what each selected course showed on the first check.</p>
-            </div>
-          </div>
-          <div className="delivery-step">
-            <Search size={18} />
-            <div>
-              <strong>Clear monitoring status</strong>
+              <strong>One real template at a time</strong>
               <p className="meta">
-                Each priority is marked fully monitored, we’re working on it, official-site only,
-                or phone only before the latest availability detail.
+                Switch variants above without stacking or cutting off another email.
               </p>
             </div>
           </div>
           <div className="delivery-step">
-            <Mail size={18} />
+            <Bell size={18} />
             <div>
-              <strong>One predictable morning update</strong>
-              <p className="meta">It becomes due after 8:00 AM in your local timezone.</p>
-            </div>
-          </div>
-          <div className="alert alert-info">
-            <Bell size={17} />
-            <span>
-              A first-check match is included in the setup report. Later openings get an immediate
-              email, which replaces that morning’s separate status update when they coincide.
-            </span>
-          </div>
-        </aside>
-      </section>
-
-      <div className="preview-header preview-section-header">
-        <div>
-          <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-            Instant match alert
-          </p>
-          <h2>New time windows opened in your range.</h2>
-          <p className="meta">
-            Dense tee sheets are grouped into concise hourly windows, with the official booking
-            link one click away.
-          </p>
-        </div>
-      </div>
-
-      <section className="preview-grid email-preview-layout" aria-label="Instant match email preview">
-        <div className="preview-card email-browser-card">
-          <div className="email-browser-chrome">
-            <span />
-            <span />
-            <span />
-            <strong>Match alert from Tee Time Spot - preview@teetimespot.com</strong>
-          </div>
-          <EmailPreviewFrame
-            className="email-frame"
-            srcDoc={alertHtml}
-            title="Rendered tee time alert email"
-          />
-        </div>
-
-        <aside className="preview-card preview-sidebar">
-          <h2>How the match alert works</h2>
-          <div className="delivery-step">
-            <Mail size={18} />
-            <div>
-              <strong>Instant only for a new match</strong>
-              <p className="meta">It must fit your date, time window, and player count.</p>
-            </div>
-          </div>
-          <div className="delivery-step">
-            <ExternalLink size={18} />
-            <div>
-              <strong>Direct booking link</strong>
+              <strong>Truthful availability</strong>
               <p className="meta">
-                One click goes straight to the course&apos;s booking page. No payment from us,
-                ever.
+                Only persisted pending matches receive a NEW badge; earlier availability stays
+                grouped into hourly windows.
               </p>
             </div>
           </div>
-
-          <div className="matched-alert-card">
-            <h3>This alert matched</h3>
-            <dl className="preview-data">
-              <div>
-                <dt>Date</dt>
-                <dd>Wed, Jul 15</dd>
-              </div>
-              <div>
-                <dt>Window</dt>
-                <dd>1:40 - 4:00 PM</dd>
-              </div>
-              <div>
-                <dt>Golfers</dt>
-                <dd>{previewAlert.matches[0].availableSpots} players</dd>
-              </div>
-              <div>
-                <dt>Sent to</dt>
-                <dd>{previewAlert.to}</dd>
-              </div>
-            </dl>
-          </div>
-
           <div className="alert alert-info">
-            <Bell size={17} />
-            <span>
-              Tee times go fast. The link in your email is live the moment we send it, so check
-              your inbox and book quickly.
-            </span>
-          </div>
-          <div className="mini-pill preview-time-pill">
-            <Clock3 size={13} />
-            Email-only alerts for v1
+            Setup and morning updates include every selected course&apos;s monitoring state.
+            Instant alerts stay focused on matching availability.
           </div>
         </aside>
       </section>

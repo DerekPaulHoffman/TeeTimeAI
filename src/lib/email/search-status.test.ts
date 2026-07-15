@@ -120,7 +120,7 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("Scheduled");
+    expect(html).toContain("SCHEDULED");
     expect(html).toContain("Booking opens Wednesday, July 15 at 5:00 AM EDT");
     expect(html).toContain("start checking at that time");
   });
@@ -142,14 +142,14 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("Official site");
+    expect(html).toContain("ADDING MONITORING");
     expect(html).toContain("Check this course directly for now");
     expect(html).toContain("We checked every selected course");
     expect(html).not.toContain("keep watching automatically");
-    expect(html).toContain("What we’re watching for you");
-    expect(html).toContain("Course layout");
-    expect(html).toContain("18-hole");
-    expect(html).toContain("Fully monitored ✓");
+    expect(html).toContain("What we're watching for you");
+    expect(html).toContain("COURSE LAYOUT");
+    expect(html).toContain("18 Holes");
+    expect(html).toContain("FULLY MONITORED");
     expect(html).toContain("at most one morning status update per day");
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
@@ -187,10 +187,10 @@ describe("renderSearchStatusHtml", () => {
 
     expect(html).toContain("7:40 AM");
     expect(html).toContain("8:10 AM");
-    expect(html).toContain("4 spots");
-    expect(html).toContain("2 spots");
-    expect(html).toContain("I booked — stop these emails");
+    expect(html).toContain("I booked &mdash; stop these results");
     expect(html).toContain("Cancel this alert");
+    expect(html).toContain('href="https://teetimespot.com/alerts/stop?token=cancelled"');
+    expect(html).toContain(">Unsubscribe</a>");
   });
 
   it("does not claim an official-site-only course is monitored automatically", () => {
@@ -223,10 +223,10 @@ describe("renderSearchStatusHtml", () => {
     });
 
     expect(html).toContain("keep checking supported courses");
-    expect(html).toContain("Official site only");
+    expect(html).toContain("OFFICIAL SITE ONLY");
     expect(html).toContain("not automatically monitored");
-    expect(html).toContain("Open official site →");
-    expect(html).toContain("Call (860) 555-0102 →");
+    expect(html).toContain("Open official site &rarr;");
+    expect(html).toContain("Call (860) 555-0102 &rarr;");
     expect(html).not.toContain("keep watching automatically");
   });
 
@@ -253,9 +253,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("Priority 1 · Book online directly");
+    expect(html).toContain("PRIORITY 1 &middot; BOOK ONLINE DIRECTLY");
     expect(html).toContain("Use the official booking page to book directly");
-    expect(html).toContain("Open official booking page →");
+    expect(html).toContain("Open official booking page &rarr;");
     expect(html).toContain("not automatically monitored");
   });
 
@@ -283,11 +283,11 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("Priority 1 · Phone only");
+    expect(html).toContain("PRIORITY 1 &middot; PHONE ONLY");
     expect(html).toContain("Call the course to check availability and book directly");
     expect(html).toContain('href="tel:+12035550199"');
-    expect(html).toContain("Call +1 (203) 555-0199 →");
-    expect(html).toContain("Open official site →");
+    expect(html).toContain("Call +1 (203) 555-0199 &rarr;");
+    expect(html).toContain("Open official site &rarr;");
     expect(html).not.toContain("Open official booking page");
   });
 
@@ -327,13 +327,95 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(pendingHtml).toContain("Official site");
-    expect(alertedHtml).toContain("Official site");
+    expect(pendingHtml).toContain("ADDING MONITORING");
+    expect(alertedHtml).toContain("ADDING MONITORING");
     expect(pendingHtml).toContain("Check this course directly for now");
     expect(alertedHtml).toContain("Check this course directly for now");
     expect(pendingHtml).not.toContain("team has been alerted");
     expect(alertedHtml).not.toContain("team has been alerted");
     expect(alertedHtml).not.toContain("Automatic monitoring isn’t available yet");
+  });
+
+  it("uses the Figma shell, alternating course imagery, and availability-first order", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-figma",
+      to: "player@example.com",
+      kind: "daily",
+      targetDate: "2026-07-18",
+      startTime: "07:30",
+      endTime: "09:00",
+      players: 2,
+      requestedLayoutHoles: 18,
+      checkedAt: new Date("2026-07-15T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "pinebrook",
+          courseName: "Pinebrook Golf Club",
+          rank: 1,
+          courseAddress: "1 Pine Road, Glastonbury, CT 06033, USA",
+          timeZone: "America/New_York",
+          outcome: "MATCH_FOUND",
+          availableMatches: 3,
+          bookingUrl: "https://example.com/pinebrook",
+          matchingTimes: [
+            {
+              startsAt: "2026-07-18T07:40:00-04:00",
+              availableSpots: 4,
+              priceCents: 5800,
+              holes: 18,
+              isNew: true
+            },
+            {
+              startsAt: "2026-07-18T08:10:00-04:00",
+              availableSpots: 3,
+              priceCents: 6200,
+              holes: 18,
+              isNew: false
+            },
+            {
+              startsAt: "2026-07-18T08:20:00-04:00",
+              availableSpots: 4,
+              priceCents: 6200,
+              holes: 18,
+              isNew: false
+            }
+          ]
+        },
+        {
+          courseId: "ridgecrest",
+          courseName: "Ridgecrest Golf Course",
+          rank: 2,
+          courseAddress: "2 Ridge Road, Orange, CT 06477",
+          timeZone: "America/New_York",
+          outcome: "NO_MATCH",
+          availableMatches: 0,
+          availability: { visibleSlotCount: 0, playerEligibleSlotCount: 0 }
+        }
+      ],
+      assetBaseUrl: "https://assets.example.com",
+      stopUrls: {
+        booked: "https://teetimespot.com/alerts/stop?token=booked-signed",
+        cancelled: "https://teetimespot.com/alerts/stop?token=cancelled-signed"
+      }
+    });
+
+    expect(html).toContain('width="680"');
+    expect(html).toContain("background:#f7f4eb");
+    expect(html).toContain("background:#14231d");
+    expect(html).toContain("background:#d9862f");
+    expect(html).toContain("MORNING UPDATE");
+    expect(html).toContain("https://assets.example.com/email/course-card-1.png");
+    expect(html).toContain("https://assets.example.com/email/course-card-2.png");
+    expect(html).toContain("Glastonbury, CT");
+    expect(html).toContain("Orange, CT");
+    expect(html).toContain(">NEW</span>");
+    expect(html).toContain("8:10 AM EDT – 8:20 AM EDT");
+    expect(html.indexOf("AVAILABLE NOW")).toBeLessThan(
+      html.indexOf("What we're watching for you")
+    );
+    expect(html).toContain(
+      'href="https://teetimespot.com/alerts/stop?token=cancelled-signed"'
+    );
   });
 });
 

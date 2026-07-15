@@ -70,6 +70,7 @@ const search = {
       course: {
         id: "course-1",
         name: "Official Site Only Course",
+        address: "1 Main Street, Glastonbury, CT 06033",
         timeZone: "America/New_York",
         phone: null,
         bookingPhone: null,
@@ -99,7 +100,9 @@ const search = {
 const pendingMatch = {
   id: "match-1",
   course: {
+    id: "course-1",
     name: "Available Course",
+    address: "1 Main Street, Glastonbury, CT 06033",
     timeZone: "America/New_York"
   },
   teeSearch: {
@@ -195,6 +198,66 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
+  it("flows the persisted pending state into setup-report NEW rows", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Monitored Course",
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "slot-1",
+          courseId: "course-1",
+          startsAt: "2026-07-12T08:10:00-04:00",
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          priceCents: 6200,
+          holes: 18
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    dbMocks.recordTeeTimeMatch.mockResolvedValue({
+      id: "match-1",
+      alertStatus: "PENDING"
+    });
+
+    await runSearchCheck("search-1", "test");
+
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "setup",
+        courses: [
+          expect.objectContaining({
+            rank: 1,
+            courseAddress: "1 Main Street, Glastonbury, CT 06033",
+            matchingTimes: [
+              expect.objectContaining({
+                startsAt: "2026-07-12T08:10:00-04:00",
+                isNew: true
+              })
+            ]
+          })
+        ]
+      })
+    );
+    expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
+  });
+
   it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
@@ -204,6 +267,22 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(emailMocks.sendTeeTimeAlert).toHaveBeenCalledOnce();
+    expect(emailMocks.sendTeeTimeAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetDate: "2026-07-12",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        matches: [
+          expect.objectContaining({
+            courseId: "course-1",
+            courseRank: 1,
+            courseAddress: "1 Main Street, Glastonbury, CT 06033",
+            isNew: true
+          })
+        ]
+      })
+    );
     expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalled();
     expect(dbMocks.markSearchStatusEmailSent).toHaveBeenCalledWith(
       expect.objectContaining({ searchId: "search-1" })

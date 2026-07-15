@@ -1261,42 +1261,26 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/email-preview");
 
-    await expect(
-      page.getByRole("heading", { name: "Useful updates, without inbox noise." })
-    ).toBeVisible();
-    await expect(page.getByTitle("Rendered search status email")).toBeVisible();
-    await expect(page.getByTitle("Rendered tee time alert email")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Morning update" })).toBeVisible();
+    await expect(page.getByTitle("Rendered morning update email")).toBeVisible();
 
-    const statusFrame = page.frameLocator("iframe[title='Rendered search status email']");
-    await expect(statusFrame.locator("body")).toContainText("Your tee-time alert is active");
-    await expect(statusFrame.locator("body")).toContainText("Fairview Farm Golf Course");
-    await expect(statusFrame.locator("body")).toContainText("Phone only");
-    await expect(statusFrame.getByRole("link", { name: "Call (860) 689-1000" })).toBeVisible();
-    await expect(statusFrame.locator("body")).toContainText("No time in your window");
-    await expect(statusFrame.locator("body")).toContainText("Nothing visible for this date yet");
-    await expect(statusFrame.locator("body")).toContainText("Priority 5");
-    await expect(statusFrame.locator("body")).not.toContainText(/Priority [6-9]/);
-    await expect(statusFrame.locator("body")).toContainText("Official site");
-    await expect(statusFrame.locator("body")).toContainText(
-      "Check this course directly for now"
-    );
-    await expect(statusFrame.locator("body")).not.toContainText("Needs support");
-    await expect(statusFrame.locator("body")).toContainText(
+    const morningFrame = page.frameLocator("iframe[title='Rendered morning update email']");
+    await expect(morningFrame.locator("body")).toContainText("MORNING UPDATE");
+    await expect(morningFrame.locator("body")).toContainText("Pinebrook Golf Club");
+    await expect(morningFrame.locator("body")).toContainText("Ridgecrest Golf Course");
+    await expect(morningFrame.locator("body")).toContainText("NEW");
+    await expect(morningFrame.locator("body")).toContainText("What we're watching for you");
+    await expect(morningFrame.locator("body")).toContainText("PRIORITY 5");
+    await expect(morningFrame.locator("body")).not.toContainText(/PRIORITY [6-9]/);
+    await expect(morningFrame.locator("body")).toContainText(
       /at most one morning status update per day/i
     );
+    await expect(morningFrame.locator("body")).toContainText(/first come,\s+first served/i);
+    await expect(morningFrame.locator("body")).not.toContainText(/we book/i);
 
-    const emailFrame = page.frameLocator("iframe[title='Rendered tee time alert email']");
-    await expect(emailFrame.locator("body")).toContainText("Tashua Knolls Golf Course");
-    await expect(emailFrame.locator("body")).toContainText("New tee time windows just opened!");
-    await expect(emailFrame.locator("body")).toContainText("6 tee times");
-    await expect(
-      emailFrame.getByRole("link", { name: "Open official booking page" })
-    ).toBeVisible();
-    await expect(emailFrame.locator("body")).toContainText(/first come,\s+first served/i);
-    await expect(emailFrame.locator("body")).not.toContainText(/we book/i);
-
-    for (const title of ["Rendered search status email", "Rendered tee time alert email"]) {
-      const frameMetrics = await page.locator(`iframe[title='${title}']`).evaluate((element) => {
+    const morningMetrics = await page
+      .locator("iframe[title='Rendered morning update email']")
+      .evaluate((element) => {
         const frame = element as HTMLIFrameElement;
         const document = frame.contentDocument;
         return {
@@ -1309,9 +1293,57 @@ test.describe("Tee Time Spot UI smoke", () => {
           viewportWidth: document?.documentElement.clientWidth ?? 0
         };
       });
-      expect(frameMetrics.frameHeight).toBeGreaterThanOrEqual(frameMetrics.contentHeight - 2);
-      expect(frameMetrics.contentWidth).toBeLessThanOrEqual(frameMetrics.viewportWidth + 2);
-    }
+    expect(morningMetrics.frameHeight).toBeGreaterThanOrEqual(morningMetrics.contentHeight - 2);
+    expect(morningMetrics.contentWidth).toBeLessThanOrEqual(morningMetrics.viewportWidth + 2);
+    await captureUiElementScreenshot(
+      page.locator("iframe[title='Rendered morning update email']"),
+      testInfo,
+      "email-preview-morning"
+    );
+
+    await page.getByRole("link", { name: "Instant" }).click();
+    await expect(page).toHaveURL(/\/email-preview\?variant=instant$/);
+    const instantFrame = page.frameLocator("iframe[title='Rendered instant alert email']");
+    await expect(instantFrame.locator("body")).toContainText("NEW TEE TIME ALERT");
+    await expect(instantFrame.locator("body")).toContainText("Pinebrook Golf Club");
+    await expect(
+      instantFrame.getByRole("link", { name: "Open official booking page" }).first()
+    ).toBeVisible();
+    await expect(instantFrame.locator("body")).not.toContainText("What we're watching for you");
+
+    const instantFrameLocator = page.locator("iframe[title='Rendered instant alert email']");
+    await expect
+      .poll(async () =>
+        instantFrameLocator.evaluate((element) => {
+          const frame = element as HTMLIFrameElement;
+          const document = frame.contentDocument;
+          const contentHeight = Math.max(
+            document?.documentElement.scrollHeight ?? 0,
+            document?.body?.scrollHeight ?? 0
+          );
+          return frame.getBoundingClientRect().height - contentHeight;
+        })
+      )
+      .toBeGreaterThanOrEqual(-2);
+    const instantMetrics = await instantFrameLocator.evaluate((element) => {
+        const frame = element as HTMLIFrameElement;
+        const document = frame.contentDocument;
+        return {
+          contentHeight: Math.max(
+            document?.documentElement.scrollHeight ?? 0,
+            document?.body?.scrollHeight ?? 0
+          ),
+          contentWidth: document?.documentElement.scrollWidth ?? 0,
+          frameHeight: frame.getBoundingClientRect().height,
+          viewportWidth: document?.documentElement.clientWidth ?? 0
+        };
+      });
+    expect(instantMetrics.contentWidth).toBeLessThanOrEqual(instantMetrics.viewportWidth + 2);
+    await captureUiElementScreenshot(
+      instantFrameLocator,
+      testInfo,
+      "email-preview-instant"
+    );
 
     await captureUiScreenshot(page, testInfo, "email-preview");
 

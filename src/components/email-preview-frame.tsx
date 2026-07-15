@@ -19,8 +19,9 @@ export function EmailPreviewFrame({
   const [height, setHeight] = useState(initialHeight);
 
   const syncHeight = useCallback(() => {
-    const document = frameRef.current?.contentDocument;
-    if (!document) {
+    const frame = frameRef.current;
+    const document = frame?.contentDocument;
+    if (!frame || !document) {
       return;
     }
 
@@ -34,6 +35,7 @@ export function EmailPreviewFrame({
     );
 
     if (nextHeight > 0) {
+      frame.style.height = `${nextHeight}px`;
       setHeight(nextHeight);
     }
   }, []);
@@ -64,8 +66,12 @@ export function EmailPreviewFrame({
     frame.addEventListener("load", observeDocument);
     window.addEventListener("resize", syncHeight);
     observeDocument();
+    const settleTimers = [0, 50, 250, 750].map((delay) =>
+      window.setTimeout(syncHeight, delay)
+    );
 
     return () => {
+      settleTimers.forEach((timer) => window.clearTimeout(timer));
       observer?.disconnect();
       frame.removeEventListener("load", observeDocument);
       window.removeEventListener("resize", syncHeight);

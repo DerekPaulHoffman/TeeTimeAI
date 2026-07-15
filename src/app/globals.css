@@ -1379,6 +1379,17 @@ button {
   grid-template-columns: minmax(0, 1fr) minmax(300px, 390px);
 }
 
+.email-preview-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 22px;
+}
+
+.email-preview-tabs .button {
+  min-width: 104px;
+}
+
 .email-browser-card {
   background: #f7f8f4;
   overflow: hidden;
