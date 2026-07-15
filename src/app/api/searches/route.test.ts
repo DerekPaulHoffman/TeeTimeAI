@@ -4,12 +4,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { POST } from "./route";
 
 const mocks = vi.hoisted(() => ({
+  after: vi.fn(),
   createTeeSearchForUser: vi.fn(),
   getRequiredAppUser: vi.fn(),
   hasClerkConfig: vi.fn(),
   hasDatabaseConfig: vi.fn(),
   listTeeSearchesForUser: vi.fn(),
+  queuePendingCourseProfiles: vi.fn(),
   startSearchSchedule: vi.fn()
+}));
+
+vi.mock("next/server", async (importOriginal) => ({
+  ...await importOriginal<typeof import("next/server")>(),
+  after: mocks.after
 }));
 
 vi.mock("@/lib/auth/current-user", () => ({
@@ -22,6 +29,9 @@ vi.mock("@/lib/env", () => ({
   hasClerkConfig: mocks.hasClerkConfig,
   hasDatabaseConfig: mocks.hasDatabaseConfig
 }));
+vi.mock("@/lib/course-profiles/service", () => ({
+  queuePendingCourseProfiles: mocks.queuePendingCourseProfiles
+}));
 vi.mock("@/lib/searches/service", () => ({
   createTeeSearchForUser: mocks.createTeeSearchForUser,
   listTeeSearchesForUser: mocks.listTeeSearchesForUser
@@ -31,6 +41,7 @@ describe("POST /api/searches", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.after.mockImplementation((callback: () => unknown) => callback());
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
   });
@@ -65,7 +76,10 @@ describe("POST /api/searches", () => {
       id: "app-user-1",
       email: "owner@example.com"
     });
-    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1" });
+    mocks.createTeeSearchForUser.mockResolvedValue({
+      id: "search-1",
+      preferences: [{ courseId: "course-1" }]
+    });
     mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
 
     const response = await POST(searchRequest("different-person@example.com", "TEST"));
@@ -78,6 +92,7 @@ describe("POST /api/searches", () => {
       false
     );
     expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
+    expect(mocks.queuePendingCourseProfiles).toHaveBeenCalledWith(["course-1"]);
   });
 
   it("fails closed to unclassified provenance for an unknown traffic label", async () => {
@@ -86,7 +101,7 @@ describe("POST /api/searches", () => {
       id: "app-user-1",
       email: "owner@example.com"
     });
-    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1" });
+    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1", preferences: [] });
     mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
 
     const response = await POST(searchRequest("owner@example.com", "visitor-123"));
@@ -106,7 +121,7 @@ describe("POST /api/searches", () => {
       id: "app-user-1",
       email: "owner@example.com"
     });
-    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1" });
+    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1", preferences: [] });
     mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
 
     await POST(searchRequest("owner@example.com", "TEST", true));

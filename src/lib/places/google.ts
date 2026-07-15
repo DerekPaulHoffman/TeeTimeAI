@@ -28,6 +28,11 @@ export type GooglePlace = {
     text?: string;
   };
   formattedAddress?: string;
+  addressComponents?: Array<{
+    longText?: string;
+    shortText?: string;
+    types?: string[];
+  }>;
   businessStatus?: string;
   primaryType?: string;
   googleMapsTypeLabel?: {
@@ -62,9 +67,15 @@ export type CoursePhotoAttribution = {
 };
 
 export type CourseCandidate = {
+  courseId?: string;
   googlePlaceId: string;
   name: string;
   address?: string;
+  city?: string;
+  stateCode?: string;
+  stateName?: string;
+  county?: string;
+  countryCode?: string;
   latitude: number;
   longitude: number;
   timeZone: string;
@@ -85,6 +96,7 @@ export type CourseCandidate = {
   layoutHolesStatus?: "VERIFIED" | "UNVERIFIED";
   layoutHolesEvidenceUrl?: string;
   layoutHolesVerifiedAt?: string;
+  profileUrl?: string;
 };
 
 export type NearbyCourseSearchInput = {
@@ -167,6 +179,11 @@ export function mapGooglePlaceToCourseCandidate(
     googlePlaceId,
     name,
     address: identityOverride?.canonicalAddress ?? place.formattedAddress,
+    city: getAddressComponent(place, ["locality", "postal_town", "administrative_area_level_3"]),
+    stateCode: getAddressComponent(place, ["administrative_area_level_1"], true)?.toUpperCase(),
+    stateName: getAddressComponent(place, ["administrative_area_level_1"]),
+    county: getAddressComponent(place, ["administrative_area_level_2"])?.replace(/\s+County$/i, ""),
+    countryCode: getAddressComponent(place, ["country"], true)?.toUpperCase(),
     latitude,
     longitude,
     timeZone: getTimeZoneForCoordinates(latitude, longitude),
@@ -176,6 +193,13 @@ export function mapGooglePlaceToCourseCandidate(
     photoReference: place.photos?.[0]?.name,
     photoAttributions: place.photos?.[0]?.authorAttributions
   };
+}
+
+function getAddressComponent(place: GooglePlace, types: string[], short = false) {
+  const component = place.addressComponents?.find((item) =>
+    item.types?.some((type) => types.includes(type))
+  );
+  return short ? component?.shortText : component?.longText;
 }
 
 export function filterPublicGolfCoursePlaces(
@@ -365,7 +389,7 @@ export async function searchGolfCoursesByName(
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
+        "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
     },
     body: JSON.stringify({
       textQuery: input.query.trim(),
@@ -444,7 +468,7 @@ async function searchPublicGolfCoursePlacesByName(input: CourseNameSearchInput) 
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
+          "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
       },
       body: JSON.stringify({
         textQuery: `${input.query.trim()} public golf course`,
@@ -493,7 +517,7 @@ async function searchNearbyGolfCoursePlaces(
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus,places.containingPlaces"
+        "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus,places.containingPlaces"
     },
     body: JSON.stringify({
       languageCode: "en",
@@ -534,7 +558,7 @@ async function searchPublicGolfCoursePlaces(input: NearbyCourseSearchInput) {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.location,places.websiteUri,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
+          "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
       },
       body: JSON.stringify({
         textQuery: "public golf courses",
@@ -585,7 +609,7 @@ async function searchVerifiedPublicCoursePlaces(
               headers: {
                 "X-Goog-Api-Key": apiKey,
                 "X-Goog-FieldMask":
-                  "id,displayName,formattedAddress,location,rating,nationalPhoneNumber,websiteUri,photos,types,primaryType,businessStatus"
+                  "id,displayName,formattedAddress,addressComponents,location,rating,nationalPhoneNumber,websiteUri,photos,types,primaryType,businessStatus"
               }
             }
           );

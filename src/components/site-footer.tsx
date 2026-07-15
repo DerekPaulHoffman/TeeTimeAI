@@ -11,6 +11,7 @@ const footerGroups = [
       { href: "/how-it-works", label: "How it works" },
       { href: "/search", label: "Find a tee time" },
       { href: "/methodology", label: "Methodology" },
+      { href: "/locations/connecticut", label: "Connecticut courses" },
       { href: "/dashboard", label: "My alerts" }
     ]
   },

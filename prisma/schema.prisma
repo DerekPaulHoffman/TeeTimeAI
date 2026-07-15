@@ -124,6 +124,34 @@ enum CourseSupportResolution {
   DIRECT_BOOKING_CLASSIFIED
 }
 
+enum CourseProfileStatus {
+  PENDING
+  PUBLISHED
+  BLOCKED_EVIDENCE
+  STALE
+}
+
+enum CourseProfileType {
+  MUNICIPAL
+  DAILY_FEE
+  RESORT
+  UNIVERSITY
+  MILITARY
+  SEMI_PRIVATE
+  OTHER_PUBLIC
+}
+
+enum CourseProfileSourceType {
+  OFFICIAL_COURSE
+  OFFICIAL_OPERATOR
+  MUNICIPAL_GOVERNMENT
+  OFFICIAL_BOOKING
+  GOLF_ASSOCIATION
+  GOVERNMENT_TOURISM
+  ESTABLISHED_NEWS
+  GOOGLE_PLACE_IDENTITY
+}
+
 model User {
   id          String      @id @default(cuid())
   clerkUserId String      @unique
@@ -138,6 +166,11 @@ model Course {
   googlePlaceId            String?                     @unique
   name                     String
   address                  String?
+  city                     String?
+  stateCode                String?
+  stateName                String?
+  county                   String?
+  countryCode              String?
   latitude                 Float
   longitude                Float
   timeZone                 String                      @default("America/New_York")
@@ -177,11 +210,70 @@ model Course {
   matches                  TeeTimeMatch[]
   automationDiscoveries    CourseAutomationDiscovery[]
   supportIncident          CourseSupportIncident?
+  profile                  CourseProfile?
 
   @@index([latitude, longitude])
+  @@index([stateCode, county, automationEligibility])
   @@index([detectedPlatform, automationEligibility])
   @@index([bookingMethod, automationEligibility])
   @@index([intelligenceReviewAt])
+}
+
+model CourseProfile {
+  id                    String                   @id @default(cuid())
+  courseId              String                   @unique
+  canonicalSlug         String                   @unique
+  status                CourseProfileStatus      @default(PENDING)
+  courseType            CourseProfileType?
+  accessSummary         String?
+  overview              String?
+  courseCharacter       String?
+  notableFacts          String[]                 @default([])
+  contentHash           String?
+  contentVersion        Int                      @default(1)
+  profileVerifiedAt     DateTime?
+  reviewDueAt           DateTime?
+  publishedAt           DateTime?
+  lastResearchAttemptAt DateTime?
+  lastRefreshedAt       DateTime?
+  failedResearchAt      DateTime?
+  failureReason         String?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+  course                Course                   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  sources               CourseProfileSource[]
+  slugAliases           CourseProfileSlugAlias[]
+
+  @@index([status, reviewDueAt])
+  @@index([publishedAt])
+}
+
+model CourseProfileSource {
+  id              String                  @id @default(cuid())
+  courseProfileId String
+  url             String
+  title           String
+  publisher       String
+  sourceType      CourseProfileSourceType
+  claimKeys       String[]                @default([])
+  evidenceSummary String
+  accessedAt      DateTime
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+  courseProfile   CourseProfile           @relation(fields: [courseProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([courseProfileId, url])
+  @@index([courseProfileId, sourceType])
+}
+
+model CourseProfileSlugAlias {
+  id              String        @id @default(cuid())
+  courseProfileId String
+  slug            String        @unique
+  createdAt       DateTime      @default(now())
+  courseProfile   CourseProfile @relation(fields: [courseProfileId], references: [id], onDelete: Cascade)
+
+  @@index([courseProfileId])
 }
 
 model GooglePlaceReview {

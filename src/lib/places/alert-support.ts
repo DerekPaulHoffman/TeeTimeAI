@@ -16,9 +16,11 @@ import { prisma } from "@/lib/prisma";
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
 type KnownCourseRecord = CourseIdentity & {
+  id: string;
   bookingMethod: BookingMethod;
   automationEligibility: string;
   detectedBookingUrl?: string | null;
+  profile?: { canonicalSlug: string; status: string } | null;
 };
 
 export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[]) {
@@ -41,6 +43,7 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
     },
     take: 500,
     select: {
+      id: true,
       googlePlaceId: true,
       name: true,
       address: true,
@@ -50,7 +53,8 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
       phone: true,
       bookingMethod: true,
       automationEligibility: true,
-      detectedBookingUrl: true
+      detectedBookingUrl: true,
+      profile: { select: { canonicalSlug: true, status: true } }
     }
   });
 
@@ -72,10 +76,17 @@ function mapCourseAlertSupport(
     course.bookingMethod === "PUBLIC_ONLINE" && course.detectedBookingUrl
       ? { ...candidate, website: course.detectedBookingUrl }
       : candidate;
+  const candidateWithProfile = {
+    ...candidateWithOfficialBooking,
+    courseId: course.id,
+    ...(course.profile?.status === "PUBLISHED"
+      ? { profileUrl: `/courses/${course.profile.canonicalSlug}` }
+      : {})
+  };
   const alertSupport = getCourseAlertSupport(course);
   return alertSupport
-    ? { ...candidateWithOfficialBooking, alertSupport, monitoringSupport }
-    : { ...candidateWithOfficialBooking, monitoringSupport };
+    ? { ...candidateWithProfile, alertSupport, monitoringSupport }
+    : { ...candidateWithProfile, monitoringSupport };
 }
 
 export function findKnownCourse(

@@ -97,12 +97,17 @@ describe("course alert support enrichment", () => {
   it("only claims automatic monitoring for a known allowed course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {
+        id: "course-timberlin",
         googlePlaceId: "timberlin",
         name: "Timberlin Golf Course",
         latitude: 41.62,
         longitude: -72.75,
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "ALLOWED"
+        automationEligibility: "ALLOWED",
+        profile: {
+          canonicalSlug: "timberlin-golf-course-berlin-ct",
+          status: "PUBLISHED"
+        }
       }
     ] as never);
 
@@ -124,6 +129,8 @@ describe("course alert support enrichment", () => {
     ]);
 
     expect(knownCourse.monitoringSupport).toBe("AUTOMATIC");
+    expect(knownCourse.courseId).toBe("course-timberlin");
+    expect(knownCourse.profileUrl).toBe("/courses/timberlin-golf-course-berlin-ct");
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
   });
 

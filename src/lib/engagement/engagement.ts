@@ -18,7 +18,11 @@ export const websiteEventNames = [
   "search_submitted",
   "search_submission_failed",
   "feedback_opened",
-  "feedback_submitted"
+  "feedback_submitted",
+  "course_profile_viewed",
+  "course_profile_alert_clicked",
+  "course_profile_official_link_clicked",
+  "location_page_viewed"
 ] as const;
 
 const trafficClassSchema = z.enum(websiteTrafficClasses).optional().default("UNCLASSIFIED");
@@ -52,10 +56,19 @@ const eventBase = {
   discoverySource: discoverySourceSchema,
   trafficClass: trafficClassSchema
 };
+const knowledgeMetadataSchema = z
+  .object({
+    slug: z.string().trim().min(1).max(180)
+  })
+  .strict();
 
 export const websiteEventInputSchema = z.discriminatedUnion("name", [
   z.object({ name: z.literal("page_viewed"), ...eventBase }).strict(),
   z.object({ name: z.literal("feedback_opened"), ...eventBase }).strict(),
+  z.object({ name: z.literal("course_profile_viewed"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
+  z.object({ name: z.literal("course_profile_alert_clicked"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
+  z.object({ name: z.literal("course_profile_official_link_clicked"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
+  z.object({ name: z.literal("location_page_viewed"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
   z.object({ name: z.literal("start_search_clicked"), ...eventBase, metadata: clickMetadataSchema }).strict(),
   z.object({ name: z.literal("dashboard_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
   z.object({ name: z.literal("email_preview_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),

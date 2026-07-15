@@ -8,6 +8,7 @@ import {
   buildRepeatedCoveragePortfolioCandidates
 } from "@/lib/automation/improvement";
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
+import { listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
@@ -53,7 +54,8 @@ async function main() {
     recentWebsiteEvents,
     websiteEventCounts,
     courseDiscoveryEvents,
-    unresolvedWebsiteFeedback
+    unresolvedWebsiteFeedback,
+    courseProfileQueue
   ] =
     await Promise.all([
       prisma.automationRun.findMany({
@@ -205,7 +207,8 @@ async function main() {
         where: { resolvedAt: null },
         orderBy: { createdAt: "desc" },
         take: 20
-      })
+      }),
+      listCourseProfileQueue(3)
     ]);
 
   const activeSearchIds = activeSearches.map((search) => search.id);
@@ -299,6 +302,19 @@ async function main() {
             evidenceCount: candidate.evidence.length
           }))
         },
+        courseProfileQueue: courseProfileQueue.map((course) => ({
+          courseId: course.id,
+          name: course.name,
+          city: course.city,
+          stateCode: course.stateCode,
+          county: course.county,
+          website: sanitizeExternalUrl(course.website),
+          bookingUrl: sanitizeExternalUrl(course.detectedBookingUrl),
+          eligibility: course.automationEligibility,
+          profileStatus: course.profile?.status ?? "MISSING",
+          reviewDueAt: course.profile?.reviewDueAt ?? null,
+          failureReason: summarize(course.profile?.failureReason ?? null)
+        })),
         activeSearches: activeSearches.map((search) => ({
           id: search.id,
           trafficClass: search.trafficClass,

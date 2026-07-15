@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { after, NextRequest, NextResponse } from "next/server";
 
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
+import { queuePendingCourseProfiles } from "@/lib/course-profiles/service";
 import {
   parseSyntheticMultiCycle,
   parseWebsiteTrafficClass,
@@ -83,6 +84,7 @@ export async function POST(request: NextRequest) {
       trafficClass,
       syntheticMultiCycle
     );
+    after(() => queuePendingCourseProfiles(search.preferences.map((preference) => preference.courseId)));
     let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
     try {
       schedule = await startSearchSchedule(search.id);

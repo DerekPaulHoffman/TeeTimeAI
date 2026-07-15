@@ -2,6 +2,7 @@
 
 import { SignInButton, useUser } from "@clerk/nextjs";
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Leaflet from "leaflet";
@@ -333,6 +334,10 @@ function TeeTimeIntakeContent({
       if (transferred.players !== undefined) setPlayers(transferred.players);
       if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
       if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
+      if (transferred.selectedCourse !== undefined) {
+        setSelected([transferred.selectedCourse]);
+        setCourses([transferred.selectedCourse]);
+      }
     });
   }, []);
 
@@ -1162,7 +1167,13 @@ function TeeTimeIntakeContent({
                       preferredHoleCounts={cardHoleCount ? [cardHoleCount] : undefined}
                     />
                   </div>
-                  <h3>{course.name}</h3>
+                  <h3>
+                    {course.profileUrl ? (
+                      <Link href={course.profileUrl as `/courses/${string}`}>{course.name}</Link>
+                    ) : (
+                      course.name
+                    )}
+                  </h3>
                   <CourseAddressLink course={course} />
                   <CourseMonitoringStatus course={course} />
                 </div>

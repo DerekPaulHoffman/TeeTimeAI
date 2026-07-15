@@ -21,6 +21,7 @@ import "leaflet/dist/leaflet.css";
 import "./globals.css";
 import "./pricing.css";
 import "./editorial.css";
+import "./knowledge.css";
 
 const inter = Inter({
   display: "swap",
@@ -88,7 +89,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   const clerkEnabled = Boolean(clerkPublishableKey);
 
   return (
-    <html lang="en">
+    <html data-scroll-behavior="smooth" lang="en">
       <body className={inter.variable}>
         <OptionalClerkProvider publishableKey={clerkPublishableKey}>
           <div className="site-shell">

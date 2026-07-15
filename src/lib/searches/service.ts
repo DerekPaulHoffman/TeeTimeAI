@@ -53,7 +53,7 @@ export async function createTeeSearchForUser(
   }
   const coursePreferences = resolvedPreferences.map((preference) => preference.create);
 
-  return prisma.teeSearch.create({
+  const teeSearch = await prisma.teeSearch.create({
     data: {
       userId,
       date: parseLocalDate(input.date),
@@ -72,6 +72,8 @@ export async function createTeeSearchForUser(
     },
     include: searchInclude
   });
+
+  return teeSearch;
 }
 
 async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
@@ -81,7 +83,14 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
   if (reusableCourse) {
     await prisma.course.update({
       where: { id: reusableCourse.id },
-      data: { timeZone }
+      data: {
+        timeZone,
+        ...(course.city ? { city: course.city } : {}),
+        ...(course.stateCode ? { stateCode: course.stateCode.toUpperCase() } : {}),
+        ...(course.stateName ? { stateName: course.stateName } : {}),
+        ...(course.county ? { county: course.county.replace(/\s+County$/i, "") } : {}),
+        ...(course.countryCode ? { countryCode: course.countryCode.toUpperCase() } : {})
+      }
     });
     return {
       automationEligibility: reusableCourse.automationEligibility,
@@ -115,6 +124,11 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
             googlePlaceId: placeId,
             name: course.name,
             address: course.address,
+            city: course.city,
+            stateCode: course.stateCode?.toUpperCase(),
+            stateName: course.stateName,
+            county: course.county?.replace(/\s+County$/i, ""),
+            countryCode: course.countryCode?.toUpperCase(),
             latitude: course.latitude,
             longitude: course.longitude,
             timeZone,

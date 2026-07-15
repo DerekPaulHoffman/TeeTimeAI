@@ -33,6 +33,31 @@ describe("search prefill transfer", () => {
     expect(consumeSearchPrefill()).toBeUndefined();
   });
 
+  it("sanitizes a selected course for the course-page CTA", () => {
+    const selectedCourse = {
+      courseId: "course-1",
+      googlePlaceId: "place-1",
+      name: "Tashua Knolls Golf Course",
+      address: "40 Tashua Knolls Lane, Trumbull, CT",
+      city: "Trumbull",
+      stateCode: "ct",
+      stateName: "Connecticut",
+      county: "Fairfield",
+      countryCode: "us",
+      latitude: 41.268,
+      longitude: -73.221,
+      timeZone: "America/New_York",
+      website: "https://example.com/golf",
+      profileUrl: "/courses/tashua-knolls-golf-course-trumbull-ct"
+    };
+
+    expect(sanitizeSearchPrefill({ selectedCourse }).selectedCourse).toMatchObject({
+      ...selectedCourse,
+      stateCode: "CT",
+      countryCode: "US"
+    });
+  });
+
   it("drops malformed or out-of-range values", () => {
     expect(
       sanitizeSearchPrefill({

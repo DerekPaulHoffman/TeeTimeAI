@@ -16,6 +16,22 @@ export type SearchPrefill = {
   holes?: "any" | "9" | "18";
   radius?: number;
   coordinates?: { latitude: number; longitude: number };
+  selectedCourse?: {
+    courseId?: string;
+    googlePlaceId: string;
+    name: string;
+    address?: string;
+    city?: string;
+    stateCode?: string;
+    stateName?: string;
+    county?: string;
+    countryCode?: string;
+    latitude: number;
+    longitude: number;
+    timeZone: string;
+    website?: string;
+    profileUrl?: string;
+  };
 };
 
 let volatilePrefill: SearchPrefill | undefined;
@@ -120,6 +136,7 @@ export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
     ? value.holes
     : undefined;
   const coordinates = sanitizeCoordinates(value.coordinates);
+  const selectedCourse = sanitizeSelectedCourse(value.selectedCourse);
 
   return {
     location,
@@ -129,7 +146,46 @@ export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
     players,
     radius: radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES,
     holes,
-    coordinates
+    coordinates,
+    ...(selectedCourse ? { selectedCourse } : {})
+  };
+}
+
+function sanitizeSelectedCourse(value: unknown): SearchPrefill["selectedCourse"] {
+  if (!isRecord(value)) return undefined;
+  const googlePlaceId = safeString(value.googlePlaceId, 200);
+  const name = safeString(value.name, 200);
+  const coordinates = sanitizeCoordinates(value);
+  const timeZone = safeString(value.timeZone, 100);
+  if (!googlePlaceId || !name || !coordinates || !timeZone) return undefined;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format();
+  } catch {
+    return undefined;
+  }
+  const safeUrl = (candidate: unknown) => {
+    if (typeof candidate !== "string") return undefined;
+    try {
+      const url = new URL(candidate, "https://teetimespot.com");
+      return new Set(["http:", "https:"]).has(url.protocol) ? candidate.slice(0, 500) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    courseId: safeString(value.courseId, 100),
+    googlePlaceId,
+    name,
+    address: safeString(value.address, 300),
+    city: safeString(value.city, 120),
+    stateCode: safeString(value.stateCode, 2)?.toUpperCase(),
+    stateName: safeString(value.stateName, 120),
+    county: safeString(value.county, 120),
+    countryCode: safeString(value.countryCode, 2)?.toUpperCase(),
+    ...coordinates,
+    timeZone,
+    website: safeUrl(value.website),
+    profileUrl: safeUrl(value.profileUrl)
   };
 }
 
