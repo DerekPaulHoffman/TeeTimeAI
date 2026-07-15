@@ -169,6 +169,56 @@ describe("Google Place review operator command", () => {
     });
   });
 
+  it("reconciles a verified private review into persisted course and incident state", async () => {
+    mockedPrisma.googlePlaceReview.upsert.mockResolvedValue({} as never);
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "approach-course",
+      name: "The Approach presented by the Eiras Family"
+    } as never);
+    mockedPrisma.course.update.mockResolvedValue({} as never);
+    mockedResolveCourseSupportIncident.mockResolvedValue(null);
+    const command = parseGooglePlaceReviewCommand([
+      "upsert",
+      "--place-id",
+      "ChIJAfI2SQDL5YgRBhnU_dStib0",
+      "--access-override",
+      "VERIFIED_PRIVATE",
+      "--name",
+      "The Approach presented by the Eiras Family",
+      "--classification",
+      "PRIVATE_MEMBER_AMENITY",
+      "--evidence-url",
+      "https://www.deerwoodclub.com/membership",
+      "--reviewed-at",
+      "2026-07-15",
+      "--apply"
+    ]);
+
+    await expect(executeGooglePlaceReviewCommand(command)).resolves.toEqual({
+      mode: "applied",
+      action: "upsert",
+      googlePlaceId: "ChIJAfI2SQDL5YgRBhnU_dStib0",
+      reconciledCourseIds: ["approach-course"]
+    });
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith({
+      where: { id: "approach-course" },
+      data: expect.objectContaining({
+        isPublic: false,
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        policyNotes:
+          "Verified private course listing Google Place review: PRIVATE_MEMBER_AMENITY. Evidence: https://www.deerwoodclub.com/membership",
+        intelligenceConfidence: 1
+      })
+    });
+    expect(mockedResolveCourseSupportIncident).toHaveBeenCalledWith({
+      courseId: "approach-course",
+      resolution: "DIRECT_BOOKING_CLASSIFIED",
+      message:
+        "The Approach presented by the Eiras Family was verified as a private course listing (PRIVATE_MEMBER_AMENITY)."
+    });
+  });
+
   it("deactivates an existing review only when applied", async () => {
     mockedPrisma.googlePlaceReview.updateMany.mockResolvedValue({ count: 1 });
     const command = parseGooglePlaceReviewCommand([

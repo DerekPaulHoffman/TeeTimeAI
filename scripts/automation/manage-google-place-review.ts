@@ -194,19 +194,26 @@ export async function executeGooglePlaceReviewCommand(
     update: reviewData
   });
 
-  if (command.review.accessOverride === "VERIFIED_NON_COURSE") {
+  if (
+    command.review.accessOverride === "VERIFIED_NON_COURSE" ||
+    command.review.accessOverride === "VERIFIED_PRIVATE"
+  ) {
     const course = await prisma.course.findUnique({
       where: { googlePlaceId },
       select: { id: true, name: true }
     });
     if (course) {
+      const reviewKind =
+        command.review.accessOverride === "VERIFIED_PRIVATE"
+          ? "private course listing"
+          : "non-course listing";
       await prisma.course.update({
         where: { id: course.id },
         data: {
           isPublic: false,
           automationEligibility: "BLOCKED",
           automationReason: "OTHER",
-          policyNotes: `Verified non-course Google Place review: ${command.review.classification}. Evidence: ${command.review.evidenceUrl}`,
+          policyNotes: `Verified ${reviewKind} Google Place review: ${command.review.classification}. Evidence: ${command.review.evidenceUrl}`,
           intelligenceVerifiedAt: command.review.reviewedAt,
           intelligenceConfidence: 1
         }
@@ -214,7 +221,7 @@ export async function executeGooglePlaceReviewCommand(
       await resolveCourseSupportIncident({
         courseId: course.id,
         resolution: "DIRECT_BOOKING_CLASSIFIED",
-        message: `${course.name} was verified as a non-course listing (${command.review.classification}).`
+        message: `${course.name} was verified as a ${reviewKind} (${command.review.classification}).`
       });
       return {
         mode: "applied",
