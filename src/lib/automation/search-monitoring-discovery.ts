@@ -24,7 +24,12 @@ const MAX_HTML_BYTES = 1_500_000;
 
 type CollectedPageEvidence = Pick<
   BrowserDiscoveryEvidence,
-  "sourceUrl" | "finalUrl" | "observedUrls" | "visibleText" | "bookingSurfaceText"
+  | "sourceUrl"
+  | "finalUrl"
+  | "observedUrls"
+  | "visibleText"
+  | "bookingSurfaceText"
+  | "accessBarrierUrls"
 >;
 
 export type SearchMonitoringDiscoveryResult = {
@@ -225,12 +230,40 @@ export async function collectOfficialSiteEvidence(
       .map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
-      .slice(0, 4_000)
+      .slice(0, 4_000),
+    accessBarrierUrls: pages
+      .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
+      .map((page) => page.finalUrl)
   };
 }
 
 async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
-  let currentUrl = parseSafePublicUrl(sourceUrl).toString();
+  const parsedSource = parseSafePublicUrl(sourceUrl);
+  if (parsedSource.protocol === "http:") {
+    const secureSource = new URL(parsedSource);
+    secureSource.protocol = "https:";
+    secureSource.port = "";
+    const secureCandidates = [secureSource];
+    if (secureSource.hostname.toLowerCase().startsWith("www.")) {
+      const apexSource = new URL(secureSource);
+      apexSource.hostname = secureSource.hostname.slice(4);
+      secureCandidates.push(apexSource);
+    }
+    for (const candidate of secureCandidates) {
+      try {
+        return await fetchPublicHtmlFromUrl(candidate.toString(), fetchImpl);
+      } catch {
+        // Try the equivalent secure apex before the stored HTTP URL.
+      }
+    }
+    return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl);
+  }
+
+  return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl);
+}
+
+async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch) {
+  let currentUrl = sourceUrl;
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
     const response = await fetchImpl(currentUrl, {
@@ -251,7 +284,10 @@ async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
       continue;
     }
 
-    if (!response.ok) {
+    const managedChallenge =
+      response.status === 403 &&
+      response.headers.get("cf-mitigated")?.toLowerCase() === "challenge";
+    if (!response.ok && !managedChallenge) {
       throw new Error(`Official site returned HTTP ${response.status}`);
     }
     const contentType = response.headers.get("content-type")?.toLowerCase();
@@ -270,7 +306,8 @@ async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
 
     return {
       finalUrl: parseSafePublicUrl(response.url || currentUrl).toString(),
-      html: (await response.text()).slice(0, MAX_HTML_BYTES)
+      html: (await response.text()).slice(0, MAX_HTML_BYTES),
+      accessBarrier: managedChallenge ? ("MANAGED_CHALLENGE" as const) : undefined
     };
   }
 

@@ -11,6 +11,7 @@ export type BrowserDiscoveryEvidence = {
   observedUrls: string[];
   visibleText?: string;
   bookingSurfaceText?: string;
+  accessBarrierUrls?: string[];
 };
 
 export type BrowserDiscovery = {
@@ -129,6 +130,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return chelseaDiscovery;
   }
 
+  const protectedCpsDiscovery = learnProtectedCpsDiscovery(evidence, observedUrls);
+
+  if (protectedCpsDiscovery) {
+    return protectedCpsDiscovery;
+  }
+
   const cpsDiscovery = learnCpsDiscovery(evidence, observedUrls);
 
   if (cpsDiscovery) {
@@ -161,6 +168,40 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "browser-visible-links"
+    }
+  };
+}
+
+function learnProtectedCpsDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const barrierUrl = evidence.accessBarrierUrls
+    ?.map(parseUrl)
+    .find((url) => Boolean(url?.hostname.endsWith(".cps.golf")));
+  if (!barrierUrl) {
+    return null;
+  }
+
+  const bookingBaseUrl = `${barrierUrl.origin}/`;
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "BLOCKED",
+    automationReason: "CAPTCHA_OR_QUEUE",
+    policyNotes:
+      "The official CPS booking page shows public online tee times, but direct retrieval is protected by a managed browser challenge. Tee Time Spot does not bypass challenge-protected access, so golfers should check and book on the official page directly.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "cps-managed-challenge-booking"
     }
   };
 }

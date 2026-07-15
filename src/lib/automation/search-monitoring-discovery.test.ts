@@ -447,6 +447,89 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("upgrades a stale HTTP site and classifies its challenge-protected CPS booking", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://www.grassyhillcountryclub.com/") {
+        return new Response("Conflict", { status: 409 });
+      }
+      if (value === "https://grassyhillcountryclub.com/") {
+        return new Response(
+          '<html><a href="https://secure.east.prophetservices.com/GrassyHillCCV3">Book Online Tee Times</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === "https://secure.east.prophetservices.com/GrassyHillCCV3") {
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://grassyhill.cps.golf" }
+        });
+      }
+      if (value === "https://grassyhill.cps.golf/") {
+        return new Response("<html><body>Enable JavaScript and cookies to continue</body></html>", {
+          status: 403,
+          headers: {
+            "content-type": "text/html",
+            "cf-mitigated": "challenge"
+          }
+        });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "grassy-hill",
+          name: "Grassy Hill Country Club",
+          website: "http://www.grassyhillcountryclub.com/",
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      "https://www.grassyhillcountryclub.com/",
+      "https://grassyhillcountryclub.com/",
+      "https://secure.east.prophetservices.com/GrassyHillCCV3",
+      "https://grassyhill.cps.golf/"
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "VERIFIED",
+        bookingUrl: "https://grassyhill.cps.golf/",
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE"
+      })
+    );
+  });
+
+  it("falls back to an HTTP official site when HTTPS is unavailable", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://legacy.example/") {
+        throw new TypeError("TLS unavailable");
+      }
+      expect(value).toBe("http://legacy.example/");
+      return new Response("<html><body>Public golf course</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    await collectOfficialSiteEvidence("http://legacy.example/", fetchImpl as typeof fetch);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      "https://legacy.example/",
+      "http://legacy.example/"
+    ]);
+  });
+
   it("allows one retry after thirty minutes but caps discovery at two attempts per day", () => {
     expect(
       shouldAttemptMonitoringDiscovery(

@@ -179,6 +179,32 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies a managed-challenge CPS surface as direct booking", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "grassy-hill",
+      courseName: "Grassy Hill Country Club",
+      sourceUrl: "http://www.grassyhillcountryclub.com/",
+      finalUrl: "https://grassyhill.cps.golf/",
+      observedUrls: [
+        "https://secure.east.prophetservices.com/GrassyHillCCV3",
+        "https://grassyhill.cps.golf/"
+      ],
+      accessBarrierUrls: ["https://grassyhill.cps.golf/"],
+      visibleText: "Book Online Tee Times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://grassyhill.cps.golf/",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      evidence: { learnedFrom: "cps-managed-challenge-booking" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("learns CPS metadata from an official tee-time widget config", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-stanley",
