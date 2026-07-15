@@ -577,6 +577,39 @@ describe("adapter remediation closeout", () => {
       nextAction: "Approve or decline the provider data-access agreement."
     });
   });
+
+  it("never escalates engineering-only coverage to the owner", () => {
+    const engineeringCandidate = selectImprovementCandidate({
+      activeSearchCount: 0,
+      pendingAlerts: [],
+      supportIncidents: [
+        {
+          id: "engineering-incident",
+          status: "AUTO_INVESTIGATING",
+          kind: "NEEDS_ADAPTER",
+          courseName: "Coverage Course",
+          platform: "UNKNOWN",
+          lastSeenAt: "2026-07-15T20:00:00.000Z",
+          engineeringOnly: true
+        }
+      ],
+      actionableProbes: []
+    });
+
+    expect(() =>
+      validateAdapterRemediationCloseout({
+        candidate: engineeringCandidate,
+        outcome: "needs_human",
+        evidence: {
+          incidentId: "engineering-incident",
+          attempts: ["Inspected the official public booking surface."],
+          evidence: ["The provider requires an account."],
+          result: "No public unauthenticated retrieval path exists.",
+          requiredExternalAction: "Create a provider account."
+        }
+      })
+    ).toThrow("cannot escalate to an owner");
+  });
 });
 
 describe("hourly dirty-worktree recovery", () => {

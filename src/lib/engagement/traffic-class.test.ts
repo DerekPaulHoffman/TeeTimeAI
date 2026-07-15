@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   detectWebsiteTrafficClass,
+  isEngineeringRemediationSearch,
   isSyntheticWebsiteTrafficClass,
   parseSyntheticMultiCycle,
   parseWebsiteTrafficClass,
@@ -53,6 +54,15 @@ describe("traffic-class persistence", () => {
     expect(parseSyntheticMultiCycle("false", "TEST")).toBe(false);
     expect(parseSyntheticMultiCycle("true", "PUBLIC")).toBe(false);
     expect(parseSyntheticMultiCycle("true", "UNCLASSIFIED")).toBe(false);
+  });
+
+  it("keeps real demand and explicit multi-cycle coverage in engineering remediation", () => {
+    expect(isEngineeringRemediationSearch("PUBLIC", false)).toBe(true);
+    expect(isEngineeringRemediationSearch("UNCLASSIFIED", false)).toBe(true);
+    expect(isEngineeringRemediationSearch("TEST", true)).toBe(true);
+    expect(isEngineeringRemediationSearch("AUTOMATION", true)).toBe(true);
+    expect(isEngineeringRemediationSearch("TEST", false)).toBe(false);
+    expect(isEngineeringRemediationSearch("AUTOMATION", false)).toBe(false);
   });
 });
 

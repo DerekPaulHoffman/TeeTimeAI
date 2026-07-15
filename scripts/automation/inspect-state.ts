@@ -10,7 +10,7 @@ import {
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import { listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
-import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
+import { isEngineeringRemediationSearch } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
@@ -130,7 +130,9 @@ async function main() {
               preferences: {
                 where: { teeSearch: { status: "ACTIVE" } },
                 select: {
-                  teeSearch: { select: { trafficClass: true } }
+                  teeSearch: {
+                    select: { trafficClass: true, syntheticMultiCycle: true }
+                  }
                 }
               }
             }
@@ -248,7 +250,11 @@ async function main() {
         })
       : [];
   const currentActionableProbes = latestCurrentActionableProbes(recentActiveProbes).filter(
-    (probe) => !isSyntheticWebsiteTrafficClass(probe.teeSearch.trafficClass)
+    (probe) =>
+      isEngineeringRemediationSearch(
+        probe.teeSearch.trafficClass,
+        probe.teeSearch.syntheticMultiCycle
+      )
   );
   const courseIntelligenceReviews = [
     ...new Map(
@@ -318,6 +324,7 @@ async function main() {
         activeSearches: activeSearches.map((search) => ({
           id: search.id,
           trafficClass: search.trafficClass,
+          syntheticMultiCycle: search.syntheticMultiCycle,
           user: redactEmail(search.user.email),
           date: search.date.toISOString().slice(0, 10),
           window: `${search.startTime}-${search.endTime}`,
@@ -372,6 +379,7 @@ async function main() {
           user: redactEmail(probe.teeSearch.user.email),
           searchId: probe.teeSearchId,
           trafficClass: probe.teeSearch.trafficClass,
+          syntheticMultiCycle: probe.teeSearch.syntheticMultiCycle,
           automationRunId: probe.automationRunId,
           automationRunOutcome: probe.automationRun?.outcome ?? null,
           message: summarize(probe.message)
@@ -386,6 +394,7 @@ async function main() {
           firstAffectedSearchId: incident.firstAffectedSearchId,
           affectedSearchCount: incident.affectedSearchCount,
           occurrenceCount: incident.occurrenceCount,
+          engineeringOnly: incident.engineeringOnly,
           firstSeenAt: incident.firstSeenAt,
           lastSeenAt: incident.lastSeenAt,
           ownerNotifiedAt: incident.ownerNotifiedAt,
@@ -395,7 +404,8 @@ async function main() {
           activeDemandTrafficClasses: [
             ...new Set(
               incident.course.preferences.map(
-                (preference) => preference.teeSearch.trafficClass
+                (preference) =>
+                  `${preference.teeSearch.trafficClass}:${preference.teeSearch.syntheticMultiCycle ? "MULTI_CYCLE" : "STANDARD"}`
               )
             )
           ].sort()

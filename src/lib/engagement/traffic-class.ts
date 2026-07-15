@@ -36,6 +36,13 @@ export function parseSyntheticMultiCycle(
   return isSyntheticWebsiteTrafficClass(trafficClass) && value === "true";
 }
 
+export function isEngineeringRemediationSearch(
+  trafficClass: WebsiteTrafficClassValue,
+  syntheticMultiCycle: boolean
+) {
+  return !isSyntheticWebsiteTrafficClass(trafficClass) || syntheticMultiCycle;
+}
+
 /**
  * Returns an aggregate traffic label only. It deliberately creates no visitor
  * or session identifier.

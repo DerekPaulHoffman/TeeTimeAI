@@ -26,6 +26,7 @@ type SupportIncidentInput = {
   platform: string;
   lastSeenAt: string;
   message?: string | null;
+  engineeringOnly?: boolean;
 };
 
 type LearningSignalInput = {
@@ -153,6 +154,7 @@ export type ImprovementCandidate = {
   priority?: number;
   selectionReason?: string;
   evidence?: string[];
+  engineeringOnly?: boolean;
 };
 
 export type AdapterRemediationCloseoutEvidence = {
@@ -784,6 +786,11 @@ export function validateAdapterRemediationCloseout(input: {
   if (input.outcome !== "needs_human") {
     return { escalate: false } as const;
   }
+  if (input.candidate.engineeringOnly) {
+    throw new Error(
+      "engineering-only adapter remediation cannot escalate to an owner; persist a runnable or conclusive final disposition"
+    );
+  }
 
   const evidence = input.evidence as Partial<AdapterRemediationCloseoutEvidence> | null;
   const referenceId = input.candidate.referenceId;
@@ -1130,7 +1137,8 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
         referenceId: probe.id,
         category: "search_discovery",
         priority: 84,
-        selectionReason: "Fresh non-synthetic adapter evidence outranks discretionary work.",
+        selectionReason:
+          "Fresh real-demand or explicit multi-cycle coverage evidence outranks discretionary work.",
         researchDirective:
           "Inspect current official booking surface and policy evidence before implementing; if unsupported after repeated inspection, record a blocked or stale learning instead of repeating the same probe."
       };
@@ -1193,11 +1201,15 @@ function candidateFromSupportIncident(
     kind: "adapter_remediation",
     summary: `${action} for ${incident.courseName} (${incident.platform}) and verify the affected active search end to end.`,
     referenceId: incident.id,
+    engineeringOnly: incident.engineeringOnly,
     category: "operations_incidents",
     priority: 110,
-    selectionReason: "An open support incident affecting non-synthetic active demand has priority.",
-    researchDirective:
-      "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
+    selectionReason: incident.engineeringOnly
+      ? "An engineering-only multi-cycle coverage incident has priority until it receives a runnable or final disposition."
+      : "An open support incident affecting real active demand has priority.",
+    researchDirective: incident.engineeringOnly
+      ? "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Persist a conclusive direct-booking, policy, contact, or identity disposition when public monitoring is not possible; do not escalate synthetic coverage to the owner."
+      : "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
   };
 }
 

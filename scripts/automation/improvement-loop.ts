@@ -1160,7 +1160,10 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         },
         teeSearch: {
           status: "ACTIVE",
-          trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+          OR: [
+            { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
+            { syntheticMultiCycle: true }
+          ],
           date: {
             gte: today
           }
@@ -1170,25 +1173,37 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         observedAt: "desc"
       },
       include: {
-        course: true
+        course: true,
+        teeSearch: {
+          select: { trafficClass: true, syntheticMultiCycle: true }
+        }
       }
     }),
     prisma.courseSupportIncident.findMany({
       where: {
         status: { not: "RESOLVED" },
-        course: {
-          preferences: {
-            some: {
-              teeSearch: {
-                status: "ACTIVE",
-                trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-                date: { gte: today }
+        OR: [
+          { engineeringOnly: true },
+          {
+            course: {
+              preferences: {
+                some: {
+                  teeSearch: {
+                    status: "ACTIVE",
+                    trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+                    date: { gte: today }
+                  }
+                }
               }
             }
           }
-        }
+        ]
       },
-      orderBy: [{ affectedSearchCount: "desc" }, { firstSeenAt: "asc" }],
+      orderBy: [
+        { engineeringOnly: "asc" },
+        { affectedSearchCount: "desc" },
+        { firstSeenAt: "asc" }
+      ],
       include: { course: true }
     }),
     prisma.automationRun.findMany({
@@ -1295,7 +1310,8 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       message:
         incident.latestMessage ??
         incident.initialMessage ??
-        "Course monitoring incident remains unresolved."
+        "Course monitoring incident remains unresolved.",
+      engineeringOnly: incident.engineeringOnly
     })),
     actionableProbes: probeCandidates,
     learningSignals: buildLearningSignals(recentRuns, recentDiscoveries),

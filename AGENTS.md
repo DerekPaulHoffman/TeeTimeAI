@@ -103,7 +103,7 @@ discover public courses -> save ranked demand -> check official availability
 
 - A missing discovery result goes through exact provider-shape inspection, direct lookup, official-site corroboration, and, when justified, a `GooglePlaceReview` correction.
 - A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Policy-safe reusable provider support belongs in an adapter; phone-only, account-required, prohibited, captcha/queue, or otherwise unsafe access is classified honestly.
-- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. These are internal engineering work first: the hourly loop should attempt discovery, implementation, and verification before asking the owner for one concrete unavoidable external action.
+- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. These are internal engineering work first: the hourly loop should attempt discovery, implementation, and verification before asking the owner for one concrete unavoidable external action. Ordinary one-check `TEST`/`AUTOMATION` searches remain excluded, but an explicitly opted-in `syntheticMultiCycle` search may open an `engineeringOnly` incident. Engineering-only incidents never send customer or operator support email, remain actionable after the source search ends, and must stay open until reusable monitoring works or a conclusive policy/contact/identity disposition is persisted. Real demand on the same course promotes the incident to normal customer-demand priority.
 - Customer copy should say what Tee Time Spot can do now and offer the official site; do not expose terms such as adapter, probe, queue, Prisma, Neon, Codex, or automation incident.
 
 ### 6. Learn From Real Use
@@ -487,7 +487,7 @@ Fix the smallest authoritative layer that is wrong. Do not start with a broad re
 - Put exact evidence-backed Google place facts in `GooglePlaceReview` through the protected operator command.
 - Put canonical supported-course and automation facts on `Course`; preserve how they were learned in `CourseAutomationDiscovery`.
 - Put customer intent and lifecycle on `TeeSearch`; do not infer it later from analytics or email history.
-- Put recurring monitoring failures in `CourseSupportIncident`; keep individual observations in `CourseProbe`.
+- Put recurring monitoring failures in `CourseSupportIncident`; keep individual observations in `CourseProbe`. Use `engineeringOnly=true` only for explicit multi-cycle synthetic coverage, never as a substitute for normal customer-demand ownership or notification state.
 - Keep UI state local when it is merely presentation/prefill. Do not create database models for transient form state.
 - Prefer additive schema changes and backward-compatible rollouts. Do not combine a migration with unrelated UI redesign.
 - When correcting live data, also fix the path that produced the bad data and add a regression test; otherwise the next discovery or workflow can recreate it.

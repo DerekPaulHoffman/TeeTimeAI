@@ -450,6 +450,7 @@ model CourseSupportIncident {
   nextAction            String?
   affectedSearchCount   Int                         @default(1)
   occurrenceCount       Int                         @default(1)
+  engineeringOnly       Boolean                     @default(false)
   firstSeenAt           DateTime                    @default(now())
   lastSeenAt            DateTime                    @default(now())
   ownerNotifiedAt       DateTime?

@@ -23,6 +23,7 @@
     "automation:configure-known-foreup": "tsx scripts/automation/configure-known-foreup-courses.ts",
     "automation:place-review": "tsx scripts/automation/manage-google-place-review.ts",
     "automation:course-profile": "tsx scripts/automation/course-profile.ts",
+    "automation:backfill-synthetic-remediation": "tsx scripts/automation/backfill-synthetic-remediation.ts",
     "maintenance:scrub-engagement-privacy": "tsx scripts/maintenance/scrub-engagement-privacy.ts",
     "seed:foreup": "tsx scripts/seed-foreup.ts"
   },

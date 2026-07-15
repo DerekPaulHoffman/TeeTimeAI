@@ -112,7 +112,7 @@ export async function escalateCourseSupportIncident(input: {
   const current = await prisma.courseSupportIncident.findUnique({
     where: { id: input.incidentId }
   });
-  if (!current || current.status === "RESOLVED") {
+  if (!current || current.status === "RESOLVED" || current.engineeringOnly) {
     return current;
   }
 
@@ -152,12 +152,15 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
   const [sourceSearch, affectedSearchCount, existing] = await Promise.all([
     prisma.teeSearch.findUnique({
       where: { id: input.searchId },
-      select: { trafficClass: true }
+      select: { trafficClass: true, syntheticMultiCycle: true }
     }),
     prisma.teeSearch.count({
       where: {
         status: "ACTIVE",
-        trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+        OR: [
+          { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
+          { syntheticMultiCycle: true }
+        ],
         preferences: {
           some: { courseId: input.course.id }
         }
@@ -168,9 +171,21 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     })
   ]);
 
-  if (sourceSearch && isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass)) {
+  const disposableSyntheticSearch = Boolean(
+    sourceSearch &&
+      isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
+      !sourceSearch.syntheticMultiCycle
+  );
+  const engineeringOnlySource = Boolean(
+    sourceSearch &&
+      isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
+      sourceSearch.syntheticMultiCycle
+  );
+
+  if (disposableSyntheticSearch) {
     if (
       existing &&
+      !existing.engineeringOnly &&
       existing.status !== "RESOLVED" &&
       affectedSearchCount === 0 &&
       !existing.ownerNotifiedAt &&
@@ -213,6 +228,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         latestMessage: input.message,
         nextAction: input.nextAction,
         affectedSearchCount: Math.max(affectedSearchCount, 1),
+        engineeringOnly: engineeringOnlySource,
         firstSeenAt: now,
         lastSeenAt: now
       }
@@ -233,6 +249,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         nextAction: input.nextAction,
         affectedSearchCount: Math.max(affectedSearchCount, 1),
         occurrenceCount: 1,
+        engineeringOnly: engineeringOnlySource,
         firstSeenAt: now,
         lastSeenAt: now,
         ownerNotifiedAt: null,
@@ -253,6 +270,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         nextAction: input.nextAction,
         affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
         occurrenceCount: { increment: 1 },
+        engineeringOnly: existing.engineeringOnly && engineeringOnlySource,
         lastSeenAt: now
       }
     });
@@ -273,6 +291,7 @@ async function notifyCourseSupportIssueBatchWithLease(
     where: {
       id: { in: incidentIds },
       status: "NEEDS_HUMAN",
+      engineeringOnly: false,
       ownerNotifiedAt: null,
       escalationNotifiedAt: null
     },
