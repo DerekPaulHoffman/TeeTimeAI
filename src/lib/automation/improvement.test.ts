@@ -352,7 +352,92 @@ describe("selectImprovementCandidate", () => {
       summary:
         "Initial queue evidence is empty; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
       researchDirective:
-        "Rotate to the least-recently covered evidence surfaces. An empty first pass is not a terminal outcome."
+        "Rotate to the least-recently covered evidence surfaces. A healthy first pass is not a terminal outcome."
+    });
+  });
+
+  it("requires broader exploration when active searches are healthy", () => {
+    const candidate = selectImprovementCandidate({
+      activeSearchCount: 3,
+      pendingAlerts: [],
+      actionableProbes: [],
+      learningSignals: []
+    });
+
+    expect(candidate).toEqual({
+      outcome: "exploration_required",
+      kind: "exploration_required",
+      summary:
+        "Active searches have no current delivery, incident, probe, or shippable portfolio blocker; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
+      researchDirective:
+        "Rotate to the least-recently covered evidence surfaces. A healthy first pass is not a terminal outcome."
+    });
+  });
+
+  it("keeps repeated coverage blockers ranked without terminally selecting them", () => {
+    const coverageBlocker = {
+      id: "coverage:discord-history",
+      category: "test_developer_tooling" as const,
+      source: "coverage" as const,
+      summary: "Authenticated Discord history needs a read-only member session.",
+      observedAt: "2026-07-15T05:00:00.000Z",
+      priority: 90,
+      outcome: "needs_human" as const,
+      evidence: ["Unavailable in three successful runs."]
+    };
+
+    expect(rankPortfolioCandidates([coverageBlocker], [])[0]).toMatchObject({
+      id: "coverage:discord-history",
+      source: "coverage"
+    });
+    expect(
+      selectImprovementCandidate({
+        activeSearchCount: 3,
+        pendingAlerts: [],
+        actionableProbes: [],
+        portfolioCandidates: [coverageBlocker],
+        learningSignals: []
+      })
+    ).toMatchObject({
+      outcome: "exploration_required",
+      kind: "exploration_required"
+    });
+  });
+
+  it("selects a shippable portfolio signal while preserving a higher-ranked coverage gap", () => {
+    const candidate = selectImprovementCandidate({
+      activeSearchCount: 3,
+      pendingAlerts: [],
+      actionableProbes: [],
+      portfolioCandidates: [
+        {
+          id: "coverage:discord-history",
+          category: "test_developer_tooling",
+          source: "coverage",
+          summary: "Authenticated Discord history needs a read-only member session.",
+          observedAt: "2026-07-15T05:00:00.000Z",
+          priority: 100,
+          outcome: "needs_human",
+          evidence: ["Unavailable in three successful runs."]
+        },
+        {
+          id: "metadata:canonical",
+          category: "metadata_seo",
+          source: "metadata",
+          summary: "Repair a verified canonical URL regression.",
+          observedAt: "2026-07-15T05:00:00.000Z",
+          priority: 60,
+          evidence: ["Production route emits the wrong canonical URL."]
+        }
+      ],
+      learningSignals: []
+    });
+
+    expect(candidate).toMatchObject({
+      outcome: "success",
+      kind: "portfolio_signal",
+      referenceId: "metadata:canonical",
+      category: "metadata_seo"
     });
   });
 });

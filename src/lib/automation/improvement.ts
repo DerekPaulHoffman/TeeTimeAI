@@ -365,7 +365,10 @@ export function selectImprovementCandidate(
     input.portfolioCandidates ?? [],
     input.categoryHistory ?? []
   );
-  const urgentPortfolioCandidate = rankedPortfolio.find(
+  const selectablePortfolio = rankedPortfolio.filter(
+    (candidate) => candidate.source !== "coverage"
+  );
+  const urgentPortfolioCandidate = selectablePortfolio.find(
     (candidate) => candidate.adjustedPriority >= 95
   );
   if (urgentPortfolioCandidate) {
@@ -377,7 +380,7 @@ export function selectImprovementCandidate(
     return candidateFromProbe(probe);
   }
 
-  const portfolioCandidate = rankedPortfolio[0];
+  const portfolioCandidate = selectablePortfolio[0];
   if (portfolioCandidate) {
     return candidateFromPortfolioSignal(portfolioCandidate);
   }
@@ -399,28 +402,15 @@ export function selectImprovementCandidate(
     };
   }
 
-  if (input.activeSearchCount === 0) {
-    return {
-      outcome: "exploration_required",
-      kind: "exploration_required",
-      summary:
-        "Initial queue evidence is empty; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
-      researchDirective:
-        "Rotate to the least-recently covered evidence surfaces. An empty first pass is not a terminal outcome."
-    };
-  }
-
   return {
-    outcome: "needs_human",
-    kind: "ui_smoke",
+    outcome: "exploration_required",
+    kind: "exploration_required",
     summary:
-      "Active searches have no fresh adapter or alert blockers; run UI smoke, compare current product/tooling best practices, and select the strongest verified UX or access issue.",
-    category: "ui_ux",
-    priority: 50,
-    selectionReason:
-      "No durable portfolio signal exists yet; browser evidence must confirm or replace this fallback.",
+      input.activeSearchCount === 0
+        ? "Initial queue evidence is empty; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found."
+        : "Active searches have no current delivery, incident, probe, or shippable portfolio blocker; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
     researchDirective:
-      "Use current external research only when it can produce a concrete, verifiable repo or provider improvement."
+      "Rotate to the least-recently covered evidence surfaces. A healthy first pass is not a terminal outcome."
   };
 }
 

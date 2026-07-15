@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-15: Coverage blockers should inform exploration, not preempt it
+
+- Sources: [Vercel Runtime Logs](https://vercel.com/docs/logs/runtime), published 2026-02 and accessed 2026-07-15 America/New_York, documents environment, status-code, and branch filters for separating production incidents from expected traffic. [Prisma aggregation and grouping](https://www.prisma.io/docs/orm/prisma-client/queries/aggregation-grouping-summarizing), accessed 2026-07-15, recommends filtering records before grouping so the database returns only the evidence needed for a summary.
+- Tee Time Spot evidence: the v11 prepare handoff ranked six repeated Discord-history gaps and five reserved-dashboard-auth gaps, then returned terminal `needs_human` with `candidate_selected=true` before this run performed its required evidence rotation. The live queue was healthy but not empty: three real searches were waiting normally, no schedule was stale, no pending alert or unresolved feedback existed, and no open support incident touched active real demand. Production error, fatal, warning, 4xx, and 5xx queries since the prior checkpoint were empty.
+- Decision: keep repeated access gaps in the machine-readable ranked portfolio with their exact unblock action, but exclude coverage-only signals from automatic implementation selection. A healthy or coverage-only first pass now returns nonterminal `exploration_required`; current-run browser, operations, feedback, search-quality, research, and product-quality evidence must still find safe work or prove the terminal blocker.
+- Rotation evidence: signed-out production ZIP `69101` returned Indian Meadows and Lake Maloney on 1440x1000 desktop and 320x800 mobile. Keyboard submission, add/remove ranking, screenshots, images, console/page/network capture, and horizontal-overflow checks were clean; both sessions retained the `AUTOMATION` marker and no customer demand was saved.
+
 ## 2026-07-14: Legacy municipal links need identity-aware course handoffs
 
 - Sources: the [City of Winter Park's official WP9 page](https://cityofwinterpark.org/departments/parks-recreation/golf-courses/winter-park-golf-course/), accessed 2026-07-14 America/New_York, identifies Winter Park Golf Course as a public nine-hole course, says public tee times can be made three days ahead, and links `https://winter-park-country-club.book.teeitup.com/` as its official booking surface.
