@@ -453,7 +453,7 @@ function scoreBookingCandidate(candidate: { url: string; label: string }, curren
   const parsed = new URL(candidate.url);
   const searchable = `${candidate.label} ${parsed.hostname} ${parsed.pathname} ${parsed.search}`;
   let score = 0;
-  if (/foreupsoftware\.com|\.book\.teeitup\.(?:golf|com)|\.cps\.golf|\.teesnap\.net/i.test(candidate.url)) {
+  if (/foreupsoftware\.com|\.book\.teeitup\.(?:golf|com)|\.cps\.golf|\.teesnap\.net|fox\.tenfore\.golf/i.test(candidate.url)) {
     score += 100;
   }
   if (/tee.?times?/i.test(searchable)) {

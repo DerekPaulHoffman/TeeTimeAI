@@ -404,6 +404,49 @@ describe("search monitoring discovery", () => {
     expect(result.retryCourseIds).toEqual([]);
   });
 
+  it("preserves the official TenFore link even when a later simulator page is inspected", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://gainfield.example/") {
+        return new Response(
+          '<html><a href="https://fox.tenfore.golf/gainfieldfarms">Book Tee Time</a><a href="/simulator-at-gainfield-farms/">Book indoor golf</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("<html><body>Public booking surface</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "gainfield",
+          name: "Gainfield Farms Golf Course",
+          website: "https://gainfield.example/",
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "VERIFIED",
+        detectedPlatform: "CUSTOM",
+        bookingUrl: "https://fox.tenfore.golf/gainfieldfarms",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE"
+      })
+    );
+  });
+
   it("allows one retry after thirty minutes but caps discovery at two attempts per day", () => {
     expect(
       shouldAttemptMonitoringDiscovery(

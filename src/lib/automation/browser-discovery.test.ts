@@ -802,6 +802,35 @@ describe("Chronogolf public profile enrichment", () => {
   });
 });
 
+describe("TenFore public booking enrichment", () => {
+  it("keeps the official booking link while blocking captcha-protected retrieval", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "gainfield",
+      courseName: "Gainfield Farms Golf Course",
+      sourceUrl: "https://gainfieldgolf.com/",
+      finalUrl: "https://gainfieldgolf.com/simulator-at-gainfield-farms/",
+      observedUrls: [
+        "https://fox.tenfore.golf/gainfieldfarms",
+        "https://gainfieldgolf.com/simulator-at-gainfield-farms/"
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://fox.tenfore.golf/gainfieldfarms",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      confidence: 0.98,
+      evidence: expect.objectContaining({
+        learnedFrom: "tenfore-captcha-protected-booking"
+      })
+    });
+    expect(discovery.policyNotes).toContain("reCAPTCHA token");
+  });
+});
+
 function chronogolfNextData(input: {
   id: number;
   onlineBookingEnabled: boolean;

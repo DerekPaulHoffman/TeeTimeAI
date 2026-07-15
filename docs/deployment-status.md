@@ -16,6 +16,8 @@ Last updated: 2026-07-14
 
 ## Verified
 
+- 2026-07-15 hourly product loop recognized official TenFore booking links as direct public online booking with captcha-protected retrieval. Gainfield Farms' signed-out TenFore page visibly exposed tee-time availability, but the underlying request required an `x-recaptcha-token` and rejected a tokenless request. Discovery now preserves the official `fox.tenfore.golf` link, classifies automatic monitoring as `CAPTCHA_OR_QUEUE`, and never generates, replays, or bypasses the captcha token.
+
 - 2026-07-15 hourly product loop corrected the public email preview to reflect the real five-course ranking limit. The status sample now keeps five representative monitoring outcomes instead of showing impossible priorities 6 and 7, while focused email tests retain coverage for the omitted before-window and insufficient-capacity variants.
 
 - 2026-07-15 hourly product loop made the public `/search` route self-consistent across document, canonical, Open Graph, and Twitter metadata. Production evidence showed the route previously inherited the homepage social title and `og:url` because Next.js shallowly merges nested metadata; the route now uses the shared page-metadata helper with search-specific alert-setup copy and a focused regression test.

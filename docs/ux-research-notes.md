@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-15 - Keep TenFore booking public without bypassing captcha protection
+
+- Source: Gainfield Farms Golf Course's official site, accessed July 15, 2026, links `https://fox.tenfore.golf/gainfieldfarms` as “Book Tee Time.” The signed-out TenFore page visibly returned dated tee times, player capacity, hole counts, and online-booking cards without requiring an account.
+- Safety evidence: the public page's availability request requires an `x-recaptcha-token`. A direct request without that browser-issued token returned HTTP 400. Tee Time Spot must not generate, replay, solve, or bypass captcha-protected retrieval even though the page itself is useful to golfers.
+- Decision: recognize `fox.tenfore.golf/<tenant>` as a direct public booking surface, keep that official link instead of a later simulator page, and classify automatic monitoring as blocked with `CAPTCHA_OR_QUEUE`. This resolves support work honestly while preserving the golfer's ability to check and book direct.
+- Rotation evidence: signed-out production ZIP `85621` returned Medici's Palo Duro Creek Golf on desktop and 320x800 mobile with the `AUTOMATION` marker. Screenshots, add/remove ranking, image checks, and horizontal-overflow metrics were clean; no alert was saved. One console exception without a source URL appeared only in the in-app browser after viewport tooling, while committed local smoke and production runtime logs remained clean.
+
 ## 2026-07-15 - Keep the public email preview inside the five-course contract
 
 - Source: the official [React Email CLI documentation](https://react.email/docs/cli), accessed July 15, 2026, describes previewing templates locally while recommending the same prop-driven render utility used at send time. Tee Time Spot already follows that pattern, so the preview data should remain a valid product example rather than a separate fictional shape.

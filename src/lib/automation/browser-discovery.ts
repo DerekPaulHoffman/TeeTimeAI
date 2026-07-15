@@ -141,6 +141,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return teesnapDiscovery;
   }
 
+  const tenForeDiscovery = learnTenForeDiscovery(evidence, observedUrls);
+
+  if (tenForeDiscovery) {
+    return tenForeDiscovery;
+  }
+
   const bookingUrl = pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
 
   return {
@@ -155,6 +161,37 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "browser-visible-links"
+    }
+  };
+}
+
+function learnTenForeDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const bookingUrl = observedUrls.find(isTenForeBookingUrl);
+  if (!bookingUrl) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: canonicalizeTenForeBookingUrl(bookingUrl),
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "BLOCKED",
+    automationReason: "CAPTCHA_OR_QUEUE",
+    policyNotes:
+      "The official TenFore page shows public online tee times, but its availability request requires a reCAPTCHA token. Tee Time Spot does not solve or bypass captcha-protected retrieval, so golfers should check and book on the official page directly.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "tenfore-captcha-protected-booking"
     }
   };
 }
@@ -907,6 +944,9 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
   if (urls.some(isTeesnapBookingUrl)) {
     return "CUSTOM";
   }
+  if (urls.some(isTenForeBookingUrl)) {
+    return "CUSTOM";
+  }
   if (
     urls.some((url) =>
       /(^|\.)chelseareservations\.com$/i.test(parseUrl(url)?.hostname ?? "")
@@ -1054,6 +1094,20 @@ function getTeesnapCourseMetadata(urls: string[], text: string | undefined, cour
   return selected && typeof selected.id === "number"
     ? buildTeesnapCourseMetadata(selected, selected.id)
     : undefined;
+}
+
+function isTenForeBookingUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(
+    url?.hostname.toLowerCase() === "fox.tenfore.golf" &&
+    /^\/[a-z0-9-]+\/?$/i.test(url.pathname)
+  );
+}
+
+function canonicalizeTenForeBookingUrl(value: string) {
+  const url = new URL(value);
+  const vanityName = url.pathname.split("/").filter(Boolean)[0];
+  return `${url.origin}/${vanityName}`;
 }
 
 function parseTeesnapCourseConfigs(text?: string): TeesnapDiscoveryCourseConfig[] {
