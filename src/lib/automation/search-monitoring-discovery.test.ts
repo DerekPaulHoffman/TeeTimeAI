@@ -283,6 +283,12 @@ describe("search monitoring discovery", () => {
           { status: 200, headers: { "content-type": "text/html" } }
         );
       }
+      if (value === "https://www.whoosh.io/terms") {
+        return new Response(
+          "<html><body>Attempt to access or search the Whoosh Platform or Content or download Content through the use of any engine, software, tool, agent, device or mechanism, including spiders, robots, crawlers, and data mining tools.</body></html>",
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
       return new Response("<html><body>Whoosh</body></html>", {
         status: 200,
         headers: { "content-type": "text/html" }
@@ -310,17 +316,21 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
       "https://yalebulldogs.com/golf",
       "https://yalebulldogs.com/faqs",
-      "https://app.whoosh.io/patron/club/yale-golf-course"
+      "https://app.whoosh.io/patron/club/yale-golf-course",
+      "https://www.whoosh.io/terms"
     ]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "VERIFIED",
         detectedPlatform: "CUSTOM",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "NEEDS_REVIEW",
-        automationReason: "UNSUPPORTED_PLATFORM",
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED",
         bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
-        evidence: expect.objectContaining({ learnedFrom: "official-whoosh-booking" })
+        evidence: expect.objectContaining({
+          observedUrls: expect.arrayContaining(["https://www.whoosh.io/terms"]),
+          learnedFrom: "whoosh-automation-prohibited-booking"
+        })
       })
     );
   });

@@ -11,6 +11,8 @@ export type BrowserDiscoveryEvidence = {
   observedUrls: string[];
   visibleText?: string;
   bookingSurfaceText?: string;
+  providerPolicyText?: string;
+  providerPolicyUrl?: string;
   accessBarrierUrls?: string[];
 };
 
@@ -308,6 +310,36 @@ function learnWhooshBookingClassification(
 
   if (!whooshBookingUrl) {
     return null;
+  }
+
+  const providerPolicyText = evidence.providerPolicyText?.replace(/\s+/g, " ").trim() ?? "";
+  const providerTermsProhibitAutomation =
+    /attempt to (?:access or )?search the whoosh platform or content[^.]{0,500}\b(?:engine|software|tool|agent|device|mechanism)\b/i.test(
+      providerPolicyText
+    ) &&
+    /\b(?:spiders?|robots?|crawlers?|data mining tools?)\b/i.test(providerPolicyText);
+
+  if (providerTermsProhibitAutomation) {
+    return {
+      courseId: evidence.courseId,
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: whooshBookingUrl.toString(),
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED",
+      policyNotes:
+        "Whoosh's current End User Terms prohibit using automated agents, robots, crawlers, data-mining tools, or similar mechanisms to search or download platform content. Golfers can still view and book on the official Whoosh page directly, but Tee Time Spot does not retrieve Whoosh availability automatically.",
+      intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      confidence: 0.99,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls,
+        visibleText: summarizeVisibleText(providerPolicyText),
+        learnedFrom: "whoosh-automation-prohibited-booking"
+      }
+    };
   }
 
   return {

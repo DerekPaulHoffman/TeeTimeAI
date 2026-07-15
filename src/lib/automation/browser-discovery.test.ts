@@ -465,7 +465,7 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("does not treat stale auxiliary registration guidance as proof that Whoosh availability is gated", () => {
+  it("blocks automated Whoosh retrieval under the current provider terms while preserving direct booking", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "yale",
       courseName: "Yale University Golf Course",
@@ -475,6 +475,9 @@ describe("buildBrowserDiscovery", () => {
         "https://yalebulldogs.com/sports/2026/2/27/faqs.aspx",
         "https://app.whoosh.io/patron/club/yale-golf-course"
       ],
+      providerPolicyUrl: "https://www.whoosh.io/terms",
+      providerPolicyText:
+        "Attempt to access or search the Whoosh Platform or Content or download Content through the use of any engine, software, tool, agent, device or mechanism (including spiders, robots, crawlers, data mining tools or the like) other than the software and search agents provided by Whoosh.",
       visibleText:
         "Players must register in Whoosh before booking. Once a player’s registration is confirmed, availability of tee times through Whoosh can be viewed once booking windows open."
     });
@@ -483,11 +486,11 @@ describe("buildBrowserDiscovery", () => {
       status: "VERIFIED",
       detectedPlatform: "CUSTOM",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM",
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED",
       bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
-      confidence: 0.9,
-      evidence: { learnedFrom: "official-whoosh-booking" }
+      confidence: 0.99,
+      evidence: { learnedFrom: "whoosh-automation-prohibited-booking" }
     });
   });
 
@@ -512,14 +515,34 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("preserves public Whoosh availability when registration is needed only to book", () => {
+  it("preserves direct public Whoosh booking while blocking prohibited automated retrieval", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "public-whoosh",
       courseName: "Example Public Golf Course",
       sourceUrl: "https://example.com/",
       observedUrls: ["https://app.whoosh.io/patron/club/example-public-course"],
+      providerPolicyText:
+        "Attempt to search the Whoosh Platform or Content through the use of any engine, software, tool, agent, device or mechanism, including spiders, robots, crawlers, or data mining tools.",
       visibleText:
         "Public tee-time availability is visible to everyone. Players must register in Whoosh before booking."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED",
+      evidence: { learnedFrom: "whoosh-automation-prohibited-booking" }
+    });
+  });
+
+  it("keeps Whoosh under review when current provider terms cannot be verified", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unverified-whoosh",
+      courseName: "Example Whoosh Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://app.whoosh.io/patron/club/example-course"],
+      visibleText: "Public online booking with Whoosh."
     });
 
     expect(discovery).toMatchObject({

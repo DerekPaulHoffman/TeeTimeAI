@@ -21,6 +21,7 @@ const FETCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 4;
 const MAX_BOOKING_LINK_FOLLOWUPS = 2;
 const MAX_HTML_BYTES = 1_500_000;
+const WHOOSH_TERMS_URL = "https://www.whoosh.io/terms";
 
 type CollectedPageEvidence = Pick<
   BrowserDiscoveryEvidence,
@@ -29,6 +30,8 @@ type CollectedPageEvidence = Pick<
   | "observedUrls"
   | "visibleText"
   | "bookingSurfaceText"
+  | "providerPolicyText"
+  | "providerPolicyUrl"
   | "accessBarrierUrls"
 >;
 
@@ -214,12 +217,37 @@ export async function collectOfficialSiteEvidence(
     }
   }
 
+  const whooshBookingPage = pages.find((page) => {
+    const parsed = new URL(page.finalUrl);
+    return (
+      /(^|\.)app\.whoosh\.io$/i.test(parsed.hostname) &&
+      /^\/patron\/club\/[^/]+/i.test(parsed.pathname)
+    );
+  });
+  let providerPolicyPage: (typeof pages)[number] | undefined;
+  if (whooshBookingPage) {
+    try {
+      const fetched = await fetchPage(WHOOSH_TERMS_URL);
+      providerPolicyPage = {
+        ...fetched,
+        evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
+      };
+    } catch {
+      // Preserve direct booking as NEEDS_REVIEW when current provider terms cannot be verified.
+    }
+  }
+
   const finalPage = pages.at(-1)!;
   return {
     sourceUrl,
     finalUrl: finalPage.finalUrl,
     observedUrls: uniqueStrings(
-      pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls])
+      [
+        ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
+        ...(providerPolicyPage
+          ? [providerPolicyPage.finalUrl, ...providerPolicyPage.evidence.observedUrls]
+          : [])
+      ]
     ),
     visibleText: pages.slice().reverse().map((page) => page.evidence.visibleText)
       .filter(Boolean)
@@ -231,6 +259,11 @@ export async function collectOfficialSiteEvidence(
       .filter(Boolean)
       .join("\n")
       .slice(0, 4_000),
+    providerPolicyText: providerPolicyPage
+      ? extractWhooshAutomationPolicyText(providerPolicyPage.html) ??
+        providerPolicyPage.evidence.visibleText.slice(0, 12_000)
+      : undefined,
+    providerPolicyUrl: providerPolicyPage?.finalUrl,
     accessBarrierUrls: pages
       .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
       .map((page) => page.finalUrl)
@@ -389,6 +422,20 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     linkCandidates,
     visibleText
   };
+}
+
+function extractWhooshAutomationPolicyText(html: string) {
+  const decodedHtml = decodeHtmlEntities(html);
+  const prohibitionStart = decodedHtml.search(
+    /attempt to access or search the whoosh platform or content/i
+  );
+  if (prohibitionStart < 0) {
+    return undefined;
+  }
+
+  return stripHtml(decodedHtml.slice(prohibitionStart, prohibitionStart + 1_200))
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function pickLikelyBookingCandidate(
