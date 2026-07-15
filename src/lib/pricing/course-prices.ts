@@ -14,6 +14,7 @@ export type CoursePriceEstimate = {
 };
 
 export type CoursePriceView = "any" | "9" | "18";
+export type BookableHoleCount = 9 | 18;
 
 type CoursePriceEvidence = {
   probes: Array<{ observedAt: Date; rawSummary: unknown }>;
@@ -51,12 +52,54 @@ export function summarizeCourseSlotPrices(
   return buildEstimateFromPrices(pricesByHoles, observedAt);
 }
 
+export function summarizeBookableHoleCounts(slots: TeeTimeSlot[]) {
+  const observed = new Set<BookableHoleCount>();
+  for (const slot of slots) {
+    for (const holes of [
+      ...(slot.bookableHoleCounts ?? []),
+      slot.holes,
+      ...(slot.priceOptions ?? []).map((option) => option.holes)
+    ]) {
+      if (isSupportedHoles(holes)) observed.add(holes);
+    }
+  }
+  return ([9, 18] as const).filter((holes) => observed.has(holes));
+}
+
 export function hasPriceForView(
   estimate: CoursePriceEstimate | undefined,
   priceView: CoursePriceView
 ) {
   if (priceView === "any") return true;
   return priceView === "9" ? Boolean(estimate?.nineHoles) : Boolean(estimate?.eighteenHoles);
+}
+
+export function getHeadlineBookableHoleCount(holeCounts: readonly number[] | undefined) {
+  if (holeCounts?.includes(18)) return 18 as const;
+  if (holeCounts?.includes(9)) return 9 as const;
+  return undefined;
+}
+
+export function getHeadlineCoursePrice(
+  estimate: CoursePriceEstimate | undefined,
+  preferredHoleCounts: readonly number[] = []
+) {
+  if (!estimate) return undefined;
+
+  if (preferredHoleCounts.includes(18) && estimate.eighteenHoles) {
+    return { holes: 18 as const, range: estimate.eighteenHoles };
+  }
+  if (preferredHoleCounts.includes(9) && estimate.nineHoles) {
+    return { holes: 9 as const, range: estimate.nineHoles };
+  }
+  if (preferredHoleCounts.length > 0) return undefined;
+
+  if (estimate.eighteenHoles) {
+    return { holes: 18 as const, range: estimate.eighteenHoles };
+  }
+  return estimate.nineHoles
+    ? { holes: 9 as const, range: estimate.nineHoles }
+    : undefined;
 }
 
 export function buildCoursePriceEstimate(
@@ -77,6 +120,30 @@ export function buildCoursePriceEstimate(
   }
 
   return observedAt ? buildEstimateFromPrices(pricesByHoles, observedAt) : undefined;
+}
+
+export function buildObservedBookableHoleCounts(evidence: CoursePriceEvidence) {
+  const observed = new Set<BookableHoleCount>();
+
+  for (const probe of evidence.probes) {
+    if (!isRecord(probe.rawSummary)) continue;
+    for (const holes of Array.isArray(probe.rawSummary.bookableHoleCounts)
+      ? probe.rawSummary.bookableHoleCounts
+      : []) {
+      if (isSupportedHoles(holes)) observed.add(holes);
+    }
+
+    if (isRecord(probe.rawSummary.pricing)) {
+      if (parseRange(probe.rawSummary.pricing.nineHoles)) observed.add(9);
+      if (parseRange(probe.rawSummary.pricing.eighteenHoles)) observed.add(18);
+    }
+  }
+
+  for (const match of evidence.matches) {
+    if (isSupportedHoles(match.holes)) observed.add(match.holes);
+  }
+
+  return ([9, 18] as const).filter((holes) => observed.has(holes));
 }
 
 function parseStoredPriceSnapshot(rawSummary: unknown, fallbackObservedAt: Date) {

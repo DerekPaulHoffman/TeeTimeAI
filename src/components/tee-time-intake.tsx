@@ -9,8 +9,8 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  CircleHelp,
-  CircleOff,
+  CircleAlert,
+  CircleCheck,
   CircleDollarSign,
   ExternalLink,
   Flag,
@@ -60,6 +60,8 @@ import {
   milesToMeters
 } from "@/lib/places/radius";
 import {
+  getHeadlineBookableHoleCount,
+  getHeadlineCoursePrice,
   type CoursePriceEstimate,
   type CoursePriceRange
 } from "@/lib/pricing/course-prices";
@@ -1098,6 +1100,7 @@ function TeeTimeIntakeContent({
               course.layoutHoleCounts,
               requestedLayoutHoles
             );
+            const cardHoleCount = getHeadlineBookableHoleCount(course.bookableHoleCounts);
 
             return (
               <div
@@ -1109,38 +1112,45 @@ function TeeTimeIntakeContent({
                 {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
                 <div className="course-copy">
                   <div className="figma-course-badges">
-                    <span className="figma-course-pill is-public"><Trees size={11} /> Public</span>
+                    <span className="figma-course-pill is-public">Public</span>
                     {course.rating ? (
                       <span className="figma-course-pill is-rating">
-                        <Star size={11} /> {course.rating.toFixed(1)}
+                        <Star aria-hidden="true" fill="currentColor" size={10} />
+                        {course.rating.toFixed(1)}
                       </span>
                     ) : null}
                     {course.distanceMeters !== undefined ? (
-                      <span className="figma-course-pill"><MapPin size={10} /> {formatDistance(course.distanceMeters)}</span>
-                    ) : null}
-                    {course.layoutHoleCounts?.length ? (
-                      <span className="figma-course-pill">
-                        <Flag size={11} /> {getCourseLayoutLabel(course.layoutHoleCounts)} course
-                      </span>
-                    ) : requestedLayoutHoles && layoutCompatibility === "unknown" ? (
-                      <span className="figma-course-pill">
-                        <Flag size={11} /> Layout unverified
+                      <span className="figma-course-pill is-detail">
+                        <span aria-hidden="true">·</span> {formatDistance(course.distanceMeters)}
                       </span>
                     ) : null}
+                    {cardHoleCount ? (
+                      <span
+                        className="figma-course-pill is-detail"
+                        title="Recently observed official booking options"
+                      >
+                        <span aria-hidden="true">·</span>{" "}
+                        {cardHoleCount}H
+                      </span>
+                    ) : null}
+                    {course.par ? (
+                      <span className="figma-course-pill is-detail">
+                        <span aria-hidden="true">·</span> Par {course.par}
+                      </span>
+                    ) : null}
+                    {requestedLayoutHoles && layoutCompatibility === "unknown" ? (
+                      <span className="figma-course-pill is-detail">
+                        <span aria-hidden="true">·</span> Layout unverified
+                      </span>
+                    ) : null}
+                    <CourseHeadlinePrice
+                      estimate={course.priceEstimate}
+                      preferredHoleCounts={cardHoleCount ? [cardHoleCount] : undefined}
+                    />
                   </div>
                   <h3>{course.name}</h3>
                   <CourseAddressLink course={course} />
                   <CourseMonitoringStatus course={course} />
-                  <CoursePriceDisplay estimate={course.priceEstimate} />
-                  <button
-                    aria-label={`Report incorrect information for ${course.name}`}
-                    className="course-report-button"
-                    onClick={() => reportCourseIssue(course)}
-                    type="button"
-                  >
-                    <Flag size={13} />
-                    Report incorrect info
-                  </button>
                 </div>
                 <div className="course-actions">
                   {course.website ? (
@@ -1151,7 +1161,7 @@ function TeeTimeIntakeContent({
                       rel="noreferrer"
                       target="_blank"
                     >
-                      <ExternalLink size={16} />
+                      <ExternalLink aria-hidden="true" size={10} />
                       Official site
                     </a>
                   ) : null}
@@ -1162,8 +1172,14 @@ function TeeTimeIntakeContent({
                     aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
                     title={isSelected ? `Remove priority ${selectedIndex + 1}` : "Add course"}
                   >
-                    {isSelected ? <Check size={13} /> : <Plus size={13} />}
-                    {isSelected ? "Added" : "Add"}
+                    {isSelected ? (
+                      <>
+                        <Check aria-hidden="true" size={10} />
+                        Added
+                      </>
+                    ) : (
+                      "+ Add to my list"
+                    )}
                   </button>
                 </div>
               </div>
@@ -1731,8 +1747,13 @@ function CourseThumbnail({
 }) {
   const className =
     variant === "compact" ? "course-thumbnail course-thumbnail-compact" : "course-thumbnail";
+  const [failedPhotoReference, setFailedPhotoReference] = useState<string | null>(null);
+  const photoReference =
+    course.photoReference && course.photoReference !== failedPhotoReference
+      ? course.photoReference
+      : null;
 
-  if (!course.photoReference) {
+  if (!photoReference) {
     return (
       <div className={`${className} course-thumbnail-empty`} aria-hidden="true">
         <MapPinned size={22} />
@@ -1747,7 +1768,8 @@ function CourseThumbnail({
       className={className}
       height={variant === "compact" ? 72 : 90}
       loading="lazy"
-      src={`/api/courses/photo?ref=${encodeURIComponent(course.photoReference)}`}
+      onError={() => setFailedPhotoReference(photoReference)}
+      src={`/api/courses/photo?ref=${encodeURIComponent(photoReference)}`}
       unoptimized
       width={variant === "compact" ? 96 : 120}
     />
@@ -1795,12 +1817,10 @@ function CourseMonitoringStatus({
     <p
       className={`course-monitoring-status${isManualOnly ? " is-manual" : ""}${isUnconfirmed ? " is-unconfirmed" : ""}${compact ? " is-compact" : ""}`}
     >
-      {isManualOnly ? (
-        <CircleOff aria-hidden="true" size={14} />
-      ) : isAutomatic ? (
-        <Bell aria-hidden="true" size={14} />
+      {isAutomatic ? (
+        <CircleCheck aria-hidden="true" size={11} />
       ) : (
-        <CircleHelp aria-hidden="true" size={14} />
+        <CircleAlert aria-hidden="true" size={11} />
       )}
       <span>
         <strong>
@@ -2308,20 +2328,15 @@ async function readApiError(response: Response, fallback: string) {
   }
 }
 
-function CoursePriceDisplay({ estimate }: { estimate?: CoursePriceEstimate }) {
-  const ranges = [
-    { holes: 9 as const, range: estimate?.nineHoles },
-    { holes: 18 as const, range: estimate?.eighteenHoles }
-  ];
-  const availableRanges = ranges.filter(
-    (entry): entry is { holes: 9 | 18; range: CoursePriceRange } => Boolean(entry.range)
-  );
-
-  if (availableRanges.length === 0) {
-    return (
-      <p className="course-price-unavailable">Recent rates not available</p>
-    );
-  }
+function CourseHeadlinePrice({
+  estimate,
+  preferredHoleCounts
+}: {
+  estimate?: CoursePriceEstimate;
+  preferredHoleCounts?: readonly number[];
+}) {
+  const headlinePrice = getHeadlineCoursePrice(estimate, preferredHoleCounts);
+  if (!headlinePrice) return null;
 
   const observedLabel = estimate
     ? new Date(estimate.observedAt).toLocaleDateString("en-US", {
@@ -2331,21 +2346,13 @@ function CoursePriceDisplay({ estimate }: { estimate?: CoursePriceEstimate }) {
     : undefined;
 
   return (
-    <div
-      className="course-price-estimates"
-      title={observedLabel ? `Based on official rates observed through ${observedLabel}` : undefined}
+    <span
+      aria-label={`Estimated ${headlinePrice.holes}-hole course cost ${formatAccessiblePriceRange(headlinePrice.range)}`}
+      className="figma-course-pill is-price"
+      title={observedLabel ? `Based on official ${headlinePrice.holes}-hole rates observed through ${observedLabel}` : undefined}
     >
-      {availableRanges.map(({ holes, range }) => (
-        <span
-          aria-label={`Estimated ${holes}-hole price ${formatAccessiblePriceRange(range)}`}
-          className="course-price-estimate"
-          key={holes}
-        >
-          <span>{holes}H</span>
-          <strong>{formatPriceRange(range)}</strong>
-        </span>
-      ))}
-    </div>
+      <span aria-hidden="true">·</span> {formatPriceRange(headlinePrice.range)}
+    </span>
   );
 }
 

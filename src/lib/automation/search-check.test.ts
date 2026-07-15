@@ -441,6 +441,13 @@ describe("runSearchCheck email cadence", () => {
         }
       ]
     });
+    adapterMocks.fetchChronogolfSlots.mockResolvedValueOnce([{
+      sourceId: "blue-rock-2026-07-12-0800",
+      startsAt: "2026-07-12T08:00",
+      availableSpots: 4,
+      bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
+      bookableHoleCounts: [9, 18]
+    }]);
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -455,7 +462,8 @@ describe("runSearchCheck email cadence", () => {
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
         courseId: "blue-rock",
-        outcome: "NO_MATCH"
+        outcome: "NO_MATCH",
+        rawSummary: expect.objectContaining({ bookableHoleCounts: [9, 18] })
       })
     );
     expect(supportIncidentMocks.resolveCourseSupportIncident).toHaveBeenCalledWith(

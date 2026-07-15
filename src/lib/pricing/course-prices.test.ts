@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
-import { buildCoursePriceEstimate, hasPriceForView, summarizeCourseSlotPrices } from "./course-prices";
+import {
+  buildObservedBookableHoleCounts,
+  buildCoursePriceEstimate,
+  getHeadlineBookableHoleCount,
+  getHeadlineCoursePrice,
+  hasPriceForView,
+  summarizeBookableHoleCounts,
+  summarizeCourseSlotPrices
+} from "./course-prices";
 
 describe("course prices", () => {
   it("keeps separate nine and eighteen hole ranges", () => {
@@ -26,6 +34,39 @@ describe("course prices", () => {
     expect(estimate?.eighteenHoles?.sampleSize).toBe(1);
   });
 
+  it("captures bookable hole options even when the provider omits prices", () => {
+    expect(summarizeBookableHoleCounts([
+      slot({ bookableHoleCounts: [9, 18] }),
+      slot({ holes: 18, sourceId: "two" })
+    ])).toEqual([9, 18]);
+  });
+
+  it("uses the longest observed bookable round in the card metadata", () => {
+    expect(getHeadlineBookableHoleCount([9, 18])).toBe(18);
+    expect(getHeadlineBookableHoleCount([9])).toBe(9);
+    expect(getHeadlineBookableHoleCount(undefined)).toBeUndefined();
+  });
+
+  it("restores bookable options from probes, legacy pricing, and matches", () => {
+    expect(buildObservedBookableHoleCounts({
+      probes: [
+        {
+          observedAt: new Date("2026-07-10T14:00:00Z"),
+          rawSummary: { bookableHoleCounts: [9] }
+        },
+        {
+          observedAt: new Date("2026-07-10T13:00:00Z"),
+          rawSummary: {
+            pricing: {
+              eighteenHoles: { minPriceCents: 4800, maxPriceCents: 4800, sampleSize: 1 }
+            }
+          }
+        }
+      ],
+      matches: [{ holes: 18, priceCents: null, lastConfirmedAt: new Date("2026-07-10T12:00:00Z") }]
+    })).toEqual([9, 18]);
+  });
+
   it("uses confirmed matches to bootstrap existing data", () => {
     expect(buildCoursePriceEstimate({
       probes: [],
@@ -36,6 +77,48 @@ describe("course prices", () => {
   it("keeps unknown-price courses in the all-courses view", () => {
     expect(hasPriceForView(undefined, "any")).toBe(true);
     expect(hasPriceForView(undefined, "9")).toBe(false);
+  });
+
+  it("uses the price matching a preferred observed booking option for the card headline", () => {
+    const estimate = {
+      currency: "USD" as const,
+      observedAt: "2026-07-10T14:00:00.000Z",
+      nineHoles: { minPriceCents: 2800, maxPriceCents: 3400, sampleSize: 2 },
+      eighteenHoles: { minPriceCents: 4800, maxPriceCents: 4800, sampleSize: 1 }
+    };
+
+    expect(getHeadlineCoursePrice(estimate, [18])).toEqual({
+      holes: 18,
+      range: estimate.eighteenHoles
+    });
+    expect(getHeadlineCoursePrice(estimate, [9])).toEqual({
+      holes: 9,
+      range: estimate.nineHoles
+    });
+  });
+
+  it("does not label a nine-hole price as an eighteen-hole estimate", () => {
+    const estimate = {
+      currency: "USD" as const,
+      observedAt: "2026-07-10T14:00:00.000Z",
+      nineHoles: { minPriceCents: 2800, maxPriceCents: 3400, sampleSize: 2 }
+    };
+
+    expect(getHeadlineCoursePrice(estimate, [18])).toBeUndefined();
+  });
+
+  it("prefers an eighteen-hole observation when no booking option is preferred", () => {
+    const estimate = {
+      currency: "USD" as const,
+      observedAt: "2026-07-10T14:00:00.000Z",
+      nineHoles: { minPriceCents: 2800, maxPriceCents: 3400, sampleSize: 2 },
+      eighteenHoles: { minPriceCents: 4800, maxPriceCents: 4800, sampleSize: 1 }
+    };
+
+    expect(getHeadlineCoursePrice(estimate)).toEqual({
+      holes: 18,
+      range: estimate.eighteenHoles
+    });
   });
 });
 

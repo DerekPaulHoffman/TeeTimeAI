@@ -14,59 +14,6 @@
   flex: 0 0 auto;
 }
 
-.search-page .course-row,
-.search-page .course-row-selected {
-  min-height: 94px;
-}
-
-.search-page .course-thumbnail {
-  height: 92px;
-}
-
-.course-price-estimates {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 0;
-  margin-top: 7px;
-}
-
-.course-price-estimate {
-  align-items: baseline;
-  color: #536c65;
-  display: inline-flex;
-  font-size: 0.72rem;
-  gap: 5px;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-.course-price-estimate + .course-price-estimate::before {
-  color: #bfd0ca;
-  content: "·";
-  margin: 0 9px;
-}
-
-.course-price-estimate > span {
-  color: #16825c;
-  font-size: 0.65rem;
-  font-weight: 850;
-  letter-spacing: 0.035em;
-}
-
-.course-price-estimate strong {
-  color: #18332b;
-  font-size: 0.78rem;
-  font-weight: 800;
-}
-
-.course-price-unavailable {
-  color: #8a9c97;
-  font-size: 0.7rem;
-  line-height: 1.2;
-  margin: 7px 0 0;
-}
-
 @media (max-width: 620px) {
   .course-pricing-note {
     align-items: flex-start;
@@ -75,14 +22,11 @@
 
   .search-page .course-row,
   .search-page .course-row-selected {
-    min-height: 104px;
+    min-height: 118px;
   }
 
   .search-page .course-thumbnail {
-    height: 102px;
+    height: 100%;
   }
 
-  .course-price-estimate + .course-price-estimate::before {
-    margin-inline: 7px;
-  }
 }

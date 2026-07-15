@@ -1,4 +1,7 @@
-import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
+import type {
+  BookableHoleCount,
+  CoursePriceEstimate
+} from "@/lib/pricing/course-prices";
 import type {
   CourseAlertSupport,
   CourseMonitoringSupport
@@ -67,11 +70,13 @@ export type CourseCandidate = {
   timeZone: string;
   distanceMeters?: number;
   rating?: number;
+  par?: number;
   phone?: string;
   website?: string;
   photoReference?: string;
   photoAttributions?: CoursePhotoAttribution[];
   priceEstimate?: CoursePriceEstimate;
+  bookableHoleCounts?: BookableHoleCount[];
   alertSupport?: CourseAlertSupport;
   monitoringSupport?: CourseMonitoringSupport;
   layoutHoleCounts?: CourseLayoutHoleCount[];

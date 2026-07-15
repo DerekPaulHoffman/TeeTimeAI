@@ -52,7 +52,10 @@ import {
   summarizeSearchStatusAvailability,
   type SearchStatusCourseReport
 } from "@/lib/email/search-status";
-import { summarizeCourseSlotPrices } from "@/lib/pricing/course-prices";
+import {
+  summarizeBookableHoleCounts,
+  summarizeCourseSlotPrices
+} from "@/lib/pricing/course-prices";
 import {
   dedupeMatches,
   filterSlotsForSearch,
@@ -371,6 +374,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         continue;
       }
       const availability = summarizeSearchStatusAvailability(searchWindow, rawSlots);
+      const bookableHoleCounts = summarizeBookableHoleCounts(rawSlots);
       const pricing = summarizeCourseSlotPrices(rawSlots);
       const currentMatches = rankMatches(
         searchWindow,
@@ -418,6 +422,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
             : "No qualifying tee times in the requested window",
         rawSummary: {
           ...availability,
+          ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
           ...(pricing ? { pricing } : {})
         }
       });

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
 import Link from "next/link";
 import { Flag } from "lucide-react";
 
@@ -20,6 +21,12 @@ import "leaflet/dist/leaflet.css";
 import "./globals.css";
 import "./pricing.css";
 import "./editorial.css";
+
+const inter = Inter({
+  display: "swap",
+  subsets: ["latin"],
+  variable: "--font-inter"
+});
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,
@@ -82,7 +89,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
 
   return (
     <html lang="en">
-      <body>
+      <body className={inter.variable}>
         <OptionalClerkProvider publishableKey={clerkPublishableKey}>
           <div className="site-shell">
             <header className="topbar">

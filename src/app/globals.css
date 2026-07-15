@@ -3148,17 +3148,19 @@ button {
 .search-page .figma-course-list .course-row {
   align-items: stretch;
   background: #ffffff;
-  border: 1px solid #dce4df;
+  border: 1px solid #e2e8e4;
   border-radius: 16px;
-  box-shadow: 0 1px 2px rgba(17, 29, 24, 0.035);
+  box-shadow: 0 1px 4px rgba(17, 26, 34, 0.04);
   display: grid;
+  font-family: var(--font-inter), Inter, sans-serif;
   gap: 0;
   grid-template-areas: "thumbnail copy actions";
-  grid-template-columns: 100px minmax(0, 1fr) auto;
-  min-height: 96px;
+  grid-template-columns: 110px minmax(0, 1fr) auto;
+  min-height: 110px;
   overflow: hidden;
   padding: 0;
   scroll-margin-top: 84px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .search-page .figma-course-list .course-row:hover {
@@ -3169,8 +3171,8 @@ button {
 }
 
 .search-page .figma-course-list .course-row-selected {
-  border-color: #12c76f;
-  box-shadow: 0 0 0 1px rgba(18, 199, 111, 0.22), 0 4px 16px rgba(18, 199, 111, 0.09);
+  border: 2px solid #1f7a4d;
+  box-shadow: 0 2px 12px rgba(31, 122, 77, 0.1), 0 0 0 3px rgba(31, 122, 77, 0.06);
 }
 
 .search-page .figma-course-list .course-thumbnail,
@@ -3178,13 +3180,21 @@ button {
   align-self: stretch;
   border-radius: 15px 0 0 15px;
   height: 100%;
-  min-height: 94px;
-  width: 100px;
+  min-height: 108px;
+  width: 110px;
+}
+
+.search-page .figma-course-list .course-row-selected .course-thumbnail {
+  filter: brightness(0.7) saturate(0.9);
 }
 
 .search-page .figma-course-list .course-copy {
   align-self: center;
-  padding: 11px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  padding: 10px 12px;
 }
 
 .figma-course-badges {
@@ -3192,32 +3202,45 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 6px;
+  margin: 0;
 }
 
 .figma-course-pill {
   align-items: center;
-  background: #f1f4f2;
-  border-radius: 999px;
-  color: #536861;
+  background: transparent;
+  border-radius: 0;
+  color: #8fa89c;
   display: inline-flex;
-  font-size: 0.67rem;
-  font-weight: 800;
+  font-size: 0.6875rem;
+  font-weight: 400;
   gap: 3px;
-  line-height: 1;
-  min-height: 23px;
-  padding: 0 8px;
+  line-height: 1.2;
+  min-height: 0;
+  padding: 0;
   white-space: nowrap;
 }
 
 .figma-course-pill.is-public {
-  background: #e6f7ed;
-  color: #15834b;
+  background: #eaf3ee;
+  border-radius: 999px;
+  color: #1f7a4d;
+  font-weight: 600;
+  padding: 1px 7px;
 }
 
 .figma-course-pill.is-rating {
-  background: #fff7e6;
-  color: #8c5a07;
+  color: #9a6400;
+  font-weight: 600;
+}
+
+.figma-course-pill.is-detail {
+  gap: 2px;
+}
+
+.figma-course-pill.is-price {
+  color: #14231d;
+  font-weight: 700;
+  gap: 2px;
 }
 
 .figma-course-pill.is-official-site-only {
@@ -3226,18 +3249,29 @@ button {
 }
 
 .search-page .figma-course-list .course-copy h3 {
-  color: #051c2c;
-  font-size: 0.92rem;
-  font-weight: 850;
+  color: #14231d;
+  font-size: 0.875rem;
+  font-weight: 700;
   line-height: 1.2;
   margin: 0;
 }
 
 .search-page .figma-course-list .course-address-link,
 .search-page .figma-course-list .course-copy > .meta {
-  color: #86a09a;
-  font-size: 0.73rem;
-  margin: 5px 0 0;
+  color: #8fa89c;
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.search-page .figma-course-list .course-address-link {
+  gap: 4px;
+  min-width: 0;
+}
+
+.search-page .figma-course-list .course-address-link svg {
+  height: 9px;
+  width: 9px;
 }
 
 .search-page .figma-course-list .course-alert-support-note {
@@ -3249,17 +3283,17 @@ button {
 
 .course-monitoring-status {
   align-items: flex-start;
-  color: #087446;
+  color: #1f7a4d;
   display: flex;
-  font-size: 0.7rem;
-  gap: 6px;
-  line-height: 1.35;
-  margin: 7px 0 0;
+  font-size: 0.6875rem;
+  gap: 4px;
+  line-height: 1.2;
+  margin: 0;
 }
 
 .course-monitoring-status > svg {
   flex: 0 0 auto;
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 .course-monitoring-status > span {
@@ -3268,22 +3302,26 @@ button {
 }
 
 .course-monitoring-status strong {
-  font-weight: 850;
+  font-weight: 600;
 }
 
 .course-monitoring-status small {
-  color: #5e766e;
-  font-size: 0.68rem;
+  color: #8fa89c;
+  font-size: 0.625rem;
+  font-weight: 400;
 }
 
-.course-monitoring-status.is-manual,
-.course-monitoring-status.is-manual small {
-  color: #8a4f19;
+.course-monitoring-status.is-manual {
+  color: #c0392b;
 }
 
-.course-monitoring-status.is-unconfirmed,
+.course-monitoring-status.is-manual small,
 .course-monitoring-status.is-unconfirmed small {
-  color: #5e6f69;
+  color: #8fa89c;
+}
+
+.course-monitoring-status.is-unconfirmed {
+  color: #9a6400;
 }
 
 .course-monitoring-status.is-compact {
@@ -3318,13 +3356,14 @@ button {
 }
 
 .search-page .figma-course-list .course-actions {
-  align-items: center;
+  align-items: flex-end;
   align-self: stretch;
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  justify-content: end;
+  justify-content: center;
   margin: 0;
-  padding: 0 16px 0 8px;
+  padding: 10px 13px 10px 4px;
 }
 
 .search-page .figma-course-list .course-actions .button-ghost,
@@ -3335,18 +3374,34 @@ button {
   border-radius: 999px;
   color: #132b25;
   display: inline-flex;
-  font-size: 0.73rem;
-  font-weight: 850;
-  gap: 5px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  gap: 4px;
   justify-content: center;
-  min-height: 34px;
-  padding: 0 13px;
+  min-height: 28px;
+  padding: 0 12px;
   white-space: nowrap;
 }
 
 .search-page .figma-course-list .figma-add-button {
-  background: #f5f7f5;
-  color: #50645e;
+  background: #121e27;
+  border-color: #121e27;
+  color: #ffffff;
+  padding-inline: 16px;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.search-page .figma-course-list .figma-add-button:not(.is-added):hover,
+.search-page .figma-course-list .figma-add-button:not(.is-added):focus-visible {
+  background: #21313c;
+  border-color: #21313c;
+  box-shadow: 0 4px 10px rgba(18, 30, 39, 0.18);
+  color: #ffffff;
+  transform: translateY(-1px);
 }
 
 .search-page .figma-course-list .figma-add-button.is-added {
@@ -3356,10 +3411,12 @@ button {
 }
 
 .search-page .figma-course-list .course-rank-overlay {
-  height: 30px;
-  left: 35px;
-  top: 32px;
-  width: 30px;
+  background: #105338;
+  font-size: 0.625rem;
+  height: 20px;
+  left: 6px;
+  top: 6px;
+  width: 20px;
 }
 
 .figma-empty-results {
@@ -3939,10 +3996,6 @@ button {
   .search-page .figma-course-list .course-thumbnail,
   .search-page .figma-course-list .course-row:not(.course-row-selected) .course-thumbnail {
     width: 88px;
-  }
-
-  .figma-course-badges .figma-course-pill:last-child {
-    display: none;
   }
 
   .search-page .figma-course-list .course-actions {
@@ -6145,20 +6198,17 @@ button {
 
   .search-page .figma-course-list .course-row,
   .search-page .figma-course-list .course-row-selected {
-    grid-template-areas:
-      "thumbnail"
-      "copy"
-      "actions";
-    grid-template-columns: minmax(0, 1fr);
-    min-height: 0;
+    grid-template-areas: "thumbnail copy actions";
+    grid-template-columns: 88px minmax(0, 1fr) 64px;
+    min-height: 118px;
   }
 
   .search-page .figma-course-list .course-thumbnail,
   .search-page .figma-course-list .course-row:not(.course-row-selected) .course-thumbnail {
-    border-radius: 15px 15px 0 0;
-    height: 128px;
-    min-height: 128px;
-    width: 100%;
+    border-radius: 15px 0 0 15px;
+    height: 100%;
+    min-height: 116px;
+    width: 88px;
   }
 
   .search-page .figma-course-list .course-row-selected .course-thumbnail {
@@ -6166,7 +6216,7 @@ button {
   }
 
   .search-page .figma-course-list .course-copy {
-    padding: 12px 16px 8px;
+    padding: 10px;
   }
 
   .figma-course-badges .figma-course-pill:last-child {
@@ -6174,8 +6224,11 @@ button {
   }
 
   .search-page .figma-course-list .course-actions {
-    justify-content: flex-start;
-    padding: 0 16px 12px;
+    align-items: center;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    justify-content: center;
+    padding: 8px 8px 8px 2px;
   }
 
   .search-page .figma-course-list .course-actions .button-ghost {
@@ -6205,15 +6258,50 @@ button {
   }
 
   .search-page .figma-course-list .figma-add-button {
-    flex: 1;
+    flex: 0 0 auto;
+  }
+
+  .search-page .figma-course-list .course-actions .button-ghost {
+    font-size: 0;
+    padding: 0;
+    width: 44px;
+  }
+
+  .search-page .figma-course-list .figma-add-button {
+    font-size: 0;
+    padding: 0 8px;
+    width: 56px;
+  }
+
+  .search-page .figma-course-list .figma-add-button::after {
+    content: "+ Add";
+    font-size: 0.6875rem;
+  }
+
+  .search-page .figma-course-list .figma-add-button.is-added::after {
+    content: "Added";
+  }
+
+  .missing-course-result .course-thumbnail,
+  .missing-course-result .course-thumbnail-compact {
+    aspect-ratio: auto;
+    height: 88px;
+    min-height: 88px;
+  }
+
+  .missing-course-result .course-monitoring-status small {
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    display: -webkit-box;
+    overflow: hidden;
   }
 
   .search-page .figma-course-list .course-rank-overlay {
     font-size: 0.68rem;
-    height: 24px;
-    left: 12px;
-    top: 12px;
-    width: 24px;
+    height: 20px;
+    left: 6px;
+    top: 6px;
+    width: 20px;
   }
 
   .mobile-selection-toggle {

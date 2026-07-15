@@ -8,7 +8,7 @@ import { GET } from "./route";
 const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
-  enrichCoursesWithPriceEstimates: vi.fn(),
+  enrichCoursesWithBookingEvidence: vi.fn(),
   searchNearbyGolfCourses: vi.fn()
 }));
 
@@ -21,7 +21,7 @@ vi.mock("@/lib/places/hole-layout-enrichment", () => ({
 }));
 
 vi.mock("@/lib/pricing/course-price-enrichment", () => ({
-  enrichCoursesWithPriceEstimates: mocks.enrichCoursesWithPriceEstimates
+  enrichCoursesWithBookingEvidence: mocks.enrichCoursesWithBookingEvidence
 }));
 
 vi.mock("@/lib/places/google", () => ({

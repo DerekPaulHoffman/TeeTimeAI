@@ -8,6 +8,7 @@ const discoveredCourses = [
     latitude: 41.415596,
     longitude: -73.039627,
     distanceMeters: 1200,
+    bookableHoleCounts: [9, 18],
     layoutHoleCounts: [9],
     layoutHolesStatus: "VERIFIED",
     layoutHolesEvidenceUrl: "https://www.woodhavenctgolf.com/"
@@ -19,6 +20,7 @@ const discoveredCourses = [
     latitude: 41.42,
     longitude: -73.04,
     distanceMeters: 1800,
+    bookableHoleCounts: [9, 18],
     layoutHoleCounts: [18],
     layoutHolesStatus: "VERIFIED",
     priceEstimate: {
@@ -69,18 +71,21 @@ test.describe("physical course layout filtering", () => {
     await expect(page.getByText("Verified Eighteen Golf Course", { exact: true })).toBeVisible();
     await expect(page.getByText("Woodhaven Golf Course", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Unverified Public Golf Course", { exact: true })).toBeVisible();
-    await expect(page.getByText("Layout unverified", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Layout unverified/)).toBeVisible();
     await expect(page.getByText(/Hiding 1 verified course without an 18-hole layout/)).toBeVisible();
     const verifiedEighteenRow = page.locator(".course-row").filter({
       hasText: "Verified Eighteen Golf Course"
     });
-    await expect(verifiedEighteenRow.getByLabel(/Estimated 9-hole price/)).toBeVisible();
-    await expect(verifiedEighteenRow.getByLabel(/Estimated 18-hole price/)).toBeVisible();
+    await expect(verifiedEighteenRow.getByText(/18H/)).toBeVisible();
+    await expect(verifiedEighteenRow.getByText(/9H/)).toHaveCount(0);
+    await expect(verifiedEighteenRow.getByLabel(/Estimated 18-hole course cost/)).toBeVisible();
 
     await page.getByRole("button", { name: "9-hole", exact: true }).click();
-    await expect(page.getByText("Woodhaven Golf Course", { exact: true })).toBeVisible();
+    const woodhavenRow = page.locator(".course-row").filter({ hasText: "Woodhaven Golf Course" });
+    await expect(woodhavenRow).toBeVisible();
     await expect(page.getByText("Verified Eighteen Golf Course", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("9-hole course", { exact: true })).toBeVisible();
+    await expect(woodhavenRow.getByText(/18H/)).toBeVisible();
+    await expect(woodhavenRow.getByText(/9H/)).toHaveCount(0);
 
     await page.getByRole("button", { name: "Any", exact: true }).click();
     await expect(page.getByText("Woodhaven Golf Course", { exact: true })).toBeVisible();

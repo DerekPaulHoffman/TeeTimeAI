@@ -19,12 +19,26 @@ const smokeCourses = [
   "Fairchild Wheeler Golf Course"
 ].map((name, index) => ({
   address: `${100 + index} Public Links Rd, Trumbull, CT`,
-  distanceMeters: 2_000 + index * 800,
+  bookableHoleCounts: index === 0 ? [9, 18] : [18],
+  distanceMeters: [3.2, 5.1, 6.4, 8.9, 11.2, 12.7, 14.3][index] * 1_609.344,
   googlePlaceId: `ui-smoke-course-${index + 1}`,
+  layoutHoleCounts: [18],
   latitude: 41.24 + index * 0.002,
   longitude: -73.2 - index * 0.002,
   name,
   monitoringSupport: index === 0 ? "AUTOMATIC" : "UNCONFIRMED",
+  par: [72, 72, 71, 70, 71, 72, 72][index],
+  photoReference: `ui-smoke-photo-${index + 1}`,
+  priceEstimate: {
+    currency: "USD",
+    eighteenHoles: {
+      maxPriceCents: [4800, 6200, 4400, 5100, 5700, 4900, 5400][index],
+      minPriceCents: [4800, 6200, 4400, 5100, 5700, 4900, 5400][index],
+      sampleSize: 1
+    },
+    observedAt: "2026-07-15T12:00:00.000Z"
+  },
+  rating: [4.3, 4.5, 4.1, 4.2, 4.0, 3.9, 4.2][index],
   website: `https://example.com/course-${index + 1}`
 }));
 
@@ -598,6 +612,46 @@ test.describe("Tee Time Spot UI smoke", () => {
     ).toBeVisible();
   });
 
+  test("matches the Figma card font, photo, and metadata row", async ({ page }, testInfo) => {
+    test.skip(!useMockedSearchProviders, "This visual contract uses deterministic course fixtures.");
+    const issues = collectPageIssues(page);
+    await mockSmokeCourseSearch(page);
+    await page.goto("/search");
+
+    const locationInput = page.getByRole("textbox", { name: "Location", exact: true });
+    await locationInput.fill("Trumbull, CT");
+    await locationInput.press("Enter");
+
+    const firstCourse = page.locator(".course-row").first();
+    await expect(firstCourse).toBeVisible();
+    await expect.poll(async () =>
+      firstCourse.locator("img.course-thumbnail").evaluate((image) => {
+        const element = image as HTMLImageElement;
+        return element.complete && element.naturalWidth > 0;
+      })
+    ).toBe(true);
+    await expect(firstCourse.getByText("Public", { exact: true })).toBeVisible();
+    await expect(firstCourse.getByText("4.3", { exact: true })).toBeVisible();
+    await expect(firstCourse.getByText(/3\.2 mi/)).toBeVisible();
+    await expect(firstCourse.getByText(/18H/)).toBeVisible();
+    await expect(firstCourse.getByText(/9H/)).toHaveCount(0);
+    await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
+    await expect(firstCourse.getByLabel("Estimated 18-hole course cost $48")).toBeVisible();
+    const addButton = firstCourse.getByRole("button", { name: /Add Tashua Knolls/i });
+    await expect(addButton).toHaveText("+ Add to my list");
+    expect(await addButton.evaluate((button) => ({
+      backgroundColor: window.getComputedStyle(button).backgroundColor,
+      color: window.getComputedStyle(button).color
+    }))).toEqual({
+      backgroundColor: "rgb(18, 30, 39)",
+      color: "rgb(255, 255, 255)"
+    });
+    expect(await firstCourse.evaluate((card) => window.getComputedStyle(card).fontFamily)).toMatch(
+      /Inter/i
+    );
+    await expectNoPageIssues(issues, testInfo);
+  });
+
   test("onboarding discovery, ranking limit, and controls are usable", async ({
     page
   }, testInfo) => {
@@ -606,20 +660,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     const usesSelectionDrawer = (page.viewportSize()?.width ?? 1440) <= 920;
 
     if (useMockedSearchProviders) {
-      await page.route("**/api/location/geocode?**", async (route) => {
-        await route.fulfill({
-          body: JSON.stringify({ latitude: 41.242, longitude: -73.209 }),
-          contentType: "application/json",
-          status: 200
-        });
-      });
-      await page.route("**/api/courses/discover?**", async (route) => {
-        await route.fulfill({
-          body: JSON.stringify({ courses: smokeCourses }),
-          contentType: "application/json",
-          status: 200
-        });
-      });
+      await mockSmokeCourseSearch(page);
     }
 
     await page.goto("/search");
@@ -741,6 +782,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(firstCourse).toBeVisible();
     await expect(firstCourse.locator(".course-monitoring-status")).toBeVisible();
     if (useMockedSearchProviders) {
+      await expect.poll(async () =>
+        firstCourse.locator("img.course-thumbnail").evaluate((image) => {
+          const element = image as HTMLImageElement;
+          return element.complete && element.naturalWidth > 0;
+        })
+      ).toBe(true);
+      await expect(firstCourse.getByText("Public", { exact: true })).toBeVisible();
+      await expect(firstCourse.getByText("4.3", { exact: true })).toBeVisible();
+      await expect(firstCourse.getByText(/18H/)).toBeVisible();
+      await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
       await expect(firstCourse.getByText("Automatic availability alerts", { exact: true })).toBeVisible();
       await expect(
         page.locator(".course-row").nth(1).getByText("Automatic alerts not yet confirmed", {
@@ -751,16 +802,33 @@ test.describe("Tee Time Spot UI smoke", () => {
         firstCourse.getByRole("link", { name: /Open official site for/i })
       ).toBeVisible();
     }
-    const firstCourseName = await firstCourse.locator("h3").innerText();
-    await firstCourse
-      .getByRole("button", { name: /Report incorrect information for/i })
-      .click();
-    const courseReportDialog = page.getByRole("dialog", { name: "Send feedback" });
-    await expect(courseReportDialog).toBeVisible();
-    expect(await courseReportDialog.getByLabel("Details").inputValue()).toContain(firstCourseName);
-    await expect(courseReportDialog.getByRole("button", { name: "Broken" })).toHaveClass(/active/);
-    await page.getByRole("button", { name: "Close feedback" }).click();
-    await expect(courseReportDialog).toBeHidden();
+    const firstCourseCardLayout = await firstCourse.evaluate((card) => {
+      const thumbnail = card.querySelector<HTMLElement>(".course-thumbnail");
+      const copy = card.querySelector<HTMLElement>(".course-copy");
+      const actions = card.querySelector<HTMLElement>(".course-actions");
+      const cardBox = card.getBoundingClientRect();
+      const thumbnailBox = thumbnail?.getBoundingClientRect();
+      const copyBox = copy?.getBoundingClientRect();
+      const actionsBox = actions?.getBoundingClientRect();
+      return {
+        actionsDirection: actions ? window.getComputedStyle(actions).flexDirection : "",
+        cardHeight: cardBox.height,
+        cardTop: cardBox.top,
+        copyTop: copyBox?.top ?? -1,
+        thumbnailHeight: thumbnailBox?.height ?? -1,
+        thumbnailTop: thumbnailBox?.top ?? -1,
+        thumbnailWidth: thumbnailBox?.width ?? -1,
+        actionsTop: actionsBox?.top ?? -1
+      };
+    });
+    expect(firstCourseCardLayout.actionsDirection).toBe("column");
+    expect(firstCourseCardLayout.thumbnailWidth).toBe(isMobile ? 88 : 110);
+    expect(firstCourseCardLayout.thumbnailHeight).toBeGreaterThanOrEqual(
+      firstCourseCardLayout.cardHeight - 4
+    );
+    expect(Math.abs(firstCourseCardLayout.thumbnailTop - firstCourseCardLayout.cardTop)).toBeLessThan(3);
+    expect(Math.abs(firstCourseCardLayout.copyTop - firstCourseCardLayout.cardTop)).toBeLessThan(3);
+    expect(Math.abs(firstCourseCardLayout.actionsTop - firstCourseCardLayout.cardTop)).toBeLessThan(3);
     const resultsLayout = await page.locator(".figma-results-column").evaluate((column) => {
       const status = column.querySelector<HTMLElement>(".figma-results-banner");
       const course = column.querySelector<HTMLElement>(".course-row");
@@ -1254,6 +1322,57 @@ function nextSaturdayDateInputValue(from = new Date()) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+async function mockSmokeCourseSearch(page: Page) {
+  await page.route("**/api/location/geocode?**", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({ latitude: 41.242, longitude: -73.209 }),
+      contentType: "application/json",
+      status: 200
+    });
+  });
+  await page.route("**/api/courses/discover?**", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({ courses: smokeCourses }),
+      contentType: "application/json",
+      status: 200
+    });
+  });
+  await page.route("**/api/courses/photo?**", async (route) => {
+    const photoReference = new URL(route.request().url()).searchParams.get("ref") ?? "";
+    const photoIndex = Number(photoReference.match(/ui-smoke-photo-(\d+)/)?.[1] ?? "1") - 1;
+    await route.fulfill({
+      body: getSmokeCoursePhotoSvg(photoIndex),
+      contentType: "image/svg+xml",
+      status: 200
+    });
+  });
+}
+
+function getSmokeCoursePhotoSvg(index: number) {
+  const palettes = [
+    ["#b9d7ef", "#507d3a", "#1f5b2c", "#d7c292"],
+    ["#9dcbe8", "#6f9d43", "#315e31", "#e3cf9b"],
+    ["#7ebee8", "#7fa54a", "#285737", "#d9c48a"],
+    ["#b8d8e7", "#476d37", "#234b32", "#ead6a8"],
+    ["#a9d0ed", "#789c45", "#355e35", "#d7be80"],
+    ["#c2dced", "#5c843d", "#254e31", "#e5ce99"],
+    ["#91c4e4", "#6d9746", "#2c5836", "#dcc58b"]
+  ];
+  const [sky, fairway, tree, sand] = palettes[index % palettes.length];
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220">
+    <rect width="220" height="220" fill="${sky}"/>
+    <circle cx="178" cy="38" r="18" fill="#fff4c7" opacity=".9"/>
+    <path d="M0 96 C35 72 66 88 104 78 C146 67 181 75 220 58 V220 H0 Z" fill="${tree}"/>
+    <path d="M0 126 C55 99 91 111 126 97 C162 83 194 91 220 82 V220 H0 Z" fill="${fairway}"/>
+    <path d="M94 101 C127 107 157 132 172 220 H55 C69 165 82 128 94 101 Z" fill="#86b958"/>
+    <path d="M143 148 C167 140 189 146 195 159 C184 173 158 176 139 165 Z" fill="${sand}"/>
+    <path d="M115 103 V151" stroke="#f6f4ea" stroke-width="3"/>
+    <path d="M116 104 L145 113 L116 123 Z" fill="#e36f43"/>
+    <ellipse cx="115" cy="153" rx="27" ry="9" fill="#a6cf78"/>
+  </svg>`;
 }
 
 async function captureUiScreenshot(

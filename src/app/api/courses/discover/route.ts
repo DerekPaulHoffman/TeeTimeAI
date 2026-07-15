@@ -7,7 +7,7 @@ import { searchNearbyGolfCourses } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
-import { enrichCoursesWithPriceEstimates } from "@/lib/pricing/course-price-enrichment";
+import { enrichCoursesWithBookingEvidence } from "@/lib/pricing/course-price-enrichment";
 
 export async function GET(request: NextRequest) {
   const latitude = Number(request.nextUrl.searchParams.get("latitude"));
@@ -49,7 +49,7 @@ export async function GET(request: NextRequest) {
         return coursesWithSupport;
       }
     );
-    const coursesWithPrices = await enrichCoursesWithPriceEstimates(coursesWithLayouts).catch((error) => {
+    const coursesWithPrices = await enrichCoursesWithBookingEvidence(coursesWithLayouts).catch((error) => {
       console.warn(
         "Course pricing enrichment unavailable",
         error instanceof Error ? error.message : "Unknown pricing error"

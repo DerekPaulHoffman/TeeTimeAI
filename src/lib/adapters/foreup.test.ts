@@ -7,7 +7,7 @@ describe("ForeUP adapter", () => {
     vi.unstubAllGlobals();
   });
 
-  it("normalizes ForeUP slots and omits ambiguous holes values", async () => {
+  it("normalizes every official ForeUP booking option", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -45,7 +45,8 @@ describe("ForeUP adapter", () => {
         startsAt: "2026-08-10T13:40",
         availableSpots: 4,
         priceCents: 5500,
-        holes: undefined
+        holes: undefined,
+        bookableHoleCounts: [9, 18]
       },
       {
         sourceId: "foreup-6654-2026-08-10 14:20",
@@ -87,7 +88,8 @@ describe("ForeUP adapter", () => {
       sourceId: "foreup-11739-2026-07-10 18:50",
       startsAt: "2026-07-10T18:50",
       availableSpots: 4,
-      priceCents: 5200
+      priceCents: 5200,
+      bookableHoleCounts: [9, 18]
     });
   });
 

@@ -96,17 +96,21 @@ async function fetchForeupAvailability(input: {
 
   const normalizedSlots = slots
     .filter((slot) => slot.time && slot.available_spots)
-    .map((slot) => ({
-      courseId: input.courseId,
-      sourceId: `foreup-${input.metadata.scheduleId}-${slot.time}`,
-      startsAt: normalizeForeupTime(slot.time as string),
-      availableSpots: slot.available_spots ?? 0,
-      bookingUrl: input.metadata.bookingBaseUrl,
-      priceCents:
-        typeof slot.green_fee === "number" ? Math.round(slot.green_fee * 100) : undefined,
-      holes: normalizeForeupHoles(slot.holes),
-      evidenceUrl: url.toString()
-    }));
+    .map((slot) => {
+      const bookableHoleCounts = normalizeForeupBookableHoleCounts(slot.holes);
+      return {
+        courseId: input.courseId,
+        sourceId: `foreup-${input.metadata.scheduleId}-${slot.time}`,
+        startsAt: normalizeForeupTime(slot.time as string),
+        availableSpots: slot.available_spots ?? 0,
+        bookingUrl: input.metadata.bookingBaseUrl,
+        priceCents:
+          typeof slot.green_fee === "number" ? Math.round(slot.green_fee * 100) : undefined,
+        holes: bookableHoleCounts.length === 1 ? bookableHoleCounts[0] : undefined,
+        ...(bookableHoleCounts.length > 1 ? { bookableHoleCounts } : {}),
+        evidenceUrl: url.toString()
+      };
+    });
 
   return {
     slots: normalizedSlots,
@@ -143,14 +147,12 @@ function normalizeForeupTime(time: string) {
   return time;
 }
 
-function normalizeForeupHoles(holes: ForeupApiSlot["holes"]) {
-  if (Number.isInteger(holes)) {
-    return holes as number;
-  }
-
-  if (typeof holes === "string" && /^\d+$/.test(holes)) {
-    return Number(holes);
-  }
-
-  return undefined;
+function normalizeForeupBookableHoleCounts(holes: ForeupApiSlot["holes"]): Array<9 | 18> {
+  const values = typeof holes === "string" ? holes.match(/\b(?:9|18)\b/g) ?? [] : [holes];
+  const observed = new Set(
+    values
+      .map(Number)
+      .filter((value): value is 9 | 18 => value === 9 || value === 18)
+  );
+  return ([9, 18] as const).filter((value) => observed.has(value));
 }

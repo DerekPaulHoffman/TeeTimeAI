@@ -1,8 +1,11 @@
 import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
-import { buildCoursePriceEstimate } from "@/lib/pricing/course-prices";
+import {
+  buildCoursePriceEstimate,
+  buildObservedBookableHoleCounts
+} from "@/lib/pricing/course-prices";
 
-const PRICE_LOOKBACK_DAYS = 30;
+const BOOKING_EVIDENCE_LOOKBACK_DAYS = 30;
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
 export type PricingCourseRecord = {
@@ -14,13 +17,12 @@ export type PricingCourseRecord = {
   matches: Array<{ priceCents: number | null; holes: number | null; lastConfirmedAt: Date }>;
 };
 
-export async function enrichCoursesWithPriceEstimates(candidates: CourseCandidate[], now = new Date()) {
+export async function enrichCoursesWithBookingEvidence(candidates: CourseCandidate[], now = new Date()) {
   if (candidates.length === 0) return candidates;
   const latitudes = candidates.map((course) => course.latitude);
   const longitudes = candidates.map((course) => course.longitude);
-  const cutoff = new Date(now.getTime() - PRICE_LOOKBACK_DAYS * 86_400_000);
-  const priceEvidence = {
-    priceCents: { not: null },
+  const cutoff = new Date(now.getTime() - BOOKING_EVIDENCE_LOOKBACK_DAYS * 86_400_000);
+  const bookingEvidence = {
     holes: { in: [9, 18] },
     lastConfirmedAt: { gte: cutoff }
   };
@@ -30,7 +32,7 @@ export async function enrichCoursesWithPriceEstimates(candidates: CourseCandidat
       longitude: { gte: Math.min(...longitudes) - 0.06, lte: Math.max(...longitudes) + 0.06 },
       OR: [
         { probes: { some: { observedAt: { gte: cutoff } } } },
-        { matches: { some: priceEvidence } }
+        { matches: { some: bookingEvidence } }
       ]
     },
     take: 500,
@@ -46,7 +48,7 @@ export async function enrichCoursesWithPriceEstimates(candidates: CourseCandidat
         select: { observedAt: true, rawSummary: true }
       },
       matches: {
-        where: priceEvidence,
+        where: bookingEvidence,
         orderBy: { lastConfirmedAt: "desc" },
         take: 200,
         select: { priceCents: true, holes: true, lastConfirmedAt: true }
@@ -57,7 +59,16 @@ export async function enrichCoursesWithPriceEstimates(candidates: CourseCandidat
   return candidates.map((candidate) => {
     const matchedCourse = findPricingCourse(candidate, courses);
     const priceEstimate = matchedCourse ? buildCoursePriceEstimate(matchedCourse) : undefined;
-    return priceEstimate ? { ...candidate, priceEstimate } : candidate;
+    const bookableHoleCounts = matchedCourse
+      ? buildObservedBookableHoleCounts(matchedCourse)
+      : [];
+    return priceEstimate || bookableHoleCounts.length > 0
+      ? {
+          ...candidate,
+          ...(priceEstimate ? { priceEstimate } : {}),
+          ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {})
+        }
+      : candidate;
   });
 }
 
