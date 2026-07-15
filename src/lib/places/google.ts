@@ -24,6 +24,9 @@ export type GooglePlace = {
   formattedAddress?: string;
   businessStatus?: string;
   primaryType?: string;
+  googleMapsTypeLabel?: {
+    text?: string;
+  };
   types?: string[];
   location?: {
     latitude?: number;
@@ -104,6 +107,7 @@ const EXPLICIT_PRIVATE_NAME_PATTERNS = [
   /\bmembers?\s+only\b/i,
   /\bmembership\s+required\b/i
 ];
+const PRIVATE_GOLF_COURSE_LABEL_PATTERN = /^\s*private\s+golf\s+course\s*$/i;
 const AMBIGUOUS_COUNTRY_CLUB_NAME_PATTERN = /\bcountry\s+club\b/i;
 
 const NON_COURSE_NAME_PATTERNS = [
@@ -236,6 +240,10 @@ function isLikelyPublicGolfCoursePlace(
     return true;
   }
 
+  if (PRIVATE_GOLF_COURSE_LABEL_PATTERN.test(place.googleMapsTypeLabel?.text ?? "")) {
+    return false;
+  }
+
   const hasTypedGolfCourseEvidence =
     place.primaryType === "golf_course" && placeTypes.includes("golf_course");
   const hasSemanticFallbackEvidence =
@@ -346,10 +354,11 @@ export async function searchGolfCoursesByName(
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus"
+        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
     },
     body: JSON.stringify({
       textQuery: input.query.trim(),
+      languageCode: "en",
       includedType: "golf_course",
       strictTypeFiltering: true,
       pageSize: 8,
@@ -424,10 +433,11 @@ async function searchPublicGolfCoursePlacesByName(input: CourseNameSearchInput) 
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus"
+          "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
       },
       body: JSON.stringify({
         textQuery: `${input.query.trim()} public golf course`,
+        languageCode: "en",
         pageSize: 8,
         rankPreference: "RELEVANCE",
         ...(hasLocationBias
@@ -472,9 +482,10 @@ async function searchNearbyGolfCoursePlaces(
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus,places.containingPlaces"
+        "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus,places.containingPlaces"
     },
     body: JSON.stringify({
+      languageCode: "en",
       includedPrimaryTypes: ["golf_course"],
       excludedPrimaryTypes: Array.from(NON_PUBLIC_PRIMARY_TYPES),
       maxResultCount: 20,
@@ -512,10 +523,11 @@ async function searchPublicGolfCoursePlaces(input: NearbyCourseSearchInput) {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": apiKey,
         "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.location,places.websiteUri,places.types,places.primaryType,places.businessStatus"
+          "places.id,places.displayName,places.formattedAddress,places.location,places.websiteUri,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
       },
       body: JSON.stringify({
         textQuery: "public golf courses",
+        languageCode: "en",
         pageSize: 20,
         rankPreference: "RELEVANCE",
         ...getTextSearchLocation(input)

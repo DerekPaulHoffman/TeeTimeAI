@@ -316,6 +316,7 @@ describe("Google Places mapping", () => {
     expect(requestBody).toEqual(
       expect.objectContaining({
         textQuery: "Bethpage Black",
+        languageCode: "en",
         includedType: "golf_course",
         pageSize: 8,
         locationBias: {
@@ -738,6 +739,100 @@ describe("Google Places mapping", () => {
     );
 
     expect(places).toEqual([]);
+  });
+
+  it("filters provider-labeled private courses while preserving public and verified controls", () => {
+    const places = filterPublicGolfCoursePlaces([
+      {
+        id: "places/cda-main-gate",
+        displayName: { text: "CDA National Reserve Main Gate" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Private Golf Course" },
+        types: ["golf_course", "athletic_field", "sports_activity_location"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.cdanational.com/",
+        location: { latitude: 47.554, longitude: -116.893 }
+      },
+      {
+        id: "places/black-rock",
+        displayName: { text: "The Golf Club At Black Rock" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: " private   golf course " },
+        types: ["golf_course", "association_or_organization"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.blackrockidaho.com/",
+        location: { latitude: 47.518, longitude: -116.871 }
+      },
+      {
+        id: "places/liberty-lake",
+        displayName: { text: "Liberty Lake Golf Course" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Golf Course" },
+        types: ["golf_course", "athletic_field"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.spokanecounty.org/1210/Liberty-Lake",
+        location: { latitude: 47.639, longitude: -117.032 }
+      },
+      {
+        id: "places/cda-public",
+        displayName: { text: "Coeur d'Alene Public Golf Club" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Public Golf Course" },
+        types: ["golf_course", "sports_club", "association_or_organization"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://cdagolfclub.com/",
+        location: { latitude: 47.704, longitude: -116.811 }
+      },
+      {
+        id: "places/cda-resort",
+        displayName: { text: "The Coeur d'Alene Resort Golf Course" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Golf Course" },
+        types: ["golf_course", "resort_hotel", "restaurant"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.floatinggreen.com/",
+        location: { latitude: 47.673, longitude: -116.773 }
+      },
+      {
+        id: "places/pinehurst-no-2",
+        displayName: { text: "Pinehurst No. 2" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Golf Course" },
+        types: ["golf_course", "athletic_field"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.pinehurst.com/golf/courses/no-2/",
+        location: { latitude: 35.195, longitude: -79.473 }
+      },
+      {
+        id: "places/pinehurst-no-4",
+        displayName: { text: "Pinehurst No. 4" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Golf Course" },
+        types: ["golf_course", "athletic_field"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://www.pinehurst.com/golf/courses/no-4/",
+        location: { latitude: 35.194, longitude: -79.477 }
+      },
+      {
+        id: "places/ChIJHRdhRQt16IkRnZxbawELtdM",
+        displayName: { text: "Grassy Hill Country Club" },
+        primaryType: "golf_course",
+        googleMapsTypeLabel: { text: "Private Golf Course" },
+        types: ["golf_course", "association_or_organization"],
+        businessStatus: "OPERATIONAL",
+        websiteUri: "https://grassyhillcountryclub.com/",
+        location: { latitude: 41.278, longitude: -73.025 }
+      }
+    ]);
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Liberty Lake Golf Course",
+      "Coeur d'Alene Public Golf Club",
+      "The Coeur d'Alene Resort Golf Course",
+      "Pinehurst No. 2",
+      "Pinehurst No. 4",
+      "Grassy Hill Country Club"
+    ]);
   });
 
   it("filters the exact BagBoyz2 non-course while preserving Orlando public-course controls", () => {
@@ -1695,9 +1790,18 @@ describe("Google Places mapping", () => {
       "https://places.googleapis.com/v1/places:searchNearby",
       expect.objectContaining({
         headers: expect.objectContaining({
-          "X-Goog-FieldMask": expect.stringContaining("places.primaryType")
+          "X-Goog-FieldMask": expect.stringContaining("places.googleMapsTypeLabel")
         }),
         body: expect.stringContaining('"includedPrimaryTypes":["golf_course"]')
+      })
+    );
+    const nearbyRequestBody = JSON.parse(
+      (fetchMock.mock.calls[0]?.[1] as RequestInit | undefined)?.body as string
+    );
+    expect(nearbyRequestBody).toEqual(
+      expect.objectContaining({
+        languageCode: "en",
+        includedPrimaryTypes: ["golf_course"]
       })
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -1712,7 +1816,7 @@ describe("Google Places mapping", () => {
       "https://places.googleapis.com/v1/places:searchText",
       expect.objectContaining({
         headers: expect.objectContaining({
-          "X-Goog-FieldMask": expect.stringContaining("places.displayName")
+          "X-Goog-FieldMask": expect.stringContaining("places.googleMapsTypeLabel")
         }),
         body: expect.stringContaining('"locationRestriction"')
       })
