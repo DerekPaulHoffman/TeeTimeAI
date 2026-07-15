@@ -3,6 +3,10 @@ import "./load-local-env";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
+import {
+  MAX_BOOKING_WINDOW_DAYS_AHEAD,
+  normalizeReleaseTime
+} from "@/lib/courses/booking-window";
 import { applyCourseProfileDraft, createCourseProfileSlugAlias, getCourseProfileResearchPacket, listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { validateCourseProfileDraft } from "@/lib/course-profiles/validation";
 import { prisma } from "@/lib/prisma";
@@ -27,6 +31,55 @@ export function parseCourseProfileCommand(args: readonly string[]) {
     if (!courseId) throw new Error("research requires --course-id");
     return { action, courseId } as const;
   }
+  if (action === "booking-window") {
+    const courseId = value("--course-id");
+    const daysAheadValue = value("--days-ahead");
+    const releaseTimeValue = value("--release-time");
+    const evidenceUrl = value("--evidence-url");
+    if (!courseId || daysAheadValue === undefined || !evidenceUrl) {
+      throw new Error(
+        "booking-window requires --course-id, --days-ahead, and --evidence-url"
+      );
+    }
+    const daysAhead = Number(daysAheadValue);
+    if (
+      !Number.isInteger(daysAhead) ||
+      daysAhead < 0 ||
+      daysAhead > MAX_BOOKING_WINDOW_DAYS_AHEAD
+    ) {
+      throw new Error(
+        `--days-ahead must be an integer from 0 to ${MAX_BOOKING_WINDOW_DAYS_AHEAD}`
+      );
+    }
+    const releaseTimeLocal = releaseTimeValue
+      ? normalizeReleaseTime(releaseTimeValue)
+      : null;
+    if (releaseTimeValue && !releaseTimeLocal) {
+      throw new Error("--release-time must be a valid course-local time");
+    }
+    let parsedEvidenceUrl: URL;
+    try {
+      parsedEvidenceUrl = new URL(evidenceUrl);
+    } catch {
+      throw new Error("--evidence-url must be an HTTP(S) URL");
+    }
+    if (
+      !/^https?:$/.test(parsedEvidenceUrl.protocol) ||
+      parsedEvidenceUrl.username ||
+      parsedEvidenceUrl.password ||
+      /^(?:localhost|127\.|0\.0\.0\.0$|\[?::1\]?$)/i.test(parsedEvidenceUrl.hostname)
+    ) {
+      throw new Error("--evidence-url must be an HTTP(S) URL");
+    }
+    return {
+      action,
+      courseId,
+      daysAhead,
+      releaseTimeLocal,
+      evidenceUrl: parsedEvidenceUrl.toString(),
+      apply
+    } as const;
+  }
   if (action === "alias") {
     const courseId = value("--course-id");
     const slug = value("--slug");
@@ -34,7 +87,7 @@ export function parseCourseProfileCommand(args: readonly string[]) {
     return { action, courseId, slug, apply } as const;
   }
   if (action === "upsert") return { action, apply, file: value("--file") } as const;
-  throw new Error('Expected "cohort", "queue", "research", "validate-seeds", "backfill-connecticut", "alias", or "upsert"');
+  throw new Error('Expected "cohort", "queue", "research", "validate-seeds", "backfill-connecticut", "booking-window", "alias", or "upsert"');
 }
 
 export function assertCourseProfileBackfillValid(
@@ -62,6 +115,56 @@ export async function executeCourseProfileCommand(command: ReturnType<typeof par
   }
   if (command.action === "queue") return listCourseProfileQueue(command.limit);
   if (command.action === "research") return getCourseProfileResearchPacket(command.courseId);
+  if (command.action === "booking-window") {
+    const course = await prisma.course.findUnique({
+      where: { id: command.courseId },
+      select: {
+        id: true,
+        name: true,
+        bookingWindowDaysAhead: true,
+        bookingReleaseTimeLocal: true,
+        bookingWindowSource: true,
+        bookingWindowConfidence: true,
+        bookingWindowEvidenceUrl: true,
+        bookingWindowCheckedAt: true,
+        bookingWindowObservedAt: true
+      }
+    });
+    if (!course) throw new Error(`Course ${command.courseId} was not found`);
+
+    const proposed = {
+      bookingWindowDaysAhead: command.daysAhead,
+      bookingReleaseTimeLocal: command.releaseTimeLocal,
+      bookingWindowSource: "OFFICIAL_BOOKING_PAGE" as const,
+      bookingWindowConfidence: 1,
+      bookingWindowEvidenceUrl: command.evidenceUrl
+    };
+    if (!command.apply) {
+      return { apply: false, course, proposed };
+    }
+
+    const observedAt = new Date();
+    const updated = await prisma.course.update({
+      where: { id: command.courseId },
+      data: {
+        ...proposed,
+        bookingWindowCheckedAt: observedAt,
+        bookingWindowObservedAt: observedAt
+      },
+      select: {
+        id: true,
+        name: true,
+        bookingWindowDaysAhead: true,
+        bookingReleaseTimeLocal: true,
+        bookingWindowSource: true,
+        bookingWindowConfidence: true,
+        bookingWindowEvidenceUrl: true,
+        bookingWindowCheckedAt: true,
+        bookingWindowObservedAt: true
+      }
+    });
+    return { apply: true, course: updated };
+  }
   if (command.action === "alias") return createCourseProfileSlugAlias(command.courseId, command.slug, command.apply);
   if (command.action === "validate-seeds") {
     const profiles = connecticutCourseProfileSeeds.map((seed) => {

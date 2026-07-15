@@ -335,7 +335,16 @@ export const connecticutCourseProfileSeeds: Seed[] = [
     overview: "Tashua Knolls combines the original eighteen-hole Knolls layout with the adjacent nine-hole Tashua Glen on a self-funded municipal property in northern Trumbull.",
     courseCharacter: "The Knolls moves through rolling New England farmland, mature trees, old stone walls, bunkers, and water, while the Glen provides a shorter family-oriented routing with additional forward tees.",
     notableFacts: ["The Town of Trumbull owns the facility.", "The property includes a full driving range, short-game areas, and indoor training space."],
-    sources: [source("https://www.tashuaknolls.com/golf-course/", "About Tashua Knolls", "Tashua Knolls Golf Course", "MUNICIPAL_GOVERNMENT")]
+    sources: [
+      source("https://www.tashuaknolls.com/golf-course/", "About Tashua Knolls", "Tashua Knolls Golf Course", "MUNICIPAL_GOVERNMENT"),
+      source(
+        "https://www.tashuaknolls.com/tee-times-fees/reservations/",
+        "Tee Time Reservations",
+        "Tashua Knolls Golf Course",
+        "OFFICIAL_BOOKING",
+        ["booking_window"]
+      )
+    ]
   }),
   profile({
     googlePlaceId: "ChIJExAgjx_f54kROzCYBnwhxwo",

@@ -528,6 +528,44 @@ describe("runSearchCheck email cadence", () => {
     });
   });
 
+  it("passes a stored official rule page to ForeUP when refreshing booking-window evidence", async () => {
+    const evidenceUrl = "https://www.tashuaknolls.com/tee-times-fees/reservations/";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "FOREUP",
+            detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              scheduleId: 6654,
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
+            },
+            bookingWindowEvidenceUrl: evidenceUrl,
+            bookingWindowCheckedAt: new Date("2026-05-01T12:00:00.000Z"),
+            bookingWindowObservedAt: new Date("2026-05-01T12:00:00.000Z")
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        discoverBookingWindow: true,
+        metadata: expect.objectContaining({ bookingWindowEvidenceUrl: evidenceUrl })
+      })
+    );
+  });
+
   it("uses learned Chronogolf metadata for public availability checks", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,

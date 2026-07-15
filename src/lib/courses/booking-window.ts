@@ -123,7 +123,10 @@ export function parsePublicBookingWindowRule(
         /\b(?:(?:tee\s+times?\s+)?(?:can\s+be\s+)?book(?:ed)?|tee\s+time\s+reservations\s+can\s+be\s+made(?:\s+online)?)\s+(\d{1,2})\s+days?\s+in\s+advance\b([^.!?]{0,140})/i
       )
     : null;
-  const ruleMatch = publicRule ?? genericRule;
+  const generalTeeTimeRule = text.match(
+    /\btee\s+times?\s+(?:can\s+be\s+)?(?:seen|viewed|reserved|booked)(?:\s+online)?\s+(?:up\s+to\s+)?(\d{1,2})\s+days?\s+in\s+advance\b([^.!?]{0,140})/i
+  );
+  const ruleMatch = publicRule ?? generalTeeTimeRule ?? genericRule;
   const daysAhead = Number(ruleMatch?.[1]);
 
   if (!Number.isInteger(daysAhead) || daysAhead < 0 || daysAhead > MAX_BOOKING_WINDOW_DAYS_AHEAD) {
@@ -131,14 +134,14 @@ export function parsePublicBookingWindowRule(
   }
 
   const timeMatch = (ruleMatch?.[2] ?? "").match(
-    /\b(?:starting\s+|also\s+)?at\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/i
+    /\b(?:starting\s+|beginning\s+|also\s+)?at\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/i
   );
 
   return {
     daysAhead,
     releaseTimeLocal: normalizeReleaseTime(timeMatch?.[1] ?? null),
     source: "OFFICIAL_BOOKING_PAGE",
-    confidence: publicRule ? 0.98 : 0.9,
+    confidence: publicRule ? 0.98 : generalTeeTimeRule ? 0.95 : 0.9,
     evidenceUrl
   };
 }

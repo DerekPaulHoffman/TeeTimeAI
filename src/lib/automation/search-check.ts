@@ -832,11 +832,17 @@ function fetchCourseTeeSheet(
   discoverBookingWindow: boolean
 ): Promise<CourseTeeSheetResult> {
   if (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
+    const metadata = course.bookingWindowEvidenceUrl
+      ? {
+          ...course.bookingMetadata,
+          bookingWindowEvidenceUrl: course.bookingWindowEvidenceUrl
+        }
+      : course.bookingMetadata;
     return fetchForeupTeeSheet({
       courseId: course.id,
       date,
       players,
-      metadata: course.bookingMetadata,
+      metadata,
       discoverBookingWindow
     });
   }

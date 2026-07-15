@@ -24,8 +24,12 @@ test("renders a facility-first supported course guide without browser errors", a
   await expect(page.getByRole("heading", { name: "About Tashua Knolls Golf Course" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Facility highlights" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Booking at Tashua Knolls Golf Course" })).toBeVisible();
-  await expect(page.getByText("Advance booking schedule", { exact: true })).toBeVisible();
-  await expect(page.getByText("Confirm on the official booking page.", { exact: true })).toBeVisible();
+  await expect(page.getByText("7-day booking window", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Public tee times open up to 7 days ahead at 5:30 a\.m\. course-local time/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "View official booking details" })).toHaveAttribute(
+    "href",
+    "https://www.tashuaknolls.com/tee-times-fees/reservations/"
+  );
   await expect(page.getByRole("heading", { name: "Tee time alerts for Tashua Knolls Golf Course" })).toBeVisible();
   await expect(page.getByText("Get notified when a public tee time matches your date, time, group size, and course preference.", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "References" })).toBeVisible();
@@ -66,7 +70,7 @@ test("renders a verified booking window as a direct course fact", async ({ page 
   await expect(page.getByRole("heading", { level: 1, name: "Cedar Ridge Golf Course" })).toBeVisible();
   await expect(page.getByText("14-day booking window", { exact: true })).toBeVisible();
   await expect(page.getByText(/Public tee times open up to 14 days ahead/)).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open the official booking page" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View official booking details" })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

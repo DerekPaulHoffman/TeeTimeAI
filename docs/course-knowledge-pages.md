@@ -38,6 +38,15 @@ npm run automation:course-profile -- upsert --file <draft.json>
 npm run automation:course-profile -- upsert --file <draft.json> --apply
 ```
 
+When an official course or booking page states a dependable release rule, record it on the operational course separately from the editorial profile. The command is dry-run-first and stores the source URL used for the time-sensitive claim:
+
+```powershell
+npx vercel env run -e production -- npm run automation:course-profile -- booking-window --course-id <course-id> --days-ahead <days> --release-time <course-local-time> --evidence-url <official-url>
+npx vercel env run -e production -- npm run automation:course-profile -- booking-window --course-id <course-id> --days-ahead <days> --release-time <course-local-time> --evidence-url <official-url> --apply
+```
+
+Omit `--release-time` only when the official source verifies the number of days but not a release time. ForeUP courses will reuse the stored official evidence URL during later booking-window refreshes.
+
 Validation requires authoritative sources, claim keys for every notable fact, original wording, and a current verification date. Failed applied drafts become `BLOCKED_EVIDENCE`; published profiles are refreshed after 180 days. A material change to course identity, access, support, official website, or booking URL immediately marks the profile stale and removes it from public routes until it is revalidated.
 
 Write every public profile as a confident facility guide. State supported facts directly and focus on the course layouts, setting, amenities, ownership, public access, and playing experience. Keep claim keys, evidence summaries, authority checks, and uncertainty about the research process internal. Public prose must not say “what Tee Time Spot understands,” “what we know,” “our research found,” “not enough evidence,” or similar editorial-process language. When one fact is unavailable, describe only that field conservatively and direct the golfer to the official course or booking page.

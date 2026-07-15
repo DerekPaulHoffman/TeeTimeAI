@@ -174,4 +174,44 @@ describe("ForeUP adapter", () => {
       }
     });
   });
+
+  it("refreshes a booking window from a separate official policy page", async () => {
+    const policyUrl = "https://www.tashuaknolls.com/tee-times-fees/reservations/";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(
+          "Tee times can be seen up to 7 days in advance beginning at 5:30am.",
+          { status: 200 }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchForeupTeeSheet({
+      courseId: "tashua",
+      date: new Date("2026-08-10T00:00:00-04:00"),
+      players: 2,
+      discoverBookingWindow: true,
+      metadata: {
+        scheduleId: 6654,
+        bookingClassId: 14910,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+        bookingWindowEvidenceUrl: policyUrl
+      }
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      policyUrl,
+      expect.objectContaining({ headers: { accept: "text/html,application/xhtml+xml" } })
+    );
+    expect(result.bookingWindowEvidence).toEqual({
+      daysAhead: 7,
+      releaseTimeLocal: "05:30",
+      source: "OFFICIAL_BOOKING_PAGE",
+      confidence: 0.95,
+      evidenceUrl: policyUrl
+    });
+  });
 });

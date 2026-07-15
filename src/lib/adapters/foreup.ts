@@ -8,6 +8,7 @@ export type ForeupMetadata = {
   scheduleId: number;
   bookingClassId?: number;
   bookingBaseUrl: string;
+  bookingWindowEvidenceUrl?: string;
 };
 
 type ForeupApiSlot = {
@@ -33,7 +34,9 @@ export function isForeupMetadata(value: unknown): value is ForeupMetadata {
   return (
     typeof metadata.scheduleId === "number" &&
     (metadata.bookingClassId === undefined || typeof metadata.bookingClassId === "number") &&
-    typeof metadata.bookingBaseUrl === "string"
+    typeof metadata.bookingBaseUrl === "string" &&
+    (metadata.bookingWindowEvidenceUrl === undefined ||
+      isPublicHttpUrl(metadata.bookingWindowEvidenceUrl))
   );
 }
 
@@ -121,16 +124,31 @@ async function fetchForeupAvailability(input: {
 async function fetchForeupBookingWindow(
   metadata: ForeupMetadata
 ): Promise<BookingWindowEvidence | null> {
+  const evidenceUrl = metadata.bookingWindowEvidenceUrl ?? metadata.bookingBaseUrl;
   try {
-    const response = await fetch(metadata.bookingBaseUrl, {
+    const response = await fetch(evidenceUrl, {
       headers: { accept: "text/html,application/xhtml+xml" }
     });
     if (!response.ok) {
       return null;
     }
-    return parsePublicBookingWindowRule(await response.text(), metadata.bookingBaseUrl);
+    return parsePublicBookingWindowRule(await response.text(), evidenceUrl);
   } catch {
     return null;
+  }
+}
+
+function isPublicHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return (
+      ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      !/^(?:localhost|127\.|0\.0\.0\.0$|\[?::1\]?$)/i.test(url.hostname)
+    );
+  } catch {
+    return false;
   }
 }
 

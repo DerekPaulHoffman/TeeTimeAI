@@ -52,6 +52,21 @@ describe("course booking windows", () => {
     expect(evidence?.releaseTimeLocal).toBe("06:00");
   });
 
+  it("parses an official course rule for tee times shown up to seven days ahead", () => {
+    const evidence = parsePublicBookingWindowRule(
+      "Tee times can be seen up to 7 days in advance beginning at 5:30am.",
+      "https://www.tashuaknolls.com/tee-times-fees/reservations/"
+    );
+
+    expect(evidence).toEqual({
+      daysAhead: 7,
+      releaseTimeLocal: "05:30",
+      source: "OFFICIAL_BOOKING_PAGE",
+      confidence: 0.95,
+      evidenceUrl: "https://www.tashuaknolls.com/tee-times-fees/reservations/"
+    });
+  });
+
   it("parses an exact TeeItUp release message", () => {
     const evidence = parseBookingReleaseMessage({
       message:

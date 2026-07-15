@@ -20,14 +20,26 @@ export function getBookingWindowPresentation(course: BookingWindowCourse) {
   }
 
   const time = course.bookingReleaseTimeLocal
-    ? ` at ${course.bookingReleaseTimeLocal} course-local time`
+    ? ` at ${formatCourseLocalTime(course.bookingReleaseTimeLocal)} course-local time`
     : "";
+  const evidenceUrl = course.bookingWindowEvidenceUrl ?? officialBookingUrl;
   return {
     title: `${course.bookingWindowDaysAhead}-day booking window`,
     copy: `Public tee times open up to ${course.bookingWindowDaysAhead} days ahead${time}. Check the official booking page for current availability and any player-specific rules.`,
-    sourceUrl: officialBookingUrl ?? course.bookingWindowEvidenceUrl,
-    sourceLabel: officialBookingUrl ? "Open the official booking page" : "View official booking details"
+    sourceUrl: evidenceUrl,
+    sourceLabel: evidenceUrl ? "View official booking details" : null
   };
+}
+
+function formatCourseLocalTime(value: string) {
+  const match = value.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return value;
+  const hour = Number(match[1]);
+  const minute = match[2];
+  if (hour > 23) return value;
+  const displayHour = hour % 12 || 12;
+  const meridiem = hour < 12 ? "a.m." : "p.m.";
+  return `${displayHour}:${minute} ${meridiem}`;
 }
 
 export function getPublicFacilityFacts(facts: string[]) {

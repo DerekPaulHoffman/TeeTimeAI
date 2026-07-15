@@ -27,9 +27,9 @@ describe("course profile presentation", () => {
       website: "https://example.com"
     })).toEqual({
       title: "7-day booking window",
-      copy: "Public tee times open up to 7 days ahead at 07:00 course-local time. Check the official booking page for current availability and any player-specific rules.",
-      sourceUrl: "https://example.com/book",
-      sourceLabel: "Open the official booking page"
+      copy: "Public tee times open up to 7 days ahead at 7:00 a.m. course-local time. Check the official booking page for current availability and any player-specific rules.",
+      sourceUrl: "https://example.com/policy",
+      sourceLabel: "View official booking details"
     });
   });
 
