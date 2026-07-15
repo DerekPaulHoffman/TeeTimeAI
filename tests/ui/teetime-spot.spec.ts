@@ -885,6 +885,16 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(
         page.locator(".course-row").nth(1).getByRole("link", { name: /View course guide for/i })
       ).toHaveCount(0);
+      await expect(firstCourse.locator(".course-actions > *")).toHaveCount(3);
+      expect(
+        await firstCourse
+          .locator(".course-actions > *")
+          .evaluateAll((actions) => actions.map((action) => action.getAttribute("aria-label")))
+      ).toEqual([
+        "View course guide for Tashua Knolls Golf Course",
+        "Open official site for Tashua Knolls Golf Course",
+        "Add Tashua Knolls Golf Course"
+      ]);
     }
     const firstCourseCardLayout = await firstCourse.evaluate((card) => {
       const thumbnail = card.querySelector<HTMLElement>(".course-thumbnail");

@@ -1231,18 +1231,18 @@ function TeeTimeIntakeContent({
                   </h3>
                   <CourseAddressLink course={course} />
                   <CourseMonitoringStatus course={course} />
+                </div>
+                <div className="course-actions">
                   {course.profileUrl ? (
                     <Link
                       aria-label={`View course guide for ${course.name}`}
-                      className="course-profile-link"
+                      className="button button-ghost course-profile-button"
                       href={course.profileUrl as `/courses/${string}`}
                     >
-                      <BookOpenText aria-hidden="true" size={12} />
+                      <BookOpenText aria-hidden="true" size={10} />
                       Course guide
                     </Link>
                   ) : null}
-                </div>
-                <div className="course-actions">
                   {course.website ? (
                     <a
                       className="button button-ghost"
