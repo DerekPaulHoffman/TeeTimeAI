@@ -1,4 +1,9 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import {
+  MAX_BOOKING_WINDOW_DAYS_AHEAD,
+  normalizeReleaseTime,
+  type BookingWindowEvidence
+} from "@/lib/courses/booking-window";
 import { getTimeZoneOffsetMinutes, zonedDateTimeToDate } from "@/lib/timezones";
 
 export type CpsMetadata = {
@@ -35,6 +40,22 @@ type CpsSearchResponse =
     }
   | CpsApiSlot[];
 
+type CpsBookingRule = {
+  courseId?: number;
+  daysInAdvance?: number;
+  daysInAdvanceWeekend?: number;
+  time?: string;
+};
+
+type CpsBookingRuleResponse = {
+  bookingRuleByClass?: Array<{
+    classCode?: string;
+    bookingRuleByCourse?: CpsBookingRule[];
+  }>;
+  bookingRuleByCourses?: CpsBookingRule[];
+  weekends?: string[];
+};
+
 type CpsApiSlot = {
   teeSheetId?: number;
   startTime?: string;
@@ -51,6 +72,20 @@ type CpsApiSlot = {
     displayPrice?: number;
     shItemCode?: string;
   }>;
+};
+
+type CpsFetchInput = {
+  courseId: string;
+  date: Date;
+  players: number;
+  timeZone?: string;
+  metadata: CpsMetadata;
+};
+
+export type CpsTeeSheetResult = {
+  slots: TeeTimeSlot[];
+  targetDateStatus: "OPEN" | "UNKNOWN";
+  bookingWindowEvidence: BookingWindowEvidence | null;
 };
 
 export function isCpsMetadata(value: unknown): value is CpsMetadata {
@@ -73,13 +108,13 @@ export function isCpsMetadata(value: unknown): value is CpsMetadata {
   );
 }
 
-export async function fetchCpsSlots(input: {
-  courseId: string;
-  date: Date;
-  players: number;
-  timeZone?: string;
-  metadata: CpsMetadata;
-}): Promise<TeeTimeSlot[]> {
+export async function fetchCpsSlots(input: CpsFetchInput): Promise<TeeTimeSlot[]> {
+  return (await fetchCpsTeeSheet(input)).slots;
+}
+
+export async function fetchCpsTeeSheet(
+  input: CpsFetchInput & { discoverBookingWindow?: boolean }
+): Promise<CpsTeeSheetResult> {
   let configuration = await loadConfiguration(input.metadata);
   const credential = configuration.apiKey
     ? { apiKey: configuration.apiKey }
@@ -87,7 +122,7 @@ export async function fetchCpsSlots(input: {
   if (credential.apiKey) {
     configuration = await loadPublicOptions(
       configuration,
-      credential.apiKey,
+      credential,
       input.timeZone ?? "America/New_York",
       input.date
     );
@@ -98,6 +133,26 @@ export async function fetchCpsSlots(input: {
     input.timeZone ?? "America/New_York",
     input.date
   );
+  const [slots, bookingWindowEvidence] = await Promise.all([
+    fetchCpsAvailability(input, configuration, credential, headers),
+    input.discoverBookingWindow
+      ? fetchCpsBookingWindow(input, configuration, credential)
+      : Promise.resolve(null)
+  ]);
+
+  return {
+    slots,
+    targetDateStatus: slots.length > 0 ? "OPEN" : "UNKNOWN",
+    bookingWindowEvidence
+  };
+}
+
+async function fetchCpsAvailability(
+  input: CpsFetchInput,
+  configuration: CpsConfiguration,
+  credential: { token?: string; apiKey?: string },
+  headers: Record<string, string>
+) {
   const slots: TeeTimeSlot[] = [];
   const seen = new Set<string>();
 
@@ -161,6 +216,99 @@ export async function fetchCpsSlots(input: {
   return slots;
 }
 
+async function fetchCpsBookingWindow(
+  input: CpsFetchInput,
+  configuration: CpsConfiguration,
+  credential: { token?: string; apiKey?: string }
+): Promise<BookingWindowEvidence | null> {
+  try {
+    const timeZone = input.timeZone ?? "America/New_York";
+    const optionsConfiguration = credential.token
+      ? await loadPublicOptions(configuration, credential, timeZone, input.date)
+      : configuration;
+    const url = new URL(`${optionsConfiguration.onlineApi}/BookingRuleModels`);
+    url.searchParams.set("classcode", "R");
+    url.searchParams.set("courseIds", input.metadata.courseIds.join(","));
+    url.searchParams.set("searchDate", formatCpsDate(input.date));
+
+    const response = await fetch(url, {
+      headers: cpsHeaders(optionsConfiguration, credential, timeZone, input.date)
+    });
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as CpsBookingRuleResponse;
+    const publicRules =
+      payload.bookingRuleByClass?.find((group) => group.classCode?.toUpperCase() === "R")
+        ?.bookingRuleByCourse ?? [];
+    const rules = publicRules.length > 0 ? publicRules : (payload.bookingRuleByCourses ?? []);
+    const normalizedRules = rules
+      .filter(
+        (rule) =>
+          rule.courseId === undefined || input.metadata.courseIds.includes(rule.courseId)
+      )
+      .map((rule) => normalizeCpsBookingRule(rule, payload.weekends, input.date))
+      .filter((rule): rule is { daysAhead: number; releaseTimeLocal: string | null } => Boolean(rule));
+
+    if (normalizedRules.length === 0) {
+      return null;
+    }
+
+    const daysAhead = new Set(normalizedRules.map((rule) => rule.daysAhead));
+    const releaseTimes = new Set(normalizedRules.map((rule) => rule.releaseTimeLocal));
+    if (daysAhead.size !== 1 || releaseTimes.size !== 1) {
+      return null;
+    }
+
+    return {
+      daysAhead: normalizedRules[0].daysAhead,
+      releaseTimeLocal: normalizedRules[0].releaseTimeLocal,
+      source: "PROVIDER_CONFIG",
+      confidence: 1,
+      evidenceUrl: url.toString()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCpsBookingRule(
+  rule: CpsBookingRule,
+  weekends: string[] | undefined,
+  targetDate: Date
+) {
+  const weekday = FULL_WEEKDAYS[targetDate.getUTCDay()];
+  const usesWeekendRule = weekends?.some(
+    (candidate) => candidate.toLowerCase() === weekday.toLowerCase()
+  );
+  const daysAhead = usesWeekendRule
+    ? (rule.daysInAdvanceWeekend ?? rule.daysInAdvance)
+    : rule.daysInAdvance;
+  if (
+    !Number.isInteger(daysAhead) ||
+    daysAhead == null ||
+    daysAhead < 0 ||
+    daysAhead > MAX_BOOKING_WINDOW_DAYS_AHEAD
+  ) {
+    return null;
+  }
+
+  return {
+    daysAhead,
+    releaseTimeLocal: normalizeCpsReleaseTime(rule.time)
+  };
+}
+
+function normalizeCpsReleaseTime(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const localTime = value.match(/(?:T|\s)(\d{1,2}:\d{2})(?::\d{2})?/i)?.[1] ?? value;
+  return normalizeReleaseTime(localTime);
+}
+
 async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguration> {
   if (metadata.onlineApi && metadata.authorityBaseUrl && metadata.websiteId) {
     return {
@@ -208,7 +356,7 @@ async function fetchShortLivedToken(configuration: CpsConfiguration) {
 
 async function loadPublicOptions(
   configuration: CpsConfiguration,
-  apiKey: string,
+  credential: { token?: string; apiKey?: string },
   timeZone: string,
   date: Date
 ) {
@@ -218,7 +366,7 @@ async function loadPublicOptions(
   }
   url.searchParams.set("product", "3");
   const response = await fetch(url, {
-    headers: cpsHeaders(configuration, { apiKey }, timeZone, date)
+    headers: cpsHeaders(configuration, credential, timeZone, date)
   });
   if (!response.ok) {
     throw new Error(`CPS public options returned ${response.status}`);
@@ -287,7 +435,6 @@ function buildTeeTimesUrl(
 }
 
 function formatCpsDate(date: Date) {
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const months = [
     "Jan",
     "Feb",
@@ -305,8 +452,19 @@ function formatCpsDate(date: Date) {
   const year = date.getUTCFullYear();
   const month = date.getUTCMonth();
   const day = date.getUTCDate();
-  return `${weekdays[date.getUTCDay()]} ${months[month]} ${String(day).padStart(2, "0")} ${year}`;
+  return `${SHORT_WEEKDAYS[date.getUTCDay()]} ${months[month]} ${String(day).padStart(2, "0")} ${year}`;
 }
+
+const SHORT_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const FULL_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday"
+];
 
 function cpsHeaders(
   configuration: CpsConfiguration,

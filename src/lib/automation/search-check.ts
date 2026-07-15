@@ -25,7 +25,7 @@ import {
   reportCourseSupportIssue,
   resolveCourseSupportIncident
 } from "@/lib/automation/support-incidents";
-import { fetchCpsSlots, isCpsMetadata } from "@/lib/adapters/cps";
+import { fetchCpsTeeSheet, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
@@ -358,7 +358,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       } else if (refreshBookingWindow) {
         await markCourseBookingWindowChecked(course.id, checkStartedAt);
       }
-      if (rawSlots.length === 0 && bookingWindow && bookingWindow.opensAt > checkStartedAt) {
+      if (bookingWindow && bookingWindow.opensAt > checkStartedAt) {
         await recordBookingWindowWaitingProbe({
           searchId: search.id,
           courseId: course.id,
@@ -856,17 +856,14 @@ function fetchCourseTeeSheet(
     }));
   }
   if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
-    return fetchCpsSlots({
+    return fetchCpsTeeSheet({
       courseId: course.id,
       date,
       players,
       timeZone: course.timeZone,
-      metadata: course.bookingMetadata
-    }).then((slots) => ({
-      slots,
-      targetDateStatus: slots.length > 0 ? "OPEN" as const : "UNKNOWN" as const,
-      bookingWindowEvidence: null
-    }));
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
+    });
   }
   if (course.detectedPlatform === "CUSTOM" && isChelseaMetadata(course.bookingMetadata)) {
     return fetchChelseaTeeSheet({

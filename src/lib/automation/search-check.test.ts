@@ -584,7 +584,7 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("uses public Chelsea metadata and persists its non-member booking window", async () => {
+  it("persists a booking window and ignores provider-visible slots until public release", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       date: new Date("2026-08-15T00:00:00.000Z"),
@@ -614,8 +614,16 @@ describe("runSearchCheck email cadence", () => {
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
     adapterMocks.fetchChelseaTeeSheet.mockResolvedValue({
-      slots: [],
-      targetDateStatus: "NOT_OPEN",
+      slots: [
+        {
+          courseId: "dennis-highland",
+          sourceId: "provider-visible-before-release",
+          startsAt: "2026-08-15T08:00",
+          availableSpots: 4,
+          bookingUrl: "https://dennis.chelseareservations.com/"
+        }
+      ],
+      targetDateStatus: "OPEN",
       bookingWindowEvidence: {
         daysAhead: 7,
         releaseTimeLocal: null,
@@ -651,5 +659,6 @@ describe("runSearchCheck email cadence", () => {
       outcome: "NO_MATCH",
       bookingWindow: { releaseDate: "2026-08-08", exactTime: false }
     });
+    expect(dbMocks.recordTeeTimeMatch).not.toHaveBeenCalled();
   });
 });

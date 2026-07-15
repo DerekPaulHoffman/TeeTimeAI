@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchCpsSlots, isCpsMetadata } from "./cps";
+import { fetchCpsSlots, fetchCpsTeeSheet, isCpsMetadata } from "./cps";
 
 describe("isCpsMetadata", () => {
   it("recognizes reusable CPS metadata", () => {
@@ -194,6 +194,120 @@ describe("fetchCpsSlots", () => {
         holes: 18
       })
     ]);
+  });
+
+  it("learns the public booking window from CPS booking-rule configuration", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = input.toString();
+
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse({
+          clientId: "onlineresweb",
+          authorityBaseUrl: "https://shennecossett.cps.golf/identityapi",
+          onlineApi:
+            "https://shennecossett.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          websiteId: "00000000-0000-0000-0000-000000000000",
+          siteName: "shennecossett",
+          buildNumber: "26.1.2.26379768992\n"
+        });
+      }
+
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return jsonResponse({ access_token: "token" });
+      }
+
+      if (url.includes("/GetAllOptions/shennecossett?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers.authorization).toBe("Bearer token");
+        expect(headers["x-websiteid"]).toBe("00000000-0000-0000-0000-000000000000");
+        expect(new URL(url).searchParams.get("version")).toBe("26.1.2.26379768992");
+        return jsonResponse({
+          webSiteId: "ee8d09d9-2ab6-4349-c825-08dec0b787e5",
+          reservationOptions: { terminalId: 3 }
+        });
+      }
+
+      if (url.includes("/BookingRuleModels?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["x-websiteid"]).toBe("ee8d09d9-2ab6-4349-c825-08dec0b787e5");
+        expect(headers["x-terminalid"]).toBe("3");
+        const bookingRuleUrl = new URL(url);
+        expect(bookingRuleUrl.searchParams.get("classcode")).toBe("R");
+        expect(bookingRuleUrl.searchParams.get("courseIds")).toBe("1,2");
+        expect(bookingRuleUrl.searchParams.get("searchDate")).toBe("Wed Jul 22 2026");
+        return jsonResponse({
+          bookingRuleByClass: [
+            {
+              classCode: "R",
+              bookingRuleByCourse: [
+                {
+                  courseId: 1,
+                  daysInAdvance: 7,
+                  daysInAdvanceWeekend: 7,
+                  time: "2026-06-08T20:00:00"
+                }
+              ]
+            }
+          ],
+          bookingRuleByCourses: [{ courseId: 1, daysInAdvance: 7 }],
+          weekends: ["Friday", "Saturday", "Sunday"]
+        });
+      }
+
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+
+      if (url.includes("/TeeTimes?")) {
+        const teeTimesUrl = new URL(url);
+        if (teeTimesUrl.searchParams.get("holes") === "18") {
+          return jsonResponse({
+            transactionId: "tx",
+            content: [
+              {
+                teeSheetId: 789,
+                startTime: "2026-07-22T08:00:00",
+                availableParticipantNo: [1, 2, 3, 4],
+                holes: 18
+              }
+            ]
+          });
+        }
+        return jsonResponse({ transactionId: "tx", content: [] });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const result = await fetchCpsTeeSheet({
+      courseId: "shennecossett",
+      date: new Date("2026-07-22T00:00:00.000Z"),
+      players: 4,
+      timeZone: "America/New_York",
+      metadata: {
+        provider: "CPS",
+        siteName: "shennecossett",
+        bookingBaseUrl: "https://shennecossett.cps.golf/",
+        courseIds: [1, 2],
+        holes: [18, 9]
+      },
+      discoverBookingWindow: true
+    });
+
+    expect(result.slots).toEqual([
+      expect.objectContaining({
+        sourceId: "cps-shennecossett-789",
+        startsAt: "2026-07-22T08:00",
+        availableSpots: 4
+      })
+    ]);
+    expect(result.bookingWindowEvidence).toEqual({
+      daysAhead: 7,
+      releaseTimeLocal: "20:00",
+      source: "PROVIDER_CONFIG",
+      confidence: 1,
+      evidenceUrl: expect.stringContaining("/BookingRuleModels?")
+    });
   });
 });
 
