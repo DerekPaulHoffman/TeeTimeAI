@@ -3281,6 +3281,11 @@ button {
   color: #8a4f19;
 }
 
+.course-monitoring-status.is-unconfirmed,
+.course-monitoring-status.is-unconfirmed small {
+  color: #5e6f69;
+}
+
 .course-monitoring-status.is-compact {
   margin-top: 5px;
 }

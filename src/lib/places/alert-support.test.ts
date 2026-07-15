@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 
-import { enrichCoursesWithAlertSupport, findBlockedCourse } from "./alert-support";
+import { enrichCoursesWithAlertSupport, findKnownCourse } from "./alert-support";
 
 vi.mock("@/lib/prisma", () => ({ prisma: { course: { findMany: vi.fn() } } }));
 
@@ -34,6 +34,40 @@ describe("course alert support enrichment", () => {
     ]);
 
     expect(course.alertSupport).toBe("PHONE_ONLY");
+    expect(course.monitoringSupport).toBe("MANUAL_ONLY");
+  });
+
+  it("only claims automatic monitoring for a known allowed course", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED"
+      }
+    ] as never);
+
+    const [knownCourse, unknownCourse] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        timeZone: "America/New_York"
+      },
+      {
+        googlePlaceId: "not-reviewed",
+        name: "Not Yet Reviewed Golf Course",
+        latitude: 41.7,
+        longitude: -72.8,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(knownCourse.monitoringSupport).toBe("AUTOMATIC");
+    expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
   });
 
   it("matches an alternate place id only when name and coordinates agree", () => {
@@ -47,7 +81,7 @@ describe("course alert support enrichment", () => {
     };
 
     expect(
-      findBlockedCourse(
+      findKnownCourse(
         {
           googlePlaceId: "alternate-fairview-id",
           name: "Fairview Farm Golf Course",
@@ -58,7 +92,7 @@ describe("course alert support enrichment", () => {
       )
     ).toBe(blocked);
     expect(
-      findBlockedCourse(
+      findKnownCourse(
         {
           googlePlaceId: "unrelated-course",
           name: "General Store",
@@ -81,7 +115,7 @@ describe("course alert support enrichment", () => {
     };
 
     expect(
-      findBlockedCourse(
+      findKnownCourse(
         {
           googlePlaceId: "generic-fairview",
           name: "Golf Course",
@@ -92,7 +126,7 @@ describe("course alert support enrichment", () => {
       )
     ).toBe(blocked);
     expect(
-      findBlockedCourse(
+      findKnownCourse(
         {
           googlePlaceId: "generic-elsewhere",
           name: "Golf Course",
@@ -130,6 +164,6 @@ describe("course alert support enrichment", () => {
       }
     ];
 
-    expect(findBlockedCourse(generic, courses)).toBeUndefined();
+    expect(findKnownCourse(generic, courses)).toBeUndefined();
   });
 });

@@ -22,6 +22,25 @@ export type CourseAlertSupport =
   | "CONTACT_COURSE"
   | "WALK_IN_ONLY";
 
+export type CourseMonitoringSupport =
+  | "AUTOMATIC"
+  | "MANUAL_ONLY"
+  | "UNCONFIRMED";
+
+export function getCourseMonitoringSupport(input?: {
+  automationEligibility: string;
+}): CourseMonitoringSupport {
+  if (input?.automationEligibility === "ALLOWED") {
+    return "AUTOMATIC";
+  }
+
+  if (input?.automationEligibility === "BLOCKED") {
+    return "MANUAL_ONLY";
+  }
+
+  return "UNCONFIRMED";
+}
+
 export function getCourseAlertSupport(input: {
   automationEligibility: string;
   bookingMethod?: BookingMethod | null;

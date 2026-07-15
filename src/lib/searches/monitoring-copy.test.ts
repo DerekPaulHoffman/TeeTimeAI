@@ -4,15 +4,26 @@ import { buildSearchSavedMessage } from "./monitoring-copy";
 
 describe("buildSearchSavedMessage", () => {
   it("keeps the standard confirmation when every course can be monitored", () => {
-    expect(buildSearchSavedMessage([{ name: "Timberlin Golf Course" }])).toContain(
+    expect(buildSearchSavedMessage([
+      { name: "Timberlin Golf Course", monitoringSupport: "AUTOMATIC" }
+    ])).toContain(
       "We'll email you the moment a matching tee time opens up."
     );
+  });
+
+  it("does not promise alerts before monitoring has been confirmed", () => {
+    const message = buildSearchSavedMessage([{ name: "Unreviewed Golf Course" }]);
+
+    expect(message).toContain(
+      "We'll verify automatic monitoring for Unreviewed Golf Course as your alert starts."
+    );
+    expect(message).not.toContain("the moment a matching tee time opens up");
   });
 
   it("names a phone-only course without claiming it is monitored", () => {
     const message = buildSearchSavedMessage([
       { name: "Fairview Farm Golf Course", alertSupport: "PHONE_ONLY" },
-      { name: "Timberlin Golf Course" }
+      { name: "Timberlin Golf Course", monitoringSupport: "AUTOMATIC" }
     ]);
 
     expect(message).toContain("We'll monitor supported courses");

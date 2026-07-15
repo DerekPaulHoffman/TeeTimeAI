@@ -1,5 +1,8 @@
 import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
-import type { CourseAlertSupport } from "@/lib/courses/intelligence";
+import type {
+  CourseAlertSupport,
+  CourseMonitoringSupport
+} from "@/lib/courses/intelligence";
 import type { CourseLayoutHoleCount } from "@/lib/courses/course-layout";
 import {
   areEquivalentNamedCourses,
@@ -70,6 +73,7 @@ export type CourseCandidate = {
   photoAttributions?: CoursePhotoAttribution[];
   priceEstimate?: CoursePriceEstimate;
   alertSupport?: CourseAlertSupport;
+  monitoringSupport?: CourseMonitoringSupport;
   layoutHoleCounts?: CourseLayoutHoleCount[];
   layoutHolesStatus?: "VERIFIED" | "UNVERIFIED";
   layoutHolesEvidenceUrl?: string;
