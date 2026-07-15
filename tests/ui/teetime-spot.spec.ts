@@ -1171,13 +1171,13 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(saveRequestCount, "signed-out visitors must not submit alert searches").toBe(0);
     } else if (/Start getting alerts/i.test(alertActionText)) {
       await expect(alertActionButton).toBeEnabled();
-      await alertActionButton.click();
-      await expect(
-        page.getByText("You're all set. We'll email you the moment a matching tee time opens up.")
-      ).toBeVisible();
-      await expect(alertActionButton).toBeDisabled();
-      await alertActionButton.click({ force: true });
-      expect(saveRequestCount, "unchanged saved searches should not submit more than once").toBe(1);
+      await Promise.all([
+        page.waitForURL((url) =>
+          url.pathname === "/dashboard" && url.searchParams.get("created") === "ui-smoke-1"
+        ),
+        alertActionButton.click()
+      ]);
+      expect(saveRequestCount, "a successful alert save should submit once before redirecting").toBe(1);
       expect(lastSavePayload).toEqual(
         expect.objectContaining({
           additionalEmails: ["friend@example.com", "teammate@example.com"]

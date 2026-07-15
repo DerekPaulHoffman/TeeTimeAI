@@ -2,6 +2,7 @@
 
 import { SignInButton, useUser } from "@clerk/nextjs";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Leaflet from "leaflet";
 import {
@@ -277,6 +278,7 @@ function TeeTimeIntakeContent({
   initialValues: TeeTimeIntakeInitialValues;
   accountState: IntakeAccountState;
 }) {
+  const router = useRouter();
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
@@ -801,6 +803,15 @@ function TeeTimeIntakeContent({
         }
       });
       setSavedSignature(searchSignature);
+      const responseBody = (await response.json().catch(() => null)) as {
+        search?: { id?: string };
+      } | null;
+      const createdSearchId = responseBody?.search?.id;
+      router.push(
+        createdSearchId
+          ? `/dashboard?created=${encodeURIComponent(createdSearchId)}`
+          : "/dashboard"
+      );
     } catch (error) {
       setNotice({
         type: "error",
