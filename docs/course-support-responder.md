@@ -61,6 +61,8 @@ Every new `CourseProbe` records `runtimeVersion`, normally the deployed Git comm
 - its `runtimeVersion` exactly matches the claimed release SHA; and
 - its outcome is `MATCH_FOUND` or `NO_MATCH`.
 
+If the same owned batch needs a follow-up release after an earlier deployment, the release fence may advance only during an explicit `VERIFYING` heartbeat. The checkout must be clean on the claimed branch, the persisted release must be an ancestor of the new HEAD, and both the cumulative and incremental diffs must contain only already planned paths. The transition preserves the prior deployment, recheck, and ordinal verification evidence in bounded `releaseHistory`, then atomically clears the current deployment/recheck fields and non-human machine proof. Verification cannot continue until the descendant SHA has its own deployment proof. Recovery may preserve a clean planned descendant only for the original owner task; it never advances the release by itself.
+
 An older success, a local check, a Workflow id by itself, or a new probe from a different runtime cannot resolve the incident. A persisted final classification uses the classification-only path and does not pretend an adapter ran.
 
 ## Vercel Queue Fallback

@@ -4,6 +4,12 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 import {
+  normalizeGitCommandOutput,
+  parseGitNulPaths,
+  parseGitPorcelainV1ZPaths
+} from "./git-output";
+
+import {
   appendCourseSupportBatchPath,
   backfillCourseSupportResponderState,
   claimCourseSupportBatch,
@@ -16,7 +22,8 @@ import {
   markCourseSupportBatchNeedsHuman,
   recoverCourseSupportBatch,
   resolveCourseSupportBatchReference,
-  verifyCourseSupportBatch
+  verifyCourseSupportBatch,
+  type CourseSupportReleaseAdvanceProof
 } from "@/lib/automation/course-support-batches";
 import {
   getResponderThreadPolicy,
@@ -172,15 +179,20 @@ async function heartbeat(args: string[]) {
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
   const releaseSha = readOption(args, "--release-sha");
+  let releaseAdvanceProof: CourseSupportReleaseAdvanceProof | undefined;
   if (releaseSha) {
-    await assertReleaseGitProvenance(batchId, releaseSha);
+    ({ releaseAdvanceProof } = await assertReleaseGitProvenance(
+      batchId,
+      releaseSha
+    ));
   }
   return heartbeatCourseSupportBatch({
     batchId,
     leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
     ownerThreadId,
     status: requestedStatus as "IMPLEMENTING" | "VERIFYING" | undefined,
-    releaseSha
+    releaseSha,
+    releaseAdvanceProof
   });
 }
 
@@ -240,11 +252,15 @@ async function recover(args: string[]) {
   const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
   const baseIsAncestor = isGitAncestor(provenance.baseSha, git.headSha);
   const committedPaths = baseIsAncestor
-    ? runGit(["diff", "--name-only", `${provenance.baseSha}..${git.headSha}`])
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((path) => path.replaceAll("\\", "/"))
+    ? readCommittedPaths(provenance.baseSha, git.headSha)
     : [];
+  const releaseIsAncestor = provenance.releaseSha
+    ? isGitAncestor(provenance.releaseSha, git.headSha)
+    : undefined;
+  const releaseCommittedPaths =
+    provenance.releaseSha && releaseIsAncestor
+      ? readCommittedPaths(provenance.releaseSha, git.headSha)
+      : [];
   return recoverCourseSupportBatch({
     batchId,
     requestingThreadId: requireOwnerThread(args),
@@ -252,7 +268,9 @@ async function recover(args: string[]) {
     currentHeadSha: git.headSha,
     dirtyPaths: git.dirtyPaths,
     baseIsAncestor,
-    committedPaths
+    committedPaths,
+    releaseIsAncestor,
+    releaseCommittedPaths
   });
 }
 
@@ -279,20 +297,60 @@ async function assertReleaseGitProvenance(batchId: string, releaseSha: string) {
     throw new Error("The claimed base SHA is not an ancestor of the responder release.");
   }
   const plannedPaths = new Set(provenance.plannedPaths);
-  const committedPaths = runGit([
-    "diff",
-    "--name-only",
-    `${provenance.baseSha}..${git.headSha}`
-  ])
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((path) => path.replaceAll("\\", "/"));
+  const committedPaths = readCommittedPaths(provenance.baseSha, git.headSha);
   const unplannedPaths = committedPaths.filter((path) => !plannedPaths.has(path));
   if (unplannedPaths.length > 0) {
     throw new Error(
       `Release contains paths not claimed by the responder: ${unplannedPaths.join(", ")}`
     );
   }
+  if (!provenance.releaseSha || provenance.releaseSha === releaseSha) {
+    return { releaseAdvanceProof: undefined };
+  }
+  if (!isGitAncestor(provenance.releaseSha, releaseSha)) {
+    throw new Error(
+      "A follow-up responder release must descend from the persisted release."
+    );
+  }
+  const releaseCommittedPaths = readCommittedPaths(
+    provenance.releaseSha,
+    releaseSha
+  );
+  if (releaseCommittedPaths.length === 0) {
+    throw new Error("A follow-up responder release must contain a committed change.");
+  }
+  const unplannedReleasePaths = releaseCommittedPaths.filter(
+    (path) => !plannedPaths.has(path)
+  );
+  if (unplannedReleasePaths.length > 0) {
+    throw new Error(
+      `Follow-up release contains paths not claimed by the responder: ${unplannedReleasePaths.join(", ")}`
+    );
+  }
+  if (!provenance.branch) {
+    throw new Error("The responder batch is missing its claimed branch provenance.");
+  }
+  return {
+    releaseAdvanceProof: {
+      fromSha: provenance.releaseSha,
+      toSha: releaseSha,
+      branch: provenance.branch,
+      committedPaths: releaseCommittedPaths,
+      descendantVerified: true as const
+    }
+  };
+}
+
+function readCommittedPaths(fromSha: string, toSha: string) {
+  return parseGitNulPaths(
+    runGit([
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      `${fromSha}..${toSha}`
+    ])
+  );
 }
 
 function readGitState() {
@@ -302,20 +360,20 @@ function readGitState() {
   }
   const headSha = runGit(["rev-parse", "HEAD"]);
   const originMainSha = runGit(["rev-parse", "origin/main"]);
-  const dirtyPaths = runGit(["status", "--porcelain"])
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim())
-    .map((path) => path.replaceAll("\\", "/"));
+  const dirtyPaths = parseGitPorcelainV1ZPaths(
+    runGit(["status", "--porcelain=v1", "-z"])
+  );
   return { branch, headSha, originMainSha, dirtyPaths };
 }
 
 function runGit(args: string[]) {
-  return execFileSync("git", args, {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  }).trim();
+  return normalizeGitCommandOutput(
+    execFileSync("git", args, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+  );
 }
 
 function isGitAncestor(baseSha: string, headSha: string) {

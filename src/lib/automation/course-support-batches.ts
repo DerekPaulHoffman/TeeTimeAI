@@ -225,7 +225,7 @@ export async function resolveCourseSupportBatchReference(reference: string) {
 export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
   const batch = await prisma.courseSupportBatch.findUnique({
     where: { id: batchId },
-    select: { baseSha: true, summary: true }
+    select: { baseSha: true, releaseSha: true, summary: true }
   });
   if (!batch) {
     throw new Error("Course-support batch was not found.");
@@ -233,6 +233,7 @@ export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
   const summary = asJsonObject(batch.summary);
   return {
     baseSha: batch.baseSha,
+    releaseSha: batch.releaseSha,
     branch: typeof summary.branch === "string" ? summary.branch : null,
     plannedPaths: Array.isArray(summary.plannedPaths)
       ? normalizePaths(
@@ -452,6 +453,8 @@ export function assessCourseSupportRecovery(input: {
   dirtyPaths: string[];
   baseIsAncestor?: boolean;
   committedPaths?: string[];
+  releaseIsAncestor?: boolean;
+  releaseCommittedPaths?: string[];
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -464,15 +467,25 @@ export function assessCourseSupportRecovery(input: {
   }
   const expectedHead = input.releaseSha ?? input.baseSha;
   if (input.currentHeadSha !== expectedHead) {
+    const committedPaths = input.releaseSha
+      ? (input.releaseCommittedPaths ?? [])
+      : (input.committedPaths ?? []);
     const safelyCommittedPlannedChange =
-      !input.releaseSha &&
       input.baseIsAncestor === true &&
-      (input.committedPaths ?? []).length > 0 &&
-      (input.committedPaths ?? []).every((path) =>
-        input.plannedPaths.includes(path)
-      );
+      (!input.releaseSha || input.releaseIsAncestor === true) &&
+      committedPaths.length > 0 &&
+      committedPaths.every((path) => input.plannedPaths.includes(path));
     if (!safelyCommittedPlannedChange) {
       reasons.push("The checkout HEAD does not match the batch provenance.");
+    }
+    if (
+      input.releaseSha &&
+      safelyCommittedPlannedChange &&
+      input.ownerThreadId !== input.requestingThreadId
+    ) {
+      reasons.push(
+        "A different task cannot adopt a committed follow-up release."
+      );
     }
   }
   const plannedPaths = new Set(input.plannedPaths);
@@ -494,6 +507,127 @@ export function assessCourseSupportRecovery(input: {
   return reasons.length === 0
     ? { action: "RECOVER" as const, reasons: [] }
     : { action: "BLOCK" as const, reasons };
+}
+
+export type CourseSupportReleaseAdvanceProof = {
+  fromSha: string;
+  toSha: string;
+  branch: string;
+  committedPaths: string[];
+  descendantVerified: boolean;
+};
+
+export function orderCourseSupportBatchIncidents<
+  T extends { id: string; createdAt: Date; course: { name: string } }
+>(entries: readonly T[]) {
+  return [...entries].sort((left, right) => {
+    const nameOrder = compareOrdinalText(left.course.name, right.course.name);
+    if (nameOrder !== 0) {
+      return nameOrder;
+    }
+    const createdAtOrder = left.createdAt.getTime() - right.createdAt.getTime();
+    return createdAtOrder || compareOrdinalText(left.id, right.id);
+  });
+}
+
+export function assessCourseSupportReleaseTransition(input: {
+  persistedReleaseSha: string | null;
+  requestedReleaseSha: string | null | undefined;
+  expectedBranch: string | null;
+  plannedPaths: string[];
+  advanceProof?: CourseSupportReleaseAdvanceProof;
+}) {
+  if (
+    !input.requestedReleaseSha ||
+    input.requestedReleaseSha === input.persistedReleaseSha
+  ) {
+    return { action: "UNCHANGED" as const, reasons: [] };
+  }
+  if (!input.persistedReleaseSha) {
+    return { action: "INITIAL" as const, reasons: [] };
+  }
+
+  const proof = input.advanceProof;
+  const committedPaths = normalizeCourseSupportObservedGitPaths(
+    proof?.committedPaths ?? []
+  );
+  const reasons: string[] = [];
+  if (!proof || proof.fromSha !== input.persistedReleaseSha) {
+    reasons.push("The follow-up release does not start from the persisted release.");
+  }
+  if (!proof || proof.toSha !== input.requestedReleaseSha) {
+    reasons.push("The follow-up release proof does not match the requested SHA.");
+  }
+  if (!proof?.descendantVerified) {
+    reasons.push("The follow-up release ancestry was not verified.");
+  }
+  if (!input.expectedBranch || proof?.branch !== input.expectedBranch) {
+    reasons.push("The follow-up release branch does not match batch provenance.");
+  }
+  if (committedPaths.length === 0) {
+    reasons.push("The follow-up release has no committed change.");
+  }
+  if (committedPaths.some((path) => !input.plannedPaths.includes(path))) {
+    reasons.push("The follow-up release contains an unplanned path.");
+  }
+
+  return reasons.length === 0
+    ? { action: "ADVANCE" as const, reasons: [] }
+    : { action: "REJECT" as const, reasons };
+}
+
+export function buildCourseSupportReleaseHistory(input: {
+  summary: Prisma.JsonValue | null;
+  previousReleaseSha: string;
+  previousDeployedAt: Date | null;
+  previousRecheckDispatchKey: string | null;
+  previousRecheckDispatchStartedAt: Date | null;
+  previousRecheckDispatchedAt: Date | null;
+  previousIncidentVerifications: Array<{
+    ordinal: number;
+    result: CourseSupportBatchIncidentResult;
+    message: string | null;
+    proofSnapshot: Prisma.JsonValue | null;
+    verifiedIncidentUpdatedAt: Date | null;
+    verifiedAt: Date | null;
+  }>;
+  nextReleaseSha: string;
+  advancedAt: Date;
+}) {
+  const summary = asJsonObject(input.summary);
+  const existingHistory = Array.isArray(summary.releaseHistory)
+    ? summary.releaseHistory
+    : [];
+  return {
+    ...summary,
+    releaseHistory: [
+      ...existingHistory,
+      {
+        releaseSha: input.previousReleaseSha,
+        deployedAt: input.previousDeployedAt?.toISOString() ?? null,
+        recheckDispatchKey: input.previousRecheckDispatchKey,
+        recheckDispatchStartedAt:
+          input.previousRecheckDispatchStartedAt?.toISOString() ?? null,
+        recheckDispatchedAt:
+          input.previousRecheckDispatchedAt?.toISOString() ?? null,
+        recheckDispatch: summary.recheckDispatch ?? null,
+        incidentVerifications: input.previousIncidentVerifications.map(
+          (entry) => ({
+            ordinal: entry.ordinal,
+            result: entry.result,
+            message: entry.message,
+            proofSnapshot: entry.proofSnapshot,
+            verifiedIncidentUpdatedAt:
+              entry.verifiedIncidentUpdatedAt?.toISOString() ?? null,
+            verifiedAt: entry.verifiedAt?.toISOString() ?? null
+          })
+        ),
+        supersededBy: input.nextReleaseSha,
+        supersededAt: input.advancedAt.toISOString()
+      }
+    ].slice(-20),
+    recheckDispatch: null
+  } as Prisma.InputJsonValue;
 }
 
 export function shouldDispatchRemediatedCourseRechecks(input: {
@@ -976,8 +1110,14 @@ export async function getCourseSupportBatchPacket(input: {
       failureFingerprint: true,
       createdAt: true,
       incidents: {
-        orderBy: [{ course: { name: "asc" } }, { createdAt: "asc" }],
+        orderBy: [
+          { course: { name: "asc" } },
+          { createdAt: "asc" },
+          { id: "asc" }
+        ],
         select: {
+          id: true,
+          createdAt: true,
           cycle: true,
           result: true,
           course: {
@@ -1023,7 +1163,7 @@ export async function getCourseSupportBatchPacket(input: {
     providerFamilyKey: batch.providerFamilyKey,
     failureFingerprint: batch.failureFingerprint,
     claimedAt: batch.createdAt.toISOString(),
-    courses: batch.incidents.map((entry, index) => ({
+    courses: orderCourseSupportBatchIncidents(batch.incidents).map((entry, index) => ({
       ordinal: String(index + 1).padStart(2, "0"),
       name: entry.course.name,
       providerFamilyKey: entry.course.providerFamilyKey,
@@ -1085,12 +1225,18 @@ export async function markCourseSupportBatchNeedsHuman(input: {
       status: true,
       revision: true,
       incidents: {
-        orderBy: [{ course: { name: "asc" } }, { createdAt: "asc" }],
+        orderBy: [
+          { course: { name: "asc" } },
+          { createdAt: "asc" },
+          { id: "asc" }
+        ],
         select: {
           id: true,
+          createdAt: true,
           incidentId: true,
           cycle: true,
           updatedAt: true,
+          course: { select: { name: true } },
           incident: {
             select: {
               engineeringOnly: true,
@@ -1103,7 +1249,9 @@ export async function markCourseSupportBatchNeedsHuman(input: {
       }
     }
   });
-  const entry = batch?.incidents[input.ordinal - 1];
+  const entry = batch
+    ? orderCourseSupportBatchIncidents(batch.incidents)[input.ordinal - 1]
+    : undefined;
   if (!batch || !entry) {
     throw new Error("Course-support ordinal is not present in the owned batch.");
   }
@@ -1172,6 +1320,7 @@ export async function heartbeatCourseSupportBatch(input: {
   ownerThreadId: string;
   status?: "IMPLEMENTING" | "VERIFYING";
   releaseSha?: string | null;
+  releaseAdvanceProof?: CourseSupportReleaseAdvanceProof;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -1186,7 +1335,33 @@ export async function heartbeatCourseSupportBatch(input: {
       status: { in: ACTIVE_BATCH_STATUSES },
       leaseExpiresAt: { gte: now }
     },
-    select: { status: true, revision: true, releaseSha: true }
+    select: {
+      status: true,
+      revision: true,
+      releaseSha: true,
+      deployedAt: true,
+      recheckDispatchKey: true,
+      recheckDispatchStartedAt: true,
+      recheckDispatchedAt: true,
+      summary: true,
+      incidents: {
+        orderBy: [
+          { course: { name: "asc" } },
+          { createdAt: "asc" },
+          { id: "asc" }
+        ],
+        select: {
+          id: true,
+          createdAt: true,
+          result: true,
+          message: true,
+          proofSnapshot: true,
+          verifiedIncidentUpdatedAt: true,
+          verifiedAt: true,
+          course: { select: { name: true } }
+        }
+      }
+    }
   });
   if (!batch) {
     return {
@@ -1196,32 +1371,99 @@ export async function heartbeatCourseSupportBatch(input: {
       archiveReason: "Responder batch ownership or lease freshness was lost."
     };
   }
-  if (
-    batch.releaseSha &&
-    input.releaseSha &&
-    batch.releaseSha !== input.releaseSha
-  ) {
-    throw new Error("Release SHA does not match the batch's persisted release.");
+  const summary = asJsonObject(batch.summary);
+  const plannedPaths = Array.isArray(summary.plannedPaths)
+    ? normalizePaths(
+        summary.plannedPaths.filter(
+          (path): path is string => typeof path === "string"
+        )
+      )
+    : [];
+  const releaseTransition = assessCourseSupportReleaseTransition({
+    persistedReleaseSha: batch.releaseSha,
+    requestedReleaseSha: input.releaseSha,
+    expectedBranch: typeof summary.branch === "string" ? summary.branch : null,
+    plannedPaths,
+    advanceProof: input.releaseAdvanceProof
+  });
+  if (releaseTransition.action === "REJECT") {
+    throw new Error(releaseTransition.reasons.join(" "));
+  }
+  const releaseAdvanced = releaseTransition.action === "ADVANCE";
+  if (releaseAdvanced && input.status !== "VERIFYING") {
+    throw new Error("A follow-up release must explicitly enter VERIFYING.");
   }
 
   const status = nextBatchStatus(batch.status, input.status);
   const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
-  const updated = await prisma.courseSupportBatch.updateMany({
-    where: {
-      id: input.batchId,
-      leaseToken: input.leaseToken,
-      ownerThreadId: input.ownerThreadId,
-      status: batch.status,
-      revision: batch.revision,
-      leaseExpiresAt: { gte: now }
-    },
-    data: {
-      status,
-      heartbeatAt: now,
-      leaseExpiresAt,
-      releaseSha: input.releaseSha ?? batch.releaseSha,
-      revision: { increment: 1 }
+  const updated = await prisma.$transaction(async (tx) => {
+    const batchUpdated = await tx.courseSupportBatch.updateMany({
+      where: {
+        id: input.batchId,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        status: batch.status,
+        revision: batch.revision,
+        leaseExpiresAt: { gte: now },
+        releaseSha: batch.releaseSha,
+        deployedAt: batch.deployedAt
+      },
+      data: {
+        status,
+        heartbeatAt: now,
+        leaseExpiresAt,
+        releaseSha: input.releaseSha ?? batch.releaseSha,
+        ...(releaseAdvanced && batch.releaseSha && input.releaseSha
+          ? {
+              deployedAt: null,
+              recheckDispatchKey: null,
+              recheckDispatchStartedAt: null,
+              recheckDispatchedAt: null,
+              summary: buildCourseSupportReleaseHistory({
+                summary: batch.summary,
+                previousReleaseSha: batch.releaseSha,
+                previousDeployedAt: batch.deployedAt,
+                previousRecheckDispatchKey: batch.recheckDispatchKey,
+                previousRecheckDispatchStartedAt:
+                  batch.recheckDispatchStartedAt,
+                previousRecheckDispatchedAt: batch.recheckDispatchedAt,
+                previousIncidentVerifications: orderCourseSupportBatchIncidents(
+                  batch.incidents
+                ).map(
+                  (entry, index) => ({
+                    ordinal: index + 1,
+                    result: entry.result,
+                    message: entry.message,
+                    proofSnapshot: entry.proofSnapshot,
+                    verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
+                    verifiedAt: entry.verifiedAt
+                  })
+                ),
+                nextReleaseSha: input.releaseSha,
+                advancedAt: now
+              })
+            }
+          : {}),
+        revision: { increment: 1 }
+      }
+    });
+    if (batchUpdated.count === 1 && releaseAdvanced) {
+      await tx.courseSupportBatchIncident.updateMany({
+        where: {
+          batchId: input.batchId,
+          result: { not: "NEEDS_HUMAN" }
+        },
+        data: {
+          result: "PENDING",
+          postProbeId: null,
+          message: null,
+          proofSnapshot: Prisma.DbNull,
+          verifiedIncidentUpdatedAt: null,
+          verifiedAt: null
+        }
+      });
     }
+    return batchUpdated;
   });
   return {
     outcome: updated.count === 1 ? ("ready" as const) : ("recovery_required" as const),
@@ -1229,6 +1471,7 @@ export async function heartbeatCourseSupportBatch(input: {
     status,
     releaseSha:
       updated.count === 1 ? (input.releaseSha ?? batch.releaseSha) : null,
+    releaseAdvanced: updated.count === 1 && releaseAdvanced,
     leaseExpiresAt: updated.count === 1 ? leaseExpiresAt.toISOString() : null,
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason:
@@ -1315,6 +1558,11 @@ export async function verifyCourseSupportBatch(input: {
   if (deployedAt && !releaseSha) {
     throw new Error(
       "Fresh-runtime verification requires a persisted release SHA before deployment proof."
+    );
+  }
+  if (releaseSha && !deployedAt) {
+    throw new Error(
+      "Release verification requires deployment proof for the persisted SHA."
     );
   }
   if (batch.deployedAt && input.deployedAt && batch.deployedAt.getTime() !== input.deployedAt.getTime()) {
@@ -2351,6 +2599,8 @@ export async function recoverCourseSupportBatch(input: {
   dirtyPaths: string[];
   baseIsAncestor?: boolean;
   committedPaths?: string[];
+  releaseIsAncestor?: boolean;
+  releaseCommittedPaths?: string[];
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -2414,9 +2664,15 @@ export async function recoverCourseSupportBatch(input: {
             (path): path is string => typeof path === "string"
           )
         : [],
-      dirtyPaths: normalizePaths(input.dirtyPaths),
+      dirtyPaths: normalizeCourseSupportObservedGitPaths(input.dirtyPaths),
       baseIsAncestor: input.baseIsAncestor,
-      committedPaths: normalizePaths(input.committedPaths ?? []),
+      committedPaths: normalizeCourseSupportObservedGitPaths(
+        input.committedPaths ?? []
+      ),
+      releaseIsAncestor: input.releaseIsAncestor,
+      releaseCommittedPaths: normalizeCourseSupportObservedGitPaths(
+        input.releaseCommittedPaths ?? []
+      ),
       now
     });
     if (recovery.action === "BLOCK") {
@@ -3041,6 +3297,20 @@ function deriveBackfillFailureClass(input: {
     return "AUTH";
   }
   return input.observedFailure;
+}
+
+function compareOrdinalText(left: string, right: string) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+export function normalizeCourseSupportObservedGitPaths(paths: string[]) {
+  return [
+    ...new Set(
+      paths
+        .map((path) => path.replaceAll("\\", "/"))
+        .filter((path) => path.length > 0)
+    )
+  ].sort();
 }
 
 function normalizePaths(paths: string[]) {

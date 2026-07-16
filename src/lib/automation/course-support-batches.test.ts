@@ -1,21 +1,55 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const prismaMocks = vi.hoisted(() => ({
+  batchFindFirst: vi.fn(),
+  batchUpdateMany: vi.fn(),
+  incidentUpdateMany: vi.fn(),
+  transaction: vi.fn()
+}));
+
+vi.mock("@/lib/prisma", () => ({
+  prisma: {
+    courseSupportBatch: { findFirst: prismaMocks.batchFindFirst },
+    $transaction: prismaMocks.transaction
+  }
+}));
 
 import {
   assessCourseSupportRecovery,
+  assessCourseSupportReleaseTransition,
   buildFailureFingerprint,
+  buildCourseSupportReleaseHistory,
   canCloseCourseSupportRetry,
   classifyFreshBatchEvidence,
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
+  heartbeatCourseSupportBatch,
   isDurableTerminalProof,
   isRemediatedSearchSchedulerHealthy,
+  normalizeCourseSupportObservedGitPaths,
+  orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
   selectCourseSupportBatch,
   shouldDispatchRemediatedCourseRechecks,
+  verifyCourseSupportBatch,
   type CourseSupportCandidate
 } from "./course-support-batches";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
+
+const transactionClient = {
+  courseSupportBatch: { updateMany: prismaMocks.batchUpdateMany },
+  courseSupportBatchIncident: { updateMany: prismaMocks.incidentUpdateMany }
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  prismaMocks.transaction.mockImplementation(
+    async (
+      worker: (transaction: typeof transactionClient) => Promise<unknown>
+    ) => worker(transactionClient)
+  );
+});
 
 function candidate(
   overrides: Partial<CourseSupportCandidate> = {}
@@ -780,6 +814,420 @@ describe("course-support recovery", () => {
         now
       }).action
     ).toBe("RECOVER");
+  });
+
+  it("lets only the same task recover a planned descendant of a persisted release", () => {
+    const input = {
+      leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+      ownerThreadId: "owner-thread",
+      requestingThreadId: "owner-thread",
+      baseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      releaseSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      expectedBranch: "automation/course-support-20260715-190000",
+      currentBranch: "automation/course-support-20260715-190000",
+      currentHeadSha: "cccccccccccccccccccccccccccccccccccccccc",
+      plannedPaths: ["src/lib/provider.ts"],
+      committedPaths: ["src/lib/provider.ts"],
+      releaseCommittedPaths: ["src/lib/provider.ts"],
+      baseIsAncestor: true,
+      releaseIsAncestor: true,
+      dirtyPaths: [],
+      now
+    };
+
+    expect(assessCourseSupportRecovery(input).action).toBe("RECOVER");
+    expect(
+      assessCourseSupportRecovery({
+        ...input,
+        requestingThreadId: "different-thread"
+      }).action
+    ).toBe("BLOCK");
+    expect(
+      assessCourseSupportRecovery({
+        ...input,
+        releaseIsAncestor: false
+      }).action
+    ).toBe("BLOCK");
+  });
+
+  it("keeps observed Git-path whitespace exact and blocks a lookalike claimed path", () => {
+    const observedPaths = normalizeCourseSupportObservedGitPaths([
+      " src\\lib\\provider.ts"
+    ]);
+
+    expect(observedPaths).toEqual([" src/lib/provider.ts"]);
+    expect(
+      assessCourseSupportRecovery({
+        leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+        ownerThreadId: "owner-thread",
+        requestingThreadId: "owner-thread",
+        baseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        releaseSha: null,
+        expectedBranch: "automation/course-support-20260715-190000",
+        currentBranch: "automation/course-support-20260715-190000",
+        currentHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        plannedPaths: ["src/lib/provider.ts"],
+        committedPaths: observedPaths,
+        baseIsAncestor: true,
+        dirtyPaths: [],
+        now
+      }).action
+    ).toBe("BLOCK");
+  });
+});
+
+describe("course-support batch ordinals", () => {
+  it("uses course name before creation time and id for stable packet/history ordinals", () => {
+    const entries = [
+      {
+        id: "entry-1",
+        createdAt: new Date("2026-07-15T18:00:00.000Z"),
+        course: { name: "Zulu Course" }
+      },
+      {
+        id: "entry-3",
+        createdAt: new Date("2026-07-15T19:00:00.000Z"),
+        course: { name: "Alpha Course" }
+      },
+      {
+        id: "entry-2",
+        createdAt: new Date("2026-07-15T19:00:00.000Z"),
+        course: { name: "Alpha Course" }
+      }
+    ];
+
+    expect(orderCourseSupportBatchIncidents(entries).map((entry) => entry.id)).toEqual([
+      "entry-2",
+      "entry-3",
+      "entry-1"
+    ]);
+  });
+});
+
+describe("course-support follow-up releases", () => {
+  const previousReleaseSha = "a".repeat(40);
+  const nextReleaseSha = "b".repeat(40);
+  const branch = "automation/course-support-20260715-190000";
+
+  it("accepts a nonempty same-branch descendant containing only planned paths", () => {
+    expect(
+      assessCourseSupportReleaseTransition({
+        persistedReleaseSha: previousReleaseSha,
+        requestedReleaseSha: nextReleaseSha,
+        expectedBranch: branch,
+        plannedPaths: ["src/lib/provider.ts"],
+        advanceProof: {
+          fromSha: previousReleaseSha,
+          toSha: nextReleaseSha,
+          branch,
+          committedPaths: ["src/lib/provider.ts"],
+          descendantVerified: true
+        }
+      })
+    ).toEqual({ action: "ADVANCE", reasons: [] });
+  });
+
+  it.each([
+    {
+      label: "mismatched target SHA",
+      advanceProof: {
+        fromSha: previousReleaseSha,
+        toSha: "c".repeat(40),
+        branch,
+        committedPaths: ["src/lib/provider.ts"],
+        descendantVerified: true
+      }
+    },
+    {
+      label: "sibling release",
+      advanceProof: {
+        fromSha: previousReleaseSha,
+        toSha: nextReleaseSha,
+        branch,
+        committedPaths: ["src/lib/provider.ts"],
+        descendantVerified: false
+      }
+    },
+    {
+      label: "wrong branch",
+      advanceProof: {
+        fromSha: previousReleaseSha,
+        toSha: nextReleaseSha,
+        branch: "automation/course-support-other",
+        committedPaths: ["src/lib/provider.ts"],
+        descendantVerified: true
+      }
+    },
+    {
+      label: "empty delta",
+      advanceProof: {
+        fromSha: previousReleaseSha,
+        toSha: nextReleaseSha,
+        branch,
+        committedPaths: [],
+        descendantVerified: true
+      }
+    },
+    {
+      label: "unplanned path",
+      advanceProof: {
+        fromSha: previousReleaseSha,
+        toSha: nextReleaseSha,
+        branch,
+        committedPaths: ["src/lib/unplanned.ts"],
+        descendantVerified: true
+      }
+    },
+    {
+      label: "whitespace lookalike path",
+      advanceProof: {
+        fromSha: previousReleaseSha,
+        toSha: nextReleaseSha,
+        branch,
+        committedPaths: [" src/lib/provider.ts"],
+        descendantVerified: true
+      }
+    }
+  ])("rejects a $label", ({ advanceProof }) => {
+    expect(
+      assessCourseSupportReleaseTransition({
+        persistedReleaseSha: previousReleaseSha,
+        requestedReleaseSha: nextReleaseSha,
+        expectedBranch: branch,
+        plannedPaths: ["src/lib/provider.ts"],
+        advanceProof
+      }).action
+    ).toBe("REJECT");
+  });
+
+  it("archives prior deployment and verification evidence without duplicating unchanged releases", () => {
+    expect(
+      assessCourseSupportReleaseTransition({
+        persistedReleaseSha: previousReleaseSha,
+        requestedReleaseSha: previousReleaseSha,
+        expectedBranch: branch,
+        plannedPaths: []
+      }).action
+    ).toBe("UNCHANGED");
+
+    const summary = buildCourseSupportReleaseHistory({
+      summary: {
+        branch,
+        plannedPaths: ["src/lib/provider.ts"],
+        recheckDispatch: { attempted: true }
+      },
+      previousReleaseSha,
+      previousDeployedAt: new Date("2026-07-15T20:05:00.000Z"),
+      previousRecheckDispatchKey: "dispatch-key",
+      previousRecheckDispatchStartedAt: new Date("2026-07-15T20:06:00.000Z"),
+      previousRecheckDispatchedAt: new Date("2026-07-15T20:07:00.000Z"),
+      previousIncidentVerifications: [
+        {
+          ordinal: 1,
+          result: "FINAL_DISPOSITION",
+          message: "Reviewed final disposition.",
+          proofSnapshot: { kind: "EXACT_PLACE_REVIEW" },
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T20:04:00.000Z"),
+          verifiedAt: new Date("2026-07-15T20:08:00.000Z")
+        }
+      ],
+      nextReleaseSha,
+      advancedAt: new Date("2026-07-15T20:10:00.000Z")
+    }) as Record<string, unknown>;
+
+    expect(summary.recheckDispatch).toBeNull();
+    expect(summary.releaseHistory).toEqual([
+      expect.objectContaining({
+        releaseSha: previousReleaseSha,
+        deployedAt: "2026-07-15T20:05:00.000Z",
+        supersededBy: nextReleaseSha,
+        supersededAt: "2026-07-15T20:10:00.000Z",
+        incidentVerifications: [
+          expect.objectContaining({
+            ordinal: 1,
+            result: "FINAL_DISPOSITION"
+          })
+        ]
+      })
+    ]);
+  });
+});
+
+describe("course-support release heartbeat persistence", () => {
+  const previousReleaseSha = "a".repeat(40);
+  const nextReleaseSha = "b".repeat(40);
+  const branch = "automation/course-support-20260715-190000";
+  const deployedAt = new Date("2026-07-15T20:05:00.000Z");
+
+  function ownedBatch() {
+    return {
+      status: "VERIFYING",
+      revision: 7,
+      releaseSha: previousReleaseSha,
+      deployedAt,
+      recheckDispatchKey: "dispatch-key",
+      recheckDispatchStartedAt: new Date("2026-07-15T20:06:00.000Z"),
+      recheckDispatchedAt: new Date("2026-07-15T20:07:00.000Z"),
+      summary: {
+        branch,
+        plannedPaths: ["src/lib/provider.ts"],
+        recheckDispatch: { attempted: true }
+      },
+      incidents: [
+        {
+          id: "entry-zulu",
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          course: { name: "Zulu Course" },
+          result: "NEEDS_HUMAN",
+          message: "Owner action is still required.",
+          proofSnapshot: { kind: "HUMAN_ACTION" },
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T20:03:00.000Z"),
+          verifiedAt: new Date("2026-07-15T20:08:00.000Z")
+        },
+        {
+          id: "entry-alpha",
+          createdAt: new Date("2026-07-15T19:00:00.000Z"),
+          course: { name: "Alpha Course" },
+          result: "FINAL_DISPOSITION",
+          message: "Reviewed final disposition.",
+          proofSnapshot: { kind: "EXACT_PLACE_REVIEW" },
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T20:04:00.000Z"),
+          verifiedAt: new Date("2026-07-15T20:09:00.000Z")
+        }
+      ]
+    };
+  }
+
+  const advanceProof = {
+    fromSha: previousReleaseSha,
+    toSha: nextReleaseSha,
+    branch,
+    committedPaths: ["src/lib/provider.ts"],
+    descendantVerified: true
+  };
+
+  it("advances with owner/CAS fences, archives stable ordinals, and resets only machine proof", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(ownedBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    const result = await heartbeatCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      status: "VERIFYING",
+      releaseSha: nextReleaseSha,
+      releaseAdvanceProof: advanceProof,
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      releaseSha: nextReleaseSha,
+      releaseAdvanced: true
+    });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          status: "VERIFYING",
+          revision: 7,
+          releaseSha: previousReleaseSha,
+          deployedAt
+        }),
+        data: expect.objectContaining({
+          status: "VERIFYING",
+          releaseSha: nextReleaseSha,
+          deployedAt: null,
+          recheckDispatchKey: null,
+          recheckDispatchStartedAt: null,
+          recheckDispatchedAt: null
+        })
+      })
+    );
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith({
+      where: {
+        batchId: "batch-1",
+        result: { not: "NEEDS_HUMAN" }
+      },
+      data: {
+        result: "PENDING",
+        postProbeId: null,
+        message: null,
+        proofSnapshot: expect.anything(),
+        verifiedIncidentUpdatedAt: null,
+        verifiedAt: null
+      }
+    });
+
+    const updateInput = prismaMocks.batchUpdateMany.mock.calls[0]?.[0] as {
+      data: { summary: { releaseHistory: Array<Record<string, unknown>> } };
+    };
+    expect(
+      updateInput.data.summary.releaseHistory[0]?.incidentVerifications
+    ).toEqual([
+      expect.objectContaining({ ordinal: 1, result: "FINAL_DISPOSITION" }),
+      expect.objectContaining({ ordinal: 2, result: "NEEDS_HUMAN" })
+    ]);
+  });
+
+  it("requires an explicit VERIFYING transition before advancing", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(ownedBatch());
+
+    await expect(
+      heartbeatCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        status: "IMPLEMENTING",
+        releaseSha: nextReleaseSha,
+        releaseAdvanceProof: advanceProof,
+        now
+      })
+    ).rejects.toThrow("explicitly enter VERIFYING");
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("does not reset incident proof when the batch compare-and-set loses", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(ownedBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 0 });
+
+    const result = await heartbeatCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      status: "VERIFYING",
+      releaseSha: nextReleaseSha,
+      releaseAdvanceProof: advanceProof,
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "recovery_required",
+      releaseAdvanced: false
+    });
+    expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects release verification until deployment proof exists", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue({
+      releaseSha: previousReleaseSha,
+      deployedAt: null,
+      incidents: []
+    });
+
+    await expect(
+      verifyCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        releaseSha: previousReleaseSha,
+        now
+      })
+    ).rejects.toThrow("requires deployment proof");
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
   });
 });
 
