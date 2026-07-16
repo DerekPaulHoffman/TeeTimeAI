@@ -121,6 +121,15 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return walkInClassification;
   }
 
+  const contactOnlyClassification = learnOfficialContactOnlyClassification(
+    evidence,
+    observedUrls
+  );
+
+  if (contactOnlyClassification) {
+    return contactOnlyClassification;
+  }
+
   const accountRequiredClassification = learnAccountRequiredClassification(
     evidence,
     observedUrls
@@ -836,6 +845,72 @@ function learnWalkInClassification(
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "official-walk-in-access"
+    }
+  };
+}
+
+function learnOfficialContactOnlyClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const identifiesPhysicalCourse =
+    /\b(?:nine|eighteen|9|18)[- ]hole\b[^.]{0,100}\bgolf course\b/i.test(
+      visibleText
+    ) || /\bpar\s*3\s+golf course\b/i.test(visibleText);
+  const postsPublicPrice =
+    /\bprices?\b/i.test(visibleText) &&
+    /\b(?:adult|senior|junior|weekdays?|weekends?|holidays?)\b[^$]{0,80}\$\s*\d/i.test(
+      visibleText
+    );
+  const directsContactForCurrentDetails =
+    /\bhours? of operation may vary by season\b[^.]{0,180}\bplease contact us for details\b/i.test(
+      visibleText
+    ) ||
+    /\bplease contact us for (?:current )?(?:hours?|details|availability)\b/i.test(
+      visibleText
+    );
+  const phoneMatch = visibleText.match(
+    /(?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}\b/
+  );
+  const advertisesOnlineBooking =
+    Boolean(pickBookingLikeUrl(observedUrls)) ||
+    (evidence.linkCandidates ?? []).some(({ url, label }) =>
+      /\b(?:book|booking|tee\s*times?|reservations?|reserve)\b/i.test(
+        `${label} ${url}`
+      )
+    ) ||
+    /\b(?:book|reserve)\s+(?:a\s+)?tee\s*time\s+online\b/i.test(visibleText);
+
+  if (
+    !identifiesPhysicalCourse ||
+    !postsPublicPrice ||
+    !directsContactForCurrentDetails ||
+    !phoneMatch ||
+    advertisesOnlineBooking
+  ) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: evidence.finalUrl ?? evidence.sourceUrl,
+    bookingMethod: "CONTACT_COURSE",
+    bookingPhone: phoneMatch[0].replace(/\s+/g, " ").trim(),
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    policyNotes:
+      "The official course page publishes public play pricing and directs golfers to contact the facility for current hours or availability, without presenting an online tee-time reservation surface. Tee Time Spot must direct golfers to the course instead of attempting automated retrieval.",
+    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    confidence: 0.9,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-contact-only-course-access"
     }
   };
 }

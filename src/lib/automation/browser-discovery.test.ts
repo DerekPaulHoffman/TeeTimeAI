@@ -1042,6 +1042,61 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official priced course page that directs golfers to contact the facility", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "contact-only-par-three",
+      courseName: "Example Executive Golf Course",
+      sourceUrl: "https://example-golf.test/",
+      finalUrl: "https://example-golf.test/executive-course/",
+      observedUrls: [
+        "https://example-golf.test/",
+        "https://example-golf.test/executive-course/",
+        "https://example-golf.test/contact/"
+      ],
+      linkCandidates: [
+        { url: "https://example-golf.test/contact/", label: "Contact Us" }
+      ],
+      visibleText:
+        "Our Eighteen Hole Par 3 Golf Course is open to the public. Prices Adult Weekdays - $17.00 Senior Weekdays - $13.00 Weekends and Holidays - $18.00. Location and Hours 112 Allen Street 413.525.4444. Hours of operation may vary by season. Please contact us for details."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "413.525.4444",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.9,
+      evidence: { learnedFrom: "official-contact-only-course-access" }
+    });
+  });
+
+  it("preserves online booking when a priced course page also lists seasonal contact details", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "online-booking-with-seasonal-contact",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example-golf.test/",
+      finalUrl: "https://example-golf.test/course/",
+      observedUrls: [
+        "https://example-golf.test/course/",
+        "https://booking.example-golf.test/tee-times"
+      ],
+      linkCandidates: [
+        {
+          url: "https://booking.example-golf.test/tee-times",
+          label: "Book a Tee Time"
+        }
+      ],
+      visibleText:
+        "An Eighteen Hole public golf course. Prices Adult Weekdays - $25.00. Call 413-555-0100. Hours of operation may vary by season. Please contact us for details. Book a tee time online."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it("learns a reusable signed-out WebTrac golf search without entering cart", () => {
     const bookingUrl = "https://myffr.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25";
     const discovery = buildBrowserDiscovery({
