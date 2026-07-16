@@ -2,23 +2,36 @@ import "./load-local-env";
 
 import { listActiveSearchesForAutomation } from "@/lib/automation/db-service";
 import { buildSearchScheduleReference } from "@/lib/automation/search-recheck-queue";
-import { startSearchSchedule } from "@/lib/automation/search-scheduler";
+import { queueOperatorSearchScheduleRecovery } from "@/lib/automation/search-schedule-operator";
 
 async function main() {
   const searches = await listActiveSearchesForAutomation();
   const results = [];
+  const observedAt = new Date();
 
   for (const search of searches) {
-    try {
-      const schedule = await startSearchSchedule(search.id);
-      results.push({ searchRef: buildSearchScheduleReference(search.id), outcome: "queued", schedule });
-    } catch {
+    const hasLiveLease = Boolean(
+      search.checkLeaseExpiresAt && search.checkLeaseExpiresAt > observedAt
+    );
+    if (search.checkStatus !== "WAITING" || hasLiveLease) {
       results.push({
         searchRef: buildSearchScheduleReference(search.id),
-        outcome: "start_failed",
-        schedule: null
+        outcome: "not_eligible",
+        scheduleVersion: null
       });
+      continue;
     }
+
+    const schedule = await queueOperatorSearchScheduleRecovery(search.id, {
+      scheduleVersion: search.scheduleVersion,
+      updatedAt: search.updatedAt,
+      observedAt
+    });
+    results.push({
+      searchRef: buildSearchScheduleReference(search.id),
+      outcome: schedule.outcome,
+      scheduleVersion: schedule.scheduleVersion
+    });
   }
 
   console.log(
@@ -28,7 +41,7 @@ async function main() {
         searches: results.map((result) => ({
           searchRef: result.searchRef,
           outcome: result.outcome,
-          scheduleVersion: result.schedule?.scheduleVersion ?? null
+          scheduleVersion: result.scheduleVersion
         }))
       },
       null,
@@ -37,7 +50,7 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  console.error(error);
+main().catch(() => {
+  console.error("Automation poll could not persist schedule recovery.");
   process.exitCode = 1;
 });

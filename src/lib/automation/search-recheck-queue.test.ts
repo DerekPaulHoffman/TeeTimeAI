@@ -206,8 +206,7 @@ describe("search schedule recovery queue", () => {
         .fn()
         .mockResolvedValueOnce({ scheduleVersion: 8 })
         .mockResolvedValueOnce({ scheduleVersion: 3 }),
-      enqueue: vi.fn().mockResolvedValue(undefined),
-      recover: vi.fn()
+      enqueue: vi.fn().mockResolvedValue(undefined)
     };
 
     await expect(
@@ -246,8 +245,7 @@ describe("search schedule recovery queue", () => {
     const dependencies = {
       listSearchIds: vi.fn().mockResolvedValue(["search-1"]),
       queueSearch: vi.fn().mockResolvedValue({ scheduleVersion: 8 }),
-      enqueue: vi.fn().mockResolvedValue(undefined),
-      recover: vi.fn()
+      enqueue: vi.fn().mockResolvedValue(undefined)
     };
 
     await enqueueRemediatedCourseRechecks(
@@ -274,8 +272,7 @@ describe("search schedule recovery queue", () => {
     const dependencies = {
       listSearchIds: vi.fn().mockResolvedValue(["search-1"]),
       queueSearch: vi.fn().mockResolvedValue({ scheduleVersion: 9 }),
-      enqueue: vi.fn().mockRejectedValue(new Error("queue unavailable")),
-      recover: vi.fn().mockRejectedValue(new Error("workflow unavailable"))
+      enqueue: vi.fn().mockRejectedValue(new Error("queue unavailable"))
     };
 
     await expect(
@@ -299,34 +296,6 @@ describe("search schedule recovery queue", () => {
     expect(dependencies.queueSearch).toHaveBeenCalledOnce();
   });
 
-  it("starts the exact version directly when queue publishing is unavailable", async () => {
-    const dependencies = {
-      listSearchIds: vi.fn().mockResolvedValue(["search-1"]),
-      queueSearch: vi.fn().mockResolvedValue({ scheduleVersion: 9 }),
-      enqueue: vi.fn().mockRejectedValue(new Error("queue unavailable")),
-      recover: vi.fn().mockResolvedValue({ outcome: "started" as const })
-    };
-
-    await expect(
-      enqueueRemediatedCourseRechecks(["course-1"], dependencies)
-    ).resolves.toEqual({
-      affectedSearchCount: 1,
-      queuedCount: 1,
-      queueFailureCount: 1,
-      directStartCount: 1,
-      scheduledSearches: [
-        {
-          searchId: "search-1",
-          searchRef: buildSearchScheduleReference("search-1"),
-          scheduleVersion: 9
-        }
-      ],
-      affectedSearchRefs: [
-        { searchRef: buildSearchScheduleReference("search-1"), scheduleVersion: 9 }
-      ]
-    });
-  });
-
   it("accounts for a localized schedule-save failure without aborting the batch", async () => {
     const dependencies = {
       listSearchIds: vi.fn().mockResolvedValue(["search-1", "search-2"]),
@@ -334,8 +303,7 @@ describe("search schedule recovery queue", () => {
         .fn()
         .mockRejectedValueOnce(new Error("save failed"))
         .mockResolvedValueOnce({ scheduleVersion: 4 }),
-      enqueue: vi.fn().mockResolvedValue(undefined),
-      recover: vi.fn()
+      enqueue: vi.fn().mockResolvedValue(undefined)
     };
 
     await expect(
@@ -352,14 +320,14 @@ describe("search schedule recovery queue", () => {
     });
   });
 
-  it("uses direct same-version recovery when a start-failure queue send fails", async () => {
+  it("leaves failed starts recoverable without attempting a local Workflow start", async () => {
     const dependencies = {
-      enqueue: vi.fn().mockRejectedValue(new Error("queue unavailable")),
-      recover: vi.fn().mockResolvedValue({ outcome: "started" as const })
+      enqueue: vi.fn().mockRejectedValue(new Error("queue unavailable"))
     };
 
     await expect(
       recoverSearchScheduleStartFailure(message, dependencies)
-    ).resolves.toEqual({ outcome: "started_directly" });
+    ).resolves.toEqual({ outcome: "failed" });
+    expect(mocks.start).not.toHaveBeenCalled();
   });
 });

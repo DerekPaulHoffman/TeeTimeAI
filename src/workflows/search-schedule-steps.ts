@@ -88,7 +88,7 @@ export async function startNextSearchCheckStep(
       console.error("[startNextSearchCheckStep] QUEUE_FALLBACK_FAILED", {
         searchRef,
         scheduleVersion,
-        message: "Could not enqueue or directly restart successor recovery"
+        message: "Could not enqueue successor recovery; deployed cron recovery remains pending"
       });
     }
     return null;

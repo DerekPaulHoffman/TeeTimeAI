@@ -396,14 +396,11 @@ npx vercel env run -- npm run automation:inspect
 `automation:poll`:
 
 - Is a manual recovery command for due active searches, not the production scheduler.
-- Uses the same per-search checker as the durable workflow.
-- Acquires a per-search Postgres transaction-scoped advisory lease.
-- Records probes.
-- Reconciles currently available and gone matches.
-- Sends or dry-runs alerts.
-- Marks alerts sent/suppressed.
+- Queues only eligible `WAITING` searches with an atomic schedule-version, timestamp, status, and lease guard.
+- Persists recovery intent in Postgres and never starts a Vercel Workflow from the local operator process.
+- Leaves provider checks, probe recording, match reconciliation, and email delivery to the deployed per-search workflow.
 
-Creating, editing, resuming, or manually checking a search starts its durable workflow. Each run checks only that search, updates Postgres before sending email, calculates `nextCheckAt`, sleeps without active compute, and chains the next run onto the latest deployment. A daily recovery cron only restarts overdue or failed schedules.
+Creating, editing, resuming, or manually checking a search starts its durable workflow. Each run checks only that search, updates Postgres before sending email, calculates `nextCheckAt`, sleeps without active compute, and chains the next run onto the latest deployment. A five-minute recovery cron starts locally queued requests and restarts overdue, stuck, or failed schedules; fresh queued rows without an attached Workflow use a two-minute eligibility threshold, while attached queued runs retain the ten-minute safety threshold.
 
 `automation:inspect` is the preferred truth source for classifying checks. The authoritative state is stored in `TeeSearch` scheduler fields, `AutomationRun`, `CourseProbe`, `TeeTimeMatch`, and pending alerts.
 

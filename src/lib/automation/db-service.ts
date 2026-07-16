@@ -1090,6 +1090,7 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
 
 export async function listSearchesNeedingScheduleRecovery() {
   const now = new Date();
+  const queuedOverdueBefore = new Date(now.getTime() - 2 * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - 10 * 60 * 1000);
   return prisma.teeSearch.findMany({
     where: {
@@ -1097,7 +1098,16 @@ export async function listSearchesNeedingScheduleRecovery() {
       date: { gte: startOfUtcCalendarDay() },
       OR: [
         { checkStatus: "IDLE" },
-        { checkStatus: "QUEUED", updatedAt: { lte: overdueBefore } },
+        {
+          checkStatus: "QUEUED",
+          workflowRunId: null,
+          updatedAt: { lte: queuedOverdueBefore }
+        },
+        {
+          checkStatus: "QUEUED",
+          workflowRunId: { not: null },
+          updatedAt: { lte: overdueBefore }
+        },
         {
           checkStatus: "CHECKING",
           OR: [

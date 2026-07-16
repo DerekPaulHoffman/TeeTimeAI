@@ -416,6 +416,42 @@ describe("schedule recovery fairness", () => {
     );
   });
 
+  it("recovers QUEUED rows after two minutes while retaining ten-minute waiting thresholds", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    try {
+      await listSearchesNeedingScheduleRecovery();
+
+      expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              {
+                checkStatus: "QUEUED",
+                workflowRunId: null,
+                updatedAt: { lte: new Date("2026-07-16T11:58:00.000Z") }
+              },
+              {
+                checkStatus: "QUEUED",
+                workflowRunId: { not: null },
+                updatedAt: { lte: new Date("2026-07-16T11:50:00.000Z") }
+              },
+              {
+                checkStatus: "WAITING",
+                nextCheckAt: { lte: new Date("2026-07-16T11:50:00.000Z") }
+              }
+            ])
+          }),
+          select: { id: true }
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recovers a waiting search when an available pending match has no timely delivery", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));

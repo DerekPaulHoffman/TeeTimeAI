@@ -70,9 +70,6 @@ type RemediatedCourseRecheckDependencies = {
     message: SearchScheduleQueueRequest,
     idempotencySeed?: string
   ) => Promise<void>;
-  recover: (message: SearchScheduleQueueMessage) => Promise<{
-    outcome: "stale" | "already_started" | "stale_after_start" | "started";
-  }>;
 };
 
 const defaultConsumerDependencies: SearchScheduleQueueDependencies = {
@@ -127,9 +124,9 @@ const defaultRemediatedCourseRecheckDependencies: RemediatedCourseRecheckDepende
     }
     return queued;
   },
-  enqueue: async (message, idempotencySeed) =>
-    enqueueSearchScheduleMessage(message, defaultProducerDependencies, idempotencySeed),
-  recover: async (message) => consumeSearchScheduleMessage(message)
+  // Local responder runs persist QUEUED state. Deployed schedule recovery
+  // picks it up on its next heartbeat without a local Queue or Workflow call.
+  enqueue: async () => undefined
 };
 
 export class InvalidSearchScheduleQueueMessageError extends Error {
@@ -155,12 +152,8 @@ export async function recoverSearchScheduleStartFailure(
   input: SearchScheduleQueueRequest,
   dependencies: {
     enqueue: (message: SearchScheduleQueueRequest) => Promise<void>;
-    recover: (message: SearchScheduleQueueMessage) => Promise<{
-      outcome: "stale" | "already_started" | "stale_after_start" | "started";
-    }>;
   } = {
-    enqueue: enqueueSearchScheduleMessage,
-    recover: consumeSearchScheduleMessage
+    enqueue: enqueueSearchScheduleMessage
   }
 ) {
   const message = parseSearchScheduleQueueMessage(input);
@@ -168,18 +161,7 @@ export async function recoverSearchScheduleStartFailure(
     await dependencies.enqueue(message);
     return { outcome: "queued" as const };
   } catch {
-    try {
-      const recovered = await dependencies.recover(message);
-      return {
-        outcome:
-          recovered.outcome === "started" ||
-          recovered.outcome === "already_started"
-            ? ("started_directly" as const)
-            : ("stale" as const)
-      };
-    } catch {
-      return { outcome: "failed" as const };
-    }
+    return { outcome: "failed" as const };
   }
 }
 
@@ -211,7 +193,7 @@ export async function enqueueRemediatedCourseRechecks(
   const searchIds = [...new Set(await dependencies.listSearchIds(uniqueCourseIds))];
   let queuedCount = 0;
   let queueFailureCount = 0;
-  let directStartCount = 0;
+  const directStartCount = 0;
   const scheduledSearches: Array<{
     searchId: string;
     searchRef: string;
@@ -254,22 +236,7 @@ export async function enqueueRemediatedCourseRechecks(
       queuedCount += 1;
     } catch {
       queueFailureCount += 1;
-      try {
-        const recovered = await dependencies.recover({
-          searchId,
-          scheduleVersion: queued.scheduleVersion,
-          trigger: "COURSE_REMEDIATED"
-        });
-        if (
-          recovered.outcome === "started" ||
-          recovered.outcome === "already_started"
-        ) {
-          queuedCount += 1;
-          directStartCount += 1;
-        }
-      } catch {
-        // The persisted QUEUED row remains eligible for schedule recovery.
-      }
+      // The persisted QUEUED row remains eligible for deployed schedule recovery.
     }
   }
 

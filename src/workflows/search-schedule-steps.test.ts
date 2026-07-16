@@ -105,9 +105,7 @@ describe("search schedule workflow steps", () => {
       count: 1,
       nextCheckAt: new Date("2026-07-16T13:05:00.000Z")
     });
-    mocks.recoverSearchScheduleStartFailure.mockResolvedValue({
-      outcome: "started_directly"
-    });
+    mocks.recoverSearchScheduleStartFailure.mockResolvedValue({ outcome: "queued" });
 
     await expect(startNextSearchCheckStep("search-1", 7)).resolves.toBeNull();
 
@@ -127,7 +125,7 @@ describe("search schedule workflow steps", () => {
     expect(mocks.attachSearchWorkflowRun).not.toHaveBeenCalled();
   });
 
-  it("does not enqueue or directly restart after a stale failure update", async () => {
+  it("does not enqueue recovery after a stale failure update", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T13:00:00.000Z"));
     mocks.getSearchScheduleState.mockResolvedValue({

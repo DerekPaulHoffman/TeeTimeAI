@@ -67,7 +67,7 @@ An older success, a local check, a Workflow id by itself, or a new probe from a 
 
 ## Vercel Queue Fallback
 
-Vercel Queue is a bounded fallback for starting a Workflow when the immediate start fails and for dispatching one fresh check after a course remediation. The configured trigger is the beta `queue/v2beta` surface, so it is not the source of truth and is not a second scheduler.
+Vercel Queue is a bounded deployed-runtime fallback for starting a Workflow when an immediate start fails. The configured trigger is the beta `queue/v2beta` surface, so it is not the source of truth and is not a second scheduler. Local course-remediation runs persist `QUEUED` state in Postgres for the deployed recovery cron instead of publishing through a development-scoped queue.
 
 - Topic: `tee-time-spot-search-schedule`.
 - Private push consumer: `/api/queues/search-schedule`.
@@ -75,8 +75,8 @@ Vercel Queue is a bounded fallback for starting a Workflow when the immediate st
 - The message has exactly `searchId`, `scheduleVersion`, and trigger (`START_FAILED` or `COURSE_REMEDIATED`). It contains no email address, alias tag, course/provider details, booking URL, signed link, or credentials.
 - The producer uses a SHA-256-derived idempotency key rather than exposing the search id in that key.
 - Retention is 24 hours. Consumer concurrency is capped at 2, callback visibility is 120 seconds, and the configured trigger retry delay is 30 seconds; transient failures use bounded backoff and invalid messages are acknowledged as poison messages.
-- A remediation increments and queues each affected active search once. Hashed affected-search references, dispatch counts, scheduler state, and fresh check timestamps are persisted; closeout waits until all affected searches are accounted for.
-- If queue delivery fails, same-version direct recovery is attempted. Postgres remains recoverable, the current durable Workflow caps its next wake to any due email retry, and the daily safety cron can restart an unusually orphaned schedule later. Never delete saved demand because a Workflow, queue, or email attempt failed.
+- A remediation increments and queues each affected active search once. Hashed affected-search references, dispatch counts, scheduler state, and fresh check timestamps are persisted; closeout waits until all affected searches have real scheduler and provider evidence.
+- The five-minute deployed recovery cron picks up a locally queued row with no Workflow after a two-minute guard period. Attached queued runs and other overdue states retain the ten-minute safety threshold. If deployed Queue delivery fails, Postgres remains recoverable and the cron can restart the schedule; no local process directly starts Workflow. Never delete saved demand because a Workflow, queue, or email attempt failed.
 
 Keep the queue payload minimal. Do not log raw message bodies, database ids, workflow ids, recipient data, signed URLs, or provider tokens in responder summaries.
 

@@ -138,7 +138,7 @@ export async function startSearchSchedule(
         console.error("[search-schedule:queue-fallback-failed]", {
           searchRef: buildSearchScheduleReference(searchId),
           scheduleVersion: queued.scheduleVersion,
-          message: "Could not enqueue or directly restart workflow recovery"
+          message: "Could not enqueue workflow recovery; deployed cron recovery remains pending"
         });
       }
     }
