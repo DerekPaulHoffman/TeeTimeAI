@@ -227,6 +227,181 @@ describe("remediation schedule dispatch", () => {
   });
 });
 
+describe("guarded schedule dispatch", () => {
+  const observedAt = new Date("2026-07-16T18:30:00.000Z");
+  const updatedAt = new Date("2026-07-16T18:29:00.000Z");
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function mockGuardedTransaction(
+    updateCount: number,
+    findResult: Record<string, unknown> | null = {
+      id: "search-1",
+      status: "ACTIVE",
+      scheduleVersion: 9,
+      workflowRunId: null,
+      checkStatus: "QUEUED",
+      updatedAt: observedAt
+    }
+  ) {
+    const tx = {
+      teeSearch: {
+        updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
+        findUnique: vi.fn().mockResolvedValue(findResult)
+      }
+    };
+    mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
+      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+    );
+    return tx;
+  }
+
+  it("atomically queues the exact waiting version with no live lease", async () => {
+    const tx = mockGuardedTransaction(1);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt
+      })
+    ).resolves.toMatchObject({
+      status: "ACTIVE",
+      scheduleVersion: 9,
+      checkStatus: "QUEUED"
+    });
+
+    expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "search-1",
+          status: "ACTIVE",
+          scheduleVersion: 8,
+          updatedAt,
+          checkStatus: "WAITING",
+          OR: [
+            { checkLeaseExpiresAt: null },
+            { checkLeaseExpiresAt: { lte: observedAt } }
+          ]
+        },
+        data: expect.objectContaining({
+          scheduleVersion: { increment: 1 },
+          checkStatus: "QUEUED"
+        })
+      })
+    );
+    expect(tx.teeSearch.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "search-1",
+          status: "ACTIVE",
+          scheduleVersion: 9,
+          checkStatus: "QUEUED",
+          workflowRunId: null
+        }
+      })
+    );
+  });
+
+  it("rejects a row with a future lease without reading a newer state", async () => {
+    const tx = mockGuardedTransaction(0);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt
+      })
+    ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
+
+    expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
+  });
+
+  it.each(["QUEUED", "CHECKING"])(
+    "rejects a search that has moved to %s without reading a newer state",
+    async () => {
+      const tx = mockGuardedTransaction(0);
+
+      await expect(
+        queueSearchCheck("search-1", undefined, {
+          scheduleVersion: 8,
+          updatedAt,
+          observedAt
+        })
+      ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
+
+      expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ checkStatus: "WAITING" })
+        })
+      );
+      expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rejects a schedule-version race without reading a newer state", async () => {
+    const tx = mockGuardedTransaction(0);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt
+      })
+    ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
+
+    expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ scheduleVersion: 8 })
+      })
+    );
+    expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("rejects a WAITING state restored after an ABA transition", async () => {
+    const tx = mockGuardedTransaction(0);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt
+      })
+    ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
+
+    expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ updatedAt })
+      })
+    );
+    expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("throws to roll back when the exact queued row cannot be read", async () => {
+    const tx = mockGuardedTransaction(1, null);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt
+      })
+    ).rejects.toThrow("Guarded search schedule changed after it was queued.");
+
+    expect(tx.teeSearch.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          scheduleVersion: 9,
+          checkStatus: "QUEUED",
+          workflowRunId: null
+        })
+      })
+    );
+  });
+});
+
 describe("schedule recovery fairness", () => {
   it("bounds a full cohort recovery pass and orders the stalest rows first", async () => {
     mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);

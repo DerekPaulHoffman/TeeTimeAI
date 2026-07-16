@@ -558,14 +558,98 @@ function addIsoDateDays(value: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
-export async function queueSearchCheck(
+const queuedSearchCheckSelect = {
+  id: true,
+  status: true,
+  scheduleVersion: true,
+  workflowRunId: true,
+  checkStatus: true,
+  updatedAt: true
+} satisfies Prisma.TeeSearchSelect;
+
+export type QueuedSearchCheck = Prisma.TeeSearchGetPayload<{
+  select: typeof queuedSearchCheckSelect;
+}>;
+
+export type SearchScheduleExpectedState = {
+  scheduleVersion: number;
+  updatedAt: Date;
+  observedAt: Date;
+};
+
+export type SearchScheduleNotEligible = {
+  outcome: "not_eligible";
+  reason: "state_changed";
+};
+
+export function queueSearchCheck(
   searchId: string,
   remediationDispatchKey?: string
-) {
+): Promise<QueuedSearchCheck | null>;
+export function queueSearchCheck(
+  searchId: string,
+  remediationDispatchKey: string | undefined,
+  expectedState: SearchScheduleExpectedState
+): Promise<QueuedSearchCheck | SearchScheduleNotEligible>;
+
+export async function queueSearchCheck(
+  searchId: string,
+  remediationDispatchKey?: string,
+  expectedState?: SearchScheduleExpectedState
+): Promise<QueuedSearchCheck | SearchScheduleNotEligible | null> {
   if (remediationDispatchKey && remediationDispatchKey.length > 128) {
     throw new Error("Remediation dispatch key is too long.");
   }
+  if (remediationDispatchKey && expectedState) {
+    throw new Error("Expected-state guards cannot be combined with remediation dispatch.");
+  }
   return prisma.$transaction(async (tx) => {
+    if (expectedState) {
+      const updated = await tx.teeSearch.updateMany({
+        where: {
+          id: searchId,
+          status: "ACTIVE",
+          scheduleVersion: expectedState.scheduleVersion,
+          updatedAt: expectedState.updatedAt,
+          checkStatus: "WAITING",
+          OR: [
+            { checkLeaseExpiresAt: null },
+            { checkLeaseExpiresAt: { lte: expectedState.observedAt } }
+          ]
+        },
+        data: {
+          scheduleVersion: { increment: 1 },
+          checkStatus: "QUEUED",
+          nextCheckAt: new Date(),
+          lastCheckOutcome: null,
+          workflowRunId: null,
+          checkLeaseToken: null,
+          checkLeaseExpiresAt: null,
+          recheckRequestedAt: null
+        }
+      });
+      if (updated.count === 0) {
+        return {
+          outcome: "not_eligible" as const,
+          reason: "state_changed" as const
+        };
+      }
+      const queued = await tx.teeSearch.findUnique({
+        where: {
+          id: searchId,
+          status: "ACTIVE",
+          scheduleVersion: expectedState.scheduleVersion + 1,
+          checkStatus: "QUEUED",
+          workflowRunId: null
+        },
+        select: queuedSearchCheckSelect
+      });
+      if (!queued) {
+        throw new Error("Guarded search schedule changed after it was queued.");
+      }
+      return queued;
+    }
+
     if (remediationDispatchKey) {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const current = await tx.teeSearch.findUnique({
@@ -621,14 +705,7 @@ export async function queueSearchCheck(
         if (updated.count === 1) {
           return tx.teeSearch.findUnique({
             where: { id: searchId },
-            select: {
-              id: true,
-              status: true,
-              scheduleVersion: true,
-              workflowRunId: true,
-              checkStatus: true,
-              updatedAt: true
-            }
+            select: queuedSearchCheckSelect
           });
         }
       }
@@ -651,14 +728,7 @@ export async function queueSearchCheck(
     });
     return tx.teeSearch.findUnique({
       where: { id: searchId },
-      select: {
-        id: true,
-        status: true,
-        scheduleVersion: true,
-        workflowRunId: true,
-        checkStatus: true,
-        updatedAt: true
-      }
+      select: queuedSearchCheckSelect
     });
   });
 }
