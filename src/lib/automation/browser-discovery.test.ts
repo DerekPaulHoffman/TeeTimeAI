@@ -342,16 +342,17 @@ describe("buildBrowserDiscovery", () => {
       "https://apimanager-cc28.clubcaddie.com/webapi/view/amherst-public/slots";
     const ponemahUrl =
       "https://apimanager-cc28.clubcaddie.com/webapi/view/ponemah-public/slots";
+    const ponemahInteractionUrl = `${ponemahUrl}?Interaction=request-local-value`;
     const activityUrl =
       "https://apimanager-cc28.clubcaddie.com/webapi/view/simulator-public/slots";
     const discovery = buildBrowserDiscovery({
       courseId: "ponemah",
       courseName: "Ponemah Green Family Golf Center",
       sourceUrl: "https://www.playamherst.com/ponemah-green",
-      observedUrls: [amherstUrl, ponemahUrl, activityUrl],
+      observedUrls: [amherstUrl, ponemahInteractionUrl, activityUrl],
       linkCandidates: [
         { url: amherstUrl, label: "Book @ ACC" },
-        { url: ponemahUrl, label: "Book @ PG" },
+        { url: ponemahInteractionUrl, label: "Book @ PG" },
         { url: activityUrl, label: "Book Golf Simulator" }
       ],
       visibleText: "Book a public tee time"
@@ -371,6 +372,8 @@ describe("buildBrowserDiscovery", () => {
       },
       evidence: { learnedFrom: "club-caddie-public-tee-time-link" }
     });
+    expect(JSON.stringify(discovery)).not.toContain("Interaction");
+    expect(JSON.stringify(discovery)).not.toContain("request-local-value");
     expect(
       buildBrowserDiscovery({
         courseId: "amherst",

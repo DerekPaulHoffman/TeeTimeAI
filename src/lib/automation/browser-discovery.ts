@@ -442,7 +442,11 @@ function sanitizeClubCaddieDiscoveryEvidence(
     finalUrl: evidence.finalUrl
       ? sanitizeClubCaddieEvidenceUrl(evidence.finalUrl)
       : undefined,
-    observedUrls: evidence.observedUrls.map(sanitizeClubCaddieEvidenceUrl)
+    observedUrls: evidence.observedUrls.map(sanitizeClubCaddieEvidenceUrl),
+    linkCandidates: evidence.linkCandidates?.map((candidate) => ({
+      ...candidate,
+      url: sanitizeClubCaddieEvidenceUrl(candidate.url)
+    }))
   };
 }
 
