@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchCpsSlots, fetchCpsTeeSheet, isCpsMetadata } from "./cps";
+import {
+  fetchCpsSlots,
+  fetchCpsTeeSheet,
+  isCpsAutomationPolicyBlockedError,
+  isCpsMetadata
+} from "./cps";
 
 describe("isCpsMetadata", () => {
   it("recognizes reusable CPS metadata", () => {
@@ -311,6 +316,81 @@ describe("fetchCpsSlots", () => {
       confidence: 1,
       evidenceUrl: expect.stringContaining("/BookingRuleModels?")
     });
+  });
+
+  it("stops after an access denial when the official robots policy blocks the required endpoint", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      if (url.endsWith("/robots.txt")) {
+        return new Response(
+          [
+            "User-agent: *",
+            "Disallow: /",
+            "Allow: /onlineresweb/index.html"
+          ].join("\n"),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const error = await fetchCpsSlots({
+      courseId: "policy-blocked",
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      players: 2,
+      metadata: {
+        provider: "CPS",
+        siteName: "policy-blocked",
+        bookingBaseUrl: "https://policy-blocked.cps.golf/",
+        courseIds: [1]
+      }
+    }).catch((caught) => caught);
+
+    expect(isCpsAutomationPolicyBlockedError(error)).toBe(true);
+    expect(error).toEqual(
+      expect.objectContaining({
+        bookingUrl: "https://policy-blocked.cps.golf/",
+        policyUrl: "https://policy-blocked.cps.golf/robots.txt"
+      })
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves the provider auth failure when robots explicitly allows the configuration path", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      if (url.endsWith("/robots.txt")) {
+        return new Response(
+          [
+            "User-agent: *",
+            "Disallow: /",
+            "Allow: /onlineresweb/Home/Configuration"
+          ].join("\n"),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(
+      fetchCpsSlots({
+        courseId: "auth-failed",
+        date: new Date("2026-07-18T00:00:00.000Z"),
+        players: 2,
+        metadata: {
+          provider: "CPS",
+          siteName: "auth-failed",
+          bookingBaseUrl: "https://auth-failed.cps.golf/",
+          courseIds: [1]
+        }
+      })
+    ).rejects.toThrow("CPS configuration returned 403");
   });
 });
 

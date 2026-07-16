@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
+  applyBrowserDiscoveryToCourse: vi.fn(),
   finishAutomationRun: vi.fn(),
   getActiveSearchForAutomation: vi.fn(),
   heartbeatSearchCheckLease: vi.fn(),
@@ -13,6 +14,7 @@ const dbMocks = vi.hoisted(() => ({
   markMissingMatchesUnavailable: vi.fn(),
   markSearchStatusEmailSent: vi.fn(),
   recordCourseBookingWindowEvidence: vi.fn(),
+  recordBrowserDiscovery: vi.fn(),
   recordCourseProbe: vi.fn(),
   recordCourseProbeIfChanged: vi.fn(),
   recordTeeTimeMatch: vi.fn(),
@@ -41,12 +43,14 @@ const deliveryOutboxMocks = vi.hoisted(() => ({
 }));
 
 const adapterMocks = vi.hoisted(() => ({
+  fetchCpsTeeSheet: vi.fn(),
   fetchChelseaTeeSheet: vi.fn(),
   fetchChronogolfSlots: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
   fetchGolfBackTeeSheet: vi.fn(),
   fetchWebTracTeeSheet: vi.fn(),
   isChelseaMetadata: vi.fn(),
+  isCpsMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
   isForeupMetadata: vi.fn(),
   isGolfBackMetadata: vi.fn()
@@ -71,6 +75,12 @@ vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
+vi.mock("@/lib/adapters/cps", () => ({
+  fetchCpsTeeSheet: adapterMocks.fetchCpsTeeSheet,
+  isCpsMetadata: adapterMocks.isCpsMetadata,
+  isCpsAutomationPolicyBlockedError: (error: unknown) =>
+    error instanceof Error && error.name === "CpsAutomationPolicyBlockedError"
+}));
 vi.mock("@/lib/adapters/golfback", () => adapterMocks);
 vi.mock("@/lib/adapters/webtrac", () => adapterMocks);
 vi.mock("@/lib/adapters/chelsea", () => adapterMocks);
@@ -246,6 +256,12 @@ describe("runSearchCheck email cadence", () => {
       status: "SENT"
     });
     adapterMocks.isForeupMetadata.mockReturnValue(true);
+    adapterMocks.isCpsMetadata.mockReturnValue(false);
+    adapterMocks.fetchCpsTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
     adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
       slots: [],
       targetDateStatus: "UNKNOWN",
@@ -575,6 +591,70 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "FETCH_FAILED" })
     );
+  });
+
+  it("persists and applies an official CPS robots-policy block without opening another support incident", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: "https://policy-blocked.cps.golf/",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "policy-blocked",
+              bookingBaseUrl: "https://policy-blocked.cps.golf/",
+              courseIds: [1]
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    const policyError = Object.assign(
+      new Error("Official robots policy blocks required endpoints"),
+      {
+        name: "CpsAutomationPolicyBlockedError",
+        bookingUrl: "https://policy-blocked.cps.golf/",
+        policyUrl: "https://policy-blocked.cps.golf/robots.txt"
+      }
+    );
+    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(policyError);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(result.courseResults).toEqual([
+      expect.objectContaining({
+        outcome: "BLOCKED_POLICY",
+        bookingUrl: "https://policy-blocked.cps.golf/"
+      })
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "course-1",
+        status: "BLOCKED",
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED",
+        sourceUrl: "https://policy-blocked.cps.golf/robots.txt"
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({ automationReason: "AUTOMATION_PROHIBITED" })
+    );
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "BLOCKED_POLICY" })
+    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
   });
 
   it("retries a persisted match delivery group even after no match remains globally pending", async () => {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   finishAutomationRun,
+  applyBrowserDiscoveryToCourse,
   getActiveSearchForAutomation,
   heartbeatSearchCheckLease,
   isSearchCheckLeaseCurrent,
@@ -10,6 +11,7 @@ import {
   markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
   recordCourseBookingWindowEvidence,
+  recordBrowserDiscovery,
   recordCourseProbe,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
@@ -17,7 +19,11 @@ import {
   startAutomationRun,
   type SearchCheckLease
 } from "@/lib/automation/db-service";
-import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
+import {
+  getBestProbeUrl,
+  shouldQueueBrowserProbe,
+  type BrowserDiscovery
+} from "@/lib/automation/browser-discovery";
 import { evaluateAutomationPolicy } from "@/lib/automation/policy";
 import {
   classifyProviderFailure,
@@ -32,7 +38,11 @@ import {
   reportCourseSupportIssue,
   resolveCourseSupportIncident
 } from "@/lib/automation/support-incidents";
-import { fetchCpsTeeSheet, isCpsMetadata } from "@/lib/adapters/cps";
+import {
+  fetchCpsTeeSheet,
+  isCpsAutomationPolicyBlockedError,
+  isCpsMetadata
+} from "@/lib/adapters/cps";
 import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
@@ -600,6 +610,52 @@ async function checkSearch(
       });
     } catch (error) {
       await maintainSearchCheckLease(lease);
+      if (isCpsAutomationPolicyBlockedError(error)) {
+        const message =
+          "The official provider policy disallows automated access to the reservation endpoints. Check and book on the official page directly.";
+        const discovery: BrowserDiscovery = {
+          courseId: course.id,
+          status: "BLOCKED",
+          detectedPlatform: "CUSTOM",
+          sourceUrl: error.policyUrl,
+          bookingUrl: error.bookingUrl,
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          policyNotes: message,
+          intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          confidence: 0.99,
+          evidence: {
+            finalUrl: error.policyUrl,
+            observedUrls: [error.bookingUrl, error.policyUrl],
+            visibleText:
+              "The official provider robots policy disallows automated access to the required reservation endpoints.",
+            learnedFrom: "cps-official-robots-policy"
+          }
+        };
+        await recordBrowserDiscovery(discovery);
+        await applyBrowserDiscoveryToCourse(discovery);
+        await recordCourseProbe({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          outcome: "BLOCKED_POLICY",
+          message
+        });
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 0,
+          message,
+          bookingUrl: error.bookingUrl,
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingAccess: "BOOKING_PAGE"
+        });
+        return;
+      }
       const message = error instanceof Error ? error.message : "Unknown adapter error";
       if (SHORT_SEARCH_RETRY_FAILURES.has(classifyProviderFailure({ error }).failureClass)) {
         monitoringRetryCourseIds.add(course.id);
