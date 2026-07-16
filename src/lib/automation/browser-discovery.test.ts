@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildBrowserDiscovery,
+  enrichBrowserDiscoveryWithProviderLease,
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
+  findCorroboratingAccessBarrier,
   getBestProbeUrl,
+  keepPolicyOnlyDiscoveryActionable,
+  sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
   type BrowserDiscoveryEvidence
 } from "./browser-discovery";
@@ -1042,6 +1046,294 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("does not mistake a one-segment ForeUP booking id for a schedule id", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: "https://westwoodsgc.com/",
+      finalUrl: "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      observedUrls: [
+        "https://foreupsoftware.com/index.php/booking/22518#/teetimes"
+      ],
+      visibleText: "Book a tee time"
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("FOREUP");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe("foreup-url-without-schedule");
+  });
+
+  it("learns the real ForeUP schedule from an API request behind a one-segment booking root", () => {
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: "https://westwoodsgc.com/",
+      finalUrl: "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      observedUrls: [
+        "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+        "https://foreupsoftware.com/index.php/api/booking/times?date=07-17-2026&schedule_id=6123&booking_class=4455"
+      ],
+      visibleText: "Book a tee time"
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.apiMetadata).toEqual({
+      scheduleId: 6123,
+      bookingClassId: 4455,
+      bookingBaseUrl:
+        "https://foreupsoftware.com/index.php/booking/22518#/teetimes"
+    });
+  });
+
+  it("classifies a ForeUP access denial without attempting to bypass it", () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518#/teetimes";
+    const barrier = {
+      url: "https://foreupsoftware.com/index.php/booking/22518",
+      status: 403 as const
+    };
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: bookingUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl],
+      accessBarriers: [barrier],
+      corroboratedAccessBarrier: barrier,
+      visibleText: "403 Forbidden"
+    };
+
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "FOREUP",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "foreup-access-control"
+      }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("keeps a first ForeUP access denial non-terminal", () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518#/teetimes";
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: bookingUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl],
+      accessBarriers: [
+        {
+          url: "https://foreupsoftware.com/index.php/booking/22518",
+          status: 403
+        }
+      ],
+      visibleText: "403 Forbidden"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      evidence: { learnedFrom: "foreup-access-control-unconfirmed" }
+    });
+  });
+
+  it("never treats a denied ForeUP API response as runnable metadata", () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518#/teetimes";
+    const apiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?schedule_id=6123&booking_class=4455&challenge_token=secret-value";
+    const barrier = { url: apiUrl, status: 403 as const };
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: bookingUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl, apiUrl],
+      accessBarriers: [barrier],
+      corroboratedAccessBarrier: barrier,
+      visibleText: "403 Forbidden"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE"
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.accessBarriers).toEqual([
+      {
+        url: "https://foreupsoftware.com/index.php/api/booking/times",
+        status: 403
+      }
+    ]);
+    expect(discovery.evidence.observedUrls).toContain(
+      "https://foreupsoftware.com/index.php/api/booking/times"
+    );
+    expect(discovery.evidence.observedUrls.join(" ")).not.toContain(
+      "challenge_token"
+    );
+    expect(discovery.evidence.observedUrls).not.toContain(apiUrl);
+    expect(discovery.evidence.accessBarrierProviderIds).toEqual({
+      scheduleId: 6123,
+      bookingClassId: 4455
+    });
+  });
+
+  it("distinguishes a repeated ForeUP authentication barrier", () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518#/teetimes";
+    const barrier = { url: bookingUrl, status: 401 as const };
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: bookingUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl],
+      accessBarriers: [barrier],
+      corroboratedAccessBarrier: barrier
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      automationReason: "ACCOUNT_REQUIRED"
+    });
+  });
+
+  it("corroborates a barrier only against matching prior technical evidence", () => {
+    const barrier = {
+      url: "https://foreupsoftware.com/index.php/booking/22518",
+      status: 403 as const
+    };
+
+    expect(
+      findCorroboratingAccessBarrier(
+        {
+          visibleText: "403 Forbidden",
+          observedUrls: [barrier.url]
+        },
+        [barrier]
+      )
+    ).toEqual(barrier);
+    expect(
+      findCorroboratingAccessBarrier(
+        {
+          accessBarriers: [{ ...barrier, status: 401 }]
+        },
+        [barrier]
+      )
+    ).toBeNull();
+  });
+
+  it("classifies only the exact current ForeUP barrier corroborated by prior evidence", () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518#/teetimes";
+    const apiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?schedule_id=6123";
+    const bookingBarrier = { url: bookingUrl, status: 403 as const };
+    const apiBarrier = { url: apiUrl, status: 401 as const };
+    const currentBarriers = [bookingBarrier, apiBarrier];
+    const corroboratedAccessBarrier = findCorroboratingAccessBarrier(
+      { accessBarriers: [apiBarrier] },
+      currentBarriers
+    );
+
+    expect(corroboratedAccessBarrier).toEqual(apiBarrier);
+
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-westwoods",
+      courseName: "Westwoods Golf Course",
+      sourceUrl: bookingUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl, apiUrl],
+      accessBarriers: currentBarriers,
+      corroboratedAccessBarrier: corroboratedAccessBarrier ?? undefined
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      evidence: {
+        accessBarriers: [
+          {
+            url: "https://foreupsoftware.com/index.php/api/booking/times",
+            status: 401
+          }
+        ]
+      }
+    });
+  });
+
+  it("retains automation-policy text as non-terminal discovery evidence", () => {
+    const policyDiscovery = buildBrowserDiscovery({
+      courseId: "course-whoosh",
+      courseName: "Public Whoosh Course",
+      sourceUrl: "https://example.com/tee-times",
+      finalUrl: "https://app.whoosh.io/patron/club/public-course",
+      observedUrls: ["https://app.whoosh.io/patron/club/public-course"],
+      providerPolicyUrl: "https://www.whoosh.io/terms",
+      providerPolicyText:
+        "You may not attempt to access or search the Whoosh platform or content using any engine, software, tool, agent, device, or mechanism, including robots, spiders, crawlers, or data mining tools."
+    });
+
+    expect(policyDiscovery).toMatchObject({
+      status: "VERIFIED",
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED"
+    });
+
+    expect(keepPolicyOnlyDiscoveryActionable(policyDiscovery)).toMatchObject({
+      status: "INSPECTED",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      bookingUrl: "https://app.whoosh.io/patron/club/public-course",
+      evidence: {
+        learnedFrom:
+          "whoosh-automation-prohibited-booking:policy-evidence-only"
+      }
+    });
+  });
+
+  it("removes denied query credentials from every persisted discovery URL", () => {
+    const deniedUrl =
+      "https://booking.example.com/tee-times?course=12&session_token=secret-value";
+    const barrier = { url: deniedUrl, status: 403 as const };
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-generic",
+      courseName: "Generic Public Course",
+      sourceUrl: deniedUrl,
+      finalUrl: deniedUrl,
+      observedUrls: [deniedUrl],
+      accessBarriers: [barrier]
+    });
+
+    const sanitized = sanitizeBrowserDiscoveryAccessEvidence(discovery, [barrier]);
+
+    expect(sanitized.sourceUrl).toBe("https://booking.example.com/tee-times");
+    expect(sanitized.bookingUrl).toBe("https://booking.example.com/tee-times");
+    expect(sanitized.evidence.finalUrl).toBe(
+      "https://booking.example.com/tee-times"
+    );
+    expect(sanitized.evidence.observedUrls).toEqual([
+      "https://booking.example.com/tee-times"
+    ]);
+    expect(JSON.stringify(sanitized)).not.toContain("session_token");
+    expect(JSON.stringify(sanitized)).not.toContain("secret-value");
+  });
+
   it("classifies an official priced course page that directs golfers to contact the facility", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "contact-only-par-three",
@@ -1328,6 +1620,70 @@ describe("browser probe target selection", () => {
 });
 
 describe("Chronogolf public profile enrichment", () => {
+  it("leases the follow-up fetch by its discovered destination family", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-chrono",
+      courseName: "Public Chronogolf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://www.chronogolf.com/club/public-chrono"]
+    });
+    const leasedFamilies: string[] = [];
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      url: "https://www.chronogolf.com/club/public-chrono",
+      text: vi.fn().mockResolvedValue(
+        chronogolfNextData({
+          id: 4444,
+          onlineBookingEnabled: true,
+          courses: [{ uuid: "course-public-uuid" }]
+        })
+      )
+    });
+
+    const result = await enrichBrowserDiscoveryWithProviderLease(
+      discovery,
+      "Public Chronogolf Course",
+      async (providerFamilyKey, worker) => {
+        leasedFamilies.push(providerFamilyKey);
+        return { acquired: true, value: await worker() };
+      },
+      fetchImpl as typeof fetch
+    );
+
+    expect(leasedFamilies).toEqual(["CHRONOGOLF"]);
+    expect(result).toMatchObject({
+      acquired: true,
+      discovery: {
+        status: "LEARNED",
+        automationEligibility: "ALLOWED"
+      }
+    });
+  });
+
+  it("defers enrichment without a provider fetch or probe-ready result when its lease is busy", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-southers-marsh",
+      courseName: "Southers Marsh Golf Club",
+      sourceUrl: "https://southersmarsh.com/",
+      observedUrls: ["https://southersmarsh.teesnap.net/"],
+      visibleText: "Public tee times"
+    });
+    const fetchImpl = vi.fn();
+
+    const result = await enrichBrowserDiscoveryWithProviderLease(
+      discovery,
+      "Southers Marsh Golf Club",
+      async () => ({ acquired: false }),
+      fetchImpl as typeof fetch
+    );
+
+    expect(result).toEqual({
+      acquired: false,
+      providerFamilyKey: "TEESNAP"
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("classifies a club with online booking disabled as direct-contact only", async () => {
     const discovery = buildBrowserDiscovery({
       courseId: "pequabuck",

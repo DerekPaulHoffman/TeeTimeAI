@@ -21,6 +21,13 @@ export type BrowserDiscoveryEvidence = {
   providerPolicyText?: string;
   providerPolicyUrl?: string;
   accessBarrierUrls?: string[];
+  accessBarriers?: BrowserAccessBarrier[];
+  corroboratedAccessBarrier?: BrowserAccessBarrier;
+};
+
+export type BrowserAccessBarrier = {
+  url: string;
+  status: 401 | 403;
 };
 
 export type BrowserDiscovery = {
@@ -89,9 +96,121 @@ export type BrowserDiscovery = {
     finalUrl?: string;
     observedUrls: string[];
     visibleText?: string;
+    accessBarriers?: BrowserAccessBarrier[];
+    accessBarrierProviderIds?: {
+      scheduleId?: number;
+      bookingClassId?: number;
+    };
     learnedFrom: string;
   };
 };
+
+export function keepPolicyOnlyDiscoveryActionable(
+  discovery: BrowserDiscovery
+): BrowserDiscovery {
+  if (discovery.automationReason !== "AUTOMATION_PROHIBITED") {
+    return discovery;
+  }
+
+  return {
+    ...discovery,
+    status: "INSPECTED",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "UNSUPPORTED_PLATFORM",
+    intelligenceReviewAt: undefined,
+    confidence: Math.min(discovery.confidence, 0.79),
+    evidence: {
+      ...discovery.evidence,
+      learnedFrom: `${discovery.evidence.learnedFrom}:policy-evidence-only`
+    }
+  };
+}
+
+export function sanitizeBrowserDiscoveryAccessEvidence(
+  discovery: BrowserDiscovery,
+  barriers: BrowserAccessBarrier[] | undefined
+): BrowserDiscovery {
+  if (!barriers?.length) {
+    return discovery;
+  }
+
+  return {
+    ...discovery,
+    sourceUrl: sanitizeDeniedUrl(discovery.sourceUrl, barriers),
+    bookingUrl: discovery.bookingUrl
+      ? sanitizeDeniedUrl(discovery.bookingUrl, barriers)
+      : discovery.bookingUrl,
+    evidence: {
+      ...discovery.evidence,
+      finalUrl: discovery.evidence.finalUrl
+        ? sanitizeDeniedUrl(discovery.evidence.finalUrl, barriers)
+        : discovery.evidence.finalUrl,
+      observedUrls: sanitizeObservedAccessBarrierUrls(
+        discovery.evidence.observedUrls,
+        barriers
+      )
+    }
+  };
+}
+
+export type BrowserDiscoveryProviderLeaseRunner = <T>(
+  providerFamilyKey: string,
+  worker: () => Promise<T>
+) => Promise<{ acquired: true; value: T } | { acquired: false }>;
+
+export type BrowserDiscoveryEnrichmentResult =
+  | { acquired: true; discovery: BrowserDiscovery }
+  | { acquired: false; providerFamilyKey: string };
+
+class BrowserDiscoveryEnrichmentDeferredError extends Error {
+  constructor(readonly providerFamilyKey: string) {
+    super("Browser discovery enrichment was deferred by the provider concurrency guard");
+  }
+}
+
+export async function enrichBrowserDiscoveryWithProviderLease(
+  discovery: BrowserDiscovery,
+  courseName: string,
+  runWithLease: BrowserDiscoveryProviderLeaseRunner,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscoveryEnrichmentResult> {
+  const leasedFetch = (async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1]
+  ) => {
+    const destinationUrl = input instanceof Request ? input.url : input.toString();
+    const providerFamilyKey = resolveProviderCapability({
+      detectedBookingUrl: destinationUrl
+    }).providerFamilyKey;
+    const execution = await runWithLease(providerFamilyKey, () =>
+      fetchImpl(input, init)
+    );
+    if (!execution.acquired) {
+      throw new BrowserDiscoveryEnrichmentDeferredError(providerFamilyKey);
+    }
+    return execution.value;
+  }) as typeof fetch;
+
+  try {
+    const chronogolfDiscovery = await enrichChronogolfDiscovery(
+      discovery,
+      leasedFetch
+    );
+    return {
+      acquired: true,
+      discovery: await enrichTeesnapDiscovery(
+        chronogolfDiscovery,
+        courseName,
+        leasedFetch
+      )
+    };
+  } catch (error) {
+    if (error instanceof BrowserDiscoveryEnrichmentDeferredError) {
+      return { acquired: false, providerFamilyKey: error.providerFamilyKey };
+    }
+    throw error;
+  }
+}
 
 export type BrowserProbeCourseInput = {
   detectedPlatform: string;
@@ -1664,7 +1783,81 @@ function learnForeupDiscovery(
     return null;
   }
 
-  const scheduleId = getNumericSearchParam(foreupApiUrl, "schedule_id") ?? getForeupScheduleId(foreupBookingUrl);
+  const foreupAccessBarriers = evidence.accessBarriers?.filter(
+    (barrier) =>
+      isForeupBookingUrl(barrier.url) || isForeupApiUrl(barrier.url)
+  ) ?? [];
+  const safeObservedUrls = sanitizeObservedAccessBarrierUrls(
+    observedUrls,
+    foreupAccessBarriers
+  );
+  const scheduleId =
+    getNumericSearchParam(foreupApiUrl, "schedule_id") ??
+    getForeupScheduleId(foreupBookingUrl);
+  const bookingClassId = getNumericSearchParam(foreupApiUrl, "booking_class");
+  const accessBarrierProviderIds = {
+    ...(scheduleId ? { scheduleId } : {}),
+    ...(bookingClassId ? { bookingClassId } : {})
+  };
+  const corroboratedAccessBarrier = evidence.corroboratedAccessBarrier
+    ? foreupAccessBarriers.find((barrier) =>
+        areSameAccessBarrier(barrier, evidence.corroboratedAccessBarrier!)
+      )
+    : undefined;
+  const accessBarrier = corroboratedAccessBarrier ?? foreupAccessBarriers[0];
+  if (accessBarrier) {
+    const safeAccessBarriers = sanitizeAccessBarriers([accessBarrier]);
+    if (!corroboratedAccessBarrier) {
+      return {
+        courseId: evidence.courseId,
+        status: "INSPECTED",
+        detectedPlatform: "FOREUP",
+        sourceUrl: evidence.sourceUrl,
+        bookingUrl: foreupBookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "NONE",
+        confidence: 0.65,
+          evidence: {
+            finalUrl: evidence.finalUrl,
+            observedUrls: safeObservedUrls,
+            visibleText: summarizeVisibleText(evidence.visibleText),
+            accessBarriers: safeAccessBarriers,
+            ...(Object.keys(accessBarrierProviderIds).length > 0
+              ? { accessBarrierProviderIds }
+              : {}),
+            learnedFrom: "foreup-access-control-unconfirmed"
+        }
+      };
+    }
+
+    return {
+      courseId: evidence.courseId,
+      status: "VERIFIED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: foreupBookingUrl ?? accessBarrier.url,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason:
+        accessBarrier.status === 401 ? "ACCOUNT_REQUIRED" : "CAPTCHA_OR_QUEUE",
+      policyNotes:
+        "The official ForeUP booking page is available for golfers, but signed-out automated retrieval is denied by the provider's access control. Tee Time Spot does not bypass access controls, so golfers should check and book on the official page directly.",
+      intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      confidence: 0.95,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls: safeObservedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        accessBarriers: safeAccessBarriers,
+        ...(Object.keys(accessBarrierProviderIds).length > 0
+          ? { accessBarrierProviderIds }
+          : {}),
+        learnedFrom: "foreup-access-control"
+      }
+    };
+  }
+
   if (!scheduleId) {
     return {
       courseId: evidence.courseId,
@@ -1685,8 +1878,6 @@ function learnForeupDiscovery(
 
   const bookingBaseUrl =
     foreupBookingUrl ?? `https://foreupsoftware.com/index.php/booking/${scheduleId}#/teetimes`;
-  const bookingClassId = getNumericSearchParam(foreupApiUrl, "booking_class");
-
   return {
     courseId: evidence.courseId,
     status: "LEARNED",
@@ -1775,8 +1966,137 @@ function getNumericSearchParam(url: URL | null | undefined, key: string) {
 }
 
 function getForeupScheduleId(value?: string) {
-  const match = value?.match(/\/booking\/(?:\d+\/)?(\d+)/);
+  const match = value?.match(/\/booking\/\d+\/(\d+)(?:[/?#]|$)/);
   return match ? Number(match[1]) : undefined;
+}
+
+function isForeupApiUrl(value?: string) {
+  const url = parseUrl(value);
+  return Boolean(
+    url?.hostname.includes("foreupsoftware.com") &&
+      url.pathname.includes("/api/booking/times")
+  );
+}
+
+export function findCorroboratingAccessBarrier(
+  previousEvidence: unknown,
+  currentBarriers: BrowserAccessBarrier[] | undefined
+) {
+  if (!currentBarriers?.length || !previousEvidence || typeof previousEvidence !== "object") {
+    return null;
+  }
+  const previous = previousEvidence as Record<string, unknown>;
+  const previousBarriers = Array.isArray(previous.accessBarriers)
+    ? previous.accessBarriers
+        .filter(
+          (value): value is Record<string, unknown> =>
+            Boolean(value) && typeof value === "object" && !Array.isArray(value)
+        )
+        .map((value) => ({
+          url: typeof value.url === "string" ? value.url : "",
+          status: value.status
+        }))
+    : [];
+
+  for (const current of currentBarriers) {
+    if (!normalizeAccessBarrierUrl(current.url)) {
+      continue;
+    }
+    if (
+      previousBarriers.some((previousBarrier) =>
+        areSameAccessBarrier(previousBarrier as BrowserAccessBarrier, current)
+      )
+    ) {
+      return current;
+    }
+
+    const legacyVisibleText =
+      typeof previous.visibleText === "string" ? previous.visibleText : "";
+    const legacyObservedUrls = Array.isArray(previous.observedUrls)
+      ? previous.observedUrls.filter((value): value is string => typeof value === "string")
+      : [];
+    if (
+      current.status === 403 &&
+      /\b403\s+Forbidden\b/i.test(legacyVisibleText) &&
+      legacyObservedUrls.some(
+        (value) => normalizeAccessBarrierUrl(value) === normalizeAccessBarrierUrl(current.url)
+      )
+    ) {
+      return current;
+    }
+  }
+
+  return null;
+}
+
+function areSameAccessBarrier(
+  left: Pick<BrowserAccessBarrier, "url" | "status">,
+  right: Pick<BrowserAccessBarrier, "url" | "status">
+) {
+  const leftUrl = normalizeAccessBarrierUrl(left.url);
+  return Boolean(
+    leftUrl &&
+      left.status === right.status &&
+      leftUrl === normalizeAccessBarrierUrl(right.url)
+  );
+}
+
+function sanitizeAccessBarriers(barriers: BrowserAccessBarrier[]) {
+  return barriers.flatMap((barrier) => {
+    const url = normalizeAccessBarrierUrl(barrier.url);
+    return url ? [{ url, status: barrier.status }] : [];
+  });
+}
+
+function sanitizeObservedAccessBarrierUrls(
+  observedUrls: string[],
+  barriers: BrowserAccessBarrier[]
+) {
+  const deniedUrls = new Set(
+    barriers.flatMap((barrier) => {
+      const url = parseUrl(barrier.url);
+      if (!url) {
+        return [];
+      }
+      url.hash = "";
+      return [url.toString()];
+    })
+  );
+
+  return uniqueUrls(
+    observedUrls.map((value) => {
+      const url = parseUrl(value);
+      if (!url) {
+        return value;
+      }
+      url.hash = "";
+      return deniedUrls.has(url.toString())
+        ? `${url.origin}${url.pathname}`
+        : value;
+    })
+  );
+}
+
+function sanitizeDeniedUrl(value: string, barriers: BrowserAccessBarrier[]) {
+  const url = parseUrl(value);
+  if (!url) {
+    return value;
+  }
+  url.hash = "";
+  const denied = barriers.some((barrier) => {
+    const deniedUrl = parseUrl(barrier.url);
+    if (!deniedUrl) {
+      return false;
+    }
+    deniedUrl.hash = "";
+    return deniedUrl.toString() === url.toString();
+  });
+  return denied ? `${url.origin}${url.pathname}` : value;
+}
+
+function normalizeAccessBarrierUrl(value: string) {
+  const url = parseUrl(value);
+  return url ? `${url.origin}${url.pathname}` : null;
 }
 
 function getOriginAndPath(url: URL) {

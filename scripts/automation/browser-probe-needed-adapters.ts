@@ -4,8 +4,10 @@ import { chromium, type Page } from "playwright";
 
 import {
   buildBrowserDiscovery,
-  enrichChronogolfDiscovery,
-  enrichTeesnapDiscovery,
+  enrichBrowserDiscoveryWithProviderLease,
+  findCorroboratingAccessBarrier,
+  keepPolicyOnlyDiscoveryActionable,
+  sanitizeBrowserDiscoveryAccessEvidence,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
 import {
@@ -16,6 +18,8 @@ import {
   recordCourseProbe,
   startAutomationRun
 } from "@/lib/automation/db-service";
+import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { prisma } from "@/lib/prisma";
 
@@ -25,14 +29,18 @@ const NAVIGATION_TIMEOUT_MS = 20_000;
 
 async function main() {
   const limit = Number(process.env.BROWSER_PROBE_LIMIT ?? DEFAULT_LIMIT);
+  const requestedCourseName = process.env.BROWSER_PROBE_COURSE_NAME?.trim();
   const run = await startAutomationRun(PROMPT_VERSION);
   const notes: string[] = [];
 
   try {
-    const targets = await listBrowserProbeTargets(limit);
+    const targets = await listBrowserProbeTargets(limit, requestedCourseName);
     notes.push(`Selected ${targets.length} browser probe targets.`);
 
     if (targets.length === 0) {
+      if (requestedCourseName) {
+        throw new Error("The requested browser-probe course was not eligible.");
+      }
       await finishAutomationRun(run.id, { outcome: "no_op", notes: notes.join("\n") });
       return;
     }
@@ -42,68 +50,142 @@ async function main() {
       for (const target of targets) {
         const page = await browser.newPage();
         try {
-          const evidence = await collectBrowserEvidence(page, {
-            courseId: target.course.id,
-            courseName: target.course.name,
-            sourceUrl: target.probeUrl
+          const previousDiscovery = await prisma.courseAutomationDiscovery.findFirst({
+            where: { courseId: target.course.id },
+            orderBy: { createdAt: "desc" },
+            select: { evidence: true }
           });
-          const chronogolfDiscovery = await enrichChronogolfDiscovery(
-            buildBrowserDiscovery(evidence)
+          const providerFamilyKey = resolveProviderCapability({
+            detectedPlatform: target.course.detectedPlatform,
+            providerFamilyKey: target.course.providerFamilyKey,
+            detectedBookingUrl: target.course.detectedBookingUrl,
+            website: target.course.website,
+            bookingMetadata: target.course.bookingMetadata
+          }).providerFamilyKey;
+          const providerExecution = await runWithProviderRequestLease(
+            providerFamilyKey,
+            () =>
+              collectBrowserEvidence(page, {
+                courseId: target.course.id,
+                courseName: target.course.name,
+                sourceUrl: target.probeUrl
+              })
           );
-          const discovery = await enrichTeesnapDiscovery(
-            chronogolfDiscovery,
-            target.course.name
+          if (!providerExecution.acquired) {
+            notes.push(
+              `${target.course.name}: deferred by the provider concurrency guard.`
+            );
+            continue;
+          }
+          const evidence = {
+            ...providerExecution.value,
+            corroboratedAccessBarrier: findCorroboratingAccessBarrier(
+              previousDiscovery?.evidence,
+              providerExecution.value.accessBarriers
+            ) ?? undefined
+          };
+          const enrichment = await enrichBrowserDiscoveryWithProviderLease(
+            buildBrowserDiscovery(evidence),
+            target.course.name,
+            runWithProviderRequestLease
+          );
+          if (!enrichment.acquired) {
+            notes.push(
+              `${target.course.name}: enrichment deferred by the provider concurrency guard.`
+            );
+            continue;
+          }
+          const discovery = sanitizeBrowserDiscoveryAccessEvidence(
+            keepPolicyOnlyDiscoveryActionable(enrichment.discovery),
+            evidence.accessBarriers
           );
 
           await recordBrowserDiscovery(discovery);
           const appliedCourse = await applyBrowserDiscoveryToCourse(discovery);
+          if (!appliedCourse) {
+            const currentCourse = await prisma.course.findUnique({
+              where: { id: target.course.id },
+              select: {
+                providerFamilyKey: true,
+                detectedPlatform: true,
+                detectedBookingUrl: true,
+                website: true,
+                bookingMetadata: true
+              }
+            });
+            if (currentCourse && resolveProviderCapability(currentCourse).isRunnable) {
+              notes.push(
+                `${target.course.name}: stale browser result ignored because newer runnable provider evidence is already persisted.`
+              );
+              continue;
+            }
+          }
           const directBookingVerified =
             appliedCourse &&
             discovery.automationEligibility === "BLOCKED" &&
             ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
               discovery.bookingMethod ?? "UNKNOWN"
             );
-          if (directBookingVerified) {
+          const accessControlVerified =
+            appliedCourse &&
+            discovery.automationEligibility === "BLOCKED" &&
+            ["ACCOUNT_REQUIRED", "CAPTCHA_OR_QUEUE"].includes(
+              discovery.automationReason ?? "NONE"
+            );
+          const finalDispositionVerified =
+            directBookingVerified || accessControlVerified;
+          if (finalDispositionVerified) {
             await resolveCourseSupportIncident({
               courseId: target.course.id,
               resolution: "DIRECT_BOOKING_CLASSIFIED",
-              message: `${target.course.name} was verified as ${discovery.bookingMethod}; automatic monitoring is not available.`
+              message: accessControlVerified
+                ? `${target.course.name} has a verified official booking path, but signed-out monitoring is not technically accessible without crossing the current access control.`
+                : `${target.course.name} was verified as ${discovery.bookingMethod}; no public online tee sheet is currently available to monitor.`
             });
           }
-          await recordCourseProbe({
-            searchId: target.searchId,
-            courseId: target.course.id,
-            automationRunId: run.id,
-            outcome: directBookingVerified ? "BLOCKED_POLICY" : "NEEDS_ADAPTER",
-            message:
-              directBookingVerified
-                ? `Browser probe verified direct booking classification: ${discovery.bookingMethod}.`
-                : discovery.status === "LEARNED"
-                ? `Browser probe learned ${discovery.detectedPlatform} adapter metadata; rerun the poller to verify tee-sheet retrieval.`
-                : `Browser probe inspected site but did not learn a reusable adapter yet.`,
-            evidenceUrl: discovery.bookingUrl,
-            rawSummary: {
-              browserProbe: {
-                status: discovery.status,
-                detectedPlatform: discovery.detectedPlatform,
-                apiEndpoint: discovery.apiEndpoint,
-                confidence: discovery.confidence,
-                learnedFrom: discovery.evidence.learnedFrom
+          if (target.searchId) {
+            await recordCourseProbe({
+              searchId: target.searchId,
+              courseId: target.course.id,
+              automationRunId: run.id,
+              outcome: accessControlVerified
+                ? "BLOCKED_AUTH"
+                : directBookingVerified
+                  ? "BLOCKED_POLICY"
+                  : "NEEDS_ADAPTER",
+              message:
+                finalDispositionVerified
+                  ? "Browser discovery verified a direct-booking-only disposition."
+                  : discovery.status === "LEARNED"
+                  ? `Browser probe learned ${discovery.detectedPlatform} adapter metadata; rerun the poller to verify tee-sheet retrieval.`
+                  : `Browser probe inspected site but did not learn a reusable adapter yet.`,
+              evidenceUrl: discovery.bookingUrl,
+              rawSummary: {
+                browserProbe: {
+                  status: discovery.status,
+                  detectedPlatform: discovery.detectedPlatform,
+                  apiEndpoint: discovery.apiEndpoint,
+                  automationReason: discovery.automationReason,
+                  confidence: discovery.confidence,
+                  learnedFrom: discovery.evidence.learnedFrom
+                }
               }
-            }
-          });
+            });
+          }
 
           notes.push(
             `${target.course.name}: ${discovery.status} ${discovery.detectedPlatform} confidence=${discovery.confidence}`
           );
         } catch (error) {
-          await recordCourseProbe({
-            searchId: target.searchId,
-            courseId: target.course.id,
-            automationRunId: run.id,
-            outcome: "FETCH_FAILED",
-            message: error instanceof Error ? error.message : "Browser probe failed"
-          });
+          if (target.searchId) {
+            await recordCourseProbe({
+              searchId: target.searchId,
+              courseId: target.course.id,
+              automationRunId: run.id,
+              outcome: "FETCH_FAILED",
+              message: error instanceof Error ? error.message : "Browser probe failed"
+            });
+          }
           notes.push(
             `${target.course.name}: failed - ${error instanceof Error ? error.message : "unknown error"}`
           );
@@ -134,12 +216,18 @@ async function collectBrowserEvidence(
   input: Pick<BrowserDiscoveryEvidence, "courseId" | "courseName" | "sourceUrl">
 ): Promise<BrowserDiscoveryEvidence> {
   const observedUrls = new Set<string>();
+  const accessBarrierUrls = new Set<string>();
+  const accessBarriers = new Map<string, 401 | 403>();
 
   page.on("request", (request) => {
     observedUrls.add(request.url());
   });
   page.on("response", (response) => {
     observedUrls.add(response.url());
+    if ([401, 403].includes(response.status())) {
+      accessBarrierUrls.add(response.url());
+      accessBarriers.set(response.url(), response.status() as 401 | 403);
+    }
   });
 
   await page.goto(input.sourceUrl, {
@@ -167,6 +255,8 @@ async function collectBrowserEvidence(
     ...input,
     finalUrl: page.url(),
     observedUrls: [...observedUrls],
+    accessBarrierUrls: [...accessBarrierUrls],
+    accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),
     visibleText: [landingPageEvidence.visibleText, destinationPageEvidence.visibleText]
       .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
       .join("\n")

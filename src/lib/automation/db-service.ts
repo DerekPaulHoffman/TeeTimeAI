@@ -57,11 +57,7 @@ export type PendingAlertMatch = Prisma.TeeTimeMatchGetPayload<{
 }>;
 
 export type BrowserProbeTarget = {
-  searchId: string;
-  date: Date;
-  startTime: string;
-  endTime: string;
-  players: number;
+  searchId?: string;
   rank: number;
   course: {
     id: string;
@@ -69,6 +65,7 @@ export type BrowserProbeTarget = {
     website: string | null;
     detectedBookingUrl: string | null;
     detectedPlatform: string;
+    providerFamilyKey: string;
     automationEligibility: string;
     bookingMetadata: unknown;
   };
@@ -139,7 +136,14 @@ export async function getActiveSearchForAutomation(
   });
 }
 
-export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTarget[]> {
+export async function listBrowserProbeTargets(
+  limit = 5,
+  courseName?: string
+): Promise<BrowserProbeTarget[]> {
+  const requestedCourseName = courseName?.trim().toLocaleLowerCase("en-US");
+  if (requestedCourseName) {
+    return listExactIncidentBrowserProbeTarget(requestedCourseName);
+  }
   const [searches, openIncidents] = await Promise.all([
     prisma.teeSearch.findMany({
       where: {
@@ -182,10 +186,6 @@ export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTa
 
       targets.push({
         searchId: search.id,
-        date: search.date,
-        startTime: search.startTime,
-        endTime: search.endTime,
-        players: search.players,
         rank: preference.rank,
         course: {
           id: course.id,
@@ -193,6 +193,7 @@ export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTa
           website: course.website,
           detectedBookingUrl: course.detectedBookingUrl,
           detectedPlatform: course.detectedPlatform,
+          providerFamilyKey: course.providerFamilyKey,
           automationEligibility: course.automationEligibility,
           bookingMetadata: course.bookingMetadata
         },
@@ -203,19 +204,67 @@ export async function listBrowserProbeTargets(limit = 5): Promise<BrowserProbeTa
     }
   }
 
-  return targets
-    .sort((left, right) => left.supportPriority - right.supportPriority || left.rank - right.rank)
+  const orderedTargets = targets.sort(
+    (left, right) => left.supportPriority - right.supportPriority || left.rank - right.rank
+  );
+  return orderedTargets
     .slice(0, limit)
     .map((target) => ({
       searchId: target.searchId,
-      date: target.date,
-      startTime: target.startTime,
-      endTime: target.endTime,
-      players: target.players,
       rank: target.rank,
       course: target.course,
       probeUrl: target.probeUrl
     }));
+}
+
+async function listExactIncidentBrowserProbeTarget(
+  requestedCourseName: string
+): Promise<BrowserProbeTarget[]> {
+  const courses = await prisma.course.findMany({
+    where: {
+      name: { equals: requestedCourseName, mode: "insensitive" },
+      supportIncident: { is: { status: { not: "RESOLVED" } } }
+    },
+    include: {
+      preferences: {
+        where: {
+          teeSearch: {
+            status: "ACTIVE",
+            date: { gte: startOfUtcCalendarDay() }
+          }
+        },
+        orderBy: { rank: "asc" },
+        take: 1,
+        include: { teeSearch: { select: { id: true } } }
+      }
+    }
+  });
+  if (courses.length > 1) {
+    throw new Error("The requested browser-probe course name is ambiguous.");
+  }
+  const course = courses[0];
+  const probeUrl = course ? getBestProbeUrl(course) : null;
+  if (!course || !probeUrl || !shouldQueueBrowserProbe(course)) {
+    return [];
+  }
+  const preference = course.preferences[0];
+  return [
+    {
+      searchId: preference?.teeSearch.id,
+      rank: preference?.rank ?? Number.MAX_SAFE_INTEGER,
+      course: {
+        id: course.id,
+        name: course.name,
+        website: course.website,
+        detectedBookingUrl: course.detectedBookingUrl,
+        detectedPlatform: course.detectedPlatform,
+        providerFamilyKey: course.providerFamilyKey,
+        automationEligibility: course.automationEligibility,
+        bookingMetadata: course.bookingMetadata
+      },
+      probeUrl
+    }
+  ];
 }
 
 export async function listPendingMatchAlerts(searchId?: string): Promise<PendingAlertMatch[]> {
@@ -372,8 +421,37 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
     automationEligibility === "BLOCKED" &&
     ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(bookingMethod);
 
-  return prisma.course.update({
+  const current = await prisma.course.findUnique({
     where: { id: input.courseId },
+    select: {
+      providerFamilyKey: true,
+      detectedPlatform: true,
+      detectedBookingUrl: true,
+      website: true,
+      bookingMetadata: true,
+      updatedAt: true
+    }
+  });
+  if (!current) {
+    return null;
+  }
+  const persistedProvider = resolveProviderCapability(current);
+  const differentKnownProvider = Boolean(
+    persistedProvider.capability &&
+      provider.capability &&
+      persistedProvider.providerFamilyKey !== provider.providerFamilyKey
+  );
+  if (
+    provider.evidenceConflict ||
+    persistedProvider.evidenceConflict ||
+    persistedProvider.isRunnable ||
+    differentKnownProvider
+  ) {
+    return null;
+  }
+
+  const updated = await prisma.course.updateMany({
+    where: { id: input.courseId, updatedAt: current.updatedAt },
     data: {
       detectedPlatform: input.detectedPlatform,
       providerFamilyKey: provider.providerFamilyKey,
@@ -393,6 +471,11 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
       intelligenceConfidence: input.confidence
     }
   });
+  if (updated.count !== 1) {
+    return null;
+  }
+
+  return prisma.course.findUnique({ where: { id: input.courseId } });
 }
 
 export async function recordTeeTimeMatch(input: {
