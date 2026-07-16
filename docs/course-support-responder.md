@@ -17,15 +17,15 @@ The course-support responder is the dedicated engineering path for persistent `N
 
 Provider identity and runnable support come from `src/lib/automation/provider-capabilities.ts`, not scattered platform switches or optimistic URL guesses.
 
-- Runnable families are `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, and `WEBTRAC` when their required metadata validates.
-- Recognized but non-runnable families are `GOLFNOW`, `CLUB_CADDIE`, `WHOOSH`, and `TENFORE`. Recognition is not proof of monitoring support.
+- Runnable families are `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `WEBTRAC`, and `CLUB_CADDIE` when their required metadata validates.
+- Recognized but non-runnable families are `GOLFNOW`, `WHOOSH`, and `TENFORE`. Recognition is not proof of monitoring support.
 - Missing official source, missing metadata, unsupported family, authentication, rate limit, challenge, not-found, provider 5xx, timeout, network, schema, and unknown failures are classified separately.
 - Contradictory persisted provider signals resolve to `SOURCE_CONFLICT`, which is deliberately non-runnable. No provider request may run until current official-source evidence reconciles the platform, booking URL, and metadata to one family.
 - A failure fingerprint is a hash of the normalized provider family, failure class, operation, and HTTP status bucket. It contains no course name, recipient, URL, token, or raw error text.
 
 Customer-facing readiness is derived independently from internal engineering state. The canonical dispositions are `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, `BOOKING_NOT_OPEN`, `DIRECT_SITE_ONLY`, `PHONE_OR_WALK_IN`, `ACCOUNT_REQUIRED`, `POLICY_BLOCKED`, `CAPTCHA_OR_QUEUE`, `PRIVATE_OR_INVALID`, `SOURCE_UNVERIFIED`, `RETRYING`, and `ENGINEERING`. Only `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, and `BOOKING_NOT_OPEN` count as effective monitored coverage.
 
-A responder may resolve without a runnable adapter only when a current, sufficiently confident `CourseAutomationDiscovery` record cites an official HTTP(S) source and agrees with the persisted course state: booking is `PHONE_ONLY`, `CONTACT_COURSE`, or `WALK_IN`; or automation is blocked for `NO_ONLINE_BOOKING`, `AUTOMATION_PROHIBITED`, `ACCOUNT_REQUIRED`, or `CAPTCHA_OR_QUEUE`. A stale course snapshot, unsupported URL guess, or internally contradictory discovery is never a final disposition. Private/non-course identity still requires the separate exact-place review path; when that review is applied during an active responder claim, verification accepts it only if the active exact review is newer than the latest incident evidence and the persisted course is reconciled to non-public, blocked state.
+A responder may resolve without a runnable adapter only when a current, sufficiently confident `CourseAutomationDiscovery` record cites an official HTTP(S) source and agrees with the persisted course state: booking is `PHONE_ONLY`, `CONTACT_COURSE`, or `WALK_IN`; or automation is blocked for `NO_ONLINE_BOOKING`, `AUTOMATION_PROHIBITED`, `ACCOUNT_REQUIRED`, or `CAPTCHA_OR_QUEUE`. A stale course snapshot, unsupported URL guess, or internally contradictory discovery is never a final disposition. Private/non-course identity still requires the separate exact-place review path. Terminal discovery or exact-review evidence must belong to the current incident cycle and agree with the reconciled course state; later repeats of the same unresolved observation do not invalidate that durable classification. Restored runnable monitoring remains stricter and must supersede the newest failure with fresh exact-runtime workflow proof.
 
 ## Claim, Lease, And Repository Safety
 

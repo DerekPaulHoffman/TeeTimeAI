@@ -46,12 +46,14 @@ const adapterMocks = vi.hoisted(() => ({
   fetchCpsTeeSheet: vi.fn(),
   fetchChelseaTeeSheet: vi.fn(),
   fetchChronogolfSlots: vi.fn(),
+  fetchClubCaddieTeeSheet: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
   fetchGolfBackTeeSheet: vi.fn(),
   fetchWebTracTeeSheet: vi.fn(),
   isChelseaMetadata: vi.fn(),
   isCpsMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
+  isClubCaddieMetadata: vi.fn(),
   isForeupMetadata: vi.fn(),
   isGolfBackMetadata: vi.fn()
   ,isWebTracMetadata: vi.fn()
@@ -85,6 +87,7 @@ vi.mock("@/lib/adapters/golfback", () => adapterMocks);
 vi.mock("@/lib/adapters/webtrac", () => adapterMocks);
 vi.mock("@/lib/adapters/chelsea", () => adapterMocks);
 vi.mock("@/lib/adapters/chronogolf", () => adapterMocks);
+vi.mock("@/lib/adapters/clubcaddie", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerRequestLeaseMocks);
@@ -306,6 +309,12 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isChronogolfMetadata.mockReturnValue(true);
     adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
+    adapterMocks.isClubCaddieMetadata.mockReturnValue(false);
+    adapterMocks.fetchClubCaddieTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
     adapterMocks.isChelseaMetadata.mockReturnValue(true);
     adapterMocks.fetchChelseaTeeSheet.mockResolvedValue({
       slots: [],
@@ -1324,6 +1333,49 @@ describe("runSearchCheck email cadence", () => {
         courseId: "casa-linda",
         players: 2,
         metadata: expect.objectContaining({ provider: "WEBTRAC", courseCode: "25" })
+      })
+    );
+  });
+
+  it("dispatches reusable Club Caddie metadata to the anonymous public adapter", async () => {
+    const bookingBaseUrl =
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/public-course/slots";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [{
+        rank: 1,
+        course: {
+          ...search.preferences[0].course,
+          id: "ponemah",
+          name: "Ponemah Green Family Golf Center",
+          detectedPlatform: "CLUB_CADDIE",
+          detectedBookingUrl: bookingBaseUrl,
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          policyNotes: "Read-only signed-out availability; booking remains on Club Caddie.",
+          bookingMetadata: {
+            provider: "CLUB_CADDIE",
+            bookingBaseUrl
+          }
+        }
+      }]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(false);
+    adapterMocks.isChelseaMetadata.mockReturnValue(false);
+    adapterMocks.isGolfBackMetadata.mockReturnValue(false);
+    adapterMocks.isWebTracMetadata.mockReturnValue(false);
+    adapterMocks.isClubCaddieMetadata.mockReturnValue(true);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchClubCaddieTeeSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "ponemah",
+        players: 2,
+        metadata: { provider: "CLUB_CADDIE", bookingBaseUrl }
       })
     );
   });

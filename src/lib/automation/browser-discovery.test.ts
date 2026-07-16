@@ -152,7 +152,7 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("learns reusable CPS metadata from CPS booking links", () => {
+  it("recognizes a CPS tenant without inventing course ids", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
       courseName: "The Tradition Golf Club at Oak Lane",
@@ -164,19 +164,106 @@ describe("buildBrowserDiscovery", () => {
 
     const discovery = buildBrowserDiscovery(evidence);
 
-    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.status).toBe("INSPECTED");
     expect(discovery.detectedPlatform).toBe("CUSTOM");
     expect(discovery.bookingUrl).toBe("https://traditionoaklane.cps.golf/");
     expect(discovery.apiEndpoint).toBe(
       "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes"
     );
-    expect(discovery.apiMetadata).toEqual({
-      provider: "CPS",
-      siteName: "traditionoaklane",
-      bookingBaseUrl: "https://traditionoaklane.cps.golf/",
-      courseIds: [1, 2],
-      holes: [18, 9]
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe("cps-course-id-missing");
+  });
+
+  it("learns CPS metadata only when the selected tenant exposes a course id", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-with-provider-id",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.test/golf",
+      observedUrls: [
+        "https://examplepublic.cps.golf/onlineresweb/search-teetime?CourseId=7"
+      ]
     });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      bookingUrl: "https://examplepublic.cps.golf/",
+      apiMetadata: {
+        provider: "CPS",
+        siteName: "examplepublic",
+        bookingBaseUrl: "https://examplepublic.cps.golf/",
+        courseIds: [7],
+        holes: [18, 9]
+      }
+    });
+  });
+
+  it("selects the unique course-matching CPS tenant at a shared facility", () => {
+    const oaksUrl = "https://oaksgolflinks.cps.golf/onlineresweb/search-teetime";
+    const candiaUrl = "https://candiawoods.cps.golf/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "candia-woods",
+      courseName: "Candia Woods Golf Links",
+      sourceUrl: "https://candiaoaks.example/",
+      observedUrls: [oaksUrl, candiaUrl],
+      linkCandidates: [
+        { url: oaksUrl, label: "The Oaks Book A Tee Time" },
+        { url: candiaUrl, label: "Candia Woods Book A Tee Time" }
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      bookingUrl: "https://candiawoods.cps.golf/",
+      evidence: { learnedFrom: "cps-course-id-missing" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("keeps same-tenant CPS course ids separate until the target course is selected", () => {
+    const oaksUrl =
+      "https://candiaoaks.cps.golf/onlineresweb/search-teetime?CourseId=11";
+    const candiaUrl =
+      "https://candiaoaks.cps.golf/onlineresweb/search-teetime?CourseId=22";
+    const discovery = buildBrowserDiscovery({
+      courseId: "candia-woods",
+      courseName: "Candia Woods Golf Links",
+      sourceUrl: "https://candiaoaks.example/",
+      observedUrls: [oaksUrl, candiaUrl],
+      linkCandidates: [
+        { url: oaksUrl, label: "The Oaks Golf Links Book A Tee Time" },
+        { url: candiaUrl, label: "Candia Woods Golf Links Book A Tee Time" }
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      bookingUrl: "https://candiaoaks.cps.golf/",
+      apiMetadata: {
+        provider: "CPS",
+        siteName: "candiaoaks",
+        bookingBaseUrl: "https://candiaoaks.cps.golf/",
+        courseIds: [22]
+      }
+    });
+  });
+
+  it("does not merge unlabeled course ids from one shared CPS tenant", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unresolved-shared-tenant-course",
+      courseName: "Target Public Golf Course",
+      sourceUrl: "https://shared.example/",
+      observedUrls: [
+        "https://sharedfacility.cps.golf/onlineresweb/search-teetime?CourseId=11",
+        "https://sharedfacility.cps.golf/onlineresweb/search-teetime?CourseId=22"
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      bookingUrl: "https://sharedfacility.cps.golf/",
+      evidence: { learnedFrom: "cps-course-id-missing" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("classifies a managed-challenge CPS surface as direct booking", () => {
@@ -250,6 +337,198 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
   });
 
+  it("maps Ponemah to its labeled Club Caddie tee sheet instead of Amherst or activity inventory", () => {
+    const amherstUrl =
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/amherst-public/slots";
+    const ponemahUrl =
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/ponemah-public/slots";
+    const activityUrl =
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/simulator-public/slots";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ponemah",
+      courseName: "Ponemah Green Family Golf Center",
+      sourceUrl: "https://www.playamherst.com/ponemah-green",
+      observedUrls: [amherstUrl, ponemahUrl, activityUrl],
+      linkCandidates: [
+        { url: amherstUrl, label: "Book @ ACC" },
+        { url: ponemahUrl, label: "Book @ PG" },
+        { url: activityUrl, label: "Book Golf Simulator" }
+      ],
+      visibleText: "Book a public tee time"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CLUB_CADDIE",
+      bookingUrl: ponemahUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiEndpoint: "https://apimanager-cc28.clubcaddie.com/webapi/TeeTimes",
+      apiMetadata: {
+        provider: "CLUB_CADDIE",
+        bookingBaseUrl: ponemahUrl
+      },
+      evidence: { learnedFrom: "club-caddie-public-tee-time-link" }
+    });
+    expect(
+      buildBrowserDiscovery({
+        courseId: "amherst",
+        courseName: "Amherst Country Club",
+        sourceUrl: "https://www.playamherst.com/",
+        observedUrls: [amherstUrl, ponemahUrl],
+        linkCandidates: [
+          { url: amherstUrl, label: "Book @ ACC" },
+          { url: ponemahUrl, label: "Book @ PG" }
+        ]
+      }).apiMetadata
+    ).toEqual({
+      provider: "CLUB_CADDIE",
+      bookingBaseUrl: amherstUrl
+    });
+  });
+
+  it("keeps Independence Championship and Bear Club Caddie inventories separate", () => {
+    const championshipUrl =
+      "https://apimanager-cc30.clubcaddie.com/webapi/view/championship-public/slots";
+    const bearUrl =
+      "https://apimanager-cc30.clubcaddie.com/webapi/view/bear-public/slots";
+    const evidence = {
+      sourceUrl: "https://independencegolfclub.com/overview/bear/",
+      observedUrls: [championshipUrl, bearUrl],
+      linkCandidates: [
+        { url: championshipUrl, label: "Book Championship Course Tee Times" },
+        { url: bearUrl, label: "Book The Bear Tee Times" }
+      ]
+    };
+
+    expect(
+      buildBrowserDiscovery({
+        ...evidence,
+        courseId: "independence",
+        courseName: "Independence Golf Club"
+      }).apiMetadata
+    ).toEqual({
+      provider: "CLUB_CADDIE",
+      bookingBaseUrl: championshipUrl
+    });
+    expect(
+      buildBrowserDiscovery({
+        ...evidence,
+        courseId: "bear",
+        courseName: "The Bear at Independence Golf Club"
+      }).apiMetadata
+    ).toEqual({
+      provider: "CLUB_CADDIE",
+      bookingBaseUrl: bearUrl
+    });
+  });
+
+  it("does not guess between multiple unlabeled Club Caddie tee sheets", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "ambiguous-club-caddie",
+      courseName: "Shared Facility Golf Course",
+      sourceUrl: "https://shared.example/golf",
+      finalUrl:
+        "https://apimanager-cc20.clubcaddie.com/webapi/view/first-public/slots",
+      observedUrls: [
+        "https://apimanager-cc20.clubcaddie.com/webapi/view/first-public/slots",
+        "https://apimanager-cc20.clubcaddie.com/webapi/view/second-public/slots"
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CLUB_CADDIE",
+      bookingUrl: "https://shared.example/golf"
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("learns one unambiguous safe Club Caddie public tee sheet", () => {
+    const bookingUrl =
+      "https://apimanager-cc12.clubcaddie.com/webapi/view/single-public/slots";
+    const discovery = buildBrowserDiscovery({
+      courseId: "single-club-caddie",
+      courseName: "Single Public Golf Course",
+      sourceUrl: "https://single.example/",
+      observedUrls: [bookingUrl],
+      linkCandidates: [{
+        url: bookingUrl,
+        label: "Book Tee Times"
+      }]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      bookingUrl,
+      apiMetadata: { provider: "CLUB_CADDIE", bookingBaseUrl: bookingUrl }
+    });
+  });
+
+  it("does not map a lone generic Club Caddie link to an uncorroborated sibling course", () => {
+    const championshipUrl =
+      "https://apimanager-cc30.clubcaddie.com/webapi/view/championship-public/slots";
+    const discovery = buildBrowserDiscovery({
+      courseId: "bear",
+      courseName: "The Bear at Independence Golf Club",
+      sourceUrl: "https://independencegolfclub.com/overview/bear/",
+      observedUrls: [championshipUrl],
+      linkCandidates: [{ url: championshipUrl, label: "Book Tee Times" }]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CLUB_CADDIE",
+      bookingUrl: "https://independencegolfclub.com/overview/bear/"
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not persist a Club Caddie request-local interaction URL as metadata", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "session-specific-club-caddie",
+      courseName: "Session Specific Golf Course",
+      sourceUrl: "https://session-specific.example/",
+      observedUrls: [
+        "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots?Interaction=request-local-value"
+      ]
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+    const serialized = JSON.stringify(discovery);
+    expect(serialized).not.toContain("Interaction");
+    expect(serialized).not.toContain("request-local-value");
+    expect(discovery.evidence.observedUrls).toEqual(
+      expect.arrayContaining([
+        "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots"
+      ])
+    );
+  });
+
+  it("does not learn a lone Club Caddie simulator or mini-golf inventory", () => {
+    const bookingUrl =
+      "https://apimanager-cc12.clubcaddie.com/webapi/view/activity-public/slots";
+    const discovery = buildBrowserDiscovery({
+      courseId: "activity-only-club-caddie",
+      courseName: "Example Golf Course",
+      sourceUrl: "https://example.test/golf",
+      observedUrls: [bookingUrl],
+      linkCandidates: [{
+        url: bookingUrl,
+        label: "Book Mini Golf Simulator Activity"
+      }]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CLUB_CADDIE",
+      bookingUrl: "https://example.test/golf"
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("learns CPS metadata from an official tee-time widget config", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-stanley",
@@ -273,6 +552,46 @@ describe("buildBrowserDiscovery", () => {
       courseIds: [0],
       holes: [18, 9]
     });
+  });
+
+  it("selects only the uniquely matching course from a multi-location CPS widget", () => {
+    const visibleText =
+      '{"baseURL":"https://candiaoaks.cps.golf/onlineresweb/search-teetime","locations":[{"name":"The Oaks Golf Links","courseId":"11"},{"name":"Candia Woods Golf Links","courseId":"22"}]}';
+    const discover = (courseId: string, courseName: string) =>
+      buildBrowserDiscovery({
+        courseId,
+        courseName,
+        sourceUrl: "https://candiaoaks.example/",
+        observedUrls: ["https://candiaoaks.example/"],
+        visibleText
+      });
+
+    expect(discover("candia-woods", "Candia Woods Golf Links").apiMetadata).toMatchObject({
+      provider: "CPS",
+      courseIds: [22]
+    });
+    expect(discover("the-oaks", "The Oaks Golf Links").apiMetadata).toMatchObject({
+      provider: "CPS",
+      courseIds: [11]
+    });
+  });
+
+  it("leaves a multi-location CPS widget without a unique course match unrunnable", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-facility",
+      courseName: "Shared Facility Golf Course",
+      sourceUrl: "https://shared.example/",
+      observedUrls: ["https://shared.example/"],
+      visibleText:
+        '{"baseURL":"https://sharedfacility.cps.golf/onlineresweb/search-teetime","locations":[{"name":"North Course","courseId":"11"},{"name":"South Course","courseId":"22"}]}'
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      bookingUrl: "https://sharedfacility.cps.golf/",
+      evidence: { learnedFrom: "cps-course-id-missing" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("does not mistake a CPS webstore for a public tee-time reservation surface", () => {
@@ -321,6 +640,25 @@ describe("buildBrowserDiscovery", () => {
       defaultHoles: 18,
       defaultAddons: "off"
     });
+  });
+
+  it("does not let a stale TeeSnap course URL override current provider config", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "stale-teesnap-link",
+      courseName: "Current Public Golf Course",
+      sourceUrl: "https://current.example/",
+      observedUrls: [
+        "https://current.teesnap.net/customer-api/teetimes-day?course=999"
+      ],
+      visibleText:
+        'window.courses = [{"id":1,"name":"Current Public Golf Course","holes_default":18}]'
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe(
+      "teesnap-url-without-course-id:observed-course-config-mismatch"
+    );
   });
 
   it("does not treat social media links as booking pages just because facebook contains book", () => {
@@ -414,6 +752,60 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("selects one compatible physical TeeSnap course and excludes disc golf", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "sunset-ridge",
+      courseName: "Sunset Ridge Golf Links",
+      sourceUrl: "https://sunset-ridge.example/",
+      observedUrls: ["https://sunsetridge.teesnap.net/"],
+      visibleText:
+        'window.courses = [{"id":412,"name":"Sunset Ridge","holes_default":18},{"id":413,"name":"Sunset Ridge Disc Golf","course_type":"disc_golf"}]; window.bookingReady = true;'
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      apiMetadata: {
+        provider: "TEESNAP",
+        courseId: 412,
+        bookingBaseUrl: "https://sunsetridge.teesnap.net/",
+        defaultHoles: 18
+      }
+    });
+  });
+
+  it("does not infer TeeSnap identity from a sole unnamed config", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unnamed-teesnap-config",
+      courseName: "Expected Public Golf Course",
+      sourceUrl: "https://expected.example/",
+      observedUrls: ["https://expected.teesnap.net/"],
+      visibleText: 'window.courses = [{"id":412,"holes_default":18}]'
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe(
+      "teesnap-url-without-course-id:physical-course-config-missing"
+    );
+  });
+
+  it("does not guess between multiple compatible physical TeeSnap courses", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "river-valley",
+      courseName: "River Valley Golf Course",
+      sourceUrl: "https://river-valley.example/",
+      observedUrls: ["https://rivervalley.teesnap.net/"],
+      visibleText:
+        'window.courses = [{"id":41,"name":"River Valley North"},{"id":42,"name":"River Valley South"}];'
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe(
+      "teesnap-url-without-course-id:course-config-ambiguous"
+    );
+  });
+
   it("enriches a public Teesnap page when the initial site crawl only found its URL", async () => {
     const discovery = buildBrowserDiscovery({
       courseId: "course-southers-marsh",
@@ -458,6 +850,28 @@ describe("buildBrowserDiscovery", () => {
       },
       evidence: { learnedFrom: "teesnap-public-course-config" }
     });
+  });
+
+  it("records a bounded reason when public TeeSnap config has no course data", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "missing-teesnap-config",
+      courseName: "Missing TeeSnap Config Golf Course",
+      sourceUrl: "https://missing.example/",
+      observedUrls: ["https://missing.teesnap.net/"]
+    });
+    const enriched = await enrichTeesnapDiscovery(
+      discovery,
+      "Missing TeeSnap Config Golf Course",
+      vi.fn().mockResolvedValue(
+        new Response("<html><body>Public tee times</body></html>", { status: 200 })
+      ) as typeof fetch
+    );
+
+    expect(enriched.status).toBe("INSPECTED");
+    expect(enriched.apiMetadata).toBeUndefined();
+    expect(enriched.evidence.learnedFrom).toBe(
+      "teesnap-public-config-course-config-missing"
+    );
   });
 
   it("classifies explicit official private-club access without a public adapter", () => {

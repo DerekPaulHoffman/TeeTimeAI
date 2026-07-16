@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildChronogolfPublicRequestHeaders,
   fetchChronogolfSlots,
   isChronogolfMetadata
 } from "./chronogolf";
@@ -15,6 +16,32 @@ describe("Chronogolf adapter", () => {
       })
     ).toBe(true);
     expect(isChronogolfMetadata({ clubId: 7221, courseIds: [] })).toBe(false);
+    expect(
+      isChronogolfMetadata({
+        clubId: 7221,
+        courseIds: ["course-id"],
+        bookingBaseUrl: "https://members.chronogolf.com/club/member-login"
+      })
+    ).toBe(false);
+    expect(
+      isChronogolfMetadata({
+        clubId: 7221,
+        courseIds: ["course-id"],
+        bookingBaseUrl: "https://cdn2.chronogolf.com/widgets/v2"
+      })
+    ).toBe(false);
+  });
+
+  it("identifies itself and uses the canonical public profile as request context", () => {
+    expect(
+      buildChronogolfPublicRequestHeaders(
+        "https://chronogolf.com/club/blue-rock-golf-course"
+      )
+    ).toEqual({
+      accept: "application/json",
+      referer: "https://www.chronogolf.com/club/blue-rock-golf-course",
+      "user-agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)"
+    });
   });
 
   it("normalizes public tee times without entering the booking flow", async () => {
@@ -69,11 +96,13 @@ describe("Chronogolf adapter", () => {
 
     expect(requestMock).toHaveBeenNthCalledWith(
       1,
-      "https://www.chronogolf.com/marketplace/v2/teetimes?start_date=2026-07-14&free_slots=3&course_ids=7657db51-4e0c-4bc7-8e98-bd0a705370af&page=1"
+      "https://www.chronogolf.com/marketplace/v2/teetimes?start_date=2026-07-14&free_slots=3&course_ids=7657db51-4e0c-4bc7-8e98-bd0a705370af&page=1",
+      "https://www.chronogolf.com/club/blue-rock-golf-course"
     );
     expect(requestMock).toHaveBeenNthCalledWith(
       2,
-      "https://www.chronogolf.com/marketplace/v2/teetimes?start_date=2026-07-14&free_slots=3&course_ids=7657db51-4e0c-4bc7-8e98-bd0a705370af&page=2"
+      "https://www.chronogolf.com/marketplace/v2/teetimes?start_date=2026-07-14&free_slots=3&course_ids=7657db51-4e0c-4bc7-8e98-bd0a705370af&page=2",
+      "https://www.chronogolf.com/club/blue-rock-golf-course"
     );
     expect(slots).toEqual([
       {

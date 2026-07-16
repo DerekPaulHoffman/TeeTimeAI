@@ -747,6 +747,62 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("preserves official booking-link labels so shared Club Caddie inventories can be mapped safely", async () => {
+    const amherstUrl =
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/amherst-public/slots";
+    const ponemahUrl =
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/ponemah-public/slots";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === "https://playamherst.example/ponemah") {
+        return new Response(
+          `<html><a href="${amherstUrl}">Book @ ACC</a><a href="${ponemahUrl}">Book @ PG</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("<html><body>Public tee-time search</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      "https://playamherst.example/ponemah",
+      fetchImpl as typeof fetch,
+      "Ponemah Green Family Golf Center"
+    );
+
+    expect(evidence.linkCandidates).toEqual(expect.arrayContaining([
+      { url: amherstUrl, label: "Book @ ACC" },
+      { url: ponemahUrl, label: "Book @ PG" }
+    ]));
+  });
+
+  it("follows the course-matching CPS tenant before a sibling facility", async () => {
+    const sourceUrl = "https://candiaoaks.example/";
+    const oaksUrl = "https://oaksgolflinks.cps.golf/onlineresweb/search-teetime";
+    const candiaUrl = "https://candiawoods.cps.golf/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><a href="${oaksUrl}">The Oaks Book A Tee Time</a><a href="${candiaUrl}">Candia Woods Book A Tee Time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("<html><body>Public tee times</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Candia Woods Golf Links"
+    );
+
+    expect(fetchImpl.mock.calls[1]?.[0].toString()).toBe(candiaUrl);
+  });
+
   it("falls back to an HTTP official site when HTTPS is unavailable", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();

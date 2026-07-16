@@ -60,6 +60,11 @@ const runnableMetadata = {
     bookingBaseUrl:
       "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25",
     courseCode: "25"
+  },
+  CLUB_CADDIE: {
+    provider: "CLUB_CADDIE",
+    bookingBaseUrl:
+      "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots"
   }
 } as const;
 
@@ -82,7 +87,7 @@ describe("provider capability registry", () => {
       GOLFBACK: [true, "CUSTOM"],
       WEBTRAC: [true, "CUSTOM"],
       GOLFNOW: [false, "GOLFNOW"],
-      CLUB_CADDIE: [false, "CLUB_CADDIE"],
+      CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [false, "CUSTOM"],
       TENFORE: [false, "CUSTOM"]
     });
@@ -94,7 +99,12 @@ describe("provider capability registry", () => {
       expect(isProviderMetadataReady(family, metadata)).toBe(true);
       expect(
         resolveProviderCapability({
-          detectedPlatform: ["FOREUP", "TEEITUP", "CHRONOGOLF"].includes(family)
+          detectedPlatform: [
+            "FOREUP",
+            "TEEITUP",
+            "CHRONOGOLF",
+            "CLUB_CADDIE"
+          ].includes(family)
             ? family
             : "CUSTOM",
           bookingMetadata: metadata

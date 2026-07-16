@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { isCpsMetadata } from "@/lib/adapters/cps";
 import { isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { isChronogolfMetadata } from "@/lib/adapters/chronogolf";
+import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isForeupMetadata } from "@/lib/adapters/foreup";
 import { isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
@@ -162,8 +163,9 @@ export const PROVIDER_CAPABILITIES = {
   CLUB_CADDIE: {
     family: "CLUB_CADDIE",
     detectedPlatform: "CLUB_CADDIE",
-    supportsAutomation: false,
-    matchesHostname: (hostname) => matchesDomain(hostname, "clubcaddie.com")
+    supportsAutomation: true,
+    matchesHostname: (hostname) => matchesDomain(hostname, "clubcaddie.com"),
+    validatesMetadata: isClubCaddieMetadata
   },
   WHOOSH: {
     family: "WHOOSH",
@@ -228,7 +230,8 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["CHELSEA", "CHELSEA"],
   ["TEESNAP", "TEESNAP"],
   ["GOLFBACK", "GOLFBACK"],
-  ["WEBTRAC", "WEBTRAC"]
+  ["WEBTRAC", "WEBTRAC"],
+  ["CLUB_CADDIE", "CLUB_CADDIE"]
 ]);
 
 export function resolveProviderCapability(

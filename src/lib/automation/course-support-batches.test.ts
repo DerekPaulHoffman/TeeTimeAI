@@ -339,7 +339,8 @@ describe("fresh runtime verification", () => {
     expect(
       classifyFreshBatchEvidence({
         batchCreatedAt: now,
-        incidentLastSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
         course: {
           ...runnableCourse,
           bookingMethod: "PHONE_ONLY",
@@ -359,11 +360,62 @@ describe("fresh runtime verification", () => {
     ).toBe("FINAL_DISPOSITION");
   });
 
+  it("accepts a current technical access barrier as a terminal disposition", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
+        course: {
+          ...runnableCourse,
+          automationEligibility: "BLOCKED",
+          automationReason: "ACCOUNT_REQUIRED",
+          latestDiscovery: {
+            status: "BLOCKED",
+            bookingMethod: "PUBLIC_ONLINE",
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            sourceUrl: "https://course.example/official-booking",
+            bookingUrl: "https://course.example/official-booking",
+            confidence: 0.9,
+            createdAt: new Date("2026-07-15T18:30:00.000Z")
+          }
+        }
+      }).result
+    ).toBe("FINAL_DISPOSITION");
+  });
+
+  it("accepts a current source-backed prohibited-automation disposition", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
+        course: {
+          ...runnableCourse,
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          latestDiscovery: {
+            status: "BLOCKED",
+            bookingMethod: "PUBLIC_ONLINE",
+            automationEligibility: "BLOCKED",
+            automationReason: "AUTOMATION_PROHIBITED",
+            sourceUrl: "https://course.example/official-booking",
+            bookingUrl: "https://course.example/official-booking",
+            confidence: 0.9,
+            createdAt: new Date("2026-07-15T18:30:00.000Z")
+          }
+        }
+      }).result
+    ).toBe("FINAL_DISPOSITION");
+  });
+
   it("accepts a current exact-place non-course disposition after course reconciliation", () => {
     expect(
       classifyFreshBatchEvidence({
         batchCreatedAt: now,
-        incidentLastSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
         course: {
           ...runnableCourse,
           isPublic: false,
@@ -390,7 +442,7 @@ describe("fresh runtime verification", () => {
 
   it.each([
     {
-      label: "the exact review predates the latest incident evidence",
+      label: "the exact review predates the incident cycle",
       isPublic: false,
       automationEligibility: "BLOCKED" as const,
       automationReason: "OTHER" as const,
@@ -417,7 +469,8 @@ describe("fresh runtime verification", () => {
     expect(
       classifyFreshBatchEvidence({
         batchCreatedAt: now,
-        incidentLastSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+        incidentFirstSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
         course: {
           ...runnableCourse,
           isPublic: scenario.isPublic,
@@ -453,7 +506,10 @@ describe("fresh runtime verification", () => {
           },
           verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
           verifiedIncidentUpdatedAt: new Date("2026-07-15T19:00:00.000Z"),
-          incident: { lastSeenAt: new Date("2026-07-15T19:00:00.000Z") }
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
         },
         {
           createdAt: new Date("2026-07-15T18:00:00.000Z"),
@@ -465,7 +521,7 @@ describe("fresh runtime verification", () => {
     ).toBe(true);
   });
 
-  it("rejects exact-place terminal proof older than the latest incident evidence", () => {
+  it("rejects exact-place terminal proof older than the incident cycle", () => {
     expect(
       isDurableTerminalProof(
         {
@@ -482,13 +538,75 @@ describe("fresh runtime verification", () => {
           },
           verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
           verifiedIncidentUpdatedAt: new Date("2026-07-15T19:00:00.000Z"),
-          incident: { lastSeenAt: new Date("2026-07-15T19:00:00.000Z") }
+          incident: {
+            firstSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
         },
         {
           createdAt: new Date("2026-07-15T18:00:00.000Z"),
           releaseSha: null,
           deployedAt: null,
           recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(false);
+  });
+
+  it("keeps a source-backed terminal disposition durable across repeated identical failures", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: {
+            kind: "FINAL_DISPOSITION",
+            disposition: "MANUAL_DIRECT",
+            evidenceOrigin: "https://course.example",
+            discoveryCreatedAt: "2026-07-15T18:30:00.000Z",
+            confidence: 0.9
+          },
+          verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(true);
+  });
+
+  it("still requires restored monitoring to supersede the newest failure", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "RESTORED",
+          proofSnapshot: {
+            kind: "PROVIDER_PROBE",
+            outcome: "NO_MATCH",
+            observedAt: "2026-07-15T20:06:00.000Z",
+            freshSearchCheckedAt: "2026-07-15T20:06:00.000Z",
+            runtimeVersion: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            providerExecution: true
+          },
+          verifiedAt: new Date("2026-07-15T20:07:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T20:06:30.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T20:06:30.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T20:00:00.000Z"),
+          releaseSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+          recheckDispatchStartedAt: new Date("2026-07-15T20:05:30.000Z")
         }
       )
     ).toBe(false);

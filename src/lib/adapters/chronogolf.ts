@@ -7,6 +7,8 @@ const CHRONOGOLF_MARKETPLACE_BASE_URL = "https://www.chronogolf.com";
 const CHRONOGOLF_REQUEST_TIMEOUT_MS = 10_000;
 const CHRONOGOLF_RESPONSE_LIMIT_BYTES = 5 * 1024 * 1024;
 const CHRONOGOLF_MAX_PAGES = 10;
+const CHRONOGOLF_PUBLIC_MONITOR_USER_AGENT =
+  "TeeTimeSpot/1.0 (+https://teetimespot.com)";
 
 export type ChronogolfMetadata = {
   clubId: number;
@@ -42,7 +44,25 @@ type ChronogolfPage = {
   perPage: number;
 };
 
-type ChronogolfRequester = (url: string) => Promise<ChronogolfPage>;
+type ChronogolfRequester = (
+  url: string,
+  bookingBaseUrl: string
+) => Promise<ChronogolfPage>;
+
+export function buildChronogolfPublicRequestHeaders(bookingBaseUrl: string) {
+  const publicProfileUrl = normalizeChronogolfPublicProfileUrl(bookingBaseUrl);
+  if (!publicProfileUrl) {
+    throw new Error(
+      "Chronogolf metadata did not include a canonical public club profile"
+    );
+  }
+
+  return {
+    accept: "application/json",
+    referer: publicProfileUrl,
+    "user-agent": CHRONOGOLF_PUBLIC_MONITOR_USER_AGENT
+  };
+}
 
 export function isChronogolfMetadata(value: unknown): value is ChronogolfMetadata {
   if (!value || typeof value !== "object") {
@@ -56,8 +76,11 @@ export function isChronogolfMetadata(value: unknown): value is ChronogolfMetadat
     metadata.clubId > 0 &&
     Array.isArray(metadata.courseIds) &&
     metadata.courseIds.length > 0 &&
-    metadata.courseIds.every((courseId) => typeof courseId === "string" && courseId.length > 0) &&
-    typeof metadata.bookingBaseUrl === "string"
+    metadata.courseIds.every(
+      (courseId) => typeof courseId === "string" && courseId.length > 0
+    ) &&
+    typeof metadata.bookingBaseUrl === "string" &&
+    normalizeChronogolfPublicProfileUrl(metadata.bookingBaseUrl) !== null
   );
 }
 
@@ -71,7 +94,7 @@ export async function fetchChronogolfSlots(input: {
 
   for (let page = 1; page <= CHRONOGOLF_MAX_PAGES; page += 1) {
     const url = buildTeeTimesUrl(input.date, input.players, input.metadata.courseIds, page);
-    const response = await request(url);
+    const response = await request(url, input.metadata.bookingBaseUrl);
     const teeTimes = Array.isArray(response.payload.teetimes)
       ? response.payload.teetimes
       : [];
@@ -125,8 +148,12 @@ function normalizeSlot(
     }];
 }
 
-async function requestChronogolfJson(urlValue: string): Promise<ChronogolfPage> {
+async function requestChronogolfJson(
+  urlValue: string,
+  bookingBaseUrl: string
+): Promise<ChronogolfPage> {
   const url = new URL(urlValue);
+  const headers = buildChronogolfPublicRequestHeaders(bookingBaseUrl);
 
   return new Promise((resolve, reject) => {
     const client = connect(url.origin);
@@ -161,7 +188,7 @@ async function requestChronogolfJson(urlValue: string): Promise<ChronogolfPage> 
     const request = client.request({
       ":method": "GET",
       ":path": `${url.pathname}${url.search}`,
-      accept: "application/json"
+      ...headers
     });
 
     request.setEncoding("utf8");
@@ -229,8 +256,38 @@ function toPriceCents(value?: number) {
 }
 
 function withSearchDate(bookingBaseUrl: string, date: Date) {
-  const url = new URL(bookingBaseUrl);
+  const publicProfileUrl = normalizeChronogolfPublicProfileUrl(bookingBaseUrl);
+  if (!publicProfileUrl) {
+    throw new Error(
+      "Chronogolf metadata did not include a canonical public club profile"
+    );
+  }
+  const url = new URL(publicProfileUrl);
   url.searchParams.set("date", date.toISOString().slice(0, 10));
   url.searchParams.set("step", "teetimes");
   return url.toString();
+}
+
+function normalizeChronogolfPublicProfileUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      url.port ||
+      url.username ||
+      url.password ||
+      !["chronogolf.com", "www.chronogolf.com"].includes(url.hostname.toLowerCase()) ||
+      url.search ||
+      url.hash ||
+      !/^\/club\/[^/]+\/?$/i.test(url.pathname)
+    ) {
+      return null;
+    }
+
+    url.hostname = "www.chronogolf.com";
+    url.pathname = url.pathname.replace(/\/$/, "");
+    return url.toString();
+  } catch {
+    return null;
+  }
 }

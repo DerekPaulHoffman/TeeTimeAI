@@ -45,6 +45,10 @@ import {
 } from "@/lib/adapters/cps";
 import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
+import {
+  fetchClubCaddieTeeSheet,
+  isClubCaddieMetadata
+} from "@/lib/adapters/clubcaddie";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
@@ -1295,6 +1299,17 @@ function fetchCourseTeeSheet(
       players,
       metadata: course.bookingMetadata,
       discoverBookingWindow
+    });
+  }
+  if (
+    providerFamily === "CLUB_CADDIE" &&
+    isClubCaddieMetadata(course.bookingMetadata)
+  ) {
+    return fetchClubCaddieTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
     });
   }
   if (providerFamily === "TEESNAP" && isTeesnapMetadata(course.bookingMetadata)) {

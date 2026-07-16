@@ -16,6 +16,10 @@ import {
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import {
+  haveCompatibleCourseNames,
+  normalizeCourseIdentityName
+} from "@/lib/places/course-identity";
 
 const DISCOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_RETRY_DELAY_MS = 30 * 60 * 1000;
@@ -38,6 +42,7 @@ type CollectedPageEvidence = Pick<
   | "sourceUrl"
   | "finalUrl"
   | "observedUrls"
+  | "linkCandidates"
   | "visibleText"
   | "bookingSurfaceText"
   | "providerPolicyText"
@@ -229,7 +234,8 @@ export async function collectOfficialSiteEvidence(
       ) ??
       pickLikelyBookingCandidate(
         unvisitedCandidates,
-        firstPage.finalUrl
+        firstPage.finalUrl,
+        courseName
       ) ??
       pickPrivateClubInformationCandidate(
         unvisitedCandidates,
@@ -293,6 +299,9 @@ export async function collectOfficialSiteEvidence(
           : [])
       ]
     ),
+    linkCandidates: uniqueLinkCandidates(
+      pages.flatMap((page) => page.evidence.linkCandidates)
+    ).slice(0, 200),
     visibleText: pages.slice().reverse().map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
@@ -505,12 +514,13 @@ function extractWhooshAutomationPolicyText(html: string) {
 
 function pickLikelyBookingCandidate(
   candidates: Array<{ url: string; label: string }>,
-  currentUrl: string
+  currentUrl: string,
+  courseName?: string
 ) {
   return candidates
     .map((candidate) => ({
       ...candidate,
-      score: scoreBookingCandidate(candidate, currentUrl)
+      score: scoreBookingCandidate(candidate, currentUrl, courseName)
     }))
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score)[0]?.url;
@@ -598,7 +608,11 @@ function pickPrivateClubInformationCandidate(
   })?.url;
 }
 
-function scoreBookingCandidate(candidate: { url: string; label: string }, currentUrl: string) {
+function scoreBookingCandidate(
+  candidate: { url: string; label: string },
+  currentUrl: string,
+  courseName?: string
+) {
   const parsed = new URL(candidate.url);
   const searchable = `${candidate.label} ${parsed.hostname} ${parsed.pathname} ${parsed.search}`;
   let score = 0;
@@ -610,6 +624,27 @@ function scoreBookingCandidate(candidate: { url: string; label: string }, curren
   }
   if (/book|reserve|reservation/i.test(searchable)) {
     score += 15;
+  }
+  if (
+    courseName &&
+    candidate.label &&
+    haveCompatibleCourseNames(courseName, candidate.label)
+  ) {
+    score += 80;
+  }
+  if (courseName && parsed.hostname.endsWith(".cps.golf")) {
+    const targetIdentity = normalizeCourseIdentityName(
+      courseName.replace(/\b(?:and|at|of)\b/gi, " ")
+    ).replace(/\s+/g, "");
+    const tenant = parsed.hostname.split(".")[0]
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+    if (
+      targetIdentity.length >= 4 &&
+      (tenant.includes(targetIdentity) || targetIdentity.includes(tenant))
+    ) {
+      score += 80;
+    }
   }
   if (normalizeSourceKey(candidate.url) === normalizeSourceKey(currentUrl)) {
     score -= 100;
@@ -761,4 +796,16 @@ function normalizeSourceKey(value: string) {
 
 function uniqueStrings(values: Array<string | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function uniqueLinkCandidates(values: Array<{ url: string; label: string }>) {
+  const seen = new Set<string>();
+  return values.filter((candidate) => {
+    const key = `${candidate.url}\u0000${candidate.label}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }

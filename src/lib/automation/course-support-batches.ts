@@ -370,8 +370,8 @@ export function classifyFreshBatchEvidence(input: {
 }): BatchIncidentVerification {
   const finalDisposition = getPersistedFinalDisposition(
     input.course,
-    input.incidentLastSeenAt ??
-      input.incidentFirstSeenAt ??
+    input.incidentFirstSeenAt ??
+      input.incidentLastSeenAt ??
       input.batchCreatedAt
   );
   if (finalDisposition) {
@@ -3549,7 +3549,7 @@ export function isDurableTerminalProof(
     proofSnapshot: Prisma.JsonValue | null;
     verifiedAt: Date | null;
     verifiedIncidentUpdatedAt: Date | null;
-    incident: { lastSeenAt: Date };
+    incident: { firstSeenAt: Date; lastSeenAt: Date };
   },
   batch: {
     createdAt: Date;
@@ -3594,7 +3594,7 @@ export function isDurableTerminalProof(
           getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
           reviewedAt &&
           reviewUpdatedAt &&
-          reviewUpdatedAt.getTime() >= entry.incident.lastSeenAt.getTime() &&
+          reviewUpdatedAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
           proof.automationEligibility === "BLOCKED" &&
           proof.automationReason === "OTHER"
       );
@@ -3605,7 +3605,7 @@ export function isDurableTerminalProof(
         typeof proof.evidenceOrigin === "string" &&
         getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
         discoveredAt &&
-        discoveredAt.getTime() >= entry.incident.lastSeenAt.getTime() &&
+        discoveredAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
         typeof proof.confidence === "number" &&
         proof.confidence >= 0.7
     );

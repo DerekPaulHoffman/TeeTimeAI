@@ -2,7 +2,12 @@ import type {
   AutomationReason,
   BookingMethod
 } from "@/lib/courses/intelligence";
+import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import {
+  haveCompatibleCourseNames,
+  normalizeCourseIdentityName
+} from "@/lib/places/course-identity";
 
 export type BrowserDiscoveryEvidence = {
   courseId: string;
@@ -10,6 +15,7 @@ export type BrowserDiscoveryEvidence = {
   sourceUrl: string;
   finalUrl?: string;
   observedUrls: string[];
+  linkCandidates?: Array<{ url: string; label: string }>;
   visibleText?: string;
   bookingSurfaceText?: string;
   providerPolicyText?: string;
@@ -71,6 +77,9 @@ export type BrowserDiscovery = {
     bookingWindowDaysAhead?: number;
     bookingWindowEvidenceUrl?: string;
   } | {
+    provider: "CLUB_CADDIE";
+    bookingBaseUrl: string;
+  } | {
     clubId: number;
     courseIds: string[];
     bookingBaseUrl: string;
@@ -94,6 +103,7 @@ export type BrowserProbeCourseInput = {
 };
 
 export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): BrowserDiscovery {
+  evidence = sanitizeClubCaddieDiscoveryEvidence(evidence);
   const observedUrls = uniqueUrls([
     evidence.finalUrl,
     evidence.sourceUrl,
@@ -156,6 +166,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return webTracDiscovery;
   }
 
+  const clubCaddieDiscovery = learnClubCaddieDiscovery(evidence, observedUrls);
+
+  if (clubCaddieDiscovery) {
+    return clubCaddieDiscovery;
+  }
+
   const protectedCpsDiscovery = learnProtectedCpsDiscovery(evidence, observedUrls);
 
   if (protectedCpsDiscovery) {
@@ -180,7 +196,10 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return tenForeDiscovery;
   }
 
-  const bookingUrl = pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
+  const clubCaddieCandidates = getClubCaddieCandidates(evidence, observedUrls);
+  const bookingUrl = clubCaddieCandidates.length > 0
+    ? evidence.sourceUrl
+    : pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
 
   return {
     courseId: evidence.courseId,
@@ -196,6 +215,283 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       learnedFrom: "browser-visible-links"
     }
   };
+}
+
+function learnClubCaddieDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const candidates = getClubCaddieCandidates(evidence, observedUrls);
+  const selected = selectClubCaddieCandidate(candidates, evidence.courseName);
+  if (!selected) {
+    return null;
+  }
+
+  const metadata = {
+    provider: "CLUB_CADDIE" as const,
+    bookingBaseUrl: selected.url
+  };
+  if (!isClubCaddieMetadata(metadata)) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CLUB_CADDIE",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: selected.url,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The course's official site links to a signed-out Club Caddie tee sheet. Tee Time Spot reads only public availability and leaves account, cart, checkout, and booking actions to the golfer on the official provider page.",
+    apiEndpoint: `${new URL(selected.url).origin}/webapi/TeeTimes`,
+    apiMetadata: metadata,
+    confidence: candidates.length === 1 ? 0.92 : 0.96,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "club-caddie-public-tee-time-link"
+    }
+  };
+}
+
+type ClubCaddieLinkCandidate = { url: string; label: string };
+
+function getClubCaddieCandidates(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): ClubCaddieLinkCandidate[] {
+  const candidates = [
+    ...(evidence.linkCandidates ?? []),
+    ...observedUrls.map((url) => ({ url, label: "" }))
+  ];
+  const byUrl = new Map<string, ClubCaddieLinkCandidate>();
+
+  for (const candidate of candidates) {
+    const url = canonicalizeClubCaddieBookingUrl(candidate.url);
+    if (!url) {
+      continue;
+    }
+    const label = candidate.label.replace(/\s+/g, " ").trim().slice(0, 160);
+    const current = byUrl.get(url);
+    if (!current || (!current.label && label)) {
+      byUrl.set(url, { url, label });
+    }
+  }
+
+  return [...byUrl.values()];
+}
+
+function canonicalizeClubCaddieBookingUrl(value: string) {
+  const url = parseUrl(value);
+  if (
+    !url ||
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.search ||
+    url.hash ||
+    !/^apimanager-cc\d{1,4}\.clubcaddie\.com$/i.test(url.hostname) ||
+    !/^\/webapi\/view\/[a-z0-9_-]{4,128}(?:\/slots)?\/?$/i.test(url.pathname)
+  ) {
+    return null;
+  }
+
+  url.pathname = url.pathname.replace(/\/$/, "");
+  return url.toString();
+}
+
+function selectClubCaddieCandidate(
+  candidates: ClubCaddieLinkCandidate[],
+  courseName: string
+) {
+  if (candidates.length === 1) {
+    return isCourseCorroboratedClubCaddieCandidate(candidates[0], courseName)
+      ? candidates[0]
+      : undefined;
+  }
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  if (candidates.some((candidate) => !candidate.label)) {
+    return undefined;
+  }
+
+  const safeCandidates = candidates.filter((candidate) =>
+    isSafeClubCaddieLinkLabel(candidate.label)
+  );
+  if (safeCandidates.length === 0) {
+    return undefined;
+  }
+
+  const normalizedName = normalizeCourseName(courseName);
+  const meaningfulTokens = normalizedName
+    .split(" ")
+    .filter((token) => !CLUB_CADDIE_GENERIC_COURSE_WORDS.has(token));
+  if (meaningfulTokens.length === 0) {
+    return undefined;
+  }
+  const expectedAcronyms = [...new Set([
+    meaningfulTokens.map((token) => token[0]).join(""),
+    normalizedName
+      .split(" ")
+      .filter((token) => !["and", "at", "of", "the"].includes(token))
+      .map((token) => token[0])
+      .join("")
+  ].filter((value) => value.length >= 2))];
+  const scored = safeCandidates.map((candidate) => ({
+    candidate,
+    score: scoreClubCaddieCandidate(
+      candidate.label,
+      normalizedName,
+      meaningfulTokens,
+      expectedAcronyms
+    )
+  }));
+  const highestScore = Math.max(...scored.map(({ score }) => score));
+  const strongest = scored.filter(({ score }) => score === highestScore && score > 0);
+  if (strongest.length === 1) {
+    return strongest[0].candidate;
+  }
+
+  const targetIsBear = meaningfulTokens.includes("bear");
+  const targetIsShortCourse = meaningfulTokens.some((token) =>
+    ["short", "par3", "executive"].includes(token)
+  );
+  const bearCandidates = safeCandidates.filter((candidate) => /\bbear\b/i.test(candidate.label));
+  const championshipCandidates = safeCandidates.filter((candidate) =>
+    /\bchampionship\b/i.test(candidate.label)
+  );
+  if (targetIsBear && bearCandidates.length === 1) {
+    return bearCandidates[0];
+  }
+  if (
+    !targetIsBear &&
+    !targetIsShortCourse &&
+    bearCandidates.length === 1 &&
+    championshipCandidates.length === 1
+  ) {
+    return championshipCandidates[0];
+  }
+
+  return undefined;
+}
+
+function isCourseCorroboratedClubCaddieCandidate(
+  candidate: ClubCaddieLinkCandidate,
+  courseName: string
+) {
+  if (!isSafeClubCaddieLinkLabel(candidate.label)) {
+    return false;
+  }
+  if (haveCompatibleCourseNames(courseName, candidate.label)) {
+    return true;
+  }
+
+  const normalizedName = normalizeCourseName(courseName);
+  const meaningfulTokens = normalizedName
+    .split(" ")
+    .filter((token) => !CLUB_CADDIE_GENERIC_COURSE_WORDS.has(token));
+  const expectedAcronyms = [...new Set([
+    meaningfulTokens.map((token) => token[0]).join(""),
+    normalizedName
+      .split(" ")
+      .filter((token) => !["and", "at", "of", "the"].includes(token))
+      .map((token) => token[0])
+      .join("")
+  ].filter((value) => value.length >= 2))];
+  const labelAcronyms = [...candidate.label.matchAll(/(?:@|\b)([A-Z]{2,8})\b/g)]
+    .map((match) => match[1].toLowerCase());
+  if (expectedAcronyms.some((acronym) => labelAcronyms.includes(acronym))) {
+    return true;
+  }
+
+  const resourceSlug = new URL(candidate.url).pathname.match(
+    /^\/webapi\/view\/([^/]+)/i
+  )?.[1];
+  return Boolean(
+    resourceSlug &&
+      haveCompatibleCourseNames(
+        courseName,
+        decodeURIComponent(resourceSlug).replace(/[-_]+/g, " ")
+      )
+  );
+}
+
+function isSafeClubCaddieLinkLabel(label: string) {
+  const normalized = label.replace(/\s+/g, " ").trim();
+  return Boolean(
+    normalized &&
+      !/\b(?:activit(?:y|ies)|driving\s+range|events?|gift\s+cards?|leagues?|lessons?|mini\s+golf|putt(?:-|\s)putt|putting\s+course|simulators?)\b/i.test(
+        normalized
+      )
+  );
+}
+
+function sanitizeClubCaddieDiscoveryEvidence(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscoveryEvidence {
+  return {
+    ...evidence,
+    sourceUrl: sanitizeClubCaddieEvidenceUrl(evidence.sourceUrl),
+    finalUrl: evidence.finalUrl
+      ? sanitizeClubCaddieEvidenceUrl(evidence.finalUrl)
+      : undefined,
+    observedUrls: evidence.observedUrls.map(sanitizeClubCaddieEvidenceUrl)
+  };
+}
+
+function sanitizeClubCaddieEvidenceUrl(value: string) {
+  const url = parseUrl(value);
+  if (!url || !/(^|\.)clubcaddie\.com$/i.test(url.hostname)) {
+    return value;
+  }
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+const CLUB_CADDIE_GENERIC_COURSE_WORDS = new Set([
+  "and",
+  "at",
+  "center",
+  "centre",
+  "club",
+  "country",
+  "course",
+  "family",
+  "golf",
+  "links",
+  "municipal",
+  "of",
+  "public",
+  "the"
+]);
+
+function scoreClubCaddieCandidate(
+  label: string,
+  normalizedName: string,
+  meaningfulTokens: string[],
+  expectedAcronyms: string[]
+) {
+  const normalizedLabel = normalizeCourseName(label);
+  let score = normalizedLabel.includes(normalizedName) ? 100 : 0;
+  score += meaningfulTokens.filter(
+    (token) => token.length >= 3 && normalizedLabel.split(" ").includes(token)
+  ).length * 20;
+
+  const labelAcronyms = [...label.matchAll(/(?:@|\b)([A-Z]{2,8})\b/g)]
+    .map((match) => match[1].toLowerCase());
+  if (expectedAcronyms.some((acronym) => labelAcronyms.includes(acronym))) {
+    score += 80;
+  }
+
+  return score;
 }
 
 function learnWebTracDiscovery(
@@ -294,14 +590,18 @@ function learnProtectedCpsDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const barrierUrl = evidence.accessBarrierUrls
-    ?.map(parseUrl)
-    .find((url) => Boolean(url?.hostname.endsWith(".cps.golf")));
-  if (!barrierUrl) {
+  const barrierCandidate = selectCpsBookingCandidate(
+    getCpsBookingCandidates(evidence, evidence.accessBarrierUrls ?? [], {
+      includeEvidenceLinks: false,
+      includeWidget: false
+    }),
+    evidence.courseName
+  );
+  if (!barrierCandidate) {
     return null;
   }
 
-  const bookingBaseUrl = `${barrierUrl.origin}/`;
+  const bookingBaseUrl = barrierCandidate.bookingBaseUrl;
   return {
     courseId: evidence.courseId,
     status: "VERIFIED",
@@ -650,17 +950,50 @@ function learnCpsDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const cpsUrl =
-    observedUrls.map(parseUrl).find(isCpsReservationUrl) ??
-    getCpsWidgetUrl(evidence.visibleText);
+  const candidates = getCpsBookingCandidates(evidence, observedUrls);
+  const selected = selectCpsBookingCandidate(candidates, evidence.courseName);
 
-  if (!cpsUrl) {
+  if (!selected && candidates.length === 0) {
     return null;
   }
+  if (!selected) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: evidence.sourceUrl,
+      confidence: 0.55,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        learnedFrom: "cps-tenant-ambiguous"
+      }
+    };
+  }
 
-  const siteName = cpsUrl.hostname.split(".")[0];
-  const bookingBaseUrl = `${cpsUrl.origin}/`;
-  const courseIds = getCpsCourseIds(cpsUrl, evidence.visibleText) ?? [1, 2];
+  const siteName = selected.url.hostname.split(".")[0];
+  const bookingBaseUrl = selected.bookingBaseUrl;
+  const apiEndpoint = `${selected.url.origin}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes`;
+  if (!selected.courseIds?.length) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: bookingBaseUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      apiEndpoint,
+      confidence: 0.7,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        learnedFrom: "cps-course-id-missing"
+      }
+    };
+  }
 
   return {
     courseId: evidence.courseId,
@@ -668,12 +1001,12 @@ function learnCpsDiscovery(
     detectedPlatform: "CUSTOM",
     sourceUrl: evidence.sourceUrl,
     bookingUrl: bookingBaseUrl,
-    apiEndpoint: `${cpsUrl.origin}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes`,
+    apiEndpoint,
     apiMetadata: {
       provider: "CPS",
       siteName,
       bookingBaseUrl,
-      courseIds,
+      courseIds: selected.courseIds,
       holes: [18, 9]
     },
     confidence: 0.85,
@@ -686,10 +1019,144 @@ function learnCpsDiscovery(
   };
 }
 
-function isCpsReservationUrl(url: URL | null) {
+type CpsBookingCandidate = {
+  url: URL;
+  bookingBaseUrl: string;
+  label: string;
+  courseIds?: number[];
+};
+
+function getCpsBookingCandidates(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[],
+  options: { includeEvidenceLinks?: boolean; includeWidget?: boolean } = {}
+): CpsBookingCandidate[] {
+  const includeEvidenceLinks = options.includeEvidenceLinks ?? true;
+  const includeWidget = options.includeWidget ?? true;
+  const rawCandidates: Array<{ value: string; label: string; courseIds?: number[] }> = [
+    ...(includeEvidenceLinks ? (evidence.linkCandidates ?? []).map((candidate) => ({
+      value: candidate.url,
+      label: candidate.label
+    })) : []),
+    ...observedUrls.map((value) => ({ value, label: "" })),
+    ...(includeWidget ? getCpsWidgetCandidates(evidence.visibleText, evidence.courseName) : [])
+  ];
+  const candidates = new Map<string, CpsBookingCandidate>();
+
+  for (const raw of rawCandidates) {
+    const url = parseUrl(raw.value);
+    if (!isCpsBookingCandidateUrl(url)) {
+      continue;
+    }
+    const bookingBaseUrl = `${url!.origin}/`;
+    const courseIds = raw.courseIds ?? getCpsCourseIdsFromUrl(url!);
+    const label = raw.label.replace(/\s+/g, " ").trim().slice(0, 160);
+    const candidateKey = [
+      url!.href,
+      label.toLowerCase(),
+      [...(courseIds ?? [])].sort((left, right) => left - right).join(",")
+    ].join("\u0000");
+    candidates.set(candidateKey, {
+      url: url!,
+      bookingBaseUrl,
+      label,
+      courseIds
+    });
+  }
+
+  return [...candidates.values()];
+}
+
+function selectCpsBookingCandidate(
+  candidates: CpsBookingCandidate[],
+  courseName: string
+) {
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  const labelMatches = candidates.filter(
+    (candidate) =>
+      candidate.label && haveCompatibleCourseNames(courseName, candidate.label)
+  );
+  if (labelMatches.length > 0) {
+    const matchingTenant = selectCpsTenantGroup(labelMatches, courseName);
+    return matchingTenant
+      ? mergeCpsCandidates(matchingTenant, { courseSpecificEvidence: true })
+      : undefined;
+  }
+
+  const tenant = selectCpsTenantGroup(candidates, courseName);
+  return tenant
+    ? mergeCpsCandidates(tenant, { courseSpecificEvidence: false })
+    : undefined;
+}
+
+function selectCpsTenantGroup(
+  candidates: CpsBookingCandidate[],
+  courseName: string
+) {
+  const groups = new Map<string, CpsBookingCandidate[]>();
+  for (const candidate of candidates) {
+    const group = groups.get(candidate.bookingBaseUrl) ?? [];
+    group.push(candidate);
+    groups.set(candidate.bookingBaseUrl, group);
+  }
+  if (groups.size === 1) {
+    return [...groups.values()][0];
+  }
+
+  const targetIdentity = normalizeCpsTenantIdentity(courseName);
+  const tenantMatches = targetIdentity && targetIdentity.length >= 4
+    ? [...groups.values()].filter((group) => {
+        const tenant = group[0].url.hostname.split(".")[0]
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "");
+        return tenant.includes(targetIdentity) || targetIdentity.includes(tenant);
+      })
+    : [];
+  return tenantMatches.length === 1 ? tenantMatches[0] : undefined;
+}
+
+function mergeCpsCandidates(
+  candidates: CpsBookingCandidate[],
+  options: { courseSpecificEvidence: boolean }
+): CpsBookingCandidate {
+  const primary = candidates.find((candidate) => candidate.courseIds?.length) ?? candidates[0];
+  const courseIds = [...new Set(candidates.flatMap((candidate) => candidate.courseIds ?? []))]
+    .sort((left, right) => left - right);
+  const courseIdSignatures = candidates.map((candidate) =>
+    [...(candidate.courseIds ?? [])].sort((left, right) => left - right).join(",")
+  );
+  const allCandidatesIdentifySameCourse = Boolean(
+    courseIdSignatures[0] &&
+      courseIdSignatures.every((signature) => signature === courseIdSignatures[0])
+  );
+  const safeCourseIds = options.courseSpecificEvidence ||
+    candidates.length === 1 ||
+    allCandidatesIdentifySameCourse
+    ? courseIds
+    : [];
+
+  return {
+    ...primary,
+    label: candidates.find((candidate) => candidate.label)?.label ?? primary.label,
+    courseIds: safeCourseIds.length > 0 ? safeCourseIds : undefined
+  };
+}
+
+function normalizeCpsTenantIdentity(value: string) {
+  return normalizeCourseIdentityName(
+    value.replace(/\b(?:and|at|of)\b/gi, " ")
+  ).replace(/\s+/g, "");
+}
+
+function isCpsBookingCandidateUrl(url: URL | null) {
   return Boolean(
     url?.hostname.endsWith(".cps.golf") &&
-      /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/i.test(url.pathname)
+      url.hostname !== "sc.cps.golf" &&
+      (url.pathname === "/" ||
+        /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/i.test(url.pathname))
   );
 }
 
@@ -784,7 +1251,7 @@ export async function enrichTeesnapDiscovery(
 ): Promise<BrowserDiscovery> {
   if (
     discovery.detectedPlatform !== "CUSTOM" ||
-    discovery.evidence.learnedFrom !== "teesnap-url-without-course-id" ||
+    !discovery.evidence.learnedFrom.startsWith("teesnap-url-without-course-id") ||
     !discovery.bookingUrl ||
     !isTeesnapBookingUrl(discovery.bookingUrl)
   ) {
@@ -811,14 +1278,21 @@ export async function enrichTeesnapDiscovery(
   }
 
   const html = await response.text();
-  const courseMetadata = getTeesnapCourseMetadata(
+  const metadataResolution = resolveTeesnapCourseMetadata(
     discovery.evidence.observedUrls,
     html,
     courseName
   );
-  if (!courseMetadata) {
-    return discovery;
+  if (!metadataResolution.metadata) {
+    return {
+      ...discovery,
+      evidence: {
+        ...discovery.evidence,
+        learnedFrom: `teesnap-public-config-${metadataResolution.reason}`
+      }
+    };
   }
+  const courseMetadata = metadataResolution.metadata;
 
   const canonicalUrl = response.url || bookingBaseUrl;
   return {
@@ -913,12 +1387,71 @@ function parseChronogolfClubProfile(html: string) {
   }
 }
 
-function getCpsWidgetUrl(text?: string) {
-  const match = text?.match(/"baseURL"\s*:\s*"([^"]+\.cps\.golf\/[^"]+)"/i);
-  return parseUrl(match?.[1]);
+function getCpsWidgetCandidates(text: string | undefined, courseName: string) {
+  const urls = [...(text?.matchAll(/"baseURL"\s*:\s*"([^"]+\.cps\.golf\/[^"]+)"/gi) ?? [])]
+    .map((match) => match[1])
+    .filter((value, index, values) => values.indexOf(value) === index);
+  const locations = getCpsWidgetLocations(text);
+  const locationMatches = locations.filter((location) =>
+    haveCompatibleCpsLocationName(courseName, location.name)
+  );
+  const selectedLocation = urls.length === 1 && locationMatches.length === 1
+    ? locationMatches[0]
+    : undefined;
+
+  return urls.map((value) => ({
+    value,
+    label: selectedLocation?.name ?? courseName,
+    ...(selectedLocation ? { courseIds: [selectedLocation.courseId] } : {})
+  }));
 }
 
-function getCpsCourseIds(url: URL, text?: string) {
+function getCpsWidgetLocations(text: string | undefined) {
+  const locations: Array<{ name: string; courseId: number }> = [];
+  for (const object of text?.match(/\{[^{}]{0,1500}\}/g) ?? []) {
+    const nameMatch = object.match(/"name"\s*:\s*"((?:\\.|[^"\\])*)"/i);
+    const courseIdMatch = object.match(/"courseId"\s*:\s*"?(\d+)"?/i);
+    if (!nameMatch || !courseIdMatch) {
+      continue;
+    }
+    const courseId = Number(courseIdMatch[1]);
+    if (!Number.isInteger(courseId) || courseId < 0) {
+      continue;
+    }
+    let name = nameMatch[1];
+    try {
+      name = JSON.parse(`"${name}"`) as string;
+    } catch {
+      // Keep the bounded raw label when the widget contains malformed escaping.
+    }
+    name = name.replace(/\s+/g, " ").trim().slice(0, 160);
+    if (
+      name &&
+      !locations.some((location) =>
+        location.courseId === courseId && location.name === name
+      )
+    ) {
+      locations.push({ name, courseId });
+    }
+  }
+  return locations;
+}
+
+function haveCompatibleCpsLocationName(courseName: string, locationName: string) {
+  if (haveCompatibleCourseNames(courseName, locationName)) {
+    return true;
+  }
+  const targetTokens = normalizeCourseIdentityName(courseName).split(" ").filter(Boolean);
+  const locationTokens = normalizeCourseIdentityName(locationName).split(" ").filter(Boolean);
+  return Boolean(
+    locationTokens.length === 1 &&
+      locationTokens[0].length >= 5 &&
+      targetTokens.length <= 2 &&
+      targetTokens.includes(locationTokens[0])
+  );
+}
+
+function getCpsCourseIdsFromUrl(url: URL) {
   const courseIdFromUrl = getNumericSearchParam(url, "CourseId") ?? getNumericSearchParam(url, "courseId");
   if (courseIdFromUrl !== undefined) {
     return [courseIdFromUrl];
@@ -933,10 +1466,7 @@ function getCpsCourseIds(url: URL, text?: string) {
     return courseIdsFromUrl;
   }
 
-  const courseIds = [...(text?.matchAll(/"courseId"\s*:\s*"?(\d+)"?/gi) ?? [])].map((match) =>
-    Number(match[1])
-  );
-  return courseIds.length ? [...new Set(courseIds)] : undefined;
+  return undefined;
 }
 
 function learnTeesnapDiscovery(
@@ -948,12 +1478,12 @@ function learnTeesnapDiscovery(
     return null;
   }
 
-  const courseMetadata = getTeesnapCourseMetadata(
+  const metadataResolution = resolveTeesnapCourseMetadata(
     observedUrls,
     evidence.visibleText,
     evidence.courseName
   );
-  if (!courseMetadata) {
+  if (!metadataResolution.metadata) {
     return {
       courseId: evidence.courseId,
       status: "INSPECTED",
@@ -966,10 +1496,11 @@ function learnTeesnapDiscovery(
         finalUrl: evidence.finalUrl,
         observedUrls,
         visibleText: summarizeVisibleText(evidence.visibleText),
-        learnedFrom: "teesnap-url-without-course-id"
+        learnedFrom: `teesnap-url-without-course-id:${metadataResolution.reason}`
       }
     };
   }
+  const courseMetadata = metadataResolution.metadata;
 
   return {
     courseId: evidence.courseId,
@@ -1215,37 +1746,90 @@ type TeesnapDiscoveryCourseConfig = {
   addons_default?: unknown;
 };
 
-function getTeesnapCourseMetadata(urls: string[], text: string | undefined, courseName: string) {
-  const configs = parseTeesnapCourseConfigs(text);
+type TeesnapMetadataResolutionReason =
+  | "course-config-ambiguous"
+  | "course-config-invalid"
+  | "course-config-missing"
+  | "observed-course-config-mismatch"
+  | "physical-course-config-missing";
 
-  for (const url of urls.map(parseUrl)) {
-    const courseId = getNumericSearchParam(url, "course");
-    if (courseId) {
-      return buildTeesnapCourseMetadata(
-        configs.find((candidate) => candidate.id === courseId),
-        courseId
-      );
+function resolveTeesnapCourseMetadata(
+  urls: string[],
+  text: string | undefined,
+  courseName: string
+): {
+  metadata?: ReturnType<typeof buildTeesnapCourseMetadata>;
+  reason: TeesnapMetadataResolutionReason;
+} {
+  const parsed = parseTeesnapCourseConfigs(text);
+  const observedCourseIds = [...new Set(
+    urls
+      .map(parseUrl)
+      .map((url) => getNumericSearchParam(url, "course"))
+      .filter((courseId): courseId is number => courseId !== undefined)
+  )];
+  const physicalConfigs = dedupeTeesnapCourseConfigs(
+    parsed.configs.filter(isPhysicalTeesnapCourseConfig)
+  );
+
+  if (observedCourseIds.length === 1) {
+    const courseId = observedCourseIds[0];
+    const matchingConfig = parsed.configs.find((candidate) => candidate.id === courseId);
+    if (matchingConfig && isPhysicalTeesnapCourseConfig(matchingConfig)) {
+      return {
+        metadata: buildTeesnapCourseMetadata(matchingConfig, courseId),
+        reason: parsed.reason
+      };
     }
+    if (matchingConfig) {
+      return { reason: "physical-course-config-missing" };
+    }
+    if (parsed.configs.length > 0) {
+      return { reason: "observed-course-config-mismatch" };
+    }
+    return {
+      metadata: buildTeesnapCourseMetadata(undefined, courseId),
+      reason: parsed.reason
+    };
+  }
+
+  const namedPhysicalConfigs = physicalConfigs.filter((candidate) =>
+    typeof candidate.name === "string" && candidate.name.trim().length > 0
+  );
+  const eligibleConfigs = observedCourseIds.length > 1
+    ? namedPhysicalConfigs.filter((candidate) =>
+        observedCourseIds.includes(candidate.id as number)
+      )
+    : namedPhysicalConfigs;
+  if (eligibleConfigs.length === 0) {
+    return {
+      reason: parsed.configs.length > 0
+        ? "physical-course-config-missing"
+        : parsed.reason
+    };
   }
 
   const normalizedTarget = normalizeCourseName(courseName);
-  const eligibleConfigs = configs.filter((candidate) => {
-    const name = typeof candidate.name === "string" ? candidate.name : "";
-    return (
-      Number.isInteger(candidate.id) &&
-      candidate.enabled !== false &&
-      candidate.customer_enabled !== false &&
-      candidate.course_type !== "simulator" &&
-      !/\b(?:simulator|top\s*tracer|toptracer|driving range)\b/i.test(name)
-    );
-  });
-  const exactMatch = eligibleConfigs.find(
+  const exactMatches = eligibleConfigs.filter(
     (candidate) => normalizeCourseName(String(candidate.name ?? "")) === normalizedTarget
   );
-  const selected = exactMatch ?? (eligibleConfigs.length === 1 ? eligibleConfigs[0] : undefined);
+  const compatibleMatches = exactMatches.length > 0
+    ? exactMatches
+    : eligibleConfigs.filter((candidate) =>
+        typeof candidate.name === "string" &&
+        haveCompatibleCourseNames(courseName, candidate.name)
+      );
+  const selected = compatibleMatches.length === 1
+    ? compatibleMatches[0]
+    : compatibleMatches.length === 0 && eligibleConfigs.length === 1
+      ? eligibleConfigs[0]
+      : undefined;
   return selected && typeof selected.id === "number"
-    ? buildTeesnapCourseMetadata(selected, selected.id)
-    : undefined;
+    ? {
+        metadata: buildTeesnapCourseMetadata(selected, selected.id),
+        reason: parsed.reason
+      }
+    : { reason: "course-config-ambiguous" };
 }
 
 function isTenForeBookingUrl(value: string) {
@@ -1278,18 +1862,84 @@ function canonicalizeTenForeBookingUrl(value: string) {
   return `${url.origin}/${vanityName}`;
 }
 
-function parseTeesnapCourseConfigs(text?: string): TeesnapDiscoveryCourseConfig[] {
-  const match = text?.match(/window\.courses\s*=\s*(\[[\s\S]*?\])\s*;?\s*window\.property/i);
-  if (!match) {
-    return [];
+function parseTeesnapCourseConfigs(text?: string): {
+  configs: TeesnapDiscoveryCourseConfig[];
+  reason: TeesnapMetadataResolutionReason;
+} {
+  const assignment = text?.match(/window\.courses\s*=/i);
+  if (!text || assignment?.index === undefined) {
+    return { configs: [], reason: "course-config-missing" };
+  }
+  const start = text.indexOf("[", assignment.index + assignment[0].length);
+  const serialized = start >= 0 ? extractBalancedJsonArray(text, start) : null;
+  if (!serialized) {
+    return { configs: [], reason: "course-config-invalid" };
   }
 
   try {
-    const parsed = JSON.parse(match[1]);
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(serialized);
+    return Array.isArray(parsed)
+      ? { configs: parsed, reason: "course-config-missing" }
+      : { configs: [], reason: "course-config-invalid" };
   } catch {
-    return [];
+    return { configs: [], reason: "course-config-invalid" };
   }
+}
+
+function extractBalancedJsonArray(text: string, start: number) {
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "[") {
+      depth += 1;
+    } else if (character === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
+}
+
+function dedupeTeesnapCourseConfigs(configs: TeesnapDiscoveryCourseConfig[]) {
+  const byId = new Map<number, TeesnapDiscoveryCourseConfig>();
+  for (const config of configs) {
+    if (typeof config.id === "number" && !byId.has(config.id)) {
+      byId.set(config.id, config);
+    }
+  }
+  return [...byId.values()];
+}
+
+function isPhysicalTeesnapCourseConfig(config: TeesnapDiscoveryCourseConfig) {
+  const name = typeof config.name === "string" ? config.name : "";
+  const courseType = typeof config.course_type === "string" ? config.course_type : "";
+  return Boolean(
+    Number.isInteger(config.id) &&
+      config.enabled !== false &&
+      config.customer_enabled !== false &&
+      !/\b(?:activit(?:y|ies)|driving[\s_-]+range|events?|gift[\s_-]+cards?|leagues?|lessons?|mini[\s_-]+golf|putt(?:-|[\s_])putt|putting[\s_-]+course|simulators?|top[\s_-]*tracer)\b/i.test(
+        `${name} ${courseType}`
+      ) &&
+      !/\bdisc[\s_-]*golf\b/i.test(`${name} ${courseType}`)
+  );
 }
 
 function buildTeesnapCourseMetadata(
