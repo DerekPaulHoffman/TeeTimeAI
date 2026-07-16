@@ -1,6 +1,6 @@
 # Course-Support Responder
 
-The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It runs every 10 minutes, groups reusable work, and either restores policy-safe monitoring or records a final evidence-backed disposition. It is separate from per-search scheduling and from the broad hourly product-improvement loop.
+The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It runs every 10 minutes, groups reusable work, and either restores public read-only monitoring or records a final evidence-backed technical-access/contact/identity disposition. It is separate from per-search scheduling and from the broad hourly product-improvement loop.
 
 ## Ownership And Cadence
 
@@ -25,7 +25,7 @@ Provider identity and runnable support come from `src/lib/automation/provider-ca
 
 Customer-facing readiness is derived independently from internal engineering state. The canonical dispositions are `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, `BOOKING_NOT_OPEN`, `DIRECT_SITE_ONLY`, `PHONE_OR_WALK_IN`, `ACCOUNT_REQUIRED`, `POLICY_BLOCKED`, `CAPTCHA_OR_QUEUE`, `PRIVATE_OR_INVALID`, `SOURCE_UNVERIFIED`, `RETRYING`, and `ENGINEERING`. Only `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, and `BOOKING_NOT_OPEN` count as effective monitored coverage.
 
-A responder may resolve without a runnable adapter only when a current, sufficiently confident `CourseAutomationDiscovery` record cites an official HTTP(S) source and agrees with the persisted course state: booking is `PHONE_ONLY`, `CONTACT_COURSE`, or `WALK_IN`; or automation is blocked for `NO_ONLINE_BOOKING`, `AUTOMATION_PROHIBITED`, `ACCOUNT_REQUIRED`, or `CAPTCHA_OR_QUEUE`. A stale course snapshot, unsupported URL guess, or internally contradictory discovery is never a final disposition. Private/non-course identity still requires the separate exact-place review path. Terminal discovery or exact-review evidence must belong to the current incident cycle and agree with the reconciled course state; later repeats of the same unresolved observation do not invalidate that durable classification. Restored runnable monitoring remains stricter and must supersede the newest failure with fresh exact-runtime workflow proof.
+A responder may resolve without a runnable adapter only when a current, sufficiently confident `CourseAutomationDiscovery` record cites an official HTTP(S) source and agrees with the persisted course state: booking is `PHONE_ONLY`, `CONTACT_COURSE`, or `WALK_IN`; or current technical access is blocked for `NO_ONLINE_BOOKING`, `ACCOUNT_REQUIRED`, or `CAPTCHA_OR_QUEUE`. `AUTOMATION_PROHIBITED` and policy text are legacy evidence, never terminal monitoring dispositions. A stale course snapshot, unsupported URL guess, or internally contradictory discovery is never a final disposition. Private/non-course identity still requires the separate exact-place review path; when that review is applied during an active responder claim, verification accepts it only if the active exact review is newer than the latest incident evidence and the persisted course is reconciled to non-public, blocked state. Terminal discovery or exact-review evidence must belong to the current incident cycle and agree with the reconciled course state; later repeats of the same unresolved observation do not invalidate that durable classification. Restored runnable monitoring remains stricter and must supersede the newest failure with fresh exact-runtime workflow proof.
 
 ## Claim, Lease, And Repository Safety
 
@@ -160,8 +160,8 @@ Rollback is application-first when the additive columns remain harmless to the p
 
 ## Safety Boundaries
 
-- Use only official, public, policy-safe provider surfaces. Never enter checkout, account, verification-code, CAPTCHA, waiting-room, or queue-gated flows; never bypass a block or rate limit.
-- Treat account-required, CAPTCHA/queue, prohibited automation, private/non-course identity, phone/walk-in, and unsupported providers as honest outcomes, not engineering successes.
+- Use only official, public, signed-out, read-only provider surfaces. Never enter checkout, account, verification-code, CAPTCHA, waiting-room, or queue-gated flows; never bypass a block or rate limit.
+- Treat account-required, CAPTCHA/queue, private/non-course identity, phone/walk-in, and unsupported providers as honest outcomes, not engineering successes. Provider or course policy text alone is not a monitoring outcome.
 - Do not send course-support email for engineering-only synthetic incidents. Synthetic demand never outranks critical real demand.
 - Do not expose recipients, alias addresses, signed stop links, provider tokens, raw provider responses, database ids, Workflow ids, or responder lease tokens.
 - A course-level failure must not suppress checks or alerts for the golfer's other ranked courses.

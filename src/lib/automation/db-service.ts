@@ -10,8 +10,14 @@ import {
 import { prisma } from "@/lib/prisma";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
-import type { BrowserDiscovery } from "./browser-discovery";
-import { getBestProbeUrl, shouldQueueBrowserProbe } from "./browser-discovery";
+import {
+  evaluateBrowserDiscoveryMonitoringGate,
+  getBestProbeUrl,
+  keepPolicyOnlyDiscoveryActionable,
+  shouldQueueBrowserProbe,
+  type BrowserDiscovery,
+  type BrowserProbeCourseInput
+} from "./browser-discovery";
 import { startOfUtcCalendarDay } from "./date-boundary";
 import {
   hasCompletePreEditProvenance,
@@ -24,6 +30,7 @@ import {
   resolveProviderCapability,
   resolveProviderDiscoveryIdentity
 } from "./provider-capabilities";
+import { evaluateMonitoringGate } from "./policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
@@ -67,7 +74,14 @@ export type BrowserProbeTarget = {
     detectedPlatform: string;
     providerFamilyKey: string;
     automationEligibility: string;
+    automationReason: string;
+    bookingMethod: string;
+    isPublic: boolean;
+    intelligenceVerifiedAt: Date | null;
+    intelligenceReviewAt: Date | null;
+    intelligenceConfidence: number | null;
     bookingMetadata: unknown;
+    monitoringFailureEvidence?: BrowserProbeCourseInput["monitoringFailureEvidence"];
   };
   probeUrl: string;
 };
@@ -162,13 +176,48 @@ export async function listBrowserProbeTargets(
     }),
     prisma.courseSupportIncident.findMany({
       where: { status: { not: "RESOLVED" } },
-      select: { courseId: true, status: true }
+      select: {
+        courseId: true,
+        status: true,
+        kind: true,
+        occurrenceCount: true,
+        lastSeenAt: true,
+        course: {
+          select: {
+            id: true,
+            name: true,
+            website: true,
+            detectedBookingUrl: true,
+            detectedPlatform: true,
+            providerFamilyKey: true,
+            automationEligibility: true,
+            automationReason: true,
+            bookingMethod: true,
+            isPublic: true,
+            intelligenceVerifiedAt: true,
+            intelligenceReviewAt: true,
+            intelligenceConfidence: true,
+            bookingMetadata: true,
+            probes: {
+              orderBy: { observedAt: "desc" },
+              take: 1,
+              select: { outcome: true, observedAt: true }
+            }
+          }
+        }
+      }
     })
   ]);
   const incidentPriority = new Map(
     openIncidents.map((incident) => [
       incident.courseId,
       incident.status === "NEEDS_HUMAN" ? 0 : 1
+    ])
+  );
+  const monitoringFailureByCourse = new Map(
+    openIncidents.map((incident) => [
+      incident.courseId,
+      getIncidentMonitoringFailureEvidence(incident)
     ])
   );
 
@@ -178,9 +227,15 @@ export async function listBrowserProbeTargets(
   for (const search of searches) {
     for (const preference of search.preferences) {
       const course = preference.course;
-      const probeUrl = getBestProbeUrl(course);
+      const monitoringFailureEvidence = monitoringFailureByCourse.get(course.id);
+      const probeCourse = { ...course, monitoringFailureEvidence };
+      const probeUrl = getBestProbeUrl(probeCourse);
 
-      if (!probeUrl || queuedCourseIds.has(course.id) || !shouldQueueBrowserProbe(course)) {
+      if (
+        !probeUrl ||
+        queuedCourseIds.has(course.id) ||
+        !shouldQueueBrowserProbe(probeCourse)
+      ) {
         continue;
       }
 
@@ -195,13 +250,56 @@ export async function listBrowserProbeTargets(
           detectedPlatform: course.detectedPlatform,
           providerFamilyKey: course.providerFamilyKey,
           automationEligibility: course.automationEligibility,
-          bookingMetadata: course.bookingMetadata
+          automationReason: course.automationReason,
+          bookingMethod: course.bookingMethod,
+          isPublic: course.isPublic,
+          intelligenceVerifiedAt: course.intelligenceVerifiedAt,
+          intelligenceReviewAt: course.intelligenceReviewAt,
+          intelligenceConfidence: course.intelligenceConfidence,
+          bookingMetadata: course.bookingMetadata,
+          monitoringFailureEvidence
         },
         probeUrl,
         supportPriority: incidentPriority.get(course.id) ?? 2
       });
       queuedCourseIds.add(course.id);
     }
+  }
+
+  for (const incident of openIncidents) {
+    const course = incident.course;
+    if (!course?.id || queuedCourseIds.has(course.id)) {
+      continue;
+    }
+    const monitoringFailureEvidence = monitoringFailureByCourse.get(course.id);
+    const probeCourse = { ...course, monitoringFailureEvidence };
+    const probeUrl = getBestProbeUrl(probeCourse);
+    if (!probeUrl || !shouldQueueBrowserProbe(probeCourse)) {
+      continue;
+    }
+    targets.push({
+      rank: Number.MAX_SAFE_INTEGER,
+      course: {
+        id: course.id,
+        name: course.name,
+        website: course.website,
+        detectedBookingUrl: course.detectedBookingUrl,
+        detectedPlatform: course.detectedPlatform,
+        providerFamilyKey: course.providerFamilyKey,
+        automationEligibility: course.automationEligibility,
+        automationReason: course.automationReason,
+        bookingMethod: course.bookingMethod,
+        isPublic: course.isPublic,
+        intelligenceVerifiedAt: course.intelligenceVerifiedAt,
+        intelligenceReviewAt: course.intelligenceReviewAt,
+        intelligenceConfidence: course.intelligenceConfidence,
+        bookingMetadata: course.bookingMetadata,
+        monitoringFailureEvidence
+      },
+      probeUrl,
+      supportPriority: incidentPriority.get(course.id) ?? 1
+    });
+    queuedCourseIds.add(course.id);
   }
 
   const orderedTargets = targets.sort(
@@ -226,6 +324,18 @@ async function listExactIncidentBrowserProbeTarget(
       supportIncident: { is: { status: { not: "RESOLVED" } } }
     },
     include: {
+      supportIncident: {
+        select: {
+          kind: true,
+          occurrenceCount: true,
+          lastSeenAt: true
+        }
+      },
+      probes: {
+        orderBy: { observedAt: "desc" },
+        take: 1,
+        select: { outcome: true, observedAt: true }
+      },
       preferences: {
         where: {
           teeSearch: {
@@ -243,8 +353,17 @@ async function listExactIncidentBrowserProbeTarget(
     throw new Error("The requested browser-probe course name is ambiguous.");
   }
   const course = courses[0];
-  const probeUrl = course ? getBestProbeUrl(course) : null;
-  if (!course || !probeUrl || !shouldQueueBrowserProbe(course)) {
+  const monitoringFailureEvidence = course
+    ? getIncidentMonitoringFailureEvidence({
+        kind: course.supportIncident?.kind,
+        occurrenceCount: course.supportIncident?.occurrenceCount,
+        lastSeenAt: course.supportIncident?.lastSeenAt,
+        course: { probes: course.probes ?? [] }
+      })
+    : undefined;
+  const probeCourse = course ? { ...course, monitoringFailureEvidence } : null;
+  const probeUrl = probeCourse ? getBestProbeUrl(probeCourse) : null;
+  if (!course || !probeUrl || !probeCourse || !shouldQueueBrowserProbe(probeCourse)) {
     return [];
   }
   const preference = course.preferences[0];
@@ -260,11 +379,47 @@ async function listExactIncidentBrowserProbeTarget(
         detectedPlatform: course.detectedPlatform,
         providerFamilyKey: course.providerFamilyKey,
         automationEligibility: course.automationEligibility,
-        bookingMetadata: course.bookingMetadata
+        automationReason: course.automationReason,
+        bookingMethod: course.bookingMethod,
+        isPublic: course.isPublic,
+        intelligenceVerifiedAt: course.intelligenceVerifiedAt,
+        intelligenceReviewAt: course.intelligenceReviewAt,
+        intelligenceConfidence: course.intelligenceConfidence,
+        bookingMetadata: course.bookingMetadata,
+        monitoringFailureEvidence
       },
       probeUrl
     }
   ];
+}
+
+function getIncidentMonitoringFailureEvidence(incident: {
+  kind?: string | null;
+  occurrenceCount?: number | null;
+  lastSeenAt?: Date | null;
+  course?: {
+    probes?: Array<{ outcome: string; observedAt: Date }>;
+  } | null;
+}): BrowserProbeCourseInput["monitoringFailureEvidence"] {
+  if (
+    incident.kind !== "FETCH_FAILED" ||
+    !incident.lastSeenAt ||
+    (incident.occurrenceCount ?? 0) < 2
+  ) {
+    return undefined;
+  }
+  const latestProbe = incident.course?.probes?.[0];
+  const latestSuccessfulAt =
+    latestProbe &&
+    (latestProbe.outcome === "MATCH_FOUND" || latestProbe.outcome === "NO_MATCH")
+      ? latestProbe.observedAt
+      : null;
+  return {
+    kind: "FETCH_FAILED",
+    occurrenceCount: incident.occurrenceCount ?? 0,
+    latestFailureAt: incident.lastSeenAt,
+    latestSuccessfulAt
+  };
 }
 
 export async function listPendingMatchAlerts(searchId?: string): Promise<PendingAlertMatch[]> {
@@ -318,6 +473,7 @@ export async function recordCourseProbe(input: CourseProbeInput) {
 }
 
 export async function recordBrowserDiscovery(input: BrowserDiscovery) {
+  input = normalizeBrowserDiscoveryForMonitoring(input);
   const learnedOnline = input.status === "LEARNED" && Boolean(input.apiMetadata);
   return prisma.courseAutomationDiscovery.create({
     data: {
@@ -341,6 +497,7 @@ export async function recordBrowserDiscovery(input: BrowserDiscovery) {
 }
 
 export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
+  input = normalizeBrowserDiscoveryForMonitoring(input);
   const provider = resolveProviderCapability({
     detectedPlatform: input.detectedPlatform,
     detectedBookingUrl: input.bookingUrl,
@@ -359,6 +516,8 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
   const learnedOnlineAdapter =
     input.status === "LEARNED" &&
     provider.isRunnable;
+  const incomingGate = evaluateBrowserDiscoveryMonitoringGate(input);
+  const incomingTerminal = incomingGate.disposition !== "ACTIONABLE";
   const verifiedClassification = Boolean(
     input.bookingMethod &&
     input.bookingMethod !== "UNKNOWN" &&
@@ -380,6 +539,13 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
         detectedBookingUrl: true,
         website: true,
         bookingMetadata: true,
+        isPublic: true,
+        bookingMethod: true,
+        automationEligibility: true,
+        automationReason: true,
+        intelligenceVerifiedAt: true,
+        intelligenceReviewAt: true,
+        intelligenceConfidence: true,
         updatedAt: true
       }
     });
@@ -429,6 +595,13 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
       detectedBookingUrl: true,
       website: true,
       bookingMetadata: true,
+      isPublic: true,
+      bookingMethod: true,
+      automationEligibility: true,
+      automationReason: true,
+      intelligenceVerifiedAt: true,
+      intelligenceReviewAt: true,
+      intelligenceConfidence: true,
       updatedAt: true
     }
   });
@@ -436,16 +609,26 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
     return null;
   }
   const persistedProvider = resolveProviderCapability(current);
+  const persistedGate = evaluateMonitoringGate(current);
   const differentKnownProvider = Boolean(
     persistedProvider.capability &&
       provider.capability &&
       persistedProvider.providerFamilyKey !== provider.providerFamilyKey
   );
+  const persistedMetadataStale =
+    persistedGate.requiresRevalidation || !persistedGate.currentEvidence;
+  const corroboratedLearnedReplacement = Boolean(
+    learnedOnlineAdapter &&
+      persistedGate.adapterAllowed &&
+      persistedMetadataStale &&
+      hasPersistedOfficialCourseProviderCorroboration(input, current.website)
+  );
   if (
     provider.evidenceConflict ||
-    persistedProvider.evidenceConflict ||
-    persistedProvider.isRunnable ||
-    differentKnownProvider
+    (persistedProvider.evidenceConflict && !corroboratedLearnedReplacement) ||
+    (learnedOnlineAdapter && !persistedGate.adapterAllowed) ||
+    (!learnedOnlineAdapter && !incomingTerminal && persistedProvider.isRunnable) ||
+    (differentKnownProvider && !corroboratedLearnedReplacement)
   ) {
     return null;
   }
@@ -476,6 +659,102 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
   }
 
   return prisma.course.findUnique({ where: { id: input.courseId } });
+}
+
+function normalizeBrowserDiscoveryForMonitoring(
+  discovery: BrowserDiscovery
+): BrowserDiscovery {
+  const normalized = keepPolicyOnlyDiscoveryActionable(discovery);
+  const gate = evaluateBrowserDiscoveryMonitoringGate(normalized);
+  const manualFieldsPresent =
+    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+      normalized.bookingMethod ?? ""
+    ) || normalized.automationReason === "NO_ONLINE_BOOKING";
+  const incoherentManualDisposition =
+    manualFieldsPresent && gate.disposition !== "MANUAL_FINAL";
+  const nonTerminalBlock =
+    normalized.automationEligibility === "BLOCKED" &&
+    gate.disposition === "ACTIONABLE";
+  if (!incoherentManualDisposition && !nonTerminalBlock) {
+    return normalized;
+  }
+
+  return {
+    ...normalized,
+    status: ["LEARNED", "VERIFIED", "BLOCKED"].includes(normalized.status)
+      ? "INSPECTED"
+      : normalized.status,
+    automationEligibility: "NEEDS_REVIEW",
+    intelligenceReviewAt: undefined,
+    confidence: Math.min(normalized.confidence, 0.79),
+    evidence: {
+      ...normalized.evidence,
+      learnedFrom: `${normalized.evidence.learnedFrom}:${
+        incoherentManualDisposition
+          ? "incoherent-manual-disposition"
+          : "non-terminal-block"
+      }`
+    }
+  };
+}
+
+function hasPersistedOfficialCourseProviderCorroboration(
+  discovery: BrowserDiscovery,
+  persistedWebsite: string | null
+) {
+  const proof = discovery.evidence.courseIdentityCorroboration;
+  if (
+    proof?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK" ||
+    !persistedWebsite ||
+    !discovery.bookingUrl
+  ) {
+    return false;
+  }
+  const persisted = parseSafePublicUrl(persistedWebsite);
+  const source = parseSafePublicUrl(discovery.sourceUrl);
+  const proofWebsite = parseSafePublicUrl(proof.officialWebsiteUrl);
+  const proofPage = parseSafePublicUrl(proof.officialPageUrl);
+  const proofProvider = parseSafePublicUrl(proof.providerUrl);
+  const discoveredProvider = parseSafePublicUrl(discovery.bookingUrl);
+  if (
+    !persisted ||
+    !source ||
+    !proofWebsite ||
+    !proofPage ||
+    !proofProvider ||
+    !discoveredProvider ||
+    resolveProviderCapability({ detectedBookingUrl: persisted.toString() }).capability
+  ) {
+    return false;
+  }
+  return (
+    haveSameCourseWebsiteOrigin(persisted, proofWebsite) &&
+    haveSameCourseWebsiteOrigin(persisted, proofPage) &&
+    haveSameCourseWebsiteOrigin(persisted, source) &&
+    proofProvider.toString() === discoveredProvider.toString()
+  );
+}
+
+function parseSafePublicUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password
+      ? url
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function haveSameCourseWebsiteOrigin(left: URL, right: URL) {
+  const normalizeHostname = (hostname: string) =>
+    hostname.toLowerCase().replace(/^www\./u, "");
+  return (
+    (left.protocol === right.protocol ||
+      (left.protocol === "http:" && right.protocol === "https:")) &&
+    normalizeHostname(left.hostname) === normalizeHostname(right.hostname) &&
+    left.port === right.port
+  );
 }
 
 export async function recordTeeTimeMatch(input: {
@@ -1341,7 +1620,7 @@ export async function listRecentCourseAutomationDiscoveries(
       createdAt: { gte: since }
     },
     orderBy: { createdAt: "desc" },
-    select: { courseId: true, createdAt: true }
+    select: { courseId: true, createdAt: true, evidence: true }
   });
 }
 

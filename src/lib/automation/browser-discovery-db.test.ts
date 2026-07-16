@@ -30,6 +30,12 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
+const chronogolfOfficialLinkProof = {
+  kind: "OFFICIAL_COURSE_PROVIDER_LINK" as const,
+  officialWebsiteUrl: "https://westwoodsgc.com/",
+  officialPageUrl: "https://westwoodsgc.com/",
+  providerUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
+};
 
 describe("browser discovery persistence", () => {
   beforeEach(() => {
@@ -347,8 +353,10 @@ describe("browser discovery persistence", () => {
     });
   });
 
-  it("does not let a stale access-barrier discovery downgrade a now-runnable course", async () => {
-    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+  it("lets newer corroborated technical evidence outrank historical runnable metadata", async () => {
+    const updatedAt = new Date("2026-07-16T12:05:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
       detectedBookingUrl:
@@ -359,8 +367,17 @@ describe("browser discovery persistence", () => {
         bookingBaseUrl:
           "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
-      updatedAt: new Date("2026-07-16T12:05:00.000Z")
-    } as never);
+      isPublic: true,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date("2026-07-15T12:00:00.000Z"),
+      intelligenceReviewAt: null,
+      intelligenceConfidence: 0.95,
+      updatedAt
+    } as never)
+      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
 
     const result = await applyBrowserDiscoveryToCourse({
       courseId: "course-westwoods",
@@ -372,10 +389,477 @@ describe("browser discovery persistence", () => {
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "CAPTCHA_OR_QUEUE",
+      intelligenceReviewAt: "2026-08-16T00:00:00.000Z",
       confidence: 0.95,
       evidence: {
         learnedFrom: "foreup-access-control",
         observedUrls: []
+      }
+    });
+
+    expect(result).toEqual({ id: "course-westwoods" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "course-westwoods", updatedAt },
+        data: expect.objectContaining({
+          automationEligibility: "BLOCKED",
+          automationReason: "CAPTCHA_OR_QUEUE",
+          bookingMetadata: undefined
+        })
+      })
+    );
+  });
+
+  it("does not let a corroborated cross-provider discovery overwrite a current technical final", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      providerFamilyKey: "FOREUP",
+      detectedPlatform: "FOREUP",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      website: "https://westwoodsgc.com/",
+      bookingMetadata: {
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      isPublic: true,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
+      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      intelligenceConfidence: 0.95,
+      updatedAt: new Date("2026-07-16T12:05:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl: "https://www.chronogolf.com/club/westwoods-golf-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        clubId: 7221,
+        courseIds: ["westwoods-course"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "chronogolf-public-club-profile",
+        observedUrls: [],
+        courseIdentityCorroboration: chronogolfOfficialLinkProof
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("lets a corroborated cross-provider discovery replace stale known metadata", async () => {
+    const updatedAt = new Date("2026-07-16T12:05:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "FOREUP",
+        detectedPlatform: "FOREUP",
+        detectedBookingUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+        website: "https://westwoodsgc.com/",
+        bookingMetadata: {
+          scheduleId: 6123,
+          bookingBaseUrl:
+            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        },
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED",
+        intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+        intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+        intelligenceConfidence: 0.95,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl: "https://www.chronogolf.com/club/westwoods-golf-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        clubId: 7221,
+        courseIds: ["westwoods-course"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "chronogolf-public-club-profile",
+        observedUrls: [],
+        courseIdentityCorroboration: chronogolfOfficialLinkProof
+      }
+    });
+
+    expect(result).toEqual({ id: "course-westwoods" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "course-westwoods", updatedAt },
+        data: expect.objectContaining({
+          providerFamilyKey: "CHRONOGOLF",
+          detectedPlatform: "CHRONOGOLF",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE"
+        })
+      })
+    );
+  });
+
+  it("rejects provider-page self-attestation for cross-provider replacement", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      providerFamilyKey: "FOREUP",
+      detectedPlatform: "FOREUP",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      website: "https://westwoodsgc.com/",
+      bookingMetadata: {
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      isPublic: true,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+      intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+      intelligenceConfidence: 0.95,
+      updatedAt: new Date("2026-07-16T12:05:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl: "https://www.chronogolf.com/club/westwoods-golf-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        clubId: 7221,
+        courseIds: ["westwoods-course"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "chronogolf-public-club-profile",
+        observedUrls: [],
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          officialWebsiteUrl: "https://westwoodsgc.com/",
+          officialPageUrl:
+            "https://www.chronogolf.com/club/westwoods-golf-course",
+          providerUrl:
+            "https://www.chronogolf.com/club/westwoods-golf-course"
+        }
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps current coherent provider metadata despite cross-provider corroboration", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      providerFamilyKey: "FOREUP",
+      detectedPlatform: "FOREUP",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      website: "https://westwoodsgc.com/",
+      bookingMetadata: {
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      isPublic: true,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
+      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      intelligenceConfidence: 0.95,
+      updatedAt: new Date("2026-07-16T12:05:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl: "https://www.chronogolf.com/club/westwoods-golf-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        clubId: 7221,
+        courseIds: ["westwoods-course"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "chronogolf-public-club-profile",
+        observedUrls: [],
+        courseIdentityCorroboration: chronogolfOfficialLinkProof
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("lets corroborated learned metadata replace stale conflicting provider evidence", async () => {
+    const updatedAt = new Date("2026-07-16T12:07:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "GOLFNOW",
+        detectedPlatform: "GOLFNOW",
+        detectedBookingUrl: "https://www.golfnow.com/course/westwoods",
+        website: "https://westwoodsgc.com/",
+        bookingMetadata: {
+          provider: "GOLFBACK",
+          courseId: "123e4567-e89b-42d3-a456-426614174000",
+          bookingBaseUrl:
+            "https://golfback.com/#/course/123e4567-e89b-42d3-a456-426614174000"
+        },
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED",
+        intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+        intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+        intelligenceConfidence: 0.95,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl: "https://www.chronogolf.com/club/westwoods-golf-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        clubId: 7221,
+        courseIds: ["westwoods-course"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "chronogolf-public-club-profile",
+        observedUrls: [],
+        courseIdentityCorroboration: chronogolfOfficialLinkProof
+      }
+    });
+
+    expect(result).toEqual({ id: "course-westwoods" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "course-westwoods", updatedAt },
+        data: expect.objectContaining({ providerFamilyKey: "CHRONOGOLF" })
+      })
+    );
+  });
+
+  it("lets learned runnable metadata replace a stale manual final", async () => {
+    const updatedAt = new Date("2026-07-16T12:05:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "FOREUP",
+        detectedPlatform: "FOREUP",
+        detectedBookingUrl: null,
+        website: "https://westwoodsgc.com/",
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "PHONE_ONLY",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+        intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+        intelligenceConfidence: 0.95,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      confidence: 0.95,
+      evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
+    });
+
+    expect(result).toEqual({ id: "course-westwoods" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "course-westwoods", updatedAt },
+        data: expect.objectContaining({
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE"
+        })
+      })
+    );
+  });
+
+  it("lets learned runnable metadata replace a stale technical final", async () => {
+    const updatedAt = new Date("2026-07-16T12:06:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "FOREUP",
+        detectedPlatform: "FOREUP",
+        detectedBookingUrl: null,
+        website: "https://westwoodsgc.com/",
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED",
+        intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+        intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+        intelligenceConfidence: 0.95,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      confidence: 0.95,
+      evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
+    });
+
+    expect(result).toEqual({ id: "course-westwoods" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "course-westwoods", updatedAt },
+        data: expect.objectContaining({
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE"
+        })
+      })
+    );
+  });
+
+  it("does not let learned runnable metadata replace a current manual final", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      providerFamilyKey: "FOREUP",
+      detectedPlatform: "FOREUP",
+      detectedBookingUrl: null,
+      website: "https://westwoodsgc.com/",
+      bookingMetadata: null,
+      isPublic: true,
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
+      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      intelligenceConfidence: 0.95,
+      updatedAt: new Date("2026-07-16T12:05:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://westwoodsgc.com/",
+      bookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      confidence: 0.95,
+      evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "the booking method is unknown",
+      bookingMethod: "UNKNOWN" as const,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "NO_ONLINE_BOOKING" as const
+    },
+    {
+      label: "the discovery is allowed",
+      bookingMethod: "PHONE_ONLY" as const,
+      automationEligibility: "ALLOWED" as const,
+      automationReason: "NO_ONLINE_BOOKING" as const
+    },
+    {
+      label: "the reason is not no-online-booking",
+      bookingMethod: "CONTACT_COURSE" as const,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "OTHER" as const
+    }
+  ])("does not accept an incoherent manual discovery when $label", async (scenario) => {
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-manual",
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://course.example/",
+      bookingUrl: "https://course.example/tee-times",
+      bookingMethod: scenario.bookingMethod,
+      automationEligibility: scenario.automationEligibility,
+      automationReason: scenario.automationReason,
+      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "official-site-research",
+        observedUrls: ["https://course.example/tee-times"]
       }
     });
 
@@ -454,6 +938,55 @@ describe("browser discovery persistence", () => {
     );
   });
 
+  it("automatically targets a runnable provider after current repeated failures", async () => {
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([]);
+    mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        status: "AUTO_INVESTIGATING",
+        kind: "FETCH_FAILED",
+        occurrenceCount: 3,
+        lastSeenAt: new Date(),
+        course: {
+          id: "course-1",
+          name: "Repeated Failure Course",
+          website: "https://course.example/",
+          detectedBookingUrl:
+            "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
+          detectedPlatform: "FOREUP",
+          providerFamilyKey: "FOREUP",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          bookingMethod: "PUBLIC_ONLINE",
+          isPublic: true,
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          bookingMetadata: {
+            scheduleId: 2,
+            bookingBaseUrl:
+              "https://foreupsoftware.com/index.php/booking/1/2#/teetimes"
+          },
+          probes: [{ outcome: "FETCH_FAILED", observedAt: new Date() }]
+        }
+      }
+    ] as never);
+
+    const targets = await listBrowserProbeTargets();
+
+    expect(targets).toEqual([
+      expect.objectContaining({
+        probeUrl: "https://course.example/",
+        course: expect.objectContaining({
+          id: "course-1",
+          monitoringFailureEvidence: expect.objectContaining({
+            occurrenceCount: 3
+          })
+        })
+      })
+    ]);
+  });
+
   it("limits a targeted browser probe to the exact requested course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -476,6 +1009,66 @@ describe("browser discovery persistence", () => {
     expect(targets[0]?.course.name).toBe("Westwoods Golf Course");
     expect(targets[0]?.course.providerFamilyKey).toBe("FOREUP");
     expect(targets[0]?.searchId).toBeUndefined();
+  });
+
+  it("targets a completed-search incident when its stored block is policy-only", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "policy-course",
+        name: "Policy Course",
+        website: "https://policy-course.example/",
+        detectedBookingUrl: "https://policy-course.example/tee-times",
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "policy-course.example",
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED",
+        bookingMethod: "PUBLIC_ONLINE",
+        isPublic: true,
+        intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+        intelligenceConfidence: 0.99,
+        bookingMetadata: null,
+        preferences: []
+      }
+    ] as never);
+
+    const targets = await listBrowserProbeTargets(1, "Policy Course");
+
+    expect(targets).toEqual([
+      expect.objectContaining({
+        searchId: undefined,
+        course: expect.objectContaining({
+          id: "policy-course",
+          automationReason: "AUTOMATION_PROHIBITED"
+        })
+      })
+    ]);
+  });
+
+  it("does not target a current corroborated technical final", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "account-course",
+        name: "Account Course",
+        website: "https://account-course.example/",
+        detectedBookingUrl: "https://account-course.example/tee-times",
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "account-course.example",
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED",
+        bookingMethod: "PUBLIC_ONLINE",
+        isPublic: true,
+        intelligenceVerifiedAt: new Date(),
+        intelligenceReviewAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        intelligenceConfidence: 0.95,
+        bookingMetadata: null,
+        preferences: []
+      }
+    ] as never);
+
+    await expect(
+      listBrowserProbeTargets(1, "Account Course")
+    ).resolves.toEqual([]);
   });
 
   it("rejects an ambiguous targeted course name", async () => {

@@ -344,6 +344,7 @@ describe("fresh runtime verification", () => {
         course: {
           ...runnableCourse,
           bookingMethod: "PHONE_ONLY",
+          automationEligibility: "BLOCKED",
           automationReason: "NO_ONLINE_BOOKING",
           latestDiscovery: {
             status: "VERIFIED",
@@ -358,6 +359,65 @@ describe("fresh runtime verification", () => {
         }
       }).result
     ).toBe("FINAL_DISPOSITION");
+  });
+
+  it.each([
+    {
+      label: "the current course method is unknown",
+      courseMethod: "UNKNOWN" as const,
+      courseEligibility: "BLOCKED" as const,
+      discoveryMethod: "UNKNOWN" as const,
+      discoveryEligibility: "BLOCKED" as const,
+      discoveryStatus: "VERIFIED"
+    },
+    {
+      label: "the current course is not blocked",
+      courseMethod: "PHONE_ONLY" as const,
+      courseEligibility: "ALLOWED" as const,
+      discoveryMethod: "PHONE_ONLY" as const,
+      discoveryEligibility: "BLOCKED" as const,
+      discoveryStatus: "VERIFIED"
+    },
+    {
+      label: "the discovery is not blocked",
+      courseMethod: "CONTACT_COURSE" as const,
+      courseEligibility: "BLOCKED" as const,
+      discoveryMethod: "CONTACT_COURSE" as const,
+      discoveryEligibility: "ALLOWED" as const,
+      discoveryStatus: "VERIFIED"
+    },
+    {
+      label: "the discovery is learned but not verified",
+      courseMethod: "WALK_IN" as const,
+      courseEligibility: "BLOCKED" as const,
+      discoveryMethod: "WALK_IN" as const,
+      discoveryEligibility: "BLOCKED" as const,
+      discoveryStatus: "LEARNED"
+    }
+  ])("rejects a manual final when $label", (scenario) => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
+        course: {
+          ...runnableCourse,
+          bookingMethod: scenario.courseMethod,
+          automationEligibility: scenario.courseEligibility,
+          automationReason: "NO_ONLINE_BOOKING",
+          latestDiscovery: {
+            status: scenario.discoveryStatus,
+            bookingMethod: scenario.discoveryMethod,
+            automationEligibility: scenario.discoveryEligibility,
+            automationReason: "NO_ONLINE_BOOKING",
+            sourceUrl: "https://course.example/official-booking",
+            bookingUrl: null,
+            confidence: 0.9,
+            createdAt: new Date("2026-07-15T19:30:00.000Z")
+          }
+        }
+      }).result
+    ).toBe("STALE_EVIDENCE");
   });
 
   it("accepts a current technical access barrier as a terminal disposition", () => {
@@ -385,7 +445,7 @@ describe("fresh runtime verification", () => {
     ).toBe("FINAL_DISPOSITION");
   });
 
-  it("accepts a current source-backed prohibited-automation disposition", () => {
+  it("keeps a current source-backed prohibited-automation disposition actionable", () => {
     expect(
       classifyFreshBatchEvidence({
         batchCreatedAt: now,
@@ -407,7 +467,7 @@ describe("fresh runtime verification", () => {
           }
         }
       }).result
-    ).toBe("FINAL_DISPOSITION");
+    ).toBe("STALE_EVIDENCE");
   });
 
   it("accepts a current exact-place non-course disposition after course reconciliation", () => {
@@ -563,7 +623,14 @@ describe("fresh runtime verification", () => {
             disposition: "MANUAL_DIRECT",
             evidenceOrigin: "https://course.example",
             discoveryCreatedAt: "2026-07-15T18:30:00.000Z",
-            confidence: 0.9
+            confidence: 0.9,
+            discoveryStatus: "VERIFIED",
+            bookingMethod: "PHONE_ONLY",
+            automationEligibility: "BLOCKED",
+            automationReason: "NO_ONLINE_BOOKING",
+            discoveryBookingMethod: "PHONE_ONLY",
+            discoveryAutomationEligibility: "BLOCKED",
+            discoveryAutomationReason: "NO_ONLINE_BOOKING"
           },
           verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
           verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
@@ -580,6 +647,64 @@ describe("fresh runtime verification", () => {
         }
       )
     ).toBe(true);
+  });
+
+  it("rejects legacy manual proof without coherent course and discovery fields", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: {
+            kind: "FINAL_DISPOSITION",
+            disposition: "MANUAL_DIRECT",
+            evidenceOrigin: "https://course.example",
+            discoveryCreatedAt: "2026-07-15T18:30:00.000Z",
+            confidence: 0.9
+          },
+          verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a legacy policy-only terminal proof", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: {
+            kind: "FINAL_DISPOSITION",
+            disposition: "AUTOMATION_PROHIBITED",
+            evidenceOrigin: "https://course.example",
+            discoveryCreatedAt: "2026-07-15T19:30:00.000Z",
+            confidence: 0.99
+          },
+          verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T19:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(false);
   });
 
   it("still requires restored monitoring to supersede the newest failure", () => {

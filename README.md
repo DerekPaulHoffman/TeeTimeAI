@@ -428,7 +428,7 @@ Common probe meaning:
 - `NO_MATCH`: checked successfully, no qualifying time found.
 - `MATCH_FOUND`: qualifying time found and recorded.
 - `NEEDS_ADAPTER`: course/platform is not supported yet.
-- `BLOCKED_POLICY`: terms or stored eligibility prohibit automation.
+- `BLOCKED_POLICY`: legacy evidence only. Re-check current public read-only access and treat it as `NEEDS_ADAPTER`; policy text alone is never terminal.
 - `BLOCKED_AUTH`: access requires auth, captcha, verification, or a restricted account.
 - `FETCH_FAILED`: network/provider failure.
 

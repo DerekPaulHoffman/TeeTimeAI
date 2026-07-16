@@ -39,16 +39,17 @@ The app must not:
 - Hold, reserve, or pay for tee times.
 - Enter checkout.
 - Use verification-code flows.
-- Bypass captchas, queues, rate limits, or access controls.
+- Bypass active captchas, waiting rooms/queues, rate limits, authentication, or other technical access controls.
 - Use account-specific course sessions in the POC.
-- Automate retrieval when a course blocks or prohibits automation.
 - Imply that Tee Time Spot completes the booking.
 
 Use copy such as "official site", "official booking page", "direct link", and "you book direct". Avoid copy such as "we book", "Tee Time Spot books", or anything implying guaranteed availability.
 
+Booking, reservation, purchase, and checkout policies govern those transactions; they do not govern observation of public availability. Public, signed-out, read-only tee-time data is eligible for monitoring regardless of provider or course terms about booking automation. Policy text alone must never set `BLOCKED` or `BLOCKED_POLICY`, overwrite a working official booking link, or stop adapter investigation. Terms may be retained as evidence, but current observed public access is the source of truth for monitoring eligibility. The technical boundary remains strict: do not solve, generate, replay, or bypass captcha tokens; do not bypass waiting rooms, rate limits, authentication, or access controls; do not use private/account-specific data; and do not proceed into booking or checkout.
+
 ## Product Mental Model
 
-The product is a saved-demand and notification system, not a live tee-time marketplace. A golfer tells Tee Time Spot where and when they want to play; the app persists that intent, monitors only policy-safe public booking surfaces, and sends the golfer back to the course to finish the booking.
+The product is a saved-demand and notification system, not a live tee-time marketplace. A golfer tells Tee Time Spot where and when they want to play; the app persists that intent, monitors public read-only booking surfaces without entering the transaction flow, and sends the golfer back to the course to finish the booking.
 
 There are five important actors:
 
@@ -86,7 +87,7 @@ discover public courses -> save ranked demand -> check official availability
 ### 3. Monitor And Notify
 
 1. The per-search workflow wakes at `nextCheckAt` and runs against the latest deployment.
-2. Each selected course is checked independently. Its course-local timezone, policy, automation eligibility, booking method, provider metadata, and requested physical layout determine what can run.
+2. Each selected course is checked independently. Its course-local timezone, current technical access requirements, booking method, provider metadata, and requested physical layout determine what can run. Booking or transaction policy text alone does not make a public read-only surface ineligible.
 3. Every course gets a check result; material observation changes and adapter attempts produce durable `CourseProbe` evidence, while unchanged unsupported facts may reuse the latest row. Supported availability becomes an idempotent `TeeTimeMatch`; one course's failure must not suppress another course's success.
 4. New matching openings send email to the Clerk account email plus normalized additional recipients. Emails show course-local time as the booking source of truth and the golfer's timezone when it differs.
 5. The email links to the official booking page. Availability is first come, first served, and the golfer completes the booking.
@@ -102,8 +103,8 @@ discover public courses -> save ranked demand -> check official availability
 ### 5. Recover From Missing Or Unsupported Coverage
 
 - A missing discovery result goes through exact provider-shape inspection, direct lookup, official-site corroboration, and, when justified, a `GooglePlaceReview` correction.
-- A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Policy-safe reusable provider support belongs in an adapter; phone-only, account-required, prohibited, captcha/queue, or otherwise unsafe access is classified honestly.
-- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. The dedicated 10-minute course-support responder owns discovery, reusable implementation, fresh-runtime verification, retry, and final disposition; the broad hourly loop must not select these incidents. Ordinary one-check `TEST`/`AUTOMATION` searches remain excluded, but an explicitly opted-in `syntheticMultiCycle` search may open an `engineeringOnly` incident. Engineering-only incidents never send customer or operator support email, remain actionable after the source search ends, and must stay open until reusable monitoring works or a conclusive policy/contact/identity disposition is persisted. Real demand on the same course promotes the incident to normal customer-demand priority.
+- A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Reusable support for public, signed-out, read-only availability belongs in an adapter. Phone-only, account-required, captcha/queue, private/non-course, or otherwise technically inaccessible surfaces are classified honestly; provider terms or booking policy alone are not a terminal monitoring disposition.
+- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. The dedicated 10-minute course-support responder owns discovery, reusable implementation, fresh-runtime verification, retry, and final disposition; the broad hourly loop must not select these incidents. Ordinary one-check `TEST`/`AUTOMATION` searches remain excluded, but an explicitly opted-in `syntheticMultiCycle` search may open an `engineeringOnly` incident. Engineering-only incidents never send customer or operator support email, remain actionable after the source search ends, and must stay open until reusable monitoring works or a conclusive technical-access/contact/identity disposition is persisted. Real demand on the same course promotes the incident to normal customer-demand priority.
 - Customer copy should say what Tee Time Spot can do now and offer the official site; do not expose terms such as adapter, probe, queue, Prisma, Neon, Codex, or automation incident.
 
 ### 6. Learn From Real Use
@@ -111,7 +112,7 @@ discover public courses -> save ranked demand -> check official availability
 - `WebsiteEvent`, `WebsiteFeedback`, lookup misses, support incidents, probes, matches, and automation runs are the product-learning surfaces.
 - Analytics are aggregate and traffic-classed as `PUBLIC`, `AUTOMATION`, `TEST`, or `UNCLASSIFIED`. Never add a persistent visitor/session identifier just to improve reporting.
 - Automated and test browsers must identify their traffic so they do not masquerade as customer demand.
-- Treat feedback as an input to diagnosis and prioritization, not as permission to bypass product safety or provider policy.
+- Treat feedback as an input to diagnosis and prioritization, not as permission to bypass technical access controls or enter a booking transaction. Do not let booking-policy text override stronger current evidence that a surface is publicly readable.
 
 ## Canonical Decisions
 
@@ -183,7 +184,7 @@ Core data:
 - **Neon Postgres is the durable source of truth.** Dashboard/search state, schedules, provider reviews, probes, matches, incidents, analytics, and automation history must survive process restarts and deploys.
 - **Vercel Workflow owns per-search scheduling.** It orchestrates sleep/wake/check behavior; Postgres schedule version, row-token lease, and compare-and-set completion prevent stale workflow work from winning.
 - **Vercel Queue is only a Workflow-start fallback.** Its private, minimal, at-least-once messages recover failed starts and dispatch one post-remediation recheck; Postgres remains authoritative.
-- **Course adapters read policy-safe public availability.** The official provider remains authoritative for current availability, price, rules, and booking.
+- **Course adapters read public, signed-out availability without transacting.** The official provider remains authoritative for current availability, price, rules, and booking.
 - **Resend transports email.** A local `SENT` record means the send path completed/provider accepted it; it is not proof of inbox placement or an open.
 - **Vercel Git deployments own production runtime.** A successful local build or database write is not proof that the matching application commit is live.
 - **The course-support Codex responder owns provider coverage incidents.** It runs every 10 minutes and resolves them with reusable support or final evidence-backed dispositions.
@@ -355,7 +356,7 @@ Important behavior:
 - The truth is in Postgres: the `TeeSearch` schedule row, `AutomationRun`, newest per-course `CourseProbe`, `TeeTimeMatch`, `CourseSupportIncident`, and pending alerts.
 - Use the newest observation for each course/search when classifying current health. A later `NO_MATCH` or success supersedes an older failure even though history remains valuable.
 - Use `automation:inspect` to classify the result.
-- Report normalized outcomes such as `success`, `no new matches`, `alerts sent/dry-run`, `blocked_env`, `needs_adapter`, or `blocked_policy`.
+- Report normalized outcomes such as `success`, `no new matches`, `alerts sent/dry-run`, `blocked_env`, `needs_adapter`, `account_required`, or `captcha_or_queue`. Do not use `blocked_policy` as a terminal result for public read-only monitoring.
 - Do not revive the retired 15-minute Codex poller.
 
 The historical automation memory path for manual recovery runs is:
@@ -380,7 +381,7 @@ Important behavior:
 - The responder and hourly loop share the transaction-scoped `tee-time-spot:repository-writer` lease for state transitions. A durable batch plus unfinished `AutomationRun` owns the implementation interval.
 - The responder and hourly automations must use separate already-approved persistent checkouts; never point both schedules at one mutable Git worktree.
 - Code remediation requires a new per-course runnable-provider proof snapshot from the exact deployed release: `CourseProbe.runtimeVersion` must equal the release SHA and the observation must be newer than the pre-claim/deployment and latest-incident boundaries. A Workflow id, layout skip, or older success is insufficient.
-- Classification-only closeout requires a current, sufficiently confident official-source discovery that agrees with the persisted phone/contact/walk-in, no-online-booking, prohibited-automation, account-required, or CAPTCHA/queue disposition. Exact private/non-course identity remains in the reviewed-place path.
+- Classification-only closeout requires a current, sufficiently confident official-source discovery that agrees with the persisted phone/contact/walk-in, no-online-booking, account-required, CAPTCHA/queue, or other technical-access disposition. Provider terms or a prohibited-automation statement alone cannot close public read-only monitoring work. Exact private/non-course identity remains in the reviewed-place path.
 - Terminal closeout waits for complete affected-search dispatch, healthy scheduler state, and a fresh post-dispatch check. Global provider I/O is capped at two requests and one request per provider family.
 - Retry transient failures on the persisted 15-minute, 1-hour, 6-hour, then 24-hour ladder with jitter; honor bounded rate-limit `Retry-After`. Explicit recovery requires expired ownership and exact branch/HEAD/dirty-path provenance.
 - Auto-archive only routine results after durable closeout: no due work, durably deferred busy, success, classification-only, partial, or retryable failure with a future `nextAttemptAt`. Keep active/recovery/human, privacy, delivery, unsafe-provider, migration/deploy/production-verification, auth/env/Git, command, and repeated-SLA tasks visible.
@@ -429,19 +430,21 @@ Every automated browser context must set session storage key `tee-time-spot:traf
 
 Before fetching a tee sheet:
 
-- Check `Course.automationEligibility`.
-- Check `Course.policyNotes`.
+- Confirm the official booking source and whether its availability is currently public and readable while signed out.
+- Check `Course.automationEligibility` and `Course.policyNotes` as historical evidence, not as unquestioned authority. Re-check the live public surface when either says `BLOCKED` or `BLOCKED_POLICY`.
 - Check the requested physical layout against verified `Course.layoutHoleCounts`; skip a known mismatch before provider retrieval.
-- Evaluate policy text if available.
-- Skip `BLOCKED` courses.
-- Record `BLOCKED_POLICY` if terms appear to prohibit automated retrieval.
-- Record `NEEDS_ADAPTER` for unsupported platforms.
+- Never infer that booking, reservation, purchase, or checkout restrictions prohibit read-only monitoring. Policy text alone does not determine monitoring eligibility.
+- If public availability can be read without bypassing a technical access control, monitoring is allowed regardless of provider or course terms.
+- Skip retrieval only when current evidence shows that the read itself requires an account-specific/private session, an active captcha or waiting-room token, access-control circumvention, or another prohibited technical bypass. A stored `BLOCKED` value is not sufficient without that current evidence.
+- Do not record `BLOCKED_POLICY` for a public read-only monitoring surface. Use the precise technical disposition, such as `ACCOUNT_REQUIRED` or `CAPTCHA_OR_QUEUE`, only when current observed behavior supports it.
+- Record `NEEDS_ADAPTER` for unsupported public platforms when no technical access boundary has been demonstrated.
 - Record `NO_MATCH` for supported checks with no qualifying time.
 - Record `MATCH_FOUND` when a slot qualifies.
 
 Adapter behavior:
 
-- Use public tee-sheet endpoints only.
+- Use public, signed-out tee-sheet endpoints only.
+- Distinguish visible UI from network access requirements. An invisible or background captcha token is still a captcha requirement even when the golfer sees no checkbox; do not generate, replay, solve, or bypass it.
 - Run official-site/provider discovery before declaring a new course unsupported, and append evidence to `CourseAutomationDiscovery`.
 - Treat contradictory provider platform, booking URL, and metadata signals as non-runnable source conflict. Do not call any provider until current official-source evidence reconciles them to one family.
 - Prefer stable source IDs to dedupe matches.
@@ -462,7 +465,7 @@ Do not assume every `DetectedPlatform` enum has a runnable adapter.
 - Recognized but non-runnable today: `GOLFNOW`, `WHOOSH`, and `TENFORE`; finding one is not evidence that monitoring is implemented.
 - `UNKNOWN` means provider discovery is still needed, not that the course is unsupported forever.
 
-Use the registry's consumer dispositions rather than optimistic support labels. Only a current trusted `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, or `BOOKING_NOT_OPEN` result counts as effective monitored coverage. Direct-site, phone/walk-in, account-required, policy-blocked, CAPTCHA/queue, private/invalid, source-unverified, retrying, and engineering states must remain distinct.
+Use the registry's consumer dispositions rather than optimistic support labels. Only a current trusted `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, or `BOOKING_NOT_OPEN` result counts as effective monitored coverage. Direct-site, phone/walk-in, account-required, CAPTCHA/queue, private/invalid, source-unverified, retrying, and engineering states must remain distinct. Treat `policy-blocked` as a legacy state that requires live revalidation, not a terminal result for public read-only monitoring.
 
 Before adding an adapter, search existing provider dispatch, metadata parsers, seeds, and tests. Extend a reusable family when the public endpoint contract matches; do not create course-name-specific fetch code.
 
@@ -509,7 +512,7 @@ Fix the smallest authoritative layer that is wrong. Do not start with a broad re
 - **Discovery:** compare raw Google shape, active `GooglePlaceReview`, generic classifier output, dedupe result, API response, and rendered list. Use stable exact Place IDs for exceptions and test nearby public controls.
 - **Saved search:** inspect the authenticated API result and `User`/`TeeSearch`/`CoursePreference` transaction. Confirm primary email came from Clerk, ranks are unique, and selected course candidates resolved to the intended canonical `Course` rows.
 - **Scheduling:** inspect `TeeSearch.status`, `checkStatus`, `scheduleVersion`, `workflowRunId`, `nextCheckAt`, recent Workflow/`AutomationRun` outcomes, and the newest probe per course. Do not diagnose from one old failure row.
-- **Provider monitoring:** inspect `Course` eligibility/reason/policy/booking metadata, newest probe, append-only discovery evidence, and open support incident. Confirm the official booking surface and policy before changing an adapter.
+- **Provider monitoring:** inspect `Course` eligibility/reason/policy/booking metadata, newest probe, append-only discovery evidence, and open support incident. Confirm the official booking surface and current signed-out technical access requirements before changing an adapter; policy text is context, not a monitoring gate.
 - **Matches/email:** inspect current matches, availability vs alert state, status snapshot, recipients, idempotency behavior, and provider send result. "Sent" does not prove inbox delivery; never promise open/delivery proof the available evidence cannot provide.
 - **Deployment/configuration:** verify the exact Git SHA, applied migrations, Vercel deployment source/aliases, environment presence without printing values, live routes, and logs. Local success is not production proof.
 - **Quick route probes:** use the real contracts: geocode takes `q`; discover takes `latitude`, `longitude`, and `radiusMeters`; lookup takes `q` plus either both coordinates or neither. Wrong probe shapes create false failures.
@@ -720,7 +723,7 @@ Provider/setup gaps can drift, so verify before acting. Last known items:
 - Clerk account mode is active in production with owner-scoped dashboards and email/password plus Google sign-in. `CLERK_AUTH_READY` remains the required safety gate; verify live provider state before changing it.
 - Google Places key should remain restricted and should be rotated after confirming healthy production behavior.
 - Google place corrections are operator-command-only by design; there is no public/admin review editor.
-- Adapter coverage is intentionally narrow; add adapters only with policy-safe public retrieval evidence.
+- Adapter coverage is intentionally narrow; add adapters only with current evidence of public, signed-out, read-only retrieval that does not require bypassing a technical access control.
 - Resend/provider acceptance is recorded, but the current architecture has no separate inbox-delivery/open ledger.
 - Admin/reporting for feedback, events, probes, and adapter gaps can be improved.
 - No Redis, warehouse, read replica, separate queue, or full course-catalog cache is currently justified.

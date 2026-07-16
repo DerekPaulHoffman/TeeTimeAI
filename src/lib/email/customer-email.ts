@@ -548,6 +548,24 @@ function buildAvailabilityRows(
   );
 }
 
+export function getRenderedAvailabilityStartTimes(
+  times: CustomerEmailAvailabilityTime[],
+  timeZone?: string
+) {
+  return getRenderedAvailabilityTimes(times, timeZone).map((match) =>
+    match.startsAtDate.getTime()
+  );
+}
+
+export function getRenderedAvailabilityTimes<
+  T extends CustomerEmailAvailabilityTime
+>(times: T[], timeZone?: string) {
+  const normalizedTimeZone = normalizeTimeZone(timeZone, DEFAULT_TIME_ZONE);
+  return buildAvailabilityRows(times, normalizedTimeZone)
+    .slice(0, MAX_EMAIL_AVAILABILITY_ROWS_PER_COURSE)
+    .flatMap((row) => row.matches) as Array<T & { startsAtDate: Date }>;
+}
+
 function formatAvailabilityWindow(
   window: CustomerEmailAvailabilityWindow,
   timeZone: string,

@@ -1,4 +1,8 @@
-import type { BookingMethod } from "@/lib/courses/intelligence";
+import type { MonitoringDisposition } from "@/lib/automation/policy";
+import type {
+  AutomationReason,
+  BookingMethod
+} from "@/lib/courses/intelligence";
 import {
   renderCustomerEmail,
   type CustomerEmailMonitoringCourse
@@ -25,12 +29,20 @@ export type SearchStatusCourseReport = {
   rank?: number;
   courseAddress?: string;
   timeZone?: string;
-  outcome: "MATCH_FOUND" | "NO_MATCH" | "BLOCKED_POLICY" | "NEEDS_ADAPTER" | "FETCH_FAILED";
+  outcome:
+    | "MATCH_FOUND"
+    | "NO_MATCH"
+    | "BLOCKED_POLICY"
+    | "BLOCKED_AUTH"
+    | "NEEDS_ADAPTER"
+    | "FETCH_FAILED";
   availableMatches: number;
   message?: string;
   bookingUrl?: string;
   phone?: string;
   bookingMethod?: BookingMethod;
+  automationReason?: AutomationReason;
+  monitoringDisposition?: MonitoringDisposition;
   supportStatus?: "TEAM_ALERTED" | "PENDING_ALERT";
   bookingAccess?:
     | "BOOKING_PAGE"
@@ -165,13 +177,24 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const currentSnapshot = buildSearchStatusSnapshot(input.courses);
   const changedCourses = getChangedCourseNames(currentSnapshot, input.previousSnapshot);
   const hasAvailability = input.courses.some(
-    (course) => (course.matchingTimes?.length ?? 0) > 0
+    (course) =>
+      (course.matchingTimes?.length ?? 0) > 0 &&
+      getBlockedMonitoringCategory(course) !== "IDENTITY_FINAL"
   );
   const hasDirectOnlyCourse = input.courses.some(
-    (course) => course.outcome === "BLOCKED_POLICY"
+    (course) => {
+      const category = getBlockedMonitoringCategory(course);
+      return (
+        category === "MANUAL_FINAL" ||
+        category === "TECHNICAL_FINAL" ||
+        category === "IDENTITY_FINAL"
+      );
+    }
   );
   const hasWorkInProgressCourse = input.courses.some(
-    (course) => course.outcome === "NEEDS_ADAPTER"
+    (course) =>
+      course.outcome === "NEEDS_ADAPTER" ||
+      getBlockedMonitoringCategory(course) === "POLICY_REMEDIATION"
   );
   const heading = input.kind === "setup"
     ? "Your tee-time alert is active"
@@ -191,7 +214,11 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
           : "No course status changed since your last email. We're still checking.";
   const availabilityCourses = input.courses
     .map((course, index) => ({ course, fallbackRank: index + 1 }))
-    .filter(({ course }) => (course.matchingTimes?.length ?? 0) > 0)
+    .filter(
+      ({ course }) =>
+        (course.matchingTimes?.length ?? 0) > 0 &&
+        getBlockedMonitoringCategory(course) !== "IDENTITY_FINAL"
+    )
     .map(({ course, fallbackRank }) => ({
       courseId: course.courseId,
       courseName: course.courseName,
@@ -241,6 +268,11 @@ function toMonitoringCourse(
 ): CustomerEmailMonitoringCourse {
   const description = describeCourse(course, players);
   const bookingAccess = getBookingAccess(course);
+  const blockedCategory = getBlockedMonitoringCategory(course);
+  const identityFinal = blockedCategory === "IDENTITY_FINAL";
+  const isAddingMonitoring =
+    course.outcome === "NEEDS_ADAPTER" ||
+    blockedCategory === "POLICY_REMEDIATION";
   const presentation = course.outcome === "MATCH_FOUND"
     ? {
         badgeLabel: "FULLY MONITORED",
@@ -259,7 +291,7 @@ function toMonitoringCourse(
             tone: "monitored" as const,
             detail: `${description.stateLabel}. ${description.detail}`
           }
-        : course.outcome === "NEEDS_ADAPTER"
+        : isAddingMonitoring
           ? {
               badgeLabel: "ADDING MONITORING",
               tone: "adding" as const,
@@ -287,9 +319,9 @@ function toMonitoringCourse(
     badgeLabel: presentation.badgeLabel,
     detail: presentation.detail,
     tone: presentation.tone,
-    bookingUrl: course.bookingUrl,
+    bookingUrl: identityFinal ? undefined : course.bookingUrl,
     bookingLinkLabel,
-    phone: course.phone
+    phone: identityFinal ? undefined : course.phone
   };
 }
 
@@ -384,7 +416,57 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
     };
   }
 
-  if (course.outcome === "BLOCKED_POLICY") {
+  const blockedCategory = getBlockedMonitoringCategory(course);
+  if (blockedCategory === "IDENTITY_FINAL") {
+    return {
+      monitoringLabel: "Not a public course",
+      stateLabel: "Not eligible for tee-time monitoring",
+      icon: "!",
+      color: "#7f302a",
+      badgeBackground: "#fbeae7",
+      borderColor: "#ecc4bf",
+      calloutBackground: "#fff5f3",
+      calloutBorder: "#efc9c4",
+      calloutText: "#7f302a",
+      detail:
+        "Current verified identity evidence shows this listing is private, is not a playable golf course, or is otherwise not a public course Tee Time Spot can monitor."
+    };
+  }
+  if (blockedCategory === "POLICY_REMEDIATION") {
+    return {
+      monitoringLabel: "Official booking page",
+      stateLabel: "Check this course directly for now",
+      icon: "↗",
+      color: "#c75c0a",
+      badgeBackground: "#fff0e4",
+      borderColor: "#f1c79e",
+      calloutBackground: "#fff8f2",
+      calloutBorder: "#f3cfad",
+      calloutText: "#713706",
+      detail:
+        "This legacy policy-only or generic classification is being re-checked against the current public booking surface. Use the official link while we keep working to add monitoring."
+    };
+  }
+
+  if (blockedCategory === "TECHNICAL_FINAL") {
+    const accountRequired = course.automationReason === "ACCOUNT_REQUIRED";
+    return {
+      monitoringLabel: accountRequired ? "Account required" : "Captcha or queue",
+      stateLabel: "Check this course directly for now",
+      icon: "⚠",
+      color: "#b66500",
+      badgeBackground: "#fff0d6",
+      borderColor: "#e8c987",
+      calloutBackground: "#fff9eb",
+      calloutBorder: "#edd39a",
+      calloutText: "#734500",
+      detail: accountRequired
+        ? "We can’t automatically monitor this course because current availability requires a golfer account. Use the official booking page directly."
+        : "We can’t automatically monitor this course because current availability is behind a captcha, queue, or equivalent access control. We don’t bypass those controls; use the official booking page directly."
+    };
+  }
+
+  if (blockedCategory === "MANUAL_FINAL") {
     const bookingAccess = getBookingAccess(course);
     const monitoringLabel = bookingAccess === "PHONE_ONLY"
       ? "Phone only"
@@ -392,18 +474,14 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
         ? "Contact course"
         : bookingAccess === "WALK_IN"
           ? "Walk-in only"
-          : bookingAccess === "BOOKING_PAGE"
-            ? "Book online directly"
-            : "Official site only";
+          : "Official site only";
     const detail = bookingAccess === "PHONE_ONLY"
       ? "We can’t automatically monitor this course. Call the course to check availability and book directly."
       : bookingAccess === "CONTACT_COURSE"
         ? "We can’t automatically monitor this course. Contact the course directly to check availability and book."
         : bookingAccess === "WALK_IN"
           ? "We can’t automatically monitor this course. Check with the course in person for availability and booking."
-          : bookingAccess === "BOOKING_PAGE"
-            ? "We can’t automatically monitor this course and won’t bypass its account or access requirements. Use the official booking page to book directly."
-            : `We can’t automatically monitor this course and won’t bypass its restrictions. Check the official site${course.phone ? " or call the course" : ""} to book directly.`;
+          : `We can’t automatically monitor this course because its current booking method is direct-only. Check the official site${course.phone ? " or call the course" : ""} to book directly.`;
     return {
       monitoringLabel,
       stateLabel: "Direct booking required",
@@ -494,6 +572,33 @@ function getBookingAccess(course: SearchStatusCourseReport) {
   return course.phone ? "PHONE_ONLY" : undefined;
 }
 
+function getBlockedMonitoringCategory(course: SearchStatusCourseReport) {
+  if (course.monitoringDisposition === "IDENTITY_FINAL") {
+    return "IDENTITY_FINAL" as const;
+  }
+  if (
+    course.monitoringDisposition === "TECHNICAL_FINAL" ||
+    course.outcome === "BLOCKED_AUTH" ||
+    course.automationReason === "ACCOUNT_REQUIRED" ||
+    course.automationReason === "CAPTCHA_OR_QUEUE"
+  ) {
+    return "TECHNICAL_FINAL" as const;
+  }
+  if (course.outcome !== "BLOCKED_POLICY") {
+    return null;
+  }
+  if (
+    course.monitoringDisposition === "MANUAL_FINAL" ||
+    (course.automationReason === "NO_ONLINE_BOOKING" &&
+      ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+        course.bookingMethod ?? ""
+      ))
+  ) {
+    return "MANUAL_FINAL" as const;
+  }
+  return "POLICY_REMEDIATION" as const;
+}
+
 function getCourseState(course: SearchStatusCourseReport) {
   if (course.outcome !== "NO_MATCH") {
     if (course.outcome === "MATCH_FOUND") {
@@ -501,6 +606,8 @@ function getCourseState(course: SearchStatusCourseReport) {
     }
     return [
       course.outcome,
+      course.monitoringDisposition ?? "UNSPECIFIED",
+      course.automationReason ?? "NONE",
       course.bookingMethod ?? getBookingAccess(course) ?? "UNKNOWN"
     ].join(":");
   }

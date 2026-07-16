@@ -8,7 +8,10 @@ import {
   buildBrowserDiscovery,
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
+  findCorroboratingAccessBarrier,
   getBestProbeUrl,
+  keepPolicyOnlyDiscoveryActionable,
+  sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence
@@ -28,7 +31,6 @@ const FETCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 4;
 const MAX_BOOKING_LINK_FOLLOWUPS = 2;
 const MAX_HTML_BYTES = 1_500_000;
-const WHOOSH_TERMS_URL = "https://www.whoosh.io/terms";
 
 class ProviderDiscoveryLeaseDeferredError extends Error {
   constructor() {
@@ -45,9 +47,8 @@ type CollectedPageEvidence = Pick<
   | "linkCandidates"
   | "visibleText"
   | "bookingSurfaceText"
-  | "providerPolicyText"
-  | "providerPolicyUrl"
-  | "accessBarrierUrls"
+  | "accessBarriers"
+  | "corroboratedAccessBarrier"
 >;
 
 export type SearchMonitoringDiscoveryResult = {
@@ -87,10 +88,14 @@ export async function prepareSearchMonitoring(
     new Date(now.getTime() - DISCOVERY_LOOKBACK_MS)
   );
   const discoveriesByCourse = new Map<string, Date[]>();
+  const previousEvidenceByCourse = new Map<string, unknown>();
   for (const discovery of recentDiscoveries) {
     const attempts = discoveriesByCourse.get(discovery.courseId) ?? [];
     attempts.push(discovery.createdAt);
     discoveriesByCourse.set(discovery.courseId, attempts);
+    if (!previousEvidenceByCourse.has(discovery.courseId)) {
+      previousEvidenceByCourse.set(discovery.courseId, discovery.evidence);
+    }
   }
 
   const dueCandidates = candidates.filter(({ course }) =>
@@ -130,18 +135,31 @@ export async function prepareSearchMonitoring(
           evidenceBySource.set(sourceKey, evidencePromise);
         }
         const collected = await evidencePromise;
+        const collectedWithCorroboration = {
+          ...collected,
+          corroboratedAccessBarrier:
+            findCorroboratingAccessBarrier(
+              previousEvidenceByCourse.get(course.id),
+              collected.accessBarriers
+            ) ?? undefined,
+          courseId: course.id,
+          courseName: course.name
+        };
         const chronogolfDiscovery = await enrichChronogolfDiscovery(
           buildBrowserDiscovery({
-            ...collected,
-            courseId: course.id,
-            courseName: course.name
+            ...collectedWithCorroboration
           }),
           leasedFetch
         );
-        const discovery = await enrichTeesnapDiscovery(
-          chronogolfDiscovery,
-          course.name,
-          leasedFetch
+        const discovery = sanitizeBrowserDiscoveryAccessEvidence(
+          keepPolicyOnlyDiscoveryActionable(
+            await enrichTeesnapDiscovery(
+              chronogolfDiscovery,
+              course.name,
+              leasedFetch
+            )
+          ),
+          collected.accessBarriers
         );
         markAttempted();
         await recordBrowserDiscovery(discovery);
@@ -264,40 +282,12 @@ export async function collectOfficialSiteEvidence(
     }
   }
 
-  const whooshBookingPage = pages.find((page) => {
-    const parsed = new URL(page.finalUrl);
-    return (
-      /(^|\.)app\.whoosh\.io$/i.test(parsed.hostname) &&
-      /^\/patron\/club\/[^/]+/i.test(parsed.pathname)
-    );
-  });
-  let providerPolicyPage: (typeof pages)[number] | undefined;
-  if (whooshBookingPage) {
-    try {
-      const fetched = await fetchPage(WHOOSH_TERMS_URL);
-      providerPolicyPage = {
-        ...fetched,
-        evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
-      };
-    } catch (error) {
-      if (error instanceof ProviderDiscoveryLeaseDeferredError) {
-        throw error;
-      }
-      // Preserve direct booking as NEEDS_REVIEW when current provider terms cannot be verified.
-    }
-  }
-
   const finalPage = pages.at(-1)!;
   return {
     sourceUrl,
     finalUrl: finalPage.finalUrl,
     observedUrls: uniqueStrings(
-      [
-        ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
-        ...(providerPolicyPage
-          ? [providerPolicyPage.finalUrl, ...providerPolicyPage.evidence.observedUrls]
-          : [])
-      ]
+      pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls])
     ),
     linkCandidates: uniqueLinkCandidates(
       pages.flatMap((page) => page.evidence.linkCandidates)
@@ -312,14 +302,9 @@ export async function collectOfficialSiteEvidence(
       .filter(Boolean)
       .join("\n")
       .slice(0, 4_000),
-    providerPolicyText: providerPolicyPage
-      ? extractWhooshAutomationPolicyText(providerPolicyPage.html) ??
-        providerPolicyPage.evidence.visibleText.slice(0, 12_000)
-      : undefined,
-    providerPolicyUrl: providerPolicyPage?.finalUrl,
-    accessBarrierUrls: pages
+    accessBarriers: pages
       .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
-      .map((page) => page.finalUrl)
+      .map((page) => ({ url: page.finalUrl, status: 403 as const }))
   };
 }
 
@@ -496,20 +481,6 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     linkCandidates,
     visibleText
   };
-}
-
-function extractWhooshAutomationPolicyText(html: string) {
-  const decodedHtml = decodeHtmlEntities(html);
-  const prohibitionStart = decodedHtml.search(
-    /attempt to access or search the whoosh platform or content/i
-  );
-  if (prohibitionStart < 0) {
-    return undefined;
-  }
-
-  return stripHtml(decodedHtml.slice(prohibitionStart, prohibitionStart + 1_200))
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function pickLikelyBookingCandidate(

@@ -1935,7 +1935,7 @@ function CourseMonitoringStatus({
             {isManualOnly && course.alertSupport
               ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
               : isAutomatic
-                ? "Tee Time Spot checks policy-safe public booking availability."
+                ? "Tee Time Spot checks public, signed-out booking availability without entering checkout."
                 : "We'll verify whether this course can be checked automatically when your alert starts."}
           </small>
         ) : null}

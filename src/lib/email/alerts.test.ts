@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildContentScopedEmailIdempotencyKey,
+  getRenderedTeeTimeAlertMatchIds,
   getMatchAlertSubject,
   normalizeEmailEnvValue,
   renderAlertHtml,
@@ -150,6 +151,23 @@ describe("renderAlertHtml", () => {
     expect(html.match(/>NEW<\/span>/g)).toHaveLength(6);
     expect(html).toContain("36 more time windows are available on the official booking page");
     expect(html).not.toContain("12:00 PM EDT");
+  });
+
+  it("returns only the exact match IDs rendered within each course row cap", () => {
+    const matches = Array.from({ length: 9 }, (_, index) => ({
+      matchId: `match-${index + 1}`,
+      courseId: "course-1",
+      courseName: "Blue Rock Golf Course",
+      courseTimeZone: "America/New_York",
+      startsAt: new Date(Date.parse("2026-08-15T11:00:00.000Z") + index * 20 * 60 * 1000),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/blue-rock",
+      isNew: true
+    }));
+
+    expect(getRenderedTeeTimeAlertMatchIds(matches)).toEqual(
+      matches.slice(0, 8).map((match) => match.matchId)
+    );
   });
 });
 

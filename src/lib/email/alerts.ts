@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 
 import { Resend } from "resend";
 
-import { renderCustomerEmail } from "@/lib/email/customer-email";
+import {
+  getRenderedAvailabilityTimes,
+  renderCustomerEmail
+} from "@/lib/email/customer-email";
 import { isVercelProduction } from "@/lib/env";
 import {
   renderSearchStatusHtml,
@@ -45,6 +48,25 @@ export type TeeTimeAlertInput = {
   checkedAt?: Date;
   assetBaseUrl?: string;
 };
+
+export function getRenderedTeeTimeAlertMatchIds(
+  matches: Array<TeeTimeAlertMatch & { matchId: string }>
+) {
+  const courseGroups = new Map<string, Array<TeeTimeAlertMatch & { matchId: string }>>();
+  for (const match of matches) {
+    const key = match.courseId ?? `${match.courseRank ?? "x"}:${match.courseName}`;
+    const group = courseGroups.get(key) ?? [];
+    group.push(match);
+    courseGroups.set(key, group);
+  }
+
+  return [...courseGroups.values()].flatMap((courseMatches) => {
+    return getRenderedAvailabilityTimes(
+      courseMatches,
+      courseMatches[0]?.courseTimeZone
+    ).map((match) => match.matchId);
+  });
+}
 
 type TeeTimeAlertWindow = {
   matches: TeeTimeAlertMatch[];

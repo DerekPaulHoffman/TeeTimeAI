@@ -259,6 +259,30 @@ describe("selectImprovementCandidate", () => {
     });
   });
 
+  it("reopens legacy policy blocks as adapter work", () => {
+    const candidate = selectImprovementCandidate({
+      activeSearchCount: 1,
+      pendingAlerts: [],
+      actionableProbes: [
+        {
+          id: "probe-policy",
+          outcome: "BLOCKED_POLICY",
+          courseName: "Yale University Golf Course",
+          platform: "WHOOSH",
+          observedAt: "2026-07-15T12:00:00.000Z"
+        }
+      ],
+      learningSignals: []
+    });
+
+    expect(candidate).toMatchObject({
+      outcome: "needs_adapter",
+      kind: "adapter_gap",
+      referenceId: "probe-policy",
+      summary: expect.stringContaining("legacy policy block")
+    });
+  });
+
   it("prioritizes an open adapter incident even when repeated browser discovery is stale", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 2,

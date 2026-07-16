@@ -96,11 +96,11 @@ Loop engineering requirements:
 - When inspection returns courseProfileQueue items and no higher-priority incident is active, process up to three as one metadata_seo batch. Use automation:course-profile research packets, authoritative sources, and dry-run validation, and apply only profiles that pass; never delay or disable alert creation when evidence is insufficient. Write public profile prose as a confident facility guide focused on layouts, setting, amenities, ownership, access, and playing experience. Keep claim keys, evidence summaries, research-process language, and broad uncertainty internal; when one fact is unavailable, qualify only that field and point golfers to the official course or booking page.
 - A required evidence track may report healthy, empty with sample counts, unavailable with the exact blocker, or actionable; it may not be omitted. After the same access gap appears in three successful runs, surface it as a durable coverage blocker instead of repeating a harmless note forever.
 - If the same non-incident course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement. Leave all provider-remediation incidents and retries to the dedicated course-support responder.
-- Stop with a normalized terminal outcome: success, incident, needs_adapter, blocked_policy, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. exploration_required is nonterminal, and no_op is prohibited for this hourly workflow.
+- Stop with a normalized terminal outcome: success, incident, needs_adapter, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. exploration_required is nonterminal, and no_op is prohibited for this hourly workflow. Treat legacy blocked_policy evidence as needs_adapter until current technical access is re-verified.
 
 Hard boundaries:
 - Alert only; never book, hold, pay, bypass controls, or solve account-specific course flows.
-- Respect terms/policy blockers and mark courses blocked when automation is prohibited.
+- Booking or transaction policy text alone never blocks public read-only monitoring. Re-check the live signed-out surface and keep adapter work open unless current technical access evidence proves a real access-control blocker.
 - Keep per-course observations separate.
 - Only alert on newly matching slots.
 `;

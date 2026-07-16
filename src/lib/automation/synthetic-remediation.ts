@@ -84,12 +84,12 @@ export function selectSyntheticRemediationCandidates(
         message:
           probe.message ??
           (kind === "FETCH_FAILED"
-            ? "The latest policy-safe provider check failed."
-            : "No reusable policy-safe monitoring connection is configured."),
+            ? "The latest public read-only provider check failed."
+            : "No reusable public read-only monitoring connection is configured."),
         nextAction:
           kind === "FETCH_FAILED"
-            ? "Reproduce the current policy-safe public fetch, repair or reclassify the reusable provider integration, and verify the course."
-            : "Inspect the official booking surface, implement reusable policy-safe monitoring when possible, or persist a conclusive policy/contact/identity classification.",
+            ? "Reproduce the current public read-only fetch, repair or technically reclassify the reusable provider integration, and verify the course."
+            : "Inspect the official booking surface, implement reusable public read-only monitoring when technically accessible, or persist a conclusive technical-access/contact/identity classification.",
         observedAt: probe.observedAt,
         affectedPreferenceCount
       });

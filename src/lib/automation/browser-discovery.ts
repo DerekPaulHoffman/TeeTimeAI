@@ -3,7 +3,11 @@ import type {
   BookingMethod
 } from "@/lib/courses/intelligence";
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
-import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import {
+  getKnownProviderFamilyForHostname,
+  resolveProviderCapability
+} from "@/lib/automation/provider-capabilities";
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import {
   haveCompatibleCourseNames,
   normalizeCourseIdentityName
@@ -16,10 +20,13 @@ export type BrowserDiscoveryEvidence = {
   finalUrl?: string;
   observedUrls: string[];
   linkCandidates?: Array<{ url: string; label: string }>;
+  officialCourseWebsite?: string | null;
+  officialPage?: {
+    url: string;
+    linkCandidates: Array<{ url: string; label: string }>;
+  };
   visibleText?: string;
   bookingSurfaceText?: string;
-  providerPolicyText?: string;
-  providerPolicyUrl?: string;
   accessBarrierUrls?: string[];
   accessBarriers?: BrowserAccessBarrier[];
   corroboratedAccessBarrier?: BrowserAccessBarrier;
@@ -101,9 +108,43 @@ export type BrowserDiscovery = {
       scheduleId?: number;
       bookingClassId?: number;
     };
+    courseIdentityCorroboration?: {
+      kind: "OFFICIAL_COURSE_PROVIDER_LINK";
+      officialWebsiteUrl: string;
+      officialPageUrl: string;
+      providerUrl: string;
+    };
     learnedFrom: string;
   };
 };
+
+export function evaluateBrowserDiscoveryMonitoringGate(
+  discovery: Pick<
+    BrowserDiscovery,
+    | "status"
+    | "bookingMethod"
+    | "automationEligibility"
+    | "automationReason"
+    | "intelligenceReviewAt"
+    | "confidence"
+  >,
+  now = new Date()
+) {
+  const finalClassification =
+    discovery.status === "VERIFIED" || discovery.status === "BLOCKED";
+  return evaluateMonitoringGate({
+    bookingMethod: discovery.bookingMethod,
+    automationEligibility: finalClassification
+      ? discovery.automationEligibility
+      : "NEEDS_REVIEW",
+    automationReason: discovery.automationReason,
+    intelligenceVerifiedAt: now,
+    intelligenceReviewAt: discovery.intelligenceReviewAt,
+    intelligenceConfidence: discovery.confidence,
+    finalClassification,
+    now
+  });
+}
 
 export function keepPolicyOnlyDiscoveryActionable(
   discovery: BrowserDiscovery
@@ -116,7 +157,7 @@ export function keepPolicyOnlyDiscoveryActionable(
     ...discovery,
     status: "INSPECTED",
     automationEligibility: "NEEDS_REVIEW",
-    automationReason: "UNSUPPORTED_PLATFORM",
+    automationReason: "AUTOMATION_PROHIBITED",
     intelligenceReviewAt: undefined,
     confidence: Math.min(discovery.confidence, 0.79),
     evidence: {
@@ -213,12 +254,24 @@ export async function enrichBrowserDiscoveryWithProviderLease(
 }
 
 export type BrowserProbeCourseInput = {
+  isPublic?: boolean | null;
   detectedPlatform: string;
   providerFamilyKey?: string | null;
   automationEligibility: string;
+  automationReason?: string | null;
+  bookingMethod?: string | null;
+  intelligenceVerifiedAt?: Date | string | null;
+  intelligenceReviewAt?: Date | string | null;
+  intelligenceConfidence?: number | null;
   website?: string | null;
   detectedBookingUrl?: string | null;
   bookingMetadata?: unknown;
+  monitoringFailureEvidence?: {
+    kind: "FETCH_FAILED";
+    occurrenceCount: number;
+    latestFailureAt: Date | string;
+    latestSuccessfulAt?: Date | string | null;
+  };
 };
 
 export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): BrowserDiscovery {
@@ -231,13 +284,13 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   const privateClubClassification = learnPrivateClubClassification(evidence, observedUrls);
 
   if (privateClubClassification) {
-    return privateClubClassification;
+    return withCourseIdentityCorroboration(privateClubClassification, evidence);
   }
 
   const walkInClassification = learnWalkInClassification(evidence, observedUrls);
 
   if (walkInClassification) {
-    return walkInClassification;
+    return withCourseIdentityCorroboration(walkInClassification, evidence);
   }
 
   const contactOnlyClassification = learnOfficialContactOnlyClassification(
@@ -246,7 +299,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   );
 
   if (contactOnlyClassification) {
-    return contactOnlyClassification;
+    return withCourseIdentityCorroboration(contactOnlyClassification, evidence);
   }
 
   const accountRequiredClassification = learnAccountRequiredClassification(
@@ -255,73 +308,73 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   );
 
   if (accountRequiredClassification) {
-    return accountRequiredClassification;
+    return withCourseIdentityCorroboration(accountRequiredClassification, evidence);
   }
 
   const whooshDiscovery = learnWhooshBookingClassification(evidence, observedUrls);
 
   if (whooshDiscovery) {
-    return whooshDiscovery;
+    return withCourseIdentityCorroboration(whooshDiscovery, evidence);
   }
 
   const foreupDiscovery = learnForeupDiscovery(evidence, observedUrls);
 
   if (foreupDiscovery) {
-    return foreupDiscovery;
+    return withCourseIdentityCorroboration(foreupDiscovery, evidence);
   }
 
   const teeItUpDiscovery = learnTeeItUpDiscovery(evidence, observedUrls);
 
   if (teeItUpDiscovery) {
-    return teeItUpDiscovery;
+    return withCourseIdentityCorroboration(teeItUpDiscovery, evidence);
   }
 
   const chelseaDiscovery = learnChelseaDiscovery(evidence, observedUrls);
 
   if (chelseaDiscovery) {
-    return chelseaDiscovery;
+    return withCourseIdentityCorroboration(chelseaDiscovery, evidence);
   }
 
   const golfBackDiscovery = learnGolfBackDiscovery(evidence, observedUrls);
 
   if (golfBackDiscovery) {
-    return golfBackDiscovery;
+    return withCourseIdentityCorroboration(golfBackDiscovery, evidence);
   }
 
   const webTracDiscovery = learnWebTracDiscovery(evidence, observedUrls);
 
   if (webTracDiscovery) {
-    return webTracDiscovery;
+    return withCourseIdentityCorroboration(webTracDiscovery, evidence);
   }
 
   const clubCaddieDiscovery = learnClubCaddieDiscovery(evidence, observedUrls);
 
   if (clubCaddieDiscovery) {
-    return clubCaddieDiscovery;
+    return withCourseIdentityCorroboration(clubCaddieDiscovery, evidence);
   }
 
   const protectedCpsDiscovery = learnProtectedCpsDiscovery(evidence, observedUrls);
 
   if (protectedCpsDiscovery) {
-    return protectedCpsDiscovery;
+    return withCourseIdentityCorroboration(protectedCpsDiscovery, evidence);
   }
 
   const cpsDiscovery = learnCpsDiscovery(evidence, observedUrls);
 
   if (cpsDiscovery) {
-    return cpsDiscovery;
+    return withCourseIdentityCorroboration(cpsDiscovery, evidence);
   }
 
   const teesnapDiscovery = learnTeesnapDiscovery(evidence, observedUrls);
 
   if (teesnapDiscovery) {
-    return teesnapDiscovery;
+    return withCourseIdentityCorroboration(teesnapDiscovery, evidence);
   }
 
   const tenForeDiscovery = learnTenForeDiscovery(evidence, observedUrls);
 
   if (tenForeDiscovery) {
-    return tenForeDiscovery;
+    return withCourseIdentityCorroboration(tenForeDiscovery, evidence);
   }
 
   const clubCaddieCandidates = getClubCaddieCandidates(evidence, observedUrls);
@@ -329,7 +382,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     ? evidence.sourceUrl
     : pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
 
-  return {
+  return withCourseIdentityCorroboration({
     courseId: evidence.courseId,
     status: "INSPECTED",
     detectedPlatform: detectPlatform(observedUrls),
@@ -342,7 +395,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "browser-visible-links"
     }
-  };
+  }, evidence);
 }
 
 function learnClubCaddieDiscovery(
@@ -722,8 +775,14 @@ function learnProtectedCpsDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
+  const cpsAccessBarriers = evidence.accessBarriers?.filter((barrier) =>
+    getCpsBookingCandidates(evidence, [barrier.url], {
+      includeEvidenceLinks: false,
+      includeWidget: false
+    }).length > 0
+  ) ?? [];
   const barrierCandidate = selectCpsBookingCandidate(
-    getCpsBookingCandidates(evidence, evidence.accessBarrierUrls ?? [], {
+    getCpsBookingCandidates(evidence, cpsAccessBarriers.map((barrier) => barrier.url), {
       includeEvidenceLinks: false,
       includeWidget: false
     }),
@@ -734,6 +793,41 @@ function learnProtectedCpsDiscovery(
   }
 
   const bookingBaseUrl = barrierCandidate.bookingBaseUrl;
+  const corroboratedAccessBarrier = evidence.corroboratedAccessBarrier
+    ? cpsAccessBarriers.find((barrier) =>
+        areSameAccessBarrier(barrier, evidence.corroboratedAccessBarrier!)
+      )
+    : undefined;
+  const accessBarrier = corroboratedAccessBarrier ?? cpsAccessBarriers[0];
+  if (!accessBarrier) {
+    return null;
+  }
+  const safeAccessBarriers = sanitizeAccessBarriers([accessBarrier]);
+  const safeObservedUrls = sanitizeObservedAccessBarrierUrls(
+    observedUrls,
+    cpsAccessBarriers
+  );
+  if (!corroboratedAccessBarrier) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: bookingBaseUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      confidence: 0.7,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls: safeObservedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        accessBarriers: safeAccessBarriers,
+        learnedFrom: "cps-managed-challenge-unconfirmed"
+      }
+    };
+  }
+
   return {
     courseId: evidence.courseId,
     status: "VERIFIED",
@@ -749,11 +843,79 @@ function learnProtectedCpsDiscovery(
     confidence: 0.98,
     evidence: {
       finalUrl: evidence.finalUrl,
-      observedUrls,
+      observedUrls: safeObservedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
+      accessBarriers: safeAccessBarriers,
       learnedFrom: "cps-managed-challenge-booking"
     }
   };
+}
+
+function withCourseIdentityCorroboration(
+  discovery: BrowserDiscovery,
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscovery {
+  const corroboration = getOfficialCourseProviderLinkCorroboration(
+    discovery,
+    evidence
+  );
+  if (!corroboration) {
+    return discovery;
+  }
+  return {
+    ...discovery,
+    evidence: {
+      ...discovery.evidence,
+      courseIdentityCorroboration: corroboration
+    }
+  };
+}
+
+function getOfficialCourseProviderLinkCorroboration(
+  discovery: BrowserDiscovery,
+  evidence: BrowserDiscoveryEvidence
+) {
+  const officialWebsite = parseUrl(evidence.officialCourseWebsite);
+  const officialPage = parseUrl(evidence.officialPage?.url);
+  const providerUrl = parseUrl(discovery.bookingUrl);
+  if (
+    !officialWebsite ||
+    !officialPage ||
+    !providerUrl ||
+    getKnownProviderFamilyForHostname(officialWebsite.hostname) ||
+    !haveSameWebsiteOrigin(officialWebsite, officialPage)
+  ) {
+    return null;
+  }
+  const exactProviderLink = evidence.officialPage?.linkCandidates.find(
+    (candidate) => haveSameExactUrl(candidate.url, providerUrl.toString())
+  );
+  if (!exactProviderLink) {
+    return null;
+  }
+  return {
+    kind: "OFFICIAL_COURSE_PROVIDER_LINK" as const,
+    officialWebsiteUrl: officialWebsite.toString(),
+    officialPageUrl: officialPage.toString(),
+    providerUrl: new URL(exactProviderLink.url).toString()
+  };
+}
+
+function haveSameWebsiteOrigin(left: URL, right: URL) {
+  const normalizeHostname = (hostname: string) =>
+    hostname.toLowerCase().replace(/^www\./u, "");
+  return (
+    (left.protocol === right.protocol ||
+      (left.protocol === "http:" && right.protocol === "https:")) &&
+    normalizeHostname(left.hostname) === normalizeHostname(right.hostname) &&
+    left.port === right.port
+  );
+}
+
+function haveSameExactUrl(left: string, right: string) {
+  const leftUrl = parseUrl(left);
+  const rightUrl = parseUrl(right);
+  return Boolean(leftUrl && rightUrl && leftUrl.toString() === rightUrl.toString());
 }
 
 function learnTenForeDiscovery(
@@ -767,22 +929,21 @@ function learnTenForeDiscovery(
 
   return {
     courseId: evidence.courseId,
-    status: "VERIFIED",
+    status: "INSPECTED",
     detectedPlatform: "CUSTOM",
     sourceUrl: evidence.sourceUrl,
     bookingUrl: canonicalizeTenForeBookingUrl(bookingUrl),
     bookingMethod: "PUBLIC_ONLINE",
-    automationEligibility: "BLOCKED",
-    automationReason: "CAPTCHA_OR_QUEUE",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "NONE",
     policyNotes:
-      "The official TenFore page shows public online tee times, but its availability request requires a reCAPTCHA token. Tee Time Spot does not solve or bypass captcha-protected retrieval, so golfers should check and book on the official page directly.",
-    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-    confidence: 0.98,
+      "The official signed-out TenFore page renders public tee-time availability in a normal browser. Its consumer availability request uses invisible reCAPTCHA, so direct server retrieval is not yet implemented; keep adapter work open instead of treating provider policy or the visible CAPTCHA badge as a terminal monitoring classification.",
+    confidence: 0.95,
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "tenfore-captcha-protected-booking"
+      learnedFrom: "tenfore-public-browser-availability"
     }
   };
 }
@@ -860,36 +1021,6 @@ function learnWhooshBookingClassification(
     return null;
   }
 
-  const providerPolicyText = evidence.providerPolicyText?.replace(/\s+/g, " ").trim() ?? "";
-  const providerTermsProhibitAutomation =
-    /attempt to (?:access or )?search the whoosh platform or content[^.]{0,500}\b(?:engine|software|tool|agent|device|mechanism)\b/i.test(
-      providerPolicyText
-    ) &&
-    /\b(?:spiders?|robots?|crawlers?|data mining tools?)\b/i.test(providerPolicyText);
-
-  if (providerTermsProhibitAutomation) {
-    return {
-      courseId: evidence.courseId,
-      status: "VERIFIED",
-      detectedPlatform: "CUSTOM",
-      sourceUrl: evidence.sourceUrl,
-      bookingUrl: whooshBookingUrl.toString(),
-      bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "BLOCKED",
-      automationReason: "AUTOMATION_PROHIBITED",
-      policyNotes:
-        "Whoosh's current End User Terms prohibit using automated agents, robots, crawlers, data-mining tools, or similar mechanisms to search or download platform content. Golfers can still view and book on the official Whoosh page directly, but Tee Time Spot does not retrieve Whoosh availability automatically.",
-      intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      confidence: 0.99,
-      evidence: {
-        finalUrl: evidence.finalUrl,
-        observedUrls,
-        visibleText: summarizeVisibleText(providerPolicyText),
-        learnedFrom: "whoosh-automation-prohibited-booking"
-      }
-    };
-  }
-
   return {
     courseId: evidence.courseId,
     status: "VERIFIED",
@@ -900,7 +1031,7 @@ function learnWhooshBookingClassification(
     automationEligibility: "NEEDS_REVIEW",
     automationReason: "UNSUPPORTED_PLATFORM",
     policyNotes:
-      "The course links to an official Whoosh online booking page. Golfers can use that page directly; Tee Time Spot has not yet confirmed policy-safe automatic monitoring for this Whoosh surface.",
+      "The course links to an official Whoosh online booking page. Keep public read-only monitoring work open until a reusable adapter succeeds or current technical access evidence proves that availability requires an account or an active access control.",
     intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     confidence: 0.9,
     evidence: {
@@ -1035,15 +1166,39 @@ function learnOfficialContactOnlyClassification(
 }
 
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
-  if (course.automationEligibility === "BLOCKED") {
+  if (!evaluateMonitoringGate(course).adapterAllowed) {
     return false;
   }
 
-  if (resolveProviderCapability(course).isRunnable) {
+  if (
+    resolveProviderCapability(course).isRunnable &&
+    !hasCurrentRepeatedMonitoringFailure(course.monitoringFailureEvidence)
+  ) {
     return false;
   }
 
   return Boolean(getBestProbeUrl(course));
+}
+
+export function hasCurrentRepeatedMonitoringFailure(
+  evidence: BrowserProbeCourseInput["monitoringFailureEvidence"],
+  now = new Date()
+) {
+  if (!evidence || evidence.kind !== "FETCH_FAILED" || evidence.occurrenceCount < 2) {
+    return false;
+  }
+  const latestFailureAt = new Date(evidence.latestFailureAt);
+  const latestSuccessfulAt = evidence.latestSuccessfulAt
+    ? new Date(evidence.latestSuccessfulAt)
+    : null;
+  return Boolean(
+    !Number.isNaN(latestFailureAt.getTime()) &&
+      latestFailureAt.getTime() <= now.getTime() + 60_000 &&
+      now.getTime() - latestFailureAt.getTime() <= 30 * 24 * 60 * 60 * 1000 &&
+      (!latestSuccessfulAt ||
+        Number.isNaN(latestSuccessfulAt.getTime()) ||
+        latestSuccessfulAt.getTime() < latestFailureAt.getTime())
+  );
 }
 
 function learnPrivateClubClassification(
@@ -1766,8 +1921,25 @@ function learnTeeItUpDiscovery(
   };
 }
 
-export function getBestProbeUrl(course: Pick<BrowserProbeCourseInput, "website" | "detectedBookingUrl">) {
+export function getBestProbeUrl(
+  course: Pick<
+    BrowserProbeCourseInput,
+    "website" | "detectedBookingUrl" | "monitoringFailureEvidence"
+  >
+) {
+  if (
+    hasCurrentRepeatedMonitoringFailure(course.monitoringFailureEvidence) &&
+    course.website &&
+    isNonProviderWebsite(course.website)
+  ) {
+    return course.website.trim();
+  }
   return course.detectedBookingUrl?.trim() || course.website?.trim() || null;
+}
+
+function isNonProviderWebsite(value: string) {
+  const url = parseUrl(value);
+  return Boolean(url && !getKnownProviderFamilyForHostname(url.hostname));
 }
 
 function learnForeupDiscovery(

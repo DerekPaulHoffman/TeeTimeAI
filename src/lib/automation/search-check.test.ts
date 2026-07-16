@@ -23,6 +23,9 @@ const dbMocks = vi.hoisted(() => ({
 }));
 
 const emailMocks = vi.hoisted(() => ({
+  getRenderedTeeTimeAlertMatchIds: vi.fn((matches) =>
+    matches.slice(0, 8).map((match) => match.matchId)
+  ),
   sendSearchStatusEmail: vi.fn(),
   sendTeeTimeAlert: vi.fn()
 }));
@@ -79,9 +82,7 @@ vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
 vi.mock("@/lib/adapters/cps", () => ({
   fetchCpsTeeSheet: adapterMocks.fetchCpsTeeSheet,
-  isCpsMetadata: adapterMocks.isCpsMetadata,
-  isCpsAutomationPolicyBlockedError: (error: unknown) =>
-    error instanceof Error && error.name === "CpsAutomationPolicyBlockedError"
+  isCpsMetadata: adapterMocks.isCpsMetadata
 }));
 vi.mock("@/lib/adapters/golfback", () => adapterMocks);
 vi.mock("@/lib/adapters/webtrac", () => adapterMocks);
@@ -281,7 +282,10 @@ describe("runSearchCheck email cadence", () => {
     });
     deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockResolvedValue({
       finalized: true,
-      status: "SENT"
+      status: "SENT",
+      ownerSent: true,
+      retainedMatchCount: 1,
+      sentMatchCount: 1
     });
     adapterMocks.isForeupMetadata.mockReturnValue(true);
     adapterMocks.isCpsMetadata.mockReturnValue(false);
@@ -344,7 +348,7 @@ describe("runSearchCheck email cadence", () => {
     vi.useRealTimers();
   });
 
-  it("uses the setup report for initial matches instead of sending a second instant email", async () => {
+  it("does not cover or count a pending match omitted from the setup report", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       requestedLayoutHoles: 18
@@ -359,8 +363,14 @@ describe("runSearchCheck email cadence", () => {
     expect(deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "SETUP" })
     );
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "SETUP",
+        payload: expect.objectContaining({ matchIds: [] })
+      })
+    );
     expect(result).toEqual(
-      expect.objectContaining({ newlyAlertedMatches: 1, statusEmailOutcome: "sent" })
+      expect.objectContaining({ newlyAlertedMatches: 0, statusEmailOutcome: "sent" })
     );
   });
 
@@ -401,8 +411,14 @@ describe("runSearchCheck email cadence", () => {
       id: "match-1",
       alertStatus: "PENDING"
     });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([
+      {
+        ...pendingMatch,
+        startsAt: new Date("2026-07-12T12:10:00.000Z")
+      }
+    ]);
 
-    await runSearchCheck("search-1", "test");
+    const result = await runSearchCheck("search-1", "test");
 
     expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -423,6 +439,74 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "SETUP",
+        payload: expect.objectContaining({ matchIds: ["match-1"] })
+      })
+    );
+    expect(result.newlyAlertedMatches).toBe(1);
+  });
+
+  it("covers only pending matches rendered within the setup email row limit", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    const localStartsAt = Array.from({ length: 9 }, (_, index) => {
+      const totalMinutes = 7 * 60 + index * 20;
+      const hours = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
+      const minutes = String(totalMinutes % 60).padStart(2, "0");
+      return `2026-07-12T${hours}:${minutes}:00-04:00`;
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: localStartsAt.map((startsAt, index) => ({
+        sourceId: `slot-${index + 1}`,
+        courseId: "course-1",
+        startsAt,
+        availableSpots: 4,
+        bookingUrl: "https://example.com/book",
+        priceCents: 6200,
+        bookableHoleCounts: [9, 18]
+      })),
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    dbMocks.recordTeeTimeMatch.mockResolvedValue({
+      id: "persisted-match",
+      alertStatus: "PENDING"
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue(
+      localStartsAt.map((startsAt, index) => ({
+        ...pendingMatch,
+        id: `match-${index + 1}`,
+        startsAt: new Date(startsAt)
+      }))
+    );
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "SETUP",
+        payload: expect.objectContaining({
+          matchIds: localStartsAt.slice(0, 8).map((_, index) => `match-${index + 1}`)
+        })
+      })
+    );
+    expect(result.newlyAlertedMatches).toBe(8);
   });
 
   it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {
@@ -497,6 +581,175 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({
         newlyAlertedMatches: 1,
         statusEmailOutcome: "covered_by_match_alert"
+      })
+    );
+  });
+
+  it("keeps a ninth same-course opening pending when the MATCH email renders eight rows", async () => {
+    const localStartsAt = Array.from({ length: 9 }, (_, index) => {
+      const totalMinutes = 7 * 60 + index * 20;
+      const hours = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
+      const minutes = String(totalMinutes % 60).padStart(2, "0");
+      return `2026-07-12T${hours}:${minutes}:00-04:00`;
+    });
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Available Course",
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: localStartsAt.map((startsAt, index) => ({
+        sourceId: `slot-${index + 1}`,
+        courseId: "course-1",
+        startsAt,
+        availableSpots: 4,
+        bookingUrl: "https://example.com/book",
+        priceCents: 6100,
+        bookableHoleCounts: [9, 18]
+      })),
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    dbMocks.recordTeeTimeMatch.mockResolvedValue({
+      id: "persisted-match",
+      alertStatus: "PENDING"
+    });
+    const matches = localStartsAt.map((startsAt, index) => ({
+      ...pendingMatch,
+      id: `match-${index + 1}`,
+      startsAt: new Date(startsAt)
+    }));
+    dbMocks.listPendingMatchAlerts.mockResolvedValue(matches);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue(matches);
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockResolvedValue({
+      finalized: true,
+      status: "SENT",
+      ownerSent: true,
+      retainedMatchCount: 8,
+      sentMatchCount: 8
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    const renderedIds = localStartsAt
+      .slice(0, 8)
+      .map((_, index) => `match-${index + 1}`);
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "MATCH",
+        payload: expect.objectContaining({
+          matchIds: renderedIds,
+          displayMatchIds: renderedIds,
+          matchReport: expect.objectContaining({
+            matches: expect.arrayContaining(
+              renderedIds.map((matchId) => expect.objectContaining({ matchId }))
+            )
+          })
+        })
+      })
+    );
+    const preparedPayload = deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mock
+      .calls.find(([input]) => input.kind === "MATCH")?.[0].payload;
+    expect(preparedPayload.matchReport.matches).toHaveLength(8);
+    expect(preparedPayload.matchIds).not.toContain("match-9");
+    expect(result).toEqual(
+      expect.objectContaining({
+        newlyAlertedMatches: 8,
+        statusEmailOutcome: "covered_by_match_alert"
+      })
+    );
+  });
+
+  it("sends the daily update when a prepared MATCH group sends no valid match email", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "slot-1",
+          courseId: "course-1",
+          startsAt: "2026-07-12T08:00:00-04:00",
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          priceCents: 6100,
+          bookableHoleCounts: [9, 18]
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    dbMocks.recordTeeTimeMatch.mockResolvedValue({
+      id: "match-1",
+      alertStatus: "PENDING"
+    });
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
+      async (input) => {
+        if (input.kind === "MATCH") {
+          return [{ id: "delivery-1", status: "SUPPRESSED" }];
+        }
+        await input.send({
+          recipient: "player@resend.dev",
+          idempotencyKey: "tee-search-delivery-daily",
+          payload: deliveryOutboxMocks.preparedPayload
+        });
+        return [{ id: "daily-delivery", status: "SENT" }];
+      }
+    );
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(
+      async (input) =>
+        input.kind === "MATCH"
+          ? {
+              finalized: true,
+              status: "SUPPRESSED",
+              ownerSent: false,
+              retainedMatchCount: 0,
+              sentMatchCount: 0
+            }
+          : {
+              finalized: true,
+              status: "SENT",
+              ownerSent: true,
+              retainedMatchCount: 0,
+              sentMatchCount: 0
+            }
+    );
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
+    expect(result).toEqual(
+      expect.objectContaining({
+        newlyAlertedMatches: 0,
+        statusEmailOutcome: "sent"
       })
     );
   });
@@ -640,7 +893,7 @@ describe("runSearchCheck email cadence", () => {
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
 
-  it("persists and applies an official CPS robots-policy block without opening another support incident", async () => {
+  it("keeps a provider-policy failure in engineering instead of closing monitoring", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -682,26 +935,20 @@ describe("runSearchCheck email cadence", () => {
 
     expect(result.courseResults).toEqual([
       expect.objectContaining({
-        outcome: "BLOCKED_POLICY",
+        outcome: "FETCH_FAILED",
         bookingUrl: "https://policy-blocked.cps.golf/"
       })
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "FETCH_FAILED" })
+    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({
-        courseId: "course-1",
-        status: "BLOCKED",
-        automationEligibility: "BLOCKED",
-        automationReason: "AUTOMATION_PROHIBITED",
-        sourceUrl: "https://policy-blocked.cps.golf/robots.txt"
+        course: expect.objectContaining({ id: "course-1" }),
+        kind: "FETCH_FAILED"
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
-      expect.objectContaining({ automationReason: "AUTOMATION_PROHIBITED" })
-    );
-    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: "BLOCKED_POLICY" })
-    );
-    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
   it("retries a persisted match delivery group even after no match remains globally pending", async () => {
@@ -767,7 +1014,13 @@ describe("runSearchCheck email cadence", () => {
               reason: "not_terminal",
               ownerFinalized: true
             }
-          : { finalized: true, status: "SENT", ownerSent: true }
+          : {
+              finalized: true,
+              status: "SENT",
+              ownerSent: true,
+              retainedMatchCount: 0,
+              sentMatchCount: 0
+            }
     );
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
@@ -785,7 +1038,7 @@ describe("runSearchCheck email cadence", () => {
       ]);
       expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
       expect(result).toEqual(
-        expect.objectContaining({ newlyAlertedMatches: 1, statusEmailOutcome: "sent" })
+        expect.objectContaining({ newlyAlertedMatches: 0, statusEmailOutcome: "sent" })
       );
       expect(warning).toHaveBeenCalledWith(
         "[email:additional-recipient-retry-pending]",
@@ -825,7 +1078,13 @@ describe("runSearchCheck email cadence", () => {
               reason: "not_terminal",
               ownerFinalized: false
             }
-          : { finalized: true, status: "SENT", ownerSent: true }
+          : {
+              finalized: true,
+              status: "SENT",
+              ownerSent: true,
+              retainedMatchCount: 0,
+              sentMatchCount: 0
+            }
     );
 
     await expect(runSearchCheck("search-1", "test")).rejects.toThrow(
@@ -925,6 +1184,237 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(result.supportRetryNeeded).toBe(false);
+  });
+
+  it("runs a runnable public adapter despite legacy policy-only evidence", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            detectedBookingUrl:
+              "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+            automationEligibility: "BLOCKED",
+            automationReason: "AUTOMATION_PROHIBITED",
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledTimes(1);
+    expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
+  });
+
+  it("preserves a pending available match for a current technical final", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            automationEligibility: "BLOCKED",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    });
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(dbMocks.markMissingMatchesUnavailable).not.toHaveBeenCalled();
+    expect(dbMocks.listPendingMatchAlerts).toHaveBeenCalledWith("search-1");
+    expect(dbMocks.markMatchAlertSuppressed).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "SETUP",
+        payload: expect.objectContaining({ matchIds: [] })
+      })
+    );
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "BLOCKED_AUTH",
+        rawSummary: expect.objectContaining({
+          automationReason: "CAPTCHA_OR_QUEUE"
+        })
+      })
+    );
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "BLOCKED_AUTH",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      monitoringDisposition: "TECHNICAL_FINAL"
+    });
+    expect(result.newlyAlertedMatches).toBe(0);
+  });
+
+  it("reconciles historical matches gone when a course is identity final", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: false,
+            automationEligibility: "BLOCKED",
+            automationReason: "OTHER",
+            bookingMethod: "CONTACT_COURSE"
+          }
+        }
+      ]
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith({
+      searchId: "search-1",
+      alertGeneration: 0,
+      checkLeaseToken: "check-lease",
+      courseId: "course-1",
+      date: "2026-07-12",
+      timeZone: "America/New_York",
+      confirmedMatches: []
+    });
+    expect(result.courseResults[0]).toMatchObject({
+      monitoringDisposition: "IDENTITY_FINAL",
+      availableMatches: 0,
+      bookingUrl: undefined
+    });
+  });
+
+  it("revalidates a stale technical reason by running the public adapter", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+            intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledTimes(1);
+    expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
+  });
+
+  it("records a manual final without calling an adapter", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            bookingMethod: "PHONE_ONLY",
+            bookingPhone: "(860) 555-0102",
+            automationEligibility: "BLOCKED",
+            automationReason: "NO_ONLINE_BOOKING",
+            intelligenceVerifiedAt: new Date("2026-07-11T11:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "BLOCKED_POLICY",
+      automationReason: "NO_ONLINE_BOOKING",
+      bookingAccess: "PHONE_ONLY",
+      monitoringDisposition: "MANUAL_FINAL"
+    });
+  });
+
+  it("revalidates stale raw manual metadata through the runnable adapter", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            bookingMethod: "WALK_IN",
+            automationEligibility: "BLOCKED",
+            automationReason: "NO_ONLINE_BOOKING",
+            intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+            intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledTimes(1);
+    expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
   });
 
   it("runs official-site discovery before classifying an unsupported course", async () => {

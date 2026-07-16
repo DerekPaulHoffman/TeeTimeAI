@@ -10,7 +10,7 @@ export const LOCATION_HUBS = {
     shortName: "Connecticut",
     stateCode: "CT",
     county: null,
-    description: "Public golf courses in Connecticut where Tee Time Spot can currently watch policy-safe online tee-time availability.",
+    description: "Public golf courses in Connecticut where Tee Time Spot can currently watch public, signed-out online tee-time availability.",
     considerations: [
       "Booking windows vary by operator, and resident or pass-holder access may open before general public inventory.",
       "Course-local Eastern Time controls release times and the tee times shown on official booking pages."

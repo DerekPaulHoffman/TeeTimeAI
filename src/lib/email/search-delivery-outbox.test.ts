@@ -118,6 +118,26 @@ describe("search email delivery outbox", () => {
     mockedPrisma.$executeRaw.mockResolvedValue(1 as never);
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValue(null);
     mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-1",
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null
+      }
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      {
+        id: "match-1",
+        courseId: "course-1",
+        alertStatus: "PENDING",
+        availabilityStatus: "AVAILABLE"
+      }
+    ] as never);
     mockedPrisma.teeTimeMatch.count.mockResolvedValue(1);
     mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
     mockedPrisma.teeSearch.update.mockResolvedValue({ id: "search-1" } as never);
@@ -348,7 +368,7 @@ describe("search email delivery outbox", () => {
       .mockResolvedValueOnce([
         { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
       ] as never);
-    mockedPrisma.teeTimeMatch.count.mockResolvedValue(0);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
     const send = vi.fn();
 
     await expect(
@@ -363,6 +383,252 @@ describe("search email delivery outbox", () => {
       })
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("suppresses a queued match retry when the course is now an identity final", async () => {
+    const owner = delivery("delivery-1", "owner@example.com", {
+      status: "FAILED",
+      nextAttemptAt: new Date(now.getTime() - 1)
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([
+        { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+      ] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-1",
+        isPublic: false,
+        bookingMethod: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        intelligenceVerifiedAt: now,
+        intelligenceReviewAt: new Date("2026-08-15T00:00:00.000Z"),
+        intelligenceConfidence: 0.99
+      }
+    ] as never);
+    const send = vi.fn();
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now
+      })
+    ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
+
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ["course-1"] } } })
+    );
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("filters one identity-final course without discarding valid matches from another", async () => {
+    const validRow = payload.matchReport.matches[0];
+    const privateRow = {
+      ...validRow,
+      matchId: "match-2",
+      courseId: "course-2",
+      courseName: "Private Course"
+    };
+    const multiCoursePayload = {
+      ...payload,
+      matchIds: ["match-1", "match-2"],
+      displayMatchIds: ["match-1", "match-2"],
+      matchReport: {
+        ...payload.matchReport,
+        matches: [validRow, privateRow]
+      }
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      status: "FAILED",
+      nextAttemptAt: new Date(now.getTime() - 1),
+      payload: multiCoursePayload
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      {
+        id: "match-1",
+        courseId: "course-1",
+        alertStatus: "PENDING",
+        availabilityStatus: "AVAILABLE"
+      },
+      {
+        id: "match-2",
+        courseId: "course-2",
+        alertStatus: "PENDING",
+        availabilityStatus: "AVAILABLE"
+      }
+    ] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-1",
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null
+      },
+      {
+        id: "course-2",
+        isPublic: false,
+        bookingMethod: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        intelligenceVerifiedAt: now,
+        intelligenceReviewAt: new Date("2026-08-15T00:00:00.000Z"),
+        intelligenceConfidence: 0.99
+      }
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "MATCH",
+      groupKey: "match-group",
+      send,
+      now: () => now
+    });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          matchIds: ["match-1"],
+          displayMatchIds: ["match-1"],
+          matchReport: expect.objectContaining({ matches: [validRow] })
+        })
+      })
+    );
+    expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: { in: ["match-2"] } }),
+        data: expect.objectContaining({
+          alertStatus: "SUPPRESSED",
+          availabilityStatus: "GONE"
+        })
+      })
+    );
+
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      { ...owner, status: "SENT", sentAt: now }
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      {
+        id: "match-1",
+        courseId: "course-1",
+        alertStatus: "SENT",
+        availabilityStatus: "AVAILABLE"
+      },
+      {
+        id: "match-2",
+        courseId: "course-2",
+        alertStatus: "SUPPRESSED",
+        availabilityStatus: "GONE"
+      }
+    ] as never);
+    await expect(
+      finalizeSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        kind: "MATCH",
+        groupKey: "match-group"
+      })
+    ).resolves.toEqual({
+      finalized: true,
+      status: "SENT",
+      ownerSent: true,
+      retainedMatchCount: 1,
+      sentMatchCount: 1
+    });
+  });
+
+  it("removes a stale GONE display match from an immutable retry payload", async () => {
+    const currentRow = payload.matchReport.matches[0];
+    const staleRow = {
+      ...currentRow,
+      matchId: "match-2",
+      courseId: "course-2",
+      courseName: "Gone Course"
+    };
+    const retryPayload = {
+      ...payload,
+      displayMatchIds: ["match-1", "match-2"],
+      matchReport: {
+        ...payload.matchReport,
+        matches: [currentRow, staleRow]
+      }
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      status: "FAILED",
+      nextAttemptAt: new Date(now.getTime() - 1),
+      payload: retryPayload
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      {
+        id: "match-1",
+        courseId: "course-1",
+        alertStatus: "PENDING",
+        availabilityStatus: "AVAILABLE"
+      },
+      {
+        id: "match-2",
+        courseId: "course-2",
+        alertStatus: "SENT",
+        availabilityStatus: "GONE"
+      }
+    ] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-1",
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null
+      },
+      {
+        id: "course-2",
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null
+      }
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "MATCH",
+      groupKey: "match-group",
+      send,
+      now: () => now
+    });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          matchIds: ["match-1"],
+          displayMatchIds: ["match-1"],
+          matchReport: expect.objectContaining({ matches: [currentRow] })
+        })
+      })
+    );
   });
 
   it("persists a one-minute Workflow recheck after a group send failure", async () => {
@@ -497,7 +763,13 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group"
       })
-    ).resolves.toEqual({ finalized: true, status: "SUPPRESSED", ownerSent: false });
+    ).resolves.toEqual({
+      finalized: true,
+      status: "SUPPRESSED",
+      ownerSent: false,
+      retainedMatchCount: 1,
+      sentMatchCount: 0
+    });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { alertStatus: "SUPPRESSED", sentAt: now } })
     );
@@ -517,7 +789,13 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group"
       })
-    ).resolves.toEqual({ finalized: true, status: "SENT", ownerSent: true });
+    ).resolves.toEqual({
+      finalized: true,
+      status: "SENT",
+      ownerSent: true,
+      retainedMatchCount: 1,
+      sentMatchCount: 1
+    });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } })
     );

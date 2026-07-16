@@ -7,6 +7,7 @@ import {
   type SearchEmailDeliveryStatus
 } from "@prisma/client";
 
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { prisma } from "@/lib/prisma";
 import type { TeeTimeAlertInput } from "@/lib/email/alerts";
 import type {
@@ -270,7 +271,7 @@ export async function drainSearchEmailDeliveryGroup<TDelivery extends {
                 kind: input.kind,
                 groupKey: input.groupKey,
                 recipient: delivery.recipient,
-                payload: claim.payload
+                payload: claim.persistedPayload
               }),
               payload: claim.payload
             })
@@ -333,7 +334,9 @@ export async function finalizeSearchEmailDeliveryGroup(input: {
     return {
       finalized: true as const,
       status: outcome.ownerSent ? ("SENT" as const) : ("SUPPRESSED" as const),
-      ownerSent: outcome.ownerSent
+      ownerSent: outcome.ownerSent,
+      retainedMatchCount: outcome.retainedMatchCount,
+      sentMatchCount: outcome.ownerSent ? outcome.retainedMatchCount : 0
     };
   });
 }
@@ -384,7 +387,8 @@ async function applyOwnerDeliveryOutcome(
       reason: "missing_group" as const,
       groupComplete: false,
       ownerFinalized: false,
-      ownerSent: false
+      ownerSent: false,
+      retainedMatchCount: 0
     };
   }
   const payload = assertIdenticalGroupPayloads(deliveries);
@@ -394,7 +398,8 @@ async function applyOwnerDeliveryOutcome(
       reason: "invalid_owner" as const,
       groupComplete: false,
       ownerFinalized: false,
-      ownerSent: false
+      ownerSent: false,
+      retainedMatchCount: 0
     };
   }
   const groupComplete = deliveries.every(
@@ -404,17 +409,33 @@ async function applyOwnerDeliveryOutcome(
   const ownerSent = ownerDelivery.status === "SENT";
   const ownerFinalized = ownerSent || (ownerDelivery.status === "SUPPRESSED" && groupComplete);
   if (!ownerFinalized) {
-    return { reason: null, groupComplete, ownerFinalized, ownerSent };
+    return {
+      reason: null,
+      groupComplete,
+      ownerFinalized,
+      ownerSent,
+      retainedMatchCount: 0
+    };
   }
 
   const terminalStatus = ownerSent ? "SENT" : "SUPPRESSED";
   const sentAt = ownerDelivery.sentAt ?? new Date(payload.checkedAt);
-  if (payload.matchIds && payload.matchIds.length > 0) {
+  const currentMatchPayload = input.kind === "MATCH"
+    ? await getCurrentMatchDeliveryPayload(
+        transaction,
+        input.searchId,
+        payload,
+        sentAt
+      )
+    : null;
+  const terminalMatchIds = currentMatchPayload?.retainedMatchIds ?? payload.matchIds ?? [];
+  if (terminalMatchIds.length > 0) {
     await transaction.teeTimeMatch.updateMany({
       where: {
-        id: { in: payload.matchIds },
+        id: { in: terminalMatchIds },
         teeSearchId: input.searchId,
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
+        ...(input.kind === "MATCH" ? { availabilityStatus: "AVAILABLE" } : {})
       },
       data: { alertStatus: terminalStatus, sentAt }
     });
@@ -423,7 +444,9 @@ async function applyOwnerDeliveryOutcome(
   const satisfiesStatusReport =
     input.kind === "SETUP" ||
     input.kind === "DAILY" ||
-    (input.kind === "MATCH" && payload.satisfiesStatusReport === true);
+    (input.kind === "MATCH" &&
+      payload.satisfiesStatusReport === true &&
+      terminalMatchIds.length > 0);
   if (
     ownerSent &&
     satisfiesStatusReport &&
@@ -438,7 +461,13 @@ async function applyOwnerDeliveryOutcome(
       }
     });
   }
-  return { reason: null, groupComplete, ownerFinalized, ownerSent };
+  return {
+    reason: null,
+    groupComplete,
+    ownerFinalized,
+    ownerSent,
+    retainedMatchCount: terminalMatchIds.length
+  };
 }
 
 export async function suppressSearchEmailDeliveriesForMatches(input: {
@@ -692,12 +721,34 @@ async function claimSearchEmailDeliveryGroup(input: {
       },
       select: { id: true }
     });
-    const matchRefsCurrent = await areMatchReferencesCurrent(
-      transaction,
-      input.searchId,
-      payload.matchIds
+    const deliveryContextCurrent = Boolean(
+      isCurrentDeliverySearch(search, input, input.now) && !newerGroup
     );
-    if (!isCurrentDeliverySearch(search, input, input.now) || newerGroup || !matchRefsCurrent) {
+    const currentMatchPayload = deliveryContextCurrent && input.kind === "MATCH"
+      ? await getCurrentMatchDeliveryPayload(
+          transaction,
+          input.searchId,
+          payload,
+          input.now
+        )
+      : null;
+    const matchRefsCurrent = deliveryContextCurrent && input.kind === "MATCH"
+      ? Boolean(
+          currentMatchPayload &&
+            currentMatchPayload.retainedMatchIds.length > 0 &&
+            currentMatchPayload.retainedDisplayMatchIds.length > 0
+        )
+      : deliveryContextCurrent
+        ? await areMatchReferencesCurrent(
+            transaction,
+            input.searchId,
+            payload.matchIds
+          )
+        : false;
+    if (
+      !deliveryContextCurrent ||
+      !matchRefsCurrent
+    ) {
       await suppressRetryableGroupRows(transaction, deliveries);
       const suppressed = await transaction.searchEmailDelivery.findMany({
         where: groupWhere(input)
@@ -752,7 +803,8 @@ async function claimSearchEmailDeliveryGroup(input: {
     return {
       outcome: "claimed" as const,
       claimToken,
-      payload,
+      payload: currentMatchPayload?.payload ?? payload,
+      persistedPayload: payload,
       deliveries: claimable.map((delivery) => ({
         ...delivery,
         attemptCount: delivery.attemptCount + 1
@@ -949,6 +1001,139 @@ async function areMatchReferencesCurrent(
     }
   });
   return currentCount === new Set(matchIds).size;
+}
+
+async function getCurrentMatchDeliveryPayload(
+  transaction: DeliveryTransaction,
+  searchId: string,
+  payload: SearchEmailDeliveryPayload,
+  now: Date
+) {
+  const report = requireJsonRecord(payload.matchReport, "match report");
+  const persistedMatches = (Array.isArray(report.matches) ? report.matches : [])
+    .map((value) => ({
+      value,
+      row: requireJsonRecord(value, "match alert row")
+    }))
+    .map(({ value, row }) => ({
+      value,
+      matchId: optionalString(row.matchId),
+      courseId: optionalString(row.courseId)
+    }))
+    .filter(
+      (match): match is { value: unknown; matchId: string; courseId: string } =>
+        Boolean(match.matchId && match.courseId)
+    );
+  const requestedMatchIds = [...new Set(payload.matchIds ?? [])];
+  const requestedDisplayMatchIds = [...new Set(payload.displayMatchIds ?? [])];
+  const requestedIds = [
+    ...new Set([...requestedMatchIds, ...requestedDisplayMatchIds])
+  ];
+  const matches = requestedIds.length > 0
+    ? await transaction.teeTimeMatch.findMany({
+        where: {
+          id: { in: requestedIds },
+          teeSearchId: searchId
+        },
+        select: {
+          id: true,
+          courseId: true,
+          alertStatus: true,
+          availabilityStatus: true
+        }
+      })
+    : [];
+  const courseIds = [...new Set(matches.map((match) => match.courseId))];
+  const courses = await transaction.course.findMany({
+    where: { id: { in: courseIds } },
+    select: {
+      id: true,
+      isPublic: true,
+      bookingMethod: true,
+      automationEligibility: true,
+      automationReason: true,
+      intelligenceVerifiedAt: true,
+      intelligenceReviewAt: true,
+      intelligenceConfidence: true
+    }
+  });
+  const identityFinalCourseIds = new Set(
+    courses
+      .filter(
+        (course) => evaluateMonitoringGate(course).disposition === "IDENTITY_FINAL"
+      )
+      .map((course) => course.id)
+  );
+  const deliverableCourseIds = new Set(
+    courses
+      .filter((course) => !identityFinalCourseIds.has(course.id))
+      .map((course) => course.id)
+  );
+  const identityFinalMatchIds = matches
+    .filter((match) => identityFinalCourseIds.has(match.courseId))
+    .map((match) => match.id);
+  if (identityFinalMatchIds.length > 0) {
+    await transaction.teeTimeMatch.updateMany({
+      where: {
+        id: { in: identityFinalMatchIds },
+        teeSearchId: searchId,
+        alertStatus: "PENDING"
+      },
+      data: {
+        alertStatus: "SUPPRESSED",
+        availabilityStatus: "GONE",
+        sentAt: now,
+        unavailableAt: now
+      }
+    });
+    await transaction.teeTimeMatch.updateMany({
+      where: {
+        id: { in: identityFinalMatchIds },
+        teeSearchId: searchId,
+        alertStatus: { not: "PENDING" }
+      },
+      data: {
+        availabilityStatus: "GONE",
+        unavailableAt: now
+      }
+    });
+  }
+
+  const persistedMatchById = new Map(
+    persistedMatches.map((match) => [match.matchId, match])
+  );
+  const currentMatchById = new Map(matches.map((match) => [match.id, match]));
+  const retainedDisplayMatchIds = requestedDisplayMatchIds.filter((matchId) => {
+    const persisted = persistedMatchById.get(matchId);
+    const current = currentMatchById.get(matchId);
+    return Boolean(
+      persisted &&
+        current &&
+        persisted.courseId === current.courseId &&
+        deliverableCourseIds.has(current.courseId) &&
+        current.availabilityStatus === "AVAILABLE" &&
+        (current.alertStatus === "PENDING" || current.alertStatus === "SENT")
+    );
+  });
+  const retainedDisplaySet = new Set(retainedDisplayMatchIds);
+  const retainedMatchIds = requestedMatchIds.filter((matchId) =>
+    retainedDisplaySet.has(matchId)
+  );
+  return {
+    payload: {
+      ...payload,
+      matchIds: retainedMatchIds,
+      displayMatchIds: retainedDisplayMatchIds,
+      matchReport: {
+        ...report,
+        matches: persistedMatches
+          .filter((match) => retainedDisplaySet.has(match.matchId))
+          .map((match) => match.value)
+      } as Prisma.InputJsonObject
+    },
+    retainedMatchIds,
+    retainedDisplayMatchIds
+  };
 }
 
 async function suppressRetryableGroupRows(

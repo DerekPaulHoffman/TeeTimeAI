@@ -1,5 +1,13 @@
 # UX Research Notes
 
+## 2026-07-16 - Public visibility keeps monitoring work open
+
+- Gainfield evidence: a normal signed-out Chrome session at [Gainfield's official TenFore booking page](https://fox.tenfore.golf/gainfieldfarms) currently renders dated tee times, capacity, holes, and prices. The reCAPTCHA badge does not by itself mean the page is unavailable to golfers.
+- Technical boundary: the consumer `BookingEngineV4/booking-times` request includes `x-recaptcha-token`; the same request without that token returns HTTP 400, and a headless page receives the same failure. Tee Time Spot will not generate, solve, replay, or bypass that token.
+- Supported integration path: [TenFore's API help](https://api.tenfore.golf/Help) documents read endpoints including `TeeSheet`, `TeeSheetExtV`, and `TeeSheetTimes`, while a credential-free request returns HTTP 401 with `WWW-Authenticate: Bearer`. [TenFore's official product page](https://tenfore.golf/) describes an open partner API and names Noteefy among its integrations.
+- Decision: preserve Gainfield's official link, classify TenFore as open engineering work rather than a terminal captcha disposition, and request official partner API access before implementing a reusable adapter. Booking or transaction policy text never changes public read-only eligibility; only current technical access evidence may classify a real gate.
+- Recurrence guard: Whoosh terms are no longer fetched during discovery, legacy `BLOCKED_POLICY` evidence is selected as adapter work, policy-only support closeout is rejected, and customer copy presents a public online legacy block as “Adding monitoring.”
+
 ## 2026-07-15 - Exact non-course reviews must reconcile saved course state
 
 - Sources: [The Harmony Golf Club's official site](https://theharmonygolfclub.com/), accessed July 15, 2026, calls the Rochester venue a private indoor golf simulator at 274 N Goodman Street, Suite D308. The [New York State Golf Association indoor-facilities directory](https://nysga.org/competitions-where-to-play-indoor-facilities), accessed the same day, independently lists The Harmony Golf Club under Rochester indoor facilities.
