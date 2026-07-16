@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  attachSearchWorkflowRun,
+  claimScheduledSearchCheck,
   closeHourlyImprovementRun,
+  completeScheduledSearchCheck,
+  failScheduledSearchCheck,
   markMissingMatchesUnavailable,
+  listSearchesNeedingScheduleRecovery,
+  queueSearchCheck,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
   updateHourlyImprovementRunState
@@ -13,9 +19,15 @@ import {
   type HourlyImprovementRunRecord
 } from "./improvement";
 
+const deliveryOutboxMocks = vi.hoisted(() => ({
+  lockSearchForEmailReconciliation: vi.fn(),
+  suppressSearchEmailDeliveriesForMatches: vi.fn()
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     teeTimeMatch: {
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
       updateMany: vi.fn()
@@ -27,13 +39,208 @@ vi.mock("@/lib/prisma", () => ({
     automationRun: {
       updateMany: vi.fn()
     },
+    teeSearch: {
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn()
+    },
+    $queryRaw: vi.fn(),
     $transaction: vi.fn()
   }
 }));
+vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 
 import { prisma } from "@/lib/prisma";
 
 const mockedPrisma = vi.mocked(prisma);
+
+describe("search check row lease", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("persists a follow-up request when the exact schedule is already busy", async () => {
+    mockedPrisma.teeSearch.updateMany
+      .mockResolvedValueOnce({ count: 0 } as never)
+      .mockResolvedValueOnce({ count: 1 } as never);
+
+    await expect(claimScheduledSearchCheck("search-1", 4)).resolves.toBeNull();
+
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "search-1",
+          scheduleVersion: 4,
+          status: "ACTIVE"
+        }),
+        data: { recheckRequestedAt: expect.any(Date) }
+      })
+    );
+  });
+
+  it("claims an expired lease with a fresh opaque token", async () => {
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const lease = await claimScheduledSearchCheck("search-1", 4);
+
+    expect(lease).toMatchObject({
+      searchId: "search-1",
+      scheduleVersion: 4,
+      token: expect.any(String),
+      expiresAt: expect.any(Date)
+    });
+    expect(lease?.token).not.toContain("search-1");
+  });
+
+  it("lets Workflow completion honor a future durable delivery retry", async () => {
+    const retryAt = new Date("2026-07-15T15:01:00.000Z");
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      { recheckRequested: true, nextCheckAt: retryAt }
+    ] as never);
+
+    await expect(
+      completeScheduledSearchCheck({
+        searchId: "search-1",
+        scheduleVersion: 4,
+        leaseToken: "lease-token",
+        outcome: "email retry queued",
+        nextCheckAt: new Date("2026-07-15T17:00:00.000Z")
+      })
+    ).resolves.toEqual({ recheckRequested: true, nextCheckAt: retryAt });
+    const query = mockedPrisma.$queryRaw.mock.calls[0]?.[0] as {
+      strings?: string[];
+    };
+    expect(query.strings?.join(" ")).toContain("GREATEST");
+    expect(query.strings?.join(" ")).toContain('current."recheckRequestedAt"');
+  });
+
+  it("keeps the earliest durable delivery retry when a scheduled check fails", async () => {
+    const retryAt = new Date("2026-07-15T15:01:00.000Z");
+    mockedPrisma.$queryRaw.mockResolvedValue([{ nextCheckAt: retryAt }] as never);
+
+    await expect(
+      failScheduledSearchCheck({
+        searchId: "search-1",
+        scheduleVersion: 4,
+        leaseToken: "lease-token",
+        message: "email delivery failed",
+        nextCheckAt: new Date("2026-07-15T15:05:00.000Z")
+      })
+    ).resolves.toEqual({ count: 1, nextCheckAt: retryAt });
+    const query = mockedPrisma.$queryRaw.mock.calls[0]?.[0] as {
+      strings?: string[];
+    };
+    expect(query.strings?.join(" ")).toContain("LEAST");
+    expect(query.strings?.join(" ")).toContain("GREATEST");
+    expect(query.strings?.join(" ")).toContain('"recheckRequestedAt"');
+    expect(query.strings?.join(" ")).toContain('"checkLeaseToken" =');
+  });
+
+  it("attaches only when no current workflow won the version or the prior start failed", async () => {
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await attachSearchWorkflowRun("search-1", 4, "run-1", "prior-run");
+
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "search-1",
+        scheduleVersion: 4,
+        status: "ACTIVE",
+        workflowRunId: "prior-run"
+      },
+      data: {
+        workflowRunId: "run-1"
+      }
+    });
+  });
+});
+
+describe("remediation schedule dispatch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the originally dispatched version without incrementing twice", async () => {
+    const tx = {
+      teeSearch: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "search-1",
+          status: "ACTIVE",
+          scheduleVersion: 12,
+          remediationDispatchKey: "dispatch-1",
+          remediationDispatchVersion: 9,
+          workflowRunId: "newer-run",
+          checkStatus: "WAITING",
+          updatedAt: new Date()
+        }),
+        updateMany: vi.fn()
+      }
+    };
+    mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
+      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+    );
+
+    await expect(queueSearchCheck("search-1", "dispatch-1")).resolves.toMatchObject({
+      scheduleVersion: 9
+    });
+    expect(tx.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("persists a dispatch key and its exact incremented schedule version", async () => {
+    const current = {
+      id: "search-1",
+      status: "ACTIVE",
+      scheduleVersion: 8,
+      remediationDispatchKey: null,
+      remediationDispatchVersion: null,
+      workflowRunId: null,
+      checkStatus: "WAITING",
+      updatedAt: new Date()
+    };
+    const tx = {
+      teeSearch: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce(current)
+          .mockResolvedValueOnce({ ...current, scheduleVersion: 9 }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 })
+      }
+    };
+    mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
+      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+    );
+
+    await expect(queueSearchCheck("search-1", "dispatch-1")).resolves.toMatchObject({
+      scheduleVersion: 9
+    });
+    expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          remediationDispatchKey: "dispatch-1",
+          remediationDispatchVersion: 9,
+          scheduleVersion: { increment: 1 }
+        })
+      })
+    );
+  });
+});
+
+describe("schedule recovery fairness", () => {
+  it("bounds a full cohort recovery pass and orders the stalest rows first", async () => {
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    await listSearchesNeedingScheduleRecovery();
+
+    expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+        take: 50
+      })
+    );
+  });
+});
 
 function buildHourlyRecord(): HourlyImprovementRunRecord {
   return {
@@ -157,13 +364,24 @@ describe("recordTeeTimeMatch", () => {
 describe("markMissingMatchesUnavailable", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+    );
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([{ id: "match-1" }] as never);
     mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
-    mockedPrisma.$transaction.mockResolvedValue([{ count: 1 }, { count: 1 }] as never);
+    deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue({
+      id: "search-1"
+    });
+    deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches.mockResolvedValue({
+      count: 1
+    });
   });
 
   it("suppresses pending alerts when their tee times disappear", async () => {
     await markMissingMatchesUnavailable({
       searchId: "search-1",
+      alertGeneration: 2,
+      checkLeaseToken: "check-lease",
       courseId: "course-1",
       date: "2026-07-11",
       timeZone: "America/New_York",
@@ -207,6 +425,37 @@ describe("markMissingMatchesUnavailable", () => {
       })
     );
     expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchId: "search-1",
+        matchIds: ["match-1"],
+        transaction: prisma
+      })
+    );
+  });
+
+  it("does not reconcile availability after the generation or check lease becomes stale", async () => {
+    deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue(null);
+
+    await expect(
+      markMissingMatchesUnavailable({
+        searchId: "search-1",
+        alertGeneration: 2,
+        checkLeaseToken: "stale-check-lease",
+        courseId: "course-1",
+        date: "2026-07-11",
+        timeZone: "America/New_York",
+        confirmedMatches: []
+      })
+    ).rejects.toThrow(
+      "Search check is no longer current during availability reconciliation"
+    );
+
+    expect(mockedPrisma.teeTimeMatch.findMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
+    expect(
+      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
+    ).not.toHaveBeenCalled();
   });
 });
 
@@ -220,7 +469,8 @@ describe("recordCourseProbeIfChanged", () => {
     mockedPrisma.courseProbe.findFirst.mockResolvedValue({
       id: "existing-probe",
       outcome: "BLOCKED_POLICY",
-      message: "Course is explicitly marked as blocked for automation."
+      message: "Course is explicitly marked as blocked for automation.",
+      runtimeVersion: "local"
     } as never);
 
     await recordCourseProbeIfChanged({
@@ -248,6 +498,29 @@ describe("recordCourseProbeIfChanged", () => {
     });
 
     expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
+  });
+
+  it("records unchanged evidence once for a newly deployed runtime", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "old-runtime-probe",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "old-release"
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "new-release"
+    });
+
+    expect(mockedPrisma.courseProbe.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ runtimeVersion: "new-release" })
+      })
+    );
   });
 
   it("records a changed policy reason", async () => {

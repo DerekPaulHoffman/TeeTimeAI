@@ -14,7 +14,7 @@ import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
 
 const FALLBACK_BOOKING_WINDOW_LEAD_DAYS = 14;
 const FAILED_CHECK_RETRY_MINUTES = 5;
-const SUPPORT_DISCOVERY_RETRY_MINUTES = 30;
+const SUPPORT_DISCOVERY_RETRY_MINUTES = 15;
 
 export async function executeScheduledSearchCheck(searchId: string, scheduleVersion: number) {
   const claimed = await claimScheduledSearchCheck(searchId, scheduleVersion);
@@ -38,6 +38,7 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       await completeScheduledSearchCheck({
         searchId,
         scheduleVersion,
+        leaseToken: claimed.token,
         outcome: "search window ended",
         nextCheckAt: null,
         completeSearch: true
@@ -51,7 +52,9 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       };
     }
 
-    const result = await runSearchCheck(searchId, "workflow");
+    const checkStartedAt = new Date();
+    const result = await runSearchCheck(searchId, "workflow", claimed);
+    const schedulingNow = new Date();
     const refreshedTiming = await getSearchScheduleTiming(searchId, scheduleVersion);
     const completeSyntheticSearch =
       result.outcome === "success" &&
@@ -62,15 +65,17 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       : calculateNextCheckAt(
           timing.date,
           timing.cadenceMinutes,
-          new Date(),
+          schedulingNow,
           searchExpiresAt,
           refreshedTiming?.preferences.map((preference) => preference.course) ??
             timing.preferences.map((preference) => preference.course),
-          result.supportRetryNeeded
+          result.supportRetryNeeded,
+          checkStartedAt
         );
-    await completeScheduledSearchCheck({
+    const completion = await completeScheduledSearchCheck({
       searchId,
       scheduleVersion,
+      leaseToken: claimed.token,
       outcome: completeSyntheticSearch
         ? `${summarizeCheckOutcome(result)}; synthetic one-check complete`
         : summarizeCheckOutcome(result),
@@ -79,7 +84,7 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
     });
     return {
       outcome: result.outcome,
-      nextCheckAt: nextCheckAt?.toISOString() ?? null,
+      nextCheckAt: completion?.nextCheckAt?.toISOString() ?? null,
       availableMatches: result.availableMatches,
       newlyAlertedMatches: result.newlyAlertedMatches,
       courseResults: result.courseResults
@@ -87,10 +92,17 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown search check failure";
     const nextCheckAt = new Date(Date.now() + FAILED_CHECK_RETRY_MINUTES * 60 * 1000);
-    await failScheduledSearchCheck({ searchId, scheduleVersion, message, nextCheckAt });
+    const failed = await failScheduledSearchCheck({
+      searchId,
+      scheduleVersion,
+      leaseToken: claimed.token,
+      message,
+      nextCheckAt
+    });
+    const persistedNextCheckAt = failed.nextCheckAt ?? nextCheckAt;
     return {
       outcome: "failed",
-      nextCheckAt: nextCheckAt.toISOString(),
+      nextCheckAt: persistedNextCheckAt.toISOString(),
       availableMatches: 0,
       newlyAlertedMatches: 0,
       courseResults: []
@@ -104,7 +116,8 @@ export function calculateNextCheckAt(
   now = new Date(),
   searchExpiresAt = endOfSearchDate(date),
   courses: CourseBookingWindowFields[] = [],
-  supportRetryNeeded = false
+  supportRetryNeeded = false,
+  checkStartedAt = now
 ) {
   if (now >= searchExpiresAt) {
     return null;
@@ -127,6 +140,12 @@ export function calculateNextCheckAt(
       .map((opensAt) => opensAt.getTime())
   );
   const hasCourseReadyToCheck = bookingWindowOpenings.some((opensAt) => opensAt <= now);
+  const releaseCrossedDuringCheck = bookingWindowOpenings.some(
+    (opensAt) => opensAt > checkStartedAt && opensAt <= now
+  );
+  if (releaseCrossedDuringCheck) {
+    return now < searchExpiresAt ? now : searchExpiresAt;
+  }
   if (!hasCourseReadyToCheck && Number.isFinite(nextBookingWindowOpening)) {
     return applySupportDiscoveryRetry(
       new Date(Math.min(nextBookingWindowOpening, searchExpiresAt.getTime())),
@@ -136,7 +155,11 @@ export function calculateNextCheckAt(
     );
   }
 
-  const next = new Date(now.getTime() + cadenceMinutes * 60 * 1000);
+  const cadenceWakeAt = now.getTime() + cadenceMinutes * 60 * 1000;
+  const nextUsefulWakeAt = Number.isFinite(nextBookingWindowOpening)
+    ? Math.min(cadenceWakeAt, nextBookingWindowOpening)
+    : cadenceWakeAt;
+  const next = new Date(nextUsefulWakeAt);
   return applySupportDiscoveryRetry(
     next < searchExpiresAt ? next : searchExpiresAt,
     supportRetryNeeded,

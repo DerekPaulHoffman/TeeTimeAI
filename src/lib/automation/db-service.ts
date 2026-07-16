@@ -1,6 +1,12 @@
+import { randomUUID } from "node:crypto";
+
 import { Prisma } from "@prisma/client";
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
+import {
+  lockSearchForEmailReconciliation,
+  suppressSearchEmailDeliveriesForMatches
+} from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
@@ -14,9 +20,12 @@ import {
   type HourlyImprovementRunRecord
 } from "./improvement";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
+import { resolveProviderCapability } from "./provider-capabilities";
+import { getAutomationRuntimeVersion } from "./runtime-version";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 const REOPEN_ALERT_MINIMUM_ABSENCE_MS = 30 * 60 * 1000;
+const SEARCH_CHECK_LEASE_MS = 15 * 60 * 1000;
 
 const activeSearchInclude = {
   user: true,
@@ -67,14 +76,33 @@ export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
   return withPostgresAdvisoryLease(prisma, AUTOMATION_POLL_LEASE_KEY, worker);
 }
 
-export function runWithSearchCheckLease<T>(searchId: string, worker: () => Promise<T>) {
-  return withPostgresAdvisoryTextLease(prisma, `tee-search:${searchId}`, worker);
+export type SearchCheckLease = {
+  searchId: string;
+  scheduleVersion: number;
+  token: string;
+  expiresAt: Date;
+};
+
+export async function runWithSearchCheckLease<T>(
+  searchId: string,
+  worker: (lease: SearchCheckLease) => Promise<T>
+) {
+  const lease = await claimDirectSearchCheckLease(searchId);
+  if (!lease) {
+    return { acquired: false as const };
+  }
+
+  try {
+    return { acquired: true as const, value: await worker(lease) };
+  } finally {
+    await releaseSearchCheckLease(lease);
+  }
 }
 
 export function runWithHourlyImprovementLease<T>(worker: () => Promise<T>) {
   return withPostgresAdvisoryTextLease(
     prisma,
-    "tee-time-spot:hourly-improvement",
+    "tee-time-spot:repository-writer",
     worker
   );
 }
@@ -219,6 +247,7 @@ type CourseProbeInput = {
   evidenceUrl?: string;
   rawSummary?: Prisma.InputJsonValue;
   automationRunId?: string;
+  runtimeVersion?: string;
 };
 
 export async function recordCourseProbe(input: CourseProbeInput) {
@@ -230,7 +259,8 @@ export async function recordCourseProbe(input: CourseProbeInput) {
       message: input.message,
       evidenceUrl: input.evidenceUrl,
       rawSummary: input.rawSummary,
-      automationRunId: input.automationRunId
+      automationRunId: input.automationRunId,
+      runtimeVersion: input.runtimeVersion ?? getAutomationRuntimeVersion()
     }
   });
 }
@@ -259,10 +289,15 @@ export async function recordBrowserDiscovery(input: BrowserDiscovery) {
 }
 
 export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
+  const provider = resolveProviderCapability({
+    detectedPlatform: input.detectedPlatform,
+    detectedBookingUrl: input.bookingUrl,
+    website: input.sourceUrl,
+    bookingMetadata: input.apiMetadata
+  });
   const learnedOnlineAdapter =
     input.status === "LEARNED" &&
-    Boolean(input.apiMetadata) &&
-    ["FOREUP", "TEEITUP", "CHRONOGOLF", "CUSTOM"].includes(input.detectedPlatform);
+    provider.isRunnable;
   const verifiedClassification = Boolean(
     input.bookingMethod &&
     input.bookingMethod !== "UNKNOWN" &&
@@ -285,6 +320,7 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
     where: { id: input.courseId },
     data: {
       detectedPlatform: input.detectedPlatform,
+      providerFamilyKey: provider.providerFamilyKey,
       automationEligibility,
       detectedBookingUrl: manualOnly ? null : input.bookingUrl,
       bookingMetadata: manualOnly
@@ -375,6 +411,8 @@ export async function recordTeeTimeMatch(input: {
 
 export async function markMissingMatchesUnavailable(input: {
   searchId: string;
+  alertGeneration: number;
+  checkLeaseToken: string;
   courseId: string;
   date: string;
   timeZone: string;
@@ -402,8 +440,32 @@ export async function markMissingMatchesUnavailable(input: {
   };
   const unavailableAt = new Date();
 
-  return prisma.$transaction([
-    prisma.teeTimeMatch.updateMany({
+  return prisma.$transaction(async (transaction) => {
+    const search = await lockSearchForEmailReconciliation(transaction, {
+      searchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      checkLeaseToken: input.checkLeaseToken,
+      now: unavailableAt
+    });
+    if (!search) {
+      throw new Error("Search check is no longer current during availability reconciliation");
+    }
+    const pendingMatches = await transaction.teeTimeMatch.findMany({
+      where: {
+        ...missingMatchWhere,
+        alertStatus: "PENDING"
+      },
+      select: { id: true }
+    });
+    await suppressSearchEmailDeliveriesForMatches({
+      searchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      checkLeaseToken: input.checkLeaseToken,
+      matchIds: pendingMatches.map((match) => match.id),
+      now: unavailableAt,
+      transaction
+    });
+    const suppressed = await transaction.teeTimeMatch.updateMany({
       where: {
         ...missingMatchWhere,
         alertStatus: "PENDING"
@@ -414,8 +476,8 @@ export async function markMissingMatchesUnavailable(input: {
         sentAt: unavailableAt,
         unavailableAt
       }
-    }),
-    prisma.teeTimeMatch.updateMany({
+    });
+    const reconciled = await transaction.teeTimeMatch.updateMany({
       where: {
         ...missingMatchWhere,
         alertStatus: { not: "PENDING" }
@@ -424,8 +486,9 @@ export async function markMissingMatchesUnavailable(input: {
         availabilityStatus: "GONE",
         unavailableAt
       }
-    })
-  ]);
+    });
+    return [suppressed, reconciled];
+  });
 }
 
 function addIsoDateDays(value: string, days: number) {
@@ -434,23 +497,108 @@ function addIsoDateDays(value: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
-export async function queueSearchCheck(searchId: string) {
-  return prisma.teeSearch.update({
-    where: { id: searchId },
-    data: {
-      scheduleVersion: { increment: 1 },
-      checkStatus: "QUEUED",
-      nextCheckAt: new Date(),
-      lastCheckOutcome: null
-    },
-    select: {
-      id: true,
-      status: true,
-      scheduleVersion: true,
-      workflowRunId: true,
-      checkStatus: true,
-      updatedAt: true
+export async function queueSearchCheck(
+  searchId: string,
+  remediationDispatchKey?: string
+) {
+  if (remediationDispatchKey && remediationDispatchKey.length > 128) {
+    throw new Error("Remediation dispatch key is too long.");
+  }
+  return prisma.$transaction(async (tx) => {
+    if (remediationDispatchKey) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const current = await tx.teeSearch.findUnique({
+          where: { id: searchId },
+          select: {
+            id: true,
+            status: true,
+            scheduleVersion: true,
+            remediationDispatchKey: true,
+            remediationDispatchVersion: true,
+            workflowRunId: true,
+            checkStatus: true,
+            updatedAt: true
+          }
+        });
+        if (!current || current.status !== "ACTIVE") {
+          return current;
+        }
+        if (current.remediationDispatchKey === remediationDispatchKey) {
+          if (current.remediationDispatchVersion === null) {
+            throw new Error("Remediation dispatch version is missing.");
+          }
+          return {
+            ...current,
+            scheduleVersion: current.remediationDispatchVersion
+          };
+        }
+
+        const nextVersion = current.scheduleVersion + 1;
+        const updated = await tx.teeSearch.updateMany({
+          where: {
+            id: searchId,
+            status: "ACTIVE",
+            scheduleVersion: current.scheduleVersion,
+            OR: [
+              { remediationDispatchKey: null },
+              { remediationDispatchKey: { not: remediationDispatchKey } }
+            ]
+          },
+          data: {
+            scheduleVersion: { increment: 1 },
+            remediationDispatchKey,
+            remediationDispatchVersion: nextVersion,
+            checkStatus: "QUEUED",
+            nextCheckAt: new Date(),
+            lastCheckOutcome: null,
+            workflowRunId: null,
+            checkLeaseToken: null,
+            checkLeaseExpiresAt: null,
+            recheckRequestedAt: null
+          }
+        });
+        if (updated.count === 1) {
+          return tx.teeSearch.findUnique({
+            where: { id: searchId },
+            select: {
+              id: true,
+              status: true,
+              scheduleVersion: true,
+              workflowRunId: true,
+              checkStatus: true,
+              updatedAt: true
+            }
+          });
+        }
+      }
+
+      throw new Error("Remediation dispatch could not claim the search schedule.");
     }
+
+    await tx.teeSearch.updateMany({
+      where: { id: searchId, status: "ACTIVE" },
+      data: {
+        scheduleVersion: { increment: 1 },
+        checkStatus: "QUEUED",
+        nextCheckAt: new Date(),
+        lastCheckOutcome: null,
+        workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null
+      }
+    });
+    return tx.teeSearch.findUnique({
+      where: { id: searchId },
+      select: {
+        id: true,
+        status: true,
+        scheduleVersion: true,
+        workflowRunId: true,
+        checkStatus: true,
+        updatedAt: true
+      }
+    });
   });
 }
 
@@ -471,12 +619,15 @@ export async function getSearchCheckRequestState(searchId: string) {
 export async function attachSearchWorkflowRun(
   searchId: string,
   scheduleVersion: number,
-  workflowRunId: string
+  workflowRunId: string,
+  expectedWorkflowRunId: string | null
 ) {
   return prisma.teeSearch.updateMany({
     where: {
       id: searchId,
-      scheduleVersion
+      scheduleVersion,
+      status: "ACTIVE",
+      workflowRunId: expectedWorkflowRunId
     },
     data: {
       workflowRunId
@@ -485,41 +636,202 @@ export async function attachSearchWorkflowRun(
 }
 
 export async function claimScheduledSearchCheck(searchId: string, scheduleVersion: number) {
+  const now = new Date();
+  const token = randomUUID();
+  const expiresAt = new Date(now.getTime() + SEARCH_CHECK_LEASE_MS);
   const result = await prisma.teeSearch.updateMany({
+    where: {
+      id: searchId,
+      scheduleVersion,
+      status: "ACTIVE",
+      OR: [
+        { checkLeaseToken: null },
+        { checkLeaseExpiresAt: null },
+        { checkLeaseExpiresAt: { lte: now } }
+      ]
+    },
+    data: {
+      checkStatus: "CHECKING",
+      nextCheckAt: null,
+      checkLeaseToken: token,
+      checkLeaseExpiresAt: expiresAt,
+      recheckRequestedAt: null
+    }
+  });
+
+  if (result.count === 1) {
+    return { searchId, scheduleVersion, token, expiresAt } satisfies SearchCheckLease;
+  }
+
+  await requestSearchRecheck(searchId, scheduleVersion, now);
+  return null;
+}
+
+async function claimDirectSearchCheckLease(searchId: string) {
+  const state = await prisma.teeSearch.findFirst({
+    where: { id: searchId, status: "ACTIVE" },
+    select: { scheduleVersion: true }
+  });
+  if (!state) {
+    return null;
+  }
+
+  const now = new Date();
+  const token = randomUUID();
+  const expiresAt = new Date(now.getTime() + SEARCH_CHECK_LEASE_MS);
+  const claimed = await prisma.teeSearch.updateMany({
+    where: {
+      id: searchId,
+      scheduleVersion: state.scheduleVersion,
+      status: "ACTIVE",
+      OR: [
+        { checkLeaseToken: null },
+        { checkLeaseExpiresAt: null },
+        { checkLeaseExpiresAt: { lte: now } }
+      ]
+    },
+    data: {
+      checkLeaseToken: token,
+      checkLeaseExpiresAt: expiresAt
+    }
+  });
+  if (claimed.count !== 1) {
+    await requestSearchRecheck(searchId, state.scheduleVersion, now);
+    return null;
+  }
+
+  return {
+    searchId,
+    scheduleVersion: state.scheduleVersion,
+    token,
+    expiresAt
+  } satisfies SearchCheckLease;
+}
+
+export async function requestSearchRecheck(
+  searchId: string,
+  scheduleVersion: number,
+  requestedAt = new Date()
+) {
+  return prisma.teeSearch.updateMany({
     where: {
       id: searchId,
       scheduleVersion,
       status: "ACTIVE"
     },
     data: {
-      checkStatus: "CHECKING",
-      nextCheckAt: null
+      recheckRequestedAt: requestedAt
     }
   });
+}
 
+export async function heartbeatSearchCheckLease(
+  lease: SearchCheckLease,
+  now = new Date()
+) {
+  const expiresAt = new Date(now.getTime() + SEARCH_CHECK_LEASE_MS);
+  const result = await prisma.teeSearch.updateMany({
+    where: {
+      id: lease.searchId,
+      scheduleVersion: lease.scheduleVersion,
+      status: "ACTIVE",
+      checkLeaseToken: lease.token,
+      checkLeaseExpiresAt: { gt: now }
+    },
+    data: { checkLeaseExpiresAt: expiresAt }
+  });
+  if (result.count === 1) {
+    lease.expiresAt = expiresAt;
+  }
   return result.count === 1;
+}
+
+export async function isSearchCheckLeaseCurrent(
+  lease: SearchCheckLease,
+  now = new Date()
+) {
+  const current = await prisma.teeSearch.findFirst({
+    where: {
+      id: lease.searchId,
+      scheduleVersion: lease.scheduleVersion,
+      status: "ACTIVE",
+      checkLeaseToken: lease.token,
+      checkLeaseExpiresAt: { gt: now }
+    },
+    select: { id: true }
+  });
+  return Boolean(current);
+}
+
+async function releaseSearchCheckLease(lease: SearchCheckLease) {
+  await prisma.teeSearch.updateMany({
+    where: {
+      id: lease.searchId,
+      scheduleVersion: lease.scheduleVersion,
+      checkLeaseToken: lease.token
+    },
+    data: {
+      checkLeaseToken: null,
+      checkLeaseExpiresAt: null
+    }
+  });
 }
 
 export async function completeScheduledSearchCheck(input: {
   searchId: string;
   scheduleVersion: number;
+  leaseToken: string;
   outcome: string;
   nextCheckAt: Date | null;
   completeSearch?: boolean;
 }) {
-  return prisma.teeSearch.updateMany({
-    where: {
-      id: input.searchId,
-      scheduleVersion: input.scheduleVersion
-    },
-    data: {
-      ...(input.completeSearch ? { status: "COMPLETED" as const } : {}),
-      checkStatus: input.nextCheckAt ? "WAITING" : "STOPPED",
-      lastCheckedAt: new Date(),
-      lastCheckOutcome: input.outcome,
-      nextCheckAt: input.nextCheckAt
-    }
-  });
+  const checkedAt = new Date();
+  const rows = await prisma.$queryRaw<Array<{ recheckRequested: boolean; nextCheckAt: Date | null }>>(
+    Prisma.sql`
+      WITH current AS (
+        SELECT "id", "status", "recheckRequestedAt"
+        FROM "TeeSearch"
+        WHERE "id" = ${input.searchId}
+          AND "scheduleVersion" = ${input.scheduleVersion}
+          AND "checkLeaseToken" = ${input.leaseToken}
+          AND "status" = 'ACTIVE'::"SearchStatus"
+        FOR UPDATE
+      )
+      UPDATE "TeeSearch" AS search
+      SET
+        "status" = CASE
+          WHEN ${input.completeSearch} THEN 'COMPLETED'::"SearchStatus"
+          ELSE current."status"
+        END,
+        "checkStatus" = CASE
+          WHEN ${input.completeSearch} THEN 'STOPPED'::"SearchCheckStatus"
+          WHEN current."recheckRequestedAt" IS NOT NULL THEN 'WAITING'::"SearchCheckStatus"
+          WHEN ${input.nextCheckAt}::timestamp IS NOT NULL THEN 'WAITING'::"SearchCheckStatus"
+          ELSE 'STOPPED'::"SearchCheckStatus"
+        END,
+        "lastCheckedAt" = ${checkedAt},
+        "lastCheckOutcome" = ${input.outcome},
+        "nextCheckAt" = CASE
+          WHEN ${input.completeSearch} THEN NULL
+          WHEN current."recheckRequestedAt" IS NOT NULL THEN GREATEST(
+            current."recheckRequestedAt",
+            ${checkedAt}
+          )
+          ELSE ${input.nextCheckAt}
+        END,
+        "checkLeaseToken" = NULL,
+        "checkLeaseExpiresAt" = NULL,
+        "recheckRequestedAt" = NULL,
+        "updatedAt" = ${checkedAt}
+      FROM current
+      WHERE search."id" = current."id"
+      RETURNING
+        (current."recheckRequestedAt" IS NOT NULL) AS "recheckRequested",
+        search."nextCheckAt" AS "nextCheckAt"
+    `
+  );
+
+  return rows[0] ?? null;
 }
 
 export async function failScheduledSearchCheck(input: {
@@ -527,19 +839,53 @@ export async function failScheduledSearchCheck(input: {
   scheduleVersion: number;
   message: string;
   nextCheckAt: Date;
+  leaseToken?: string;
+  expectedWorkflowRunId?: string | null;
 }) {
-  return prisma.teeSearch.updateMany({
-    where: {
-      id: input.searchId,
-      scheduleVersion: input.scheduleVersion
-    },
-    data: {
-      checkStatus: "FAILED",
-      lastCheckedAt: new Date(),
-      lastCheckOutcome: input.message,
-      nextCheckAt: input.nextCheckAt
-    }
-  });
+  const hasExpectedWorkflowRunId = Object.prototype.hasOwnProperty.call(
+    input,
+    "expectedWorkflowRunId"
+  );
+  const failedAt = new Date();
+  const ownershipPredicate = input.leaseToken
+    ? Prisma.sql`AND "checkLeaseToken" = ${input.leaseToken}`
+    : Prisma.sql`
+        AND "checkLeaseToken" IS NULL
+        AND "checkStatus" IN (
+          'QUEUED'::"SearchCheckStatus",
+          'WAITING'::"SearchCheckStatus",
+          'FAILED'::"SearchCheckStatus"
+        )
+        ${hasExpectedWorkflowRunId
+          ? Prisma.sql`AND "workflowRunId" IS NOT DISTINCT FROM ${input.expectedWorkflowRunId}`
+          : Prisma.empty}
+      `;
+  const rows = await prisma.$queryRaw<Array<{ nextCheckAt: Date }>>(Prisma.sql`
+    UPDATE "TeeSearch"
+    SET
+      "checkStatus" = 'FAILED'::"SearchCheckStatus",
+      "lastCheckedAt" = ${failedAt},
+      "lastCheckOutcome" = ${input.message},
+      "nextCheckAt" = CASE
+        WHEN "recheckRequestedAt" IS NULL THEN ${input.nextCheckAt}
+        ELSE LEAST(
+          ${input.nextCheckAt},
+          GREATEST("recheckRequestedAt", ${failedAt})
+        )
+      END,
+      "checkLeaseToken" = NULL,
+      "checkLeaseExpiresAt" = NULL,
+      "updatedAt" = ${failedAt}
+    WHERE "id" = ${input.searchId}
+      AND "scheduleVersion" = ${input.scheduleVersion}
+      AND "status" = 'ACTIVE'::"SearchStatus"
+      ${ownershipPredicate}
+    RETURNING "nextCheckAt"
+  `);
+  return {
+    count: rows.length,
+    nextCheckAt: rows[0]?.nextCheckAt ?? null
+  };
 }
 
 export async function stopSearchSchedule(searchId: string) {
@@ -549,7 +895,10 @@ export async function stopSearchSchedule(searchId: string) {
       scheduleVersion: { increment: 1 },
       checkStatus: "STOPPED",
       nextCheckAt: null,
-      workflowRunId: null
+      workflowRunId: null,
+      checkLeaseToken: null,
+      checkLeaseExpiresAt: null,
+      recheckRequestedAt: null
     }
   });
 }
@@ -565,7 +914,9 @@ export async function getSearchScheduleState(searchId: string, scheduleVersion: 
       id: true,
       scheduleVersion: true,
       status: true,
-      nextCheckAt: true
+      nextCheckAt: true,
+      workflowRunId: true,
+      checkStatus: true
     }
   });
 }
@@ -607,19 +958,40 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
 }
 
 export async function listSearchesNeedingScheduleRecovery() {
-  const overdueBefore = new Date(Date.now() - 10 * 60 * 1000);
+  const now = new Date();
+  const overdueBefore = new Date(now.getTime() - 10 * 60 * 1000);
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
       date: { gte: startOfUtcCalendarDay() },
       OR: [
         { checkStatus: "IDLE" },
-        { checkStatus: "FAILED", nextCheckAt: { lte: new Date() } },
-        { checkStatus: "WAITING", nextCheckAt: { lte: overdueBefore } }
+        { checkStatus: "QUEUED", updatedAt: { lte: overdueBefore } },
+        {
+          checkStatus: "CHECKING",
+          OR: [
+            { checkLeaseExpiresAt: null },
+            { checkLeaseExpiresAt: { lte: now } }
+          ]
+        },
+        { checkStatus: "FAILED", nextCheckAt: { lte: now } },
+        { checkStatus: "WAITING", nextCheckAt: { lte: overdueBefore } },
+        {
+          emailDeliveries: {
+            some: {
+              OR: [
+                { status: "PENDING", createdAt: { lte: overdueBefore } },
+                { status: "FAILED", nextAttemptAt: { lte: now } },
+                { status: "SENDING", claimExpiresAt: { lte: now } }
+              ]
+            }
+          }
+        }
       ]
     },
     select: { id: true },
-    take: 25
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    take: 50
   });
 }
 
@@ -658,6 +1030,7 @@ export async function markSearchStatusEmailSent(input: {
 }
 
 export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
+  const runtimeVersion = input.runtimeVersion ?? getAutomationRuntimeVersion();
   const latest = await prisma.courseProbe.findFirst({
     where: {
       teeSearchId: input.searchId,
@@ -666,11 +1039,24 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
     orderBy: { observedAt: "desc" }
   });
 
-  if (latest?.outcome === input.outcome && latest.message === (input.message ?? null)) {
+  if (
+    latest?.outcome === input.outcome &&
+    latest.message === (input.message ?? null) &&
+    latest.runtimeVersion === runtimeVersion &&
+    getProviderExecutionMarker(latest.rawSummary) ===
+      getProviderExecutionMarker(input.rawSummary)
+  ) {
     return latest;
   }
 
-  return recordCourseProbe(input);
+  return recordCourseProbe({ ...input, runtimeVersion });
+}
+
+function getProviderExecutionMarker(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return (value as Record<string, unknown>).providerExecution ?? null;
 }
 
 export async function listAvailableMatchAlerts(searchId: string): Promise<PendingAlertMatch[]> {

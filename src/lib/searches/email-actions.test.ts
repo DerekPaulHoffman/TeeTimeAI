@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
 import { stopTeeSearchFromEmail } from "./email-actions";
 
+const deliveryOutboxMocks = vi.hoisted(() => ({
+  lockSearchForAlertMutation: vi.fn()
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $transaction: vi.fn(),
@@ -18,6 +22,7 @@ vi.mock("@/lib/prisma", () => ({
     }
   }
 }));
+vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
@@ -27,6 +32,10 @@ describe("stopTeeSearchFromEmail", () => {
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
       (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
     );
+    deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({
+      id: "search-1",
+      status: "ACTIVE"
+    });
   });
 
   it("marks a booked search complete and stops every future notification path", async () => {
@@ -54,9 +63,14 @@ describe("stopTeeSearchFromEmail", () => {
           checkStatus: "STOPPED",
           nextCheckAt: null,
           workflowRunId: null,
-          scheduleVersion: { increment: 1 }
+          scheduleVersion: { increment: 1 },
+          alertGeneration: { increment: 1 }
         })
       })
+    );
+    expect(deliveryOutboxMocks.lockSearchForAlertMutation).toHaveBeenCalledWith(
+      prisma,
+      { searchId: "search-1" }
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -72,6 +72,20 @@ enum AlertStatus {
   SUPPRESSED
 }
 
+enum SearchEmailDeliveryKind {
+  SETUP
+  DAILY
+  MATCH
+}
+
+enum SearchEmailDeliveryStatus {
+  PENDING
+  SENDING
+  SENT
+  SUPPRESSED
+  FAILED
+}
+
 enum SearchCheckStatus {
   IDLE
   QUEUED
@@ -124,6 +138,39 @@ enum CourseSupportResolution {
   DIRECT_BOOKING_CLASSIFIED
 }
 
+enum CourseSupportFailureClass {
+  MISSING_SOURCE
+  MISSING_METADATA
+  UNSUPPORTED_FAMILY
+  AUTH
+  RATE_LIMIT
+  CHALLENGE
+  NOT_FOUND
+  HTTP_5XX
+  TIMEOUT
+  NETWORK
+  SCHEMA
+  UNKNOWN
+}
+
+enum CourseSupportBatchStatus {
+  CLAIMED
+  IMPLEMENTING
+  VERIFYING
+  SUCCEEDED
+  PARTIAL
+  RETRYABLE_FAILED
+}
+
+enum CourseSupportBatchIncidentResult {
+  PENDING
+  RESTORED
+  FINAL_DISPOSITION
+  RETRY_SCHEDULED
+  NEEDS_HUMAN
+  STALE_EVIDENCE
+}
+
 enum CourseProfileStatus {
   PENDING
   PUBLISHED
@@ -162,8 +209,8 @@ model User {
 }
 
 model Course {
-  id                       String                      @id @default(cuid())
-  googlePlaceId            String?                     @unique
+  id                       String                       @id @default(cuid())
+  googlePlaceId            String?                      @unique
   name                     String
   address                  String?
   city                     String?
@@ -173,15 +220,16 @@ model Course {
   countryCode              String?
   latitude                 Float
   longitude                Float
-  timeZone                 String                      @default("America/New_York")
+  timeZone                 String                       @default("America/New_York")
   rating                   Float?
   website                  String?
   phone                    String?
-  isPublic                 Boolean                     @default(true)
-  isManual                 Boolean                     @default(false)
+  isPublic                 Boolean                      @default(true)
+  isManual                 Boolean                      @default(false)
   detectedBookingUrl       String?
-  detectedPlatform         DetectedPlatform            @default(UNKNOWN)
-  bookingMethod            BookingMethod               @default(UNKNOWN)
+  detectedPlatform         DetectedPlatform             @default(UNKNOWN)
+  providerFamilyKey        String                       @default("SOURCE_MISSING")
+  bookingMethod            BookingMethod                @default(UNKNOWN)
   bookingPhone             String?
   bookingWindowDaysAhead   Int?
   bookingReleaseTimeLocal  String?
@@ -190,31 +238,33 @@ model Course {
   bookingWindowEvidenceUrl String?
   bookingWindowCheckedAt   DateTime?
   bookingWindowObservedAt  DateTime?
-  automationEligibility    AutomationEligibility       @default(UNKNOWN)
-  automationReason         AutomationReason            @default(NONE)
+  automationEligibility    AutomationEligibility        @default(UNKNOWN)
+  automationReason         AutomationReason             @default(NONE)
   policyNotes              String?
   bookingMetadata          Json?
   intelligenceVerifiedAt   DateTime?
   intelligenceReviewAt     DateTime?
   intelligenceConfidence   Float?
-  layoutHoleCounts         Int[]                       @default([])
+  layoutHoleCounts         Int[]                        @default([])
   layoutHolesEvidenceUrl   String?
   layoutHolesVerifiedAt    DateTime?
   par                      Int?
   parEvidenceUrl           String?
   parVerifiedAt            DateTime?
-  createdAt                DateTime                    @default(now())
-  updatedAt                DateTime                    @updatedAt
+  createdAt                DateTime                     @default(now())
+  updatedAt                DateTime                     @updatedAt
   preferences              CoursePreference[]
   probes                   CourseProbe[]
   matches                  TeeTimeMatch[]
   automationDiscoveries    CourseAutomationDiscovery[]
   supportIncident          CourseSupportIncident?
+  supportBatchIncidents    CourseSupportBatchIncident[]
   profile                  CourseProfile?
 
   @@index([latitude, longitude])
   @@index([stateCode, county, automationEligibility])
   @@index([detectedPlatform, automationEligibility])
+  @@index([providerFamilyKey, automationEligibility])
   @@index([bookingMethod, automationEligibility])
   @@index([intelligenceReviewAt])
 }
@@ -301,38 +351,73 @@ model GooglePlaceReview {
 }
 
 model TeeSearch {
-  id                   String              @id @default(cuid())
-  userId               String
-  date                 DateTime
-  startTime            String
-  endTime              String
-  userTimeZone         String              @default("America/New_York")
-  players              Int
-  requestedLayoutHoles Int?
-  cadenceMinutes       Int                 @default(5)
-  additionalEmails     String[]            @default([])
-  trafficClass         WebsiteTrafficClass @default(UNCLASSIFIED)
-  syntheticMultiCycle  Boolean             @default(false)
-  status               SearchStatus        @default(ACTIVE)
-  checkStatus          SearchCheckStatus   @default(IDLE)
-  scheduleVersion      Int                 @default(0)
-  workflowRunId        String?
-  nextCheckAt          DateTime?
-  lastCheckedAt        DateTime?
-  lastCheckOutcome     String?
-  statusEmailSentAt    DateTime?
-  statusEmailSnapshot  Json?
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
-  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  preferences          CoursePreference[]
-  probes               CourseProbe[]
-  matches              TeeTimeMatch[]
+  id                         String                     @id @default(cuid())
+  userId                     String
+  date                       DateTime
+  startTime                  String
+  endTime                    String
+  userTimeZone               String                     @default("America/New_York")
+  players                    Int
+  requestedLayoutHoles       Int?
+  cadenceMinutes             Int                        @default(5)
+  additionalEmails           String[]                   @default([])
+  trafficClass               WebsiteTrafficClass        @default(UNCLASSIFIED)
+  syntheticMultiCycle        Boolean                    @default(false)
+  status                     SearchStatus               @default(ACTIVE)
+  checkStatus                SearchCheckStatus          @default(IDLE)
+  scheduleVersion            Int                        @default(0)
+  alertGeneration            Int                        @default(0)
+  workflowRunId              String?
+  checkLeaseToken            String?
+  checkLeaseExpiresAt        DateTime?
+  recheckRequestedAt         DateTime?
+  remediationDispatchKey     String?
+  remediationDispatchVersion Int?
+  nextCheckAt                DateTime?
+  lastCheckedAt              DateTime?
+  lastCheckOutcome           String?
+  statusEmailSentAt          DateTime?
+  statusEmailSnapshot        Json?
+  createdAt                  DateTime                   @default(now())
+  updatedAt                  DateTime                   @updatedAt
+  user                       User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences                CoursePreference[]
+  probes                     CourseProbe[]
+  matches                    TeeTimeMatch[]
+  emailDeliveries            SearchEmailDelivery[]
+  courseSupportRechecks      CourseSupportBatchSearch[]
 
   @@index([status, date])
   @@index([status, nextCheckAt])
+  @@index([checkLeaseExpiresAt])
   @@index([userId, status])
   @@index([trafficClass, status, date])
+}
+
+model SearchEmailDelivery {
+  id               String                    @id @default(cuid())
+  teeSearchId      String
+  alertGeneration  Int
+  kind             SearchEmailDeliveryKind
+  groupKey         String
+  recipient        String
+  isOwnerRecipient Boolean                   @default(false)
+  payload          Json
+  status           SearchEmailDeliveryStatus @default(PENDING)
+  claimToken       String?
+  claimExpiresAt   DateTime?
+  attemptCount     Int                       @default(0)
+  nextAttemptAt    DateTime?
+  sentAt           DateTime?
+  lastError        String?
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
+  teeSearch        TeeSearch                 @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+
+  @@unique([teeSearchId, alertGeneration, kind, groupKey, recipient])
+  @@index([status, nextAttemptAt])
+  @@index([teeSearchId, alertGeneration, status])
+  @@index([claimExpiresAt])
 }
 
 model CoursePreference {
@@ -359,6 +444,7 @@ model CourseProbe {
   message         String?
   evidenceUrl     String?
   rawSummary      Json?
+  runtimeVersion  String?
   teeSearch       TeeSearch      @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
   course          Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
   automationRun   AutomationRun? @relation(fields: [automationRunId], references: [id], onDelete: SetNull)
@@ -396,15 +482,16 @@ model TeeTimeMatch {
 }
 
 model AutomationRun {
-  id            String        @id @default(cuid())
-  promptVersion String
-  startedAt     DateTime      @default(now())
-  completedAt   DateTime?
-  outcome       String?
-  errors        Json?
-  changedFiles  Json?
-  notes         String?
-  probes        CourseProbe[]
+  id             String               @id @default(cuid())
+  promptVersion  String
+  startedAt      DateTime             @default(now())
+  completedAt    DateTime?
+  outcome        String?
+  errors         Json?
+  changedFiles   Json?
+  notes          String?
+  probes         CourseProbe[]
+  supportBatches CourseSupportBatch[] @relation("SupportBatchOwner")
 
   @@index([startedAt])
   @@index([promptVersion, startedAt])
@@ -436,23 +523,32 @@ model CourseAutomationDiscovery {
 }
 
 model CourseSupportIncident {
-  id                    String                      @id @default(cuid())
-  courseId              String                      @unique
+  id                    String                       @id @default(cuid())
+  courseId              String                       @unique
   firstAffectedSearchId String?
-  cycle                 Int                         @default(1)
-  status                CourseSupportIncidentStatus @default(AUTO_INVESTIGATING)
+  cycle                 Int                          @default(1)
+  status                CourseSupportIncidentStatus  @default(AUTO_INVESTIGATING)
   kind                  CourseSupportIncidentKind
+  providerFamilyKey     String                       @default("SOURCE_MISSING")
+  failureClass          CourseSupportFailureClass    @default(UNKNOWN)
+  failureFingerprint    String                       @default("UNKNOWN")
   courseNameSnapshot    String
   platformSnapshot      DetectedPlatform
   bookingUrlSnapshot    String?
   initialMessage        String?
   latestMessage         String?
   nextAction            String?
-  affectedSearchCount   Int                         @default(1)
-  occurrenceCount       Int                         @default(1)
-  engineeringOnly       Boolean                     @default(false)
-  firstSeenAt           DateTime                    @default(now())
-  lastSeenAt            DateTime                    @default(now())
+  affectedSearchCount   Int                          @default(1)
+  occurrenceCount       Int                          @default(1)
+  engineeringOnly       Boolean                      @default(false)
+  nextAttemptAt         DateTime?
+  lastAttemptAt         DateTime?
+  attemptCount          Int                          @default(0)
+  activeRealSearchCount Int                          @default(0)
+  earliestTargetDate    DateTime?
+  activeBatchId         String?
+  firstSeenAt           DateTime                     @default(now())
+  lastSeenAt            DateTime                     @default(now())
   ownerNotifiedAt       DateTime?
   escalatedAt           DateTime?
   escalationNotifiedAt  DateTime?
@@ -460,13 +556,105 @@ model CourseSupportIncident {
   resolution            CourseSupportResolution?
   resolutionMessage     String?
   resolutionNotifiedAt  DateTime?
-  createdAt             DateTime                    @default(now())
-  updatedAt             DateTime                    @updatedAt
-  course                Course                      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  course                Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  activeBatch           CourseSupportBatch?          @relation("ActiveCourseSupportBatch", fields: [activeBatchId], references: [id], onDelete: SetNull)
+  batchIncidents        CourseSupportBatchIncident[]
 
   @@index([status, lastSeenAt])
+  @@index([status, nextAttemptAt])
+  @@index([providerFamilyKey, failureFingerprint, status])
+  @@index([activeBatchId])
   @@index([ownerNotifiedAt])
   @@index([resolutionNotifiedAt])
+}
+
+model CourseSupportBatch {
+  id                       String                       @id @default(cuid())
+  reference                String                       @unique
+  providerFamilyKey        String
+  failureFingerprint       String
+  status                   CourseSupportBatchStatus     @default(CLAIMED)
+  ownerAutomationRunId     String?
+  ownerThreadId            String?
+  leaseToken               String
+  leaseExpiresAt           DateTime
+  heartbeatAt              DateTime
+  baseSha                  String
+  releaseSha               String?
+  deployedAt               DateTime?
+  recheckDispatchKey       String?
+  recheckDispatchStartedAt DateTime?
+  recheckDispatchedAt      DateTime?
+  completedAt              DateTime?
+  revision                 Int                          @default(0)
+  maxCourses               Int                          @default(5)
+  summary                  Json?
+  createdAt                DateTime                     @default(now())
+  updatedAt                DateTime                     @updatedAt
+  ownerAutomationRun       AutomationRun?               @relation("SupportBatchOwner", fields: [ownerAutomationRunId], references: [id], onDelete: SetNull)
+  activeIncidents          CourseSupportIncident[]      @relation("ActiveCourseSupportBatch")
+  incidents                CourseSupportBatchIncident[]
+  searchDispatches         CourseSupportBatchSearch[]
+
+  @@index([status, leaseExpiresAt])
+  @@index([providerFamilyKey, failureFingerprint, createdAt])
+  @@index([ownerAutomationRunId])
+}
+
+model CourseSupportBatchIncident {
+  id                        String                           @id @default(cuid())
+  batchId                   String
+  incidentId                String
+  courseId                  String
+  cycle                     Int
+  result                    CourseSupportBatchIncidentResult @default(PENDING)
+  preProbeId                String?
+  postProbeId               String?
+  message                   String?
+  proofSnapshot             Json?
+  verifiedIncidentUpdatedAt DateTime?
+  verifiedAt                DateTime?
+  createdAt                 DateTime                         @default(now())
+  updatedAt                 DateTime                         @updatedAt
+  batch                     CourseSupportBatch               @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  incident                  CourseSupportIncident            @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+  course                    Course                           @relation(fields: [courseId], references: [id], onDelete: Restrict)
+
+  @@unique([batchId, incidentId])
+  @@index([incidentId])
+  @@index([courseId])
+  @@index([result, updatedAt])
+}
+
+model CourseSupportBatchSearch {
+  id              String             @id @default(cuid())
+  batchId         String
+  teeSearchId     String?
+  searchRef       String
+  scheduleVersion Int
+  removedAt       DateTime?
+  removalReason   String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  batch           CourseSupportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  teeSearch       TeeSearch?         @relation(fields: [teeSearchId], references: [id], onDelete: SetNull)
+
+  @@unique([batchId, searchRef])
+  @@index([teeSearchId])
+  @@index([batchId, removedAt])
+}
+
+model ProviderRequestLease {
+  providerFamilyKey String
+  slot              Int
+  leaseToken        String
+  leaseExpiresAt    DateTime
+  updatedAt         DateTime @updatedAt
+
+  @@id([providerFamilyKey, slot])
+  @@index([leaseExpiresAt])
 }
 
 model WebsiteEvent {

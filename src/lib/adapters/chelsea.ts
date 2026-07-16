@@ -2,6 +2,8 @@ import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import { getBookingWindowFromEvidence } from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
+import { providerHttpError } from "./fetch-with-timeout";
+
 const CHELSEA_REQUEST_TIMEOUT_MS = 10_000;
 const CHELSEA_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
@@ -204,7 +206,7 @@ async function requestChelseaPage(
   });
   updateCookies(cookies, response.headers);
   if (!response.ok) {
-    throw new Error(`Chelsea tee sheet returned ${response.status}`);
+    throw providerHttpError("Chelsea tee sheet", response);
   }
   const contentLength = Number(response.headers.get("content-length") ?? 0);
   if (contentLength > CHELSEA_MAX_RESPONSE_BYTES) {

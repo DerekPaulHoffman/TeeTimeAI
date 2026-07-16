@@ -5,6 +5,8 @@ import {
 } from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
+import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
+
 const GOLFBACK_API_BASE_URL = "https://api.golfback.com";
 const GOLFBACK_COURSE_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -100,13 +102,13 @@ export async function fetchGolfBackTeeSheet(
 
   const targetDate = input.date.toISOString().slice(0, 10);
   const evidenceUrl = `${GOLFBACK_API_BASE_URL}/api/v1/courses/${input.metadata.courseId}/date/${targetDate}/teetimes`;
-  const response = await fetchImpl(evidenceUrl, {
+  const response = await fetchWithProviderTimeout(evidenceUrl, {
     method: "POST",
     headers: golfBackHeaders(true),
     body: JSON.stringify({ sessionId: null })
-  });
+  }, fetchImpl);
   if (!response.ok) {
-    throw new Error(`GolfBack tee times returned ${response.status}`);
+    throw providerHttpError("GolfBack tee times", response);
   }
 
   const payload = (await response.json()) as GolfBackTeeTimeResponse;
@@ -172,9 +174,9 @@ async function fetchGolfBackBookingWindow(
   fetchImpl: typeof fetch
 ): Promise<BookingWindowEvidence | null> {
   const evidenceUrl = `${GOLFBACK_API_BASE_URL}/api/v1/courses/${metadata.courseId}`;
-  const response = await fetchImpl(evidenceUrl, {
+  const response = await fetchWithProviderTimeout(evidenceUrl, {
     headers: golfBackHeaders(false)
-  });
+  }, fetchImpl);
   if (!response.ok) {
     return null;
   }

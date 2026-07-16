@@ -3,22 +3,29 @@ import { createHash } from "node:crypto";
 import {
   finishAutomationRun,
   getActiveSearchForAutomation,
+  heartbeatSearchCheckLease,
+  isSearchCheckLeaseCurrent,
   listAvailableMatchAlerts,
   listPendingMatchAlerts,
   markCourseBookingWindowChecked,
-  markMatchAlertSent,
-  markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
-  markSearchStatusEmailSent,
   recordCourseBookingWindowEvidence,
   recordCourseProbe,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
   runWithSearchCheckLease,
-  startAutomationRun
+  startAutomationRun,
+  type SearchCheckLease
 } from "@/lib/automation/db-service";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import { evaluateAutomationPolicy } from "@/lib/automation/policy";
+import {
+  classifyProviderFailure,
+  resolveProviderCapability
+} from "@/lib/automation/provider-capabilities";
+import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
+import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { prepareSearchMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import {
   notifyCourseSupportIssueBatch,
@@ -49,6 +56,17 @@ import {
 } from "@/lib/courses/course-layout";
 import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
 import {
+  drainSearchEmailDeliveryGroup,
+  finalizeSearchEmailDeliveryGroup,
+  getSafeOfficialBookingUrl,
+  hydrateMatchAlertPayload,
+  hydrateSearchStatusEmailPayload,
+  listRetryableSearchEmailDeliveryGroups,
+  prepareSearchEmailDeliveryGroup,
+  suppressSearchEmailDeliveriesForMatches,
+  toSearchEmailJson
+} from "@/lib/email/search-delivery-outbox";
+import {
   buildSearchStatusSnapshot,
   getSearchStatusEmailKind,
   summarizeSearchStatusAvailability,
@@ -67,6 +85,12 @@ import {
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
+const SHORT_SEARCH_RETRY_FAILURES = new Set([
+  "HTTP_5XX",
+  "TIMEOUT",
+  "NETWORK",
+  "UNKNOWN"
+]);
 
 type AutomationCourse = {
   id: string;
@@ -77,6 +101,7 @@ type AutomationCourse = {
   bookingPhone: string | null;
   website: string | null;
   detectedBookingUrl: string | null;
+  providerFamilyKey: string;
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
@@ -113,12 +138,40 @@ export type SearchCheckResult = {
   statusEmailOutcome?: "sent" | "dry_run" | "skipped" | "covered_by_match_alert" | "failed";
 };
 
-export async function runSearchCheck(searchId: string, trigger = "scheduled") {
+export class SearchCheckLeaseLostError extends Error {
+  constructor() {
+    super("Search check lease is no longer current");
+    this.name = "SearchCheckLeaseLostError";
+  }
+}
+
+async function maintainSearchCheckLease(lease?: SearchCheckLease) {
+  if (!lease) {
+    return;
+  }
+  const current =
+    lease.expiresAt.getTime() - Date.now() < 5 * 60 * 1000
+      ? await heartbeatSearchCheckLease(lease)
+      : await isSearchCheckLeaseCurrent(lease);
+  if (!current) {
+    throw new SearchCheckLeaseLostError();
+  }
+}
+
+export async function runSearchCheck(
+  searchId: string,
+  trigger = "scheduled",
+  existingLease?: SearchCheckLease
+) {
   const run = await startAutomationRun(PROMPT_VERSION);
 
   try {
-    const lease = await runWithSearchCheckLease(searchId, () => checkSearch(searchId, run.id));
-    if (!lease.acquired) {
+    const execution = existingLease
+      ? { acquired: true as const, value: await checkSearch(searchId, run.id, existingLease) }
+      : await runWithSearchCheckLease(searchId, (lease) =>
+          checkSearch(searchId, run.id, lease)
+        );
+    if (!execution.acquired) {
       const result: SearchCheckResult = {
         searchId,
         outcome: "busy",
@@ -129,30 +182,42 @@ export async function runSearchCheck(searchId: string, trigger = "scheduled") {
       };
       await finishAutomationRun(run.id, {
         outcome: "no_op",
-        notes: `Search ${searchId} already has a check in progress. Trigger: ${trigger}.`
+        notes: JSON.stringify({
+          trigger,
+          searchRef: createSearchLogReference(searchId),
+          outcome: "busy"
+        })
       });
       return result;
     }
 
     await finishAutomationRun(run.id, {
-      outcome: lease.value.outcome,
-      notes: JSON.stringify({ trigger, ...lease.value })
+      outcome: execution.value.outcome,
+      notes: JSON.stringify(buildSearchCheckAudit(trigger, execution.value))
     });
-    return lease.value;
+    return execution.value;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown search check failure";
+    const safeMessage = sanitizeResponderText(message);
     await finishAutomationRun(run.id, {
       outcome: "failed",
-      errors: { message },
-      notes: error instanceof Error ? error.stack ?? message : message
+      errors: {
+        name: error instanceof Error ? error.name : "Error",
+        message: safeMessage
+      },
+      notes: safeMessage
     });
     throw error;
   }
 }
 
-async function checkSearch(searchId: string, automationRunId: string): Promise<SearchCheckResult> {
-  let search = await getActiveSearchForAutomation(searchId);
-  if (!search) {
+async function checkSearch(
+  searchId: string,
+  automationRunId: string,
+  lease: SearchCheckLease
+): Promise<SearchCheckResult> {
+  const loadedSearch = await getActiveSearchForAutomation(searchId);
+  if (!loadedSearch) {
     return {
       searchId,
       outcome: "not_active",
@@ -162,17 +227,23 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       supportRetryNeeded: false
     };
   }
+  let search = loadedSearch;
 
   let monitoringRetryCourseIds = new Set<string>();
+  let monitoringDeferredCourseIds = new Set<string>();
+  let monitoringPreparationFailed = false;
   try {
     const preparation = await prepareSearchMonitoring(search);
+    await maintainSearchCheckLease(lease);
     monitoringRetryCourseIds = new Set(preparation.retryCourseIds);
+    monitoringDeferredCourseIds = new Set(preparation.deferredCourseIds);
     if (preparation.appliedCourseIds.length > 0) {
       search = (await getActiveSearchForAutomation(searchId)) ?? search;
     }
   } catch (error) {
+    monitoringPreparationFailed = true;
     console.error("[monitoring:discovery-failed]", {
-      searchId,
+      searchRef: createSearchLogReference(searchId),
       message: error instanceof Error ? error.message : "Unknown discovery preparation failure"
     });
   }
@@ -200,7 +271,13 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       ? search.requestedLayoutHoles
       : null;
 
-  for (const preference of search.preferences) {
+  await runProviderFamilyTasks(
+    search.preferences,
+    (preference) =>
+      resolveProviderCapability(preference.course as AutomationCourse)
+        .providerFamilyKey,
+    async (preference) => {
+    await maintainSearchCheckLease(lease);
     const course = preference.course as AutomationCourse;
 
     if (
@@ -212,6 +289,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       const message = `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
       await markMissingMatchesUnavailable({
         searchId: search.id,
+        alertGeneration: search.alertGeneration,
+        checkLeaseToken: lease.token,
         courseId: course.id,
         date: searchWindow.date,
         timeZone: course.timeZone,
@@ -231,12 +310,12 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "NO_MATCH",
         availableMatches: 0,
         message,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course)
       });
-      continue;
+      return;
     }
 
     const policy = evaluateAutomationPolicy({
@@ -265,15 +344,43 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "BLOCKED_POLICY",
         availableMatches: 0,
         message: policy.reason,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course)
       });
-      continue;
+      return;
     }
 
     if (!hasSupportedAdapter(course)) {
+      if (monitoringPreparationFailed || monitoringDeferredCourseIds.has(course.id)) {
+        monitoringRetryCourseIds.add(course.id);
+        const message =
+          "Official booking-source review is queued and will retry shortly before monitoring support is classified.";
+        await recordCourseProbeIfChanged({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          outcome: "NEEDS_ADAPTER",
+          message,
+          rawSummary: {
+            nextAction: "official-source-discovery-retry"
+          }
+        });
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          message,
+          bookingUrl: getCustomerBookingUrl(course),
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: course.bookingMethod,
+          bookingAccess: getCourseBookingAccess(course)
+        });
+        return;
+      }
       const browserProbeUrl = getBestProbeUrl(course);
       const browserProbeQueued = shouldQueueBrowserProbe(course);
       const message = browserProbeQueued
@@ -307,13 +414,13 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "NEEDS_ADAPTER",
         availableMatches: 0,
         message,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course),
         supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
-      continue;
+      return;
     }
 
     const checkStartedAt = new Date();
@@ -334,16 +441,39 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         bookingWindow: storedBookingWindow
       });
       courseResults.push(buildBookingWindowCourseReport(course, storedBookingWindow));
-      continue;
+      return;
     }
 
     try {
-      const teeSheet = await fetchCourseTeeSheet(
-        course,
-        search.date,
-        search.players,
-        refreshBookingWindow
+      const providerExecution = await runWithProviderRequestLease(
+        resolveProviderCapability(course).providerFamilyKey,
+        () =>
+          fetchCourseTeeSheet(
+            course,
+            search.date,
+            search.players,
+            refreshBookingWindow
+          )
       );
+      if (!providerExecution.acquired) {
+        monitoringRetryCourseIds.add(course.id);
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "FETCH_FAILED",
+          availableMatches: 0,
+          message:
+            "This provider check was deferred by the global concurrency guard and will retry.",
+          bookingUrl: getCustomerBookingUrl(course),
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: course.bookingMethod,
+          bookingAccess: getCourseBookingAccess(course)
+        });
+        return;
+      }
+      const teeSheet = providerExecution.value;
+      await maintainSearchCheckLease(lease);
       const rawSlots = teeSheet.slots;
       let bookingWindow = storedBookingWindow;
       if (teeSheet.bookingWindowEvidence) {
@@ -366,7 +496,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           courseId: course.id,
           automationRunId,
           targetDate: searchWindow.date,
-          bookingWindow
+        bookingWindow,
+        providerExecution: true
         });
         await resolveCourseSupportIncident({
           courseId: course.id,
@@ -374,7 +505,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           message: `${course.name} returned a verified booking-window release for ${searchWindow.date}.`
         });
         courseResults.push(buildBookingWindowCourseReport(course, bookingWindow));
-        continue;
+        return;
       }
       const availability = summarizeSearchStatusAvailability(searchWindow, rawSlots);
       const bookableHoleCounts = summarizeBookableHoleCounts(rawSlots);
@@ -406,6 +537,8 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
 
       await markMissingMatchesUnavailable({
         searchId: search.id,
+        alertGeneration: search.alertGeneration,
+        checkLeaseToken: lease.token,
         courseId: course.id,
         date: searchWindow.date,
         timeZone: course.timeZone,
@@ -426,6 +559,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
             ? `Confirmed ${currentMatches.length} qualifying tee times.`
             : "No qualifying tee times in the requested window",
         rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK",
           ...availability,
           ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
           ...(pricing ? { pricing } : {})
@@ -465,7 +599,11 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         }))
       });
     } catch (error) {
+      await maintainSearchCheckLease(lease);
       const message = error instanceof Error ? error.message : "Unknown adapter error";
+      if (SHORT_SEARCH_RETRY_FAILURES.has(classifyProviderFailure({ error }).failureClass)) {
+        monitoringRetryCourseIds.add(course.id);
+      }
       await recordCourseProbe({
         searchId: search.id,
         courseId: course.id,
@@ -478,6 +616,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         searchId: search.id,
         kind: "FETCH_FAILED",
         message,
+        error,
         nextAction: "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
       });
       supportIssues.push({ courseId: course.id, ...supportIssue });
@@ -488,14 +627,15 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
         outcome: "FETCH_FAILED",
         availableMatches: 0,
         message,
-        bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+        bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
         bookingAccess: getCourseBookingAccess(course),
         supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
     }
-  }
+    }
+  );
 
   const preferenceContext = new Map(
     search.preferences.map((preference) => [
@@ -511,6 +651,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     courseResult.rank = context?.rank;
     courseResult.courseAddress = context?.courseAddress;
   }
+  courseResults.sort((left, right) => (left.rank ?? 99) - (right.rank ?? 99));
 
   let batchNotification = { notifiedIncidentIds: [] as string[] };
   try {
@@ -521,7 +662,7 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
     );
   } catch (error) {
     console.error("[email:operator-summary-queue-failed]", {
-      searchId,
+      searchRef: createSearchLogReference(searchId),
       message: error instanceof Error ? error.message : "Unknown operator summary failure"
     });
   }
@@ -534,12 +675,20 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       }
     }
   }
-  const supportRetryNeeded = supportIssues.some(
-    (issue) =>
-      issue.status === "UNRECORDED" || monitoringRetryCourseIds.has(issue.courseId)
-  );
+  const supportRetryNeeded =
+    monitoringRetryCourseIds.size > 0 ||
+    supportIssues.some((issue) => issue.status === "UNRECORDED");
 
+  await maintainSearchCheckLease(lease);
+  await retryExistingSearchEmailDeliveryGroups({
+    searchId: search.id,
+    alertGeneration: search.alertGeneration,
+    lease,
+    assertCurrent: () => maintainSearchCheckLease(lease)
+  });
+  search = (await getActiveSearchForAutomation(searchId)) ?? search;
   const checkedAt = new Date();
+  await maintainSearchCheckLease(lease);
   const statusEmailKind = getSearchStatusEmailKind(
     search.statusEmailSentAt,
     checkedAt,
@@ -549,21 +698,25 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
 
   if (statusEmailKind === "setup") {
     try {
+      const setupPendingMatches = await listPendingMatchAlerts(searchId);
       statusEmailOutcome = await deliverSearchStatusReport({
         search,
         searchWindow,
         courseResults,
         checkedAt,
-        kind: statusEmailKind
+        kind: statusEmailKind,
+        coveredMatchIds: setupPendingMatches.map((match) => match.id),
+        lease,
+        assertCurrent: () => maintainSearchCheckLease(lease)
       });
-      newlyAlertedMatches = await settlePendingMatchesCoveredByStatusReport(
-        searchId,
-        statusEmailOutcome
-      );
+      newlyAlertedMatches =
+        statusEmailOutcome === "sent" || statusEmailOutcome === "dry_run"
+          ? setupPendingMatches.length
+          : 0;
     } catch (error) {
       statusEmailOutcome = "failed";
       console.error("[email:status-failed]", {
-        searchId: search.id,
+        searchRef: createSearchLogReference(search.id),
         message: error instanceof Error ? error.message : "Unknown status email failure"
       });
     }
@@ -572,15 +725,13 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
       searchWindow,
       courseResults,
       checkedAt,
-      requestedLayoutHoles
+      requestedLayoutHoles,
+      satisfiesStatusReport: statusEmailKind === "daily",
+      lease,
+      assertCurrent: () => maintainSearchCheckLease(lease)
     });
 
     if (statusEmailKind === "daily" && newlyAlertedMatches > 0) {
-      await markSearchStatusReportSatisfied({
-        searchId: search.id,
-        checkedAt,
-        courseResults
-      });
       statusEmailOutcome = "covered_by_match_alert";
     } else if (statusEmailKind === "daily") {
       try {
@@ -589,12 +740,14 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
           searchWindow,
           courseResults,
           checkedAt,
-          kind: statusEmailKind
+          kind: statusEmailKind,
+          lease,
+          assertCurrent: () => maintainSearchCheckLease(lease)
         });
       } catch (error) {
         statusEmailOutcome = "failed";
         console.error("[email:status-failed]", {
-          searchId: search.id,
+          searchRef: createSearchLogReference(search.id),
           message: error instanceof Error ? error.message : "Unknown status email failure"
         });
       }
@@ -612,6 +765,93 @@ async function checkSearch(searchId: string, automationRunId: string): Promise<S
   };
 }
 
+async function retryExistingSearchEmailDeliveryGroups(input: {
+  searchId: string;
+  alertGeneration: number;
+  lease: SearchCheckLease;
+  assertCurrent: () => Promise<void>;
+}) {
+  const groups = await listRetryableSearchEmailDeliveryGroups({
+    searchId: input.searchId,
+    alertGeneration: input.alertGeneration
+  });
+  let blockingError: unknown;
+  for (const group of groups) {
+    await input.assertCurrent();
+    let deliveryError: unknown;
+    try {
+      await drainSearchEmailDeliveryGroup({
+        searchId: input.searchId,
+        alertGeneration: input.alertGeneration,
+        checkLeaseToken: input.lease.token,
+        kind: group.kind,
+        groupKey: group.groupKey,
+        send: async ({ recipient, idempotencyKey, payload }) => {
+          await input.assertCurrent();
+          if (group.kind === "MATCH") {
+            const alert = await hydrateMatchAlertPayload({
+              searchId: input.searchId,
+              alertGeneration: input.alertGeneration,
+              payload
+            });
+            return sendTeeTimeAlert({
+              searchId: input.searchId,
+              to: recipient,
+              ...alert,
+              stableIdempotencyKey: idempotencyKey
+            });
+          }
+          const report = await hydrateSearchStatusEmailPayload(payload);
+          return sendSearchStatusEmail({
+            searchId: input.searchId,
+            to: recipient,
+            ...report,
+            stableIdempotencyKey: idempotencyKey
+          });
+        }
+      });
+    } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
+      deliveryError = error;
+    }
+    await input.assertCurrent();
+    try {
+      const finalized = await finalizeSearchEmailDeliveryGroup({
+        searchId: input.searchId,
+        alertGeneration: input.alertGeneration,
+        kind: group.kind,
+        groupKey: group.groupKey
+      });
+      const ownerFinalized =
+        finalized.finalized ||
+        ("ownerFinalized" in finalized && finalized.ownerFinalized === true);
+      if (ownerFinalized) {
+        if (!finalized.finalized) {
+          console.warn("[email:additional-recipient-retry-pending]", {
+            searchRef: createSearchLogReference(input.searchId),
+            kind: group.kind
+          });
+        }
+        continue;
+      }
+      blockingError ??=
+        deliveryError ??
+        new Error("Existing search email delivery owner did not reach a terminal state");
+    } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
+      blockingError ??= deliveryError ?? error;
+      continue;
+    }
+  }
+  if (blockingError) {
+    throw blockingError;
+  }
+}
+
 function getCourseBookingAccess(
   course: AutomationCourse
 ): SearchStatusCourseReport["bookingAccess"] {
@@ -624,13 +864,20 @@ function getCourseBookingAccess(
   if (course.bookingMethod === "WALK_IN") {
     return "WALK_IN";
   }
-  if (course.detectedBookingUrl) {
+  if (getSafeOfficialBookingUrl(course.detectedBookingUrl)) {
     return "BOOKING_PAGE";
   }
-  if (course.website) {
+  if (getSafeOfficialBookingUrl(course.website)) {
     return "OFFICIAL_SITE";
   }
   return course.bookingPhone || course.phone ? "PHONE_ONLY" : undefined;
+}
+
+function getCustomerBookingUrl(course: AutomationCourse) {
+  return (
+    getSafeOfficialBookingUrl(course.detectedBookingUrl) ??
+    getSafeOfficialBookingUrl(course.website)
+  );
 }
 
 async function deliverSearchStatusReport(input: {
@@ -644,81 +891,87 @@ async function deliverSearchStatusReport(input: {
   courseResults: SearchCheckCourseResult[];
   checkedAt: Date;
   kind: "setup" | "daily";
+  coveredMatchIds?: string[];
+  lease: SearchCheckLease;
+  assertCurrent?: () => Promise<void>;
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
   const snapshot = buildSearchStatusSnapshot(input.courseResults);
+  const persistedStatusReport = toSearchEmailJson({
+    kind: input.kind,
+    targetDate: input.searchWindow.date,
+    startTime: input.searchWindow.startTime,
+    endTime: input.searchWindow.endTime,
+    players: input.searchWindow.players,
+    requestedLayoutHoles:
+      input.search.requestedLayoutHoles === 9 ||
+      input.search.requestedLayoutHoles === 18
+        ? input.search.requestedLayoutHoles
+        : null,
+    userTimeZone: input.search.userTimeZone,
+    previousSnapshot: input.search.statusEmailSnapshot,
+    courses: input.courseResults
+  });
   const recipients = getAlertRecipients(
     input.search.user.email,
     input.search.additionalEmails
   );
   const periodKey =
     input.kind === "setup"
-      ? "setup"
-      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}`;
-  const deliveries = await Promise.all(
-    recipients.map((recipient) =>
-      sendSearchStatusEmail({
+      ? `setup-${createEmailSnapshotKey(persistedStatusReport)}`
+      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}-${createEmailSnapshotKey(persistedStatusReport)}`;
+  await input.assertCurrent?.();
+  const deliveryKind = input.kind === "setup" ? "SETUP" : "DAILY";
+  const prepared = await prepareSearchEmailDeliveryGroup({
+    searchId: input.search.id,
+    alertGeneration: input.search.alertGeneration,
+    checkLeaseToken: input.lease.token,
+    kind: deliveryKind,
+    groupKey: periodKey,
+    recipients,
+    ownerRecipient: input.search.user.email,
+    payload: {
+      schemaVersion: 2,
+      checkedAt: input.checkedAt.toISOString(),
+      statusSnapshot: snapshot,
+      statusReport: persistedStatusReport,
+      ...(input.coveredMatchIds ? { matchIds: input.coveredMatchIds } : {})
+    }
+  });
+  if (!prepared.prepared) {
+    throw new SearchCheckLeaseLostError();
+  }
+  const deliveries = await drainSearchEmailDeliveryGroup({
+    searchId: input.search.id,
+    alertGeneration: input.search.alertGeneration,
+    checkLeaseToken: input.lease.token,
+    kind: deliveryKind,
+    groupKey: periodKey,
+    send: async ({ recipient, idempotencyKey, payload }) => {
+      await input.assertCurrent?.();
+      const report = await hydrateSearchStatusEmailPayload(payload);
+      return sendSearchStatusEmail({
         searchId: input.search.id,
         to: recipient,
-        kind: input.kind,
-        targetDate: input.searchWindow.date,
-        startTime: input.searchWindow.startTime,
-        endTime: input.searchWindow.endTime,
-        players: input.searchWindow.players,
-        requestedLayoutHoles:
-          input.search.requestedLayoutHoles === 9 ||
-          input.search.requestedLayoutHoles === 18
-            ? input.search.requestedLayoutHoles
-            : null,
-        userTimeZone: input.search.userTimeZone,
-        checkedAt: input.checkedAt,
-        courses: input.courseResults,
-        previousSnapshot: input.search.statusEmailSnapshot,
-        idempotencyKey: `tee-search-status-${input.search.id}-${periodKey}-${recipient}`
-      })
-    )
-  );
-
-  await markSearchStatusEmailSent({
-    searchId: input.search.id,
-    sentAt: input.checkedAt,
-    snapshot
+        ...report,
+        stableIdempotencyKey: idempotencyKey
+      });
+    }
   });
 
-  return deliveries.every((delivery) => delivery.deliveryStatus === "dry_run")
+  await input.assertCurrent?.();
+  const finalized = await finalizeSearchEmailDeliveryGroup({
+    searchId: input.search.id,
+    alertGeneration: input.search.alertGeneration,
+    kind: deliveryKind,
+    groupKey: periodKey
+  });
+  if (!finalized.finalized) {
+    throw new Error("Search status email delivery group did not reach a terminal state");
+  }
+
+  return deliveries.every((delivery) => delivery.status === "SUPPRESSED")
     ? "dry_run"
     : "sent";
-}
-
-async function markSearchStatusReportSatisfied(input: {
-  searchId: string;
-  checkedAt: Date;
-  courseResults: SearchCheckCourseResult[];
-}) {
-  await markSearchStatusEmailSent({
-    searchId: input.searchId,
-    sentAt: input.checkedAt,
-    snapshot: buildSearchStatusSnapshot(input.courseResults)
-  });
-}
-
-async function settlePendingMatchesCoveredByStatusReport(
-  searchId: string,
-  statusEmailOutcome: "sent" | "dry_run" | "skipped" | "covered_by_match_alert" | "failed"
-) {
-  const pendingMatches = await listPendingMatchAlerts(searchId);
-  if (pendingMatches.length === 0) {
-    return 0;
-  }
-
-  if (statusEmailOutcome === "dry_run") {
-    await Promise.all(pendingMatches.map((match) => markMatchAlertSuppressed(match.id)));
-  } else if (statusEmailOutcome === "sent") {
-    await Promise.all(pendingMatches.map((match) => markMatchAlertSent(match.id)));
-  } else {
-    return 0;
-  }
-
-  return pendingMatches.length;
 }
 
 async function sendPendingMatchAlerts(
@@ -733,94 +986,183 @@ async function sendPendingMatchAlerts(
     courseResults: SearchCheckCourseResult[];
     checkedAt: Date;
     requestedLayoutHoles: 9 | 18 | null;
+    satisfiesStatusReport: boolean;
+    lease: SearchCheckLease;
+    assertCurrent?: () => Promise<void>;
   }
 ) {
   const pendingMatches = await listPendingMatchAlerts(searchId);
   if (pendingMatches.length === 0) {
     return 0;
   }
+  const search = pendingMatches[0].teeSearch;
 
-  const availableMatches = await listAvailableMatchAlerts(searchId);
-  if (availableMatches.length === 0) {
-    await Promise.all(pendingMatches.map((match) => markMatchAlertSuppressed(match.id)));
+  const allAvailableMatches = await listAvailableMatchAlerts(searchId);
+  const currentMatchKeys = new Set(
+    input.courseResults.flatMap((course) =>
+      (course.matchingTimes ?? []).map(
+        (time) =>
+          `${course.courseId}:${parseCourseLocalDateTime(time.startsAt, course.timeZone).getTime()}`
+      )
+    )
+  );
+  const availableMatches = allAvailableMatches.filter((match) =>
+    currentMatchKeys.has(`${match.course.id}:${match.startsAt.getTime()}`)
+  );
+  const currentAvailableIds = new Set(availableMatches.map((match) => match.id));
+  const stalePendingMatches = pendingMatches.filter(
+    (match) => !currentAvailableIds.has(match.id)
+  );
+  if (stalePendingMatches.length > 0) {
+    await input.assertCurrent?.();
+    const suppression = await suppressSearchEmailDeliveriesForMatches({
+      searchId,
+      alertGeneration: search.alertGeneration,
+      checkLeaseToken: input.lease.token,
+      matchIds: stalePendingMatches.map((match) => match.id)
+    });
+    if (!suppression.current) {
+      throw new SearchCheckLeaseLostError();
+    }
+  }
+  const currentPendingMatches = pendingMatches.filter((match) =>
+    currentAvailableIds.has(match.id)
+  );
+  if (availableMatches.length === 0 || currentPendingMatches.length === 0) {
     return 0;
   }
 
-  const pendingIds = new Set(pendingMatches.map((match) => match.id));
-  const search = pendingMatches[0].teeSearch;
-  const courseContext = new Map(
-    input.courseResults.map((course) => [course.courseId, course])
-  );
   const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
   const batchKey = createHash("sha256")
-    .update(pendingMatches.map((match) => match.id).sort().join(":"))
+    .update(currentPendingMatches.map((match) => match.id).sort().join(":"))
     .digest("hex")
     .slice(0, 24);
-  const deliveries = await Promise.all(
-    recipients.map((recipient) =>
-      sendTeeTimeAlert({
-        searchId,
-        to: recipient,
-        matches: availableMatches.map((match) => ({
-          courseId: match.course.id,
-          courseName: match.course.name,
-          courseRank: courseContext.get(match.course.id)?.rank,
-          courseAddress:
-            courseContext.get(match.course.id)?.courseAddress ??
-            match.course.address ??
-            undefined,
-          courseTimeZone: match.course.timeZone,
-          startsAt: match.startsAt,
-          availableSpots: match.availableSpots,
-          bookingUrl: match.bookingUrl,
-          priceCents: match.priceCents,
-          holes: match.holes,
-          bookableHoleCounts: courseContext
-            .get(match.course.id)
-            ?.matchingTimes?.find(
-              (time) =>
-                parseCourseLocalDateTime(time.startsAt, match.course.timeZone).getTime() ===
-                match.startsAt.getTime()
-            )?.bookableHoleCounts,
-          isNew: pendingIds.has(match.id)
-        })),
-        userTimeZone: search.userTimeZone,
+  await input.assertCurrent?.();
+  const prepared = await prepareSearchEmailDeliveryGroup({
+    searchId,
+    alertGeneration: search.alertGeneration,
+    checkLeaseToken: input.lease.token,
+    kind: "MATCH",
+    groupKey: batchKey,
+    recipients,
+    ownerRecipient: search.user.email,
+    payload: {
+      schemaVersion: 2,
+      checkedAt: input.checkedAt.toISOString(),
+      matchIds: currentPendingMatches.map((match) => match.id),
+      displayMatchIds: availableMatches.map((match) => match.id),
+      satisfiesStatusReport: input.satisfiesStatusReport,
+      statusSnapshot: buildSearchStatusSnapshot(input.courseResults),
+      matchReport: toSearchEmailJson({
         targetDate: input.searchWindow.date,
         startTime: input.searchWindow.startTime,
         endTime: input.searchWindow.endTime,
         players: input.searchWindow.players,
         requestedLayoutHoles: input.requestedLayoutHoles,
-        checkedAt: input.checkedAt,
-        idempotencyKey: `tee-time-match-batch-${batchKey}-${recipient}`
+        userTimeZone: search.userTimeZone,
+        matches: availableMatches.map((match) => ({
+          matchId: match.id,
+          courseId: match.course.id,
+          courseName: match.course.name,
+          courseRank: input.courseResults.find(
+            (course) => course.courseId === match.course.id
+          )?.rank,
+          courseAddress:
+            input.courseResults.find((course) => course.courseId === match.course.id)
+              ?.courseAddress ?? match.course.address ?? undefined,
+          courseTimeZone: match.course.timeZone,
+          startsAt: match.startsAt.toISOString(),
+          availableSpots: match.availableSpots,
+          bookingUrl: match.bookingUrl,
+          priceCents: match.priceCents,
+          holes: match.holes,
+          bookableHoleCounts:
+            input.courseResults
+              .find((course) => course.courseId === match.course.id)
+              ?.matchingTimes?.find(
+                (time) =>
+                  parseCourseLocalDateTime(time.startsAt, match.course.timeZone).getTime() ===
+                  match.startsAt.getTime()
+              )?.bookableHoleCounts ?? [],
+          isNew: currentPendingMatches.some((pending) => pending.id === match.id)
+        }))
       })
-    )
-  );
+    }
+  });
+  if (!prepared.prepared) {
+    throw new SearchCheckLeaseLostError();
+  }
+  const deliveries = await drainSearchEmailDeliveryGroup({
+    searchId,
+    alertGeneration: search.alertGeneration,
+    checkLeaseToken: input.lease.token,
+    kind: "MATCH",
+    groupKey: batchKey,
+    send: async ({ recipient, idempotencyKey, payload }) => {
+      await input.assertCurrent?.();
+      const alert = await hydrateMatchAlertPayload({
+        searchId,
+        alertGeneration: search.alertGeneration,
+        payload
+      });
+      return sendTeeTimeAlert({
+        searchId,
+        to: recipient,
+        ...alert,
+        stableIdempotencyKey: idempotencyKey
+      });
+    }
+  });
 
-  if (deliveries.every((delivery) => delivery.deliveryStatus === "dry_run")) {
-    await Promise.all(pendingMatches.map((match) => markMatchAlertSuppressed(match.id)));
-  } else {
-    await Promise.all(pendingMatches.map((match) => markMatchAlertSent(match.id)));
+  await input.assertCurrent?.();
+  const finalized = await finalizeSearchEmailDeliveryGroup({
+    searchId,
+    alertGeneration: search.alertGeneration,
+    kind: "MATCH",
+    groupKey: batchKey
+  });
+  if (!finalized.finalized || deliveries.length === 0) {
+    throw new Error("Match email delivery group did not reach a terminal state");
   }
 
-  return pendingMatches.length;
+  return currentPendingMatches.length;
 }
 
 function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = []) {
   return [...new Set([primaryEmail, ...additionalEmails].map((email) => email.trim().toLowerCase()))];
 }
 
-function hasSupportedAdapter(course: AutomationCourse) {
-  return (
-    (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) ||
-    (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) ||
-    (course.detectedPlatform === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) ||
-    (course.detectedPlatform === "CUSTOM" &&
-      (isCpsMetadata(course.bookingMetadata) ||
-        isChelseaMetadata(course.bookingMetadata) ||
-        isGolfBackMetadata(course.bookingMetadata) ||
-        isWebTracMetadata(course.bookingMetadata) ||
-        isTeesnapMetadata(course.bookingMetadata)))
+function createEmailSnapshotKey(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+}
+
+function createSearchLogReference(searchId: string) {
+  return createHash("sha256").update(searchId).digest("hex").slice(0, 16);
+}
+
+function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
+  const courseOutcomes = result.courseResults.reduce<Record<string, number>>(
+    (counts, course) => {
+      counts[course.outcome] = (counts[course.outcome] ?? 0) + 1;
+      return counts;
+    },
+    {}
   );
+  return {
+    trigger: sanitizeResponderText(trigger),
+    searchRef: createSearchLogReference(result.searchId),
+    outcome: result.outcome,
+    checkedCourses: result.courseResults.length,
+    courseOutcomes,
+    availableMatches: result.availableMatches,
+    newlyAlertedMatches: result.newlyAlertedMatches,
+    supportRetryNeeded: result.supportRetryNeeded,
+    statusEmailOutcome: result.statusEmailOutcome
+  };
+}
+
+function hasSupportedAdapter(course: AutomationCourse) {
+  return resolveProviderCapability(course).isRunnable;
 }
 
 type CourseTeeSheetResult = {
@@ -835,7 +1177,8 @@ function fetchCourseTeeSheet(
   players: number,
   discoverBookingWindow: boolean
 ): Promise<CourseTeeSheetResult> {
-  if (course.detectedPlatform === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
+  const providerFamily = resolveProviderCapability(course).providerFamilyKey;
+  if (providerFamily === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
     const metadata = course.bookingWindowEvidenceUrl
       ? {
           ...course.bookingMetadata,
@@ -850,10 +1193,10 @@ function fetchCourseTeeSheet(
       discoverBookingWindow
     });
   }
-  if (course.detectedPlatform === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
+  if (providerFamily === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
     return fetchTeeItUpTeeSheet({ courseId: course.id, date, metadata: course.bookingMetadata });
   }
-  if (course.detectedPlatform === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) {
+  if (providerFamily === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) {
     return fetchChronogolfSlots({
       courseId: course.id,
       date,
@@ -865,7 +1208,7 @@ function fetchCourseTeeSheet(
       bookingWindowEvidence: null
     }));
   }
-  if (course.detectedPlatform === "CUSTOM" && isCpsMetadata(course.bookingMetadata)) {
+  if (providerFamily === "CPS" && isCpsMetadata(course.bookingMetadata)) {
     return fetchCpsTeeSheet({
       courseId: course.id,
       date,
@@ -875,7 +1218,7 @@ function fetchCourseTeeSheet(
       discoverBookingWindow
     });
   }
-  if (course.detectedPlatform === "CUSTOM" && isChelseaMetadata(course.bookingMetadata)) {
+  if (providerFamily === "CHELSEA" && isChelseaMetadata(course.bookingMetadata)) {
     return fetchChelseaTeeSheet({
       courseId: course.id,
       date,
@@ -884,7 +1227,7 @@ function fetchCourseTeeSheet(
       metadata: course.bookingMetadata
     });
   }
-  if (course.detectedPlatform === "CUSTOM" && isGolfBackMetadata(course.bookingMetadata)) {
+  if (providerFamily === "GOLFBACK" && isGolfBackMetadata(course.bookingMetadata)) {
     return fetchGolfBackTeeSheet({
       courseId: course.id,
       date,
@@ -894,7 +1237,7 @@ function fetchCourseTeeSheet(
       discoverBookingWindow
     });
   }
-  if (course.detectedPlatform === "CUSTOM" && isWebTracMetadata(course.bookingMetadata)) {
+  if (providerFamily === "WEBTRAC" && isWebTracMetadata(course.bookingMetadata)) {
     return fetchWebTracTeeSheet({
       courseId: course.id,
       date,
@@ -903,7 +1246,7 @@ function fetchCourseTeeSheet(
       discoverBookingWindow
     });
   }
-  if (course.detectedPlatform === "CUSTOM" && isTeesnapMetadata(course.bookingMetadata)) {
+  if (providerFamily === "TEESNAP" && isTeesnapMetadata(course.bookingMetadata)) {
     return fetchTeesnapTeeSheet({
       courseId: course.id,
       date,
@@ -925,6 +1268,7 @@ async function recordBookingWindowWaitingProbe(input: {
   automationRunId: string;
   targetDate: string;
   bookingWindow: TargetBookingWindow;
+  providerExecution?: boolean;
 }) {
   await recordCourseProbeIfChanged({
     searchId: input.searchId,
@@ -935,6 +1279,9 @@ async function recordBookingWindowWaitingProbe(input: {
       ? `Booking for ${input.targetDate} opens at ${input.bookingWindow.opensAt.toISOString()}.`
       : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
     rawSummary: {
+      ...(input.providerExecution
+        ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
+        : {}),
       bookingWindow: {
         releaseDate: input.bookingWindow.releaseDate,
         releaseTimeLocal: input.bookingWindow.releaseTimeLocal,
@@ -957,7 +1304,7 @@ function buildBookingWindowCourseReport(
     timeZone: course.timeZone,
     outcome: "NO_MATCH",
     availableMatches: 0,
-    bookingUrl: course.detectedBookingUrl ?? course.website ?? undefined,
+    bookingUrl: getCustomerBookingUrl(course),
     phone: course.bookingPhone ?? course.phone ?? undefined,
     bookingMethod: course.bookingMethod,
     bookingAccess: getCourseBookingAccess(course),

@@ -1,4 +1,6 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+
+import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 import {
   parsePublicBookingWindowRule,
   type BookingWindowEvidence
@@ -56,12 +58,10 @@ export async function fetchForeupTeeSheet(input: {
   metadata: ForeupMetadata;
   discoverBookingWindow?: boolean;
 }): Promise<ForeupTeeSheetResult> {
-  const [availability, bookingWindowEvidence] = await Promise.all([
-    fetchForeupAvailability(input),
-    input.discoverBookingWindow
-      ? fetchForeupBookingWindow(input.metadata)
-      : Promise.resolve(null)
-  ]);
+  const availability = await fetchForeupAvailability(input);
+  const bookingWindowEvidence = input.discoverBookingWindow
+    ? await fetchForeupBookingWindow(input.metadata)
+    : null;
   return { ...availability, bookingWindowEvidence };
 }
 
@@ -82,14 +82,14 @@ async function fetchForeupAvailability(input: {
     url.searchParams.set("booking_class", String(input.metadata.bookingClassId));
   }
 
-  const response = await fetch(url, {
+  const response = await fetchWithProviderTimeout(url, {
     headers: {
       accept: "application/json"
     }
   });
 
   if (!response.ok) {
-    throw new Error(`ForeUP returned ${response.status}`);
+    throw providerHttpError("ForeUP", response);
   }
 
   const slots = (await response.json()) as ForeupApiSlot[] | false;
@@ -126,7 +126,7 @@ async function fetchForeupBookingWindow(
 ): Promise<BookingWindowEvidence | null> {
   const evidenceUrl = metadata.bookingWindowEvidenceUrl ?? metadata.bookingBaseUrl;
   try {
-    const response = await fetch(evidenceUrl, {
+    const response = await fetchWithProviderTimeout(evidenceUrl, {
       headers: { accept: "text/html,application/xhtml+xml" }
     });
     if (!response.ok) {

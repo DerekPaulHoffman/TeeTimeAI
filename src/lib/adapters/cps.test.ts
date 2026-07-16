@@ -197,6 +197,7 @@ describe("fetchCpsSlots", () => {
   });
 
   it("learns the public booking window from CPS booking-rule configuration", async () => {
+    let completedHoleSearches = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = input.toString();
 
@@ -228,6 +229,7 @@ describe("fetchCpsSlots", () => {
       }
 
       if (url.includes("/BookingRuleModels?")) {
+        expect(completedHoleSearches).toBe(2);
         const headers = init?.headers as Record<string, string>;
         expect(headers["x-websiteid"]).toBe("ee8d09d9-2ab6-4349-c825-08dec0b787e5");
         expect(headers["x-terminalid"]).toBe("3");
@@ -260,6 +262,7 @@ describe("fetchCpsSlots", () => {
 
       if (url.includes("/TeeTimes?")) {
         const teeTimesUrl = new URL(url);
+        completedHoleSearches += 1;
         if (teeTimesUrl.searchParams.get("holes") === "18") {
           return jsonResponse({
             transactionId: "tx",

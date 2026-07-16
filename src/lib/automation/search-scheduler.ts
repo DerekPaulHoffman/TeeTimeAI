@@ -7,6 +7,10 @@ import {
   queueSearchCheck
 } from "@/lib/automation/db-service";
 import { searchScheduleWorkflow } from "@/workflows/search-schedule";
+import {
+  buildSearchScheduleReference,
+  recoverSearchScheduleStartFailure
+} from "@/lib/automation/search-recheck-queue";
 
 const MANUAL_CHECK_COOLDOWN_MS = 60_000;
 
@@ -38,7 +42,7 @@ export async function startSearchSchedule(
   }
 
   const queued = await queueSearchCheck(searchId);
-  if (queued.status !== "ACTIVE") {
+  if (!queued || queued.status !== "ACTIVE") {
     throw new Error("Only active searches can be checked");
   }
 
@@ -46,7 +50,12 @@ export async function startSearchSchedule(
     const run = await start(searchScheduleWorkflow, [searchId, queued.scheduleVersion], {
       deploymentId: "latest"
     });
-    await attachSearchWorkflowRun(searchId, queued.scheduleVersion, run.runId);
+    await attachSearchWorkflowRun(
+      searchId,
+      queued.scheduleVersion,
+      run.runId,
+      queued.workflowRunId
+    );
 
     return {
       runId: run.runId,
@@ -55,12 +64,27 @@ export async function startSearchSchedule(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not start search workflow";
-    await failScheduledSearchCheck({
+    const failed = await failScheduledSearchCheck({
       searchId,
       scheduleVersion: queued.scheduleVersion,
       message,
-      nextCheckAt: new Date(Date.now() + 5 * 60 * 1000)
+      nextCheckAt: new Date(Date.now() + 5 * 60 * 1000),
+      expectedWorkflowRunId: queued.workflowRunId
     });
+    if (failed.count === 1) {
+      const recovery = await recoverSearchScheduleStartFailure({
+        searchId,
+        scheduleVersion: queued.scheduleVersion,
+        trigger: "START_FAILED"
+      });
+      if (recovery.outcome === "failed") {
+        console.error("[search-schedule:queue-fallback-failed]", {
+          searchRef: buildSearchScheduleReference(searchId),
+          scheduleVersion: queued.scheduleVersion,
+          message: "Could not enqueue or directly restart workflow recovery"
+        });
+      }
+    }
     throw error;
   }
 }

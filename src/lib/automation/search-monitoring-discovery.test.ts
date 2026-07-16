@@ -5,8 +5,12 @@ const dbMocks = vi.hoisted(() => ({
   listRecentCourseAutomationDiscoveries: vi.fn(),
   recordBrowserDiscovery: vi.fn()
 }));
+const providerLeaseMocks = vi.hoisted(() => ({
+  runWithProviderRequestLease: vi.fn()
+}));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
+vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 
 import {
   collectOfficialSiteEvidence,
@@ -22,6 +26,92 @@ describe("search monitoring discovery", () => {
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([]);
     dbMocks.recordBrowserDiscovery.mockResolvedValue({ id: "discovery-1" });
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue({ id: "course-1" });
+    providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
+      async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
+        acquired: true,
+        value: await worker()
+      })
+    );
+  });
+
+  it("defers discovery without external I/O when the distributed provider lease is busy", async () => {
+    providerLeaseMocks.runWithProviderRequestLease.mockResolvedValueOnce({
+      acquired: false
+    });
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "busy-course",
+            name: "Busy Course",
+            website: "https://busy.example/golf",
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await expect(
+      prepareSearchMonitoring(search, fetchImpl as typeof fetch, now)
+    ).resolves.toEqual({
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: ["busy-course"],
+      retryCourseIds: ["busy-course"]
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+  });
+
+  it("defers the whole discovery when a newly detected provider family is busy", async () => {
+    providerLeaseMocks.runWithProviderRequestLease
+      .mockImplementationOnce(
+        async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
+          acquired: true,
+          value: await worker()
+        })
+      )
+      .mockResolvedValueOnce({ acquired: false });
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        '<html><a href="https://busy-provider.book.teeitup.golf/">Book a tee time</a></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "busy-followup",
+            name: "Busy Followup Course",
+            website: "https://course.example/golf",
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await expect(
+      prepareSearchMonitoring(search, fetchImpl as typeof fetch, now)
+    ).resolves.toEqual({
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: ["busy-followup"],
+      retryCourseIds: ["busy-followup"]
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
   });
 
   it("tries the official site before classification and reuses exact shared-site evidence", async () => {
@@ -56,6 +146,11 @@ describe("search monitoring discovery", () => {
     const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(
+      providerLeaseMocks.runWithProviderRequestLease.mock.calls.map(
+        ([providerFamilyKey]) => providerFamilyKey
+      )
+    ).toEqual(["dennis.example", "TEEITUP"]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledTimes(2);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -68,6 +163,7 @@ describe("search monitoring discovery", () => {
       attemptedCourseIds: ["dennis-highlands", "dennis-pines"],
       appliedCourseIds: ["dennis-highlands", "dennis-pines"],
       failedCourseIds: [],
+      deferredCourseIds: [],
       retryCourseIds: ["dennis-highlands", "dennis-pines"]
     });
   });

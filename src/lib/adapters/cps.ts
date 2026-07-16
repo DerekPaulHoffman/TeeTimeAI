@@ -1,4 +1,6 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+
+import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 import {
   MAX_BOOKING_WINDOW_DAYS_AHEAD,
   normalizeReleaseTime,
@@ -133,12 +135,10 @@ export async function fetchCpsTeeSheet(
     input.timeZone ?? "America/New_York",
     input.date
   );
-  const [slots, bookingWindowEvidence] = await Promise.all([
-    fetchCpsAvailability(input, configuration, credential, headers),
-    input.discoverBookingWindow
-      ? fetchCpsBookingWindow(input, configuration, credential)
-      : Promise.resolve(null)
-  ]);
+  const slots = await fetchCpsAvailability(input, configuration, credential, headers);
+  const bookingWindowEvidence = input.discoverBookingWindow
+    ? await fetchCpsBookingWindow(input, configuration, credential)
+    : null;
 
   return {
     slots,
@@ -169,12 +169,12 @@ async function fetchCpsAvailability(
       holes,
       transactionId
     });
-    const response = await fetch(url, {
+    const response = await fetchWithProviderTimeout(url, {
       headers
     });
 
     if (!response.ok) {
-      throw new Error(`CPS tee times returned ${response.status}`);
+      throw providerHttpError("CPS tee times", response);
     }
 
     const payload = (await response.json()) as CpsSearchResponse;
@@ -231,7 +231,7 @@ async function fetchCpsBookingWindow(
     url.searchParams.set("courseIds", input.metadata.courseIds.join(","));
     url.searchParams.set("searchDate", formatCpsDate(input.date));
 
-    const response = await fetch(url, {
+    const response = await fetchWithProviderTimeout(url, {
       headers: cpsHeaders(optionsConfiguration, credential, timeZone, input.date)
     });
     if (!response.ok) {
@@ -321,16 +321,16 @@ async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguratio
   }
 
   const url = new URL("/onlineresweb/Home/Configuration", metadata.bookingBaseUrl);
-  const response = await fetch(url);
+  const response = await fetchWithProviderTimeout(url);
   if (!response.ok) {
-    throw new Error(`CPS configuration returned ${response.status}`);
+    throw providerHttpError("CPS configuration", response);
   }
 
   return (await response.json()) as CpsConfiguration;
 }
 
 async function fetchShortLivedToken(configuration: CpsConfiguration) {
-  const response = await fetch(`${configuration.authorityBaseUrl}/myconnect/token/short`, {
+  const response = await fetchWithProviderTimeout(`${configuration.authorityBaseUrl}/myconnect/token/short`, {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded"
@@ -343,7 +343,7 @@ async function fetchShortLivedToken(configuration: CpsConfiguration) {
   });
 
   if (!response.ok) {
-    throw new Error(`CPS token returned ${response.status}`);
+    throw providerHttpError("CPS token", response);
   }
 
   const token = (await response.json()) as CpsTokenResponse;
@@ -365,11 +365,11 @@ async function loadPublicOptions(
     url.searchParams.set("version", configuration.buildNumber.trim());
   }
   url.searchParams.set("product", "3");
-  const response = await fetch(url, {
+  const response = await fetchWithProviderTimeout(url, {
     headers: cpsHeaders(configuration, credential, timeZone, date)
   });
   if (!response.ok) {
-    throw new Error(`CPS public options returned ${response.status}`);
+    throw providerHttpError("CPS public options", response);
   }
   const payload = (await response.json()) as {
     webSiteId?: string;
@@ -386,7 +386,7 @@ async function loadPublicOptions(
 }
 
 async function registerTransactionId(onlineApi: string, headers: Record<string, string>, transactionId: string) {
-  const response = await fetch(`${onlineApi}/RegisterTransactionId`, {
+  const response = await fetchWithProviderTimeout(`${onlineApi}/RegisterTransactionId`, {
     method: "POST",
     headers: {
       ...headers,
@@ -399,7 +399,7 @@ async function registerTransactionId(onlineApi: string, headers: Record<string, 
   });
 
   if (!response.ok) {
-    throw new Error(`CPS transaction registration returned ${response.status}`);
+    throw providerHttpError("CPS transaction registration", response);
   }
 }
 

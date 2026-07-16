@@ -5,6 +5,7 @@ import {
   getCourseLayoutLabel,
   type CourseLayoutHoleCount
 } from "@/lib/courses/course-layout";
+import { lockSearchForAlertMutation } from "@/lib/email/search-delivery-outbox";
 import {
   findUniqueGenericCourseMatch,
   haveCompatibleCourseNames,
@@ -271,13 +272,24 @@ export async function updateTeeSearchStatusForUser(
     await assertQueueCapacity(userId, searchId);
   }
 
-  return prisma.teeSearch.update({
-    where: {
-      id: searchId,
-      userId
-    },
-    data: { status },
-    include: searchInclude
+  return prisma.$transaction(async (transaction) => {
+    await lockSearchForAlertMutation(transaction, { searchId, userId });
+    return transaction.teeSearch.update({
+      where: {
+        id: searchId,
+        userId
+      },
+      data: {
+        status,
+        scheduleVersion: { increment: 1 },
+        alertGeneration: { increment: 1 },
+        workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null
+      },
+      include: searchInclude
+    });
   });
 }
 
@@ -314,6 +326,12 @@ export async function updateTeeSearchForUser(
   }
 
   const teeSearchData = {
+    scheduleVersion: { increment: 1 } as const,
+    alertGeneration: { increment: 1 } as const,
+    workflowRunId: null,
+    checkLeaseToken: null,
+    checkLeaseExpiresAt: null,
+    recheckRequestedAt: null,
     ...(input.date ? { date: parseLocalDate(input.date) } : {}),
     ...(input.startTime ? { startTime: input.startTime } : {}),
     ...(input.endTime ? { endTime: input.endTime } : {}),
@@ -331,7 +349,40 @@ export async function updateTeeSearchForUser(
   const coursePreferences = normalizeCoursePreferenceRankUpdates(input.coursePreferences);
 
   if (coursePreferences.length === 0) {
-    return prisma.teeSearch.update({
+    return prisma.$transaction(async (transaction) => {
+      await lockSearchForAlertMutation(transaction, { searchId, userId });
+      return transaction.teeSearch.update({
+        where: {
+          id: searchId,
+          userId
+        },
+        data: teeSearchData,
+        include: searchInclude
+      });
+    });
+  }
+
+  return prisma.$transaction(async (transaction) => {
+    await lockSearchForAlertMutation(transaction, { searchId, userId });
+    for (const [index, preference] of coursePreferences.entries()) {
+      await transaction.coursePreference.updateMany({
+        where: {
+          id: preference.id,
+          teeSearchId: searchId
+        },
+        data: { rank: -(index + 1) }
+      });
+    }
+    for (const preference of coursePreferences) {
+      await transaction.coursePreference.updateMany({
+        where: {
+          id: preference.id,
+          teeSearchId: searchId
+        },
+        data: { rank: preference.rank }
+      });
+    }
+    return transaction.teeSearch.update({
       where: {
         id: searchId,
         userId
@@ -339,50 +390,7 @@ export async function updateTeeSearchForUser(
       data: teeSearchData,
       include: searchInclude
     });
-  }
-
-  const operations = [
-    prisma.teeSearch.findUniqueOrThrow({
-      where: {
-        id: searchId,
-        userId
-      },
-      select: { id: true }
-    }),
-    ...coursePreferences.map((preference, index) =>
-      prisma.coursePreference.updateMany({
-        where: {
-          id: preference.id,
-          teeSearchId: searchId
-        },
-        data: { rank: -(index + 1) }
-      })
-    ),
-    ...coursePreferences.map((preference) =>
-      prisma.coursePreference.updateMany({
-        where: {
-          id: preference.id,
-          teeSearchId: searchId
-        },
-        data: { rank: preference.rank }
-      })
-    ),
-    prisma.teeSearch.update({
-      where: {
-        id: searchId,
-        userId
-      },
-      data: teeSearchData,
-      include: searchInclude
-    })
-  ];
-  const results = await prisma.$transaction(operations);
-  const updatedSearch = results.at(-1);
-  if (!updatedSearch) {
-    throw new Error("Could not update search");
-  }
-
-  return updatedSearch as Awaited<ReturnType<typeof prisma.teeSearch.update>>;
+  });
 }
 
 function normalizeCoursePreferenceRankUpdates(
@@ -421,11 +429,22 @@ function normalizeCoursePreferenceRankUpdates(
 }
 
 export async function deleteTeeSearchForUser(userId: string, searchId: string) {
-  return prisma.teeSearch.delete({
-    where: {
-      id: searchId,
-      userId
-    }
+  return prisma.$transaction(async (transaction) => {
+    await lockSearchForAlertMutation(transaction, { searchId, userId });
+    const removedAt = new Date();
+    await transaction.courseSupportBatchSearch.updateMany({
+      where: { teeSearchId: searchId, removedAt: null },
+      data: {
+        removedAt,
+        removalReason: "SEARCH_DELETED_BY_OWNER"
+      }
+    });
+    return transaction.teeSearch.delete({
+      where: {
+        id: searchId,
+        userId
+      }
+    });
   });
 }
 

@@ -3,9 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
 import {
   createTeeSearchForUser,
+  deleteTeeSearchForUser,
   updateTeeSearchForUser,
   updateTeeSearchStatusForUser
 } from "./service";
+
+const deliveryOutboxMocks = vi.hoisted(() => ({
+  lockSearchForAlertMutation: vi.fn()
+}));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -18,17 +23,29 @@ vi.mock("@/lib/prisma", () => ({
     coursePreference: {
       updateMany: vi.fn()
     },
+    courseSupportBatchSearch: {
+      updateMany: vi.fn()
+    },
     teeSearch: {
       count: vi.fn(),
       create: vi.fn(),
       findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn(),
+      delete: vi.fn(),
       update: vi.fn()
     }
   }
 }));
+vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
+
+beforeEach(() => {
+  mockedPrisma.$transaction.mockImplementation(async (callback) =>
+    (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+  );
+  deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({ id: "search-1" });
+});
 
 describe("createTeeSearchForUser", () => {
   beforeEach(() => {
@@ -685,7 +702,10 @@ describe("updateTeeSearchStatusForUser", () => {
     });
     expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { status: "ACTIVE" }
+        data: expect.objectContaining({
+          status: "ACTIVE",
+          alertGeneration: { increment: 1 }
+        })
       })
     );
   });
@@ -694,9 +714,6 @@ describe("updateTeeSearchStatusForUser", () => {
 describe("updateTeeSearchForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedPrisma.$transaction.mockImplementation(async (operations) =>
-      Promise.all(operations as Array<Promise<unknown>>)
-    );
     mockedPrisma.teeSearch.findUniqueOrThrow
       .mockResolvedValueOnce({ id: "search-1" } as never)
       .mockResolvedValueOnce({ id: "search-1", preferences: [] } as never);
@@ -711,10 +728,10 @@ describe("updateTeeSearchForUser", () => {
       ]
     });
 
-    expect(mockedPrisma.teeSearch.findUniqueOrThrow).toHaveBeenNthCalledWith(1, {
-      where: { id: "search-1", userId: "user-1" },
-      select: { id: true }
-    });
+    expect(deliveryOutboxMocks.lockSearchForAlertMutation).toHaveBeenCalledWith(
+      prisma,
+      { searchId: "search-1", userId: "user-1" }
+    );
     expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(1, {
       where: { id: "pref-b", teeSearchId: "search-1" },
       data: { rank: -1 }
@@ -752,5 +769,27 @@ describe("updateTeeSearchForUser", () => {
     ).rejects.toThrow("Woodhaven Country Club (9-hole)");
 
     expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("deleteTeeSearchForUser", () => {
+  it("records an owner-deletion tombstone before the search row is removed", async () => {
+    mockedPrisma.courseSupportBatchSearch.updateMany.mockResolvedValue({
+      count: 1
+    } as never);
+    mockedPrisma.teeSearch.delete.mockResolvedValue({ id: "search-1" } as never);
+
+    await deleteTeeSearchForUser("user-1", "search-1");
+
+    expect(mockedPrisma.courseSupportBatchSearch.updateMany).toHaveBeenCalledWith({
+      where: { teeSearchId: "search-1", removedAt: null },
+      data: {
+        removedAt: expect.any(Date),
+        removalReason: "SEARCH_DELETED_BY_OWNER"
+      }
+    });
+    expect(mockedPrisma.teeSearch.delete).toHaveBeenCalledWith({
+      where: { id: "search-1", userId: "user-1" }
+    });
   });
 });

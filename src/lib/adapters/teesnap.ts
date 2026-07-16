@@ -1,4 +1,6 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+
+import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 import {
   MAX_BOOKING_WINDOW_DAYS_AHEAD,
   normalizeReleaseTime,
@@ -86,12 +88,10 @@ export async function fetchTeesnapTeeSheet(input: {
   metadata: TeesnapMetadata;
   discoverBookingWindow?: boolean;
 }): Promise<TeesnapTeeSheetResult> {
-  const [availability, bookingWindowEvidence] = await Promise.all([
-    fetchTeesnapAvailability(input),
-    input.discoverBookingWindow
-      ? fetchTeesnapBookingWindow(input.metadata)
-      : Promise.resolve(null)
-  ]);
+  const availability = await fetchTeesnapAvailability(input);
+  const bookingWindowEvidence = input.discoverBookingWindow
+    ? await fetchTeesnapBookingWindow(input.metadata)
+    : null;
 
   return {
     ...availability,
@@ -107,7 +107,7 @@ async function fetchTeesnapAvailability(input: {
 }): Promise<Pick<TeesnapTeeSheetResult, "slots" | "targetDateStatus">> {
   const holes = input.metadata.defaultHoles ?? 18;
   const url = buildTeeTimesUrl(input.metadata, input.date, input.players, holes);
-  const response = await fetch(url, {
+  const response = await fetchWithProviderTimeout(url, {
     headers: teesnapHeaders(input.metadata.bookingBaseUrl)
   });
   const payload = (await response.json().catch(() => null)) as TeesnapResponse | null;
@@ -116,7 +116,7 @@ async function fetchTeesnapAvailability(input: {
     if (payload?.errors === "date_not_allowed") {
       return { slots: [], targetDateStatus: "NOT_OPEN" };
     }
-    throw new Error(`Teesnap tee times returned ${response.status}`);
+    throw providerHttpError("Teesnap tee times", response);
   }
 
   const teeTimes = payload?.teeTimes?.teeTimes;
@@ -170,7 +170,7 @@ async function fetchTeesnapBookingWindow(
 ): Promise<BookingWindowEvidence | null> {
   try {
     const evidenceUrl = new URL("/", metadata.bookingBaseUrl).toString();
-    const response = await fetch(evidenceUrl, {
+    const response = await fetchWithProviderTimeout(evidenceUrl, {
       headers: teesnapHeaders(metadata.bookingBaseUrl)
     });
     if (!response.ok) {

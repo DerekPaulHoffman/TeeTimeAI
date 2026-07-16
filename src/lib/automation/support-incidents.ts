@@ -15,7 +15,14 @@ import {
 } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
+import { startOfUtcCalendarDay } from "./date-boundary";
 import { withPostgresAdvisoryTextLease } from "./lease";
+import {
+  buildProviderFailureFingerprint,
+  classifyProviderFailure,
+  getProviderReadinessFailure,
+  resolveProviderCapability
+} from "./provider-capabilities";
 
 export type CourseSupportIssueInput = {
   course: {
@@ -24,10 +31,13 @@ export type CourseSupportIssueInput = {
     detectedPlatform: DetectedPlatform;
     detectedBookingUrl: string | null;
     website: string | null;
+    providerFamilyKey?: string | null;
+    bookingMetadata?: unknown;
   };
   searchId: string;
   kind: CourseSupportIncidentKind;
   message?: string;
+  error?: unknown;
   nextAction?: string;
   now?: Date;
 };
@@ -64,10 +74,20 @@ export async function resolveCourseSupportIncident(input: {
   now?: Date;
 }) {
   const current = await prisma.courseSupportIncident.findUnique({
-    where: { courseId: input.courseId }
+    where: { courseId: input.courseId },
+    select: {
+      id: true,
+      courseId: true,
+      status: true,
+      activeBatchId: true,
+      ownerNotifiedAt: true,
+      escalationNotifiedAt: true,
+      resolutionNotifiedAt: true
+    }
   });
   if (
     !current ||
+    current.activeBatchId ||
     (current.status === "RESOLVED" &&
       (Boolean(current.resolutionNotifiedAt) ||
         (!current.ownerNotifiedAt && !current.escalationNotifiedAt)))
@@ -149,7 +169,7 @@ export async function escalateCourseSupportIncident(input: {
 
 async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
   const now = input.now ?? new Date();
-  const [sourceSearch, affectedSearchCount, existing] = await Promise.all([
+  const [sourceSearch, affectedSearchCount, realDemand, existing] = await Promise.all([
     prisma.teeSearch.findUnique({
       where: { id: input.searchId },
       select: { trafficClass: true, syntheticMultiCycle: true }
@@ -157,6 +177,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     prisma.teeSearch.count({
       where: {
         status: "ACTIVE",
+        date: { gte: startOfUtcCalendarDay(now) },
         OR: [
           { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
           { syntheticMultiCycle: true }
@@ -165,6 +186,18 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           some: { courseId: input.course.id }
         }
       }
+    }),
+    prisma.teeSearch.aggregate({
+      where: {
+        status: "ACTIVE",
+        date: { gte: startOfUtcCalendarDay(now) },
+        trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+        preferences: {
+          some: { courseId: input.course.id }
+        }
+      },
+      _count: { id: true },
+      _min: { date: true }
     }),
     prisma.courseSupportIncident.findUnique({
       where: { courseId: input.course.id }
@@ -181,10 +214,13 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
       sourceSearch.syntheticMultiCycle
   );
+  const activeRealSearchCount = realDemand._count.id;
+  const earliestTargetDate = realDemand._min.date;
 
   if (disposableSyntheticSearch) {
     if (
       existing &&
+      !existing.activeBatchId &&
       !existing.engineeringOnly &&
       existing.status !== "RESOLVED" &&
       affectedSearchCount === 0 &&
@@ -212,7 +248,79 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     } satisfies CourseSupportIssueState;
   }
 
+  if (existing?.activeBatchId && existing.status !== "RESOLVED") {
+    const nextActiveRealSearchCount = Math.max(
+      existing.activeRealSearchCount,
+      activeRealSearchCount
+    );
+    const nextAffectedSearchCount = Math.max(
+      existing.affectedSearchCount,
+      affectedSearchCount,
+      1
+    );
+    const nextEarliestTargetDate =
+      existing.earliestTargetDate && earliestTargetDate
+        ? new Date(
+            Math.min(
+              existing.earliestTargetDate.getTime(),
+              earliestTargetDate.getTime()
+            )
+          )
+        : (existing.earliestTargetDate ?? earliestTargetDate);
+    const shouldPromoteRealDemand =
+      activeRealSearchCount > 0 &&
+      (existing.engineeringOnly ||
+        nextActiveRealSearchCount !== existing.activeRealSearchCount ||
+        nextAffectedSearchCount !== existing.affectedSearchCount ||
+        nextEarliestTargetDate?.getTime() !==
+          existing.earliestTargetDate?.getTime());
+
+    if (shouldPromoteRealDemand) {
+      await prisma.courseSupportIncident.updateMany({
+        where: {
+          id: existing.id,
+          cycle: existing.cycle,
+          status: existing.status,
+          activeBatchId: existing.activeBatchId,
+          updatedAt: existing.updatedAt
+        },
+        data: {
+          affectedSearchCount: nextAffectedSearchCount,
+          engineeringOnly: false,
+          activeRealSearchCount: nextActiveRealSearchCount,
+          earliestTargetDate: nextEarliestTargetDate,
+          lastSeenAt: now
+        }
+      });
+    }
+
+    return {
+      incidentId: existing.id,
+      status:
+        existing.status === "NEEDS_HUMAN"
+          ? "NEEDS_HUMAN"
+          : "AUTO_INVESTIGATING",
+      ownerAlerted: Boolean(
+        existing.ownerNotifiedAt || existing.escalationNotifiedAt
+      )
+    } satisfies CourseSupportIssueState;
+  }
+
   const bookingUrl = input.course.detectedBookingUrl ?? input.course.website;
+  const provider = resolveProviderCapability(input.course);
+  const readinessFailure =
+    input.kind === "NEEDS_ADAPTER" ? getProviderReadinessFailure(provider) : null;
+  const failure = classifyProviderFailure({
+    error: input.error ?? input.message,
+    readinessFailure
+  });
+  const failureFingerprint = buildProviderFailureFingerprint({
+    providerFamilyKey: provider.providerFamilyKey,
+    failureClass: failure.failureClass,
+    operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
+    httpStatus: failure.httpStatus
+  });
+  const initialNextAttemptAt = getInitialCourseSupportAttemptAt(failure, now);
   let incident: CourseSupportIncident;
 
   if (!existing) {
@@ -221,6 +329,9 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         courseId: input.course.id,
         firstAffectedSearchId: input.searchId,
         kind: input.kind,
+        providerFamilyKey: provider.providerFamilyKey,
+        failureClass: failure.failureClass,
+        failureFingerprint,
         courseNameSnapshot: input.course.name,
         platformSnapshot: input.course.detectedPlatform,
         bookingUrlSnapshot: bookingUrl,
@@ -228,7 +339,10 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         latestMessage: input.message,
         nextAction: input.nextAction,
         affectedSearchCount: Math.max(affectedSearchCount, 1),
-        engineeringOnly: engineeringOnlySource,
+        engineeringOnly: engineeringOnlySource && activeRealSearchCount === 0,
+        nextAttemptAt: initialNextAttemptAt,
+        activeRealSearchCount,
+        earliestTargetDate,
         firstSeenAt: now,
         lastSeenAt: now
       }
@@ -240,6 +354,9 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         cycle: { increment: 1 },
         status: "AUTO_INVESTIGATING",
         kind: input.kind,
+        providerFamilyKey: provider.providerFamilyKey,
+        failureClass: failure.failureClass,
+        failureFingerprint,
         courseNameSnapshot: input.course.name,
         platformSnapshot: input.course.detectedPlatform,
         bookingUrlSnapshot: bookingUrl,
@@ -249,7 +366,13 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         nextAction: input.nextAction,
         affectedSearchCount: Math.max(affectedSearchCount, 1),
         occurrenceCount: 1,
-        engineeringOnly: engineeringOnlySource,
+        engineeringOnly: engineeringOnlySource && activeRealSearchCount === 0,
+        nextAttemptAt: initialNextAttemptAt,
+        lastAttemptAt: null,
+        attemptCount: 0,
+        activeRealSearchCount,
+        earliestTargetDate,
+        activeBatchId: null,
         firstSeenAt: now,
         lastSeenAt: now,
         ownerNotifiedAt: null,
@@ -262,15 +385,43 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       }
     });
   } else {
+    const fingerprintChanged =
+      existing.providerFamilyKey !== provider.providerFamilyKey ||
+      existing.failureFingerprint !== failureFingerprint;
     incident = await prisma.courseSupportIncident.update({
       where: { id: existing.id },
       data: {
+        ...(fingerprintChanged
+          ? {
+              cycle: { increment: 1 },
+              status: "AUTO_INVESTIGATING" as const,
+              firstAffectedSearchId: input.searchId,
+              initialMessage: input.message,
+              firstSeenAt: now,
+              lastAttemptAt: null,
+              attemptCount: 0,
+              activeBatchId: null,
+              escalatedAt: null,
+              escalationNotifiedAt: null
+            }
+          : {}),
         kind: input.kind,
+        providerFamilyKey: provider.providerFamilyKey,
+        failureClass: failure.failureClass,
+        failureFingerprint,
         latestMessage: input.message,
         nextAction: input.nextAction,
         affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
         occurrenceCount: { increment: 1 },
-        engineeringOnly: existing.engineeringOnly && engineeringOnlySource,
+        engineeringOnly:
+          existing.engineeringOnly &&
+          engineeringOnlySource &&
+          activeRealSearchCount === 0,
+        nextAttemptAt: fingerprintChanged
+          ? initialNextAttemptAt
+          : (existing.nextAttemptAt ?? initialNextAttemptAt),
+        activeRealSearchCount,
+        earliestTargetDate,
         lastSeenAt: now
       }
     });
@@ -281,6 +432,20 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     status: incident.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
     ownerAlerted: Boolean(incident.ownerNotifiedAt || incident.escalationNotifiedAt)
   } satisfies CourseSupportIssueState;
+}
+
+function getInitialCourseSupportAttemptAt(
+  failure: ReturnType<typeof classifyProviderFailure>,
+  now: Date
+) {
+  if (failure.failureClass !== "RATE_LIMIT") {
+    return now;
+  }
+  const retrySeconds =
+    failure.retryAfterSeconds !== null && failure.retryAfterSeconds > 0
+      ? Math.min(24 * 60 * 60, Math.max(60, failure.retryAfterSeconds))
+      : 15 * 60;
+  return new Date(now.getTime() + retrySeconds * 1000);
 }
 
 async function notifyCourseSupportIssueBatchWithLease(
@@ -354,22 +519,40 @@ async function resolveCourseSupportIncidentWithLease(input: {
     where: { courseId: input.courseId }
   });
 
-  if (!existing) {
+  if (!existing || existing.activeBatchId) {
     return null;
   }
 
   let incident = existing;
   if (existing.status !== "RESOLVED") {
-    incident = await prisma.courseSupportIncident.update({
-      where: { id: existing.id },
+    const updated = await prisma.courseSupportIncident.updateMany({
+      where: {
+        id: existing.id,
+        status: { not: "RESOLVED" },
+        activeBatchId: null
+      },
       data: {
         status: "RESOLVED",
         resolvedAt: now,
         resolution: input.resolution,
         resolutionMessage: input.message,
-        lastSeenAt: now
+        lastSeenAt: now,
+        nextAttemptAt: null,
+        activeBatchId: null
       }
     });
+    if (updated.count !== 1) {
+      return prisma.courseSupportIncident.findUnique({
+        where: { id: existing.id }
+      });
+    }
+    const resolved = await prisma.courseSupportIncident.findUnique({
+      where: { id: existing.id }
+    });
+    if (!resolved) {
+      return null;
+    }
+    incident = resolved;
   }
 
   if (

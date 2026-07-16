@@ -34,6 +34,7 @@ export type TeeTimeAlertInput = {
   matches: TeeTimeAlertMatch[];
   userTimeZone?: string;
   idempotencyKey?: string;
+  stableIdempotencyKey?: string;
   stopUrls?: EmailStopUrls;
   targetDate?: string;
   startTime?: string;
@@ -106,8 +107,8 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
 
   if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
     console.warn("[email:dry-run]", {
-      to: input.to,
-      searchId: input.searchId,
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
       matchingTimes: input.matches.length,
       courses: new Set(input.matches.map((match) => match.courseName)).size
     });
@@ -132,13 +133,12 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   };
   const result = await resend.emails.send(
     email,
-    input.idempotencyKey
+    input.stableIdempotencyKey || input.idempotencyKey
       ? {
           headers: {
-            "Idempotency-Key": buildContentScopedEmailIdempotencyKey(
-              input.idempotencyKey,
-              email
-            )
+            "Idempotency-Key":
+              input.stableIdempotencyKey ??
+              buildContentScopedEmailIdempotencyKey(input.idempotencyKey!, email)
           }
         }
       : undefined
@@ -159,7 +159,8 @@ export async function sendSearchStatusEmail(
 
   if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
     console.warn("[email:status-dry-run]", {
-      to: input.to,
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
       kind: input.kind,
       targetDate: input.targetDate,
       courses: input.courses.length
@@ -181,13 +182,12 @@ export async function sendSearchStatusEmail(
   };
   const result = await new Resend(apiKey).emails.send(
     email,
-    input.idempotencyKey
+    input.stableIdempotencyKey || input.idempotencyKey
       ? {
           headers: {
-            "Idempotency-Key": buildContentScopedEmailIdempotencyKey(
-              input.idempotencyKey,
-              email
-            )
+            "Idempotency-Key":
+              input.stableIdempotencyKey ??
+              buildContentScopedEmailIdempotencyKey(input.idempotencyKey!, email)
           }
         }
       : undefined
@@ -209,8 +209,8 @@ export async function sendCourseSupportOperatorEmail(
 
   if (!to) {
     console.error("[email:operator-not-configured]", {
-      incidentId: input.incidentId,
-      courseId: input.courseId,
+      incidentRef: createLogReference(input.incidentId),
+      courseRef: createLogReference(input.courseId),
       event: input.event
     });
     return { deliveryStatus: "not_configured" };
@@ -218,9 +218,9 @@ export async function sendCourseSupportOperatorEmail(
 
   if (!apiKey || !from || shouldDryRunRecipient(to)) {
     console.warn("[email:operator-dry-run]", {
-      to,
-      incidentId: input.incidentId,
-      courseId: input.courseId,
+      recipientRef: createLogReference(to),
+      incidentRef: createLogReference(input.incidentId),
+      courseRef: createLogReference(input.courseId),
       event: input.event
     });
     return { id: "dry-run", deliveryStatus: "dry_run" };
@@ -252,14 +252,16 @@ export async function sendCourseSupportOperatorSummaryEmail(
 
   if (!to) {
     console.error("[email:operator-summary-not-configured]", {
-      incidents: input.incidents.map((incident) => incident.incidentId)
+      incidentRefs: input.incidents.map((incident) =>
+        createLogReference(incident.incidentId)
+      )
     });
     return { deliveryStatus: "not_configured" };
   }
 
   if (!apiKey || !from || shouldDryRunRecipient(to)) {
     console.warn("[email:operator-summary-dry-run]", {
-      to,
+      recipientRef: createLogReference(to),
       incidents: input.incidents.length
     });
     return { id: "dry-run", deliveryStatus: "dry_run" };
@@ -602,6 +604,10 @@ function buildStableEmailStopUrls(searchId: string, targetDate?: string) {
   return buildEmailStopUrls(searchId, {
     expiresAt: Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt
   });
+}
+
+function createLogReference(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 function escapeHtml(value: string) {

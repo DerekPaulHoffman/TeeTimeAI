@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import type { EmailStopReason } from "@/lib/email/search-actions";
+import { lockSearchForAlertMutation } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 
 export async function getEmailStopSearchSummary(searchId: string) {
@@ -39,6 +40,10 @@ export async function stopTeeSearchFromEmail(searchId: string, reason: EmailStop
       return { ...search, changed: false };
     }
 
+    const lockedSearch = await lockSearchForAlertMutation(transaction, { searchId });
+    if (lockedSearch.status !== "ACTIVE" && lockedSearch.status !== "PAUSED") {
+      return { id: lockedSearch.id, status: lockedSearch.status, changed: false };
+    }
     const status = reason === "booked" ? "COMPLETED" : "CANCELLED";
     const stoppedAt = new Date();
     const updated = await transaction.teeSearch.update({
@@ -46,9 +51,13 @@ export async function stopTeeSearchFromEmail(searchId: string, reason: EmailStop
       data: {
         status,
         scheduleVersion: { increment: 1 },
+        alertGeneration: { increment: 1 },
         checkStatus: "STOPPED",
         nextCheckAt: null,
         workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null,
         lastCheckOutcome:
           reason === "booked"
             ? "Stopped from email after the golfer booked."

@@ -13,6 +13,9 @@ import {
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
+import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
+import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 
 const DISCOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_RETRY_DELAY_MS = 30 * 60 * 1000;
@@ -22,6 +25,13 @@ const MAX_REDIRECTS = 4;
 const MAX_BOOKING_LINK_FOLLOWUPS = 2;
 const MAX_HTML_BYTES = 1_500_000;
 const WHOOSH_TERMS_URL = "https://www.whoosh.io/terms";
+
+class ProviderDiscoveryLeaseDeferredError extends Error {
+  constructor() {
+    super("Provider discovery capacity is temporarily unavailable");
+    this.name = "ProviderDiscoveryLeaseDeferredError";
+  }
+}
 
 type CollectedPageEvidence = Pick<
   BrowserDiscoveryEvidence,
@@ -39,6 +49,7 @@ export type SearchMonitoringDiscoveryResult = {
   attemptedCourseIds: string[];
   appliedCourseIds: string[];
   failedCourseIds: string[];
+  deferredCourseIds: string[];
   retryCourseIds: string[];
 };
 
@@ -61,6 +72,7 @@ export async function prepareSearchMonitoring(
       attemptedCourseIds: [],
       appliedCourseIds: [],
       failedCourseIds: [],
+      deferredCourseIds: [],
       retryCourseIds: []
     };
   }
@@ -84,52 +96,72 @@ export async function prepareSearchMonitoring(
   const attemptedCourseIds: string[] = [];
   const appliedCourseIds: string[] = [];
   const failedCourseIds: string[] = [];
+  const deferredCourseIds: string[] = [];
 
-  for (const { course, sourceUrl } of dueCandidates) {
-    attemptedCourseIds.push(course.id);
-    try {
-      const sourceKey = `${normalizeSourceKey(sourceUrl)}|${normalizeCourseLinkName(course.name)}`;
-      let evidencePromise = evidenceBySource.get(sourceKey);
-      if (!evidencePromise) {
-        evidencePromise = collectOfficialSiteEvidence(
-          sourceUrl,
-          fetchImpl,
-          course.name,
-          pageFetches
+  await runProviderFamilyTasks(
+    dueCandidates,
+    ({ course, sourceUrl }) =>
+      resolveProviderCapability({
+        ...course,
+        detectedBookingUrl: sourceUrl
+      }).providerFamilyKey,
+    async ({ course, sourceUrl }) => {
+      const leasedFetch = createProviderLeasedDiscoveryFetch(fetchImpl);
+      const markAttempted = () => {
+        if (!attemptedCourseIds.includes(course.id)) {
+          attemptedCourseIds.push(course.id);
+        }
+      };
+      try {
+        const sourceKey = `${normalizeSourceKey(sourceUrl)}|${normalizeCourseLinkName(course.name)}`;
+        let evidencePromise = evidenceBySource.get(sourceKey);
+        if (!evidencePromise) {
+          evidencePromise = collectOfficialSiteEvidence(
+            sourceUrl,
+            leasedFetch,
+            course.name,
+            pageFetches
+          );
+          evidenceBySource.set(sourceKey, evidencePromise);
+        }
+        const collected = await evidencePromise;
+        const chronogolfDiscovery = await enrichChronogolfDiscovery(
+          buildBrowserDiscovery({
+            ...collected,
+            courseId: course.id,
+            courseName: course.name
+          }),
+          leasedFetch
         );
-        evidenceBySource.set(sourceKey, evidencePromise);
+        const discovery = await enrichTeesnapDiscovery(
+          chronogolfDiscovery,
+          course.name,
+          leasedFetch
+        );
+        markAttempted();
+        await recordBrowserDiscovery(discovery);
+        const applied = await applyBrowserDiscoveryToCourse(discovery);
+        if (applied) {
+          appliedCourseIds.push(course.id);
+        }
+      } catch (error) {
+        if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+          deferredCourseIds.push(course.id);
+          return;
+        }
+        markAttempted();
+        failedCourseIds.push(course.id);
+        await recordBrowserDiscovery(
+          buildFailedDiscovery({
+            courseId: course.id,
+            sourceUrl,
+            detectedPlatform: course.detectedPlatform,
+            message: error instanceof Error ? error.message : "Official-site discovery failed"
+          })
+        );
       }
-      const collected = await evidencePromise;
-      const chronogolfDiscovery = await enrichChronogolfDiscovery(
-        buildBrowserDiscovery({
-          ...collected,
-          courseId: course.id,
-          courseName: course.name
-        }),
-        fetchImpl
-      );
-      const discovery = await enrichTeesnapDiscovery(
-        chronogolfDiscovery,
-        course.name,
-        fetchImpl
-      );
-      await recordBrowserDiscovery(discovery);
-      const applied = await applyBrowserDiscoveryToCourse(discovery);
-      if (applied) {
-        appliedCourseIds.push(course.id);
-      }
-    } catch (error) {
-      failedCourseIds.push(course.id);
-      await recordBrowserDiscovery(
-        buildFailedDiscovery({
-          courseId: course.id,
-          sourceUrl,
-          detectedPlatform: course.detectedPlatform,
-          message: error instanceof Error ? error.message : "Official-site discovery failed"
-        })
-      );
     }
-  }
+  );
 
   const attemptedCourseIdSet = new Set(attemptedCourseIds);
   const retryCourseIds = candidates
@@ -140,7 +172,13 @@ export async function prepareSearchMonitoring(
     })
     .map(({ course }) => course.id);
 
-  return { attemptedCourseIds, appliedCourseIds, failedCourseIds, retryCourseIds };
+  return {
+    attemptedCourseIds,
+    appliedCourseIds,
+    failedCourseIds,
+    deferredCourseIds,
+    retryCourseIds
+  };
 }
 
 export function shouldAttemptMonitoringDiscovery(attempts: Date[], now = new Date()) {
@@ -211,7 +249,10 @@ export async function collectOfficialSiteEvidence(
       };
       pages.push(page);
       visited.add(normalizeSourceKey(page.finalUrl));
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+        throw error;
+      }
       // A failed PDF or booking shell must not prevent inspection of another official policy page.
       continue;
     }
@@ -232,7 +273,10 @@ export async function collectOfficialSiteEvidence(
         ...fetched,
         evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+        throw error;
+      }
       // Preserve direct booking as NEEDS_REVIEW when current provider terms cannot be verified.
     }
   }
@@ -285,7 +329,10 @@ async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
     for (const candidate of secureCandidates) {
       try {
         return await fetchPublicHtmlFromUrl(candidate.toString(), fetchImpl);
-      } catch {
+      } catch (error) {
+        if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+          throw error;
+        }
         // Try the equivalent secure apex before the stored HTTP URL.
       }
     }
@@ -293,6 +340,22 @@ async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
   }
 
   return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl);
+}
+
+function createProviderLeasedDiscoveryFetch(fetchImpl: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    const providerFamilyKey = resolveProviderCapability({
+      detectedBookingUrl: url
+    }).providerFamilyKey;
+    const execution = await runWithProviderRequestLease(providerFamilyKey, () =>
+      fetchImpl(input, init)
+    );
+    if (!execution.acquired) {
+      throw new ProviderDiscoveryLeaseDeferredError();
+    }
+    return execution.value;
+  }) as typeof fetch;
 }
 
 async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch) {

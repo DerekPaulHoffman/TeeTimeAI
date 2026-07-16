@@ -76,6 +76,7 @@ export type SearchStatusEmailInput = {
   courses: SearchStatusCourseReport[];
   previousSnapshot?: unknown;
   idempotencyKey?: string;
+  stableIdempotencyKey?: string;
   stopUrls?: EmailStopUrls;
   assetBaseUrl?: string;
 };

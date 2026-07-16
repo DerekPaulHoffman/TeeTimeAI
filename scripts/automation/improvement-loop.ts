@@ -24,8 +24,6 @@ import {
   rankPortfolioCandidates,
   sanitizeAutomationText,
   selectDuePortfolioCategory,
-  selectLatestActionableProbes,
-  validateAdapterRemediationCloseout,
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology,
   type HourlyImprovementRunRecord,
@@ -33,12 +31,11 @@ import {
   type ImprovementCandidateInput,
   selectImprovementCandidate
 } from "@/lib/automation/improvement";
-import { escalateCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v11";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v12";
 const PROMPT_VERSION_PREFIX = "tee-time-spot-improvement-loop-v";
 const ACTIVE_RUN_STALE_AFTER_MS = 55 * 60 * 1000;
 const PORTFOLIO_HISTORY_HOURS = 24;
@@ -48,15 +45,15 @@ const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
-1. Before edits, fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work. A dirty checkout may be resumed only when the immediately preceding unfinished run for this exact automation recorded the same branch, expected HEAD, owner run, owner thread, and every dirty path in its pre-edit plan; otherwise block it.
-2. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, CourseProbe, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
+1. Before branch setup, installation, research, or edits, run \`npm run automation:course-support -- inspect\`. If a responder batch is active, expired and awaiting recovery, or has due incidents, stop this broad loop with blocked_concurrent. Otherwise fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work. A dirty checkout may be resumed only when the immediately preceding unfinished run for this exact automation recorded the same branch, expected HEAD, owner run, owner thread, and every dirty path in its pre-edit plan; otherwise block it.
+2. The prepare command checks responder ownership again under the shared database transition lease before candidate selection. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
 3. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
 4. Before browser exploration, set sessionStorage key \`tee-time-spot:traffic-class\` to \`AUTOMATION\` (or \`TEST\` only for an explicit manual test). Confirm analytics requests carry that aggregate marker. Never create a persistent visitor/session identifier, and never let unmarked automation traffic persist as public funnel activity.
 5. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
 6. Confirm checkpoints: queue_confirmed, candidate_selected, provenance_recorded, tool_research_done, ui_smoke_done, verification_done, git_committed, git_pushed, production_verified, outcome_recorded. Keep outcome_recorded false until the same database write that sets completedAt and the terminal outcome.
-7. Rank the highest-leverage evidence-backed improvements. Drain already-found pending alerts first, then treat every open CourseSupportIncident affecting non-synthetic active demand as urgent autonomous remediation ahead of exploratory product work. After those incidents, rank structured feedback, funnel, browser, email, performance, metadata, security, coverage, actionable-probe, and learning signals together. Record the selected category and ranked alternatives. Apply the diversity bonus to the least-recently shipped eligible category; discretionary search_discovery may not win after two consecutive successful selections unless current real-user BROKEN feedback or an incident overrides the cap. An empty initial queue is the nonterminal state exploration_required: broaden least-recently tested ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice evidence until at least one safe valuable improvement or a concrete blocker is found. no_op is not an hourly outcome.
+7. Rank the highest-leverage evidence-backed improvements. Drain already-found pending alerts first, then rank structured feedback, funnel, browser, email, performance, metadata, security, coverage, and learning signals together. The dedicated course-support responder exclusively owns CourseSupportIncident and provider-remediation work, including deferred retries; never select those incidents or their provider probes here. Record the selected category and ranked alternatives. Apply the diversity bonus to the least-recently shipped eligible category; discretionary search_discovery may not win after two consecutive successful selections unless current real-user BROKEN feedback overrides the cap. An empty initial queue is the nonterminal state exploration_required: broaden least-recently tested ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice evidence until at least one safe valuable improvement or a concrete blocker is found. no_op is not an hourly outcome.
 8. Before the first file edit, update this exact AutomationRun with the owner run/thread, branch, starting and expected HEAD SHA, exact planned paths, and provenance_recorded=true. If the plan expands, persist the added paths before editing them.
-9. Implement every compatible selected improvement in the chosen category that can be completed safely as one coherent batch. Do not piggyback a discretionary course/search correction onto a non-search release; record it as a ranked follow-up unless it is a current production incident or real BROKEN feedback. An adapter-remediation candidate must be carried through provider discovery, reusable adapter implementation or conclusive direct-booking classification, focused tests, and an affected-search verification; do not stop at another unsupported observation. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
+9. Implement every compatible selected improvement in the chosen category that can be completed safely as one coherent batch. Do not piggyback a discretionary course/search correction onto a non-search release; record it as a ranked follow-up unless it is current real BROKEN feedback. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
 10. Use current official research or stronger design tools only when they materially change the selected implementation; do not perform generic hourly research.
 11. Enter closeout no later than 40 minutes after the run starts or whenever only 20 minutes remain before the next scheduled launch. Start no new exploration or file edits after that point; reserve the closeout budget for verification, diff review, commit, rebase, push, deployment, production verification, and the durable final record. Never exit with unexplained residue.
 12. Run focused verification plus \`npm run test:run\`, \`npm run lint\`, \`npm run build\`, \`npm run ui:smoke\`, and \`git diff --check\` for code changes.
@@ -98,16 +95,8 @@ Loop engineering requirements:
 - Maintain machine-readable portfolio history in AutomationRun audit fields. Treat operations_incidents, search_discovery, ui_ux, accessibility, dashboard_auth, email_alerts, reliability_security, performance, metadata_seo, analytics_observability, and test_developer_tooling as the canonical categories.
 - When inspection returns courseProfileQueue items and no higher-priority incident is active, process up to three as one metadata_seo batch. Use automation:course-profile research packets, authoritative sources, and dry-run validation, and apply only profiles that pass; never delay or disable alert creation when evidence is insufficient. Write public profile prose as a confident facility guide focused on layouts, setting, amenities, ownership, access, and playing experience. Keep claim keys, evidence summaries, research-process language, and broad uncertainty internal; when one fact is unavailable, qualify only that field and point golfers to the official course or booking page.
 - A required evidence track may report healthy, empty with sample counts, unavailable with the exact blocker, or actionable; it may not be omitted. After the same access gap appears in three successful runs, surface it as a durable coverage blocker instead of repeating a harmless note forever.
-- If the same non-incident course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement. Never stale or rotate away from an open adapter-remediation incident; resolve it, classify it, or prove a concrete blocker.
+- If the same non-incident course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement. Leave all provider-remediation incidents and retries to the dedicated course-support responder.
 - Stop with a normalized terminal outcome: success, incident, needs_adapter, blocked_policy, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. exploration_required is nonterminal, and no_op is prohibited for this hourly workflow.
-
-Adapter remediation requirements:
-- Treat the incident as an engineering queue item, never as a request for the owner to research or implement provider support.
-- Group courses by provider and build or extend reusable platform adapters instead of one-off course scrapers.
-- Inspect current official booking and policy surfaces, then observe only public unauthenticated network behavior. Never use account sessions or bypass access controls.
-- When retrieval is allowed, implement metadata discovery, normalized availability retrieval, booking-window evidence when available, focused adapter tests, and a focused runSearchCheck for the affected search before closeout.
-- When retrieval is prohibited or no online booking exists, persist the evidence-backed direct-booking classification and resolve the incident so it does not requeue.
-- needs_adapter is not a terminal closeout for an adapter-remediation candidate. Only needs_human after concrete automated attempts prove that one exact external action is unavoidable; include adapterRemediation audit evidence with the incident id, attempts, sources, result, and requiredExternalAction. That closeout is the only path that may notify the owner.
 
 Hard boundaries:
 - Alert only; never book, hold, pay, bypass controls, or solve account-specific course flows.
@@ -421,11 +410,6 @@ async function closeoutImprovementRun() {
   }
 
   const sanitizedAudit = sanitizeCloseoutAudit(payload.audit ?? {});
-  const remediationEscalation = validateAdapterRemediationCloseout({
-    candidate: record.candidate,
-    outcome: payload.outcome,
-    evidence: sanitizedAudit.adapterRemediation
-  });
   if (commitTopologyError) {
     sanitizedBlockerReasons.push(`Owner commit verification failed: ${commitTopologyError}`);
   }
@@ -478,14 +462,6 @@ async function closeoutImprovementRun() {
   if (!closed) {
     throw new Error("closeout lost ownership because the hourly run already closed");
   }
-  if (remediationEscalation.escalate) {
-    await escalateCourseSupportIncident({
-      incidentId: remediationEscalation.incidentId,
-      message: remediationEscalation.message,
-      nextAction: remediationEscalation.nextAction
-    });
-  }
-
   writeHandoff({
     automationRunId: runId,
     outcome: payload.outcome,
@@ -499,6 +475,7 @@ async function closeoutImprovementRun() {
 async function prepareImprovementRun() {
   const git = readGitRunState();
   const ownerThreadId = resolveOwnerThreadId(process.argv.slice(2));
+  const courseSupportState = await loadCourseSupportGuardState();
   const previous = await prisma.automationRun.findFirst({
     where: {
       promptVersion: {
@@ -516,6 +493,17 @@ async function prepareImprovementRun() {
     process.argv.slice(2),
     "--recover-run"
   );
+
+  if (courseSupportState.activeBatchCount > 0) {
+    writeHandoff({
+      state: "blocked_concurrent",
+      reason:
+        "The dedicated course-support responder owns or must recover the repository writer lane.",
+      courseSupport: courseSupportState
+    });
+    process.exitCode = 2;
+    return;
+  }
 
   if (git.dirtyPaths.length > 0) {
     const exactSameThreadRecoveryClaim = Boolean(
@@ -692,6 +680,44 @@ async function prepareImprovementRun() {
     });
   }
 
+  if (courseSupportState.dueIncidentCount > 0) {
+    const blockedRun = await startAutomationRun(PROMPT_VERSION);
+    const reasons = [
+      "Due provider-remediation incidents belong to the dedicated course-support responder."
+    ];
+    const blockedRecord = buildRunRecord({
+      runId: blockedRun.id,
+      ownerThreadId,
+      git,
+      lifecycle: "blocked",
+      checkpoints: buildImprovementCheckpoints({
+        queueConfirmed: true,
+        candidateSelected: false
+      }),
+      blocker: {
+        outcome: "blocked_concurrent",
+        reasons
+      }
+    });
+    await closeHourlyImprovementRun(blockedRun.id, {
+      outcome: "blocked_concurrent",
+      record: blockedRecord,
+      errors: {
+        code: "COURSE_SUPPORT_RESPONDER_PRIORITY",
+        dueIncidentCount: courseSupportState.dueIncidentCount
+      }
+    });
+    writeHandoff({
+      automationRunId: blockedRun.id,
+      state: "blocked_concurrent",
+      outcomeRecorded: true,
+      reason: reasons[0],
+      courseSupport: courseSupportState
+    });
+    process.exitCode = 2;
+    return;
+  }
+
   if (
     !git.branch.startsWith("automation/hourly-") ||
     git.aheadOfOriginMain !== 0 ||
@@ -784,8 +810,7 @@ async function prepareImprovementRun() {
       snapshot: {
         activeSearchCount: snapshot.activeSearchCount,
         pendingAlertCount: snapshot.pendingAlerts.length,
-        actionableProbeCount:
-          snapshot.actionableProbes.length + (snapshot.supportIncidents?.length ?? 0),
+        actionableProbeCount: snapshot.actionableProbes.length,
         learningSignalCount: snapshot.learningSignals?.length ?? 0,
         portfolioCandidateCount: snapshot.portfolioCandidates?.length ?? 0,
         dueCategory,
@@ -832,6 +857,30 @@ async function prepareImprovementRun() {
     });
     throw error;
   }
+}
+
+async function loadCourseSupportGuardState() {
+  const now = new Date();
+  const [activeBatchCount, dueIncidentCount] = await Promise.all([
+    prisma.courseSupportBatch.count({
+      where: {
+        status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] }
+      }
+    }),
+    prisma.courseSupportIncident.count({
+      where: {
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: null,
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+      }
+    })
+  ]);
+
+  return {
+    observedAt: now.toISOString(),
+    activeBatchCount,
+    dueIncidentCount
+  };
 }
 
 function buildRunRecord(input: {
@@ -1109,7 +1158,6 @@ function writeHandoff(value: object) {
 }
 
 async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
-  const recentSince = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const portfolioSince = new Date(
     Date.now() - PORTFOLIO_HISTORY_HOURS * 60 * 60 * 1000
   );
@@ -1121,8 +1169,6 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
   const [
     activeSearchCount,
     pendingAlerts,
-    probes,
-    openSupportIncidents,
     recentRuns,
     recentDiscoveries,
     unresolvedFeedback,
@@ -1152,59 +1198,6 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       include: {
         course: true
       }
-    }),
-    prisma.courseProbe.findMany({
-      where: {
-        observedAt: {
-          gte: recentSince
-        },
-        teeSearch: {
-          status: "ACTIVE",
-          OR: [
-            { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
-            { syntheticMultiCycle: true }
-          ],
-          date: {
-            gte: today
-          }
-        }
-      },
-      orderBy: {
-        observedAt: "desc"
-      },
-      include: {
-        course: true,
-        teeSearch: {
-          select: { trafficClass: true, syntheticMultiCycle: true }
-        }
-      }
-    }),
-    prisma.courseSupportIncident.findMany({
-      where: {
-        status: { not: "RESOLVED" },
-        OR: [
-          { engineeringOnly: true },
-          {
-            course: {
-              preferences: {
-                some: {
-                  teeSearch: {
-                    status: "ACTIVE",
-                    trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-                    date: { gte: today }
-                  }
-                }
-              }
-            }
-          }
-        ]
-      },
-      orderBy: [
-        { engineeringOnly: "asc" },
-        { affectedSearchCount: "desc" },
-        { firstSeenAt: "asc" }
-      ],
-      include: { course: true }
     }),
     prisma.automationRun.findMany({
       where: {
@@ -1257,28 +1250,6 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     })
   ]);
 
-  const incidentCourseIds = new Set(openSupportIncidents.map((incident) => incident.courseId));
-  const probeCandidates = selectLatestActionableProbes(probes).flatMap((probe) => {
-    const outcome = probe.outcome;
-    if (
-      incidentCourseIds.has(probe.courseId) ||
-      probe.course.automationEligibility === "BLOCKED"
-    ) {
-      return [];
-    }
-
-    return [
-      {
-        id: probe.id,
-        outcome,
-        courseName: probe.course.name,
-        platform: probe.course.detectedPlatform,
-        observedAt: probe.observedAt.toISOString(),
-        message: probe.message
-      }
-    ];
-  });
-
   const categoryHistory = buildPortfolioCategoryHistory(recentRuns);
   const portfolioCandidates = [
     ...buildFeedbackPortfolioCandidates(unresolvedFeedback),
@@ -1299,21 +1270,8 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       courseName: alert.course.name,
       firstSeenAt: alert.firstSeenAt.toISOString()
     })),
-    supportIncidents: openSupportIncidents.map((incident) => ({
-      id: incident.id,
-      status:
-        incident.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
-      kind: incident.kind,
-      courseName: incident.course.name,
-      platform: incident.course.detectedPlatform,
-      lastSeenAt: incident.lastSeenAt.toISOString(),
-      message:
-        incident.latestMessage ??
-        incident.initialMessage ??
-        "Course monitoring incident remains unresolved.",
-      engineeringOnly: incident.engineeringOnly
-    })),
-    actionableProbes: probeCandidates,
+    supportIncidents: [],
+    actionableProbes: [],
     learningSignals: buildLearningSignals(recentRuns, recentDiscoveries),
     portfolioCandidates,
     categoryHistory

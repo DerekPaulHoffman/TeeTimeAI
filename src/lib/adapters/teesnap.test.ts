@@ -116,16 +116,19 @@ describe("fetchTeesnapSlots", () => {
   });
 
   it("learns the exact booking window from the public TeeSnap course configuration", async () => {
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        jsonResponse({ errors: "date_not_allowed" }, { status: 400 })
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          `<script>window.courses = [{"id":1210,"advance":7,"start_availability_time":"5:00 AM"}]; window.property = {};</script>`,
-          { status: 200 }
-        )
+    let availabilityFinished = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (input.toString().includes("/customer-api/teetimes-day")) {
+        await Promise.resolve();
+        availabilityFinished = true;
+        return jsonResponse({ errors: "date_not_allowed" }, { status: 400 });
+      }
+      expect(availabilityFinished).toBe(true);
+      return new Response(
+        `<script>window.courses = [{"id":1210,"advance":7,"start_availability_time":"5:00 AM"}]; window.property = {};</script>`,
+        { status: 200 }
       );
+    });
 
     await expect(
       fetchTeesnapTeeSheet({

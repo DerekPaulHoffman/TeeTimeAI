@@ -2,6 +2,7 @@ import type {
   AutomationReason,
   BookingMethod
 } from "@/lib/courses/intelligence";
+import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 
 export type BrowserDiscoveryEvidence = {
   courseId: string;
@@ -85,6 +86,7 @@ export type BrowserDiscovery = {
 
 export type BrowserProbeCourseInput = {
   detectedPlatform: string;
+  providerFamilyKey?: string | null;
   automationEligibility: string;
   website?: string | null;
   detectedBookingUrl?: string | null;
@@ -539,19 +541,7 @@ export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
     return false;
   }
 
-  if (course.detectedPlatform === "FOREUP" && isReusableForeupMetadata(course.bookingMetadata)) {
-    return false;
-  }
-
-  if (course.detectedPlatform === "TEEITUP" && isReusableTeeItUpMetadata(course.bookingMetadata)) {
-    return false;
-  }
-
-  if (course.detectedPlatform === "CUSTOM" && isReusableCustomMetadata(course.bookingMetadata)) {
-    return false;
-  }
-
-  if (course.detectedPlatform === "CHRONOGOLF" && isReusableChronogolfMetadata(course.bookingMetadata)) {
+  if (resolveProviderCapability(course).isRunnable) {
     return false;
   }
 
@@ -1110,36 +1100,11 @@ function learnForeupDiscovery(
 }
 
 function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
-  if (urls.some((url) => url.includes("foreupsoftware.com"))) {
-    return "FOREUP";
-  }
-  if (urls.some((url) => url.includes("golfnow.com"))) {
-    return "GOLFNOW";
-  }
-  if (urls.some((url) => url.includes("teeitup.com"))) {
-    return "TEEITUP";
-  }
-  if (urls.some((url) => url.includes("chronogolf.com"))) {
-    return "CHRONOGOLF";
-  }
-  if (urls.some((url) => url.includes("clubcaddie.com"))) {
-    return "CLUB_CADDIE";
-  }
-  if (urls.some((url) => parseUrl(url)?.hostname.endsWith(".cps.golf"))) {
-    return "CUSTOM";
-  }
-  if (urls.some(isTeesnapBookingUrl)) {
-    return "CUSTOM";
-  }
-  if (urls.some(isTenForeBookingUrl)) {
-    return "CUSTOM";
-  }
-  if (
-    urls.some((url) =>
-      /(^|\.)chelseareservations\.com$/i.test(parseUrl(url)?.hostname ?? "")
-    )
-  ) {
-    return "CUSTOM";
+  for (const url of urls) {
+    const resolution = resolveProviderCapability({ detectedBookingUrl: url });
+    if (resolution.capability) {
+      return resolution.detectedPlatform;
+    }
   }
   return "UNKNOWN";
 }
@@ -1364,82 +1329,6 @@ function summarizeVisibleText(text?: string) {
   return text?.replace(/\s+/g, " ").trim().slice(0, 1000) || undefined;
 }
 
-function isReusableForeupMetadata(value: unknown) {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const metadata = value as { scheduleId?: unknown; bookingBaseUrl?: unknown };
-  return typeof metadata.scheduleId === "number" && typeof metadata.bookingBaseUrl === "string";
-}
-
-function isReusableTeeItUpMetadata(value: unknown) {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const metadata = value as { aliases?: unknown; bookingBaseUrl?: unknown };
-  return (
-    Array.isArray(metadata.aliases) &&
-    metadata.aliases.length > 0 &&
-    metadata.aliases.every((alias) => typeof alias === "string") &&
-    typeof metadata.bookingBaseUrl === "string"
-  );
-}
-
-function isReusableCustomMetadata(value: unknown) {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const metadata = value as {
-    provider?: unknown;
-    siteName?: unknown;
-    bookingBaseUrl?: unknown;
-    courseIds?: unknown;
-    holes?: unknown;
-    courseId?: unknown;
-    courseCode?: unknown;
-    courseLabel?: unknown;
-  };
-  return (
-    (metadata.provider === "CPS" &&
-      typeof metadata.siteName === "string" &&
-      typeof metadata.bookingBaseUrl === "string" &&
-      Array.isArray(metadata.courseIds) &&
-      metadata.courseIds.length > 0 &&
-      metadata.courseIds.every((courseId) => typeof courseId === "number") &&
-      (metadata.holes === undefined ||
-        (Array.isArray(metadata.holes) &&
-          metadata.holes.length > 0 &&
-          metadata.holes.every((holes) => holes === 9 || holes === 18)))) ||
-    (metadata.provider === "TEESNAP" &&
-      typeof metadata.courseId === "number" &&
-      typeof metadata.bookingBaseUrl === "string") ||
-    (metadata.provider === "CHELSEA" &&
-      typeof metadata.bookingBaseUrl === "string" &&
-      typeof metadata.courseCode === "number" &&
-      typeof metadata.courseLabel === "string") ||
-    (metadata.provider === "WEBTRAC" &&
-      typeof metadata.bookingBaseUrl === "string" &&
-      typeof metadata.courseCode === "string")
-  );
-}
-
 function isEditorialContentPath(pathname: string) {
   return /\/(?:events?|news|blog|calendar|posts?)\//i.test(pathname);
-}
-
-function isReusableChronogolfMetadata(value: unknown) {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const metadata = value as { clubId?: unknown; courseIds?: unknown; bookingBaseUrl?: unknown };
-  return (
-    typeof metadata.clubId === "number" &&
-    Array.isArray(metadata.courseIds) &&
-    metadata.courseIds.length > 0 &&
-    metadata.courseIds.every((courseId) => typeof courseId === "string") &&
-    typeof metadata.bookingBaseUrl === "string"
-  );
 }

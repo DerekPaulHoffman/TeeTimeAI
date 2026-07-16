@@ -1,14 +1,24 @@
 import "./load-local-env";
 
 import { listActiveSearchesForAutomation } from "@/lib/automation/db-service";
-import { runSearchCheck } from "@/lib/automation/search-check";
+import { buildSearchScheduleReference } from "@/lib/automation/search-recheck-queue";
+import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 
 async function main() {
   const searches = await listActiveSearchesForAutomation();
   const results = [];
 
   for (const search of searches) {
-    results.push(await runSearchCheck(search.id, "manual-recovery"));
+    try {
+      const schedule = await startSearchSchedule(search.id);
+      results.push({ searchRef: buildSearchScheduleReference(search.id), outcome: "queued", schedule });
+    } catch {
+      results.push({
+        searchRef: buildSearchScheduleReference(search.id),
+        outcome: "start_failed",
+        schedule: null
+      });
+    }
   }
 
   console.log(
@@ -16,10 +26,9 @@ async function main() {
       {
         processed: results.length,
         searches: results.map((result) => ({
-          searchId: result.searchId,
+          searchRef: result.searchRef,
           outcome: result.outcome,
-          availableMatches: result.availableMatches,
-          newlyAlertedMatches: result.newlyAlertedMatches
+          scheduleVersion: result.schedule?.scheduleVersion ?? null
         }))
       },
       null,

@@ -137,20 +137,22 @@ describe("ForeUP adapter", () => {
   });
 
   it("learns a public-specific release rule from the official booking page", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify([]), {
+    let availabilityFinished = false;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      if (input.toString().includes("/api/booking/times")) {
+        await Promise.resolve();
+        availabilityFinished = true;
+        return new Response(JSON.stringify([]), {
           status: 200,
           headers: { "content-type": "application/json" }
-        })
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          `All members can book 9 days in advance starting at 6 am and the public (all non-members) can book 8 days in advance also at 6 am.`,
-          { status: 200 }
-        )
+        });
+      }
+      expect(availabilityFinished).toBe(true);
+      return new Response(
+        `All members can book 9 days in advance starting at 6 am and the public (all non-members) can book 8 days in advance also at 6 am.`,
+        { status: 200 }
       );
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(

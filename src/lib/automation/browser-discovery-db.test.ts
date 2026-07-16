@@ -106,6 +106,7 @@ describe("browser discovery persistence", () => {
     expect(mockedPrisma.course.update).toHaveBeenCalledWith({
       where: { id: "course-1" },
       data: {
+        providerFamilyKey: "FOREUP",
         detectedPlatform: "FOREUP",
         automationEligibility: "ALLOWED",
         detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
@@ -117,6 +118,7 @@ describe("browser discovery persistence", () => {
         bookingMethod: "PUBLIC_ONLINE",
         bookingPhone: undefined,
         automationReason: "NONE",
+        policyNotes: undefined,
         intelligenceVerifiedAt: expect.any(Date),
         intelligenceReviewAt: null,
         intelligenceConfidence: 0.95
@@ -189,6 +191,7 @@ describe("browser discovery persistence", () => {
     expect(mockedPrisma.course.update).toHaveBeenCalledWith({
       where: { id: "fairview" },
       data: {
+        providerFamilyKey: "fairviewfarmgc.com",
         detectedPlatform: "UNKNOWN",
         automationEligibility: "BLOCKED",
         detectedBookingUrl: null,
@@ -196,6 +199,7 @@ describe("browser discovery persistence", () => {
         bookingMethod: "PHONE_ONLY",
         bookingPhone: "(860) 689-1000",
         automationReason: "NO_ONLINE_BOOKING",
+        policyNotes: undefined,
         intelligenceVerifiedAt: expect.any(Date),
         intelligenceReviewAt: new Date("2026-10-10T00:00:00.000Z"),
         intelligenceConfidence: 1

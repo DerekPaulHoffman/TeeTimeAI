@@ -1,5 +1,6 @@
 import { connect } from "node:http2";
 
+import { ProviderHttpError } from "@/lib/adapters/fetch-with-timeout";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 const CHRONOGOLF_MARKETPLACE_BASE_URL = "https://www.chronogolf.com";
@@ -131,6 +132,7 @@ async function requestChronogolfJson(urlValue: string): Promise<ChronogolfPage> 
     const client = connect(url.origin);
     let body = "";
     let status = 0;
+    let retryAfter: string | null = null;
     let settled = false;
 
     let total = 0;
@@ -165,6 +167,10 @@ async function requestChronogolfJson(urlValue: string): Promise<ChronogolfPage> 
     request.setEncoding("utf8");
     request.on("response", (headers) => {
       status = Number(headers[":status"] ?? 0);
+      const retryAfterHeader = headers["retry-after"];
+      retryAfter = Array.isArray(retryAfterHeader)
+        ? retryAfterHeader[0] ?? null
+        : retryAfterHeader ?? null;
       total = Number(headers.total ?? 0);
       perPage = Number(headers["per-page"] ?? 0);
     });
@@ -178,7 +184,11 @@ async function requestChronogolfJson(urlValue: string): Promise<ChronogolfPage> 
     request.once("error", (error) => finish(error));
     request.once("end", () => {
       if (status < 200 || status >= 300) {
-        finish(new Error(`Chronogolf tee times returned ${status}`));
+        const headers = new Headers();
+        if (retryAfter) {
+          headers.set("retry-after", retryAfter);
+        }
+        finish(new ProviderHttpError("Chronogolf tee times", { status, headers }));
         return;
       }
 

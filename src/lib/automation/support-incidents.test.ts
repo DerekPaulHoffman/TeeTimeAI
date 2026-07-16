@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
   $transaction: vi.fn(),
-  teeSearch: { count: vi.fn(), findUnique: vi.fn() },
+  teeSearch: { aggregate: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
   courseSupportIncident: {
     findUnique: vi.fn(),
     findMany: vi.fn(),
@@ -68,6 +68,10 @@ describe("course support incidents", () => {
       worker({ $queryRawUnsafe: vi.fn().mockResolvedValue([{ locked: true }]) })
     );
     prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 1 },
+      _min: { date: now }
+    });
     prismaMocks.teeSearch.findUnique.mockResolvedValue({
       trafficClass: "UNCLASSIFIED",
       syntheticMultiCycle: false
@@ -112,6 +116,7 @@ describe("course support incidents", () => {
     expect(prismaMocks.teeSearch.count).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        date: { gte: new Date("2026-07-12T00:00:00.000Z") },
         OR: [
           { trafficClass: { notIn: ["AUTOMATION", "TEST"] } },
           { syntheticMultiCycle: true }
@@ -127,6 +132,10 @@ describe("course support incidents", () => {
       syntheticMultiCycle: false
     });
     prismaMocks.teeSearch.count.mockResolvedValue(0);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
 
     await expect(
@@ -159,6 +168,10 @@ describe("course support incidents", () => {
       syntheticMultiCycle: true
     });
     prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
     prismaMocks.courseSupportIncident.create.mockResolvedValue(opened);
 
@@ -192,6 +205,120 @@ describe("course support incidents", () => {
     expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
   });
 
+  it("opens a synthetic-sourced incident as real demand when a real alert already exists", async () => {
+    const opened = incident({
+      engineeringOnly: false,
+      activeRealSearchCount: 1,
+      earliestTargetDate: now
+    });
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(2);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 1 },
+      _min: { date: now }
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+    prismaMocks.courseSupportIncident.create.mockResolvedValue(opened);
+
+    await reportCourseSupportIssue({
+      course: {
+        id: "course-1",
+        name: "Shared Coverage Course",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://example.com/"
+      },
+      searchId: "search-multi-cycle",
+      kind: "NEEDS_ADAPTER",
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        engineeringOnly: false,
+        activeRealSearchCount: 1,
+        earliestTargetDate: now
+      })
+    });
+  });
+
+  it.each([
+    ["30", "2026-07-12T14:01:00.000Z"],
+    [String(3 * 24 * 60 * 60), "2026-07-13T14:00:00.000Z"]
+  ])(
+    "bounds an initial provider Retry-After of %s seconds between one minute and 24 hours",
+    async (retryAfter, expectedNextAttemptAt) => {
+      prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+      prismaMocks.courseSupportIncident.create.mockResolvedValue(incident());
+
+      await reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Rate Limited Course",
+          detectedPlatform: "FOREUP",
+          detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/1/1",
+          website: "https://example.com/"
+        },
+        searchId: "search-1",
+        kind: "FETCH_FAILED",
+        error: { status: 429, retryAfter },
+        now
+      });
+
+      expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          failureClass: "RATE_LIMIT",
+          nextAttemptAt: new Date(expectedNextAttemptAt)
+        })
+      });
+    }
+  );
+
+  it("reopens a synthetic-sourced incident as real demand when a real alert exists", async () => {
+    const resolved = incident({ status: "RESOLVED", engineeringOnly: true });
+    const reopened = incident({
+      cycle: 2,
+      engineeringOnly: false,
+      activeRealSearchCount: 1,
+      earliestTargetDate: now
+    });
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true
+    });
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 1 },
+      _min: { date: now }
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(resolved);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(reopened);
+
+    await reportCourseSupportIssue({
+      course: {
+        id: "course-1",
+        name: "Shared Coverage Course",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://example.com/"
+      },
+      searchId: "search-multi-cycle",
+      kind: "NEEDS_ADAPTER",
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({
+        engineeringOnly: false,
+        activeRealSearchCount: 1,
+        earliestTargetDate: now
+      })
+    });
+  });
+
   it("closes an unnotified synthetic-only incident without hiding real demand", async () => {
     const existing = incident();
     prismaMocks.teeSearch.findUnique.mockResolvedValue({
@@ -199,6 +326,10 @@ describe("course support incidents", () => {
       syntheticMultiCycle: false
     });
     prismaMocks.teeSearch.count.mockResolvedValue(0);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
     prismaMocks.courseSupportIncident.update.mockResolvedValue({
       ...existing,
@@ -295,6 +426,10 @@ describe("course support incidents", () => {
       syntheticMultiCycle: false
     });
     prismaMocks.teeSearch.count.mockResolvedValue(2);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 2 },
+      _min: { date: now }
+    });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(engineeringOnly);
     prismaMocks.courseSupportIncident.update.mockResolvedValue(promoted);
 
@@ -418,10 +553,14 @@ describe("course support incidents", () => {
       resolution: "DIRECT_BOOKING_CLASSIFIED",
       resolutionMessage: "Chronogolf reports online booking disabled."
     });
-    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
-    prismaMocks.courseSupportIncident.update
-      .mockResolvedValueOnce(resolved)
-      .mockResolvedValueOnce(incident({ ...resolved, resolutionNotifiedAt: now }));
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(existing)
+      .mockResolvedValueOnce(existing)
+      .mockResolvedValueOnce(resolved);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({ ...resolved, resolutionNotifiedAt: now })
+    );
 
     await resolveCourseSupportIncident({
       courseId: "course-1",
@@ -436,6 +575,133 @@ describe("course support incidents", () => {
         resolution: "DIRECT_BOOKING_CLASSIFIED"
       })
     );
+  });
+
+  it("does not resolve or detach an incident owned by a responder batch", async () => {
+    const owned = incident({ activeBatchId: "batch-1" });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(owned);
+
+    await expect(
+      resolveCourseSupportIncident({
+        courseId: "course-1",
+        resolution: "MONITORING_RESTORED",
+        message: "A normal search observed a successful check.",
+        now
+      })
+    ).resolves.toMatchObject({ id: "incident-1", activeBatchId: "batch-1" });
+
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(emailMocks.sendCourseSupportOperatorEmail).not.toHaveBeenCalled();
+  });
+
+  it("fences a resolution when responder ownership wins after the first read", async () => {
+    const unowned = incident({ activeBatchId: null });
+    const owned = incident({ activeBatchId: "batch-1" });
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(unowned)
+      .mockResolvedValueOnce(owned);
+
+    await expect(
+      resolveCourseSupportIncident({
+        courseId: "course-1",
+        resolution: "MONITORING_RESTORED",
+        message: "A normal search observed a successful check.",
+        now
+      })
+    ).resolves.toBeNull();
+
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("preserves a claimed incident cycle while promoting newly arrived real demand", async () => {
+    const owned = incident({
+      activeBatchId: "batch-1",
+      providerFamilyKey: "CHRONOGOLF",
+      failureFingerprint: "claimed-fingerprint",
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      earliestTargetDate: null
+    });
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 1 },
+      _min: { date: now }
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(owned);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Pequabuck Golf Club",
+          detectedPlatform: "CHRONOGOLF",
+          detectedBookingUrl: "https://www.chronogolf.com/club/3563",
+          website: "https://pequabuckgolf.com/"
+        },
+        searchId: "search-1",
+        kind: "FETCH_FAILED",
+        error: new Error("A newly shaped provider failure"),
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 1,
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: "batch-1",
+        updatedAt: now
+      },
+      data: expect.objectContaining({
+        engineeringOnly: false,
+        activeRealSearchCount: 1,
+        earliestTargetDate: now,
+        lastSeenAt: now
+      })
+    });
+  });
+
+  it("does not let a disposable synthetic check resolve an incident owned by a batch", async () => {
+    const owned = incident({ activeBatchId: "batch-1" });
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: false
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(0);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(owned);
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Synthetic Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://example.com/"
+        },
+        searchId: "search-test",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
   });
 
 });

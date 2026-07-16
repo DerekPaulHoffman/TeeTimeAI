@@ -5,6 +5,7 @@ import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { stopSearchSchedule } from "@/lib/automation/db-service";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
+import { SearchEmailDeliveryInProgressError } from "@/lib/email/search-delivery-outbox";
 import {
   deleteTeeSearchForUser,
   updateTeeSearchForUser
@@ -80,6 +81,24 @@ export async function PATCH(
     }
     return NextResponse.json({ search, schedule });
   } catch (error) {
+    if (error instanceof SearchEmailDeliveryInProgressError) {
+      return NextResponse.json(
+        { error: error.message, retryable: true },
+        {
+          status: 409,
+          headers: error.retryAt
+            ? {
+                "Retry-After": String(
+                  Math.max(
+                    1,
+                    Math.ceil((error.retryAt.getTime() - Date.now()) / 1000)
+                  )
+                )
+              }
+            : undefined
+        }
+      );
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not update search" },
       { status: 400 }
@@ -108,6 +127,12 @@ export async function DELETE(
     await deleteTeeSearchForUser(user.id, id);
     return NextResponse.json({ ok: true });
   } catch (error) {
+    if (error instanceof SearchEmailDeliveryInProgressError) {
+      return NextResponse.json(
+        { error: error.message, retryable: true },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not remove search" },
       { status: 400 }

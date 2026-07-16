@@ -1,6 +1,8 @@
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
+import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
+
 const WEBTRAC_SEARCH_PATH = "/navyeast/webtrac/web/search.html";
 
 export type WebTracMetadata = {
@@ -60,15 +62,15 @@ export async function fetchWebTracTeeSheet(
   fetchImpl: typeof fetch = fetch
 ): Promise<WebTracTeeSheetResult> {
   const url = buildSearchUrl(input.metadata, input.date, input.players);
-  const response = await fetchImpl(url, {
+  const response = await fetchWithProviderTimeout(url, {
     headers: {
       Accept: "text/html,application/xhtml+xml",
       "User-Agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)"
     },
     redirect: "error"
-  });
+  }, fetchImpl);
   if (!response.ok) {
-    throw new Error(`WebTrac tee times returned ${response.status}`);
+    throw providerHttpError("WebTrac tee times", response);
   }
 
   const html = await response.text();

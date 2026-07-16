@@ -1,12 +1,16 @@
 import "./load-local-env";
 
 import { pathToFileURL } from "node:url";
-import type { Prisma } from "@prisma/client";
+import { Prisma, type ProbeOutcome } from "@prisma/client";
 
 import {
   buildPortfolioCategoryHistory,
   buildRepeatedCoveragePortfolioCandidates
 } from "@/lib/automation/improvement";
+import {
+  deriveConsumerDisposition,
+  isEffectiveConsumerCoverage
+} from "@/lib/automation/provider-capabilities";
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import { listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
@@ -17,6 +21,14 @@ const RECENT_HOURS = 6;
 const WEBSITE_FUNNEL_HOURS = 24;
 const IMPROVEMENT_MEMORY_HOURS = 24;
 const IMPROVEMENT_PROMPT_PREFIX = "tee-time-spot-improvement-loop-";
+type LatestActiveProbeEvidence = {
+  teeSearchId: string;
+  courseId: string;
+  outcome: ProbeOutcome;
+  observedAt: Date;
+  rawSummary: Prisma.JsonValue | null;
+  runtimeVersion: string | null;
+};
 const activeSearchInspectionQuery = {
   where: {
     status: "ACTIVE"
@@ -249,12 +261,81 @@ async function main() {
           }
         })
       : [];
-  const currentActionableProbes = latestCurrentActionableProbes(recentActiveProbes).filter(
-    (probe) =>
-      isEngineeringRemediationSearch(
-        probe.teeSearch.trafficClass,
-        probe.teeSearch.syntheticMultiCycle
-      )
+  const latestActiveProbeEvidence =
+    activeSearchIds.length > 0 && activePreferenceCourseIds.size > 0
+      ? await prisma.$queryRaw<LatestActiveProbeEvidence[]>(Prisma.sql`
+          SELECT DISTINCT ON ("teeSearchId", "courseId")
+            "teeSearchId",
+            "courseId",
+            "outcome",
+            "observedAt",
+            "rawSummary",
+            "runtimeVersion"
+          FROM "CourseProbe"
+          WHERE "teeSearchId" IN (${Prisma.join(activeSearchIds)})
+            AND "courseId" IN (${Prisma.join([...activePreferenceCourseIds])})
+          ORDER BY "teeSearchId", "courseId", "observedAt" DESC, "id" DESC
+        `)
+      : [];
+  const newestActiveProbeBySearchCourse = new Map(
+    latestActiveProbeEvidence.map((probe) => [
+      searchCourseKey(probe.teeSearchId, probe.courseId),
+      probe
+    ])
+  );
+  const currentActionableProbes = latestCurrentActionableProbes(
+    recentActiveProbes
+  ).filter((probe) =>
+    isEngineeringRemediationSearch(
+      probe.teeSearch.trafficClass,
+      probe.teeSearch.syntheticMultiCycle
+    )
+  );
+  const activeIncidentByCourse = new Map(
+    openCourseSupportIncidents.map((incident) => [incident.courseId, incident])
+  );
+  const consumerCoverageRows = activeSearches.flatMap((search) =>
+    search.preferences.map((preference) => {
+      const probe = newestActiveProbeBySearchCourse.get(
+        searchCourseKey(search.id, preference.courseId)
+      );
+      const rawSummary = asJsonObject(probe?.rawSummary ?? null);
+      const currentEvidenceTrusted = Boolean(
+        probe?.runtimeVersion &&
+          rawSummary.providerExecution === "RUNNABLE_PROVIDER_CHECK"
+      );
+      const activeIncident = activeIncidentByCourse.get(preference.courseId);
+      const disposition = deriveConsumerDisposition({
+        ...preference.course,
+        currentEvidenceTrusted,
+        latestOutcome: probe?.outcome ?? null,
+        targetDateStatus: getProbeTargetDateStatus(rawSummary),
+        availableMatchCount: search.matches.filter(
+          (match) =>
+            match.courseId === preference.courseId &&
+            match.availabilityStatus === "AVAILABLE"
+        ).length,
+        failureClass: activeIncident?.failureClass ?? null,
+        finalClassification: hasPersistedFinalConsumerClassification(
+          preference.course
+        )
+      });
+
+      return {
+        searchId: search.id,
+        courseId: preference.courseId,
+        disposition,
+        consumerReady: isEffectiveConsumerCoverage(disposition),
+        currentEvidenceTrusted,
+        probe
+      };
+    })
+  );
+  const consumerCoverageBySearchCourse = new Map(
+    consumerCoverageRows.map((row) => [
+      searchCourseKey(row.searchId, row.courseId),
+      row
+    ])
   );
   const courseIntelligenceReviews = [
     ...new Map(
@@ -338,19 +419,35 @@ async function main() {
           availableMatchCount: search.matches.filter(
             (match) => match.availabilityStatus === "AVAILABLE"
           ).length,
-          preferences: search.preferences.map((preference) => ({
-            rank: preference.rank,
-            courseId: preference.course.id,
-            name: preference.course.name,
-            platform: preference.course.detectedPlatform,
-            eligibility: preference.course.automationEligibility,
-            bookingMethod: preference.course.bookingMethod,
-            automationReason: preference.course.automationReason,
-            intelligenceVerifiedAt: preference.course.intelligenceVerifiedAt,
-            intelligenceReviewAt: preference.course.intelligenceReviewAt,
-            hasBookingMetadata: preference.course.bookingMetadata !== null
-          }))
+          preferences: search.preferences.map((preference) => {
+            const coverage = consumerCoverageBySearchCourse.get(
+              searchCourseKey(search.id, preference.courseId)
+            );
+            const activeIncident = activeIncidentByCourse.get(preference.courseId);
+
+            return {
+              rank: preference.rank,
+              courseId: preference.course.id,
+              name: preference.course.name,
+              platform: preference.course.detectedPlatform,
+              providerFamilyKey: preference.course.providerFamilyKey,
+              eligibility: preference.course.automationEligibility,
+              bookingMethod: preference.course.bookingMethod,
+              automationReason: preference.course.automationReason,
+              intelligenceVerifiedAt: preference.course.intelligenceVerifiedAt,
+              intelligenceReviewAt: preference.course.intelligenceReviewAt,
+              hasBookingMetadata: preference.course.bookingMetadata !== null,
+              newestOutcome: coverage?.probe?.outcome ?? null,
+              newestObservedAt: coverage?.probe?.observedAt ?? null,
+              probeRuntimeVersion: coverage?.probe?.runtimeVersion ?? null,
+              currentEvidenceTrusted: coverage?.currentEvidenceTrusted ?? false,
+              activeFailureClass: activeIncident?.failureClass ?? null,
+              consumerDisposition: coverage?.disposition ?? "ENGINEERING",
+              consumerReady: coverage?.consumerReady ?? false
+            };
+          })
           })),
+        consumerCoverage: summarizeConsumerCoverage(consumerCoverageRows),
         courseIntelligenceReviews: courseIntelligenceReviews.map((course) => ({
           courseId: course.id,
           name: course.name,
@@ -388,6 +485,9 @@ async function main() {
           id: incident.id,
           status: incident.status,
           kind: incident.kind,
+          providerFamilyKey: incident.providerFamilyKey,
+          failureClass: incident.failureClass,
+          failureFingerprint: incident.failureFingerprint,
           course: incident.course.name,
           platform: incident.course.detectedPlatform,
           cycle: incident.cycle,
@@ -395,6 +495,11 @@ async function main() {
           affectedSearchCount: incident.affectedSearchCount,
           occurrenceCount: incident.occurrenceCount,
           engineeringOnly: incident.engineeringOnly,
+          activeRealSearchCount: incident.activeRealSearchCount,
+          nextAttemptAt: incident.nextAttemptAt,
+          lastAttemptAt: incident.lastAttemptAt,
+          attemptCount: incident.attemptCount,
+          activeBatch: incident.activeBatchId !== null,
           firstSeenAt: incident.firstSeenAt,
           lastSeenAt: incident.lastSeenAt,
           ownerNotifiedAt: incident.ownerNotifiedAt,
@@ -601,6 +706,77 @@ function sanitizeExternalUrl(value: string | null) {
   } catch {
     return null;
   }
+}
+
+function searchCourseKey(searchId: string, courseId: string) {
+  return `${searchId}\u0000${courseId}`;
+}
+
+function asJsonObject(value: Prisma.JsonValue | null) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function getProbeTargetDateStatus(rawSummary: Record<string, unknown>) {
+  if (
+    rawSummary.targetDateStatus === "OPEN" ||
+    rawSummary.targetDateStatus === "NOT_OPEN" ||
+    rawSummary.targetDateStatus === "UNKNOWN"
+  ) {
+    return rawSummary.targetDateStatus;
+  }
+
+  return isRecord(rawSummary.bookingWindow) ? "NOT_OPEN" : null;
+}
+
+function hasPersistedFinalConsumerClassification(course: {
+  bookingMethod: string;
+  automationEligibility: string;
+  automationReason: string;
+}) {
+  if (["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(course.bookingMethod)) {
+    return true;
+  }
+
+  return (
+    course.automationEligibility === "BLOCKED" &&
+    [
+      "NO_ONLINE_BOOKING",
+      "AUTOMATION_PROHIBITED",
+      "ACCOUNT_REQUIRED",
+      "CAPTCHA_OR_QUEUE"
+    ].includes(course.automationReason)
+  );
+}
+
+function summarizeConsumerCoverage<
+  T extends {
+    disposition: string;
+    consumerReady: boolean;
+  }
+>(rows: T[]) {
+  const dispositionCounts: Record<string, number> = {};
+  let consumerReadyCount = 0;
+
+  for (const row of rows) {
+    dispositionCounts[row.disposition] =
+      (dispositionCounts[row.disposition] ?? 0) + 1;
+    if (row.consumerReady) {
+      consumerReadyCount += 1;
+    }
+  }
+
+  return {
+    totalPreferences: rows.length,
+    consumerReadyCount,
+    notConsumerReadyCount: rows.length - consumerReadyCount,
+    dispositionCounts: Object.fromEntries(
+      Object.entries(dispositionCounts).sort(([left], [right]) =>
+        left.localeCompare(right)
+      )
+    )
+  };
 }
 
 function latestCurrentActionableProbes<

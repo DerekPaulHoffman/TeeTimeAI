@@ -19,6 +19,24 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  dbMocks.claimScheduledSearchCheck.mockResolvedValue({
+    searchId: "search-1",
+    scheduleVersion: 3,
+    token: "lease-1",
+    expiresAt: new Date("2026-07-15T12:15:00.000Z")
+  });
+  dbMocks.completeScheduledSearchCheck.mockImplementation(
+    async (input: { nextCheckAt: Date | null }) => ({
+      recheckRequested: false,
+      nextCheckAt: input.nextCheckAt
+    })
+  );
+  dbMocks.failScheduledSearchCheck.mockImplementation(
+    async (input: { nextCheckAt: Date }) => ({
+      count: 1,
+      nextCheckAt: input.nextCheckAt
+    })
+  );
 });
 
 afterEach(() => {
@@ -29,7 +47,6 @@ describe("executeScheduledSearchCheck", () => {
   it("completes an expired search without fetching course availability", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-11T23:25:00.000Z"));
-    dbMocks.claimScheduledSearchCheck.mockResolvedValue(true);
     dbMocks.getSearchScheduleTiming.mockResolvedValue({
       date: new Date("2026-07-11T00:00:00.000Z"),
       endTime: "09:00",
@@ -48,6 +65,7 @@ describe("executeScheduledSearchCheck", () => {
     expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith({
       searchId: "search-1",
       scheduleVersion: 3,
+      leaseToken: "lease-1",
       outcome: "search window ended",
       nextCheckAt: null,
       completeSearch: true
@@ -57,7 +75,6 @@ describe("executeScheduledSearchCheck", () => {
   it("completes a synthetic search after one successful check by default", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
-    dbMocks.claimScheduledSearchCheck.mockResolvedValue(true);
     dbMocks.getSearchScheduleTiming.mockResolvedValue({
       date: new Date("2026-07-18T00:00:00.000Z"),
       endTime: "18:00",
@@ -82,6 +99,7 @@ describe("executeScheduledSearchCheck", () => {
     expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith({
       searchId: "search-1",
       scheduleVersion: 3,
+      leaseToken: "lease-1",
       outcome: expect.stringContaining("synthetic one-check complete"),
       nextCheckAt: null,
       completeSearch: true
@@ -91,7 +109,6 @@ describe("executeScheduledSearchCheck", () => {
   it("keeps an explicitly multi-cycle synthetic search on its normal cadence", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
-    dbMocks.claimScheduledSearchCheck.mockResolvedValue(true);
     dbMocks.getSearchScheduleTiming.mockResolvedValue({
       date: new Date("2026-07-18T00:00:00.000Z"),
       endTime: "18:00",
@@ -116,8 +133,33 @@ describe("executeScheduledSearchCheck", () => {
     expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith({
       searchId: "search-1",
       scheduleVersion: 3,
+      leaseToken: "lease-1",
       outcome: expect.any(String),
       nextCheckAt: new Date("2026-07-15T12:15:00.000Z")
+    });
+  });
+
+  it("returns an earlier durable delivery retry when the check fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 120,
+      trafficClass: "UNCLASSIFIED",
+      syntheticMultiCycle: false,
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    });
+    runSearchCheck.mockRejectedValue(new Error("delivery failed"));
+    dbMocks.failScheduledSearchCheck.mockResolvedValue({
+      count: 1,
+      nextCheckAt: new Date("2026-07-15T12:01:00.000Z")
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "failed",
+      nextCheckAt: "2026-07-15T12:01:00.000Z"
     });
   });
 });
@@ -166,7 +208,7 @@ describe("calculateNextCheckAt", () => {
         [{ timeZone: "America/New_York" }],
         true
       )?.toISOString()
-    ).toBe("2026-07-13T20:30:00.000Z");
+    ).toBe("2026-07-13T20:15:00.000Z");
   });
 
   it("wakes for the earliest of several course-specific booking windows", () => {
@@ -219,6 +261,56 @@ describe("calculateNextCheckAt", () => {
         ]
       )?.toISOString()
     ).toBe("2026-08-16T12:16:00.000Z");
+  });
+
+  it("wakes for another selected course's release even when one course is already open", () => {
+    const searchDate = new Date("2026-08-30T00:00:00.000Z");
+    const now = new Date("2026-08-16T11:55:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        120,
+        now,
+        new Date("2026-08-31T00:00:00.000Z"),
+        [
+          {
+            timeZone: "America/Los_Angeles",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "04:00"
+          },
+          {
+            timeZone: "America/New_York",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "08:00"
+          }
+        ]
+      )?.toISOString()
+    ).toBe("2026-08-16T12:00:00.000Z");
+  });
+
+  it("immediately catches a release that occurred while the prior check was running", () => {
+    const searchDate = new Date("2026-08-30T00:00:00.000Z");
+    const checkStartedAt = new Date("2026-08-16T11:59:00.000Z");
+    const now = new Date("2026-08-16T12:01:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        120,
+        now,
+        new Date("2026-08-31T00:00:00.000Z"),
+        [
+          {
+            timeZone: "America/New_York",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "08:00"
+          }
+        ],
+        false,
+        checkStartedAt
+      )?.toISOString()
+    ).toBe("2026-08-16T12:01:00.000Z");
   });
 
   it("uses the search cadence once the booking window is open", () => {

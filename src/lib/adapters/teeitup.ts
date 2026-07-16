@@ -1,4 +1,6 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+
+import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 import {
   getBookingWindowFromEvidence,
   parseBookingReleaseMessage,
@@ -178,12 +180,12 @@ function pickEarlierBookingWindow(
 
 async function fetchFacilities(alias: string, bookingBaseUrl: string) {
   const url = `${TEEITUP_API_BASE_URL}/alias/${alias}/facilities`;
-  const response = await fetch(url, {
+  const response = await fetchWithProviderTimeout(url, {
     headers: teeItUpHeaders(alias, bookingBaseUrl)
   });
 
   if (!response.ok) {
-    throw new Error(`TeeItUp facilities returned ${response.status}`);
+    throw providerHttpError("TeeItUp facilities", response);
   }
 
   return (await response.json()) as TeeItUpFacility[];
@@ -196,12 +198,12 @@ async function fetchFacilitySlots(
   bookingBaseUrl: string
 ) {
   const url = buildTeeTimesUrl(date, facilityIds);
-  const response = await fetch(url.toString(), {
+  const response = await fetchWithProviderTimeout(url.toString(), {
     headers: teeItUpHeaders(alias, bookingBaseUrl)
   });
 
   if (!response.ok) {
-    throw new Error(`TeeItUp tee times returned ${response.status}`);
+    throw providerHttpError("TeeItUp tee times", response);
   }
 
   return (await response.json()) as TeeItUpApiDay[];

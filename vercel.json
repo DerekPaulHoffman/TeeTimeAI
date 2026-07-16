@@ -1,5 +1,17 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "src/app/api/queues/search-schedule/route.ts": {
+      "experimentalTriggers": [
+        {
+          "type": "queue/v2beta",
+          "topic": "tee-time-spot-search-schedule",
+          "maxConcurrency": 2,
+          "retryAfterSeconds": 30
+        }
+      ]
+    }
+  },
   "crons": [
     {
       "path": "/api/cron/recover-search-schedules",

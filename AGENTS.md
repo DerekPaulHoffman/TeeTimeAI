@@ -103,7 +103,7 @@ discover public courses -> save ranked demand -> check official availability
 
 - A missing discovery result goes through exact provider-shape inspection, direct lookup, official-site corroboration, and, when justified, a `GooglePlaceReview` correction.
 - A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Policy-safe reusable provider support belongs in an adapter; phone-only, account-required, prohibited, captcha/queue, or otherwise unsafe access is classified honestly.
-- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. These are internal engineering work first: the hourly loop should attempt discovery, implementation, and verification before asking the owner for one concrete unavoidable external action. Ordinary one-check `TEST`/`AUTOMATION` searches remain excluded, but an explicitly opted-in `syntheticMultiCycle` search may open an `engineeringOnly` incident. Engineering-only incidents never send customer or operator support email, remain actionable after the source search ends, and must stay open until reusable monitoring works or a conclusive policy/contact/identity disposition is persisted. Real demand on the same course promotes the incident to normal customer-demand priority.
+- `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. The dedicated 10-minute course-support responder owns discovery, reusable implementation, fresh-runtime verification, retry, and final disposition; the broad hourly loop must not select these incidents. Ordinary one-check `TEST`/`AUTOMATION` searches remain excluded, but an explicitly opted-in `syntheticMultiCycle` search may open an `engineeringOnly` incident. Engineering-only incidents never send customer or operator support email, remain actionable after the source search ends, and must stay open until reusable monitoring works or a conclusive policy/contact/identity disposition is persisted. Real demand on the same course promotes the incident to normal customer-demand priority.
 - Customer copy should say what Tee Time Spot can do now and offer the official site; do not expose terms such as adapter, probe, queue, Prisma, Neon, Codex, or automation incident.
 
 ### 6. Learn From Real Use
@@ -171,7 +171,8 @@ Core data:
 - `TeeTimeMatch`: normalized matching slot.
 - `AutomationRun`: durable poll/improvement run record.
 - `CourseAutomationDiscovery`: append-only provider/booking discovery evidence; an accepted finding can update the reusable `Course` snapshot.
-- `CourseSupportIncident`: one deduplicated unresolved monitoring incident per course, with escalation and resolution history.
+- `CourseSupportIncident`: one deduplicated unresolved monitoring incident per course, including provider family/fingerprint, retry schedule, and demand priority.
+- `CourseSupportBatch` / `CourseSupportBatchIncident`: durable ownership, provenance, lease, release verification, and per-course results for one responder provider-family/fingerprint batch.
 - `WebsiteEvent`: engagement event.
 - `WebsiteFeedback`: user feedback.
 
@@ -180,11 +181,13 @@ Core data:
 - **Clerk owns authentication and account identity.** Neon stores the app's `User` mapping and product state. Never expose another owner's search when Clerk is unavailable, and never fall back to a global recent-search dashboard.
 - **Google Places owns transient place data.** The app owns conservative filtering, exact reviewed corrections, deduplication, and the choice to present a result as likely public.
 - **Neon Postgres is the durable source of truth.** Dashboard/search state, schedules, provider reviews, probes, matches, incidents, analytics, and automation history must survive process restarts and deploys.
-- **Vercel Workflow owns per-search scheduling.** It orchestrates sleep/wake/check behavior; Postgres schedule version/state prevents stale workflow work from winning.
+- **Vercel Workflow owns per-search scheduling.** It orchestrates sleep/wake/check behavior; Postgres schedule version, row-token lease, and compare-and-set completion prevent stale workflow work from winning.
+- **Vercel Queue is only a Workflow-start fallback.** Its private, minimal, at-least-once messages recover failed starts and dispatch one post-remediation recheck; Postgres remains authoritative.
 - **Course adapters read policy-safe public availability.** The official provider remains authoritative for current availability, price, rules, and booking.
 - **Resend transports email.** A local `SENT` record means the send path completed/provider accepted it; it is not proof of inbox placement or an open.
 - **Vercel Git deployments own production runtime.** A successful local build or database write is not proof that the matching application commit is live.
-- **The hourly Codex loop owns product engineering improvement.** It is separate from customer search workflows and must not be used as the scheduler.
+- **The course-support Codex responder owns provider coverage incidents.** It runs every 10 minutes and resolves them with reusable support or final evidence-backed dispositions.
+- **The hourly Codex loop owns broad product engineering improvement.** It is separate from customer search workflows, excludes course-support incidents, and must not be used as the scheduler.
 
 ### Application Surfaces And API Boundaries
 
@@ -196,6 +199,7 @@ Core data:
 - `/api/location/geocode`, `/api/courses/discover`, `/api/courses/lookup`, and `/api/courses/photo`: public provider-backed reads with bounded inputs and safe failure responses.
 - `/api/searches` and its item/check actions: authenticated and owner-scoped. Creation, edit, pause/resume, explicit check, and delete must enforce the same ownership server-side.
 - `/api/feedback` and `/api/analytics/events`: public, validated product-learning writes; traffic class is aggregate metadata, not identity.
+- `/api/queues/search-schedule`: private Vercel Queue push consumer for strict Workflow-start messages. It is not a public mutation API and its payload must never contain recipient, course/provider, URL, or credential data.
 - Automation mutation routes require `AUTOMATION_API_KEY`; recovery cron requires `CRON_SECRET`; email actions use `EMAIL_ACTION_SECRET`. These authorities are separate and must not be interchangeable.
 
 Keep public discovery and lookup response shapes backward compatible unless the task explicitly calls for an API change. Provider or review implementation details belong behind those contracts.
@@ -205,7 +209,7 @@ Keep public discovery and lookup response shapes backward compatible unless the 
 There is no active SQLite or file-backed application database. Keep these in Neon:
 
 - Accounts and customer demand: `User`, `TeeSearch`, `CoursePreference`.
-- Course/provider knowledge: `Course`, `GooglePlaceReview`, `CourseAutomationDiscovery`, `CourseSupportIncident`.
+- Course/provider knowledge: `Course`, `GooglePlaceReview`, `CourseAutomationDiscovery`, `CourseSupportIncident`, `CourseSupportBatch`, `CourseSupportBatchIncident`.
 - Monitoring and delivery state: `CourseProbe`, `TeeTimeMatch`, `AutomationRun`.
 - Product learning: `WebsiteEvent`, `WebsiteFeedback`.
 
@@ -218,7 +222,7 @@ These are intentionally temporary and should not become database projects withou
 - Demo fixtures used outside production.
 - Ignored local environment and provider-link files.
 
-Do not add Redis, a warehouse, a read replica, a separate queue, or a full course-catalog cache for hypothetical scale. The current architecture is one app, one durable Postgres source of truth, per-search Workflows, and bounded external integrations.
+Do not add Redis, a warehouse, a read replica, another queue, or a full course-catalog cache for hypothetical scale. The current architecture is one app, one durable Postgres source of truth, per-search Workflows, and one bounded Vercel Queue fallback for Workflow starts/rechecks.
 
 ### Database Connection And Migration Rules
 
@@ -321,7 +325,7 @@ npm run automation:place-review -- upsert --place-id <place-id> --inactive [--ap
 
 ## Automation Loop Contract
 
-There are two related but different automation workflows.
+There are three related but different automation workflows.
 
 ### Event-Driven Search Checks
 
@@ -337,13 +341,16 @@ npx vercel env run -- npm run automation:inspect
 Important behavior:
 
 - `automation:poll` is a manual recovery command, not a recurring 15-minute production scheduler.
-- A daily recovery cron performs only a lightweight database query for overdue/stuck schedules and starts work only when needed.
-- `TeeSearch.checkStatus`, `nextCheckAt`, `lastCheckedAt`, `lastCheckOutcome`, and `workflowRunId` describe scheduler state.
+- A daily safety-recovery cron performs only a lightweight database query for overdue/stuck schedules or due email-outbox retries and starts work only when needed. Normal search and delivery retries remain inside the durable per-search Workflow and must wake no later than the persisted delivery retry time; the daily cron is not the timely scheduler.
+- `TeeSearch.checkStatus`, `nextCheckAt`, `lastCheckedAt`, `lastCheckOutcome`, `workflowRunId`, `checkLeaseToken`, `checkLeaseExpiresAt`, and `recheckRequestedAt` describe scheduler state.
 - `TeeSearch.scheduleVersion` invalidates older workflow executions after edit, pause, resume, cancellation, or an explicit new schedule.
+- A 15-minute row-token lease owns one check while network work runs outside a database transaction. Heartbeat and compare-and-set completion on search id, schedule version, and token prevent stale evidence. A generation-scoped `SearchEmailDelivery` outbox serializes recipient/intent mutations against active sends and retries immutable payloads with stable idempotency. Owner delivery finalizes the customer-visible match/status independently, while each additional recipient retains its own durable retry state. A busy check persists `recheckRequestedAt` for immediate follow-up.
+- Immediate Workflow start failures and the first post-remediation recheck may use the private `tee-time-spot-search-schedule` Vercel Queue fallback. Its strict payload is only search id, schedule version, and trigger; retention is 24 hours, consumer concurrency is 2, and Postgres remains the recovery source of truth.
 - `TeeSearch.status` is the customer lifecycle (`ACTIVE`, `PAUSED`, `COMPLETED`, `CANCELLED`); `checkStatus` is execution state (`IDLE`, `QUEUED`, `CHECKING`, `WAITING`, `FAILED`, `STOPPED`). Do not collapse them into one field.
 - Valid base cadence values are 5, 15, 30, 60, and 120 minutes. Booking-window scheduling may sleep longer until the next useful release event.
 - A search expires at the latest absolute end of its selected courses' local requested windows, not at arbitrary server midnight.
 - Booking-window intelligence may defer a course until its provider-confirmed release time. The workflow should wake at the next useful course event while still allowing other selected courses to run.
+- If a known booking release occurs while the prior multi-course check is still running, schedule an immediate catch-up instead of applying the base cadence from completion time.
 - `TeeTimeMatch.availabilityStatus` is independent from email `alertStatus`; emailed matches remain visible while they are still confirmed available.
 - The truth is in Postgres: the `TeeSearch` schedule row, `AutomationRun`, newest per-course `CourseProbe`, `TeeTimeMatch`, `CourseSupportIncident`, and pending alerts.
 - Use the newest observation for each course/search when classifying current health. A later `NO_MATCH` or success supersedes an older failure even though history remains valuable.
@@ -357,9 +364,32 @@ The historical automation memory path for manual recovery runs is:
 C:\Users\Grim_Leaper\.codex\automations\teetimeai-active-search-poller\memory.md
 ```
 
+### Course-Support Responder
+
+The dedicated Codex responder runs every 10 minutes and exclusively owns open `NEEDS_ADAPTER` / `FETCH_FAILED` incidents. Start every task with:
+
+```powershell
+npm run automation:course-support -- inspect
+```
+
+Important behavior:
+
+- A batch contains one `providerFamilyKey` plus one hashed failure fingerprint. Default to 5 courses and never exceed 20.
+- The central provider-capability registry owns family detection, metadata validation, runnable support, failure classes, and consumer dispositions. Recognition alone is not runnable coverage.
+- Claim only from a clean `automation/course-support-*` branch whose `HEAD` equals current `origin/main`; persist the real owner task and base SHA, inspect the ordinal-only packet, then claim every planned path before editing it. Heartbeat the 15-minute batch lease and persist the candidate release SHA immediately after commit.
+- The responder and hourly loop share the transaction-scoped `tee-time-spot:repository-writer` lease for state transitions. A durable batch plus unfinished `AutomationRun` owns the implementation interval.
+- The responder and hourly automations must use separate already-approved persistent checkouts; never point both schedules at one mutable Git worktree.
+- Code remediation requires a new per-course runnable-provider proof snapshot from the exact deployed release: `CourseProbe.runtimeVersion` must equal the release SHA and the observation must be newer than the pre-claim/deployment and latest-incident boundaries. A Workflow id, layout skip, or older success is insufficient.
+- Classification-only closeout requires a current, sufficiently confident official-source discovery that agrees with the persisted phone/contact/walk-in, no-online-booking, prohibited-automation, account-required, or CAPTCHA/queue disposition. Exact private/non-course identity remains in the reviewed-place path.
+- Terminal closeout waits for complete affected-search dispatch, healthy scheduler state, and a fresh post-dispatch check. Global provider I/O is capped at two requests and one request per provider family.
+- Retry transient failures on the persisted 15-minute, 1-hour, 6-hour, then 24-hour ladder with jitter; honor bounded rate-limit `Retry-After`. Explicit recovery requires expired ownership and exact branch/HEAD/dirty-path provenance.
+- Auto-archive only routine results after durable closeout: no due work, durably deferred busy, success, classification-only, partial, or retryable failure with a future `nextAttemptAt`. Keep active/recovery/human, privacy, delivery, unsafe-provider, migration/deploy/production-verification, auth/env/Git, command, and repeated-SLA tasks visible.
+- Backfill is dry-run by default and must not call providers. Apply the additive migration before dependent code, inspect backfill output, then use `backfill --apply`.
+- The full contract and command syntax are in `docs/course-support-responder.md`.
+
 ### Hourly Improvement Loop
 
-The hourly improvement loop is allowed to improve the product when evidence supports a change.
+The hourly improvement loop is allowed to improve the product when evidence supports a change, but only when no responder batch is active and no course-support work is due. Course-support incidents are excluded from its candidate portfolio.
 
 For this hourly workflow, `no_op` is not a valid terminal outcome. An empty first queue or a healthy baseline is the nonterminal state `exploration_required`: rotate to least-recently covered locations, devices, routes, feedback, course gaps, accessibility, performance, security, metadata, and current-practice evidence until the run finds a safe valuable improvement or a concrete blocker. This rule does not change legitimate `no_op` behavior for event-driven search checks or browser probes.
 
@@ -389,7 +419,7 @@ Before the first file edit, persist durable `AutomationRun` provenance containin
 
 Use `npm run automation:improve` to prepare the unfinished owner row, `npm run automation:improve -- claim --run-id <id> --path <path>` before edits, and pipe the structured terminal JSON to `npm run automation:improve -- closeout --run-id <id>`. Use `--owner-thread` only when `CODEX_THREAD_ID` is unavailable and the actual current Codex thread id is known. Dirty recovery requires a separate same-thread `--recover-run <id>` invocation; never infer the claim from the latest row.
 
-Acquire the short transaction-scoped hourly initialization/state-update lease before candidate selection, path claims, or closeout. The lease serializes those database transitions; the single unfinished owner `AutomationRun` is the durable guard for the rest of the run. Keep `outcome_recorded=false` during preparation, editing, and verification; set it true only in the same closeout write that records `completedAt` and the terminal outcome. Terminal exceptions must close the owned run with a redacted error and concrete blocker.
+Acquire the shared transaction-scoped `tee-time-spot:repository-writer` lease before candidate selection, path claims, or closeout. It serializes those transitions with the responder; due responder work, an active responder batch, or an active hourly run is `blocked_concurrent`. The single unfinished owner `AutomationRun` is the durable guard for the rest of the run. Keep `outcome_recorded=false` during preparation, editing, and verification; set it true only in the same closeout write that records `completedAt` and the terminal outcome. Terminal exceptions must close the owned run with a redacted error and concrete blocker.
 
 Enter closeout no later than 40 minutes after the run starts or when only 20 minutes remain before the next scheduled launch. Start no new exploration or edits after that point; reserve the closeout budget for tests, diff review, commit, rebase, push, deployment, production verification, and the durable final record.
 
@@ -413,6 +443,7 @@ Adapter behavior:
 
 - Use public tee-sheet endpoints only.
 - Run official-site/provider discovery before declaring a new course unsupported, and append evidence to `CourseAutomationDiscovery`.
+- Treat contradictory provider platform, booking URL, and metadata signals as non-runnable source conflict. Do not call any provider until current official-source evidence reconciles them to one family.
 - Prefer stable source IDs to dedupe matches.
 - Do not alert duplicate matches.
 - Do not suppress successful probes for one course because another course failed.
@@ -420,16 +451,18 @@ Adapter behavior:
 - Reconcile availability separately from delivery. Mark missing observed slots `GONE` only under the reconciliation rules, and suppress vanished unsent matches.
 - Treat recurring unsupported/fetch failures as one durable course incident rather than writing or emailing the same unresolved fact every five minutes.
 - Resolve a course incident only after monitoring succeeds or a source-backed direct-booking classification is verified. Notify resolution only when a prior owner escalation was actually sent.
-- Use transaction-scoped Postgres advisory leases for poller mutation; session-level locks are risky with pooled Neon connections.
+- Limit provider retrieval to two concurrent requests and never run two calls for the same provider family concurrently. Lease discovery follow-ups by their actual destination family and keep multi-request adapter steps sequential.
+- Use the per-search row-token lease for long checks and transaction-scoped Postgres advisory leases only for short state transitions; session-level locks and network calls inside database transactions are unsafe with pooled Neon connections.
 
 ## Current Adapter Map
 
 Do not assume every `DetectedPlatform` enum has a runnable adapter.
 
-- Runnable families: `FOREUP`, `TEEITUP`, and `CHRONOGOLF`.
-- Runnable `CUSTOM` metadata paths: CPS, Chelsea, and TeeSnap-compatible public surfaces.
-- Classification-only today: `GOLFNOW` and `CLUB_CADDIE`; finding one is not evidence that monitoring is implemented.
+- Runnable families: `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, and `WEBTRAC`, each only when the registry validates its required metadata.
+- Recognized but non-runnable today: `GOLFNOW`, `CLUB_CADDIE`, `WHOOSH`, and `TENFORE`; finding one is not evidence that monitoring is implemented.
 - `UNKNOWN` means provider discovery is still needed, not that the course is unsupported forever.
+
+Use the registry's consumer dispositions rather than optimistic support labels. Only a current trusted `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, or `BOOKING_NOT_OPEN` result counts as effective monitored coverage. Direct-site, phone/walk-in, account-required, policy-blocked, CAPTCHA/queue, private/invalid, source-unverified, retrying, and engineering states must remain distinct.
 
 Before adding an adapter, search existing provider dispatch, metadata parsers, seeds, and tests. Extend a reusable family when the public endpoint contract matches; do not create course-name-specific fetch code.
 
