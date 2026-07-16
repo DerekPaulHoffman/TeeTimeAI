@@ -11,7 +11,9 @@ import {
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     course: {
-      update: vi.fn()
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn()
     },
     courseAutomationDiscovery: {
       create: vi.fn(),
@@ -166,6 +168,108 @@ describe("browser discovery persistence", () => {
         })
       })
     );
+  });
+
+  it("persists only known provider identity from an inspected booking surface", async () => {
+    const updatedAt = new Date("2026-07-16T12:00:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "bluerockgolfcourse.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: "https://bluerockgolfcourse.com/book-a-tee-time",
+        website: "https://bluerockgolfcourse.com/",
+        bookingMetadata: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "blue-rock" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await applyBrowserDiscoveryToCourse({
+      courseId: "blue-rock",
+      status: "INSPECTED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://bluerockgolfcourse.com/",
+      bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
+      confidence: 0.45,
+      evidence: {
+        learnedFrom: "browser-visible-links",
+        observedUrls: [
+          "https://www.chronogolf.com/club/blue-rock-golf-course"
+        ]
+      }
+    });
+
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "blue-rock", updatedAt },
+      data: {
+        detectedPlatform: "CHRONOGOLF",
+        providerFamilyKey: "CHRONOGOLF",
+        detectedBookingUrl:
+          "https://www.chronogolf.com/club/blue-rock-golf-course"
+      }
+    });
+  });
+
+  it("does not apply a stale inspected identity after the course changed", async () => {
+    const updatedAt = new Date("2026-07-16T12:00:00.000Z");
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      providerFamilyKey: "course.example.com",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: "https://course.example.com/book-a-tee-time",
+      website: "https://course.example.com/",
+      bookingMetadata: null,
+      updatedAt
+    } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 0 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-1",
+      status: "INSPECTED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://course.example.com/",
+      bookingUrl: "https://www.chronogolf.com/club/example-course",
+      confidence: 0.95,
+      evidence: { learnedFrom: "browser-visible-links", observedUrls: [] }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "course-1", updatedAt } })
+    );
+  });
+
+  it("rejects a platform label that is not corroborated by the selected booking URL", async () => {
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-1",
+      status: "INSPECTED",
+      detectedPlatform: "CHRONOGOLF",
+      sourceUrl: "https://course.example.com/",
+      bookingUrl: "https://course.example.com/book-a-tee-time",
+      confidence: 0.95,
+      evidence: { learnedFrom: "browser-visible-links", observedUrls: [] }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not persist an unrecognized inspected official-site host", async () => {
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "unknown-course",
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://course.example.com/",
+      bookingUrl: "https://course.example.com/book-a-tee-time",
+      confidence: 0.45,
+      evidence: {
+        learnedFrom: "browser-visible-links",
+        observedUrls: ["https://course.example.com/book-a-tee-time"]
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
   });
 
   it("applies a high-confidence phone-only finding without adapter metadata", async () => {

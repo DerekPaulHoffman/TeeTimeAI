@@ -11,6 +11,7 @@ import {
   normalizeProviderFamilyKey,
   PROVIDER_CAPABILITIES,
   resolveProviderCapability,
+  resolveProviderDiscoveryIdentity,
   SOURCE_CONFLICT_PROVIDER_FAMILY,
   SOURCE_MISSING_PROVIDER_FAMILY,
   type ConsumerDisposition,
@@ -182,6 +183,37 @@ describe("provider capability registry", () => {
     expect(normalizeProviderFamilyKey("example.org/path?token=value")).toBe(
       SOURCE_MISSING_PROVIDER_FAMILY
     );
+  });
+
+  it("requires the selected booking URL or metadata to corroborate a discovered provider", () => {
+    expect(
+      resolveProviderDiscoveryIdentity({
+        detectedPlatform: "CHRONOGOLF",
+        bookingUrl: "https://course.example.com/book-a-tee-time",
+        confidence: 0.95
+      })
+    ).toBeNull();
+    expect(
+      resolveProviderDiscoveryIdentity({
+        detectedPlatform: "CHRONOGOLF",
+        bookingUrl: "https://example-course.book.teeitup.golf/",
+        confidence: 0.95
+      })
+    ).toBeNull();
+    expect(
+      resolveProviderDiscoveryIdentity({
+        detectedPlatform: "CHRONOGOLF",
+        bookingUrl: "https://www.chronogolf.com/club/example-course",
+        confidence: 0.39
+      })
+    ).toBeNull();
+    expect(
+      resolveProviderDiscoveryIdentity({
+        detectedPlatform: "CHRONOGOLF",
+        bookingUrl: "https://www.chronogolf.com/club/example-course",
+        confidence: 0.4
+      })
+    ).toMatchObject({ providerFamilyKey: "CHRONOGOLF" });
   });
 
   it("classifies missing source, missing metadata, and unsupported families separately", () => {

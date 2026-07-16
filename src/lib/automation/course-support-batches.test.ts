@@ -29,6 +29,7 @@ import {
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
+  resolveCourseSupportProviderCapability,
   selectCourseSupportBatch,
   shouldDispatchRemediatedCourseRechecks,
   verifyCourseSupportBatch,
@@ -1240,5 +1241,111 @@ describe("course-support fingerprints", () => {
         failureClass: "HTTP_5XX"
       })
     ).toMatch(/^[a-f0-9]{64}$/);
+  });
+});
+
+describe("course-support provider discovery reconciliation", () => {
+  it.each([
+    {
+      expectedFamily: "CHRONOGOLF",
+      detectedPlatform: "CHRONOGOLF",
+      bookingUrl: "https://www.chronogolf.com/club/example-course",
+      confidence: 0.45
+    },
+    {
+      expectedFamily: "TEEITUP",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: "https://example-course.book.teeitup.golf/",
+      confidence: 0.45
+    },
+    {
+      expectedFamily: "TEESNAP",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://example-course.teesnap.net/",
+      confidence: 0.55
+    }
+  ])(
+    "uses an inspected $expectedFamily booking surface instead of the official-site host",
+    ({ expectedFamily, detectedPlatform, bookingUrl, confidence }) => {
+      const provider = resolveCourseSupportProviderCapability({
+        providerFamilyKey: "course.example.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: "https://course.example.com/book-a-tee-time",
+        website: "https://course.example.com/",
+        bookingMetadata: null,
+        automationDiscoveries: [
+          {
+            status: "INSPECTED",
+            detectedPlatform,
+            bookingUrl,
+            sourceUrl: "https://course.example.com/",
+            apiMetadata: null,
+            confidence
+          }
+        ]
+      });
+
+      expect(provider).toMatchObject({
+        providerFamilyKey: expectedFamily,
+        metadataReady: false,
+        isRunnable: false,
+        evidenceConflict: false
+      });
+    }
+  );
+
+  it("does not use failed or conflicting discovery evidence", () => {
+    const failedProvider = resolveCourseSupportProviderCapability({
+      providerFamilyKey: "course.example.com",
+      detectedPlatform: "UNKNOWN",
+      website: "https://course.example.com/",
+      automationDiscoveries: [
+        {
+          status: "FAILED",
+          detectedPlatform: "CHRONOGOLF",
+          bookingUrl: "https://www.chronogolf.com/club/example-course",
+          sourceUrl: "https://course.example.com/",
+          confidence: 0.95
+        }
+      ]
+    });
+    const conflictingProvider = resolveCourseSupportProviderCapability({
+      providerFamilyKey: "FOREUP",
+      detectedPlatform: "FOREUP",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
+      website: "https://course.example.com/",
+      automationDiscoveries: [
+        {
+          status: "INSPECTED",
+          detectedPlatform: "CHRONOGOLF",
+          bookingUrl: "https://www.chronogolf.com/club/example-course",
+          sourceUrl: "https://course.example.com/",
+          confidence: 0.95
+        }
+      ]
+    });
+
+    expect(failedProvider.providerFamilyKey).toBe("course.example.com");
+    expect(conflictingProvider.providerFamilyKey).toBe("FOREUP");
+  });
+
+  it("does not trust a platform label when the selected booking URL is still the official site", () => {
+    const provider = resolveCourseSupportProviderCapability({
+      providerFamilyKey: "course.example.com",
+      detectedPlatform: "UNKNOWN",
+      website: "https://course.example.com/",
+      automationDiscoveries: [
+        {
+          status: "INSPECTED",
+          detectedPlatform: "CHRONOGOLF",
+          bookingUrl: "https://course.example.com/book-a-tee-time",
+          sourceUrl: "https://course.example.com/",
+          confidence: 0.95
+        }
+      ]
+    });
+
+    expect(provider.providerFamilyKey).toBe("course.example.com");
   });
 });

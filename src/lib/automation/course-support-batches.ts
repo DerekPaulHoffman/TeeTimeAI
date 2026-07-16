@@ -22,7 +22,8 @@ import {
   buildProviderFailureFingerprint,
   classifyProviderFailure,
   getProviderReadinessFailure,
-  resolveProviderCapability
+  resolveProviderCapability,
+  resolveProviderDiscoveryIdentity
 } from "./provider-capabilities";
 import {
   COURSE_SUPPORT_BATCH_LEASE_MS,
@@ -105,6 +106,15 @@ const OPERATIONAL_RETRY_CLOSEOUT_OUTCOMES = new Set<ResponderOutcome>([
   "production_verification_failed",
   "command_failed"
 ]);
+const COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUSES = [
+  "LEARNED",
+  "VERIFIED",
+  "INSPECTED",
+  "BLOCKED"
+] as const;
+const COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUS_SET = new Set<string>(
+  COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUSES
+);
 
 export type CourseSupportCandidate = {
   id: string;
@@ -2747,6 +2757,21 @@ export async function backfillCourseSupportResponderState(input?: {
         detectedBookingUrl: true,
         website: true,
         bookingMetadata: true,
+        automationDiscoveries: {
+          where: {
+            status: { in: [...COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUSES] }
+          },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: {
+            status: true,
+            detectedPlatform: true,
+            bookingUrl: true,
+            sourceUrl: true,
+            apiMetadata: true,
+            confidence: true
+          }
+        },
         updatedAt: true
       }
     }),
@@ -2760,6 +2785,21 @@ export async function backfillCourseSupportResponderState(input?: {
           detectedBookingUrl: true,
           website: true,
           bookingMetadata: true,
+          automationDiscoveries: {
+            where: {
+              status: { in: [...COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUSES] }
+            },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: {
+              status: true,
+              detectedPlatform: true,
+              bookingUrl: true,
+              sourceUrl: true,
+              apiMetadata: true,
+              confidence: true
+            }
+          },
           preferences: {
             where: {
               teeSearch: { status: "ACTIVE", date: { gte: today } }
@@ -2776,7 +2816,7 @@ export async function backfillCourseSupportResponderState(input?: {
     }
   )]);
   const courseUpdates = courses.flatMap((course) => {
-    const providerFamilyKey = resolveProviderCapability(course).providerFamilyKey;
+    const providerFamilyKey = resolveCourseSupportProviderCapability(course).providerFamilyKey;
     return providerFamilyKey === course.providerFamilyKey
       ? []
       : [
@@ -2797,7 +2837,7 @@ export async function backfillCourseSupportResponderState(input?: {
       )
       .map((preference) => preference.teeSearch.date)
       .sort((left, right) => left.getTime() - right.getTime());
-    const provider = resolveProviderCapability(incident.course);
+    const provider = resolveCourseSupportProviderCapability(incident.course);
     const providerFamilyKey = provider.providerFamilyKey;
     const observedFailure = classifyProviderFailure({
       error: incident.latestMessage ?? incident.initialMessage
@@ -2918,6 +2958,52 @@ export async function backfillCourseSupportResponderState(input?: {
         ])
     )
   };
+}
+
+export function resolveCourseSupportProviderCapability(
+  course: Parameters<typeof resolveProviderCapability>[0] & {
+    automationDiscoveries?: ReadonlyArray<{
+      status: string;
+      detectedPlatform?: string | null;
+      bookingUrl?: string | null;
+      sourceUrl?: string | null;
+      apiMetadata?: unknown;
+      confidence: number;
+    }>;
+  }
+) {
+  const persistedProvider = resolveProviderCapability(course);
+  if (persistedProvider.evidenceConflict) {
+    return persistedProvider;
+  }
+
+  const discovery = course.automationDiscoveries?.find((candidate) =>
+    COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUS_SET.has(candidate.status)
+  );
+  if (!discovery) {
+    return persistedProvider;
+  }
+
+  const discoveredProvider = resolveProviderDiscoveryIdentity({
+    detectedPlatform: discovery.detectedPlatform,
+    bookingUrl: discovery.bookingUrl,
+    apiMetadata: discovery.apiMetadata,
+    confidence: discovery.confidence
+  });
+  if (!discoveredProvider) {
+    return persistedProvider;
+  }
+  if (
+    persistedProvider.capability &&
+    persistedProvider.providerFamilyKey !== discoveredProvider.providerFamilyKey
+  ) {
+    return persistedProvider;
+  }
+  if (persistedProvider.isRunnable && !discoveredProvider.isRunnable) {
+    return persistedProvider;
+  }
+
+  return discoveredProvider;
 }
 
 export function buildFailureFingerprint(input: {

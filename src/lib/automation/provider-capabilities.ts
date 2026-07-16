@@ -188,6 +188,8 @@ export type ProviderCapabilityResolution = {
   evidenceConflict: boolean;
 };
 
+const PROVIDER_DISCOVERY_IDENTITY_MIN_CONFIDENCE = 0.4;
+
 const knownProviderFamilySet = new Set<string>(KNOWN_PROVIDER_FAMILIES);
 const externalDetectedPlatforms = new Set<string>([
   "UNKNOWN",
@@ -286,6 +288,46 @@ export function resolveProviderCapability(
     ),
     evidenceConflict
   };
+}
+
+export function resolveProviderDiscoveryIdentity(input: {
+  detectedPlatform?: string | null;
+  bookingUrl?: string | null;
+  apiMetadata?: unknown;
+  confidence: number;
+}): ProviderCapabilityResolution | null {
+  if (input.confidence < PROVIDER_DISCOVERY_IDENTITY_MIN_CONFIDENCE) {
+    return null;
+  }
+
+  const bookingHostname = getSafePublicHostname(input.bookingUrl);
+  const bookingFamily = bookingHostname
+    ? getKnownProviderFamilyForHostname(bookingHostname)
+    : null;
+  const metadataFamily = getMetadataProviderFamily(input.apiMetadata);
+  if (!bookingFamily && !metadataFamily) {
+    return null;
+  }
+  if (bookingFamily && metadataFamily && bookingFamily !== metadataFamily) {
+    return null;
+  }
+
+  const resolution = resolveProviderCapability({
+    detectedPlatform: input.detectedPlatform,
+    detectedBookingUrl: input.bookingUrl,
+    bookingMetadata: input.apiMetadata
+  });
+  const corroboratedFamily = metadataFamily ?? bookingFamily;
+  if (
+    !corroboratedFamily ||
+    !resolution.capability ||
+    resolution.evidenceConflict ||
+    resolution.providerFamilyKey !== corroboratedFamily
+  ) {
+    return null;
+  }
+
+  return resolution;
 }
 
 export function getProviderReadinessFailure(

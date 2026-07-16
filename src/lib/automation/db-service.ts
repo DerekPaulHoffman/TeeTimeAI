@@ -20,7 +20,10 @@ import {
   type HourlyImprovementRunRecord
 } from "./improvement";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
-import { resolveProviderCapability } from "./provider-capabilities";
+import {
+  resolveProviderCapability,
+  resolveProviderDiscoveryIdentity
+} from "./provider-capabilities";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
@@ -295,6 +298,15 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
     website: input.sourceUrl,
     bookingMetadata: input.apiMetadata
   });
+  const inspectedProviderIdentity =
+    input.status === "INSPECTED"
+      ? resolveProviderDiscoveryIdentity({
+          detectedPlatform: input.detectedPlatform,
+          bookingUrl: input.bookingUrl,
+          apiMetadata: input.apiMetadata,
+          confidence: input.confidence
+        })
+      : null;
   const learnedOnlineAdapter =
     input.status === "LEARNED" &&
     provider.isRunnable;
@@ -307,7 +319,51 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
   );
 
   if (!learnedOnlineAdapter && !verifiedClassification) {
-    return null;
+    if (!inspectedProviderIdentity) {
+      return null;
+    }
+
+    const current = await prisma.course.findUnique({
+      where: { id: input.courseId },
+      select: {
+        providerFamilyKey: true,
+        detectedPlatform: true,
+        detectedBookingUrl: true,
+        website: true,
+        bookingMetadata: true,
+        updatedAt: true
+      }
+    });
+    if (!current) {
+      return null;
+    }
+
+    const persistedProvider = resolveProviderCapability(current);
+    if (
+      persistedProvider.evidenceConflict ||
+      persistedProvider.isRunnable ||
+      (persistedProvider.capability &&
+        persistedProvider.providerFamilyKey !==
+          inspectedProviderIdentity.providerFamilyKey)
+    ) {
+      return null;
+    }
+
+    const updated = await prisma.course.updateMany({
+      where: { id: input.courseId, updatedAt: current.updatedAt },
+      data: {
+        detectedPlatform: inspectedProviderIdentity.detectedPlatform,
+        providerFamilyKey: inspectedProviderIdentity.providerFamilyKey,
+        ...(input.bookingUrl
+          ? { detectedBookingUrl: input.bookingUrl }
+          : {})
+      }
+    });
+    if (updated.count !== 1) {
+      return null;
+    }
+
+    return prisma.course.findUnique({ where: { id: input.courseId } });
   }
 
   const bookingMethod = input.bookingMethod ?? "PUBLIC_ONLINE";
