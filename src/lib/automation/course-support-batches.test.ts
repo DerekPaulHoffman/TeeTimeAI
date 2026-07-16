@@ -7,6 +7,7 @@ import {
   classifyFreshBatchEvidence,
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
+  isDurableTerminalProof,
   isRemediatedSearchSchedulerHealthy,
   preserveExplicitHumanVerification,
   selectCourseSupportBatch,
@@ -398,6 +399,64 @@ describe("fresh runtime verification", () => {
         }
       }).result
     ).toBe("STALE_EVIDENCE");
+  });
+
+  it("accepts a fresh reconciled exact-place review as durable terminal proof", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: {
+            kind: "EXACT_PLACE_REVIEW",
+            disposition: "VERIFIED_NON_COURSE",
+            classification: "PRIVATE_PRACTICE_GREEN",
+            evidenceOrigin: "https://course.example",
+            reviewedAt: "2026-07-15T00:00:00.000Z",
+            reviewUpdatedAt: "2026-07-15T19:30:00.000Z",
+            automationEligibility: "BLOCKED",
+            automationReason: "OTHER"
+          },
+          verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:00:00.000Z"),
+          incident: { lastSeenAt: new Date("2026-07-15T19:00:00.000Z") }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(true);
+  });
+
+  it("rejects exact-place terminal proof older than the latest incident evidence", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: {
+            kind: "EXACT_PLACE_REVIEW",
+            disposition: "VERIFIED_PRIVATE",
+            classification: "PRIVATE_MEMBER_AMENITY",
+            evidenceOrigin: "https://course.example",
+            reviewedAt: "2026-07-15T00:00:00.000Z",
+            reviewUpdatedAt: "2026-07-15T18:30:00.000Z",
+            automationEligibility: "BLOCKED",
+            automationReason: "OTHER"
+          },
+          verifiedAt: new Date("2026-07-15T20:00:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:00:00.000Z"),
+          incident: { lastSeenAt: new Date("2026-07-15T19:00:00.000Z") }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(false);
   });
 
   it("rejects contradictory online metadata for a no-online-booking disposition", () => {

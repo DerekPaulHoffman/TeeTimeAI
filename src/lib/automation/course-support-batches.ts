@@ -3187,7 +3187,7 @@ function getAffectedSearchRefs(dispatch: Record<string, unknown> | null) {
   return refs;
 }
 
-function isDurableTerminalProof(
+export function isDurableTerminalProof(
   entry: {
     normalizedResult: CourseSupportBatchIncidentResult;
     proofSnapshot: Prisma.JsonValue | null;
@@ -3226,6 +3226,23 @@ function isDurableTerminalProof(
     );
   }
   if (entry.normalizedResult === "FINAL_DISPOSITION") {
+    if (proof.kind === "EXACT_PLACE_REVIEW") {
+      const reviewUpdatedAt = parseProofDate(proof.reviewUpdatedAt);
+      const reviewedAt = parseProofDate(proof.reviewedAt);
+      return Boolean(
+        (proof.disposition === "VERIFIED_PRIVATE" ||
+          proof.disposition === "VERIFIED_NON_COURSE") &&
+          typeof proof.classification === "string" &&
+          proof.classification.trim() &&
+          typeof proof.evidenceOrigin === "string" &&
+          getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
+          reviewedAt &&
+          reviewUpdatedAt &&
+          reviewUpdatedAt.getTime() >= entry.incident.lastSeenAt.getTime() &&
+          proof.automationEligibility === "BLOCKED" &&
+          proof.automationReason === "OTHER"
+      );
+    }
     const discoveredAt = parseProofDate(proof.discoveryCreatedAt);
     return Boolean(
       proof.kind === "FINAL_DISPOSITION" &&
