@@ -79,19 +79,64 @@ describe("fetchTeesnapSlots", () => {
     );
     expect(slots).toEqual([
       expect.objectContaining({
-        sourceId: "teesnap-1210-2026-07-11T12:30:00-FRONT_NINE",
-        availableSpots: 2,
+        sourceId: "teesnap-1210-2026-07-11T12:30:00",
+        availableSpots: 4,
         priceCents: 4800,
         holes: 18,
         priceOptions: [
           { holes: 9, priceCents: 2800 },
           { holes: 18, priceCents: 4800 }
-        ]
+        ],
+        bookingUrl: "https://huntergolfclub.teesnap.net/?date=2026-07-11"
+      })
+    ]);
+  });
+
+  it("collapses front and back sections at one start while preserving distinct tee times", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        teeTimes: {
+          bookings: [],
+          teeTimes: [
+            {
+              teeTime: "2026-07-11T12:30:00",
+              teeOffSections: [
+                { teeOff: "FRONT_NINE", isHeld: false },
+                { teeOff: "BACK_NINE", isHeld: false }
+              ]
+            },
+            {
+              teeTime: "2026-07-11T12:40:00",
+              teeOffSections: [
+                { teeOff: "FRONT_NINE", isHeld: false },
+                { teeOff: "BACK_NINE", isHeld: true }
+              ]
+            }
+          ]
+        }
+      })
+    );
+
+    const slots = await fetchTeesnapSlots({
+      courseId: "course-hunter",
+      date: new Date("2026-07-11T00:00:00-04:00"),
+      players: 2,
+      metadata: {
+        provider: "TEESNAP",
+        courseId: 1210,
+        bookingBaseUrl: "https://huntergolfclub.teesnap.net/",
+        defaultHoles: 18
+      }
+    });
+
+    expect(slots).toEqual([
+      expect.objectContaining({
+        sourceId: "teesnap-1210-2026-07-11T12:30:00",
+        startsAt: "2026-07-11T12:30"
       }),
       expect.objectContaining({
-        sourceId: "teesnap-1210-2026-07-11T12:30:00-BACK_NINE",
-        availableSpots: 4,
-        bookingUrl: "https://huntergolfclub.teesnap.net/?date=2026-07-11"
+        sourceId: "teesnap-1210-2026-07-11T12:40:00",
+        startsAt: "2026-07-11T12:40"
       })
     ]);
   });

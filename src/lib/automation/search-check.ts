@@ -73,7 +73,6 @@ import {
   hydrateSearchStatusEmailPayload,
   listRetryableSearchEmailDeliveryGroups,
   prepareSearchEmailDeliveryGroup,
-  suppressSearchEmailDeliveriesForMatches,
   toSearchEmailJson
 } from "@/lib/email/search-delivery-outbox";
 import {
@@ -1066,21 +1065,6 @@ async function sendPendingMatchAlerts(
     currentMatchKeys.has(`${match.course.id}:${match.startsAt.getTime()}`)
   );
   const currentAvailableIds = new Set(availableMatches.map((match) => match.id));
-  const stalePendingMatches = pendingMatches.filter(
-    (match) => !currentAvailableIds.has(match.id)
-  );
-  if (stalePendingMatches.length > 0) {
-    await input.assertCurrent?.();
-    const suppression = await suppressSearchEmailDeliveriesForMatches({
-      searchId,
-      alertGeneration: search.alertGeneration,
-      checkLeaseToken: input.lease.token,
-      matchIds: stalePendingMatches.map((match) => match.id)
-    });
-    if (!suppression.current) {
-      throw new SearchCheckLeaseLostError();
-    }
-  }
   const currentPendingMatches = pendingMatches.filter((match) =>
     currentAvailableIds.has(match.id)
   );
@@ -1089,10 +1073,7 @@ async function sendPendingMatchAlerts(
   }
 
   const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
-  const batchKey = createHash("sha256")
-    .update(currentPendingMatches.map((match) => match.id).sort().join(":"))
-    .digest("hex")
-    .slice(0, 24);
+  const batchKey = buildMatchDeliveryGroupKey(currentPendingMatches);
   await input.assertCurrent?.();
   const prepared = await prepareSearchEmailDeliveryGroup({
     searchId,
@@ -1182,6 +1163,20 @@ async function sendPendingMatchAlerts(
   }
 
   return currentPendingMatches.length;
+}
+
+export function buildMatchDeliveryGroupKey(
+  matches: Array<{ id: string; availabilityCycle: number }>
+) {
+  return createHash("sha256")
+    .update(
+      matches
+        .map((match) => `${match.id}:${match.availabilityCycle}`)
+        .sort()
+        .join(":")
+    )
+    .digest("hex")
+    .slice(0, 24);
 }
 
 function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = []) {

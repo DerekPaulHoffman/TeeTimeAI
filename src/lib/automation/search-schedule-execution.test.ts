@@ -17,6 +17,11 @@ import {
   executeScheduledSearchCheck
 } from "./search-schedule-execution";
 
+const SOURCE_BACKED_BOOKING_WINDOW = {
+  bookingWindowSource: "OFFICIAL_BOOKING_PAGE" as const,
+  bookingWindowEvidenceUrl: "https://example.com/official-booking"
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   dbMocks.claimScheduledSearchCheck.mockResolvedValue({
@@ -165,16 +170,16 @@ describe("executeScheduledSearchCheck", () => {
 });
 
 describe("calculateNextCheckAt", () => {
-  it("sleeps until the booking window when a search is far in the future", () => {
+  it("uses configured cadence when a booking window is unknown", () => {
     const searchDate = new Date("2026-08-30T04:00:00.000Z");
     const now = new Date("2026-08-01T12:00:00.000Z");
 
-    expect(calculateNextCheckAt(searchDate, 15, now)?.getTime()).toBe(
-      searchDate.getTime() - 14 * 24 * 60 * 60 * 1000
+    expect(calculateNextCheckAt(searchDate, 15, now)?.toISOString()).toBe(
+      "2026-08-01T12:15:00.000Z"
     );
   });
 
-  it("uses a learned course-local release hour instead of the generic window", () => {
+  it("uses a source-backed course-local release hour", () => {
     const searchDate = new Date("2026-07-29T00:00:00.000Z");
     const now = new Date("2026-07-01T12:00:00.000Z");
 
@@ -188,21 +193,22 @@ describe("calculateNextCheckAt", () => {
           {
             timeZone: "America/New_York",
             bookingWindowDaysAhead: 14,
-            bookingReleaseTimeLocal: "05:00"
+            bookingReleaseTimeLocal: "05:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           }
         ]
       )?.toISOString()
     ).toBe("2026-07-15T09:00:00.000Z");
   });
 
-  it("retries an unresolved initial monitoring discovery after thirty minutes", () => {
+  it("caps an unresolved monitoring retry at fifteen minutes", () => {
     const searchDate = new Date("2026-08-15T00:00:00.000Z");
     const now = new Date("2026-07-13T20:00:00.000Z");
 
     expect(
       calculateNextCheckAt(
         searchDate,
-        5,
+        120,
         now,
         new Date("2026-08-16T00:00:00.000Z"),
         [{ timeZone: "America/New_York" }],
@@ -225,16 +231,41 @@ describe("calculateNextCheckAt", () => {
           {
             timeZone: "America/New_York",
             bookingWindowDaysAhead: 7,
-            bookingReleaseTimeLocal: "06:00"
+            bookingReleaseTimeLocal: "06:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           },
           {
             timeZone: "America/Los_Angeles",
             bookingWindowDaysAhead: 14,
-            bookingReleaseTimeLocal: "05:00"
+            bookingReleaseTimeLocal: "05:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           }
         ]
       )?.toISOString()
     ).toBe("2026-08-16T12:00:00.000Z");
+  });
+
+  it("uses configured cadence when any selected course lacks source-backed evidence", () => {
+    const searchDate = new Date("2026-08-30T00:00:00.000Z");
+    const now = new Date("2026-08-01T12:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        60,
+        now,
+        new Date("2026-08-31T00:00:00.000Z"),
+        [
+          {
+            timeZone: "America/Los_Angeles",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "05:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
+          },
+          { timeZone: "America/New_York" }
+        ]
+      )?.toISOString()
+    ).toBe("2026-08-01T13:00:00.000Z");
   });
 
   it("uses the normal cadence once any selected course is open", () => {
@@ -251,12 +282,14 @@ describe("calculateNextCheckAt", () => {
           {
             timeZone: "America/Los_Angeles",
             bookingWindowDaysAhead: 14,
-            bookingReleaseTimeLocal: "05:00"
+            bookingReleaseTimeLocal: "05:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           },
           {
             timeZone: "America/New_York",
             bookingWindowDaysAhead: 7,
-            bookingReleaseTimeLocal: "06:00"
+            bookingReleaseTimeLocal: "06:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           }
         ]
       )?.toISOString()
@@ -277,12 +310,14 @@ describe("calculateNextCheckAt", () => {
           {
             timeZone: "America/Los_Angeles",
             bookingWindowDaysAhead: 14,
-            bookingReleaseTimeLocal: "04:00"
+            bookingReleaseTimeLocal: "04:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           },
           {
             timeZone: "America/New_York",
             bookingWindowDaysAhead: 14,
-            bookingReleaseTimeLocal: "08:00"
+            bookingReleaseTimeLocal: "08:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           }
         ]
       )?.toISOString()
@@ -304,7 +339,8 @@ describe("calculateNextCheckAt", () => {
           {
             timeZone: "America/New_York",
             bookingWindowDaysAhead: 14,
-            bookingReleaseTimeLocal: "08:00"
+            bookingReleaseTimeLocal: "08:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW
           }
         ],
         false,

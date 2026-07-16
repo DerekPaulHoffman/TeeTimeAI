@@ -12,7 +12,6 @@ import {
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
 
-const FALLBACK_BOOKING_WINDOW_LEAD_DAYS = 14;
 const FAILED_CHECK_RETRY_MINUTES = 5;
 const SUPPORT_DISCOVERY_RETRY_MINUTES = 15;
 
@@ -124,22 +123,25 @@ export function calculateNextCheckAt(
   }
 
   const schedulingCourses = courses.length > 0 ? courses : [{ timeZone: "America/New_York" }];
-  const bookingWindowOpenings = schedulingCourses.map((course) => {
-    const learnedWindow = getBookingWindowForTargetDate(date, course);
-    if (learnedWindow) {
-      return learnedWindow.opensAt;
+  const sourceBackedBookingWindowOpenings = schedulingCourses.map((course) => {
+    if (!course.bookingWindowSource || !course.bookingWindowEvidenceUrl?.trim()) {
+      return null;
     }
-    return getBookingWindowForTargetDate(date, {
-      timeZone: course.timeZone,
-      bookingWindowDaysAhead: FALLBACK_BOOKING_WINDOW_LEAD_DAYS
-    })!.opensAt;
+    return getBookingWindowForTargetDate(date, course)?.opensAt ?? null;
   });
+  const hasUnknownBookingWindow = sourceBackedBookingWindowOpenings.some(
+    (opensAt) => opensAt === null
+  );
+  const bookingWindowOpenings = sourceBackedBookingWindowOpenings.filter(
+    (opensAt): opensAt is Date => opensAt !== null
+  );
   const nextBookingWindowOpening = Math.min(
     ...bookingWindowOpenings
       .filter((opensAt) => opensAt > now)
       .map((opensAt) => opensAt.getTime())
   );
-  const hasCourseReadyToCheck = bookingWindowOpenings.some((opensAt) => opensAt <= now);
+  const hasCourseReadyToCheck =
+    hasUnknownBookingWindow || bookingWindowOpenings.some((opensAt) => opensAt <= now);
   const releaseCrossedDuringCheck = bookingWindowOpenings.some(
     (opensAt) => opensAt > checkStartedAt && opensAt <= now
   );

@@ -136,30 +136,29 @@ async function fetchTeesnapAvailability(input: {
       continue;
     }
 
-    for (const section of teeTime.teeOffSections ?? []) {
-      if (section.isHeld) {
-        continue;
-      }
-
-      const availableSpots = getAvailableSpots(section, bookingSizes);
-      if (availableSpots < 1) {
-        continue;
-      }
-
-      const priceOptions = getPriceOptions(teeTime.prices);
-
-      slots.push({
-        courseId: input.courseId,
-        sourceId: `teesnap-${input.metadata.courseId}-${teeTime.teeTime}-${section.teeOff ?? "tee"}`,
-        startsAt: teeTime.teeTime.slice(0, 16),
-        availableSpots,
-        bookingUrl: withDateParam(input.metadata.bookingBaseUrl, input.date),
-        priceCents: priceOptions.find((option) => option.holes === holes)?.priceCents,
-        holes,
-        priceOptions,
-        evidenceUrl: url
-      });
+    const availableSpots = Math.max(
+      0,
+      ...(teeTime.teeOffSections ?? [])
+        .filter((section) => !section.isHeld)
+        .map((section) => getAvailableSpots(section, bookingSizes))
+    );
+    if (availableSpots < 1) {
+      continue;
     }
+
+    const priceOptions = getPriceOptions(teeTime.prices);
+
+    slots.push({
+      courseId: input.courseId,
+      sourceId: `teesnap-${input.metadata.courseId}-${teeTime.teeTime}`,
+      startsAt: teeTime.teeTime.slice(0, 16),
+      availableSpots,
+      bookingUrl: withDateParam(input.metadata.bookingBaseUrl, input.date),
+      priceCents: priceOptions.find((option) => option.holes === holes)?.priceCents,
+      holes,
+      priceOptions,
+      evidenceUrl: url
+    });
   }
 
   return { slots, targetDateStatus: "OPEN" };

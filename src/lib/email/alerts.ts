@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { Resend } from "resend";
 
 import { renderCustomerEmail } from "@/lib/email/customer-email";
+import { isVercelProduction } from "@/lib/env";
 import {
   renderSearchStatusHtml,
   type SearchStatusEmailInput
@@ -62,6 +63,16 @@ export type EmailDelivery =
       deliveryStatus: "sent";
     };
 
+export class EmailDeliveryConfigurationError extends Error {
+  readonly code = "EMAIL_DELIVERY_NOT_CONFIGURED";
+  readonly retryable = true;
+
+  constructor() {
+    super("Email delivery is temporarily unavailable.");
+    this.name = "EmailDeliveryConfigurationError";
+  }
+}
+
 export type CourseSupportOperatorEmailInput = {
   event: "opened" | "escalated" | "resolved";
   incidentId: string;
@@ -105,12 +116,23 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
 
-  if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
+  if (shouldDryRunRecipient(input.to)) {
     console.warn("[email:dry-run]", {
       recipientRef: createLogReference(input.to),
       searchRef: createLogReference(input.searchId),
       matchingTimes: input.matches.length,
       courses: new Set(input.matches.map((match) => match.courseName)).size
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+  if (!apiKey || !from) {
+    if (isVercelProduction()) {
+      throw new EmailDeliveryConfigurationError();
+    }
+    console.warn("[email:not-configured-dry-run]", {
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
+      matchingTimes: input.matches.length
     });
     return { id: "dry-run", deliveryStatus: "dry_run" };
   }
@@ -157,13 +179,25 @@ export async function sendSearchStatusEmail(
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
 
-  if (!apiKey || !from || shouldDryRunRecipient(input.to)) {
+  if (shouldDryRunRecipient(input.to)) {
     console.warn("[email:status-dry-run]", {
       recipientRef: createLogReference(input.to),
       searchRef: createLogReference(input.searchId),
       kind: input.kind,
       targetDate: input.targetDate,
       courses: input.courses.length
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+  if (!apiKey || !from) {
+    if (isVercelProduction()) {
+      throw new EmailDeliveryConfigurationError();
+    }
+    console.warn("[email:status-not-configured-dry-run]", {
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
+      kind: input.kind,
+      targetDate: input.targetDate
     });
     return { id: "dry-run", deliveryStatus: "dry_run" };
   }

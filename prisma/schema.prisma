@@ -460,6 +460,7 @@ model TeeTimeMatch {
   courseId           String
   sourceId           String
   startsAt           DateTime
+  availabilityCycle  Int                     @default(0)
   availableSpots     Int
   priceCents         Int?
   holes              Int?

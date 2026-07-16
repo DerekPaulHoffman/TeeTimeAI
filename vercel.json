@@ -15,7 +15,7 @@
   "crons": [
     {
       "path": "/api/cron/recover-search-schedules",
-      "schedule": "0 8 * * *"
+      "schedule": "*/5 * * * *"
     }
   ]
 }

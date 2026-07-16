@@ -250,45 +250,115 @@ describe("email alert delivery helpers", () => {
   });
 
   it("returns a dry-run delivery result for local recipients", async () => {
-    const result = await sendTeeTimeAlert({
-      to: "demo@teetimeai.local",
-      searchId: "search-1",
-      matches: [
-        {
-          courseName: "Tashua Knolls",
-          startsAt: new Date("2026-07-09T14:30:00.000Z"),
-          availableSpots: 4,
-          bookingUrl: "https://example.com/book"
-        }
-      ],
-      idempotencyKey: "tee-time-match-test"
-    });
+    await withMissingProductionEmailConfiguration(async () => {
+      const result = await sendTeeTimeAlert({
+        to: "demo@teetimeai.local",
+        searchId: "search-1",
+        matches: [
+          {
+            courseName: "Tashua Knolls",
+            startsAt: new Date("2026-07-09T14:30:00.000Z"),
+            availableSpots: 4,
+            bookingUrl: "https://example.com/book"
+          }
+        ],
+        idempotencyKey: "tee-time-match-test"
+      });
 
-    expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+      expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+    });
+  });
+
+  it("fails retryably for real recipients when production email configuration is missing", async () => {
+    await withMissingProductionEmailConfiguration(async () => {
+      const expectedError = {
+        name: "EmailDeliveryConfigurationError",
+        code: "EMAIL_DELIVERY_NOT_CONFIGURED",
+        retryable: true
+      };
+
+      await expect(
+        sendTeeTimeAlert({
+          to: "player@resend.dev",
+          searchId: "search-1",
+          matches: [
+            {
+              courseName: "Tashua Knolls",
+              startsAt: new Date("2026-07-09T14:30:00.000Z"),
+              availableSpots: 4,
+              bookingUrl: "https://example.com/book"
+            }
+          ]
+        })
+      ).rejects.toMatchObject(expectedError);
+
+      await expect(
+        sendSearchStatusEmail({
+          searchId: "search-1",
+          to: "player@resend.dev",
+          kind: "setup",
+          targetDate: "2026-07-11",
+          startTime: "07:30",
+          endTime: "09:00",
+          players: 1,
+          checkedAt: new Date("2026-07-10T12:00:00.000Z"),
+          courses: []
+        })
+      ).rejects.toMatchObject(expectedError);
+    });
   });
 
   it("dry-runs setup status reports for reserved test recipients", async () => {
-    const result = await sendSearchStatusEmail({
-      searchId: "search-1",
-      to: "demo@teetimeai.local",
-      kind: "setup",
-      targetDate: "2026-07-11",
-      startTime: "07:30",
-      endTime: "09:00",
-      players: 1,
-      checkedAt: new Date("2026-07-10T12:00:00.000Z"),
-      courses: [
-        {
-          courseId: "course-1",
-          courseName: "Tashua Knolls",
-          outcome: "NO_MATCH",
-          availableMatches: 0,
-          availability: { visibleSlotCount: 4, playerEligibleSlotCount: 4 }
-        }
-      ],
-      idempotencyKey: "tee-search-status-test-setup"
-    });
+    await withMissingProductionEmailConfiguration(async () => {
+      const result = await sendSearchStatusEmail({
+        searchId: "search-1",
+        to: "demo@teetimeai.local",
+        kind: "setup",
+        targetDate: "2026-07-11",
+        startTime: "07:30",
+        endTime: "09:00",
+        players: 1,
+        checkedAt: new Date("2026-07-10T12:00:00.000Z"),
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Tashua Knolls",
+            outcome: "NO_MATCH",
+            availableMatches: 0,
+            availability: { visibleSlotCount: 4, playerEligibleSlotCount: 4 }
+          }
+        ],
+        idempotencyKey: "tee-search-status-test-setup"
+      });
 
-    expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+      expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+    });
   });
 });
+
+async function withMissingProductionEmailConfiguration(worker: () => Promise<void>) {
+  const original = {
+    vercelEnvironment: process.env.VERCEL_ENV,
+    resendApiKey: process.env.RESEND_API_KEY,
+    alertEmailFrom: process.env.ALERT_EMAIL_FROM
+  };
+  process.env.VERCEL_ENV = "production";
+  delete process.env.RESEND_API_KEY;
+  delete process.env.ALERT_EMAIL_FROM;
+
+  try {
+    await worker();
+  } finally {
+    restoreEnvironment("VERCEL_ENV", original.vercelEnvironment);
+    restoreEnvironment("RESEND_API_KEY", original.resendApiKey);
+    restoreEnvironment("ALERT_EMAIL_FROM", original.alertEmailFrom);
+  }
+}
+
+function restoreEnvironment(name: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}

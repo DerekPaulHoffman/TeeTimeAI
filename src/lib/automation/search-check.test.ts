@@ -89,7 +89,7 @@ vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerRequestLeaseMocks);
 
-import { runSearchCheck } from "./search-check";
+import { buildMatchDeliveryGroupKey, runSearchCheck } from "./search-check";
 
 const search = {
   id: "search-1",
@@ -139,6 +139,7 @@ const search = {
 
 const pendingMatch = {
   id: "match-1",
+  availabilityCycle: 0,
   course: {
     id: "course-1",
     name: "Available Course",
@@ -157,6 +158,30 @@ const pendingMatch = {
   priceCents: null,
   holes: 18
 };
+
+describe("buildMatchDeliveryGroupKey", () => {
+  it("creates a new idempotency group when the same tee time reopens", () => {
+    const initial = buildMatchDeliveryGroupKey([
+      { id: "match-1", availabilityCycle: 0 }
+    ]);
+    const reopened = buildMatchDeliveryGroupKey([
+      { id: "match-1", availabilityCycle: 1 }
+    ]);
+
+    expect(reopened).not.toBe(initial);
+    expect(
+      buildMatchDeliveryGroupKey([
+        { id: "match-2", availabilityCycle: 4 },
+        { id: "match-1", availabilityCycle: 1 }
+      ])
+    ).toBe(
+      buildMatchDeliveryGroupKey([
+        { id: "match-1", availabilityCycle: 1 },
+        { id: "match-2", availabilityCycle: 4 }
+      ])
+    );
+  });
+});
 
 describe("runSearchCheck email cadence", () => {
   beforeEach(() => {
@@ -535,9 +560,10 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("requests the short support retry when provider capacity defers without an incident", async () => {
+  it("defers for provider capacity without suppressing a pending available match", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
+      statusEmailSentAt: new Date("2026-07-11T12:00:00.000Z"),
       preferences: [
         {
           rank: 1,
@@ -555,17 +581,24 @@ describe("runSearchCheck email cadence", () => {
     providerRequestLeaseMocks.runWithProviderRequestLease.mockResolvedValue({
       acquired: false
     });
-    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([pendingMatch]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([pendingMatch]);
 
     const result = await runSearchCheck("search-1", "test");
 
     expect(result.supportRetryNeeded).toBe(true);
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(
+      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
+    ).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalled();
+    expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
 
-  it("requests the short support retry after a transient provider failure", async () => {
+  it("retries a transient provider failure without suppressing a pending available match", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
+      statusEmailSentAt: new Date("2026-07-11T12:00:00.000Z"),
       preferences: [
         {
           rank: 1,
@@ -582,8 +615,8 @@ describe("runSearchCheck email cadence", () => {
       ]
     });
     adapterMocks.fetchForeupTeeSheet.mockRejectedValue(new Error("fetch failed"));
-    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
-    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([pendingMatch]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([pendingMatch]);
 
     const result = await runSearchCheck("search-1", "test");
 
@@ -591,6 +624,11 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "FETCH_FAILED" })
     );
+    expect(
+      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
+    ).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalled();
+    expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
 
   it("persists and applies an official CPS robots-policy block without opening another support incident", async () => {

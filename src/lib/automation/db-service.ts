@@ -361,7 +361,8 @@ export async function recordTeeTimeMatch(input: {
     },
     select: {
       availabilityStatus: true,
-      unavailableAt: true
+      unavailableAt: true,
+      availabilityCycle: true
     }
   });
 
@@ -387,7 +388,11 @@ export async function recordTeeTimeMatch(input: {
       availabilityStatus: "AVAILABLE",
       unavailableAt: null,
       ...(shouldAlertReopenedMatch
-        ? { alertStatus: "PENDING", sentAt: null }
+        ? {
+            alertStatus: "PENDING",
+            sentAt: null,
+            availabilityCycle: { increment: 1 }
+          }
         : {}),
       availableSpots: input.availableSpots,
       bookingUrl: input.bookingUrl,
@@ -977,15 +982,39 @@ export async function listSearchesNeedingScheduleRecovery() {
         { checkStatus: "FAILED", nextCheckAt: { lte: now } },
         { checkStatus: "WAITING", nextCheckAt: { lte: overdueBefore } },
         {
-          emailDeliveries: {
-            some: {
+          AND: [
+            {
+              checkStatus: { in: ["WAITING", "FAILED"] },
               OR: [
-                { status: "PENDING", createdAt: { lte: overdueBefore } },
-                { status: "FAILED", nextAttemptAt: { lte: now } },
-                { status: "SENDING", claimExpiresAt: { lte: now } }
+                { checkLeaseExpiresAt: null },
+                { checkLeaseExpiresAt: { lte: now } }
+              ]
+            },
+            {
+              OR: [
+                {
+                  emailDeliveries: {
+                    some: {
+                      OR: [
+                        { status: "PENDING", createdAt: { lte: overdueBefore } },
+                        { status: "FAILED", nextAttemptAt: { lte: now } },
+                        { status: "SENDING", claimExpiresAt: { lte: now } }
+                      ]
+                    }
+                  }
+                },
+                {
+                  matches: {
+                    some: {
+                      availabilityStatus: "AVAILABLE",
+                      alertStatus: "PENDING",
+                      firstSeenAt: { lte: overdueBefore }
+                    }
+                  }
+                }
               ]
             }
-          }
+          ]
         }
       ]
     },

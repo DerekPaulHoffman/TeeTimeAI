@@ -240,6 +240,84 @@ describe("schedule recovery fairness", () => {
       })
     );
   });
+
+  it("recovers a waiting search when an available pending match has no timely delivery", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    try {
+      await listSearchesNeedingScheduleRecovery();
+
+      expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              {
+                AND: [
+                  {
+                    checkStatus: { in: ["WAITING", "FAILED"] },
+                    OR: [
+                      { checkLeaseExpiresAt: null },
+                      { checkLeaseExpiresAt: { lte: new Date("2026-07-16T12:00:00.000Z") } }
+                    ]
+                  },
+                  {
+                    OR: expect.arrayContaining([
+                      {
+                        matches: {
+                          some: {
+                            availabilityStatus: "AVAILABLE",
+                            alertStatus: "PENDING",
+                            firstSeenAt: { lte: new Date("2026-07-16T11:50:00.000Z") }
+                          }
+                        }
+                      }
+                    ])
+                  }
+                ]
+              }
+            ])
+          })
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never preempts a healthy checking lease to retry delivery", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    try {
+      await listSearchesNeedingScheduleRecovery();
+
+      const query = mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0];
+      const recoveryBranches = query?.where?.OR ?? [];
+      const deliveryBranch = recoveryBranches.find(
+        (branch) => "AND" in branch && Array.isArray(branch.AND)
+      );
+
+      expect(deliveryBranch).toEqual(
+        expect.objectContaining({
+          AND: expect.arrayContaining([
+            expect.objectContaining({
+              checkStatus: { in: ["WAITING", "FAILED"] }
+            })
+          ])
+        })
+      );
+      expect(deliveryBranch?.AND).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ checkStatus: "CHECKING" })
+        ])
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function buildHourlyRecord(): HourlyImprovementRunRecord {
@@ -319,7 +397,8 @@ describe("recordTeeTimeMatch", () => {
   it("does not re-alert a tee time that briefly disappears and returns", async () => {
     mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
       availabilityStatus: "GONE",
-      unavailableAt: new Date("2026-07-10T11:45:00.000Z")
+      unavailableAt: new Date("2026-07-10T11:45:00.000Z"),
+      availabilityCycle: 0
     } as never);
 
     await recordTeeTimeMatch({
@@ -341,7 +420,8 @@ describe("recordTeeTimeMatch", () => {
   it("re-alerts a tee time that returns after being absent for 30 minutes", async () => {
     mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
       availabilityStatus: "GONE",
-      unavailableAt: new Date("2026-07-10T11:30:00.000Z")
+      unavailableAt: new Date("2026-07-10T11:30:00.000Z"),
+      availabilityCycle: 3
     } as never);
 
     await recordTeeTimeMatch({
@@ -355,7 +435,11 @@ describe("recordTeeTimeMatch", () => {
 
     expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        update: expect.objectContaining({ alertStatus: "PENDING", sentAt: null })
+        update: expect.objectContaining({
+          alertStatus: "PENDING",
+          sentAt: null,
+          availabilityCycle: { increment: 1 }
+        })
       })
     );
   });
