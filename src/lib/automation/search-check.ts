@@ -29,6 +29,7 @@ import { fetchCpsTeeSheet, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
+import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import {
@@ -815,6 +816,7 @@ function hasSupportedAdapter(course: AutomationCourse) {
     (course.detectedPlatform === "CUSTOM" &&
       (isCpsMetadata(course.bookingMetadata) ||
         isChelseaMetadata(course.bookingMetadata) ||
+        isGolfBackMetadata(course.bookingMetadata) ||
         isTeesnapMetadata(course.bookingMetadata)))
   );
 }
@@ -878,6 +880,16 @@ function fetchCourseTeeSheet(
       players,
       timeZone: course.timeZone,
       metadata: course.bookingMetadata
+    });
+  }
+  if (course.detectedPlatform === "CUSTOM" && isGolfBackMetadata(course.bookingMetadata)) {
+    return fetchGolfBackTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      timeZone: course.timeZone,
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
     });
   }
   if (course.detectedPlatform === "CUSTOM" && isTeesnapMetadata(course.bookingMetadata)) {

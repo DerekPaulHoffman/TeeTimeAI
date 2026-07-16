@@ -205,6 +205,51 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).toBeUndefined();
   });
 
+  it("learns reusable GolfBack metadata from an official public course link", () => {
+    const bookingUrl =
+      "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";
+    const discovery = buildBrowserDiscovery({
+      courseId: "windsor-parke",
+      courseName: "Windsor Parke Golf Club",
+      sourceUrl: "https://windsorparke.com/",
+      finalUrl: "https://golfback.com/",
+      observedUrls: [bookingUrl],
+      visibleText: "Reserve tee times online for the guaranteed best rate"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiEndpoint:
+        "https://api.golfback.com/api/v1/courses/5a90fb0c-b928-43f0-9486-d5d43c03d25d/date/{date}/teetimes",
+      apiMetadata: {
+        provider: "GOLFBACK",
+        courseId: "5a90fb0c-b928-43f0-9486-d5d43c03d25d",
+        bookingBaseUrl: bookingUrl
+      },
+      confidence: 0.95,
+      evidence: { learnedFrom: "golfback-public-course-link" }
+    });
+  });
+
+  it("does not learn GolfBack metadata from a malformed course id", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "golfback-under-review",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.com/",
+      observedUrls: ["https://golfback.com/#/course/not-a-provider-id"],
+      visibleText: "Book tee times online"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.automationEligibility).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
+  });
+
   it("learns CPS metadata from an official tee-time widget config", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-stanley",

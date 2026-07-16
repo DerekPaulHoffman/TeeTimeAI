@@ -519,6 +519,66 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("learns reusable GolfBack metadata from an official course link", async () => {
+    const bookingUrl =
+      "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === "https://windsorparke.example/") {
+        return new Response(
+          `<html><body>Public tee times<a href="${bookingUrl}">Book Online Now</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === bookingUrl) {
+        return new Response(
+          "<html><body>Windsor Parke public tee times</body></html>",
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "windsor-parke",
+          name: "Windsor Parke Golf Club",
+          website: "https://windsorparke.example/",
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      "https://windsorparke.example/",
+      bookingUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        detectedPlatform: "CUSTOM",
+        bookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        apiMetadata: {
+          provider: "GOLFBACK",
+          courseId: "5a90fb0c-b928-43f0-9486-d5d43c03d25d",
+          bookingBaseUrl: bookingUrl
+        },
+        evidence: expect.objectContaining({
+          learnedFrom: "golfback-public-course-link"
+        })
+      })
+    );
+  });
+
   it("falls back to an HTTP official site when HTTPS is unavailable", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();

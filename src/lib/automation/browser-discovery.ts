@@ -60,6 +60,10 @@ export type BrowserDiscovery = {
     bookingWindowDaysAhead?: number;
     bookingWindowEvidenceUrl?: string;
   } | {
+    provider: "GOLFBACK";
+    courseId: string;
+    bookingBaseUrl: string;
+  } | {
     clubId: number;
     courseIds: string[];
     bookingBaseUrl: string;
@@ -132,6 +136,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return chelseaDiscovery;
   }
 
+  const golfBackDiscovery = learnGolfBackDiscovery(evidence, observedUrls);
+
+  if (golfBackDiscovery) {
+    return golfBackDiscovery;
+  }
+
   const protectedCpsDiscovery = learnProtectedCpsDiscovery(evidence, observedUrls);
 
   if (protectedCpsDiscovery) {
@@ -170,6 +180,43 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "browser-visible-links"
+    }
+  };
+}
+
+function learnGolfBackDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const bookingUrl = observedUrls.find(isGolfBackBookingUrl);
+  const courseId = bookingUrl ? getGolfBackCourseId(bookingUrl) : null;
+  if (!bookingUrl || !courseId) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The official GolfBack course page exposes public tee-time availability without login. Tee Time Spot reads that public tee sheet and leaves booking on GolfBack.",
+    apiEndpoint: `https://api.golfback.com/api/v1/courses/${courseId}/date/{date}/teetimes`,
+    apiMetadata: {
+      provider: "GOLFBACK",
+      courseId,
+      bookingBaseUrl: bookingUrl
+    },
+    confidence: 0.95,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "golfback-public-course-link"
     }
   };
 }
@@ -1175,6 +1222,22 @@ function isTenForeBookingUrl(value: string) {
     url?.hostname.toLowerCase() === "fox.tenfore.golf" &&
     /^\/[a-z0-9-]+\/?$/i.test(url.pathname)
   );
+}
+
+function isGolfBackBookingUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(url && isGolfBackHostname(url.hostname) && getGolfBackCourseId(value));
+}
+
+function isGolfBackHostname(hostname: string) {
+  return /(^|\.)golfback\.com$/i.test(hostname);
+}
+
+function getGolfBackCourseId(value: string) {
+  const url = parseUrl(value);
+  return url?.hash.match(
+    /^#\/course\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i
+  )?.[1] ?? null;
 }
 
 function canonicalizeTenForeBookingUrl(value: string) {

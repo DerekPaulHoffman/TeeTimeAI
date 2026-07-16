@@ -27,9 +27,11 @@ const adapterMocks = vi.hoisted(() => ({
   fetchChelseaTeeSheet: vi.fn(),
   fetchChronogolfSlots: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
+  fetchGolfBackTeeSheet: vi.fn(),
   isChelseaMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
-  isForeupMetadata: vi.fn()
+  isForeupMetadata: vi.fn(),
+  isGolfBackMetadata: vi.fn()
 }));
 
 const supportIncidentMocks = vi.hoisted(() => ({
@@ -45,6 +47,7 @@ const monitoringDiscoveryMocks = vi.hoisted(() => ({
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
+vi.mock("@/lib/adapters/golfback", () => adapterMocks);
 vi.mock("@/lib/adapters/chelsea", () => adapterMocks);
 vi.mock("@/lib/adapters/chronogolf", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
@@ -146,6 +149,12 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(true);
     adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
+    adapterMocks.isGolfBackMetadata.mockReturnValue(false);
+    adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue({
       slots: [],
       targetDateStatus: "UNKNOWN",
       bookingWindowEvidence: null
@@ -698,5 +707,48 @@ describe("runSearchCheck email cadence", () => {
       bookingWindow: { releaseDate: "2026-08-08", exactTime: false }
     });
     expect(dbMocks.recordTeeTimeMatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches reusable GolfBack metadata to the public adapter", async () => {
+    const bookingBaseUrl =
+      "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [{
+        rank: 1,
+        course: {
+          ...search.preferences[0].course,
+          id: "windsor-parke",
+          name: "Windsor Parke Golf Club",
+          detectedPlatform: "CUSTOM",
+          detectedBookingUrl: bookingBaseUrl,
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          policyNotes: "Public availability is exposed without login; booking stays on GolfBack.",
+          bookingMetadata: {
+            provider: "GOLFBACK",
+            courseId: "5a90fb0c-b928-43f0-9486-d5d43c03d25d",
+            bookingBaseUrl
+          }
+        }
+      }]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(false);
+    adapterMocks.isChelseaMetadata.mockReturnValue(false);
+    adapterMocks.isGolfBackMetadata.mockReturnValue(true);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchGolfBackTeeSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "windsor-parke",
+        players: 2,
+        timeZone: "America/New_York",
+        metadata: expect.objectContaining({ provider: "GOLFBACK", bookingBaseUrl })
+      })
+    );
   });
 });
