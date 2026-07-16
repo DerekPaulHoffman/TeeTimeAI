@@ -185,7 +185,7 @@ async function collectPageEvidence(page: Page) {
       .slice(0, 80);
     const inlineCourseData = Array.from(document.querySelectorAll<HTMLScriptElement>("script:not([src])"))
       .map((script) => script.textContent ?? "")
-      .filter((text) => /window\.(courses|property)\s*=/.test(text))
+      .filter((text) => /window\.(courses|property|chronogolfSettings)\s*=/.test(text))
       .map((text) => text.slice(0, 5000))
       .join("\n")
       .slice(0, 8000);
@@ -206,9 +206,9 @@ async function collectPageEvidence(page: Page) {
       anchors,
       scripts,
       visibleText: [
-        document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 4000),
         inlineCourseData,
-        widgetConfigs
+        widgetConfigs,
+        document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 4000)
       ]
         .filter(Boolean)
         .join("\n")

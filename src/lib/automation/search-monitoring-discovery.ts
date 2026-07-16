@@ -399,17 +399,19 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     .join("\n");
   const relevantScripts = [...decodedHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
     .map((match) => match[1] ?? "")
-    .filter((script) => /window\.(?:courses|property)|baseURL|courseId|schedule_id/i.test(script))
+    .filter((script) =>
+      /window\.(?:courses|property|chronogolfSettings)|baseURL|courseId|schedule_id/i.test(script)
+    )
     .join("\n")
     .slice(0, 8_000);
   const visibleText = [
+    relevantScripts,
+    widgetConfigs,
     stripHtml(
       decodedHtml
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
         .replace(/<(?:style|nav|header)\b[^>]*>[\s\S]*?<\/(?:style|nav|header)>/gi, " ")
-    ),
-    relevantScripts,
-    widgetConfigs
+    )
   ]
     .filter(Boolean)
     .join("\n")

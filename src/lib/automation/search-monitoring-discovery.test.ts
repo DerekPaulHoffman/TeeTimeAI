@@ -135,6 +135,78 @@ describe("search monitoring discovery", () => {
     ).toBe(false);
   });
 
+  it("learns Chronogolf metadata from an official inline widget club id", async () => {
+    const officialUrl = "https://hydepark.example/";
+    const profileUrl = "https://www.chronogolf.com/club/4006";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === officialUrl) {
+        const longMarketingCopy = "Historic public golf course. ".repeat(600);
+        return new Response(
+          `<html><body><p>${longMarketingCopy}</p><script>
+            window.chronogolfSettings = { "clubId": 4006, "locale": "en-US" };
+          </script><script src="https://cdn2.chronogolf.com/widgets/v2"></script></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      expect(value).toBe(profileUrl);
+      return new Response(
+        `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+          props: {
+            pageProps: {
+              club: {
+                id: 4006,
+                features: { onlineBookingEnabled: true },
+                courses: [{ uuid: "hyde-park-course-uuid" }]
+              }
+            }
+          }
+        })}</script></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "hyde-park",
+            name: "Hyde Park Golf Club",
+            website: officialUrl,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      officialUrl,
+      profileUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        detectedPlatform: "CHRONOGOLF",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        bookingUrl: profileUrl,
+        apiMetadata: {
+          clubId: 4006,
+          courseIds: ["hyde-park-course-uuid"],
+          bookingBaseUrl: profileUrl
+        },
+        evidence: expect.objectContaining({
+          learnedFrom: "chronogolf-public-club-profile"
+        })
+      })
+    );
+  });
+
   it("follows the exact course detail after a legacy URL redirects to a multi-course index", async () => {
     const legacyUrl = "https://city.example/departments/golf-course/";
     const indexUrl = "https://city.example/departments/golf-courses/";
