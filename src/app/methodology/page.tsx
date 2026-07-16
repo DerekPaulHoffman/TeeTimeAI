@@ -29,7 +29,7 @@ export default function MethodologyPage() {
     <EditorialPage
       eyebrow="Methodology"
       title="How Tee Time Spot decides what it can responsibly watch."
-      intro="Reliable alerts begin before a tee sheet is checked. We first need a credible course identity, an official public booking surface, and a policy-safe way to observe availability."
+      intro="Reliable alerts begin before a tee sheet is checked. We first need a credible course identity, an official public booking surface, and a signed-out read-only way to observe availability."
       summary="Course discovery and active monitoring are separate. A course can appear in discovery without being monitorable. Tee Time Spot labels unsupported or blocked access instead of presenting it as active coverage."
       updated="July 13, 2026"
       toc={[

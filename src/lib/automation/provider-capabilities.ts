@@ -9,6 +9,7 @@ import { isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { isWebTracMetadata } from "@/lib/adapters/webtrac";
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 
 export const SOURCE_MISSING_PROVIDER_FAMILY = "SOURCE_MISSING" as const;
 export const SOURCE_CONFLICT_PROVIDER_FAMILY = "SOURCE_CONFLICT" as const;
@@ -493,6 +494,10 @@ export type ConsumerDispositionInput = ProviderCourseInput & {
   automationEligibility?: string | null;
   automationReason?: string | null;
   currentEvidenceTrusted?: boolean;
+  currentEvidenceObservedAt?: Date | string | null;
+  intelligenceVerifiedAt?: Date | string | null;
+  intelligenceReviewAt?: Date | string | null;
+  intelligenceConfidence?: number | null;
   latestOutcome?: string | null;
   targetDateStatus?: string | null;
   bookingOpensAt?: Date | string | null;
@@ -518,31 +523,27 @@ const effectiveConsumerDispositions = new Set<ConsumerDisposition>([
 export function deriveConsumerDisposition(
   input: ConsumerDispositionInput
 ): ConsumerDisposition {
-  if (input.invalidCourse || input.isPublic === false) {
+  const monitoringGate = evaluateMonitoringGate(input);
+  if (monitoringGate.disposition === "IDENTITY_FINAL") {
     return "PRIVATE_OR_INVALID";
   }
-  if (input.automationReason === "ACCOUNT_REQUIRED") {
-    return "ACCOUNT_REQUIRED";
+  if (monitoringGate.disposition === "TECHNICAL_FINAL") {
+    return input.automationReason === "ACCOUNT_REQUIRED"
+      ? "ACCOUNT_REQUIRED"
+      : "CAPTCHA_OR_QUEUE";
   }
-  if (input.automationReason === "CAPTCHA_OR_QUEUE") {
-    return "CAPTCHA_OR_QUEUE";
-  }
-  if (input.automationReason === "AUTOMATION_PROHIBITED") {
-    return "POLICY_BLOCKED";
-  }
-  if (["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(input.bookingMethod ?? "")) {
-    return "PHONE_OR_WALK_IN";
-  }
-
-  const provider = resolveProviderCapability(input);
-  const hasOfficialSource =
-    provider.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY &&
-    provider.providerFamilyKey !== SOURCE_CONFLICT_PROVIDER_FAMILY;
-  if (input.automationEligibility === "BLOCKED") {
-    return hasOfficialSource ? "DIRECT_SITE_ONLY" : "SOURCE_UNVERIFIED";
+  if (monitoringGate.disposition === "MANUAL_FINAL") {
+    return ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+      input.bookingMethod ?? ""
+    )
+      ? "PHONE_OR_WALK_IN"
+      : "DIRECT_SITE_ONLY";
   }
 
-  if (input.currentEvidenceTrusted) {
+  if (
+    input.currentEvidenceTrusted &&
+    isRunnableEvidenceNewEnough(input)
+  ) {
     if (input.latestOutcome === "MATCH_FOUND" && (input.availableMatchCount ?? 0) > 0) {
       return "MATCH_AVAILABLE";
     }
@@ -556,17 +557,34 @@ export function deriveConsumerDisposition(
       return "CHECKED_NO_MATCH";
     }
   }
-
+  const provider = resolveProviderCapability(input);
+  const hasOfficialSource =
+    provider.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY &&
+    provider.providerFamilyKey !== SOURCE_CONFLICT_PROVIDER_FAMILY;
   if (input.failureClass && retryableFailureClasses.has(input.failureClass)) {
     return "RETRYING";
   }
   if (!hasOfficialSource) {
     return "SOURCE_UNVERIFIED";
   }
-  if (input.finalClassification) {
-    return "DIRECT_SITE_ONLY";
-  }
   return "ENGINEERING";
+}
+
+function isRunnableEvidenceNewEnough(input: ConsumerDispositionInput) {
+  const evidenceAt = parseEvidenceDate(input.currentEvidenceObservedAt);
+  const classificationAt = parseEvidenceDate(input.intelligenceVerifiedAt);
+  if (!classificationAt) {
+    return true;
+  }
+  return Boolean(evidenceAt && evidenceAt.getTime() >= classificationAt.getTime());
+}
+
+function parseEvidenceDate(value: Date | string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 export function isEffectiveConsumerCoverage(disposition: ConsumerDisposition) {

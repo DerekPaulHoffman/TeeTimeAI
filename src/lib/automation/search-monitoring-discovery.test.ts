@@ -746,12 +746,6 @@ describe("search monitoring discovery", () => {
           { status: 200, headers: { "content-type": "text/html" } }
         );
       }
-      if (value === "https://www.whoosh.io/terms") {
-        return new Response(
-          "<html><body>Attempt to access or search the Whoosh Platform or Content or download Content through the use of any engine, software, tool, agent, device or mechanism, including spiders, robots, crawlers, and data mining tools.</body></html>",
-          { status: 200, headers: { "content-type": "text/html" } }
-        );
-      }
       return new Response("<html><body>Whoosh</body></html>", {
         status: 200,
         headers: { "content-type": "text/html" }
@@ -782,8 +776,7 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
       "https://yalebulldogs.com/golf",
       "https://yalebulldogs.com/faqs",
-      "https://app.whoosh.io/patron/club/yale-golf-course",
-      "https://www.whoosh.io/terms"
+      "https://app.whoosh.io/patron/club/yale-golf-course"
     ]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -794,9 +787,7 @@ describe("search monitoring discovery", () => {
         automationReason: "UNSUPPORTED_PLATFORM",
         bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
         evidence: expect.objectContaining({
-          observedUrls: expect.arrayContaining(["https://www.whoosh.io/terms"]),
-          learnedFrom:
-            "official-whoosh-booking-policy-evidence:legacy-policy-reconciliation"
+          learnedFrom: "official-whoosh-booking:legacy-policy-reconciliation"
         })
       })
     );
@@ -1885,17 +1876,28 @@ describe("search monitoring discovery", () => {
 
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "VERIFIED",
+        status: "INSPECTED",
         detectedPlatform: "CUSTOM",
         bookingUrl: "https://fox.tenfore.golf/gainfieldfarms",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "BLOCKED",
-        automationReason: "CAPTCHA_OR_QUEUE"
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "NONE"
       })
     );
   });
 
   it("upgrades a stale HTTP site and classifies its challenge-protected CPS booking", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "grassy-hill",
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          accessBarriers: [
+            { url: "https://grassyhill.cps.golf/", status: 403 }
+          ]
+        }
+      }
+    ]);
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();
       if (value === "https://www.grassyhillcountryclub.com/") {

@@ -75,14 +75,35 @@ describe("activeSearchInspectionQuery", () => {
 });
 
 describe("latestCurrentActionableProbes", () => {
-  it("does not surface resolved blocked-policy probes for blocked courses", () => {
+  it("keeps legacy blocked-policy probes actionable", () => {
     const probes = latestCurrentActionableProbes([
       {
         teeSearchId: "search-1",
         courseId: "course-1",
         outcome: "BLOCKED_POLICY",
         course: {
-          automationEligibility: "BLOCKED"
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED"
+        }
+      }
+    ]);
+
+    expect(probes).toHaveLength(1);
+  });
+
+  it("does not surface a current corroborated technical final", () => {
+    const probes = latestCurrentActionableProbes([
+      {
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        outcome: "BLOCKED_AUTH",
+        course: {
+          automationEligibility: "BLOCKED",
+          automationReason: "CAPTCHA_OR_QUEUE",
+          bookingMethod: "PUBLIC_ONLINE",
+          intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
+          intelligenceReviewAt: new Date("2099-08-16T00:00:00.000Z"),
+          intelligenceConfidence: 0.95
         }
       }
     ]);

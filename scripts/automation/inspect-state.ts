@@ -11,6 +11,7 @@ import {
   deriveConsumerDisposition,
   isEffectiveConsumerCoverage
 } from "@/lib/automation/provider-capabilities";
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import { listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
@@ -308,6 +309,7 @@ async function main() {
       const disposition = deriveConsumerDisposition({
         ...preference.course,
         currentEvidenceTrusted,
+        currentEvidenceObservedAt: probe?.observedAt ?? null,
         latestOutcome: probe?.outcome ?? null,
         targetDateStatus: getProbeTargetDateStatus(rawSummary),
         availableMatchCount: search.matches.filter(
@@ -731,23 +733,15 @@ function getProbeTargetDateStatus(rawSummary: Record<string, unknown>) {
 }
 
 function hasPersistedFinalConsumerClassification(course: {
+  isPublic: boolean;
   bookingMethod: string;
   automationEligibility: string;
   automationReason: string;
+  intelligenceVerifiedAt: Date | null;
+  intelligenceReviewAt: Date | null;
+  intelligenceConfidence: number | null;
 }) {
-  if (["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(course.bookingMethod)) {
-    return true;
-  }
-
-  return (
-    course.automationEligibility === "BLOCKED" &&
-    [
-      "NO_ONLINE_BOOKING",
-      "AUTOMATION_PROHIBITED",
-      "ACCOUNT_REQUIRED",
-      "CAPTCHA_OR_QUEUE"
-    ].includes(course.automationReason)
-  );
+  return evaluateMonitoringGate(course).disposition !== "ACTIONABLE";
 }
 
 function summarizeConsumerCoverage<
@@ -785,7 +779,13 @@ function latestCurrentActionableProbes<
     courseId: string;
     outcome: string;
     course: {
+      isPublic?: boolean;
+      bookingMethod?: string;
       automationEligibility: string;
+      automationReason?: string;
+      intelligenceVerifiedAt?: Date | null;
+      intelligenceReviewAt?: Date | null;
+      intelligenceConfidence?: number | null;
     };
   }
 >(probes: T[]) {
@@ -800,7 +800,7 @@ function latestCurrentActionableProbes<
 
   return [...latestBySearchCourse.values()].filter(
     (probe) =>
-      probe.course.automationEligibility !== "BLOCKED" &&
+      evaluateMonitoringGate(probe.course).adapterAllowed &&
       probe.outcome !== "NO_MATCH" &&
       probe.outcome !== "MATCH_FOUND"
   );

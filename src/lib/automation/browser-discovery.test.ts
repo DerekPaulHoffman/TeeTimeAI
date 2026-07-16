@@ -5,6 +5,7 @@ import {
   enrichBrowserDiscoveryWithProviderLease,
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
+  evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
   keepPolicyOnlyDiscoveryActionable,
@@ -13,12 +14,84 @@ import {
   type BrowserDiscoveryEvidence
 } from "./browser-discovery";
 
+describe("browser discovery monitoring gate", () => {
+  const now = new Date("2026-07-16T12:00:00.000Z");
+
+  it("accepts a newly verified coherent manual classification", () => {
+    expect(
+      evaluateBrowserDiscoveryMonitoringGate(
+        {
+          status: "VERIFIED",
+          bookingMethod: "PHONE_ONLY",
+          automationEligibility: "BLOCKED",
+          automationReason: "NO_ONLINE_BOOKING",
+          intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+          confidence: 0.95
+        },
+        now
+      )
+    ).toMatchObject({ disposition: "MANUAL_FINAL", adapterAllowed: false });
+  });
+
+  it("does not promote an inspected or incoherent discovery to a final", () => {
+    expect(
+      evaluateBrowserDiscoveryMonitoringGate(
+        {
+          status: "INSPECTED",
+          bookingMethod: "PHONE_ONLY",
+          automationEligibility: "BLOCKED",
+          automationReason: "NO_ONLINE_BOOKING",
+          intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+          confidence: 0.95
+        },
+        now
+      )
+    ).toMatchObject({ disposition: "ACTIONABLE", adapterAllowed: true });
+    expect(
+      evaluateBrowserDiscoveryMonitoringGate(
+        {
+          status: "VERIFIED",
+          bookingMethod: "CONTACT_COURSE",
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+          confidence: 0.95
+        },
+        now
+      )
+    ).toMatchObject({ disposition: "ACTIONABLE", adapterAllowed: true });
+    expect(
+      evaluateBrowserDiscoveryMonitoringGate(
+        {
+          status: "VERIFIED",
+          bookingMethod: "WALK_IN",
+          automationEligibility: "ALLOWED",
+          automationReason: "NO_ONLINE_BOOKING",
+          intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+          confidence: 0.95
+        },
+        now
+      )
+    ).toMatchObject({ disposition: "ACTIONABLE", adapterAllowed: true });
+  });
+});
+
 describe("buildBrowserDiscovery", () => {
   it("learns reusable ForeUP metadata from browser-observed API requests", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
       courseName: "Oak Hills Park Golf Course",
       sourceUrl: "https://www.oakhillsgc.com/tee-times",
+      officialCourseWebsite: "https://www.oakhillsgc.com/",
+      officialPage: {
+        url: "https://www.oakhillsgc.com/tee-times",
+        linkCandidates: [
+          {
+            url: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+            label: "Book tee times"
+          }
+        ]
+      },
       finalUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
       observedUrls: [
         "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
@@ -42,6 +115,13 @@ describe("buildBrowserDiscovery", () => {
       bookingClassId: 22739,
       bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
     });
+    expect(discovery.evidence.courseIdentityCorroboration).toEqual({
+      kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+      officialWebsiteUrl: "https://www.oakhillsgc.com/",
+      officialPageUrl: "https://www.oakhillsgc.com/tee-times",
+      providerUrl:
+        "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+    });
   });
 
   it("does not infer a ForeUP booking class from route segments without an observed API request", () => {
@@ -61,6 +141,27 @@ describe("buildBrowserDiscovery", () => {
       scheduleId: 12897,
       bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes"
     });
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+  });
+
+  it("does not let a provider page self-attest cross-provider course identity", () => {
+    const providerUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-1",
+      courseName: "Oak Hills Park Golf Course",
+      sourceUrl: providerUrl,
+      officialCourseWebsite: "https://www.oakhillsgc.com/",
+      officialPage: {
+        url: providerUrl,
+        linkCandidates: [{ url: providerUrl, label: "Oak Hills Park Golf Course" }]
+      },
+      finalUrl: providerUrl,
+      observedUrls: [providerUrl],
+      visibleText: "Oak Hills Park Golf Course"
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
   });
 
   it("records useful website evidence even when no reusable adapter is learned", () => {
@@ -270,7 +371,8 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).toBeUndefined();
   });
 
-  it("classifies a managed-challenge CPS surface as direct booking", () => {
+  it("keeps a first managed-challenge CPS observation non-terminal", () => {
+    const barrier = { url: "https://grassyhill.cps.golf/", status: 403 as const };
     const discovery = buildBrowserDiscovery({
       courseId: "grassy-hill",
       courseName: "Grassy Hill Country Club",
@@ -280,20 +382,44 @@ describe("buildBrowserDiscovery", () => {
         "https://secure.east.prophetservices.com/GrassyHillCCV3",
         "https://grassyhill.cps.golf/"
       ],
-      accessBarrierUrls: ["https://grassyhill.cps.golf/"],
+      accessBarriers: [barrier],
+      visibleText: "Book Online Tee Times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://grassyhill.cps.golf/",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      evidence: { learnedFrom: "cps-managed-challenge-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("classifies a corroborated managed-challenge CPS surface as technical", () => {
+    const barrier = { url: "https://grassyhill.cps.golf/", status: 403 as const };
+    const discovery = buildBrowserDiscovery({
+      courseId: "grassy-hill",
+      courseName: "Grassy Hill Country Club",
+      sourceUrl: "https://grassyhillcountryclub.com/",
+      finalUrl: barrier.url,
+      observedUrls: [barrier.url],
+      accessBarriers: [barrier],
+      corroboratedAccessBarrier: barrier,
       visibleText: "Book Online Tee Times"
     });
 
     expect(discovery).toMatchObject({
       status: "VERIFIED",
-      detectedPlatform: "CUSTOM",
-      bookingUrl: "https://grassyhill.cps.golf/",
-      bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "CAPTCHA_OR_QUEUE",
-      evidence: { learnedFrom: "cps-managed-challenge-booking" }
+      evidence: {
+        learnedFrom: "cps-managed-challenge-booking",
+        accessBarriers: [barrier]
+      }
     });
-    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("learns reusable GolfBack metadata from an official public course link", () => {
@@ -1002,7 +1128,7 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("keeps Whoosh under review when current provider terms cannot be verified", () => {
+  it("keeps Whoosh under review until public read-only monitoring is implemented", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "unverified-whoosh",
       courseName: "Example Whoosh Course",
@@ -1278,42 +1404,43 @@ describe("buildBrowserDiscovery", () => {
   });
 
   it("retains automation-policy text as non-terminal discovery evidence", () => {
-    const policyDiscovery = buildBrowserDiscovery({
-      courseId: "course-whoosh",
-      courseName: "Public Whoosh Course",
-      sourceUrl: "https://example.com/tee-times",
-      finalUrl: "https://app.whoosh.io/patron/club/public-course",
-      observedUrls: ["https://app.whoosh.io/patron/club/public-course"],
-      providerPolicyUrl: "https://www.whoosh.io/terms",
-      providerPolicyText:
-        "You may not attempt to access or search the Whoosh platform or content using any engine, software, tool, agent, device, or mechanism, including robots, spiders, crawlers, or data mining tools."
-    });
-
-    expect(policyDiscovery).toMatchObject({
-      status: "VERIFIED",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM"
-    });
-
     const legacyPolicyBlock = {
-      ...policyDiscovery,
+      courseId: "course-whoosh",
+      status: "VERIFIED" as const,
+      detectedPlatform: "CUSTOM" as const,
+      sourceUrl: "https://example.com/tee-times",
+      bookingUrl: "https://app.whoosh.io/patron/club/public-course",
+      bookingMethod: "PUBLIC_ONLINE" as const,
       automationEligibility: "BLOCKED" as const,
       automationReason: "AUTOMATION_PROHIBITED" as const,
       confidence: 0.99,
       evidence: {
-        ...policyDiscovery.evidence,
+        observedUrls: ["https://app.whoosh.io/patron/club/public-course"],
         learnedFrom: "legacy-policy-block"
       }
     };
-    expect(keepPolicyOnlyDiscoveryActionable(legacyPolicyBlock)).toMatchObject({
+
+    expect(legacyPolicyBlock).toMatchObject({
+      status: "VERIFIED",
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED"
+    });
+
+    const actionable = keepPolicyOnlyDiscoveryActionable(legacyPolicyBlock);
+    expect(actionable).toMatchObject({
       status: "VERIFIED",
       automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM",
+      automationReason: "AUTOMATION_PROHIBITED",
       bookingUrl: "https://app.whoosh.io/patron/club/public-course",
       confidence: 0.95,
       evidence: {
         learnedFrom: "legacy-policy-block:policy-evidence-only"
       }
+    });
+    expect(evaluateBrowserDiscoveryMonitoringGate(actionable)).toMatchObject({
+      disposition: "ACTIONABLE",
+      adapterAllowed: true,
+      requiresRevalidation: true
     });
   });
 
@@ -2856,7 +2983,7 @@ describe("browser probe target selection", () => {
     ).toBe(true);
   });
 
-  it("keeps all blocked courses out of the interactive browser probe", () => {
+  it("requeues policy-only blocks while preserving current technical finals", () => {
     expect(
       shouldQueueBrowserProbe({
         detectedPlatform: "CUSTOM",
@@ -2866,7 +2993,7 @@ describe("browser probe target selection", () => {
         detectedBookingUrl: null,
         bookingMetadata: null
       })
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldQueueBrowserProbe({
         detectedPlatform: "FOREUP",
@@ -2887,6 +3014,10 @@ describe("browser probe target selection", () => {
         detectedPlatform: "CUSTOM",
         automationEligibility: "BLOCKED",
         automationReason: "ACCOUNT_REQUIRED",
+        bookingMethod: "PUBLIC_ONLINE",
+        intelligenceVerifiedAt: new Date(),
+        intelligenceReviewAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        intelligenceConfidence: 0.95,
         website: "https://example.com",
         detectedBookingUrl: null,
         bookingMetadata: null
@@ -2919,6 +3050,53 @@ describe("browser probe target selection", () => {
           bookingBaseUrl: "https://dennis.chelseareservations.com/",
           courseCode: 2,
           courseLabel: "Highland"
+        }
+      })
+    ).toBe(false);
+  });
+
+  it("requeues structurally runnable metadata after a current repeated failure", () => {
+    const course = {
+      detectedPlatform: "FOREUP",
+      automationEligibility: "ALLOWED",
+      website: "https://course.example/",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
+      bookingMetadata: {
+        scheduleId: 2,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/1/2#/teetimes"
+      },
+      monitoringFailureEvidence: {
+        kind: "FETCH_FAILED" as const,
+        occurrenceCount: 3,
+        latestFailureAt: new Date()
+      }
+    };
+
+    expect(shouldQueueBrowserProbe(course)).toBe(true);
+    expect(getBestProbeUrl(course)).toBe("https://course.example/");
+  });
+
+  it("preserves a runnable provider after newer successful evidence", () => {
+    const latestFailureAt = new Date(Date.now() - 60_000);
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "FOREUP",
+        automationEligibility: "ALLOWED",
+        website: "https://course.example/",
+        detectedBookingUrl:
+          "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
+        bookingMetadata: {
+          scheduleId: 2,
+          bookingBaseUrl:
+            "https://foreupsoftware.com/index.php/booking/1/2#/teetimes"
+        },
+        monitoringFailureEvidence: {
+          kind: "FETCH_FAILED",
+          occurrenceCount: 3,
+          latestFailureAt,
+          latestSuccessfulAt: new Date()
         }
       })
     ).toBe(false);
@@ -3155,7 +3333,7 @@ describe("Chronogolf public profile enrichment", () => {
 });
 
 describe("TenFore public booking enrichment", () => {
-  it("keeps the official booking link while blocking captcha-protected retrieval", () => {
+  it("keeps public browser-visible TenFore availability in adapter review", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "gainfield",
       courseName: "Gainfield Farms Golf Course",
@@ -3168,18 +3346,19 @@ describe("TenFore public booking enrichment", () => {
     });
 
     expect(discovery).toMatchObject({
-      status: "VERIFIED",
+      status: "INSPECTED",
       detectedPlatform: "CUSTOM",
       bookingUrl: "https://fox.tenfore.golf/gainfieldfarms",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "BLOCKED",
-      automationReason: "CAPTCHA_OR_QUEUE",
-      confidence: 0.98,
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      confidence: 0.95,
       evidence: expect.objectContaining({
-        learnedFrom: "tenfore-captcha-protected-booking"
+        learnedFrom: "tenfore-public-browser-availability"
       })
     });
-    expect(discovery.policyNotes).toContain("reCAPTCHA token");
+    expect(discovery.policyNotes).toContain("renders public tee-time availability");
+    expect(discovery.policyNotes).toContain("keep adapter work open");
   });
 });
 

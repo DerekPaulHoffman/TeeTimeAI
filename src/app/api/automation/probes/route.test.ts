@@ -39,4 +39,27 @@ describe("POST /api/automation/probes", () => {
     });
     expect(mocks.recordCourseProbe).not.toHaveBeenCalled();
   });
+
+  it("retains legacy BLOCKED_POLICY probe compatibility during remediation", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.recordCourseProbe.mockResolvedValue({ id: "probe-1" });
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/automation/probes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          searchId: "search-1",
+          courseId: "course-1",
+          outcome: "BLOCKED_POLICY",
+          message: "Legacy policy evidence requires revalidation."
+        })
+      })
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "BLOCKED_POLICY" })
+    );
+  });
 });

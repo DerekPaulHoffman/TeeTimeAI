@@ -12,6 +12,7 @@ import type {
   ProbeOutcome
 } from "@prisma/client";
 
+import { isCoherentManualDisposition } from "@/lib/automation/policy";
 import { prisma } from "@/lib/prisma";
 
 import {
@@ -67,13 +68,7 @@ const SUCCESSFUL_PROBE_OUTCOMES = new Set<ProbeOutcome>([
   "MATCH_FOUND",
   "NO_MATCH"
 ]);
-const FINAL_BOOKING_METHODS = new Set<BookingMethod>([
-  "PHONE_ONLY",
-  "CONTACT_COURSE",
-  "WALK_IN"
-]);
 const FINAL_AUTOMATION_REASONS = new Set<AutomationReason>([
-  "AUTOMATION_PROHIBITED",
   "ACCOUNT_REQUIRED",
   "CAPTCHA_OR_QUEUE"
 ]);
@@ -3209,10 +3204,10 @@ function getPersistedFinalDisposition(
 
   const manualDisposition =
     course.isPublic &&
-    FINAL_BOOKING_METHODS.has(course.bookingMethod) &&
+    isCoherentManualDisposition(course) &&
+    isCoherentManualDisposition(discovery) &&
     discovery.bookingMethod === course.bookingMethod &&
-    course.automationReason === "NO_ONLINE_BOOKING" &&
-    discovery.automationReason === "NO_ONLINE_BOOKING";
+    ["VERIFIED", "BLOCKED"].includes(discovery.status);
   const blockedDisposition =
     course.isPublic &&
     course.automationEligibility === "BLOCKED" &&
@@ -3226,7 +3221,7 @@ function getPersistedFinalDisposition(
   return {
     message: manualDisposition
       ? "Current official evidence supports a manual direct-course disposition."
-      : "Current official evidence supports a final policy-safe non-runnable disposition.",
+      : "Current official evidence supports a final technically gated non-runnable disposition.",
     proofSnapshot: {
       kind: "FINAL_DISPOSITION",
       disposition: manualDisposition ? "MANUAL_DIRECT" : course.automationReason,
@@ -3236,7 +3231,10 @@ function getPersistedFinalDisposition(
       confidence: discovery.confidence,
       bookingMethod: course.bookingMethod,
       automationEligibility: course.automationEligibility,
-      automationReason: course.automationReason
+      automationReason: course.automationReason,
+      discoveryBookingMethod: discovery.bookingMethod,
+      discoveryAutomationEligibility: discovery.automationEligibility,
+      discoveryAutomationReason: discovery.automationReason
     } satisfies Prisma.InputJsonObject
   };
 }
@@ -3600,14 +3598,54 @@ export function isDurableTerminalProof(
       );
     }
     const discoveredAt = parseProofDate(proof.discoveryCreatedAt);
-    return Boolean(
+    const commonFinalProof = Boolean(
       proof.kind === "FINAL_DISPOSITION" &&
+        (proof.disposition === "MANUAL_DIRECT" ||
+          proof.disposition === "ACCOUNT_REQUIRED" ||
+          proof.disposition === "CAPTCHA_OR_QUEUE") &&
         typeof proof.evidenceOrigin === "string" &&
         getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
         discoveredAt &&
         discoveredAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
         typeof proof.confidence === "number" &&
         proof.confidence >= 0.7
+    );
+    if (!commonFinalProof) {
+      return false;
+    }
+    if (proof.disposition !== "MANUAL_DIRECT") {
+      return true;
+    }
+    return Boolean(
+      isCoherentManualDisposition({
+        bookingMethod:
+          typeof proof.bookingMethod === "string" ? proof.bookingMethod : null,
+        automationEligibility:
+          typeof proof.automationEligibility === "string"
+            ? proof.automationEligibility
+            : null,
+        automationReason:
+          typeof proof.automationReason === "string"
+            ? proof.automationReason
+            : null
+      }) &&
+        isCoherentManualDisposition({
+          bookingMethod:
+            typeof proof.discoveryBookingMethod === "string"
+              ? proof.discoveryBookingMethod
+              : null,
+          automationEligibility:
+            typeof proof.discoveryAutomationEligibility === "string"
+              ? proof.discoveryAutomationEligibility
+              : null,
+          automationReason:
+            typeof proof.discoveryAutomationReason === "string"
+              ? proof.discoveryAutomationReason
+              : null
+        }) &&
+        proof.discoveryBookingMethod === proof.bookingMethod &&
+        (proof.discoveryStatus === "VERIFIED" ||
+          proof.discoveryStatus === "BLOCKED")
     );
   }
   return false;

@@ -780,7 +780,7 @@ export function validateAdapterRemediationCloseout(input: {
   }
   if (input.outcome === "needs_adapter") {
     throw new Error(
-      "adapter remediation cannot close as needs_adapter; complete the adapter, classify a policy-safe direct-booking outcome, or record a concrete blocker"
+      "adapter remediation cannot close as needs_adapter; complete the adapter, classify a current technical-access or direct-booking outcome, or record a concrete blocker"
     );
   }
   if (input.outcome !== "needs_human") {
@@ -1144,13 +1144,16 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
       };
     case "BLOCKED_POLICY":
       return {
-        outcome: "blocked_policy",
-        kind: "policy_blocker",
-        summary: `${probe.courseName} is blocked by policy review or terms.`,
+        outcome: "needs_adapter",
+        kind: "adapter_gap",
+        summary: `${probe.courseName} has a legacy policy block that requires a fresh public read-only access check.`,
         referenceId: probe.id,
-        category: "operations_incidents",
+        category: "search_discovery",
         priority: 90,
-        selectionReason: "A current policy blocker on real demand requires disposition."
+        selectionReason:
+          "Legacy policy-only evidence on real demand must be re-verified and cannot remain a terminal monitoring disposition.",
+        researchDirective:
+          "Inspect the current signed-out public booking surface. Implement reusable read-only monitoring when technically accessible; record only a present technical access blocker, contact-only method, or identity disposition."
       };
     case "BLOCKED_AUTH":
       return {
@@ -1194,7 +1197,7 @@ function candidateFromSupportIncident(
       : incident.kind === "BLOCKED_TOOLING"
         ? "Repair the automation tooling and complete the provider integration"
         : incident.kind === "BLOCKED_AUTH"
-          ? "Find a policy-safe public retrieval path or conclusively classify the course for direct booking"
+          ? "Find a public signed-out read-only retrieval path or conclusively classify the current technical access requirement"
           : "Build or extend a reusable provider adapter";
   return {
     outcome: "needs_adapter",
@@ -1208,8 +1211,8 @@ function candidateFromSupportIncident(
       ? "An engineering-only multi-cycle coverage incident has priority until it receives a runnable or final disposition."
       : "An open support incident affecting real active demand has priority.",
     researchDirective: incident.engineeringOnly
-      ? "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Persist a conclusive direct-booking, policy, contact, or identity disposition when public monitoring is not possible; do not escalate synthetic coverage to the owner."
-      : "Start from the current official booking surface and policy evidence, inspect public unauthenticated provider traffic, implement reusable metadata discovery and retrieval when allowed, add focused tests, and rerun the affected search. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
+      ? "Start from the current official booking surface, inspect public signed-out provider traffic, implement reusable metadata discovery and read-only retrieval when technically accessible, add focused tests, and rerun the affected search. Persist a conclusive technical-access, contact, or identity disposition when public monitoring is not possible; do not escalate synthetic coverage to the owner."
+      : "Start from the current official booking surface, inspect public signed-out provider traffic, implement reusable metadata discovery and read-only retrieval when technically accessible, add focused tests, and rerun the affected search. Booking or transaction policy text alone is never terminal. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
   };
 }
 

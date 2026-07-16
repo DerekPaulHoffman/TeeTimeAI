@@ -5,6 +5,7 @@ import { chromium, type Page } from "playwright";
 import {
   buildBrowserDiscovery,
   enrichBrowserDiscoveryWithProviderLease,
+  evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
   keepPolicyOnlyDiscoveryActionable,
   sanitizeBrowserDiscoveryAccessEvidence,
@@ -68,7 +69,8 @@ async function main() {
               collectBrowserEvidence(page, {
                 courseId: target.course.id,
                 courseName: target.course.name,
-                sourceUrl: target.probeUrl
+                sourceUrl: target.probeUrl,
+                officialCourseWebsite: target.course.website
               })
           );
           if (!providerExecution.acquired) {
@@ -120,17 +122,17 @@ async function main() {
               continue;
             }
           }
-          const directBookingVerified =
+          const observedMonitoringGate =
+            evaluateBrowserDiscoveryMonitoringGate(discovery);
+          const directBookingVerified = Boolean(
             appliedCourse &&
-            discovery.automationEligibility === "BLOCKED" &&
-            ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
-              discovery.bookingMethod ?? "UNKNOWN"
-            );
+              (observedMonitoringGate.disposition === "MANUAL_FINAL" ||
+                observedMonitoringGate.disposition === "IDENTITY_FINAL")
+          );
           const accessControlVerified =
-            appliedCourse &&
-            discovery.automationEligibility === "BLOCKED" &&
-            ["ACCOUNT_REQUIRED", "CAPTCHA_OR_QUEUE"].includes(
-              discovery.automationReason ?? "NONE"
+            Boolean(
+              appliedCourse &&
+                observedMonitoringGate.disposition === "TECHNICAL_FINAL"
             );
           const finalDispositionVerified =
             directBookingVerified || accessControlVerified;
@@ -213,7 +215,10 @@ async function main() {
 
 async function collectBrowserEvidence(
   page: Page,
-  input: Pick<BrowserDiscoveryEvidence, "courseId" | "courseName" | "sourceUrl">
+  input: Pick<
+    BrowserDiscoveryEvidence,
+    "courseId" | "courseName" | "sourceUrl" | "officialCourseWebsite"
+  >
 ): Promise<BrowserDiscoveryEvidence> {
   const observedUrls = new Set<string>();
   const accessBarrierUrls = new Set<string>();
@@ -235,6 +240,7 @@ async function collectBrowserEvidence(
     timeout: NAVIGATION_TIMEOUT_MS
   });
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+  const landingPageUrl = page.url();
   const landingPageEvidence = await collectPageEvidence(page);
 
   await clickLikelyBookingLink(page);
@@ -255,6 +261,14 @@ async function collectBrowserEvidence(
     ...input,
     finalUrl: page.url(),
     observedUrls: [...observedUrls],
+    linkCandidates: [
+      ...landingPageEvidence.linkCandidates,
+      ...destinationPageEvidence.linkCandidates
+    ],
+    officialPage: {
+      url: landingPageUrl,
+      linkCandidates: landingPageEvidence.linkCandidates
+    },
     accessBarrierUrls: [...accessBarrierUrls],
     accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),
     visibleText: [landingPageEvidence.visibleText, destinationPageEvidence.visibleText]
@@ -265,10 +279,16 @@ async function collectBrowserEvidence(
 
 async function collectPageEvidence(page: Page) {
   return page.evaluate(() => {
-    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
-      .map((anchor) => anchor.href)
-      .filter(Boolean)
+    const linkCandidates = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>("a[href]")
+    )
+      .map((anchor) => ({
+        url: anchor.href,
+        label: anchor.textContent?.replace(/\s+/g, " ").trim() ?? ""
+      }))
+      .filter((candidate) => Boolean(candidate.url))
       .slice(0, 80);
+    const anchors = linkCandidates.map((candidate) => candidate.url);
     const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>("script[src]"))
       .map((script) => script.src)
       .filter(Boolean)
@@ -294,6 +314,7 @@ async function collectPageEvidence(page: Page) {
       .slice(0, 8000);
     return {
       anchors,
+      linkCandidates,
       scripts,
       visibleText: [
         inlineCourseData,

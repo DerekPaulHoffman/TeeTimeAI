@@ -59,7 +59,7 @@ export function getUnsupportedAlertCopy(reason: string) {
   const copy: Record<string, string> = {
     NO_ONLINE_BOOKING: "Automatic tee time alerts are not available because this course does not offer public online booking.",
     ACCOUNT_REQUIRED: "Automatic tee time alerts are not available because the booking flow requires a golfer account.",
-    AUTOMATION_PROHIBITED: "Automatic tee time alerts are not available for this course under the provider's access rules.",
+    AUTOMATION_PROHIBITED: "Automatic tee time monitoring is being re-checked against the current public booking surface.",
     CAPTCHA_OR_QUEUE: "Automatic tee time alerts are not available because the booking flow uses a captcha, queue, or other access control."
   };
   return copy[reason] ?? "Automatic tee time alerts are not currently available for this course.";

@@ -238,7 +238,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("PRIORITY 2 &middot; ADDING MONITORING");
   });
 
-  it("does not claim an official-site-only course is monitored automatically", () => {
+  it("revalidates a generic legacy block instead of treating it as final", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-1",
       to: "player@example.com",
@@ -267,15 +267,15 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("keep checking supported courses");
-    expect(html).toContain("OFFICIAL SITE ONLY");
-    expect(html).toContain("not automatically monitored");
+    expect(html).toContain("monitoring is still being added");
+    expect(html).toContain("ADDING MONITORING");
+    expect(html).toContain("generic classification is being re-checked");
     expect(html).toContain("Open official site &rarr;");
     expect(html).toContain("Call (860) 555-0102 &rarr;");
     expect(html).not.toContain("keep watching automatically");
   });
 
-  it("separates direct online booking from automatic monitoring", () => {
+  it("reopens a legacy online policy block as monitoring work", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-1",
       to: "player@example.com",
@@ -293,15 +293,16 @@ describe("renderSearchStatusHtml", () => {
           availableMatches: 0,
           bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
           bookingMethod: "PUBLIC_ONLINE",
+          automationReason: "AUTOMATION_PROHIBITED",
           bookingAccess: "BOOKING_PAGE"
         }
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; BOOK ONLINE DIRECTLY");
-    expect(html).toContain("Use the official booking page to book directly");
+    expect(html).toContain("PRIORITY 1 &middot; ADDING MONITORING");
+    expect(html).toContain("legacy policy-only or generic classification is being re-checked");
     expect(html).toContain("Open official booking page &rarr;");
-    expect(html).toContain("not automatically monitored");
+    expect(html).toContain("keep working to add monitoring");
   });
 
   it("gives phone-only courses a clear direct-booking action", () => {
@@ -323,6 +324,7 @@ describe("renderSearchStatusHtml", () => {
           bookingUrl: "https://pinebrook.example.com/",
           phone: "+1 (203) 555-0199",
           bookingMethod: "PHONE_ONLY",
+          automationReason: "NO_ONLINE_BOOKING",
           bookingAccess: "OFFICIAL_SITE"
         }
       ]
@@ -334,6 +336,137 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Call +1 (203) 555-0199 &rarr;");
     expect(html).toContain("Open official site &rarr;");
     expect(html).not.toContain("Open official booking page");
+  });
+
+  it.each([
+    ["ACCOUNT_REQUIRED", "ACCOUNT REQUIRED", "requires a golfer account"],
+    ["CAPTCHA_OR_QUEUE", "CAPTCHA OR QUEUE", "behind a captcha, queue"]
+  ] as const)(
+    "renders %s as a technical final even with the same booking page",
+    (automationReason, badge, detail) => {
+      const html = renderSearchStatusHtml({
+        searchId: "search-1",
+        to: "player@example.com",
+        kind: "setup",
+        targetDate: "2026-07-18",
+        startTime: "09:00",
+        endTime: "18:00",
+        players: 4,
+        checkedAt: new Date("2026-07-15T12:15:00.000Z"),
+        courses: [
+          {
+            courseId: "technical-course",
+            courseName: "Technical Course",
+            outcome: "BLOCKED_AUTH",
+            availableMatches: 0,
+            bookingUrl: "https://booking.example/tee-times",
+            bookingMethod: "PUBLIC_ONLINE",
+            bookingAccess: "BOOKING_PAGE",
+            automationReason
+          }
+        ]
+      });
+
+      expect(html).toContain(`PRIORITY 1 &middot; ${badge}`);
+      expect(html).toContain(detail);
+      expect(html).not.toContain("ADDING MONITORING");
+      expect(html).not.toContain("legacy policy-only");
+    }
+  );
+
+  it("renders identity finals without any booking or contact action", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-identity",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-18",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 2,
+      checkedAt: new Date("2026-07-16T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "private-listing",
+          courseName: "Private Listing",
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 1,
+          bookingUrl: "https://private.example/book",
+          phone: "+1 (203) 555-0100",
+          bookingMethod: "CONTACT_COURSE",
+          automationReason: "OTHER",
+          monitoringDisposition: "IDENTITY_FINAL",
+          matchingTimes: [
+            {
+              startsAt: "2026-07-18T10:00:00-04:00",
+              availableSpots: 4,
+              isNew: true
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(html).toContain("PRIORITY 1 &middot; NOT A PUBLIC COURSE");
+    expect(html).toContain("private, is not a playable golf course");
+    expect(html).not.toContain("AVAILABLE NOW");
+    expect(html).not.toContain("https://private.example/book");
+    expect(html).not.toContain("tel:+12035550100");
+    expect(html).not.toContain("Open official");
+    expect(html).not.toContain("Call +1");
+  });
+
+  it("does not infer a manual final from automation reason OTHER", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-other",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-18",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 2,
+      checkedAt: new Date("2026-07-16T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "generic-other",
+          courseName: "Generic Other Course",
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/book",
+          bookingMethod: "PUBLIC_ONLINE",
+          automationReason: "OTHER"
+        }
+      ]
+    });
+
+    expect(html).toContain("PRIORITY 1 &middot; ADDING MONITORING");
+    expect(html).toContain("legacy policy-only or generic classification");
+    expect(html).not.toContain("DIRECT BOOKING REQUIRED");
+  });
+
+  it("does not infer a manual final from no-online metadata with an unknown method", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-unknown-manual",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-18",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 2,
+      checkedAt: new Date("2026-07-16T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "unknown-manual",
+          courseName: "Unknown Method Course",
+          outcome: "BLOCKED_POLICY",
+          availableMatches: 0,
+          bookingMethod: "UNKNOWN",
+          automationReason: "NO_ONLINE_BOOKING"
+        }
+      ]
+    });
+
+    expect(html).toContain("PRIORITY 1 &middot; ADDING MONITORING");
+    expect(html).not.toContain("DIRECT BOOKING REQUIRED");
   });
 
   it("keeps internal escalation state out of customer-facing course copy", () => {

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import {
   finishAutomationRun,
-  applyBrowserDiscoveryToCourse,
   getActiveSearchForAutomation,
   heartbeatSearchCheckLease,
   isSearchCheckLeaseCurrent,
@@ -11,7 +10,6 @@ import {
   markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
   recordCourseBookingWindowEvidence,
-  recordBrowserDiscovery,
   recordCourseProbe,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
@@ -21,14 +19,13 @@ import {
 } from "@/lib/automation/db-service";
 import {
   getBestProbeUrl,
-  shouldQueueBrowserProbe,
-  type BrowserDiscovery
+  shouldQueueBrowserProbe
 } from "@/lib/automation/browser-discovery";
-import { evaluateAutomationPolicy } from "@/lib/automation/policy";
 import {
   classifyProviderFailure,
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
@@ -40,7 +37,6 @@ import {
 } from "@/lib/automation/support-incidents";
 import {
   fetchCpsTeeSheet,
-  isCpsAutomationPolicyBlockedError,
   isCpsMetadata
 } from "@/lib/adapters/cps";
 import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
@@ -68,7 +64,12 @@ import {
   getCourseLayoutCompatibility,
   getCourseLayoutLabel
 } from "@/lib/courses/course-layout";
-import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
+import {
+  getRenderedTeeTimeAlertMatchIds,
+  sendSearchStatusEmail,
+  sendTeeTimeAlert
+} from "@/lib/email/alerts";
+import { getRenderedAvailabilityStartTimes } from "@/lib/email/customer-email";
 import {
   drainSearchEmailDeliveryGroup,
   finalizeSearchEmailDeliveryGroup,
@@ -112,12 +113,16 @@ type AutomationCourse = {
   timeZone: string;
   phone: string | null;
   bookingPhone: string | null;
+  isPublic: boolean;
   website: string | null;
   detectedBookingUrl: string | null;
   providerFamilyKey: string;
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
+  intelligenceVerifiedAt: Date | null;
+  intelligenceReviewAt: Date | null;
+  intelligenceConfidence: number | null;
   policyNotes: string | null;
   detectedPlatform:
     | "UNKNOWN"
@@ -293,6 +298,61 @@ async function checkSearch(
     await maintainSearchCheckLease(lease);
     const course = preference.course as AutomationCourse;
 
+    const monitoringGate = evaluateMonitoringGate(course);
+    if (monitoringGate.disposition !== "ACTIONABLE") {
+      const technicalFinal = monitoringGate.disposition === "TECHNICAL_FINAL";
+      const outcome = technicalFinal ? "BLOCKED_AUTH" : "BLOCKED_POLICY";
+      const message = getFinalMonitoringMessage(course, monitoringGate.disposition);
+      if (monitoringGate.disposition === "IDENTITY_FINAL") {
+        await markMissingMatchesUnavailable({
+          searchId: search.id,
+          alertGeneration: search.alertGeneration,
+          checkLeaseToken: lease.token,
+          courseId: course.id,
+          date: searchWindow.date,
+          timeZone: course.timeZone,
+          confirmedMatches: []
+        });
+      }
+      await recordCourseProbeIfChanged({
+        searchId: search.id,
+        courseId: course.id,
+        automationRunId,
+        outcome,
+        message,
+        rawSummary: {
+          monitoringDisposition: monitoringGate.disposition,
+          automationReason: course.automationReason
+        }
+      });
+      await resolveCourseSupportIncident({
+        courseId: course.id,
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        message
+      });
+      courseResults.push({
+        courseId: course.id,
+        courseName: course.name,
+        timeZone: course.timeZone,
+        outcome,
+        availableMatches: 0,
+        message,
+        bookingUrl:
+          monitoringGate.disposition === "IDENTITY_FINAL"
+            ? undefined
+            : getCustomerBookingUrl(course),
+        phone:
+          monitoringGate.disposition === "IDENTITY_FINAL"
+            ? undefined
+            : course.bookingPhone ?? course.phone ?? undefined,
+        bookingMethod: course.bookingMethod,
+        bookingAccess: getCourseBookingAccess(course),
+        automationReason: course.automationReason,
+        monitoringDisposition: monitoringGate.disposition
+      });
+      return;
+    }
+
     if (
       requestedLayoutHoles &&
       course.layoutHolesVerifiedAt &&
@@ -323,40 +383,6 @@ async function checkSearch(
         outcome: "NO_MATCH",
         availableMatches: 0,
         message,
-        bookingUrl: getCustomerBookingUrl(course),
-        phone: course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: course.bookingMethod,
-        bookingAccess: getCourseBookingAccess(course)
-      });
-      return;
-    }
-
-    const policy = evaluateAutomationPolicy({
-      automationEligibility: course.automationEligibility,
-      termsText: course.policyNotes,
-      intendedAction: "ALERT_ONLY"
-    });
-
-    if (!policy.allowed) {
-      await recordCourseProbeIfChanged({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        outcome: "BLOCKED_POLICY",
-        message: policy.reason
-      });
-      await resolveCourseSupportIncident({
-        courseId: course.id,
-        resolution: "DIRECT_BOOKING_CLASSIFIED",
-        message: `${course.name} was conclusively classified for direct booking: ${policy.reason}`
-      });
-      courseResults.push({
-        courseId: course.id,
-        courseName: course.name,
-        timeZone: course.timeZone,
-        outcome: "BLOCKED_POLICY",
-        availableMatches: 0,
-        message: policy.reason,
         bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
@@ -397,7 +423,7 @@ async function checkSearch(
       const browserProbeUrl = getBestProbeUrl(course);
       const browserProbeQueued = shouldQueueBrowserProbe(course);
       const message = browserProbeQueued
-        ? "Official booking surface inspected; no reusable policy-safe monitoring connection was confirmed."
+        ? "Official booking surface inspected; no reusable public read-only monitoring connection was confirmed."
         : "No public booking surface is currently available for automated monitoring.";
       await recordCourseProbeIfChanged({
         searchId: search.id,
@@ -416,8 +442,8 @@ async function checkSearch(
         kind: "NEEDS_ADAPTER",
         message,
         nextAction: browserProbeQueued
-          ? `Build or extend a reusable policy-safe public adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
-          : "Autonomously classify the official booking method, find a policy-safe public retrieval path if one exists, and verify this search."
+          ? `Build or extend a reusable public read-only adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
+          : "Autonomously classify the official booking method, find a public read-only retrieval path if one exists, and verify this search."
       });
       supportIssues.push({ courseId: course.id, ...supportIssue });
       courseResults.push({
@@ -581,7 +607,7 @@ async function checkSearch(
       await resolveCourseSupportIncident({
         courseId: course.id,
         resolution: "MONITORING_RESTORED",
-        message: `${course.name} completed a policy-safe automated tee-sheet check with outcome ${outcome}.`
+        message: `${course.name} completed a public read-only tee-sheet check with outcome ${outcome}.`
       });
       courseResults.push({
         courseId: course.id,
@@ -613,52 +639,6 @@ async function checkSearch(
       });
     } catch (error) {
       await maintainSearchCheckLease(lease);
-      if (isCpsAutomationPolicyBlockedError(error)) {
-        const message =
-          "The official provider policy disallows automated access to the reservation endpoints. Check and book on the official page directly.";
-        const discovery: BrowserDiscovery = {
-          courseId: course.id,
-          status: "BLOCKED",
-          detectedPlatform: "CUSTOM",
-          sourceUrl: error.policyUrl,
-          bookingUrl: error.bookingUrl,
-          bookingMethod: "PUBLIC_ONLINE",
-          automationEligibility: "BLOCKED",
-          automationReason: "AUTOMATION_PROHIBITED",
-          policyNotes: message,
-          intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-          confidence: 0.99,
-          evidence: {
-            finalUrl: error.policyUrl,
-            observedUrls: [error.bookingUrl, error.policyUrl],
-            visibleText:
-              "The official provider robots policy disallows automated access to the required reservation endpoints.",
-            learnedFrom: "cps-official-robots-policy"
-          }
-        };
-        await recordBrowserDiscovery(discovery);
-        await applyBrowserDiscoveryToCourse(discovery);
-        await recordCourseProbe({
-          searchId: search.id,
-          courseId: course.id,
-          automationRunId,
-          outcome: "BLOCKED_POLICY",
-          message
-        });
-        courseResults.push({
-          courseId: course.id,
-          courseName: course.name,
-          timeZone: course.timeZone,
-          outcome: "BLOCKED_POLICY",
-          availableMatches: 0,
-          message,
-          bookingUrl: error.bookingUrl,
-          phone: course.bookingPhone ?? course.phone ?? undefined,
-          bookingMethod: "PUBLIC_ONLINE",
-          bookingAccess: "BOOKING_PAGE"
-        });
-        return;
-      }
       const message = error instanceof Error ? error.message : "Unknown adapter error";
       if (SHORT_SEARCH_RETRY_FAILURES.has(classifyProviderFailure({ error }).failureClass)) {
         monitoringRetryCourseIds.add(course.id);
@@ -758,19 +738,23 @@ async function checkSearch(
   if (statusEmailKind === "setup") {
     try {
       const setupPendingMatches = await listPendingMatchAlerts(searchId);
+      const renderedPendingMatchIds = getRenderedPendingMatchIds(
+        setupPendingMatches,
+        courseResults
+      );
       statusEmailOutcome = await deliverSearchStatusReport({
         search,
         searchWindow,
         courseResults,
         checkedAt,
         kind: statusEmailKind,
-        coveredMatchIds: setupPendingMatches.map((match) => match.id),
+        coveredMatchIds: renderedPendingMatchIds,
         lease,
         assertCurrent: () => maintainSearchCheckLease(lease)
       });
       newlyAlertedMatches =
         statusEmailOutcome === "sent" || statusEmailOutcome === "dry_run"
-          ? setupPendingMatches.length
+          ? renderedPendingMatchIds.length
           : 0;
     } catch (error) {
       statusEmailOutcome = "failed";
@@ -822,6 +806,29 @@ async function checkSearch(
     supportRetryNeeded,
     statusEmailOutcome
   };
+}
+
+function getRenderedPendingMatchIds(
+  pendingMatches: Array<{
+    id: string;
+    startsAt: Date;
+    course: { id: string };
+  }>,
+  courseResults: SearchCheckCourseResult[]
+) {
+  const renderedMatchKeys = new Set(
+    courseResults.flatMap((course) =>
+      getRenderedAvailabilityStartTimes(
+        course.matchingTimes ?? [],
+        course.timeZone
+      ).map((startsAt) => `${course.courseId}:${startsAt}`)
+    )
+  );
+  return pendingMatches
+    .filter((match) =>
+      renderedMatchKeys.has(`${match.course.id}:${match.startsAt.getTime()}`)
+    )
+    .map((match) => match.id);
 }
 
 async function retryExistingSearchEmailDeliveryGroups(input: {
@@ -1076,8 +1083,46 @@ async function sendPendingMatchAlerts(
     return 0;
   }
 
+  const currentPendingIds = new Set(currentPendingMatches.map((match) => match.id));
+  const reportMatches = availableMatches.map((match) => ({
+    matchId: match.id,
+    courseId: match.course.id,
+    courseName: match.course.name,
+    courseRank: input.courseResults.find(
+      (course) => course.courseId === match.course.id
+    )?.rank,
+    courseAddress:
+      input.courseResults.find((course) => course.courseId === match.course.id)
+        ?.courseAddress ?? match.course.address ?? undefined,
+    courseTimeZone: match.course.timeZone,
+    startsAt: match.startsAt,
+    availableSpots: match.availableSpots,
+    bookingUrl: match.bookingUrl,
+    priceCents: match.priceCents,
+    holes: match.holes,
+    bookableHoleCounts:
+      input.courseResults
+        .find((course) => course.courseId === match.course.id)
+        ?.matchingTimes?.find(
+          (time) =>
+            parseCourseLocalDateTime(time.startsAt, match.course.timeZone).getTime() ===
+            match.startsAt.getTime()
+        )?.bookableHoleCounts ?? [],
+    isNew: currentPendingIds.has(match.id)
+  }));
+  const renderedMatchIds = new Set(getRenderedTeeTimeAlertMatchIds(reportMatches));
+  const renderedMatches = reportMatches.filter((match) =>
+    renderedMatchIds.has(match.matchId)
+  );
+  const renderedPendingMatches = currentPendingMatches.filter((match) =>
+    renderedMatchIds.has(match.id)
+  );
+  if (renderedPendingMatches.length === 0) {
+    return 0;
+  }
+
   const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
-  const batchKey = buildMatchDeliveryGroupKey(currentPendingMatches);
+  const batchKey = buildMatchDeliveryGroupKey(renderedPendingMatches);
   await input.assertCurrent?.();
   const prepared = await prepareSearchEmailDeliveryGroup({
     searchId,
@@ -1090,8 +1135,8 @@ async function sendPendingMatchAlerts(
     payload: {
       schemaVersion: 2,
       checkedAt: input.checkedAt.toISOString(),
-      matchIds: currentPendingMatches.map((match) => match.id),
-      displayMatchIds: availableMatches.map((match) => match.id),
+      matchIds: renderedPendingMatches.map((match) => match.id),
+      displayMatchIds: renderedMatches.map((match) => match.matchId),
       satisfiesStatusReport: input.satisfiesStatusReport,
       statusSnapshot: buildSearchStatusSnapshot(input.courseResults),
       matchReport: toSearchEmailJson({
@@ -1101,31 +1146,9 @@ async function sendPendingMatchAlerts(
         players: input.searchWindow.players,
         requestedLayoutHoles: input.requestedLayoutHoles,
         userTimeZone: search.userTimeZone,
-        matches: availableMatches.map((match) => ({
-          matchId: match.id,
-          courseId: match.course.id,
-          courseName: match.course.name,
-          courseRank: input.courseResults.find(
-            (course) => course.courseId === match.course.id
-          )?.rank,
-          courseAddress:
-            input.courseResults.find((course) => course.courseId === match.course.id)
-              ?.courseAddress ?? match.course.address ?? undefined,
-          courseTimeZone: match.course.timeZone,
-          startsAt: match.startsAt.toISOString(),
-          availableSpots: match.availableSpots,
-          bookingUrl: match.bookingUrl,
-          priceCents: match.priceCents,
-          holes: match.holes,
-          bookableHoleCounts:
-            input.courseResults
-              .find((course) => course.courseId === match.course.id)
-              ?.matchingTimes?.find(
-                (time) =>
-                  parseCourseLocalDateTime(time.startsAt, match.course.timeZone).getTime() ===
-                  match.startsAt.getTime()
-              )?.bookableHoleCounts ?? [],
-          isNew: currentPendingMatches.some((pending) => pending.id === match.id)
+        matches: renderedMatches.map((match) => ({
+          ...match,
+          startsAt: match.startsAt.toISOString()
         }))
       })
     }
@@ -1166,7 +1189,7 @@ async function sendPendingMatchAlerts(
     throw new Error("Match email delivery group did not reach a terminal state");
   }
 
-  return currentPendingMatches.length;
+  return finalized.ownerSent ? finalized.sentMatchCount : 0;
 }
 
 export function buildMatchDeliveryGroupKey(
@@ -1218,6 +1241,30 @@ function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
 
 function hasSupportedAdapter(course: AutomationCourse) {
   return resolveProviderCapability(course).isRunnable;
+}
+
+function getFinalMonitoringMessage(
+  course: AutomationCourse,
+  disposition: ReturnType<typeof evaluateMonitoringGate>["disposition"]
+) {
+  if (disposition === "IDENTITY_FINAL") {
+    return `${course.name} is not a playable public course eligible for monitoring.`;
+  }
+  if (disposition === "TECHNICAL_FINAL") {
+    return course.automationReason === "ACCOUNT_REQUIRED"
+      ? `${course.name} requires an account before tee-time availability can be viewed.`
+      : `${course.name} currently places tee-time availability behind a captcha, queue, or equivalent access control.`;
+  }
+  if (course.bookingMethod === "PHONE_ONLY") {
+    return `${course.name} currently accepts tee-time requests by phone.`;
+  }
+  if (course.bookingMethod === "CONTACT_COURSE") {
+    return `${course.name} currently directs golfers to contact the course for availability.`;
+  }
+  if (course.bookingMethod === "WALK_IN") {
+    return `${course.name} currently uses walk-in or first-come availability.`;
+  }
+  return `${course.name} has current verified evidence that no online booking surface is available.`;
 }
 
 type CourseTeeSheetResult = {

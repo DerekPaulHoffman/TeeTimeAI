@@ -315,14 +315,35 @@ describe("provider failure classification", () => {
 
 describe("consumer disposition", () => {
   const source = { website: "https://course.example.org/" };
+  const currentClassification = {
+    automationEligibility: "BLOCKED" as const,
+    intelligenceVerifiedAt: new Date("2026-07-16T11:00:00.000Z"),
+    intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+    intelligenceConfidence: 0.95,
+    now: new Date("2026-07-16T12:00:00.000Z")
+  };
 
   it.each<[Partial<Parameters<typeof deriveConsumerDisposition>[0]>, ConsumerDisposition]>([
     [{ ...source, invalidCourse: true }, "PRIVATE_OR_INVALID"],
-    [{ ...source, automationReason: "ACCOUNT_REQUIRED" }, "ACCOUNT_REQUIRED"],
-    [{ ...source, automationReason: "CAPTCHA_OR_QUEUE" }, "CAPTCHA_OR_QUEUE"],
-    [{ ...source, automationReason: "AUTOMATION_PROHIBITED" }, "POLICY_BLOCKED"],
-    [{ ...source, bookingMethod: "PHONE_ONLY" }, "PHONE_OR_WALK_IN"],
-    [{ ...source, automationEligibility: "BLOCKED" }, "DIRECT_SITE_ONLY"],
+    [
+      { ...source, ...currentClassification, automationReason: "ACCOUNT_REQUIRED" },
+      "ACCOUNT_REQUIRED"
+    ],
+    [
+      { ...source, ...currentClassification, automationReason: "CAPTCHA_OR_QUEUE" },
+      "CAPTCHA_OR_QUEUE"
+    ],
+    [{ ...source, automationReason: "AUTOMATION_PROHIBITED" }, "ENGINEERING"],
+    [
+      {
+        ...source,
+        ...currentClassification,
+        bookingMethod: "PHONE_ONLY",
+        automationReason: "NO_ONLINE_BOOKING"
+      },
+      "PHONE_OR_WALK_IN"
+    ],
+    [{ ...source, automationEligibility: "BLOCKED" }, "ENGINEERING"],
     [{ currentEvidenceTrusted: false }, "SOURCE_UNVERIFIED"],
     [
       {
@@ -355,7 +376,7 @@ describe("consumer disposition", () => {
       },
       "SOURCE_UNVERIFIED"
     ],
-    [{ ...source, finalClassification: true }, "DIRECT_SITE_ONLY"]
+    [{ ...source, finalClassification: true }, "ENGINEERING"]
   ])("derives %s from persisted evidence", (input, expected) => {
     expect(deriveConsumerDisposition(input)).toBe(expected);
   });
@@ -367,5 +388,91 @@ describe("consumer disposition", () => {
     expect(isEffectiveConsumerCoverage("DIRECT_SITE_ONLY")).toBe(false);
     expect(isEffectiveConsumerCoverage("RETRYING")).toBe(false);
     expect(isEffectiveConsumerCoverage("ENGINEERING")).toBe(false);
+  });
+
+  it("lets fresh runnable evidence outrank stale blocking metadata", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED",
+      currentEvidenceTrusted: true,
+      latestOutcome: "NO_MATCH"
+    })).toBe("CHECKED_NO_MATCH");
+  });
+
+  it("does not let historical runnable evidence outrank newer metadata", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED",
+      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
+      currentEvidenceTrusted: true,
+      currentEvidenceObservedAt: new Date("2026-07-15T12:00:00.000Z"),
+      latestOutcome: "NO_MATCH"
+    })).toBe("ENGINEERING");
+  });
+
+  it("lets only newer runnable proof supersede policy-only metadata", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED",
+      intelligenceVerifiedAt: new Date("2026-07-15T12:00:00.000Z"),
+      currentEvidenceTrusted: true,
+      currentEvidenceObservedAt: new Date("2026-07-16T12:00:00.000Z"),
+      latestOutcome: "NO_MATCH"
+    })).toBe("CHECKED_NO_MATCH");
+  });
+
+  it("keeps current technical evidence ahead of runnable history", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      ...currentClassification,
+      automationReason: "CAPTCHA_OR_QUEUE",
+      currentEvidenceTrusted: true,
+      currentEvidenceObservedAt: new Date("2026-07-15T12:00:00.000Z"),
+      latestOutcome: "NO_MATCH"
+    })).toBe("CAPTCHA_OR_QUEUE");
+  });
+
+  it("keeps a current coherent manual final ahead of newer runnable evidence", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      ...currentClassification,
+      bookingMethod: "WALK_IN",
+      automationReason: "NO_ONLINE_BOOKING",
+      currentEvidenceTrusted: true,
+      currentEvidenceObservedAt: new Date("2026-07-16T12:05:00.000Z"),
+      latestOutcome: "NO_MATCH"
+    })).toBe("PHONE_OR_WALK_IN");
+  });
+
+  it("lets newer exact-runtime proof supersede stale technical metadata", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+      intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+      intelligenceConfidence: 0.95,
+      currentEvidenceTrusted: true,
+      currentEvidenceObservedAt: new Date("2026-07-16T12:00:00.000Z"),
+      latestOutcome: "NO_MATCH"
+    })).toBe("CHECKED_NO_MATCH");
+  });
+
+  it("lets newer exact-runtime proof supersede stale manual metadata", () => {
+    expect(deriveConsumerDisposition({
+      ...source,
+      bookingMethod: "PHONE_ONLY",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      intelligenceVerifiedAt: new Date("2025-01-01T00:00:00.000Z"),
+      intelligenceReviewAt: new Date("2025-02-01T00:00:00.000Z"),
+      intelligenceConfidence: 0.95,
+      currentEvidenceTrusted: true,
+      currentEvidenceObservedAt: new Date("2026-07-16T12:00:00.000Z"),
+      latestOutcome: "NO_MATCH"
+    })).toBe("CHECKED_NO_MATCH");
   });
 });
