@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 ## Live Vercel Deployment
 
@@ -15,6 +15,8 @@ Last updated: 2026-07-15
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
+
+- 2026-07-16 course-support responder extended classification-only verification to active exact Google Place reviews applied during an owned batch. A private or non-course review is accepted only when it is newer than the latest incident evidence and the persisted course is already reconciled to non-public, blocked state; stale, inactive, or contradictory reviews remain unresolved. Current official evidence identified the claimed engineering-only listing as a members-only synthetic private practice green, so an exact `VERIFIED_NON_COURSE` review now excludes it without tee-sheet access or external messaging. Verification passed 736 tests, lint with only the existing generated Workflow warning, production build, and the 84-test mixed-environment local UI smoke matrix.
 
 - 2026-07-15 hourly product loop added reusable read-only Vermont Systems WebTrac monitoring for exact Navy `navyaims.com` golf-search links. Discovery learns the provider course code and conservative published booking window from the official surface. The adapter allowlists the HTTPS host and exact golf-search path, rejects redirects, reads only signed-out result rows, never calls cart or checkout, and sends golfers back to the official provider search to book. Casa Linda Oaks returned 42 public four-player slots in the focused live adapter check; its synthetic multi-cycle search completed successfully and the three-occurrence support incident resolved as `MONITORING_RESTORED` with zero alerts.
 

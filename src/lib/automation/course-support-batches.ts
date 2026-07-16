@@ -8,6 +8,7 @@ import type {
   CourseSupportBatchStatus,
   CourseSupportFailureClass,
   CourseSupportIncidentKind,
+  GooglePlaceAccessOverride,
   ProbeOutcome
 } from "@prisma/client";
 
@@ -141,6 +142,14 @@ export type CourseSupportCourseEvidence = {
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
+  latestPlaceReview?: {
+    active: boolean;
+    accessOverride: GooglePlaceAccessOverride | null;
+    classification: string;
+    evidenceUrl: string;
+    reviewedAt: Date;
+    updatedAt: Date;
+  } | null;
   latestDiscovery?: {
     status: string;
     bookingMethod: BookingMethod;
@@ -1265,6 +1274,7 @@ export async function verifyCourseSupportBatch(input: {
           },
           course: {
             select: {
+              googlePlaceId: true,
               isPublic: true,
               bookingMethod: true,
               automationEligibility: true,
@@ -1314,6 +1324,34 @@ export async function verifyCourseSupportBatch(input: {
   if (courseIds.length === 0) {
     throw new Error("A responder batch without incident evidence cannot be verified.");
   }
+  const googlePlaceIds = [
+    ...new Set(
+      batch.incidents
+        .map((entry) => entry.course.googlePlaceId)
+        .filter((value): value is string => Boolean(value))
+    )
+  ];
+  const activePlaceReviews = googlePlaceIds.length
+    ? await prisma.googlePlaceReview.findMany({
+        where: {
+          googlePlaceId: { in: googlePlaceIds },
+          active: true,
+          accessOverride: { in: ["VERIFIED_PRIVATE", "VERIFIED_NON_COURSE"] }
+        },
+        select: {
+          googlePlaceId: true,
+          active: true,
+          accessOverride: true,
+          classification: true,
+          evidenceUrl: true,
+          reviewedAt: true,
+          updatedAt: true
+        }
+      })
+    : [];
+  const placeReviewByGooglePlaceId = new Map(
+    activePlaceReviews.map((review) => [review.googlePlaceId, review])
+  );
   const persistedSearchHealth =
     releaseSha &&
     deployedAt &&
@@ -1357,7 +1395,13 @@ export async function verifyCourseSupportBatch(input: {
             recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
             preProbeId: entry.preProbeId,
             newestProbe: newestProbeByCourse.get(entry.courseId),
-            course: { ...entry.course, latestDiscovery },
+            course: {
+              ...entry.course,
+              latestDiscovery,
+              latestPlaceReview: entry.course.googlePlaceId
+                ? (placeReviewByGooglePlaceId.get(entry.course.googlePlaceId) ?? null)
+                : null
+            },
             incidentFirstSeenAt: entry.incident.firstSeenAt,
             incidentLastSeenAt: entry.incident.lastSeenAt
           }))
@@ -2775,6 +2819,38 @@ function getPersistedFinalDisposition(
   course: CourseSupportCourseEvidence,
   incidentFirstSeenAt: Date
 ): { message: string; proofSnapshot: Prisma.InputJsonValue } | null {
+  const placeReview = course.latestPlaceReview;
+  const placeReviewEvidenceOrigin = placeReview
+    ? getSafeEvidenceOrigin(placeReview.evidenceUrl)
+    : null;
+  const exactIdentityDisposition = Boolean(
+    placeReview &&
+      placeReview.active &&
+      placeReviewEvidenceOrigin &&
+      placeReview.updatedAt.getTime() >= incidentFirstSeenAt.getTime() &&
+      (placeReview.accessOverride === "VERIFIED_PRIVATE" ||
+        placeReview.accessOverride === "VERIFIED_NON_COURSE") &&
+      !course.isPublic &&
+      course.automationEligibility === "BLOCKED" &&
+      course.automationReason === "OTHER"
+  );
+  if (placeReview && placeReviewEvidenceOrigin && exactIdentityDisposition) {
+    return {
+      message:
+        "A current exact-place review supports a final private or non-course disposition.",
+      proofSnapshot: {
+        kind: "EXACT_PLACE_REVIEW",
+        disposition: placeReview.accessOverride,
+        classification: placeReview.classification,
+        reviewedAt: placeReview.reviewedAt.toISOString(),
+        reviewUpdatedAt: placeReview.updatedAt.toISOString(),
+        evidenceOrigin: placeReviewEvidenceOrigin,
+        automationEligibility: course.automationEligibility,
+        automationReason: course.automationReason
+      } satisfies Prisma.InputJsonObject
+    };
+  }
+
   const discovery = course.latestDiscovery;
   const evidenceOrigin = discovery
     ? getSafeEvidenceOrigin(discovery.sourceUrl)

@@ -323,6 +323,83 @@ describe("fresh runtime verification", () => {
     ).toBe("FINAL_DISPOSITION");
   });
 
+  it("accepts a current exact-place non-course disposition after course reconciliation", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentLastSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+        course: {
+          ...runnableCourse,
+          isPublic: false,
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          latestPlaceReview: {
+            active: true,
+            accessOverride: "VERIFIED_NON_COURSE",
+            classification: "PRIVATE_PRACTICE_GREEN",
+            evidenceUrl: "https://course.example/",
+            reviewedAt: new Date("2026-07-15T00:00:00.000Z"),
+            updatedAt: new Date("2026-07-15T19:30:00.000Z")
+          }
+        }
+      })
+    ).toMatchObject({
+      result: "FINAL_DISPOSITION",
+      proofSnapshot: {
+        kind: "EXACT_PLACE_REVIEW",
+        disposition: "VERIFIED_NON_COURSE"
+      }
+    });
+  });
+
+  it.each([
+    {
+      label: "the exact review predates the latest incident evidence",
+      isPublic: false,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "OTHER" as const,
+      active: true,
+      updatedAt: new Date("2026-07-15T18:30:00.000Z")
+    },
+    {
+      label: "the reconciled course state is still public",
+      isPublic: true,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "OTHER" as const,
+      active: true,
+      updatedAt: new Date("2026-07-15T19:30:00.000Z")
+    },
+    {
+      label: "the exact review is inactive",
+      isPublic: false,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "OTHER" as const,
+      active: false,
+      updatedAt: new Date("2026-07-15T19:30:00.000Z")
+    }
+  ])("rejects an exact-place disposition when $label", (scenario) => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentLastSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+        course: {
+          ...runnableCourse,
+          isPublic: scenario.isPublic,
+          automationEligibility: scenario.automationEligibility,
+          automationReason: scenario.automationReason,
+          latestPlaceReview: {
+            active: scenario.active,
+            accessOverride: "VERIFIED_NON_COURSE",
+            classification: "PRIVATE_PRACTICE_GREEN",
+            evidenceUrl: "https://course.example/",
+            reviewedAt: new Date("2026-07-15T00:00:00.000Z"),
+            updatedAt: scenario.updatedAt
+          }
+        }
+      }).result
+    ).toBe("STALE_EVIDENCE");
+  });
+
   it("rejects contradictory online metadata for a no-online-booking disposition", () => {
     expect(
       classifyFreshBatchEvidence({
