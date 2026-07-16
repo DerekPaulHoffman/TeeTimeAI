@@ -625,6 +625,42 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("learns a reusable signed-out WebTrac golf search without entering cart", () => {
+    const bookingUrl = "https://myffr.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25";
+    const discovery = buildBrowserDiscovery({
+      courseId: "casa-linda",
+      courseName: "Casa Linda Oaks Golf Club",
+      sourceUrl: "https://www.navymwrjacksonville.com/programs/casa-linda",
+      observedUrls: [bookingUrl, "https://myffr.navyaims.com/navyeast/jaxgolf.html"],
+      visibleText: "Active duty may reserve 8 DAYS in advance. All other patrons may reserve 7 DAYS in advance. Tee Time Search Results."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiMetadata: {
+        provider: "WEBTRAC",
+        courseCode: "25",
+        bookingWindowDaysAhead: 7
+      },
+      evidence: { learnedFrom: "webtrac-public-golf-search" }
+    });
+  });
+
+  it("does not treat an arbitrary WebTrac-shaped host as trusted provider metadata", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "untrusted",
+      courseName: "Example Course",
+      sourceUrl: "https://example.com",
+      observedUrls: ["https://example.com/webtrac/web/search.html?module=GR&secondarycode=25"]
+    });
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("does not mistake first-come practice facilities for walk-in course access", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "public-course-with-range",

@@ -28,10 +28,12 @@ const adapterMocks = vi.hoisted(() => ({
   fetchChronogolfSlots: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
   fetchGolfBackTeeSheet: vi.fn(),
+  fetchWebTracTeeSheet: vi.fn(),
   isChelseaMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
   isForeupMetadata: vi.fn(),
   isGolfBackMetadata: vi.fn()
+  ,isWebTracMetadata: vi.fn()
 }));
 
 const supportIncidentMocks = vi.hoisted(() => ({
@@ -48,6 +50,7 @@ vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
 vi.mock("@/lib/adapters/golfback", () => adapterMocks);
+vi.mock("@/lib/adapters/webtrac", () => adapterMocks);
 vi.mock("@/lib/adapters/chelsea", () => adapterMocks);
 vi.mock("@/lib/adapters/chronogolf", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
@@ -155,6 +158,12 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isGolfBackMetadata.mockReturnValue(false);
     adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
+    adapterMocks.isWebTracMetadata.mockReturnValue(false);
+    adapterMocks.fetchWebTracTeeSheet.mockResolvedValue({
       slots: [],
       targetDateStatus: "UNKNOWN",
       bookingWindowEvidence: null
@@ -748,6 +757,49 @@ describe("runSearchCheck email cadence", () => {
         players: 2,
         timeZone: "America/New_York",
         metadata: expect.objectContaining({ provider: "GOLFBACK", bookingBaseUrl })
+      })
+    );
+  });
+
+  it("dispatches reusable WebTrac metadata to the signed-out search adapter", async () => {
+    const bookingBaseUrl =
+      "https://myffr.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [{
+        rank: 1,
+        course: {
+          ...search.preferences[0].course,
+          id: "casa-linda",
+          name: "Casa Linda Oaks Golf Club",
+          detectedPlatform: "CUSTOM",
+          detectedBookingUrl: bookingBaseUrl,
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          policyNotes: "Read-only signed-out search; booking remains on WebTrac.",
+          bookingMetadata: {
+            provider: "WEBTRAC",
+            courseCode: "25",
+            bookingBaseUrl
+          }
+        }
+      }]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(false);
+    adapterMocks.isChelseaMetadata.mockReturnValue(false);
+    adapterMocks.isGolfBackMetadata.mockReturnValue(false);
+    adapterMocks.isWebTracMetadata.mockReturnValue(true);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchWebTracTeeSheet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "casa-linda",
+        players: 2,
+        metadata: expect.objectContaining({ provider: "WEBTRAC", courseCode: "25" })
       })
     );
   });

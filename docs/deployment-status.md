@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 ## Live Vercel Deployment
 
@@ -15,6 +15,8 @@ Last updated: 2026-07-14
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
+
+- 2026-07-15 hourly product loop added reusable read-only Vermont Systems WebTrac monitoring for exact Navy `navyaims.com` golf-search links. Discovery learns the provider course code and conservative published booking window from the official surface. The adapter allowlists the HTTPS host and exact golf-search path, rejects redirects, reads only signed-out result rows, never calls cart or checkout, and sends golfers back to the official provider search to book. Casa Linda Oaks returned 42 public four-player slots in the focused live adapter check; its synthetic multi-cycle search completed successfully and the three-occurrence support incident resolved as `MONITORING_RESTORED` with zero alerts.
 
 - 2026-07-15 hourly product loop added reusable GolfBack monitoring from exact official course links. Windsor Parke's official site and policy advertise real-time public tee times, and the provider's public API returned course configuration plus read-only availability to Tee Time Spot's declared fetch identity without login or a booking session. The adapter reads only course and tee-time endpoints, learns the provider's booking window, preserves source IDs, local times, player capacity, holes, and prices, and sends golfers to the exact official GolfBack course page to book.
 

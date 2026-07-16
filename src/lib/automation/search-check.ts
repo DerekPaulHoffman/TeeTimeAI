@@ -32,6 +32,7 @@ import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
+import { fetchWebTracTeeSheet, isWebTracMetadata } from "@/lib/adapters/webtrac";
 import {
   getBookingWindowForTargetDate,
   getBookingWindowFromEvidence,
@@ -817,6 +818,7 @@ function hasSupportedAdapter(course: AutomationCourse) {
       (isCpsMetadata(course.bookingMetadata) ||
         isChelseaMetadata(course.bookingMetadata) ||
         isGolfBackMetadata(course.bookingMetadata) ||
+        isWebTracMetadata(course.bookingMetadata) ||
         isTeesnapMetadata(course.bookingMetadata)))
   );
 }
@@ -888,6 +890,15 @@ function fetchCourseTeeSheet(
       date,
       players,
       timeZone: course.timeZone,
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
+    });
+  }
+  if (course.detectedPlatform === "CUSTOM" && isWebTracMetadata(course.bookingMetadata)) {
+    return fetchWebTracTeeSheet({
+      courseId: course.id,
+      date,
+      players,
       metadata: course.bookingMetadata,
       discoverBookingWindow
     });

@@ -64,6 +64,12 @@ export type BrowserDiscovery = {
     courseId: string;
     bookingBaseUrl: string;
   } | {
+    provider: "WEBTRAC";
+    bookingBaseUrl: string;
+    courseCode: string;
+    bookingWindowDaysAhead?: number;
+    bookingWindowEvidenceUrl?: string;
+  } | {
     clubId: number;
     courseIds: string[];
     bookingBaseUrl: string;
@@ -142,6 +148,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return golfBackDiscovery;
   }
 
+  const webTracDiscovery = learnWebTracDiscovery(evidence, observedUrls);
+
+  if (webTracDiscovery) {
+    return webTracDiscovery;
+  }
+
   const protectedCpsDiscovery = learnProtectedCpsDiscovery(evidence, observedUrls);
 
   if (protectedCpsDiscovery) {
@@ -180,6 +192,61 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "browser-visible-links"
+    }
+  };
+}
+
+function learnWebTracDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const bookingUrl = observedUrls
+    .map(parseUrl)
+    .find((url) => Boolean(
+      url &&
+      (url.hostname === "navyaims.com" || url.hostname.endsWith(".navyaims.com")) &&
+      /\/webtrac\/web\/search\.html$/i.test(url.pathname) &&
+      url.searchParams.get("module")?.toUpperCase() === "GR" &&
+      url.searchParams.get("secondarycode")
+    ));
+  const courseCode = bookingUrl?.searchParams.get("secondarycode");
+  if (!bookingUrl || !courseCode) {
+    return null;
+  }
+  const bookingWindowDays = [...(evidence.visibleText ?? "").matchAll(/\b(\d{1,2})\s+DAYS?\s+(?:prior|in advance)\b/gi)]
+    .map((match) => Number(match[1]))
+    .filter((days) => days >= 0 && days <= 31);
+  const bookingBaseUrl = bookingUrl.toString();
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The official Vermont Systems WebTrac golf search exposes signed-out tee-time availability. Tee Time Spot reads only search results and leaves cart, account, and booking actions to the golfer on the provider site.",
+    apiEndpoint: `${bookingUrl.origin}${bookingUrl.pathname}?module=GR&secondarycode=${encodeURIComponent(courseCode)}&begindate={date}`,
+    apiMetadata: {
+      provider: "WEBTRAC",
+      bookingBaseUrl,
+      courseCode,
+      ...(bookingWindowDays.length > 0
+        ? {
+            bookingWindowDaysAhead: Math.min(...bookingWindowDays),
+            bookingWindowEvidenceUrl: evidence.sourceUrl
+          }
+        : {})
+    },
+    confidence: 0.95,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "webtrac-public-golf-search"
     }
   };
 }
@@ -1352,7 +1419,10 @@ function isReusableCustomMetadata(value: unknown) {
     (metadata.provider === "CHELSEA" &&
       typeof metadata.bookingBaseUrl === "string" &&
       typeof metadata.courseCode === "number" &&
-      typeof metadata.courseLabel === "string")
+      typeof metadata.courseLabel === "string") ||
+    (metadata.provider === "WEBTRAC" &&
+      typeof metadata.bookingBaseUrl === "string" &&
+      typeof metadata.courseCode === "string")
   );
 }
 
