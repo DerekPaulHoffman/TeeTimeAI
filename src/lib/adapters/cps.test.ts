@@ -431,6 +431,63 @@ describe("fetchCpsSlots", () => {
     ).rejects.toThrow("CPS tee times returned an invalid response schema");
   });
 
+  it("records only bounded structural diagnostics for an invalid CPS response", async () => {
+    const secretDetail =
+      "https://private.example/booking?token=provider-secret-value";
+    const secretMessageKey = "PROVIDER_SECRET_ABC123";
+    mockPersistedCpsFetch(() =>
+      jsonResponse({
+        transactionId: "private-transaction-value",
+        PROVIDER_SECRET_FIELD_ABC123: "provider-secret-value",
+        content: {
+          messageKey: secretMessageKey,
+          messageDetail: secretDetail,
+          PROVIDER_SECRET_PROPERTY_ABC123: "provider-secret-value"
+        }
+      })
+    );
+
+    const error = await fetchCpsTeeSheet(
+      persistedCpsInput({ holes: [18] })
+    ).catch((caught) => caught as Error);
+
+    expect(error.message).toContain(
+      "topLevel=object;topKeys=content,transactionId,+1;content=object"
+    );
+    expect(error.message).toContain(
+      `messageKey=string:length=${secretMessageKey.length}`
+    );
+    expect(error.message).toContain(
+      `messageDetail=string:length=${secretDetail.length}`
+    );
+    expect(error.message).not.toContain(secretDetail);
+    expect(error.message).not.toContain(secretMessageKey);
+    expect(error.message).not.toContain("PROVIDER_SECRET_FIELD_ABC123");
+    expect(error.message).not.toContain("PROVIDER_SECRET_PROPERTY_ABC123");
+    expect(error.message).not.toContain("private-transaction-value");
+    expect(error.message).not.toContain("provider-secret-value");
+    expect(error.message.length).toBeLessThan(400);
+  });
+
+  it("records only the allowlisted no-tee-times protocol code", async () => {
+    mockPersistedCpsFetch(() =>
+      jsonResponse({
+        transactionId: "tx",
+        content: {
+          messageKey: "NO_TEETIMES",
+          messageDetail: null
+        }
+      })
+    );
+
+    const error = await fetchCpsTeeSheet(
+      persistedCpsInput({ holes: [18] })
+    ).catch((caught) => caught as Error);
+
+    expect(error.message).toContain("messageKey=NO_TEETIMES");
+    expect(error.message).toContain("messageDetail=null");
+  });
+
   it("rejects the whole CPS result when 18 holes succeed but 9 holes return invalid schema", async () => {
     const teeTimeUrls: string[] = [];
     mockPersistedCpsFetch((url) => {
@@ -457,7 +514,9 @@ describe("fetchCpsSlots", () => {
 
     expect(outcome).toEqual(
       expect.objectContaining({
-        message: "CPS tee times returned an invalid response schema"
+        message: expect.stringContaining(
+          "CPS tee times returned an invalid response schema"
+        )
       })
     );
     expect(outcome).not.toEqual(

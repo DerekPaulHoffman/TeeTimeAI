@@ -96,6 +96,21 @@ const CPS_TIMEOUT_ERROR_CODES = new Set([
 const CPS_TRANSIENT_TOKEN_HTTP_STATUSES = new Set([502, 503, 504]);
 const CPS_NO_TEE_TIMES_MESSAGE_KEY = "NO_TEETIMES";
 const CPS_NO_TEE_TIMES_MESSAGE_DETAIL_MAX_LENGTH = 512;
+const CPS_RESPONSE_DIAGNOSTIC_KEY_LIMIT = 8;
+const CPS_RESPONSE_DIAGNOSTIC_KEYS = new Set([
+  "content",
+  "data",
+  "error",
+  "errors",
+  "messageDetail",
+  "messageKey",
+  "result",
+  "status",
+  "transactionId"
+]);
+const CPS_RESPONSE_DIAGNOSTIC_MESSAGE_KEYS = new Set([
+  CPS_NO_TEE_TIMES_MESSAGE_KEY
+]);
 
 export type CpsTeeSheetResult = {
   slots: TeeTimeSlot[];
@@ -832,7 +847,7 @@ function getCpsSearchContent(payload: unknown): CpsApiSlot[] {
     return payload;
   }
   if (!payload || typeof payload !== "object") {
-    throw new Error("CPS tee times returned an invalid response schema");
+    throw invalidCpsSearchResponseError(payload);
   }
 
   const content = (payload as { content?: unknown }).content;
@@ -842,7 +857,89 @@ function getCpsSearchContent(payload: unknown): CpsApiSlot[] {
   if (isCpsNoTeeTimesSentinel(content)) {
     return [];
   }
-  throw new Error("CPS tee times returned an invalid response schema");
+  throw invalidCpsSearchResponseError(payload);
+}
+
+function invalidCpsSearchResponseError(payload: unknown) {
+  return new Error(
+    `CPS tee times returned an invalid response schema (${describeCpsSearchResponse(payload)})`
+  );
+}
+
+function describeCpsSearchResponse(payload: unknown) {
+  const topLevel = describeCpsValueType(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return `topLevel=${topLevel}`;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const content = record.content;
+  const contentRecord =
+    content && typeof content === "object" && !Array.isArray(content)
+      ? (content as Record<string, unknown>)
+      : null;
+  const contentHasMessageKey = Boolean(
+    contentRecord && Object.hasOwn(contentRecord, "messageKey")
+  );
+  const contentHasMessageDetail = Boolean(
+    contentRecord && Object.hasOwn(contentRecord, "messageDetail")
+  );
+  const messageKey = contentHasMessageKey
+    ? contentRecord?.messageKey
+    : record.messageKey;
+  const messageDetail = contentHasMessageDetail
+    ? contentRecord?.messageDetail
+    : record.messageDetail;
+  const hasMessageDetail =
+    contentHasMessageDetail || Object.hasOwn(record, "messageDetail");
+
+  return [
+    `topLevel=${topLevel}`,
+    `topKeys=${describeCpsObjectKeys(record)}`,
+    `content=${describeCpsValueType(content)}`,
+    ...(contentRecord ? [`contentKeys=${describeCpsObjectKeys(contentRecord)}`] : []),
+    ...(messageKey !== undefined
+      ? [`messageKey=${describeCpsMessageKey(messageKey)}`]
+      : []),
+    ...(hasMessageDetail
+      ? [`messageDetail=${describeCpsDiagnosticValue(messageDetail)}`]
+      : [])
+  ].join(";");
+}
+
+function describeCpsValueType(value: unknown) {
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  return typeof value;
+}
+
+function describeCpsObjectKeys(record: Record<string, unknown>) {
+  const keys = Object.keys(record);
+  const safeKeys = keys
+    .filter((key) => CPS_RESPONSE_DIAGNOSTIC_KEYS.has(key))
+    .sort()
+    .slice(0, CPS_RESPONSE_DIAGNOSTIC_KEY_LIMIT);
+  const omitted = keys.length - safeKeys.length;
+  return `${safeKeys.length > 0 ? safeKeys.join(",") : "none"}${
+    omitted > 0 ? `,+${omitted}` : ""
+  }`;
+}
+
+function describeCpsMessageKey(value: unknown) {
+  return typeof value === "string" &&
+    CPS_RESPONSE_DIAGNOSTIC_MESSAGE_KEYS.has(value)
+    ? value
+    : describeCpsDiagnosticValue(value);
+}
+
+function describeCpsDiagnosticValue(value: unknown) {
+  return typeof value === "string"
+    ? `string:length=${value.length}`
+    : describeCpsValueType(value);
 }
 
 function isCpsNoTeeTimesSentinel(value: unknown) {
