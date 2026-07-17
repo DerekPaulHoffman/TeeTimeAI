@@ -151,16 +151,43 @@ export async function fetchCpsTeeSheet(
   input: CpsFetchInput & { discoverBookingWindow?: boolean }
 ): Promise<CpsTeeSheetResult> {
   let configuration = await loadConfiguration(input.metadata);
-  const credential = configuration.apiKey
-    ? { apiKey: configuration.apiKey }
-    : { token: await fetchShortLivedToken(configuration) };
+  let credential: { token?: string; apiKey?: string };
+  let recoveredTokenError: { error: unknown } | null = null;
+  const publishedApiKey = normalizeCpsApiKey(configuration.apiKey);
+  if (publishedApiKey) {
+    credential = { apiKey: publishedApiKey };
+  } else {
+    try {
+      credential = { token: await fetchShortLivedToken(configuration) };
+    } catch (tokenError) {
+      if (!isRetryableCpsTokenError(tokenError)) {
+        throw tokenError;
+      }
+      const recoveredApiKey = await tryLoadPublishedCpsApiKey(
+        input.metadata,
+        configuration
+      );
+      if (!recoveredApiKey) {
+        throw tokenError;
+      }
+      credential = { apiKey: recoveredApiKey };
+      recoveredTokenError = { error: tokenError };
+    }
+  }
   if (credential.apiKey) {
-    configuration = await loadPublicOptions(
-      configuration,
-      credential,
-      input.timeZone ?? "America/New_York",
-      input.date
-    );
+    try {
+      configuration = await loadPublicOptions(
+        configuration,
+        credential,
+        input.timeZone ?? "America/New_York",
+        input.date
+      );
+    } catch (setupError) {
+      if (recoveredTokenError) {
+        throw recoveredTokenError.error;
+      }
+      throw setupError;
+    }
   }
   const headers = cpsHeaders(
     configuration,
@@ -377,6 +404,147 @@ async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguratio
   });
 }
 
+async function tryLoadPublishedCpsApiKey(
+  metadata: CpsMetadata,
+  baseline: CpsConfiguration
+): Promise<string | null> {
+  // This is a single best-effort public read after the short-lived token path
+  // exhausts its narrow transient retry budget. It may contribute only a key:
+  // persisted tenant identity and endpoints remain authoritative.
+  try {
+    const url = getSafeCpsConfigurationUrl(metadata.bookingBaseUrl, baseline);
+    if (!url) {
+      return null;
+    }
+    const response = await fetchWithProviderTimeout(url, { redirect: "manual" });
+    if (!response.ok) {
+      return null;
+    }
+    return getMatchingPublishedCpsApiKey(await response.json(), baseline);
+  } catch {
+    return null;
+  }
+}
+
+function getSafeCpsConfigurationUrl(
+  bookingBaseUrl: string,
+  baseline: CpsConfiguration
+) {
+  const bookingBase = parseSafeCpsHttpsUrl(bookingBaseUrl);
+  const authorityBase = parseSafeCpsHttpsUrl(baseline.authorityBaseUrl);
+  const onlineApi = parseSafeCpsHttpsUrl(baseline.onlineApi);
+  if (
+    !bookingBase ||
+    !authorityBase ||
+    !onlineApi ||
+    bookingBase.hostname !== authorityBase.hostname ||
+    bookingBase.hostname !== onlineApi.hostname
+  ) {
+    return null;
+  }
+  return new URL("/onlineresweb/Home/Configuration", bookingBase);
+}
+
+function getMatchingPublishedCpsApiKey(
+  value: unknown,
+  baseline: CpsConfiguration
+) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const configuration = value as Partial<CpsConfiguration>;
+  const apiKey = normalizeCpsApiKey(configuration.apiKey);
+  if (
+    !apiKey ||
+    !normalizedCpsIdentityEquals(configuration.clientId, baseline.clientId) ||
+    !normalizedCpsIdentityEquals(configuration.websiteId, baseline.websiteId) ||
+    !normalizedCpsIdentityEquals(configuration.siteName, baseline.siteName) ||
+    canonicalCpsEndpoint(configuration.authorityBaseUrl) !==
+      canonicalCpsEndpoint(baseline.authorityBaseUrl) ||
+    canonicalCpsEndpoint(configuration.onlineApi) !==
+      canonicalCpsEndpoint(baseline.onlineApi)
+  ) {
+    return null;
+  }
+  return apiKey;
+}
+
+function normalizeCpsApiKey(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function normalizedCpsIdentityEquals(candidate: unknown, baseline: string) {
+  return typeof candidate === "string" && candidate.trim() === baseline.trim();
+}
+
+function canonicalCpsEndpoint(value: unknown) {
+  const url = parseSafeCpsHttpsUrl(value);
+  if (!url || url.search || url.hash) {
+    return null;
+  }
+  const pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return `${url.origin}${pathname}`;
+}
+
+function parseSafeCpsHttpsUrl(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      hasUrlUserInfo(trimmed) ||
+      url.search ||
+      url.hash ||
+      hasExplicitUrlPort(trimmed) ||
+      !isPublicHostname(url.hostname)
+    ) {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function hasUrlUserInfo(value: string) {
+  return getRawUrlAuthority(value)?.includes("@") ?? true;
+}
+
+function hasExplicitUrlPort(value: string) {
+  const authority = getRawUrlAuthority(value);
+  if (!authority) {
+    return true;
+  }
+  const host = authority.slice(authority.lastIndexOf("@") + 1);
+  return host.startsWith("[") ? host.includes("]:") : host.includes(":");
+}
+
+function getRawUrlAuthority(value: string) {
+  return value.match(/^[a-z][a-z\d+.-]*:\/\/([^/?#]+)/i)?.[1] ?? null;
+}
+
+function isPublicHostname(value: string) {
+  const hostname = value.toLowerCase().replace(/^\[|\]$/g, "");
+  return Boolean(
+    hostname.includes(".") &&
+      /[a-z]/.test(hostname) &&
+      !hostname.includes(":") &&
+      !hostname.endsWith(".") &&
+      hostname !== "localhost" &&
+      !hostname.endsWith(".localhost") &&
+      !hostname.endsWith(".local") &&
+      !hostname.endsWith(".internal") &&
+      !hostname.endsWith(".lan")
+  );
+}
+
 async function isCpsPathBlockedByOfficialRobots(
   bookingBaseUrl: string,
   requestPath: string
@@ -582,6 +750,10 @@ async function retryCpsTokenRequest<T>(request: () => Promise<T>): Promise<T> {
   }
 
   throw new Error("CPS token retry exhausted without an error");
+}
+
+function isRetryableCpsTokenError(error: unknown) {
+  return isCpsTimeoutError(error) || isTransientCpsTokenHttpError(error);
 }
 
 function isTransientCpsTokenHttpError(error: unknown) {

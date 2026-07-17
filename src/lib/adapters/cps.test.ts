@@ -556,15 +556,260 @@ describe("fetchCpsSlots", () => {
     ).toHaveLength(2);
   });
 
-  it("fails closed after two transient CPS token 503 responses", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("Unavailable", { status: 503 })
+  it("recovers exhausted transient CPS token failures through a published API key", async () => {
+    let tokenAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = input.toString();
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        tokenAttempts += 1;
+        return new Response("Unavailable", { status: 503 });
+      }
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        expect(init?.redirect).toBe("manual");
+        const configuration = cpsConfiguration();
+        return jsonResponse({
+          ...configuration,
+          authorityBaseUrl: `${configuration.authorityBaseUrl}/`,
+          onlineApi: `${configuration.onlineApi}/`,
+          apiKey: " provider-published-key "
+        });
+      }
+      if (url.includes("/GetAllOptions/traditionoaklane?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["x-apikey"]).toBe("provider-published-key");
+        expect(headers.authorization).toBeUndefined();
+        return jsonResponse({
+          webSiteId: "published-website-id",
+          reservationOptions: { terminalId: 3 }
+        });
+      }
+      if (url.includes("/TeeTimes?")) {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["x-apikey"]).toBe("provider-published-key");
+        expect(headers["x-websiteid"]).toBe("published-website-id");
+        expect(headers.authorization).toBeUndefined();
+        expect(new URL(url).searchParams.get("holes")).toBe("0");
+        return jsonResponse([]);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).resolves.toEqual([]);
+    expect(tokenAttempts).toBe(2);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/onlineresweb/Home/Configuration")
+      )
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        input.toString().endsWith("/RegisterTransactionId")
+      )
+    ).toBe(false);
+  });
+
+  it("preserves the exhausted token error when recovered API-key setup fails", async () => {
+    let tokenAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        tokenAttempts += 1;
+        return new Response("Token unavailable", {
+          status: tokenAttempts === 1 ? 503 : 504
+        });
+      }
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse({
+          ...cpsConfiguration(),
+          apiKey: "provider-published-key"
+        });
+      }
+      if (url.includes("/GetAllOptions/traditionoaklane?")) {
+        return new Response("Options unavailable", { status: 500 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      "CPS token returned 504"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(
+      fetchMock.mock.calls.some(([input]) => input.toString().includes("/TeeTimes?"))
+    ).toBe(false);
+  });
+
+  it("rejects a redirected published-key configuration without following it", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input, init) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return new Response("Token unavailable", { status: 503 });
+        }
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          expect(init?.redirect).toBe("manual");
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://other-tenant.cps.golf/configuration" }
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
     );
 
     await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
       "CPS token returned 503"
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["HTTP", "http://traditionoaklane.cps.golf/"],
+    ["an IP literal", "https://127.0.0.1/"],
+    ["a private hostname", "https://provider.internal/"],
+    ["a trailing-dot private hostname", "https://localhost./"],
+    ["a cross-host tenant", "https://other-tenant.cps.golf/"],
+    ["credentials", "https://user:pass@traditionoaklane.cps.golf/"],
+    ["empty userinfo", "https://@traditionoaklane.cps.golf/"],
+    ["an explicit default port", "https://traditionoaklane.cps.golf:443/"],
+    ["an explicit non-default port", "https://traditionoaklane.cps.golf:444/"]
+  ])(
+    "rejects %s in the published-key configuration source before fetching it",
+    async (_description, bookingBaseUrl) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return new Response("Token unavailable", { status: 503 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      await expect(
+        fetchCpsSlots(persistedCpsInput({ bookingBaseUrl }))
+      ).rejects.toThrow("CPS token returned 503");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it.each([
+    ["client id", { clientId: "other-client" }],
+    ["website id", { websiteId: "other-website" }],
+    ["site name", { siteName: "other-tenant" }],
+    [
+      "authority host",
+      { authorityBaseUrl: "https://other-tenant.cps.golf/identityapi" }
+    ],
+    [
+      "online API host",
+      {
+        onlineApi:
+          "https://other-tenant.cps.golf/onlineres/onlineapi/api/v1/onlinereservation"
+      }
+    ],
+    [
+      "credentialed authority URL",
+      {
+        authorityBaseUrl:
+          "https://user:pass@traditionoaklane.cps.golf/identityapi"
+      }
+    ],
+    [
+      "ported online API URL",
+      {
+        onlineApi:
+          "https://traditionoaklane.cps.golf:443/onlineres/onlineapi/api/v1/onlinereservation"
+      }
+    ],
+    [
+      "HTTP authority URL",
+      { authorityBaseUrl: "http://traditionoaklane.cps.golf/identityapi" }
+    ],
+    [
+      "IP online API URL",
+      { onlineApi: "https://127.0.0.1/onlineres/onlineapi/api/v1/onlinereservation" }
+    ]
+  ])(
+    "rejects a published-key configuration with a mismatched or unsafe %s",
+    async (_description, configurationOverrides) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return new Response("Token unavailable", { status: 503 });
+        }
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return jsonResponse({
+            ...cpsConfiguration(),
+            apiKey: "provider-published-key",
+            ...configurationOverrides
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+        "CPS token returned 503"
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    }
+  );
+
+  it("preserves the original token error when the published-key fallback is non-OK", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      return url.endsWith("/identityapi/myconnect/token/short")
+        ? new Response("Token unavailable", { status: 503 })
+        : new Response("Configuration unavailable", { status: 500 });
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      "CPS token returned 503"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["has no published API key", () => jsonResponse(cpsConfiguration())],
+    ["has an invalid configuration shape", () => jsonResponse({ apiKey: "published-key" })],
+    ["times out", () => Promise.reject(cpsTimeoutError())]
+  ])(
+    "preserves the original token error when the published-key fallback %s",
+    async (_description, fallbackResponse) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return new Response("Token unavailable", { status: 503 });
+        }
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return fallbackResponse();
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+        "CPS token returned 503"
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    }
+  );
+
+  it("preserves the original timeout error when published-key recovery is unusable", async () => {
+    let tokenAttempts = 0;
+    const originalTimeout = cpsTimeoutError();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        tokenAttempts += 1;
+        throw originalTimeout;
+      }
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse(cpsConfiguration());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toBe(originalTimeout);
+    expect(tokenAttempts).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it.each([401, 429])("does not retry a CPS token HTTP %s response", async (status) => {
@@ -576,6 +821,11 @@ describe("fetchCpsSlots", () => {
       `CPS token returned ${status}`
     );
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        input.toString().endsWith("/onlineresweb/Home/Configuration")
+      )
+    ).toBe(false);
   });
 
   it("does not retry a CPS token response with no access token", async () => {
@@ -585,6 +835,25 @@ describe("fetchCpsSlots", () => {
 
     await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
       "CPS token response did not include an access token"
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        input.toString().endsWith("/onlineresweb/Home/Configuration")
+      )
+    ).toBe(false);
+  });
+
+  it("does not use published-key fallback for an invalid CPS token JSON schema", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("not-json", {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toBeInstanceOf(
+      SyntaxError
     );
     expect(fetchMock).toHaveBeenCalledOnce();
   });
