@@ -95,15 +95,25 @@ const CPS_TIMEOUT_ERROR_CODES = new Set([
 ]);
 const CPS_TRANSIENT_TOKEN_HTTP_STATUSES = new Set([502, 503, 504]);
 const CPS_NO_TEE_TIMES_MESSAGE_KEY = "NO_TEETIMES";
-const CPS_NO_TEE_TIMES_MESSAGE_DETAIL_MAX_LENGTH = 512;
+const CPS_NO_TEE_TIMES_MESSAGE_TEMPLATE = "No tee times available";
+const CPS_NO_TEE_TIMES_MESSAGE_APPEARANCE =
+  "Appears on the tee sheet when there are no tee times available on a selected day";
+const CPS_NO_TEE_TIMES_MESSAGE_DETAIL =
+  "No tee times available,please try different criteria.";
+const CPS_NO_TEE_TIMES_MESSAGE_TYPE = "Attention";
+const CPS_NO_TEE_TIMES_TRANSACTION_ID_MAX_LENGTH = 128;
 const CPS_RESPONSE_DIAGNOSTIC_KEY_LIMIT = 8;
 const CPS_RESPONSE_DIAGNOSTIC_KEYS = new Set([
   "content",
   "data",
   "error",
   "errors",
+  "isSuccess",
+  "messageAppearance",
   "messageDetail",
   "messageKey",
+  "messageTemplate",
+  "messageType",
   "result",
   "status",
   "transactionId"
@@ -854,7 +864,7 @@ function getCpsSearchContent(payload: unknown): CpsApiSlot[] {
   if (Array.isArray(content)) {
     return content;
   }
-  if (isCpsNoTeeTimesSentinel(content)) {
+  if (isCpsNoTeeTimesSentinel(payload)) {
     return [];
   }
   throw invalidCpsSearchResponseError(payload);
@@ -946,20 +956,41 @@ function isCpsNoTeeTimesSentinel(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record);
+  const envelope = value as Record<string, unknown>;
+  const envelopeKeys = Object.keys(envelope);
   if (
-    keys.length < 1 ||
-    keys.length > 2 ||
-    keys.some((key) => key !== "messageKey" && key !== "messageDetail") ||
-    record.messageKey !== CPS_NO_TEE_TIMES_MESSAGE_KEY
+    envelopeKeys.length !== 3 ||
+    envelopeKeys.some(
+      (key) => key !== "transactionId" && key !== "isSuccess" && key !== "content"
+    ) ||
+    envelope.isSuccess !== true ||
+    typeof envelope.transactionId !== "string" ||
+    envelope.transactionId.length < 1 ||
+    envelope.transactionId.length > CPS_NO_TEE_TIMES_TRANSACTION_ID_MAX_LENGTH ||
+    !envelope.content ||
+    typeof envelope.content !== "object" ||
+    Array.isArray(envelope.content)
   ) {
     return false;
   }
-  return record.messageDetail === undefined ||
-    (typeof record.messageDetail === "string" &&
-      record.messageDetail.length > 0 &&
-      record.messageDetail.length <= CPS_NO_TEE_TIMES_MESSAGE_DETAIL_MAX_LENGTH);
+  const content = envelope.content as Record<string, unknown>;
+  const contentKeys = Object.keys(content);
+  return (
+    contentKeys.length === 5 &&
+    contentKeys.every(
+      (key) =>
+        key === "messageKey" ||
+        key === "messageTemplate" ||
+        key === "messageAppearance" ||
+        key === "messageDetail" ||
+        key === "messageType"
+    ) &&
+    content.messageKey === CPS_NO_TEE_TIMES_MESSAGE_KEY &&
+    content.messageTemplate === CPS_NO_TEE_TIMES_MESSAGE_TEMPLATE &&
+    content.messageAppearance === CPS_NO_TEE_TIMES_MESSAGE_APPEARANCE &&
+    content.messageDetail === CPS_NO_TEE_TIMES_MESSAGE_DETAIL &&
+    content.messageType === CPS_NO_TEE_TIMES_MESSAGE_TYPE
+  );
 }
 
 function buildTeeTimesUrl(

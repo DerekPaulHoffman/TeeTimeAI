@@ -63,10 +63,15 @@ describe("fetchCpsSlots", () => {
         if (teeTimesUrl.searchParams.get("holes") === "18") {
           return jsonResponse({
             transactionId: "tx",
+            isSuccess: true,
             content: {
               messageKey: "NO_TEETIMES",
+              messageTemplate: "No tee times available",
+              messageAppearance:
+                "Appears on the tee sheet when there are no tee times available on a selected day",
               messageDetail:
-                "No tee times available,please try different criteria."
+                "No tee times available,please try different criteria.",
+              messageType: "Attention"
             }
           });
         }
@@ -364,9 +369,14 @@ describe("fetchCpsSlots", () => {
       teeTimeUrls.push(url.toString());
       return jsonResponse({
         transactionId: "tx",
+        isSuccess: true,
         content: {
           messageKey: "NO_TEETIMES",
-          messageDetail: "No tee times available,please try different criteria."
+          messageTemplate: "No tee times available",
+          messageAppearance:
+            "Appears on the tee sheet when there are no tee times available on a selected day",
+          messageDetail: "No tee times available,please try different criteria.",
+          messageType: "Attention"
         }
       });
     });
@@ -381,6 +391,55 @@ describe("fetchCpsSlots", () => {
     expect(
       teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))
     ).toEqual(["18", "9"]);
+  });
+
+  it.each([
+    {
+      name: "a false success flag",
+      payload: cpsNoTeeTimesResponse({ envelope: { isSuccess: false } })
+    },
+    {
+      name: "a missing success flag",
+      payload: cpsNoTeeTimesResponse({ envelope: { isSuccess: undefined } })
+    },
+    {
+      name: "an extra top-level error",
+      payload: cpsNoTeeTimesResponse({ envelope: { error: "UPSTREAM_FAILURE" } })
+    },
+    {
+      name: "an invalid transaction identifier",
+      payload: cpsNoTeeTimesResponse({ envelope: { transactionId: null } })
+    },
+    {
+      name: "a different message template",
+      payload: cpsNoTeeTimesResponse({
+        content: { messageTemplate: "Inventory unavailable" }
+      })
+    },
+    {
+      name: "a different message appearance",
+      payload: cpsNoTeeTimesResponse({
+        content: { messageAppearance: "Hidden provider error" }
+      })
+    },
+    {
+      name: "a different message type",
+      payload: cpsNoTeeTimesResponse({ content: { messageType: "Error" } })
+    },
+    {
+      name: "a missing detail",
+      payload: cpsNoTeeTimesResponse({ content: { messageDetail: undefined } })
+    },
+    {
+      name: "a contradictory availability count",
+      payload: cpsNoTeeTimesResponse({ content: { availableCount: 4 } })
+    }
+  ])("rejects a no-tee-times envelope with $name", async ({ payload }) => {
+    mockPersistedCpsFetch(() => jsonResponse(payload));
+
+    await expect(
+      fetchCpsTeeSheet(persistedCpsInput({ holes: [18] }))
+    ).rejects.toThrow("CPS tee times returned an invalid response schema");
   });
 
   it("rejects a near-miss 18-hole CPS sentinel instead of reporting no match", async () => {
@@ -422,9 +481,45 @@ describe("fetchCpsSlots", () => {
     {
       name: "an oversized detail",
       content: { messageKey: "NO_TEETIMES", messageDetail: "x".repeat(513) }
+    },
+    {
+      name: "different detail text",
+      content: {
+        messageKey: "NO_TEETIMES",
+        messageDetail: "No inventory was returned."
+      }
+    },
+    {
+      name: "nested metadata",
+      content: {
+        messageKey: "NO_TEETIMES",
+        messageDetail: "No tee times available,please try different criteria.",
+        metadata: { retryable: false }
+      }
+    },
+    {
+      name: "too many metadata fields",
+      content: {
+        messageKey: "NO_TEETIMES",
+        messageDetail: "No tee times available,please try different criteria.",
+        first: true,
+        second: false,
+        third: 1,
+        fourth: 2
+      }
+    },
+    {
+      name: "oversized string metadata",
+      content: {
+        messageKey: "NO_TEETIMES",
+        messageDetail: "No tee times available,please try different criteria.",
+        metadata: "x".repeat(129)
+      }
     }
   ])("rejects a malformed CPS no-tee-times sentinel with $name", async ({ content }) => {
-    mockPersistedCpsFetch(() => jsonResponse({ transactionId: "tx", content }));
+    mockPersistedCpsFetch(() =>
+      jsonResponse({ transactionId: "tx", isSuccess: true, content })
+    );
 
     await expect(
       fetchCpsTeeSheet(persistedCpsInput({ holes: [18] }))
@@ -1241,6 +1336,26 @@ describe("fetchCpsSlots", () => {
     ).rejects.toThrow("CPS configuration returned 403");
   });
 });
+
+function cpsNoTeeTimesResponse(input?: {
+  envelope?: Record<string, unknown>;
+  content?: Record<string, unknown>;
+}) {
+  return {
+    transactionId: "tx",
+    isSuccess: true,
+    content: {
+      messageKey: "NO_TEETIMES",
+      messageTemplate: "No tee times available",
+      messageAppearance:
+        "Appears on the tee sheet when there are no tee times available on a selected day",
+      messageDetail: "No tee times available,please try different criteria.",
+      messageType: "Attention",
+      ...input?.content
+    },
+    ...input?.envelope
+  };
+}
 
 function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), {
