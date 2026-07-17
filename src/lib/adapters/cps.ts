@@ -84,6 +84,19 @@ type CpsFetchInput = {
   metadata: CpsMetadata;
 };
 
+const CPS_READ_ATTEMPTS = 2;
+const CPS_TIMEOUT_ERROR_INSPECTION_LIMIT = 16;
+const CPS_TIMEOUT_ERROR_NAMES = new Set(["TimeoutError", "AbortError"]);
+const CPS_TIMEOUT_ERROR_CODES = new Set([
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "ETIMEDOUT"
+]);
+const CPS_TRANSIENT_TOKEN_HTTP_STATUSES = new Set([502, 503, 504]);
+const CPS_NO_TEE_TIMES_MESSAGE_KEY = "NO_TEETIMES";
+const CPS_NO_TEE_TIMES_MESSAGE_DETAIL_MAX_LENGTH = 512;
+
 export type CpsTeeSheetResult = {
   slots: TeeTimeSlot[];
   targetDateStatus: "OPEN" | "UNKNOWN";
@@ -189,19 +202,18 @@ async function fetchCpsAvailability(
       holes,
       transactionId
     });
-    const response = await fetchWithProviderTimeout(url, {
-      headers
+    const payload = await retryCpsReadOnTimeout(async () => {
+      const response = await fetchWithProviderTimeout(url, {
+        headers
+      });
+
+      if (!response.ok) {
+        throw providerHttpError("CPS tee times", response);
+      }
+
+      return (await response.json()) as CpsSearchResponse;
     });
-
-    if (!response.ok) {
-      throw providerHttpError("CPS tee times", response);
-    }
-
-    const payload = (await response.json()) as CpsSearchResponse;
-    const content = Array.isArray(payload) ? payload : payload.content;
-    if (!Array.isArray(content)) {
-      continue;
-    }
+    const content = getCpsSearchContent(payload);
 
     for (const slot of content) {
       if (!slot.startTime || !slot.teeSheetId) {
@@ -251,14 +263,19 @@ async function fetchCpsBookingWindow(
     url.searchParams.set("courseIds", input.metadata.courseIds.join(","));
     url.searchParams.set("searchDate", formatCpsDate(input.date));
 
-    const response = await fetchWithProviderTimeout(url, {
-      headers: cpsHeaders(optionsConfiguration, credential, timeZone, input.date)
+    const payload = await retryCpsReadOnTimeout(async () => {
+      const response = await fetchWithProviderTimeout(url, {
+        headers: cpsHeaders(optionsConfiguration, credential, timeZone, input.date)
+      });
+      if (!response.ok) {
+        return null;
+      }
+
+      return (await response.json()) as CpsBookingRuleResponse;
     });
-    if (!response.ok) {
+    if (!payload) {
       return null;
     }
-
-    const payload = (await response.json()) as CpsBookingRuleResponse;
     const publicRules =
       payload.bookingRuleByClass?.find((group) => group.classCode?.toUpperCase() === "R")
         ?.bookingRuleByCourse ?? [];
@@ -341,21 +358,23 @@ async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguratio
   }
 
   const url = new URL("/onlineresweb/Home/Configuration", metadata.bookingBaseUrl);
-  const response = await fetchWithProviderTimeout(url);
-  if (!response.ok) {
-    if (
-      (response.status === 401 || response.status === 403) &&
-      (await isCpsPathBlockedByOfficialRobots(metadata.bookingBaseUrl, url.pathname))
-    ) {
-      throw new CpsAutomationPolicyBlockedError({
-        bookingUrl: metadata.bookingBaseUrl,
-        policyUrl: new URL("/robots.txt", metadata.bookingBaseUrl).toString()
-      });
+  return retryCpsReadOnTimeout(async () => {
+    const response = await fetchWithProviderTimeout(url);
+    if (!response.ok) {
+      if (
+        (response.status === 401 || response.status === 403) &&
+        (await isCpsPathBlockedByOfficialRobots(metadata.bookingBaseUrl, url.pathname))
+      ) {
+        throw new CpsAutomationPolicyBlockedError({
+          bookingUrl: metadata.bookingBaseUrl,
+          policyUrl: new URL("/robots.txt", metadata.bookingBaseUrl).toString()
+        });
+      }
+      throw providerHttpError("CPS configuration", response);
     }
-    throw providerHttpError("CPS configuration", response);
-  }
 
-  return (await response.json()) as CpsConfiguration;
+    return (await response.json()) as CpsConfiguration;
+  });
 }
 
 async function isCpsPathBlockedByOfficialRobots(
@@ -450,28 +469,33 @@ function robotsPatternSpecificity(pattern: string) {
 }
 
 async function fetchShortLivedToken(configuration: CpsConfiguration) {
-  const response = await fetchWithProviderTimeout(`${configuration.authorityBaseUrl}/myconnect/token/short`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({
-      client_id: "onlinereswebshortlived",
-      client_secret: "v4secret",
-      grant_type: "client_credentials"
-    })
+  return retryCpsTokenRequest(async () => {
+    const response = await fetchWithProviderTimeout(
+      `${configuration.authorityBaseUrl}/myconnect/token/short`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+          client_id: "onlinereswebshortlived",
+          client_secret: "v4secret",
+          grant_type: "client_credentials"
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw providerHttpError("CPS token", response);
+    }
+
+    const token = (await response.json()) as CpsTokenResponse;
+    if (!token.access_token) {
+      throw new Error("CPS token response did not include an access token");
+    }
+
+    return token.access_token;
   });
-
-  if (!response.ok) {
-    throw providerHttpError("CPS token", response);
-  }
-
-  const token = (await response.json()) as CpsTokenResponse;
-  if (!token.access_token) {
-    throw new Error("CPS token response did not include an access token");
-  }
-
-  return token.access_token;
 }
 
 async function loadPublicOptions(
@@ -485,16 +509,18 @@ async function loadPublicOptions(
     url.searchParams.set("version", configuration.buildNumber.trim());
   }
   url.searchParams.set("product", "3");
-  const response = await fetchWithProviderTimeout(url, {
-    headers: cpsHeaders(configuration, credential, timeZone, date)
+  const payload = await retryCpsReadOnTimeout(async () => {
+    const response = await fetchWithProviderTimeout(url, {
+      headers: cpsHeaders(configuration, credential, timeZone, date)
+    });
+    if (!response.ok) {
+      throw providerHttpError("CPS public options", response);
+    }
+    return (await response.json()) as {
+      webSiteId?: string;
+      reservationOptions?: { terminalId?: number };
+    };
   });
-  if (!response.ok) {
-    throw providerHttpError("CPS public options", response);
-  }
-  const payload = (await response.json()) as {
-    webSiteId?: string;
-    reservationOptions?: { terminalId?: number };
-  };
   if (!payload.webSiteId) {
     throw new Error("CPS public options did not include a website id");
   }
@@ -521,6 +547,150 @@ async function registerTransactionId(onlineApi: string, headers: Record<string, 
   if (!response.ok) {
     throw providerHttpError("CPS transaction registration", response);
   }
+}
+
+async function retryCpsReadOnTimeout<T>(read: () => Promise<T>): Promise<T> {
+  // Only idempotent public reads use this helper. Transaction registration
+  // remains single-attempt so a timeout can never duplicate that POST.
+  for (let attempt = 1; attempt <= CPS_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      if (attempt === CPS_READ_ATTEMPTS || !isCpsTimeoutError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("CPS read retry exhausted without an error");
+}
+
+async function retryCpsTokenRequest<T>(request: () => Promise<T>): Promise<T> {
+  // This POST only mints the short-lived read credential. Keep its retry budget
+  // to one and never retry client, rate-limit, schema, or credential failures.
+  for (let attempt = 1; attempt <= CPS_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      if (
+        attempt === CPS_READ_ATTEMPTS ||
+        (!isCpsTimeoutError(error) && !isTransientCpsTokenHttpError(error))
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error("CPS token retry exhausted without an error");
+}
+
+function isTransientCpsTokenHttpError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  try {
+    const record = error as { name?: unknown; status?: unknown };
+    return Boolean(
+      record.name === "ProviderHttpError" &&
+        typeof record.status === "number" &&
+        CPS_TRANSIENT_TOKEN_HTTP_STATUSES.has(record.status)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isCpsTimeoutError(error: unknown) {
+  const pending: unknown[] = [error];
+  const seen = new Set<object>();
+  let inspected = 0;
+
+  while (
+    pending.length > 0 &&
+    inspected < CPS_TIMEOUT_ERROR_INSPECTION_LIMIT
+  ) {
+    const candidate = pending.shift();
+    inspected += 1;
+    if (!candidate || (typeof candidate !== "object" && typeof candidate !== "function")) {
+      continue;
+    }
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+
+    try {
+      const record = candidate as {
+        name?: unknown;
+        code?: unknown;
+        cause?: unknown;
+        errors?: unknown;
+      };
+      if (
+        (typeof record.name === "string" && CPS_TIMEOUT_ERROR_NAMES.has(record.name)) ||
+        (typeof record.code === "string" && CPS_TIMEOUT_ERROR_CODES.has(record.code))
+      ) {
+        return true;
+      }
+
+      if (record.cause !== undefined) {
+        pending.push(record.cause);
+      }
+      if (
+        record.name === "AggregateError" &&
+        Array.isArray(record.errors)
+      ) {
+        pending.push(
+          ...record.errors.slice(
+            0,
+            CPS_TIMEOUT_ERROR_INSPECTION_LIMIT - inspected
+          )
+        );
+      }
+    } catch {
+      // An exotic error object with throwing accessors is not timeout proof.
+    }
+  }
+
+  return false;
+}
+
+function getCpsSearchContent(payload: unknown): CpsApiSlot[] {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new Error("CPS tee times returned an invalid response schema");
+  }
+
+  const content = (payload as { content?: unknown }).content;
+  if (Array.isArray(content)) {
+    return content;
+  }
+  if (isCpsNoTeeTimesSentinel(content)) {
+    return [];
+  }
+  throw new Error("CPS tee times returned an invalid response schema");
+}
+
+function isCpsNoTeeTimesSentinel(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length < 1 ||
+    keys.length > 2 ||
+    keys.some((key) => key !== "messageKey" && key !== "messageDetail") ||
+    record.messageKey !== CPS_NO_TEE_TIMES_MESSAGE_KEY
+  ) {
+    return false;
+  }
+  return record.messageDetail === undefined ||
+    (typeof record.messageDetail === "string" &&
+      record.messageDetail.length > 0 &&
+      record.messageDetail.length <= CPS_NO_TEE_TIMES_MESSAGE_DETAIL_MAX_LENGTH);
 }
 
 function buildTeeTimesUrl(

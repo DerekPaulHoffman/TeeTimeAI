@@ -65,7 +65,8 @@ describe("fetchCpsSlots", () => {
             transactionId: "tx",
             content: {
               messageKey: "NO_TEETIMES",
-              messageDetail: "No tee times available,please try different criteria."
+              messageDetail:
+                "No tee times available,please try different criteria."
             }
           });
         }
@@ -116,6 +117,525 @@ describe("fetchCpsSlots", () => {
         holes: 9
       })
     ]);
+  });
+
+  it("retries a nested Undici availability timeout without repeating the transaction", async () => {
+    const teeTimeSignals: Array<AbortSignal | null | undefined> = [];
+    const teeTimeUrls: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = input.toString();
+
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse({
+          clientId: "onlineresweb",
+          authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+          onlineApi:
+            "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          websiteId: "00000000-0000-0000-0000-000000000000",
+          siteName: "traditionoaklane"
+        });
+      }
+
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return jsonResponse({ access_token: "token" });
+      }
+
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+
+      if (url.includes("/TeeTimes?")) {
+        teeTimeUrls.push(url);
+        teeTimeSignals.push(init?.signal);
+        const holes = new URL(url).searchParams.get("holes");
+        if (holes === "18" && teeTimeUrls.length === 1) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            json: vi.fn().mockRejectedValue(
+              nestedFetchError(
+                new AggregateError([
+                  Object.assign(new Error("CPS response body timed out"), {
+                    code: "UND_ERR_BODY_TIMEOUT"
+                  })
+                ])
+              )
+            )
+          } as unknown as Response;
+        }
+        if (holes === "18") {
+          return jsonResponse({
+            transactionId: "tx",
+            content: [
+              {
+                teeSheetId: 901,
+                startTime: "2026-07-18T08:40:00",
+                availableParticipantNo: [1, 2, 3, 4],
+                holes: 18
+              }
+            ]
+          });
+        }
+        return jsonResponse({ transactionId: "tx", content: [] });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const slots = await fetchCpsSlots({
+      courseId: "tradition-oak-lane",
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      players: 4,
+      timeZone: "America/New_York",
+      metadata: {
+        provider: "CPS",
+        siteName: "traditionoaklane",
+        bookingBaseUrl: "https://traditionoaklane.cps.golf/",
+        courseIds: [1],
+        holes: [18, 9]
+      }
+    });
+
+    expect(teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))).toEqual([
+      "18",
+      "18",
+      "9"
+    ]);
+    expect(teeTimeUrls[1]).toBe(teeTimeUrls[0]);
+    expect(teeTimeSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(teeTimeSignals[1]).toBeInstanceOf(AbortSignal);
+    expect(teeTimeSignals[1]).not.toBe(teeTimeSignals[0]);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/RegisterTransactionId")
+      )
+    ).toHaveLength(2);
+    expect(slots).toEqual([
+      expect.objectContaining({
+        sourceId: "cps-traditionoaklane-901",
+        availableSpots: 4,
+        holes: 18
+      })
+    ]);
+  });
+
+  it("retries an AbortError from an idempotent CPS read", async () => {
+    let configurationAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        configurationAttempts += 1;
+        if (configurationAttempts === 1) {
+          throw new DOMException("The CPS configuration read was aborted", "AbortError");
+        }
+        return jsonResponse(cpsConfiguration());
+      }
+
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return jsonResponse({ access_token: "token" });
+      }
+
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+
+      if (url.includes("/TeeTimes?")) {
+        return jsonResponse({ transactionId: "tx", content: [] });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(cpsInput({ holes: [18] }))).resolves.toEqual([]);
+    expect(configurationAttempts).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT",
+    "UND_ERR_BODY_TIMEOUT",
+    "ETIMEDOUT"
+  ])("retries the exact nested timeout code %s", async (code) => {
+    let configurationAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        configurationAttempts += 1;
+        if (configurationAttempts === 1) {
+          throw nestedFetchError(
+            Object.assign(new Error("nested provider failure"), { code })
+          );
+        }
+        return jsonResponse(cpsConfiguration());
+      }
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return jsonResponse({ access_token: "token" });
+      }
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+      if (url.includes("/TeeTimes?")) {
+        return jsonResponse({ transactionId: "tx", content: [] });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(cpsInput({ holes: [18] }))).resolves.toEqual([]);
+    expect(configurationAttempts).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("fails closed when 18-hole coverage succeeds but the 9-hole retry is exhausted", async () => {
+    const teeTimeUrls: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse({
+          clientId: "onlineresweb",
+          authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+          onlineApi:
+            "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          websiteId: "00000000-0000-0000-0000-000000000000",
+          siteName: "traditionoaklane"
+        });
+      }
+
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return jsonResponse({ access_token: "token" });
+      }
+
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+
+      if (url.includes("/TeeTimes?")) {
+        teeTimeUrls.push(url);
+        if (new URL(url).searchParams.get("holes") === "18") {
+          return jsonResponse({
+            transactionId: "tx",
+            content: [
+              {
+                teeSheetId: 902,
+                startTime: "2026-07-18T08:40:00",
+                availableParticipantNo: [1, 2, 3, 4],
+                holes: 18
+              }
+            ]
+          });
+        }
+        throw cpsTimeoutError();
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const error = await fetchCpsTeeSheet({
+      courseId: "tradition-oak-lane",
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      players: 4,
+      metadata: {
+        provider: "CPS",
+        siteName: "traditionoaklane",
+        bookingBaseUrl: "https://traditionoaklane.cps.golf/",
+        courseIds: [1],
+        holes: [18, 9]
+      }
+    }).catch((caught) => caught);
+
+    expect(error).toEqual(expect.objectContaining({ name: "TimeoutError" }));
+    expect(teeTimeUrls).toHaveLength(3);
+    expect(
+      teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))
+    ).toEqual(["18", "9", "9"]);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/RegisterTransactionId")
+      )
+    ).toHaveLength(2);
+  });
+
+  it("accepts the exact bounded CPS no-tee-times sentinel as empty coverage", async () => {
+    const teeTimeUrls: string[] = [];
+    mockPersistedCpsFetch((url) => {
+      teeTimeUrls.push(url.toString());
+      return jsonResponse({
+        transactionId: "tx",
+        content: {
+          messageKey: "NO_TEETIMES",
+          messageDetail: "No tee times available,please try different criteria."
+        }
+      });
+    });
+
+    await expect(
+      fetchCpsTeeSheet(persistedCpsInput({ holes: [18, 9] }))
+    ).resolves.toEqual({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
+    expect(
+      teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))
+    ).toEqual(["18", "9"]);
+  });
+
+  it("rejects a near-miss 18-hole CPS sentinel instead of reporting no match", async () => {
+    const teeTimeUrls: string[] = [];
+    const fetchMock = mockPersistedCpsFetch((url) => {
+      teeTimeUrls.push(url.toString());
+      return jsonResponse({
+        transactionId: "tx",
+        content: { messageKey: "NO_TEE_TIMES" }
+      });
+    });
+
+    await expect(
+      fetchCpsTeeSheet(persistedCpsInput({ holes: [18] }))
+    ).rejects.toThrow("CPS tee times returned an invalid response schema");
+    expect(
+      teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))
+    ).toEqual(["18"]);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/RegisterTransactionId")
+      )
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "an extra field",
+      content: {
+        messageKey: "NO_TEETIMES",
+        messageDetail: "No tee times available.",
+        slots: []
+      }
+    },
+    {
+      name: "a non-string detail",
+      content: { messageKey: "NO_TEETIMES", messageDetail: null }
+    },
+    {
+      name: "an oversized detail",
+      content: { messageKey: "NO_TEETIMES", messageDetail: "x".repeat(513) }
+    }
+  ])("rejects a malformed CPS no-tee-times sentinel with $name", async ({ content }) => {
+    mockPersistedCpsFetch(() => jsonResponse({ transactionId: "tx", content }));
+
+    await expect(
+      fetchCpsTeeSheet(persistedCpsInput({ holes: [18] }))
+    ).rejects.toThrow("CPS tee times returned an invalid response schema");
+  });
+
+  it("rejects the whole CPS result when 18 holes succeed but 9 holes return invalid schema", async () => {
+    const teeTimeUrls: string[] = [];
+    mockPersistedCpsFetch((url) => {
+      teeTimeUrls.push(url.toString());
+      if (url.searchParams.get("holes") === "18") {
+        return jsonResponse({
+          transactionId: "tx",
+          content: [
+            {
+              teeSheetId: 903,
+              startTime: "2026-07-18T09:10:00",
+              availableParticipantNo: [1, 2, 3, 4],
+              holes: 18
+            }
+          ]
+        });
+      }
+      return jsonResponse({ transactionId: "tx", unexpected: true });
+    });
+
+    const outcome = await fetchCpsTeeSheet(
+      persistedCpsInput({ holes: [18, 9] })
+    ).catch((error) => error);
+
+    expect(outcome).toEqual(
+      expect.objectContaining({
+        message: "CPS tee times returned an invalid response schema"
+      })
+    );
+    expect(outcome).not.toEqual(
+      expect.objectContaining({
+        slots: expect.arrayContaining([
+          expect.objectContaining({ sourceId: "cps-traditionoaklane-903" })
+        ])
+      })
+    );
+    expect(
+      teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))
+    ).toEqual(["18", "9"]);
+  });
+
+  it("rejects invalid payloads on the default both-hole CPS path", async () => {
+    const teeTimeUrls: string[] = [];
+    mockPersistedCpsFetch((url) => {
+      teeTimeUrls.push(url.toString());
+      return jsonResponse({ transactionId: "tx", content: null });
+    });
+
+    await expect(fetchCpsTeeSheet(persistedCpsInput())).rejects.toThrow(
+      "CPS tee times returned an invalid response schema"
+    );
+    expect(
+      teeTimeUrls.map((url) => new URL(url).searchParams.get("holes"))
+    ).toEqual(["18"]);
+  });
+
+  it("does not retry a nested non-timeout fetch failure", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      nestedFetchError(
+        Object.assign(new Error("socket reset"), { code: "ECONNRESET" })
+      )
+    );
+
+    await expect(fetchCpsSlots(cpsInput())).rejects.toMatchObject({
+      name: "TypeError",
+      message: "fetch failed"
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("retries one timed-out short-lived CPS token request", async () => {
+    let tokenAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        tokenAttempts += 1;
+        if (tokenAttempts === 1) {
+          throw cpsTimeoutError();
+        }
+        return jsonResponse({ access_token: "token" });
+      }
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+      if (url.includes("/TeeTimes?")) {
+        return jsonResponse({ transactionId: "tx", content: [] });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).resolves.toEqual([]);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/identityapi/myconnect/token/short")
+      )
+    ).toHaveLength(2);
+  });
+
+  it("retries one transient CPS token 503 and then continues", async () => {
+    let tokenAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        tokenAttempts += 1;
+        return tokenAttempts === 1
+          ? new Response("Unavailable", { status: 503 })
+          : jsonResponse({ access_token: "token" });
+      }
+      if (url.endsWith("/RegisterTransactionId")) {
+        return jsonResponse(true);
+      }
+      if (url.includes("/TeeTimes?")) {
+        return jsonResponse({ transactionId: "tx", content: [] });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).resolves.toEqual([]);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/identityapi/myconnect/token/short")
+      )
+    ).toHaveLength(2);
+  });
+
+  it("fails closed after two transient CPS token 503 responses", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Unavailable", { status: 503 })
+    );
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      "CPS token returned 503"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([401, 429])("does not retry a CPS token HTTP %s response", async (status) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Rejected", { status })
+    );
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      `CPS token returned ${status}`
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not retry a CPS token response with no access token", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({})
+    );
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      "CPS token response did not include an access token"
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a timed-out CPS transaction registration POST single-attempt", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse(cpsConfiguration());
+      }
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return jsonResponse({ access_token: "token" });
+      }
+      if (url.endsWith("/RegisterTransactionId")) {
+        throw cpsTimeoutError();
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toMatchObject({
+      name: "TimeoutError"
+    });
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        input.toString().endsWith("/RegisterTransactionId")
+      )
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.some(([input]) => input.toString().includes("/TeeTimes?"))
+    ).toBe(false);
+  });
+
+  it("does not retry a non-timeout CPS HTTP failure", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Unavailable", { status: 503 })
+    );
+
+    await expect(
+      fetchCpsSlots({
+        courseId: "provider-unavailable",
+        date: new Date("2026-07-18T00:00:00.000Z"),
+        players: 2,
+        metadata: {
+          provider: "CPS",
+          siteName: "provider-unavailable",
+          bookingBaseUrl: "https://provider-unavailable.cps.golf/",
+          courseIds: [1]
+        }
+      })
+    ).rejects.toThrow("CPS configuration returned 503");
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("uses the provider-published public API key without a token or transaction", async () => {
@@ -400,5 +920,76 @@ function jsonResponse(value: unknown) {
     headers: {
       "content-type": "application/json"
     }
+  });
+}
+
+function cpsTimeoutError() {
+  return new DOMException("The CPS provider read timed out", "TimeoutError");
+}
+
+function nestedFetchError(cause: unknown) {
+  const error = new TypeError("fetch failed") as TypeError & { cause: unknown };
+  error.cause = cause;
+  return error;
+}
+
+function cpsConfiguration() {
+  return {
+    clientId: "onlineresweb",
+    authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+    onlineApi:
+      "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+    websiteId: "00000000-0000-0000-0000-000000000000",
+    siteName: "traditionoaklane"
+  };
+}
+
+function cpsInput(
+  metadataOverrides: Partial<Parameters<typeof fetchCpsSlots>[0]["metadata"]> = {}
+): Parameters<typeof fetchCpsSlots>[0] {
+  return {
+    courseId: "tradition-oak-lane",
+    date: new Date("2026-07-18T00:00:00.000Z"),
+    players: 4,
+    timeZone: "America/New_York",
+    metadata: {
+      provider: "CPS",
+      siteName: "traditionoaklane",
+      bookingBaseUrl: "https://traditionoaklane.cps.golf/",
+      courseIds: [1],
+      holes: [18, 9],
+      ...metadataOverrides
+    }
+  };
+}
+
+function persistedCpsInput(
+  metadataOverrides: Partial<Parameters<typeof fetchCpsSlots>[0]["metadata"]> = {}
+): Parameters<typeof fetchCpsSlots>[0] {
+  const configuration = cpsConfiguration();
+  return cpsInput({
+    clientId: configuration.clientId,
+    onlineApi: configuration.onlineApi,
+    authorityBaseUrl: configuration.authorityBaseUrl,
+    websiteId: configuration.websiteId,
+    ...metadataOverrides
+  });
+}
+
+function mockPersistedCpsFetch(
+  teeTimesResponse: (url: URL) => Response | Promise<Response>
+) {
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = input.toString();
+    if (url.endsWith("/identityapi/myconnect/token/short")) {
+      return jsonResponse({ access_token: "token" });
+    }
+    if (url.endsWith("/RegisterTransactionId")) {
+      return jsonResponse(true);
+    }
+    if (url.includes("/TeeTimes?")) {
+      return teeTimesResponse(new URL(url));
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
   });
 }
