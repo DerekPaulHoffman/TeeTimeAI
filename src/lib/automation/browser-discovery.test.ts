@@ -1212,6 +1212,10 @@ describe("buildBrowserDiscovery", () => {
         {
           url: "https://www.delcopa.gov/parks/permits-forms/reservations",
           label: "Book a pavilion online"
+        },
+        {
+          url: "https://accounts.example.gov/login?session=synthetic-session",
+          label: "Employee login"
         }
       ],
       officialPage: {
@@ -1220,6 +1224,10 @@ describe("buildBrowserDiscovery", () => {
           {
             url: "https://www.delcopa.gov/parks/permits-forms",
             label: "Reservations and Permits"
+          },
+          {
+            url: "https://accounts.example.gov/login?session=synthetic-session",
+            label: "Employee login"
           }
         ]
       },
@@ -1332,6 +1340,12 @@ describe("buildBrowserDiscovery", () => {
       linkCandidates: [
         { url: "https://parks.example/booking", label: "Book Online" }
       ],
+      officialPage: {
+        url: "https://parks.example/clayton",
+        linkCandidates: [
+          { url: "https://parks.example/booking", label: "Book Online" }
+        ]
+      },
       visibleText:
         "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office with questions."
     });

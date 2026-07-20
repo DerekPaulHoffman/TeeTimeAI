@@ -1101,8 +1101,7 @@ function learnWalkInClassification(
     if (
       evidence.bookingCallToAction ||
       hasBookingCallToActionEvidence(officialSourceEvidence) ||
-      hasTransientTeeTimeRouteEvidence(officialSourceEvidence) ||
-      hasUnsafeManualEvidenceUrl(officialSourceEvidence, officialSourceUrls)
+      hasTransientTeeTimeRouteEvidence(officialSourceEvidence)
     ) {
       return null;
     }
