@@ -194,13 +194,51 @@ export async function fetchCpsTeeSheet(
       throw setupError;
     }
   }
-  const headers = cpsHeaders(
+  let headers = cpsHeaders(
     configuration,
     credential,
     input.timeZone ?? "America/New_York",
     input.date
   );
-  const slots = await fetchCpsAvailability(input, configuration, credential, headers);
+  let slots: TeeTimeSlot[];
+  try {
+    slots = await fetchCpsAvailability(input, configuration, credential, headers);
+  } catch (availabilityError) {
+    if (
+      !credential.token ||
+      !isCpsTransactionCredentialRejection(availabilityError)
+    ) {
+      throw availabilityError;
+    }
+    const recoveredApiKey = await tryLoadPublishedCpsApiKey(
+      input.metadata,
+      configuration
+    );
+    if (!recoveredApiKey) {
+      throw availabilityError;
+    }
+    const recoveredCredential = { apiKey: recoveredApiKey };
+    let recoveredConfiguration: CpsConfiguration;
+    try {
+      recoveredConfiguration = await loadPublicOptions(
+        configuration,
+        recoveredCredential,
+        input.timeZone ?? "America/New_York",
+        input.date
+      );
+    } catch {
+      throw availabilityError;
+    }
+    configuration = recoveredConfiguration;
+    credential = recoveredCredential;
+    headers = cpsHeaders(
+      configuration,
+      credential,
+      input.timeZone ?? "America/New_York",
+      input.date
+    );
+    slots = await fetchCpsAvailability(input, configuration, credential, headers);
+  }
   const bookingWindowEvidence = input.discoverBookingWindow
     ? await fetchCpsBookingWindow(input, configuration, credential)
     : null;
@@ -619,6 +657,27 @@ async function registerTransactionId(onlineApi: string, headers: Record<string, 
 
   if (!response.ok) {
     throw providerHttpError("CPS transaction registration", response);
+  }
+}
+
+function isCpsTransactionCredentialRejection(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  try {
+    const record = error as {
+      name?: unknown;
+      message?: unknown;
+      status?: unknown;
+    };
+    return Boolean(
+      record.name === "ProviderHttpError" &&
+        (record.status === 401 || record.status === 403) &&
+        record.message ===
+          `CPS transaction registration returned ${record.status}`
+    );
+  } catch {
+    return false;
   }
 }
 
