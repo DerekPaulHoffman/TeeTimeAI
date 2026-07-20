@@ -43,8 +43,8 @@ describe("fetchCpsSlots", () => {
       const url = input.toString();
 
       if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        expect(init?.redirect).toBe("manual");
         return jsonResponse({
-          clientId: "onlineresweb",
           authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
           onlineApi:
             "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
@@ -63,6 +63,7 @@ describe("fetchCpsSlots", () => {
 
       if (url.includes("/TeeTimes?")) {
         const headers = init?.headers as Record<string, string>;
+        expect(headers["client-id"]).toBe("onlineresweb");
         expect(headers["x-timezoneid"]).toBe("America/Denver");
         expect(headers["x-timezone-offset"]).toBe("360");
         const teeTimesUrl = new URL(url);

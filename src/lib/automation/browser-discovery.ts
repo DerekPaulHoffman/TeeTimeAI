@@ -3705,7 +3705,6 @@ export function getBestProbeUrl(
 type CpsDiscoveryConfiguration = {
   courseId?: unknown;
   siteName?: unknown;
-  clientId?: unknown;
   websiteId?: unknown;
   onlineApi?: unknown;
   authorityBaseUrl?: unknown;
@@ -3832,10 +3831,6 @@ function parseCpsDiscoveryConfiguration(
     typeof configuration.siteName === "string"
       ? configuration.siteName.trim()
       : "";
-  const clientId =
-    typeof configuration.clientId === "string"
-      ? configuration.clientId.trim()
-      : "";
   const websiteId =
     typeof configuration.websiteId === "string"
       ? configuration.websiteId.trim()
@@ -3859,8 +3854,6 @@ function parseCpsDiscoveryConfiguration(
     !Number.isSafeInteger(courseId) ||
     (courseId as number) < 0 ||
     !/^[a-z0-9_-]{1,80}$/i.test(siteName) ||
-    clientId.length < 1 ||
-    clientId.length > 200 ||
     websiteId.length < 1 ||
     websiteId.length > 200 ||
     !tenantIdentity ||

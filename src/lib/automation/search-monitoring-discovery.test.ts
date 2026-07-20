@@ -333,7 +333,6 @@ describe("search monitoring discovery", () => {
           JSON.stringify({
             courseId: 0,
             siteName: "colonie",
-            clientId: "onlineresweb",
             websiteId: "public-website",
             onlineApi:
               "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",

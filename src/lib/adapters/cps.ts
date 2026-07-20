@@ -573,7 +573,9 @@ function sanitizeCpsConfiguration(
   }
   const raw = value as Partial<CpsConfiguration>;
   const siteName = normalizeCpsConfigurationText(raw.siteName, 80);
-  const clientId = normalizeCpsConfigurationText(raw.clientId, 200);
+  const clientId = raw.clientId === undefined
+    ? "onlineresweb"
+    : normalizeCpsConfigurationText(raw.clientId, 200);
   const websiteId = normalizeCpsConfigurationText(raw.websiteId, 200);
   const authorityBaseUrl = parseExpectedCpsEndpoint(
     raw.authorityBaseUrl,

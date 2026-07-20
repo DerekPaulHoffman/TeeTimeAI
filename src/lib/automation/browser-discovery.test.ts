@@ -3665,7 +3665,6 @@ describe("CPS public configuration enrichment", () => {
   const validConfiguration = {
     courseId: 0,
     siteName: "colonie",
-    clientId: "onlineresweb",
     websiteId: "public-website",
     onlineApi:
       "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
