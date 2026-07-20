@@ -7,16 +7,30 @@ import {
 } from "./cps";
 
 describe("isCpsMetadata", () => {
-  it("recognizes reusable CPS metadata", () => {
+  it("recognizes reusable CPS metadata including course id zero", () => {
     expect(
       isCpsMetadata({
         provider: "CPS",
         siteName: "traditionoaklane",
         bookingBaseUrl: "https://traditionoaklane.cps.golf/",
-        courseIds: [1, 2]
+        courseIds: [0, 2]
       })
     ).toBe(true);
   });
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1"])(
+    "rejects unsafe CPS course id %s",
+    (courseId) => {
+      expect(
+        isCpsMetadata({
+          provider: "CPS",
+          siteName: "traditionoaklane",
+          bookingBaseUrl: "https://traditionoaklane.cps.golf/",
+          courseIds: [courseId]
+        })
+      ).toBe(false);
+    }
+  );
 });
 
 describe("fetchCpsSlots", () => {
@@ -123,6 +137,109 @@ describe("fetchCpsSlots", () => {
     ]);
   });
 
+  it("rejects a redirected initial configuration without following it", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input, init) => {
+        expect(init?.redirect).toBe("manual");
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://other.cps.golf/configuration" }
+        });
+      }
+    );
+
+    await expect(fetchCpsSlots(cpsInput())).rejects.toThrow(
+      "CPS configuration returned 302"
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      "a cross-host authority endpoint",
+      { authorityBaseUrl: "https://other.cps.golf/identityapi" }
+    ],
+    [
+      "a same-host wrong authority path",
+      {
+        authorityBaseUrl:
+          "https://traditionoaklane.cps.golf/onlineres/onlineapi"
+      }
+    ],
+    [
+      "a cross-host online API endpoint",
+      {
+        onlineApi:
+          "https://other.cps.golf/onlineres/onlineapi/api/v1/onlinereservation"
+      }
+    ],
+    [
+      "a same-host wrong online API path",
+      { onlineApi: "https://traditionoaklane.cps.golf/other-api" }
+    ]
+  ])("rejects initial configuration with %s", async (_description, overrides) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        ...cpsConfiguration(),
+        apiKey: "unique-secret-that-must-not-escape",
+        ...overrides
+      })
+    );
+
+    const error = await fetchCpsSlots(cpsInput()).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      "CPS configuration returned an invalid response"
+    );
+    expect((error as Error).message).not.toContain(
+      "unique-secret-that-must-not-escape"
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      "a cross-host authority endpoint",
+      { authorityBaseUrl: "https://other.cps.golf/identityapi" }
+    ],
+    [
+      "a same-host wrong authority path",
+      {
+        authorityBaseUrl:
+          "https://traditionoaklane.cps.golf/onlineres/onlineapi"
+      }
+    ],
+    [
+      "a same-host wrong online API path",
+      { onlineApi: "https://traditionoaklane.cps.golf/other-api" }
+    ]
+  ])("rejects persisted configuration with %s before fetching", async (_description, overrides) => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    await expect(
+      fetchCpsSlots(persistedCpsInput(overrides))
+    ).rejects.toThrow("CPS persisted configuration is invalid");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized initial configuration body", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
+        ...cpsConfiguration(),
+        padding: "x".repeat(64 * 1024)
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+
+    await expect(fetchCpsSlots(cpsInput())).rejects.toThrow(
+      "CPS configuration returned an invalid response"
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("retries a nested Undici availability timeout without repeating the transaction", async () => {
     const teeTimeSignals: Array<AbortSignal | null | undefined> = [];
     const teeTimeUrls: string[] = [];
@@ -130,6 +247,7 @@ describe("fetchCpsSlots", () => {
       const url = input.toString();
 
       if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        expect(init?.redirect).toBe("manual");
         return jsonResponse({
           clientId: "onlineresweb",
           authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
@@ -845,8 +963,8 @@ describe("fetchCpsSlots", () => {
 
       await expect(
         fetchCpsSlots(persistedCpsInput({ bookingBaseUrl }))
-      ).rejects.toThrow("CPS token returned 503");
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      ).rejects.toThrow("CPS metadata is invalid");
+      expect(fetchMock).not.toHaveBeenCalled();
     }
   );
 
@@ -864,6 +982,17 @@ describe("fetchCpsSlots", () => {
         onlineApi:
           "https://other-tenant.cps.golf/onlineres/onlineapi/api/v1/onlinereservation"
       }
+    ],
+    [
+      "authority path",
+      {
+        authorityBaseUrl:
+          "https://traditionoaklane.cps.golf/onlineres/onlineapi"
+      }
+    ],
+    [
+      "online API path",
+      { onlineApi: "https://traditionoaklane.cps.golf/other-api" }
     ],
     [
       "credentialed authority URL",
@@ -971,7 +1100,74 @@ describe("fetchCpsSlots", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it.each([401, 429])("does not retry a CPS token HTTP %s response", async (status) => {
+  it.each([401, 403])(
+    "recovers a CPS token credential HTTP %s through a matching published API key",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+        async (input, init) => {
+          const url = input.toString();
+          if (url.endsWith("/identityapi/myconnect/token/short")) {
+            return new Response("Rejected", { status });
+          }
+          if (url.endsWith("/onlineresweb/Home/Configuration")) {
+            expect(init?.redirect).toBe("manual");
+            return jsonResponse({
+              ...cpsConfiguration(),
+              apiKey: "provider-published-key"
+            });
+          }
+          if (url.includes("/GetAllOptions/traditionoaklane?")) {
+            expect((init?.headers as Record<string, string>)["x-apikey"]).toBe(
+              "provider-published-key"
+            );
+            return jsonResponse({
+              webSiteId: "published-website-id",
+              reservationOptions: { terminalId: 3 }
+            });
+          }
+          if (url.includes("/TeeTimes?")) {
+            const headers = init?.headers as Record<string, string>;
+            expect(headers.authorization).toBeUndefined();
+            expect(headers["x-apikey"]).toBe("provider-published-key");
+            return jsonResponse([]);
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
+        }
+      );
+
+      await expect(fetchCpsSlots(persistedCpsInput())).resolves.toEqual([]);
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          input.toString().endsWith("/identityapi/myconnect/token/short")
+        )
+      ).toHaveLength(1);
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          input.toString().endsWith("/onlineresweb/Home/Configuration")
+        )
+      ).toHaveLength(1);
+    }
+  );
+
+  it.each([401, 403])(
+    "preserves CPS token credential HTTP %s when no matching published key exists",
+    async (status) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+        async (input) =>
+          input.toString().endsWith("/identityapi/myconnect/token/short")
+            ? new Response("Rejected", { status })
+            : jsonResponse(cpsConfiguration())
+      );
+
+      await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+        `CPS token returned ${status}`
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it("does not retry or refresh a rate-limited CPS token response", async () => {
+    const status = 429;
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("Rejected", { status })
     );

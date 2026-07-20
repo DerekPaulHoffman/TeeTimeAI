@@ -308,6 +308,157 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("learns minimal CPS metadata from the exact tenant public configuration", async () => {
+    const officialUrl = "https://town.example/golf";
+    const bookingUrl =
+      "https://colonie.cps.golf/onlineresweb/search-teetime";
+    const configurationUrl =
+      "https://colonie.cps.golf/onlineresweb/Home/Configuration";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === officialUrl) {
+        return new Response(
+          `<html><a href="${bookingUrl}">Colonie Golf Course Book a Tee Time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === bookingUrl) {
+        return new Response("<html><body>Public tee time search</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (value === configurationUrl) {
+        return new Response(
+          JSON.stringify({
+            courseId: 0,
+            siteName: "colonie",
+            clientId: "onlineresweb",
+            websiteId: "public-website",
+            onlineApi:
+              "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            authorityBaseUrl: "https://colonie.cps.golf/identityapi",
+            apiKey: "must-not-be-persisted"
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "colonie",
+          name: "Colonie Golf Course",
+          website: officialUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      officialUrl,
+      bookingUrl,
+      configurationUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        bookingUrl: "https://colonie.cps.golf/",
+        apiEndpoint:
+          "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes",
+        apiMetadata: {
+          provider: "CPS",
+          siteName: "colonie",
+          bookingBaseUrl: "https://colonie.cps.golf/",
+          courseIds: [0],
+          holes: [18, 9]
+        },
+        evidence: expect.objectContaining({
+          learnedFrom: "cps-public-configuration"
+        })
+      })
+    );
+    expect(JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls)).not.toContain(
+      "must-not-be-persisted"
+    );
+    expect(result).toEqual({
+      attemptedCourseIds: ["colonie"],
+      appliedCourseIds: ["colonie"],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: ["colonie"]
+    });
+  });
+
+  it("defers CPS enrichment without recording partial metadata when its lease is busy", async () => {
+    providerLeaseMocks.runWithProviderRequestLease
+      .mockImplementationOnce(
+        async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
+          acquired: true,
+          value: await worker()
+        })
+      )
+      .mockImplementationOnce(
+        async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
+          acquired: true,
+          value: await worker()
+        })
+      )
+      .mockResolvedValueOnce({ acquired: false });
+    const officialUrl = "https://town.example/golf";
+    const bookingUrl =
+      "https://colonie.cps.golf/onlineresweb/search-teetime";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (input.toString() === officialUrl) {
+        return new Response(
+          `<html><a href="${bookingUrl}">Colonie Golf Course Book a Tee Time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("<html><body>Public tee time search</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "colonie",
+          name: "Colonie Golf Course",
+          website: officialUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await expect(
+      prepareSearchMonitoring(search, fetchImpl as typeof fetch, now)
+    ).resolves.toEqual({
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: ["colonie"],
+      retryCourseIds: ["colonie"]
+    });
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+  });
+
   it("follows the exact course detail after a legacy URL redirects to a multi-course index", async () => {
     const legacyUrl = "https://city.example/departments/golf-course/";
     const indexUrl = "https://city.example/departments/golf-courses/";

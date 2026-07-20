@@ -17,6 +17,7 @@ import {
 } from "@/lib/automation/db-service";
 import {
   buildBrowserDiscovery,
+  enrichCpsDiscovery,
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
   findCorroboratingAccessBarrier,
@@ -579,10 +580,15 @@ export async function prepareSearchMonitoring(
           buildBrowserDiscovery(collectedWithCorroboration),
           leasedFetch
         );
+        const cpsDiscovery = await enrichCpsDiscovery(
+          chronogolfDiscovery,
+          course.name,
+          leasedFetch
+        );
         const reasonAwareDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
           keepPolicyOnlyDiscoveryActionable(
             await enrichTeesnapDiscovery(
-              chronogolfDiscovery,
+              cpsDiscovery,
               course.name,
               leasedFetch
             )

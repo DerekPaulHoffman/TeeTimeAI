@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildBrowserDiscovery,
   enrichBrowserDiscoveryWithProviderLease,
+  enrichCpsDiscovery,
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
   evaluateBrowserDiscoveryMonitoringGate,
@@ -366,7 +367,7 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery).toMatchObject({
       status: "INSPECTED",
       bookingUrl: "https://sharedfacility.cps.golf/",
-      evidence: { learnedFrom: "cps-course-id-missing" }
+      evidence: { learnedFrom: "cps-course-id-ambiguous" }
     });
     expect(discovery.apiMetadata).toBeUndefined();
   });
@@ -722,7 +723,7 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery).toMatchObject({
       status: "INSPECTED",
       bookingUrl: "https://sharedfacility.cps.golf/",
-      evidence: { learnedFrom: "cps-course-id-missing" }
+      evidence: { learnedFrom: "cps-course-id-ambiguous" }
     });
     expect(discovery.apiMetadata).toBeUndefined();
   });
@@ -3648,6 +3649,285 @@ describe("Chronogolf public profile enrichment", () => {
   });
 });
 
+describe("CPS public configuration enrichment", () => {
+  const configurationUrl =
+    "https://colonie.cps.golf/onlineresweb/Home/Configuration";
+  const missingCourseIdDiscovery = () =>
+    buildBrowserDiscovery({
+      courseId: "colonie-course",
+      courseName: "Colonie Golf Course",
+      sourceUrl: "https://example.test/colonie-golf",
+      observedUrls: [
+        "https://colonie.cps.golf/onlineresweb/search-teetime"
+      ]
+    });
+
+  const validConfiguration = {
+    courseId: 0,
+    siteName: "colonie",
+    clientId: "onlineresweb",
+    websiteId: "public-website",
+    onlineApi:
+      "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+    authorityBaseUrl: "https://colonie.cps.golf/identityapi",
+    apiKey: "must-not-be-persisted"
+  };
+
+  it("learns exact same-tenant metadata without persisting the published key", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(cpsJsonResponse(configurationUrl, validConfiguration));
+
+    const enriched = await enrichCpsDiscovery(
+      missingCourseIdDiscovery(),
+      "Colonie Golf Course",
+      fetchImpl as typeof fetch
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      new URL("https://colonie.cps.golf/onlineresweb/Home/Configuration"),
+      {
+        headers: { Accept: "application/json" },
+        redirect: "manual"
+      }
+    );
+    expect(enriched).toMatchObject({
+      status: "LEARNED",
+      bookingUrl: "https://colonie.cps.golf/",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiEndpoint:
+        "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes",
+      apiMetadata: {
+        provider: "CPS",
+        siteName: "colonie",
+        bookingBaseUrl: "https://colonie.cps.golf/",
+        courseIds: [0],
+        holes: [18, 9]
+      },
+      confidence: 0.95,
+      evidence: { learnedFrom: "cps-public-configuration" }
+    });
+    expect(JSON.stringify(enriched)).not.toContain("must-not-be-persisted");
+  });
+
+  it("leases the configuration read under the CPS family", async () => {
+    const leasedFamilies: string[] = [];
+    const result = await enrichBrowserDiscoveryWithProviderLease(
+      missingCourseIdDiscovery(),
+      "Colonie Golf Course",
+      async (providerFamilyKey, worker) => {
+        leasedFamilies.push(providerFamilyKey);
+        return { acquired: true, value: await worker() };
+      },
+      vi.fn().mockResolvedValue(
+        cpsJsonResponse(configurationUrl, validConfiguration)
+      ) as typeof fetch
+    );
+
+    expect(leasedFamilies).toEqual(["CPS"]);
+    expect(result).toMatchObject({
+      acquired: true,
+      discovery: { status: "LEARNED" }
+    });
+  });
+
+  it.each([
+    {
+      name: "a cross-tenant API endpoint",
+      courseName: "Colonie Golf Course",
+      responseUrl: "https://colonie.cps.golf/onlineresweb/Home/Configuration",
+      configuration: {
+        ...validConfiguration,
+        onlineApi:
+          "https://other.cps.golf/onlineres/onlineapi/api/v1/onlinereservation"
+      }
+    },
+    {
+      name: "a same-host authority path outside the identity API",
+      courseName: "Colonie Golf Course",
+      responseUrl: configurationUrl,
+      configuration: {
+        ...validConfiguration,
+        authorityBaseUrl: "https://colonie.cps.golf/onlineres/onlineapi"
+      }
+    },
+    {
+      name: "a queried API endpoint",
+      courseName: "Colonie Golf Course",
+      responseUrl: configurationUrl,
+      configuration: {
+        ...validConfiguration,
+        onlineApi:
+          "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation?tenant=other"
+      }
+    },
+    {
+      name: "a mismatched tenant identity",
+      courseName: "Different Municipal Golf Course",
+      responseUrl: "https://colonie.cps.golf/onlineresweb/Home/Configuration",
+      configuration: validConfiguration
+    },
+    {
+      name: "an invalid course id",
+      courseName: "Colonie Golf Course",
+      responseUrl: "https://colonie.cps.golf/onlineresweb/Home/Configuration",
+      configuration: { ...validConfiguration, courseId: -1 }
+    },
+    {
+      name: "a fractional course id",
+      courseName: "Colonie Golf Course",
+      responseUrl: configurationUrl,
+      configuration: { ...validConfiguration, courseId: 1.5 }
+    },
+    {
+      name: "a string course id",
+      courseName: "Colonie Golf Course",
+      responseUrl: configurationUrl,
+      configuration: { ...validConfiguration, courseId: "0" }
+    }
+  ])("rejects $name", async ({ courseName, responseUrl, configuration }) => {
+    const enriched = await enrichCpsDiscovery(
+      missingCourseIdDiscovery(),
+      courseName,
+      vi.fn().mockResolvedValue(
+        cpsJsonResponse(responseUrl, configuration)
+      ) as typeof fetch
+    );
+
+    expect(enriched.status).toBe("INSPECTED");
+    expect(enriched.apiMetadata).toBeUndefined();
+    expect(enriched.evidence.learnedFrom).toBe(
+      "cps-public-configuration-invalid"
+    );
+  });
+
+  it.each([
+    {
+      name: "a manual redirect",
+      response: cpsResponseAt(configurationUrl, null, {
+        status: 302,
+        headers: { location: "https://other.cps.golf/configuration" }
+      })
+    },
+    {
+      name: "a followed redirect",
+      response: cpsResponseAt(
+        "https://other.cps.golf/onlineresweb/Home/Configuration",
+        JSON.stringify(validConfiguration),
+        { status: 200, headers: { "content-type": "application/json" } },
+        true
+      )
+    },
+    {
+      name: "a wrong final path",
+      response: cpsJsonResponse(
+        "https://colonie.cps.golf/onlineresweb/Home/Other",
+        validConfiguration
+      )
+    }
+  ])("rejects $name", async ({ response }) => {
+    const enriched = await enrichCpsDiscovery(
+      missingCourseIdDiscovery(),
+      "Colonie Golf Course",
+      vi.fn().mockResolvedValue(response) as typeof fetch
+    );
+
+    expect(enriched.status).toBe("INSPECTED");
+    expect(enriched.apiMetadata).toBeUndefined();
+    expect(enriched.evidence.learnedFrom).toBe(
+      "cps-public-configuration-redirected"
+    );
+  });
+
+  it.each([
+    {
+      name: "a missing JSON content type",
+      response: cpsResponseAt(configurationUrl, JSON.stringify(validConfiguration), {
+        status: 200,
+        headers: { "content-type": "text/plain" }
+      })
+    },
+    {
+      name: "malformed JSON",
+      response: cpsResponseAt(configurationUrl, "{not-json", {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    },
+    {
+      name: "an oversized declared body",
+      response: cpsResponseAt(configurationUrl, JSON.stringify(validConfiguration), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(64 * 1024 + 1)
+        }
+      })
+    },
+    {
+      name: "an oversized actual body",
+      response: cpsResponseAt(
+        configurationUrl,
+        JSON.stringify({ ...validConfiguration, padding: "x".repeat(64 * 1024) }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    }
+  ])("keeps $name non-runnable", async ({ response }) => {
+    const enriched = await enrichCpsDiscovery(
+      missingCourseIdDiscovery(),
+      "Colonie Golf Course",
+      vi.fn().mockResolvedValue(response) as typeof fetch
+    );
+
+    expect(enriched.status).toBe("INSPECTED");
+    expect(enriched.apiMetadata).toBeUndefined();
+    expect(enriched.evidence.learnedFrom).toBe(
+      "cps-public-configuration-invalid"
+    );
+  });
+
+  it("does not enrich conflicting course IDs from a shared CPS tenant", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-course",
+      courseName: "Shared Facility Golf Course",
+      sourceUrl: "https://shared.example/golf",
+      observedUrls: [
+        "https://sharedfacility.cps.golf/onlineresweb/search-teetime?CourseId=11",
+        "https://sharedfacility.cps.golf/onlineresweb/search-teetime?CourseId=22"
+      ]
+    });
+    const fetchImpl = vi.fn();
+
+    const enriched = await enrichCpsDiscovery(
+      discovery,
+      "Shared Facility Golf Course",
+      fetchImpl as typeof fetch
+    );
+
+    expect(discovery.evidence.learnedFrom).toBe("cps-course-id-ambiguous");
+    expect(enriched).toBe(discovery);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unavailable public configuration retryable", async () => {
+    const enriched = await enrichCpsDiscovery(
+      missingCourseIdDiscovery(),
+      "Colonie Golf Course",
+      vi.fn().mockResolvedValue(
+        cpsResponseAt(configurationUrl, "Denied", { status: 403 })
+      ) as typeof fetch
+    );
+
+    expect(enriched.status).toBe("INSPECTED");
+    expect(enriched.apiMetadata).toBeUndefined();
+    expect(enriched.evidence.learnedFrom).toBe(
+      "cps-public-configuration-unavailable"
+    );
+  });
+});
+
 describe("TenFore public booking enrichment", () => {
   it("keeps public browser-visible TenFore availability in adapter review", () => {
     const discovery = buildBrowserDiscovery({
@@ -3694,4 +3974,23 @@ function chronogolfNextData(input: {
       }
     }
   })}</script></html>`;
+}
+
+function cpsJsonResponse(url: string, value: unknown) {
+  return cpsResponseAt(url, JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+}
+
+function cpsResponseAt(
+  url: string,
+  body: BodyInit | null,
+  init: ResponseInit,
+  redirected = false
+) {
+  const response = new Response(body, init);
+  Object.defineProperty(response, "url", { value: url });
+  Object.defineProperty(response, "redirected", { value: redirected });
+  return response;
 }

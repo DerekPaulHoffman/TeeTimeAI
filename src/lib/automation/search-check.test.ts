@@ -1188,6 +1188,8 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(result.supportRetryNeeded).toBe(true);
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
     expect(
       deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
@@ -1222,6 +1224,14 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(result.supportRetryNeeded).toBe(true);
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "FETCH_FAILED",
+        rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK"
+        }
+      })
+    );
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "FETCH_FAILED" })
     );
@@ -1275,7 +1285,10 @@ describe("runSearchCheck email cadence", () => {
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "FETCH_FAILED",
-        message: "CPS configuration returned 403"
+        message: "CPS configuration returned 403",
+        rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK"
+        }
       })
     );
     expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();

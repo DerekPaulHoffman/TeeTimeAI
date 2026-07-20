@@ -243,10 +243,15 @@ export async function enrichBrowserDiscoveryWithProviderLease(
       discovery,
       leasedFetch
     );
+    const cpsDiscovery = await enrichCpsDiscovery(
+      chronogolfDiscovery,
+      courseName,
+      leasedFetch
+    );
     return {
       acquired: true,
       discovery: await enrichTeesnapDiscovery(
-        chronogolfDiscovery,
+        cpsDiscovery,
         courseName,
         leasedFetch
       )
@@ -3075,7 +3080,9 @@ function learnCpsDiscovery(
         finalUrl: evidence.finalUrl,
         observedUrls,
         visibleText: summarizeVisibleText(evidence.visibleText),
-        learnedFrom: "cps-course-id-missing"
+        learnedFrom: selected.courseIdsAmbiguous
+          ? "cps-course-id-ambiguous"
+          : "cps-course-id-missing"
       }
     };
   }
@@ -3109,6 +3116,7 @@ type CpsBookingCandidate = {
   bookingBaseUrl: string;
   label: string;
   courseIds?: number[];
+  courseIdsAmbiguous?: boolean;
 };
 
 function getCpsBookingCandidates(
@@ -3118,7 +3126,12 @@ function getCpsBookingCandidates(
 ): CpsBookingCandidate[] {
   const includeEvidenceLinks = options.includeEvidenceLinks ?? true;
   const includeWidget = options.includeWidget ?? true;
-  const rawCandidates: Array<{ value: string; label: string; courseIds?: number[] }> = [
+  const rawCandidates: Array<{
+    value: string;
+    label: string;
+    courseIds?: number[];
+    courseIdsAmbiguous?: boolean;
+  }> = [
     ...(includeEvidenceLinks ? (evidence.linkCandidates ?? []).map((candidate) => ({
       value: candidate.url,
       label: candidate.label
@@ -3145,7 +3158,8 @@ function getCpsBookingCandidates(
       url: url!,
       bookingBaseUrl,
       label,
-      courseIds
+      courseIds,
+      courseIdsAmbiguous: raw.courseIdsAmbiguous
     });
   }
 
@@ -3222,11 +3236,15 @@ function mergeCpsCandidates(
     allCandidatesIdentifySameCourse
     ? courseIds
     : [];
+  const courseIdsAmbiguous =
+    candidates.some((candidate) => candidate.courseIdsAmbiguous) ||
+    (courseIds.length > 0 && safeCourseIds.length === 0);
 
   return {
     ...primary,
     label: candidates.find((candidate) => candidate.label)?.label ?? primary.label,
-    courseIds: safeCourseIds.length > 0 ? safeCourseIds : undefined
+    courseIds: safeCourseIds.length > 0 ? safeCourseIds : undefined,
+    courseIdsAmbiguous: courseIdsAmbiguous || undefined
   };
 }
 
@@ -3238,8 +3256,12 @@ function normalizeCpsTenantIdentity(value: string) {
 
 function isCpsBookingCandidateUrl(url: URL | null) {
   return Boolean(
-    url?.hostname.endsWith(".cps.golf") &&
-      url.hostname !== "sc.cps.golf" &&
+    url?.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      /^[a-z0-9](?:[a-z0-9-]{0,62})\.cps\.golf$/i.test(url.hostname) &&
+      url.hostname.toLowerCase() !== "sc.cps.golf" &&
       (url.pathname === "/" ||
         /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/i.test(url.pathname))
   );
@@ -3483,11 +3505,13 @@ function getCpsWidgetCandidates(text: string | undefined, courseName: string) {
   const selectedLocation = urls.length === 1 && locationMatches.length === 1
     ? locationMatches[0]
     : undefined;
+  const courseIdsAmbiguous = locations.length > 0 && !selectedLocation;
 
   return urls.map((value) => ({
     value,
     label: selectedLocation?.name ?? courseName,
-    ...(selectedLocation ? { courseIds: [selectedLocation.courseId] } : {})
+    ...(selectedLocation ? { courseIds: [selectedLocation.courseId] } : {}),
+    ...(courseIdsAmbiguous ? { courseIdsAmbiguous: true } : {})
   }));
 }
 
@@ -3676,6 +3700,277 @@ export function getBestProbeUrl(
     return website;
   }
   return bookingUrl ?? website;
+}
+
+type CpsDiscoveryConfiguration = {
+  courseId?: unknown;
+  siteName?: unknown;
+  clientId?: unknown;
+  websiteId?: unknown;
+  onlineApi?: unknown;
+  authorityBaseUrl?: unknown;
+};
+
+const CPS_CONFIGURATION_MAX_BYTES = 64 * 1024;
+
+export async function enrichCpsDiscovery(
+  discovery: BrowserDiscovery,
+  courseName: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscovery> {
+  const bookingBase = parseUrl(discovery.bookingUrl);
+  if (
+    discovery.status !== "INSPECTED" ||
+    discovery.detectedPlatform !== "CUSTOM" ||
+    discovery.evidence.learnedFrom !== "cps-course-id-missing" ||
+    discovery.bookingMethod !== "PUBLIC_ONLINE" ||
+    discovery.apiMetadata !== undefined ||
+    Boolean(discovery.evidence.accessBarriers?.length) ||
+    !bookingBase ||
+    !isStrictCpsTenantRoot(bookingBase)
+  ) {
+    return discovery;
+  }
+
+  const bookingBaseUrl = `${bookingBase.origin}/`;
+  const configurationUrl = new URL(
+    "/onlineresweb/Home/Configuration",
+    bookingBaseUrl
+  );
+  const response = await fetchImpl(configurationUrl, {
+    headers: { Accept: "application/json" },
+    redirect: "manual"
+  });
+  if (
+    response.redirected ||
+    (response.status >= 300 && response.status < 400)
+  ) {
+    return withCpsConfigurationResult(discovery, "redirected");
+  }
+  if (!response.ok || response.status !== 200) {
+    return withCpsConfigurationResult(discovery, "unavailable");
+  }
+
+  const responseUrl = parseUrl(response.url);
+  if (
+    response.url &&
+    (!responseUrl ||
+      responseUrl.origin !== configurationUrl.origin ||
+      responseUrl.pathname !== configurationUrl.pathname ||
+      responseUrl.search ||
+      responseUrl.hash)
+  ) {
+    return withCpsConfigurationResult(discovery, "redirected");
+  }
+
+  const rawConfiguration = await readBoundedCpsConfiguration(response);
+  if (!rawConfiguration) {
+    return withCpsConfigurationResult(discovery, "invalid");
+  }
+  const configuration = parseCpsDiscoveryConfiguration(
+    rawConfiguration,
+    bookingBase,
+    courseName
+  );
+  if (!configuration) {
+    return withCpsConfigurationResult(discovery, "invalid");
+  }
+
+  return {
+    ...discovery,
+    status: "LEARNED",
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The exact CPS tenant publishes course-specific configuration for its signed-out tee-time search. Tee Time Spot reads public availability and leaves booking on the official provider page.",
+    apiEndpoint: `${bookingBase.origin}/onlineres/onlineapi/api/v1/onlinereservation/TeeTimes`,
+    apiMetadata: {
+      provider: "CPS",
+      siteName: configuration.siteName,
+      bookingBaseUrl,
+      courseIds: [configuration.courseId],
+      holes: [18, 9]
+    },
+    confidence: 0.95,
+    evidence: {
+      ...discovery.evidence,
+      observedUrls: uniqueUrls([
+        ...discovery.evidence.observedUrls,
+        configurationUrl.toString()
+      ]),
+      learnedFrom: "cps-public-configuration"
+    }
+  };
+}
+
+function withCpsConfigurationResult(
+  discovery: BrowserDiscovery,
+  reason: "invalid" | "redirected" | "unavailable"
+) {
+  return {
+    ...discovery,
+    evidence: {
+      ...discovery.evidence,
+      learnedFrom: `cps-public-configuration-${reason}`
+    }
+  };
+}
+
+function parseCpsDiscoveryConfiguration(
+  value: unknown,
+  bookingBase: URL,
+  courseName: string
+) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const configuration = value as CpsDiscoveryConfiguration;
+  const courseId = configuration.courseId;
+  const siteName =
+    typeof configuration.siteName === "string"
+      ? configuration.siteName.trim()
+      : "";
+  const clientId =
+    typeof configuration.clientId === "string"
+      ? configuration.clientId.trim()
+      : "";
+  const websiteId =
+    typeof configuration.websiteId === "string"
+      ? configuration.websiteId.trim()
+      : "";
+  const onlineApi = parseCpsConfigurationEndpoint(
+    configuration.onlineApi,
+    bookingBase,
+    /^\/onlineres\/onlineapi\/api\/v1\/onlinereservation\/?$/i
+  );
+  const authorityBaseUrl = parseCpsConfigurationEndpoint(
+    configuration.authorityBaseUrl,
+    bookingBase,
+    /^\/identityapi\/?$/i
+  );
+  const tenantName = bookingBase.hostname.split(".")[0] ?? "";
+  const tenantIdentity = normalizeCpsTenantIdentity(tenantName);
+  const siteIdentity = normalizeCpsTenantIdentity(siteName);
+  const courseIdentity = normalizeCpsTenantIdentity(courseName);
+
+  if (
+    !Number.isSafeInteger(courseId) ||
+    (courseId as number) < 0 ||
+    !/^[a-z0-9_-]{1,80}$/i.test(siteName) ||
+    clientId.length < 1 ||
+    clientId.length > 200 ||
+    websiteId.length < 1 ||
+    websiteId.length > 200 ||
+    !tenantIdentity ||
+    tenantIdentity !== siteIdentity ||
+    !courseIdentity ||
+    tenantIdentity !== courseIdentity ||
+    !onlineApi ||
+    !authorityBaseUrl
+  ) {
+    return null;
+  }
+
+  return {
+    courseId: courseId as number,
+    siteName
+  };
+}
+
+function isStrictCpsTenantRoot(url: URL) {
+  return Boolean(
+    url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      /^[a-z0-9](?:[a-z0-9-]{0,62})\.cps\.golf$/i.test(url.hostname) &&
+      url.hostname.toLowerCase() !== "sc.cps.golf"
+  );
+}
+
+async function readBoundedCpsConfiguration(response: Response) {
+  const contentType = response.headers.get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (
+    contentType !== "application/json" &&
+    !contentType?.endsWith("+json")
+  ) {
+    return null;
+  }
+
+  const declaredLength = response.headers.get("content-length")?.trim();
+  if (
+    declaredLength &&
+    (!/^\d+$/.test(declaredLength) ||
+      Number(declaredLength) > CPS_CONFIGURATION_MAX_BYTES)
+  ) {
+    return null;
+  }
+
+  const body = response.body;
+  if (!body) {
+    return null;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      byteLength += value.byteLength;
+      if (byteLength > CPS_CONFIGURATION_MAX_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function parseCpsConfigurationEndpoint(
+  value: unknown,
+  bookingBase: URL,
+  expectedPath: RegExp
+) {
+  const url = parseUrl(typeof value === "string" ? value.trim() : undefined);
+  if (
+    !url ||
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.origin !== bookingBase.origin ||
+    url.search ||
+    url.hash ||
+    !expectedPath.test(url.pathname)
+  ) {
+    return null;
+  }
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
 function isSameHostGenericPermitDestination(website: string, bookingUrl: string) {

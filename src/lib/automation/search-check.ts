@@ -485,16 +485,19 @@ async function checkSearch(
       return;
     }
 
+    let providerRequestStarted = false;
     try {
       const providerExecution = await runWithProviderRequestLease(
         resolveProviderCapability(course).providerFamilyKey,
-        () =>
-          fetchCourseTeeSheet(
+        () => {
+          providerRequestStarted = true;
+          return fetchCourseTeeSheet(
             course,
             search.date,
             search.players,
             refreshBookingWindow
-          )
+          );
+        }
       );
       if (!providerExecution.acquired) {
         monitoringRetryCourseIds.add(course.id);
@@ -705,7 +708,10 @@ async function checkSearch(
         courseId: course.id,
         automationRunId,
         outcome: "FETCH_FAILED",
-        message
+        message,
+        rawSummary: providerRequestStarted
+          ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
+          : undefined
       });
       const supportIssue = await reportCourseSupportIssue({
         course,

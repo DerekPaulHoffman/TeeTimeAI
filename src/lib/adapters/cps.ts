@@ -85,6 +85,10 @@ type CpsFetchInput = {
 };
 
 const CPS_READ_ATTEMPTS = 2;
+const CPS_CONFIGURATION_MAX_BYTES = 64 * 1024;
+const CPS_AUTHORITY_PATH = "/identityapi";
+const CPS_ONLINE_API_PATH =
+  "/onlineres/onlineapi/api/v1/onlinereservation";
 const CPS_TIMEOUT_ERROR_INSPECTION_LIMIT = 16;
 const CPS_TIMEOUT_ERROR_NAMES = new Set(["TimeoutError", "AbortError"]);
 const CPS_TIMEOUT_ERROR_CODES = new Set([
@@ -138,9 +142,12 @@ export function isCpsMetadata(value: unknown): value is CpsMetadata {
     metadata.provider === "CPS" &&
     typeof metadata.siteName === "string" &&
     typeof metadata.bookingBaseUrl === "string" &&
+    Boolean(getSafeCpsTenantRoot(metadata.siteName, metadata.bookingBaseUrl)) &&
     Array.isArray(metadata.courseIds) &&
     metadata.courseIds.length > 0 &&
-    metadata.courseIds.every((courseId) => typeof courseId === "number") &&
+    metadata.courseIds.every(
+      (courseId) => Number.isSafeInteger(courseId) && courseId >= 0
+    ) &&
     (metadata.holes === undefined ||
       (Array.isArray(metadata.holes) &&
         metadata.holes.length > 0 &&
@@ -155,6 +162,9 @@ export async function fetchCpsSlots(input: CpsFetchInput): Promise<TeeTimeSlot[]
 export async function fetchCpsTeeSheet(
   input: CpsFetchInput & { discoverBookingWindow?: boolean }
 ): Promise<CpsTeeSheetResult> {
+  if (!isCpsMetadata(input.metadata)) {
+    throw new Error("CPS metadata is invalid");
+  }
   let configuration = await loadConfiguration(input.metadata);
   let credential: { token?: string; apiKey?: string };
   let recoveredTokenError: { error: unknown } | null = null;
@@ -165,7 +175,7 @@ export async function fetchCpsTeeSheet(
     try {
       credential = { token: await fetchShortLivedToken(configuration) };
     } catch (tokenError) {
-      if (!isRetryableCpsTokenError(tokenError)) {
+      if (!canRecoverCpsTokenErrorWithPublishedKey(tokenError)) {
         throw tokenError;
       }
       const recoveredApiKey = await tryLoadPublishedCpsApiKey(
@@ -418,23 +428,50 @@ function normalizeCpsReleaseTime(value: string | undefined) {
 
 async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguration> {
   if (metadata.onlineApi && metadata.authorityBaseUrl && metadata.websiteId) {
-    return {
-      clientId: metadata.clientId ?? "onlineresweb",
-      authorityBaseUrl: metadata.authorityBaseUrl,
-      onlineApi: metadata.onlineApi,
-      websiteId: metadata.websiteId,
-      siteName: metadata.siteName
-    };
+    const persistedConfiguration = sanitizeCpsConfiguration(
+      {
+        clientId: metadata.clientId ?? "onlineresweb",
+        authorityBaseUrl: metadata.authorityBaseUrl,
+        onlineApi: metadata.onlineApi,
+        websiteId: metadata.websiteId,
+        siteName: metadata.siteName
+      },
+      metadata
+    );
+    if (!persistedConfiguration) {
+      throw new Error("CPS persisted configuration is invalid");
+    }
+    return persistedConfiguration;
   }
 
-  const url = new URL("/onlineresweb/Home/Configuration", metadata.bookingBaseUrl);
+  const bookingBase = getSafeCpsTenantRoot(
+    metadata.siteName,
+    metadata.bookingBaseUrl
+  );
+  if (!bookingBase) {
+    throw new Error("CPS metadata is invalid");
+  }
+  const url = new URL("/onlineresweb/Home/Configuration", bookingBase);
   return retryCpsReadOnTimeout(async () => {
-    const response = await fetchWithProviderTimeout(url);
+    const response = await fetchWithProviderTimeout(url, {
+      redirect: "manual"
+    });
     if (!response.ok) {
       throw providerHttpError("CPS configuration", response);
     }
+    if (
+      response.status !== 200 ||
+      !isExpectedCpsConfigurationResponse(response, url)
+    ) {
+      throw new Error("CPS configuration returned an invalid response");
+    }
 
-    return (await response.json()) as CpsConfiguration;
+    const value = await readBoundedCpsConfiguration(response);
+    const configuration = sanitizeCpsConfiguration(value, metadata);
+    if (!configuration) {
+      throw new Error("CPS configuration returned an invalid response");
+    }
+    return configuration;
   });
 }
 
@@ -446,34 +483,47 @@ async function tryLoadPublishedCpsApiKey(
   // exhausts its narrow transient retry budget. It may contribute only a key:
   // persisted tenant identity and endpoints remain authoritative.
   try {
-    const url = getSafeCpsConfigurationUrl(metadata.bookingBaseUrl, baseline);
+    const url = getSafeCpsConfigurationUrl(metadata, baseline);
     if (!url) {
       return null;
     }
     const response = await fetchWithProviderTimeout(url, { redirect: "manual" });
-    if (!response.ok) {
+    if (
+      !response.ok ||
+      response.status !== 200 ||
+      !isExpectedCpsConfigurationResponse(response, url)
+    ) {
       return null;
     }
-    return getMatchingPublishedCpsApiKey(await response.json(), baseline);
+    return getMatchingPublishedCpsApiKey(
+      await readBoundedCpsConfiguration(response),
+      baseline,
+      metadata
+    );
   } catch {
     return null;
   }
 }
 
 function getSafeCpsConfigurationUrl(
-  bookingBaseUrl: string,
+  metadata: CpsMetadata,
   baseline: CpsConfiguration
 ) {
-  const bookingBase = parseSafeCpsHttpsUrl(bookingBaseUrl);
-  const authorityBase = parseSafeCpsHttpsUrl(baseline.authorityBaseUrl);
-  const onlineApi = parseSafeCpsHttpsUrl(baseline.onlineApi);
-  if (
-    !bookingBase ||
-    !authorityBase ||
-    !onlineApi ||
-    bookingBase.hostname !== authorityBase.hostname ||
-    bookingBase.hostname !== onlineApi.hostname
-  ) {
+  const bookingBase = getSafeCpsTenantRoot(
+    metadata.siteName,
+    metadata.bookingBaseUrl
+  );
+  const authorityBase = parseExpectedCpsEndpoint(
+    baseline.authorityBaseUrl,
+    bookingBase,
+    CPS_AUTHORITY_PATH
+  );
+  const onlineApi = parseExpectedCpsEndpoint(
+    baseline.onlineApi,
+    bookingBase,
+    CPS_ONLINE_API_PATH
+  );
+  if (!bookingBase || !authorityBase || !onlineApi) {
     return null;
   }
   return new URL("/onlineresweb/Home/Configuration", bookingBase);
@@ -481,26 +531,24 @@ function getSafeCpsConfigurationUrl(
 
 function getMatchingPublishedCpsApiKey(
   value: unknown,
-  baseline: CpsConfiguration
+  baseline: CpsConfiguration,
+  metadata: CpsMetadata
 ) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  const configuration = sanitizeCpsConfiguration(value, metadata);
+  if (!configuration) {
     return null;
   }
-  const configuration = value as Partial<CpsConfiguration>;
-  const apiKey = normalizeCpsApiKey(configuration.apiKey);
   if (
-    !apiKey ||
-    !normalizedCpsIdentityEquals(configuration.clientId, baseline.clientId) ||
-    !normalizedCpsIdentityEquals(configuration.websiteId, baseline.websiteId) ||
-    !normalizedCpsIdentityEquals(configuration.siteName, baseline.siteName) ||
-    canonicalCpsEndpoint(configuration.authorityBaseUrl) !==
-      canonicalCpsEndpoint(baseline.authorityBaseUrl) ||
-    canonicalCpsEndpoint(configuration.onlineApi) !==
-      canonicalCpsEndpoint(baseline.onlineApi)
+    !configuration.apiKey ||
+    configuration.clientId !== baseline.clientId ||
+    configuration.websiteId !== baseline.websiteId ||
+    configuration.siteName !== baseline.siteName ||
+    configuration.authorityBaseUrl !== baseline.authorityBaseUrl ||
+    configuration.onlineApi !== baseline.onlineApi
   ) {
     return null;
   }
-  return apiKey;
+  return configuration.apiKey;
 }
 
 function normalizeCpsApiKey(value: unknown) {
@@ -509,17 +557,177 @@ function normalizeCpsApiKey(value: unknown) {
     : null;
 }
 
-function normalizedCpsIdentityEquals(candidate: unknown, baseline: string) {
-  return typeof candidate === "string" && candidate.trim() === baseline.trim();
-}
-
-function canonicalCpsEndpoint(value: unknown) {
-  const url = parseSafeCpsHttpsUrl(value);
-  if (!url || url.search || url.hash) {
+function sanitizeCpsConfiguration(
+  value: unknown,
+  metadata: Pick<CpsMetadata, "siteName" | "bookingBaseUrl">
+): CpsConfiguration | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const pathname = url.pathname.replace(/\/+$/, "") || "/";
-  return `${url.origin}${pathname}`;
+  const bookingBase = getSafeCpsTenantRoot(
+    metadata.siteName,
+    metadata.bookingBaseUrl
+  );
+  if (!bookingBase) {
+    return null;
+  }
+  const raw = value as Partial<CpsConfiguration>;
+  const siteName = normalizeCpsConfigurationText(raw.siteName, 80);
+  const clientId = normalizeCpsConfigurationText(raw.clientId, 200);
+  const websiteId = normalizeCpsConfigurationText(raw.websiteId, 200);
+  const authorityBaseUrl = parseExpectedCpsEndpoint(
+    raw.authorityBaseUrl,
+    bookingBase,
+    CPS_AUTHORITY_PATH
+  );
+  const onlineApi = parseExpectedCpsEndpoint(
+    raw.onlineApi,
+    bookingBase,
+    CPS_ONLINE_API_PATH
+  );
+  if (
+    !siteName ||
+    siteName.toLowerCase() !== metadata.siteName.trim().toLowerCase() ||
+    !clientId ||
+    !websiteId ||
+    !authorityBaseUrl ||
+    !onlineApi
+  ) {
+    return null;
+  }
+
+  const apiKey = normalizeCpsApiKey(raw.apiKey);
+  const buildNumber = normalizeCpsConfigurationText(raw.buildNumber, 200);
+  const terminalId =
+    Number.isSafeInteger(raw.terminalId) && (raw.terminalId as number) >= 0
+      ? (raw.terminalId as number)
+      : undefined;
+  return {
+    clientId,
+    authorityBaseUrl,
+    onlineApi,
+    websiteId,
+    siteName,
+    ...(apiKey ? { apiKey } : {}),
+    ...(buildNumber ? { buildNumber } : {}),
+    ...(terminalId !== undefined ? { terminalId } : {})
+  };
+}
+
+function normalizeCpsConfigurationText(value: unknown, maxLength: number) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= maxLength
+    ? normalized
+    : null;
+}
+
+function getSafeCpsTenantRoot(siteNameValue: unknown, bookingBaseUrl: unknown) {
+  if (typeof siteNameValue !== "string") {
+    return null;
+  }
+  const siteName = siteNameValue.trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62})$/.test(siteName)) {
+    return null;
+  }
+  const bookingBase = parseSafeCpsHttpsUrl(bookingBaseUrl);
+  if (
+    !bookingBase ||
+    bookingBase.hostname.toLowerCase() !== `${siteName}.cps.golf` ||
+    bookingBase.hostname.toLowerCase() === "sc.cps.golf" ||
+    bookingBase.pathname !== "/"
+  ) {
+    return null;
+  }
+  return bookingBase;
+}
+
+function parseExpectedCpsEndpoint(
+  value: unknown,
+  bookingBase: URL | null,
+  expectedPath: string
+) {
+  const endpoint = parseSafeCpsHttpsUrl(value);
+  if (
+    !bookingBase ||
+    !endpoint ||
+    endpoint.origin !== bookingBase.origin ||
+    endpoint.pathname.replace(/\/+$/, "") !== expectedPath
+  ) {
+    return null;
+  }
+  return `${bookingBase.origin}${expectedPath}`;
+}
+
+function isExpectedCpsConfigurationResponse(response: Response, expectedUrl: URL) {
+  if (response.redirected) {
+    return false;
+  }
+  if (!response.url) {
+    return true;
+  }
+  try {
+    const responseUrl = new URL(response.url);
+    return responseUrl.href === expectedUrl.href;
+  } catch {
+    return false;
+  }
+}
+
+async function readBoundedCpsConfiguration(response: Response) {
+  const contentType = response.headers.get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (
+    contentType !== "application/json" &&
+    !contentType?.endsWith("+json")
+  ) {
+    return null;
+  }
+  const declaredLength = response.headers.get("content-length")?.trim();
+  if (
+    declaredLength &&
+    (!/^\d+$/.test(declaredLength) ||
+      Number(declaredLength) > CPS_CONFIGURATION_MAX_BYTES)
+  ) {
+    return null;
+  }
+  if (!response.body) {
+    return null;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value: chunk } = await reader.read();
+      if (done) {
+        break;
+      }
+      byteLength += chunk.byteLength;
+      if (byteLength > CPS_CONFIGURATION_MAX_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(chunk);
+    }
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function parseSafeCpsHttpsUrl(value: unknown) {
@@ -716,8 +924,27 @@ async function retryCpsTokenRequest<T>(request: () => Promise<T>): Promise<T> {
   throw new Error("CPS token retry exhausted without an error");
 }
 
-function isRetryableCpsTokenError(error: unknown) {
-  return isCpsTimeoutError(error) || isTransientCpsTokenHttpError(error);
+function canRecoverCpsTokenErrorWithPublishedKey(error: unknown) {
+  return (
+    isCpsTimeoutError(error) ||
+    isTransientCpsTokenHttpError(error) ||
+    isCpsTokenCredentialRejection(error)
+  );
+}
+
+function isCpsTokenCredentialRejection(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  try {
+    const record = error as { name?: unknown; status?: unknown };
+    return Boolean(
+      record.name === "ProviderHttpError" &&
+        (record.status === 401 || record.status === 403)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isTransientCpsTokenHttpError(error: unknown) {
