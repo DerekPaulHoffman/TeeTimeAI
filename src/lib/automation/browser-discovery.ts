@@ -1101,7 +1101,10 @@ function learnWalkInClassification(
     ) {
       return null;
     }
-    const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
+    const manualEvidence = getSafeCourseSourceManualEvidence(
+      evidence,
+      observedUrls
+    );
     if (
       !manualEvidence ||
       hasCurrentOnlineBookingEvidence(
@@ -1218,10 +1221,8 @@ function findExplicitNoTeeTimeEvidence(courseName: string, visibleText: string) 
       Math.min(visibleText.length, matchStart + match[0].length + 300)
     );
     const identifiesPublicPhysicalCourse =
-      /\bpublic\b[^.]{0,120}\b(?:nine|9|eighteen|18)[- ]hole\b/i.test(
-        targetSectionBeforeStatement
-      ) ||
-      /\b(?:nine|9|eighteen|18)[- ]hole\b[^.]{0,120}\bpublic\b/i.test(
+      /\bpublic\b/i.test(targetSectionBeforeStatement) &&
+      /\b(?:nine|9|eighteen|18)[- ]holes?\b/i.test(
         targetSectionBeforeStatement
       );
     const questionOnlyContact =
@@ -1235,12 +1236,15 @@ function findExplicitNoTeeTimeEvidence(courseName: string, visibleText: string) 
       !/\bopen\s+daily\b/i.test(betweenTargetAndStatement) ||
       !identifiesPublicPhysicalCourse ||
       !questionOnlyContact ||
-      hasInterveningNamedSection(betweenTargetAndStatement) ||
+      hasInterveningNamedSection(
+        betweenTargetAndStatement,
+        targetName
+      ) ||
       /\b(?:another\s+date|availability|choose|driving\s+range|inventory|practice\s+range|results?|search|selected\s+date|sold\s+out|try\s+again)\b/i.test(
         betweenTargetAndStatement
       ) ||
-      hasDifferentExplicitCourseIdentity(
-        scopedText.slice(targetName.length),
+      hasDifferentNoTeeTimeCourseIdentity(
+        betweenTargetAndStatement,
         targetName
       ) ||
       /\b(?:search|results?|inventory|availability)\b[^.]{0,120}\bno\s+tee\s+times?\b/i.test(
@@ -1278,37 +1282,88 @@ function hasTransientTeeTimeRouteEvidence(evidence: BrowserDiscoveryEvidence) {
   });
 }
 
-function hasInterveningNamedSection(value: string) {
-  const nonIdentityTokens = new Set([
-    "and",
-    "call",
+function getSafeCourseSourceManualEvidence(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+) {
+  const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
+  const sourceUrl = canonicalizeManualUrl(evidence.sourceUrl);
+  if (!manualEvidence || !sourceUrl) {
+    return null;
+  }
+  return {
+    ...manualEvidence,
+    evidenceUrl: sourceUrl,
+    observedUrls: [...new Set([sourceUrl, ...manualEvidence.observedUrls])]
+  } satisfies SafeManualEvidence;
+}
+
+function hasInterveningNamedSection(value: string, courseName: string) {
+  return [
+    ...value.matchAll(
+      /\b((?:[A-Z][\p{L}\p{N}'â€™&-]*\s+){0,5}[A-Z][\p{L}\p{N}'â€™&-]*)\s+is\s+open\s+daily\b/gu
+    )
+  ].some((match) => !isLikelyTargetCourseAlias(match[1] ?? "", courseName));
+}
+
+function hasDifferentNoTeeTimeCourseIdentity(value: string, courseName: string) {
+  return [
+    ...value.matchAll(
+      /\b((?:[A-Z][\p{L}\p{N}'â€™&-]*\s+){0,6}(?:Golf\s+(?:Course|Club|Center|Centre|Links)|Country\s+Club))\b/gu
+    )
+  ].some((match) => !isLikelyTargetCourseAlias(match[1] ?? "", courseName));
+}
+
+function isLikelyTargetCourseAlias(candidate: string, courseName: string) {
+  const genericTokens = new Set([
+    "club",
     "course",
-    "daily",
-    "fees",
     "golf",
-    "hole",
-    "hours",
-    "nine",
-    "open",
+    "links",
+    "center",
+    "centre",
+    "country",
     "park",
-    "permitting",
-    "play",
     "public",
-    "questions",
-    "rates",
-    "season",
-    "seasonal",
-    "the",
-    "to",
-    "weather"
+    "the"
   ]);
-  return [...value.matchAll(/\b((?:[A-Z][\p{L}\p{N}'â€™&-]*\s+){0,5}[A-Z][\p{L}\p{N}'â€™&-]*)\b/gu)]
-    .some((match) => {
-      const tokens = normalizeCourseIdentityName(match[1] ?? "")
-        .split(" ")
-        .filter(Boolean);
-      return tokens.length >= 1 && tokens.some((token) => !nonIdentityTokens.has(token));
-    });
+  const normalizedCandidate = normalizeCourseIdentityName(candidate);
+  const normalizedTarget = normalizeCourseIdentityName(courseName);
+  const candidateLabel = candidate
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const targetLabel = courseName
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const facilityKinds = [
+    "country club",
+    "golf club",
+    "golf course",
+    "golf center",
+    "golf centre",
+    "golf links"
+  ];
+  const candidateKind = facilityKinds.find((kind) =>
+    candidateLabel.endsWith(kind)
+  );
+  const targetKind = facilityKinds.find((kind) => targetLabel.endsWith(kind));
+  if (candidateKind && targetKind && candidateKind !== targetKind) {
+    return false;
+  }
+  const targetTokens = new Set(
+    normalizedTarget
+      .split(" ")
+      .filter((token) => token && !genericTokens.has(token))
+  );
+  const candidateTokens = normalizedCandidate
+    .split(" ")
+    .filter((token) => token && !genericTokens.has(token));
+  return Boolean(
+    candidateTokens.length > 0 &&
+      candidateTokens.every((token) => targetTokens.has(token))
+  );
 }
 
 function buildWalkInDiscovery(

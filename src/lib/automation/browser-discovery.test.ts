@@ -1194,6 +1194,40 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies the reviewed no-tee-times page without borrowing park or permit content", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://www.delcopa.gov/parks/clayton",
+      finalUrl: "https://www.delcopa.gov/parks/permits-forms",
+      observedUrls: [
+        "https://www.delcopa.gov/parks/clayton",
+        "https://www.delcopa.gov/parks/permits-forms"
+      ],
+      linkCandidates: [
+        {
+          url: "https://www.delcopa.gov/parks/permits-forms",
+          label: "Reservations and Permits"
+        }
+      ],
+      visibleText:
+        "Clayton Park Golf Course The fairways of Clayton Golf Course provide a challenging round for players of all levels. Golfers can sneak in a quick round of 9 holes. The course is open daily, weather permitting. Clayton Golf Course is open to the public. Only golfers are permitted on the course. Every golfer must have their own bag of clubs. No tee times. Call 267-386-1969 with questions."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      sourceUrl: "https://www.delcopa.gov/parks/clayton",
+      bookingUrl: "https://www.delcopa.gov/parks/clayton",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: {
+        finalUrl: "https://www.delcopa.gov/parks/clayton",
+        learnedFrom: "official-no-tee-times-access"
+      }
+    });
+  });
+
   it("does not treat a temporary empty tee-time result as a walk-in course", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "clayton-park",
@@ -1254,6 +1288,21 @@ describe("buildBrowserDiscovery", () => {
       observedUrls: ["https://parks.example/golf"],
       visibleText:
         "Target Municipal Golf Course is a public nine-hole course. Westwoods is open daily. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not treat a similarly named country club as the target golf course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://parks.example/golf",
+      finalUrl: "https://parks.example/golf",
+      observedUrls: ["https://parks.example/golf"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Clayton Country Club is open daily. No tee times. Call the course office with questions."
     });
 
     expect(discovery.status).toBe("INSPECTED");
