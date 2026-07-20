@@ -67,6 +67,7 @@ export type BrowserProbeTarget = {
     detectedPlatform: string;
     providerFamilyKey: string;
     automationEligibility: string;
+    automationReason: string;
     bookingMetadata: unknown;
   };
   probeUrl: string;
@@ -195,6 +196,7 @@ export async function listBrowserProbeTargets(
           detectedPlatform: course.detectedPlatform,
           providerFamilyKey: course.providerFamilyKey,
           automationEligibility: course.automationEligibility,
+          automationReason: course.automationReason,
           bookingMetadata: course.bookingMetadata
         },
         probeUrl,
@@ -260,6 +262,7 @@ async function listExactIncidentBrowserProbeTarget(
         detectedPlatform: course.detectedPlatform,
         providerFamilyKey: course.providerFamilyKey,
         automationEligibility: course.automationEligibility,
+        automationReason: course.automationReason,
         bookingMetadata: course.bookingMetadata
       },
       probeUrl
@@ -340,7 +343,67 @@ export async function recordBrowserDiscovery(input: BrowserDiscovery) {
   });
 }
 
-export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
+export type BrowserDiscoveryCourseExpectation = {
+  updatedAt: Date;
+  detectedBookingUrl: string | null;
+  bookingMethod: string;
+  automationEligibility: string;
+};
+
+export async function retireLegacyPolicyOnlyCourseBlock(
+  courseId: string,
+  expectedCourse: BrowserDiscoveryCourseExpectation,
+  preservation: {
+    preserveWebsite: boolean;
+    preserveDetectedBookingUrl: boolean;
+    preserveBookingMetadata: boolean;
+  }
+) {
+  const preserveProviderAccess =
+    preservation.preserveDetectedBookingUrl ||
+    preservation.preserveBookingMetadata;
+  const updated = await prisma.course.updateMany({
+    where: {
+      id: courseId,
+      updatedAt: expectedCourse.updatedAt,
+      detectedBookingUrl: expectedCourse.detectedBookingUrl,
+      automationEligibility: "BLOCKED",
+      automationReason: "AUTOMATION_PROHIBITED"
+    },
+    data: {
+      ...(!preserveProviderAccess
+        ? {
+            providerFamilyKey: "SOURCE_MISSING",
+            detectedPlatform: "UNKNOWN" as const
+          }
+        : {}),
+      ...(!preservation.preserveWebsite ? { website: null } : {}),
+      ...(!preservation.preserveDetectedBookingUrl
+        ? { detectedBookingUrl: null }
+        : {}),
+      ...(!preservation.preserveBookingMetadata
+        ? { bookingMetadata: Prisma.DbNull }
+        : {}),
+      ...(!preserveProviderAccess ? { bookingMethod: "UNKNOWN" as const } : {}),
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "OTHER",
+      policyNotes:
+        "Legacy booking-policy text is not a technical monitoring blocker. Current public monitoring support requires fresh verification.",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null
+    }
+  });
+  if (updated.count !== 1) {
+    return null;
+  }
+  return prisma.course.findUnique({ where: { id: courseId } });
+}
+
+export async function applyBrowserDiscoveryToCourse(
+  input: BrowserDiscovery,
+  expectedCourse?: BrowserDiscoveryCourseExpectation
+) {
   const provider = resolveProviderCapability({
     detectedPlatform: input.detectedPlatform,
     detectedBookingUrl: input.bookingUrl,
@@ -380,10 +443,13 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
         detectedBookingUrl: true,
         website: true,
         bookingMetadata: true,
+        bookingMethod: true,
+        automationEligibility: true,
+        automationReason: true,
         updatedAt: true
       }
     });
-    if (!current) {
+    if (!current || !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)) {
       return null;
     }
 
@@ -429,10 +495,13 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
       detectedBookingUrl: true,
       website: true,
       bookingMetadata: true,
+      bookingMethod: true,
+      automationEligibility: true,
+      automationReason: true,
       updatedAt: true
     }
   });
-  if (!current) {
+  if (!current || !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)) {
     return null;
   }
   const persistedProvider = resolveProviderCapability(current);
@@ -441,11 +510,29 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
       provider.capability &&
       persistedProvider.providerFamilyKey !== provider.providerFamilyKey
   );
+  const repairingLegacyPolicyOnlyBlock = Boolean(
+    learnedOnlineAdapter &&
+    current.automationEligibility === "BLOCKED" &&
+    current.automationReason === "AUTOMATION_PROHIBITED" &&
+    persistedProvider.isRunnable &&
+    provider.isRunnable &&
+    persistedProvider.providerFamilyKey === provider.providerFamilyKey
+  );
+  const replacingLegacyPolicyOnlyBlock = Boolean(
+    expectedCourse &&
+    input.status === "VERIFIED" &&
+    verifiedClassification &&
+    current.automationEligibility === "BLOCKED" &&
+    current.automationReason === "AUTOMATION_PROHIBITED" &&
+    input.automationReason !== "AUTOMATION_PROHIBITED"
+  );
   if (
     provider.evidenceConflict ||
-    persistedProvider.evidenceConflict ||
-    persistedProvider.isRunnable ||
-    differentKnownProvider
+    (persistedProvider.evidenceConflict && !replacingLegacyPolicyOnlyBlock) ||
+    (persistedProvider.isRunnable &&
+      !repairingLegacyPolicyOnlyBlock &&
+      !replacingLegacyPolicyOnlyBlock) ||
+    (differentKnownProvider && !replacingLegacyPolicyOnlyBlock)
   ) {
     return null;
   }
@@ -476,6 +563,19 @@ export async function applyBrowserDiscoveryToCourse(input: BrowserDiscovery) {
   }
 
   return prisma.course.findUnique({ where: { id: input.courseId } });
+}
+
+function matchesBrowserDiscoveryCourseExpectation(
+  current: BrowserDiscoveryCourseExpectation,
+  expected?: BrowserDiscoveryCourseExpectation
+) {
+  return Boolean(
+    !expected ||
+      (current.updatedAt.getTime() === expected.updatedAt.getTime() &&
+        current.detectedBookingUrl === expected.detectedBookingUrl &&
+        current.bookingMethod === expected.bookingMethod &&
+        current.automationEligibility === expected.automationEligibility)
+  );
 }
 
 export async function recordTeeTimeMatch(input: {
@@ -1338,10 +1438,16 @@ export async function listRecentCourseAutomationDiscoveries(
   return prisma.courseAutomationDiscovery.findMany({
     where: {
       courseId: { in: courseIds },
-      createdAt: { gte: since }
+      createdAt: { gt: since }
     },
-    orderBy: { createdAt: "desc" },
-    select: { courseId: true, createdAt: true }
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: {
+      courseId: true,
+      status: true,
+      sourceUrl: true,
+      createdAt: true,
+      evidence: true
+    }
   });
 }
 

@@ -23,6 +23,7 @@ export type BrowserDiscoveryEvidence = {
   accessBarrierUrls?: string[];
   accessBarriers?: BrowserAccessBarrier[];
   corroboratedAccessBarrier?: BrowserAccessBarrier;
+  bookingCallToAction?: boolean;
 };
 
 export type BrowserAccessBarrier = {
@@ -101,6 +102,7 @@ export type BrowserDiscovery = {
       scheduleId?: number;
       bookingClassId?: number;
     };
+    bookingCallToAction?: boolean;
     learnedFrom: string;
   };
 };
@@ -114,11 +116,13 @@ export function keepPolicyOnlyDiscoveryActionable(
 
   return {
     ...discovery,
-    status: "INSPECTED",
+    status: "VERIFIED",
     automationEligibility: "NEEDS_REVIEW",
     automationReason: "UNSUPPORTED_PLATFORM",
-    intelligenceReviewAt: undefined,
-    confidence: Math.min(discovery.confidence, 0.79),
+    policyNotes:
+      "The official public booking page remains eligible for signed-out, read-only monitoring. Provider terms are retained as evidence, but reusable monitoring support still needs technical verification.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: Math.max(0.9, Math.min(discovery.confidence, 0.95)),
     evidence: {
       ...discovery.evidence,
       learnedFrom: `${discovery.evidence.learnedFrom}:policy-evidence-only`
@@ -216,6 +220,7 @@ export type BrowserProbeCourseInput = {
   detectedPlatform: string;
   providerFamilyKey?: string | null;
   automationEligibility: string;
+  automationReason?: string | null;
   website?: string | null;
   detectedBookingUrl?: string | null;
   bookingMetadata?: unknown;
@@ -232,6 +237,15 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   if (privateClubClassification) {
     return privateClubClassification;
+  }
+
+  const phoneReservationClassification = learnOfficialPhoneReservationClassification(
+    evidence,
+    observedUrls
+  );
+
+  if (phoneReservationClassification) {
+    return phoneReservationClassification;
   }
 
   const walkInClassification = learnWalkInClassification(evidence, observedUrls);
@@ -340,6 +354,10 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       finalUrl: evidence.finalUrl,
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
+      ...(hasBookingCallToActionEvidence(evidence) ||
+      hasPositiveOnlineBookingText(evidence.visibleText ?? "")
+        ? { bookingCallToAction: true }
+        : {}),
       learnedFrom: "browser-visible-links"
     }
   };
@@ -867,29 +885,6 @@ function learnWhooshBookingClassification(
     ) &&
     /\b(?:spiders?|robots?|crawlers?|data mining tools?)\b/i.test(providerPolicyText);
 
-  if (providerTermsProhibitAutomation) {
-    return {
-      courseId: evidence.courseId,
-      status: "VERIFIED",
-      detectedPlatform: "CUSTOM",
-      sourceUrl: evidence.sourceUrl,
-      bookingUrl: whooshBookingUrl.toString(),
-      bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "BLOCKED",
-      automationReason: "AUTOMATION_PROHIBITED",
-      policyNotes:
-        "Whoosh's current End User Terms prohibit using automated agents, robots, crawlers, data-mining tools, or similar mechanisms to search or download platform content. Golfers can still view and book on the official Whoosh page directly, but Tee Time Spot does not retrieve Whoosh availability automatically.",
-      intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      confidence: 0.99,
-      evidence: {
-        finalUrl: evidence.finalUrl,
-        observedUrls,
-        visibleText: summarizeVisibleText(providerPolicyText),
-        learnedFrom: "whoosh-automation-prohibited-booking"
-      }
-    };
-  }
-
   return {
     courseId: evidence.courseId,
     status: "VERIFIED",
@@ -900,14 +895,20 @@ function learnWhooshBookingClassification(
     automationEligibility: "NEEDS_REVIEW",
     automationReason: "UNSUPPORTED_PLATFORM",
     policyNotes:
-      "The course links to an official Whoosh online booking page. Golfers can use that page directly; Tee Time Spot has not yet confirmed policy-safe automatic monitoring for this Whoosh surface.",
+      providerTermsProhibitAutomation
+        ? "The course links to an official public Whoosh booking page. Provider terms are retained as evidence but do not determine read-only monitoring eligibility; reusable monitoring support still needs technical verification."
+        : "The course links to an official Whoosh online booking page. Golfers can use that page directly; Tee Time Spot has not yet confirmed reusable monitoring for this Whoosh surface.",
     intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     confidence: 0.9,
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
-      visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "official-whoosh-booking"
+      visibleText: summarizeVisibleText(
+        providerTermsProhibitAutomation ? providerPolicyText : evidence.visibleText
+      ),
+      learnedFrom: providerTermsProhibitAutomation
+        ? "official-whoosh-booking-policy-evidence"
+        : "official-whoosh-booking"
     }
   };
 }
@@ -934,6 +935,7 @@ function learnWalkInClassification(
     ? Math.min(visibleText.length, noReservationMatch.index + 320)
     : Math.min(visibleText.length, nextPeriod + 1);
   const statement = visibleText.slice(statementStart, statementEnd);
+  const identifiesTargetCourse = hasTargetCourseIdentity(statement, evidence.courseName);
   const explicitlyFirstCome = /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
     statement
   );
@@ -942,71 +944,27 @@ function learnWalkInClassification(
   const contradictsWalkInOnly =
     /\b(?:book|reserve)\s+(?:a\s+)?tee times?\s+(?:online|now)\b/i.test(statement);
 
-  if (!explicitlyFirstCome || scopedToNonCourseFacility || contradictsWalkInOnly) {
+  if (
+    !identifiesTargetCourse ||
+    hasDifferentExplicitCourseIdentity(statement, evidence.courseName) ||
+    !explicitlyFirstCome ||
+    scopedToNonCourseFacility ||
+    contradictsWalkInOnly
+  ) {
     return null;
   }
-
-  return {
-    courseId: evidence.courseId,
-    status: "VERIFIED",
-    detectedPlatform: "UNKNOWN",
-    sourceUrl: evidence.sourceUrl,
-    bookingUrl: evidence.finalUrl ?? evidence.sourceUrl,
-    bookingMethod: "WALK_IN",
-    automationEligibility: "BLOCKED",
-    automationReason: "NO_ONLINE_BOOKING",
-    policyNotes:
-      "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
-    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
-    confidence: 0.98,
-    evidence: {
-      finalUrl: evidence.finalUrl,
-      observedUrls,
-      visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "official-walk-in-access"
-    }
-  };
-}
-
-function learnOfficialContactOnlyClassification(
-  evidence: BrowserDiscoveryEvidence,
-  observedUrls: string[]
-): BrowserDiscovery | null {
-  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
-  const identifiesPhysicalCourse =
-    /\b(?:nine|eighteen|9|18)[- ]hole\b[^.]{0,100}\bgolf course\b/i.test(
-      visibleText
-    ) || /\bpar\s*3\s+golf course\b/i.test(visibleText);
-  const postsPublicPrice =
-    /\bprices?\b/i.test(visibleText) &&
-    /\b(?:adult|senior|junior|weekdays?|weekends?|holidays?)\b[^$]{0,80}\$\s*\d/i.test(
-      visibleText
-    );
-  const directsContactForCurrentDetails =
-    /\bhours? of operation may vary by season\b[^.]{0,180}\bplease contact us for details\b/i.test(
-      visibleText
-    ) ||
-    /\bplease contact us for (?:current )?(?:hours?|details|availability)\b/i.test(
-      visibleText
-    );
-  const phoneMatch = visibleText.match(
-    /(?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}\b/
-  );
-  const advertisesOnlineBooking =
-    Boolean(pickBookingLikeUrl(observedUrls)) ||
-    (evidence.linkCandidates ?? []).some(({ url, label }) =>
-      /\b(?:book|booking|tee\s*times?|reservations?|reserve)\b/i.test(
-        `${label} ${url}`
-      )
-    ) ||
-    /\b(?:book|reserve)\s+(?:a\s+)?tee\s*time\s+online\b/i.test(visibleText);
-
+  if (hasUnsafeManualEvidenceUrl(evidence, observedUrls)) {
+    return null;
+  }
+  const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
   if (
-    !identifiesPhysicalCourse ||
-    !postsPublicPrice ||
-    !directsContactForCurrentDetails ||
-    !phoneMatch ||
-    advertisesOnlineBooking
+    !manualEvidence ||
+    hasCurrentOnlineBookingEvidence(
+      evidence,
+      observedUrls,
+      manualEvidence.evidenceUrl,
+      true
+    )
   ) {
     return null;
   }
@@ -1015,10 +973,1321 @@ function learnOfficialContactOnlyClassification(
     courseId: evidence.courseId,
     status: "VERIFIED",
     detectedPlatform: "UNKNOWN",
-    sourceUrl: evidence.sourceUrl,
-    bookingUrl: evidence.finalUrl ?? evidence.sourceUrl,
+    sourceUrl: manualEvidence.evidenceUrl,
+    bookingUrl: manualEvidence.evidenceUrl,
+    bookingMethod: "WALK_IN",
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    policyNotes:
+      "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: manualEvidence.evidenceUrl,
+      observedUrls: manualEvidence.observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-walk-in-access"
+    }
+  };
+}
+
+function learnOfficialPhoneReservationClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = normalizeTeeTimeTypography(
+    evidence.visibleText?.replace(/\s+/g, " ").trim() ?? ""
+  );
+  const directPhone = findDirectTeeTimeReservationPhone(visibleText);
+  if (directPhone.kind === "NONE") {
+    return null;
+  }
+  if (directPhone.kind === "AMBIGUOUS") {
+    return hasKnownProviderEvidence(evidence, observedUrls)
+      ? null
+      : buildRejectedManualDiscovery(evidence, observedUrls, "ambiguous-phone-evidence");
+  }
+  if (!hasStrongCourseIdentityEvidence(evidence.courseName, visibleText, directPhone)) {
+    return null;
+  }
+
+  if (hasUnsafeManualEvidenceUrl(evidence, observedUrls)) {
+    return hasKnownProviderEvidence(evidence, observedUrls)
+      ? null
+      : buildRejectedManualDiscovery(evidence, observedUrls, "unsafe-url-evidence");
+  }
+
+  const manualEvidence = getSafeManualEvidence(evidence, observedUrls, true);
+  if (!manualEvidence) {
+    return null;
+  }
+
+  const explicitlyPhoneOnly = hasExplicitPhoneOnlyEvidence(visibleText);
+  if (
+    hasCurrentOnlineBookingEvidence(
+      evidence,
+      observedUrls,
+      manualEvidence.evidenceUrl,
+      explicitlyPhoneOnly
+    )
+  ) {
+    return null;
+  }
+
+  const bookingMethod = explicitlyPhoneOnly ? "PHONE_ONLY" : "CONTACT_COURSE";
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: manualEvidence.evidenceUrl,
+    bookingUrl: manualEvidence.evidenceUrl,
+    bookingMethod,
+    bookingPhone: directPhone.phone,
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    policyNotes: explicitlyPhoneOnly
+      ? "The official course page explicitly says tee-time reservations are phone-only and publishes the number to call. Tee Time Spot cannot monitor phone-only inventory, so golfers should call the course directly."
+      : "The official course page directs golfers to call the course to reserve a tee time and exposes no current online booking surface. Tee Time Spot cannot confirm live inventory automatically, so golfers should contact the course directly.",
+    intelligenceReviewAt: new Date(
+      Date.now() + (explicitlyPhoneOnly ? 90 : 30) * 24 * 60 * 60 * 1000
+    ),
+    confidence: explicitlyPhoneOnly ? 0.98 : 0.92,
+    evidence: {
+      finalUrl: manualEvidence.evidenceUrl,
+      observedUrls: manualEvidence.observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: explicitlyPhoneOnly
+        ? "official-phone-only-tee-time-access"
+        : "official-phone-reservation-contact"
+    }
+  };
+}
+
+function hasStrongCourseIdentityEvidence(
+  courseName: string,
+  visibleText: string,
+  directPhone: Extract<DirectReservationPhone, { kind: "FOUND" }>
+) {
+  const normalizedCourseName = normalizeCourseIdentityName(courseName);
+  const meaningfulTokens = normalizedCourseName.split(" ").filter(Boolean);
+  const genericTokens = new Set([
+    "the",
+    "at",
+    "of",
+    "golf",
+    "course",
+    "club",
+    "center",
+    "centre",
+    "municipal",
+    "public"
+  ]);
+  if (
+    meaningfulTokens.length < 2 ||
+    !meaningfulTokens.some((token) => token.length >= 3 && !genericTokens.has(token))
+  ) {
+    return false;
+  }
+
+  const precedingContext = visibleText.slice(
+    Math.max(0, directPhone.matchStart - 600),
+    directPhone.matchStart
+  );
+  const normalizedContext = normalizeCourseIdentityName(precedingContext);
+  if (!` ${normalizedContext} `.includes(` ${normalizedCourseName} `)) {
+    return false;
+  }
+  const targetStart = precedingContext
+    .toLocaleLowerCase("en-US")
+    .lastIndexOf(courseName.toLocaleLowerCase("en-US"));
+  if (targetStart < 0) {
+    return false;
+  }
+
+  const betweenTargetAndInstruction = precedingContext.slice(
+    targetStart + courseName.length
+  );
+  const afterInstruction = visibleText.slice(
+    directPhone.matchEnd,
+    directPhone.matchEnd + 200
+  );
+  if (
+    hasDifferentExplicitCourseIdentity(
+      `${betweenTargetAndInstruction} ${afterInstruction}`,
+      courseName
+    ) ||
+    hasUnscopedPhoneAssociationContext(
+      betweenTargetAndInstruction,
+      afterInstruction
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function hasDifferentExplicitCourseIdentity(value: string, courseName: string) {
+  const normalizedTarget = normalizeCourseIdentityName(courseName);
+  return [
+    ...value.matchAll(
+      /\b((?:[\p{L}\p{N}'’&-]+\s+){0,6}(?:golf\s+(?:course|club|center|centre|links)|country\s+club))\b/giu
+    )
+  ].some((match) => {
+    const candidate = match[1] ?? "";
+    if (normalizeCourseIdentityName(candidate) === normalizedTarget) {
+      return false;
+    }
+    const genericWords = new Set([
+      "a",
+      "an",
+      "the",
+      "is",
+      "our",
+      "public",
+      "private",
+      "municipal",
+      "golf",
+      "course",
+      "club",
+      "center",
+      "centre",
+      "links",
+      "country",
+      "executive",
+      "eighteen",
+      "hole",
+      "holes",
+      "nine",
+      "par"
+    ]);
+    return candidate
+      .normalize("NFKD")
+      .toLowerCase()
+      .match(/[a-z0-9]+/g)
+      ?.some((token) => !/^\d+$/.test(token) && !genericWords.has(token)) ?? false;
+  });
+}
+
+function hasTargetCourseIdentity(value: string, courseName: string) {
+  const targetTokens = normalizeCourseIdentityName(courseName).split(" ").filter(Boolean);
+  if (targetTokens.length === 0) {
+    return false;
+  }
+  if (targetTokens.length === 1) {
+    const normalizedValue = normalizeExactCourseNamePhrase(value);
+    const normalizedCourseName = normalizeExactCourseNamePhrase(courseName);
+    return Boolean(
+      normalizedCourseName &&
+      ` ${normalizedValue} `.includes(` ${normalizedCourseName} `)
+    );
+  }
+  const valueTokens = new Set(
+    normalizeCourseIdentityName(value).split(" ").filter(Boolean)
+  );
+  return targetTokens.every((token) => valueTokens.has(token));
+}
+
+function normalizeExactCourseNamePhrase(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/&/gu, " and ")
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim()
+    .replace(/\s+/gu, " ");
+}
+
+function hasDifferentNamedCourseIdentity(value: string, courseName: string) {
+  const targetTokens = normalizeCourseIdentityName(courseName).split(" ").filter(Boolean);
+  const boundaryTokens = new Set([
+    "adjacent",
+    "beside",
+    "is",
+    "near",
+    "next",
+    "to",
+    "visit",
+    "welcome",
+    "where"
+  ]);
+  const nonNameTokens = new Set([
+    "a",
+    "an",
+    "available",
+    "award",
+    "challenging",
+    "championship",
+    "eighteen",
+    "for",
+    "hole",
+    "holes",
+    "is",
+    "member",
+    "members",
+    "neighborhood",
+    "nine",
+    "offers",
+    "our",
+    "private",
+    "public",
+    "resident",
+    "residents",
+    "social",
+    "the",
+    "to",
+    "use",
+    "winning"
+  ]);
+  const leadingDescriptorTokens = new Set([
+    "a",
+    "an",
+    "award",
+    "challenging",
+    "championship",
+    "eighteen",
+    "hole",
+    "holes",
+    "nine",
+    "our",
+    "private",
+    "public",
+    "the",
+    "winning"
+  ]);
+  const candidatesByEnd = new Map<number, string[][]>();
+  for (const match of value.matchAll(
+    /(?=\b((?:[\p{L}][\p{L}\p{N}'’&-]*\s+){1,6}?(?:golf\s+(?:course|club|center|centre|links)|country\s+club))\b)/giu
+  )) {
+    const rawCandidate = match[1] ?? "";
+    const rawTokens = rawCandidate.match(/[\p{L}\p{N}'’&-]+/gu) ?? [];
+    let boundaryIndex = -1;
+    rawTokens.forEach((token, index) => {
+      if (boundaryTokens.has(token.toLocaleLowerCase("en-US"))) {
+        boundaryIndex = index;
+      }
+    });
+    const normalizedCandidateTokens = normalizeCourseIdentityName(
+      rawTokens.slice(boundaryIndex + 1).join(" ")
+    ).split(" ").filter(Boolean);
+    const firstIdentityToken = normalizedCandidateTokens.findIndex(
+      (token) =>
+        !/^\d+$/u.test(token) && !leadingDescriptorTokens.has(token)
+    );
+    const candidateTokens = firstIdentityToken < 0
+      ? []
+      : normalizedCandidateTokens.slice(firstIdentityToken);
+    if (candidateTokens.length === 0) {
+      continue;
+    }
+    const end = (match.index ?? 0) + rawCandidate.length;
+    const candidates = candidatesByEnd.get(end) ?? [];
+    candidates.push(candidateTokens);
+    candidatesByEnd.set(end, candidates);
+  }
+
+  return [...candidatesByEnd.values()].some((candidates) => {
+    const candidateTokens = [...candidates].sort(
+      (left, right) => right.length - left.length
+    )[0];
+    if (
+      !candidateTokens ||
+      candidateTokens.join(" ") === targetTokens.join(" ")
+    ) {
+      return false;
+    }
+    return candidateTokens.some(
+      (token) => !/^\d+$/u.test(token) && !nonNameTokens.has(token)
+    );
+  });
+}
+
+function hasUnscopedPhoneAssociationContext(
+  betweenTargetAndInstruction: string,
+  afterInstruction: string
+) {
+  if (
+    betweenTargetAndInstruction
+      .split(/[.!?;]+/u)
+      .map((part) => part.replace(/^[\s,:-]+|[\s,:-]+$/gu, ""))
+      .filter(Boolean)
+      .some((part) => !isSafePhoneAssociationPart(part))
+  ) {
+    return true;
+  }
+
+  return afterInstruction
+    .split(/[.!?;]+/u)
+    .map((part) =>
+      part.replace(/^[\s()[\]{},:/\\\-–—]+|[\s()[\]{},:/\\\-–—]+$/gu, "")
+    )
+    .filter(Boolean)
+    .slice(0, 2)
+    .some(
+      (part) =>
+        !/^(?:the\s+course|(?:for|with)\s+more\s+information|(?:for|with)\s+more\s+details|details)$/i.test(
+          part
+        ) && !isSafePhoneAssociationPart(part)
+    );
+}
+
+function isSafePhoneAssociationPart(value: string) {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  if (/\b(?:at|for)\b/i.test(normalized)) {
+    return false;
+  }
+  const hasRecognizedStructure = (
+    /^(?:please|rates?|pricing|green\s+fees?)$/i.test(normalized) ||
+    /^(?:is|offers?|features?)\s+(?:an?\s+)?(?:\d+[- ]hole\s+)?(?:public|private|municipal)?\s*golf\s+(?:course|club|center|centre|links)$/i.test(
+      normalized
+    ) ||
+    /^(?:tee[- ]?times?|tee[- ]?time\s+reservations?|reservations?|bookings?)\b.{0,240}\b(?:may|can|are|is|must|accepted|taken|booked|reserved|scheduled|phone|online|advance)\b/i.test(
+      normalized
+    ) ||
+    /^(?:events?|outings?)(?:\s+and\s+(?:events?|outings?))?\b.{0,160}\bcall\b/i.test(
+      normalized
+    )
+  );
+  if (!hasRecognizedStructure) {
+    return false;
+  }
+  const allowedWords = new Set([
+    "a", "adult", "adults", "advance", "after", "all", "am", "an", "and",
+    "are", "as", "at", "be", "before", "between", "book", "booked", "booking",
+    "bookings", "by", "call", "can", "cart", "carts", "closed", "contact",
+    "course", "courses", "current", "daily", "day", "days", "daytime", "during",
+    "each", "events", "fee", "fees", "first", "for", "friday", "from", "golf",
+    "green", "greens", "holiday", "holidays", "hole", "holes", "hour", "hours",
+    "in", "included", "includes", "is", "junior", "juniors", "may", "military",
+    "monday", "must", "night", "no", "not", "offered", "on", "one", "online",
+    "only", "open", "our", "outings", "per", "phone", "please", "pm", "pricing",
+    "private", "pro", "public", "rate", "rates", "regular", "reservation",
+    "reservations", "reserve", "reserved", "reserving", "resident", "riding",
+    "saturday", "schedule", "scheduled", "senior", "seniors", "shop", "sunday",
+    "taken", "tax", "tee", "the", "thursday", "time", "times", "to", "tuesday",
+    "twilight", "up", "walking", "wednesday", "week", "weekday", "weekdays",
+    "weekend", "weekends", "weeks", "your"
+  ]);
+  const tokens = normalized
+    .normalize("NFKD")
+    .toLowerCase()
+    .match(/[a-z0-9]+/g) ?? [];
+  return tokens.length > 0 && tokens.every(
+    (token) => /^\d+$/.test(token) || allowedWords.has(token)
+  );
+}
+
+type DirectReservationPhone =
+  | { kind: "NONE" }
+  | { kind: "AMBIGUOUS" }
+  | { kind: "FOUND"; phone: string; matchStart: number; matchEnd: number };
+
+function findDirectTeeTimeReservationPhone(visibleText: string): DirectReservationPhone {
+  const patterns = [
+    /\b(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s*(?:,|\s)*(?:to|for)\s+(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)/gi,
+    /\b(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s+(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
+    /\b(?:for\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s*[:,;-]?\s*(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
+    /\btee\s*times?\b[^.!?]{0,80}\b(?:made|booked|reserved|scheduled)\b[^.!?]{0,60}\b(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
+    /\b(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s*(?:,|\s)*(?:for\s+)?tee\s*times?\b/gi
+  ];
+  const phoneByDigits = new Map<
+    string,
+    { phone: string; matchStart: number; matchEnd: number }
+  >();
+  for (const pattern of patterns) {
+    for (const match of visibleText.matchAll(pattern)) {
+      const phone = match[1]?.replace(/\s+/g, " ").trim();
+      const digits = phone?.replace(/\D/g, "");
+      if (phone && digits) {
+        const normalizedDigits = digits.length === 11 && digits.startsWith("1")
+          ? digits.slice(1)
+          : digits;
+        if (!phoneByDigits.has(normalizedDigits)) {
+          const matchStart = match.index ?? 0;
+          phoneByDigits.set(normalizedDigits, {
+            phone,
+            matchStart,
+            matchEnd: matchStart + match[0].length
+          });
+        }
+      }
+    }
+  }
+
+  if (phoneByDigits.size === 0) {
+    return { kind: "NONE" };
+  }
+  if (phoneByDigits.size > 1) {
+    return { kind: "AMBIGUOUS" };
+  }
+  return { kind: "FOUND", ...[...phoneByDigits.values()][0] };
+}
+
+function hasExplicitPhoneOnlyEvidence(value: string) {
+  return [
+    /\b(?:phone|telephone|call(?:ing)?)\s*[- ]?only\b/i,
+    /\b(?:tee\s*times?|reservations?)\b.{0,80}\bmust\b.{0,80}\b(?:call|phone)\b/i,
+    /\bmust\s+call\b.{0,80}\b(?:tee\s*times?|reservations?)\b/i,
+    /\bno\s+online\s+(?:booking|reservations?|tee\s*times?)\b/i,
+    /\bonline\s+(?:booking|reservations?|tee\s*times?)\b.{0,40}\b(?:is|are)\s+(?:not\s+available|unavailable|disabled|not\s+offered)\b/i,
+    /\bwe\s+do\s+not\s+(?:offer|accept|take)\s+online\s+(?:booking|reservations?|tee\s*times?)\b/i
+  ].some((pattern) => pattern.test(value));
+}
+
+function hasCurrentOnlineBookingEvidence(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[],
+  evidenceUrl: string,
+  allowDemonstrablyNonBookingEvidenceUrl: boolean
+) {
+  const allUrls = uniqueUrls([
+    ...observedUrls,
+    ...(evidence.linkCandidates ?? []).map(({ url }) => url)
+  ]);
+  if (
+    allUrls.some((url) => resolveProviderCapability({ detectedBookingUrl: url }).capability)
+  ) {
+    return true;
+  }
+
+  const hasBookingDestination = allUrls.some((url) => {
+    const parsed = parseUrl(url);
+    if (!parsed || !hasExplicitTeeTimeDestination(parsed)) {
+      return false;
+    }
+    return !(
+      allowDemonstrablyNonBookingEvidenceUrl &&
+      canonicalizeManualUrl(url) === evidenceUrl
+    );
+  });
+  if (hasBookingDestination) {
+    return true;
+  }
+
+  return (
+    hasBookingCallToActionEvidence(evidence) ||
+    hasPositiveOnlineBookingText(evidence.visibleText ?? "")
+  );
+}
+
+function hasBookingCallToActionEvidence(evidence: BrowserDiscoveryEvidence) {
+  return (evidence.linkCandidates ?? []).some(isBookingCallToActionCandidate);
+}
+
+function isBookingCallToActionCandidate(candidate: { url: string; label: string }) {
+  const parsed = parseUrl(candidate.url);
+  if (!parsed) {
+    return false;
+  }
+  if (
+    isClearlyUnrelatedBookingLabel(candidate.label)
+  ) {
+    return false;
+  }
+  return isBookingCallToActionLabel(candidate.label);
+}
+
+function isClearlyUnrelatedBookingUrl(url: URL) {
+  if (hasExplicitTeeTimeDestination(url)) {
+    return false;
+  }
+  return hasClearlyUnrelatedBookingCategory(
+    `${url.hostname} ${url.pathname} ${url.search}`
+  );
+}
+
+function hasExplicitTeeTimeDestination(url: URL) {
+  return /(?:^|\/)(?:(?:book|reserve|schedule)[-_ ]+(?:a[-_ ]+)?)?tee[-_ ]?times?(?:[-_ ]+(?:booking|reservations?))?(?:\.(?:aspx?|php\d?|s?html?|xhtml|jspx?|cfm|cgi|do|action))?(?:\/|$)/i.test(
+    url.pathname
+  );
+}
+
+function isClearlyUnrelatedBookingLabel(value: string) {
+  return hasClearlyUnrelatedBookingCategory(value);
+}
+
+function hasClearlyUnrelatedBookingCategory(value: string) {
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return /\b(?:privacy|terms|careers?|jobs?|employment|lessons?|instruction|academ(?:y|ies)|golf\s*academ(?:y|ies)|golf\s*schools?|clinics?|camps?|leagues?|tournaments?|simulators?|indoor\s*golf|driving\s*ranges?|practice\s*ranges?|golf\s*ranges?|mini\s*golf|miniature\s*golf|top\s*tracer|trackman|pickle\s*ball|tennis|pools?|rv\s*sites?|club\s*rentals?|equipment\s*rentals?|gift\s*cards?|memberships?|events?|outings?|restaurants?|dining|food|beverage|lodging|lodges?|stays?|resorts?|hotels?|accommodations?|cabins?|rooms?|spa|appointments?|wellness|fitness|gyms?|massage|marinas?|campgrounds?|water\s*parks?|pro\s*shops?|stores?|merchandise|fittings?|banquets?|weddings?|venues?)\b/i.test(
+    normalized
+  );
+}
+
+function isBookingCallToActionLabel(value: string) {
+  const normalized = normalizeTeeTimeTypography(value).replace(/\s+/g, " ").trim();
+  if (
+    /\b(?:call(?:ing)?|phone)\b/i.test(normalized) &&
+    !/\bonline\b/i.test(normalized)
+  ) {
+    return false;
+  }
+  return (
+    /\btee\s*times?\b/i.test(normalized) &&
+    /\b(?:book|reserve|schedule|view|see|search|find|check|make|online)\b/i.test(
+      normalized
+    )
+  );
+}
+
+type SafeManualEvidence = {
+  evidenceUrl: string;
+  observedUrls: string[];
+};
+
+function getSafeManualEvidence(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[],
+  requireFinalUrl = false
+): SafeManualEvidence | null {
+  if (requireFinalUrl && !evidence.finalUrl) {
+    return null;
+  }
+  const sourceUrl = parseUrl(evidence.sourceUrl);
+  const finalUrl = parseUrl(evidence.finalUrl ?? evidence.sourceUrl);
+  if (
+    !sourceUrl ||
+    !finalUrl ||
+    !["http:", "https:"].includes(sourceUrl.protocol) ||
+    finalUrl.protocol !== "https:" ||
+    normalizeHostname(sourceUrl.hostname) !== normalizeHostname(finalUrl.hostname) ||
+    !isSafeManualEvidenceUrl(sourceUrl) ||
+    !isSafeManualEvidenceUrl(finalUrl)
+  ) {
+    return null;
+  }
+
+  const evidenceUrl = canonicalizeManualUrl(finalUrl.toString());
+  if (!evidenceUrl) {
+    return null;
+  }
+  return {
+    evidenceUrl,
+    observedUrls: [
+      ...new Set(
+        uniqueUrls([...observedUrls, evidenceUrl]).flatMap((url) => {
+          const parsed = parseUrl(url);
+          const sanitized = canonicalizeManualUrl(url);
+          return parsed?.protocol === "https:" && sanitized
+            ? [sanitized]
+            : [];
+        })
+      )
+    ]
+  };
+}
+
+function hasKnownProviderEvidence(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+) {
+  return [
+    evidence.sourceUrl,
+    evidence.finalUrl,
+    ...observedUrls,
+    ...(evidence.linkCandidates ?? []).map(({ url }) => url)
+  ].some((value) => {
+    const parsed = parseUrl(value);
+    return Boolean(
+      parsed &&
+      isSafeManualEvidenceUrl(parsed) &&
+      resolveProviderCapability({ detectedBookingUrl: value }).capability
+    );
+  });
+}
+
+function hasUnsafeManualEvidenceUrl(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+) {
+  const primaryUrls = [evidence.sourceUrl, evidence.finalUrl].filter(
+    (value): value is string => Boolean(value)
+  );
+  if (
+    primaryUrls.some((value) => {
+      const parsed = parseUrl(value);
+      return !parsed || !isSafeManualEvidenceUrl(parsed);
+    })
+  ) {
+    return true;
+  }
+
+  return [
+    ...observedUrls,
+    ...(evidence.linkCandidates ?? []).map(({ url }) => url)
+  ].some((value) => {
+    if (!value) {
+      return false;
+    }
+    const parsed = parseUrl(value);
+    if (!parsed) {
+      return true;
+    }
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return false;
+    }
+    return !isSafeManualEvidenceUrl(parsed);
+  });
+}
+
+function isSafeManualEvidenceUrl(url: URL) {
+  const hasInvalidPort = Boolean(
+    url.port &&
+    !(
+      (url.protocol === "http:" && url.port === "80") ||
+      (url.protocol === "https:" && url.port === "443")
+    )
+  );
+  return !(
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    hasInvalidPort ||
+    url.hostname.endsWith(".") ||
+    isPrivateManualHostname(url.hostname) ||
+    isForbiddenManualSurfaceHostname(url.hostname) ||
+    hasSensitiveManualUrlState(url)
+  );
+}
+
+function hasSensitiveManualUrlState(url: URL, nestingDepth = 0) {
+  for (const [key, value] of url.searchParams) {
+    const decodedKey = decodeUrlComponent(key);
+    const decodedValue = decodeUrlComponent(value);
+    if (
+      !decodedKey ||
+      decodedValue === null ||
+      isSensitiveManualUrlKey(decodedKey) ||
+      isContextualSensitiveManualUrlParameter(decodedKey, decodedValue, url) ||
+      isOpaqueCredentialValue(decodedValue) ||
+      hasUnsafeNestedManualUrl(decodedValue, url, nestingDepth, decodedKey)
+    ) {
+      return true;
+    }
+  }
+  const decodedPath = decodeUrlPath(url.pathname);
+  if (!decodedPath) {
+    return true;
+  }
+  const pathSegments = decodedPath
+    .split(/[/;=]+/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const decodedHash = decodeUrlComponent(url.hash.slice(1));
+  if (decodedHash === null) {
+    return true;
+  }
+  if (hasSensitiveManualFragmentState(decodedHash, url, nestingDepth)) {
+    return true;
+  }
+  const hashSegments = decodedHash
+    .split(/[/;=?&]+/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return (
+    pathSegments.some(isForbiddenManualPathSegment) ||
+    hasForbiddenAdjacentManualPathSegments(pathSegments) ||
+    hasRestrictedManualBookingPathSegments(pathSegments) ||
+    pathSegments.some((segment, index) =>
+      (isOpaqueCredentialValue(segment) ||
+        isOpaqueManualRedirectPathSegment(pathSegments, index)) &&
+      !isAllowedPublicOpaquePathSegment(pathSegments, index)
+    ) ||
+    hashSegments.some(isForbiddenManualPathSegment) ||
+    hasForbiddenAdjacentManualPathSegments(hashSegments) ||
+    hasRestrictedManualBookingPathSegments(hashSegments) ||
+    hashSegments.some((segment, index) =>
+      (isOpaqueCredentialValue(segment) ||
+        isOpaqueManualRedirectPathSegment(hashSegments, index)) &&
+      !isAllowedPublicOpaquePathSegment(hashSegments, index)
+    )
+  );
+}
+
+function hasForbiddenAdjacentManualPathSegments(segments: string[]) {
+  return segments.some((segment, index) => {
+    if (index === 0) {
+      return false;
+    }
+    const adjacent = `${segments[index - 1] ?? ""}${segment}`
+      .replace(/[^a-z0-9]/gi, "")
+      .toLowerCase();
+    return isForbiddenCompactManualSecurityRoute(adjacent);
+  });
+}
+
+function hasRestrictedManualBookingPathSegments(segments: string[]) {
+  const normalized = segments.map((segment) =>
+    segment
+      .replace(/\.(?:aspx?|php\d?|s?html?|xhtml|jspx?|cfm|cgi|do|action)$/i, "")
+      .replace(/[^a-z0-9]/gi, "")
+      .toLowerCase()
+  );
+  return normalized.some((segment, index) => {
+    if (
+      !/^(?:admins?|staff|members?|customers?|users?|clients?|partners?|employees?|secure|accounts?|myaccount|portal)(?:v?\d+)?$/.test(
+        segment
+      )
+    ) {
+      return false;
+    }
+    const tailSegments = normalized.slice(index + 1);
+    return tailSegments.join("").includes("teetime") || tailSegments.some(
+      (tailSegment) =>
+        /^(?:book|booking|reserve|reservation|schedule|checkout|cart|portal|dashboard|account)$/.test(
+          tailSegment
+        )
+    );
+  });
+}
+
+function hasSensitiveManualFragmentState(
+  value: string,
+  parentUrl: URL,
+  nestingDepth: number
+) {
+  const fragment = value.replace(/^\/+/, "");
+  const queryLike = fragment.includes("?")
+    ? fragment.slice(fragment.indexOf("?") + 1)
+    : fragment;
+  if (!queryLike.includes("=")) {
+    return false;
+  }
+  return queryLike.split("&").some((part) => {
+    const separator = part.indexOf("=");
+    if (separator < 1) {
+      return false;
+    }
+    const key = decodeUrlComponent(part.slice(0, separator));
+    const valuePart = decodeUrlComponent(part.slice(separator + 1));
+    return (
+      !key ||
+      valuePart === null ||
+      isSensitiveManualUrlKey(key) ||
+      isContextualSensitiveManualUrlParameter(key, valuePart, parentUrl) ||
+      isOpaqueCredentialValue(valuePart) ||
+      hasUnsafeNestedManualUrl(valuePart, parentUrl, nestingDepth, key)
+    );
+  });
+}
+
+function hasUnsafeNestedManualUrl(
+  value: string,
+  parentUrl: URL,
+  nestingDepth: number,
+  parameterKey?: string
+) {
+  const trimmed = value.trim();
+  if (
+    nestingDepth >= 2 ||
+    !(
+      /^(?:https?:\/\/|\/\/|\/|\.\.?(?:\/|$))/i.test(trimmed) ||
+      /^[^?#\s]+\/[^\s]*$/.test(trimmed) ||
+      (parameterKey && isNavigationManualUrlKey(parameterKey))
+    )
+  ) {
+    return false;
+  }
+  try {
+    const nested = new URL(trimmed, parentUrl);
+    const hasInvalidPort = Boolean(
+      nested.port &&
+      !(
+        (nested.protocol === "http:" && nested.port === "80") ||
+        (nested.protocol === "https:" && nested.port === "443")
+      )
+    );
+    return (
+      !["http:", "https:"].includes(nested.protocol) ||
+      Boolean(nested.username || nested.password) ||
+      hasInvalidPort ||
+      nested.hostname.endsWith(".") ||
+      isPrivateManualHostname(nested.hostname) ||
+      isForbiddenManualSurfaceHostname(nested.hostname) ||
+      hasSensitiveManualUrlState(nested, nestingDepth + 1)
+    );
+  } catch {
+    return true;
+  }
+}
+
+function isNavigationManualUrlKey(value: string) {
+  const normalized = value.normalize("NFKC").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return /^(?:url|uri|(?:next|continue|destination|dest|goto|return|redirect|success|cancel|callback|forward|target|relay)(?:to|url|uri|path|location|destination)?)$/.test(
+    normalized
+  );
+}
+
+function decodeUrlComponent(value: string) {
+  let decoded = value;
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) {
+        return decoded;
+      }
+      decoded = next;
+    }
+    return /%[0-9a-f]{2}/i.test(decoded) ? null : decoded;
+  } catch {
+    return null;
+  }
+}
+
+const decodeUrlPath = decodeUrlComponent;
+
+function isForbiddenManualPathSegment(value: string) {
+  const normalized = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const tokens = getManualSecurityTokens(value);
+  const hasStrongSensitiveToken = tokens.some((token) =>
+    /^(?:accounts?|myaccount|useraccount|memberaccount|customeraccount|login|signin|signup|logout|register|registration|session|jsessionid|signed|signature|token|auth\d*|authentication|authorize|authorization|oauth\d*|openid|oidc|sso\d*|saml|assertion|relaystate|ticket|credential|password|passwordless|secret|consent|mfa|2fa|webauthn|captcha|recaptcha|turnstile|queue|queueit|waitingroom|verify|verification|magiclink|invite|invitation|checkout)$/i.test(
+      token
+    )
+  );
+  const hasSensitiveFlowPair =
+    tokens.some((token) =>
+      /^(?:payment|pay|cart|purchase|order|challenge)$/i.test(token)
+    ) &&
+    tokens.some((token) =>
+      /^(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|page|wait|waiting|progress|acs|connect|provider|gateway|settings|reset|recover|recovery|forgot|checkout|booking|reservation)$/i.test(
+        token
+      )
+    );
+  const hasAccountSurfacePair =
+    tokens.some((token) =>
+      /^(?:admin|staff|member|customer|user)$/i.test(token)
+    ) &&
+    tokens.some((token) =>
+      /^(?:account|dashboard|portal|profile|settings|login|signin)$/i.test(token)
+    );
+  const hasIdentityRecoveryPair =
+    tokens.some((token) =>
+      /^(?:forgot|reset|recover|recovery|confirm|confirmation|verify|verification)$/i.test(
+        token
+      )
+    ) &&
+    tokens.some((token) => /^(?:username|email|password|account)$/i.test(token));
+  return (
+    hasStrongSensitiveToken ||
+    hasSensitiveFlowPair ||
+    hasAccountSurfacePair ||
+    hasIdentityRecoveryPair ||
+    isForbiddenCompactManualSecurityRoute(normalized) ||
+    /^(?:checkout|securecheckout|payment|pay|cart|shoppingcart|purchase|order|myaccount|useraccount|memberaccount|customeraccount|account|accountlogin|accountsignin|accountsignup|accountportal|memberportal|customerportal|login|userlogin|memberlogin|customerlogin|loginredirect|signin|signup|logout|register|registration|createaccount|session|jsessionid|signed|signature|token|auth|authentication|authcallback|auth0|oauth\d*|oauthcallback|authorize|authorization|openid|oidc|sso|ssologin|saml|assertion|relaystate|ticket|credential|password|passwordless|resetpassword|passwordreset|secret|consent|mfa|2fa|webauthn|captcha|recaptcha|captchachallenge|turnstile|queue|queueit|waitingroom|challenge|challengeplatform|verify|verification|verifyemail|emailverification|magiclink|invite|invitation)$/.test(
+      normalized
+    ) ||
+    /^(?:(?:forgot|reset|recover|recovery)(?:my)?(?:password|account)(?:confirm|confirmation)?|(?:password|account)(?:forgot|reset|recover|recovery|settings)(?:confirm|confirmation)?|(?:login|signin|auth|oauth\d*|oidc|sso)(?:callback|redirect|oidc|sso|oauth\d*)|(?:callback|redirect)(?:login|signin|auth|oauth\d*|oidc|sso)|(?:checkout|payment|captcha|recaptcha|queue|challenge)(?:session|flow|status|page|wait|waiting|redirect|response|confirm|confirmation|verify|verification|v\d+))$/.test(
+      normalized
+    )
+  );
+}
+
+function isForbiddenCompactManualSecurityRoute(normalized: string) {
+  return (
+    normalized.includes("login") ||
+    /^(?:(?:admin|staff|member|customer|user|client|partner|employee|regional|secure)?(?:signon|logon))[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:saml|openid|oidc|oauth\d*|adfs|identity|idp|mfa|2fa|webauthn|captcha|recaptcha|hcaptcha|funcaptcha|turnstile|queue|queueit|waitingroom|checkout|authorize|authorization|authentication|signin|signup|logout|register|registration|password|session|token|magiclink|invite|invitation|verify|verification|wresult)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^auth\d*(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|challenge|login|signin|provider|gateway|server|service|proxy)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^auth(?:n|z|enticate|entication|orize|orization)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:accounts?|myaccount|useraccount|memberaccount|customeraccount|clientaccount|partneraccount|employeeaccount|regionalaccount)(?:(?:login|signin|signup|portal|dashboard|profile|settings|callback|redirect|recovery|recover|reset|management|manage)[a-z0-9]*)?$/.test(
+      normalized
+    ) ||
+    /^(?:login\d*|(?:admin|staff|member|customer|user|secure|portal|prod|tenant)login\d*)(?:callback|redirect|flow|session|step|start|portal|dashboard|secure|provider|gateway|us|eu|prod|dev|stage|staging|\d*)?$/.test(
+      normalized
+    ) ||
+    /^(?:admin|staff|member|customer|user)(?:account|dashboard|portal|profile|settings|login|signin)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:members?|admin|staff|customer|user|client|partner|employee|regional|secure)(?:center|centre|booking|portal|dashboard|profile|settings|account)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:forgot|reset|recover|recovery|confirm|confirmation|verify|verification)(?:username|email|password|account)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:email|username)(?:verify|verification|confirm|confirmation|reset|recovery)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^billing(?:portal|account|history|settings|payment|invoices?|details?)?$/.test(
+      normalized
+    ) ||
+    /^payment[a-z0-9]*$/.test(normalized) ||
+    /^(?:credentials?|signature|signed(?:url)?|assertion|relaystate|consent|jsessionid|authcode|nonce|jwt|bearer)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:token|secret|ticket)[a-z0-9]*$/.test(normalized) ||
+    /^(?:access|refresh|id|api|client|service|login|auth)(?:token|key|secret|ticket)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:pay(?:portal|account|method|ment)?|basket|shoppingbag|placeorder|completepurchase|orderhistory|purchasehistory|transactionhistory)$/.test(
+      normalized
+    ) ||
+    /^(?:order|cart)(?:review|summary|confirm|confirmation|checkout|payment|billing)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:booking|reservation|cart)(?:payment|checkout)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:payment|pay|cart|purchase|order|challenge)(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|page|wait|waiting|progress|checkout)[a-z0-9]*$/.test(
+      normalized
+    )
+  );
+}
+
+function getManualSecurityTokens(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function isSensitiveManualUrlKey(value: string) {
+  const normalized = value.normalize("NFKC").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return (
+    /^(?:token|secret|nonce|jwt|ticket|loginticket|serviceticket|authorization|signature|signed|sig|credential|password|expires?|expiry|expiration|assertion|relaystate|saml(?:response|art)?|oauth(?:token|code|state|verifier)?|authcode|verificationcode|session(?:id|token|key|state)?|clientid|responsetype|redirecturi|granttype|scope|codechallenge|codeverifier|(?:access|auth|id|api|client)(?:token|key|secret))$/.test(
+      normalized
+    ) ||
+    /^(?:saml|oauth|openid|oidc|auth|authentication|login)[a-z0-9]*$/.test(
+      normalized
+    ) ||
+    /^(?:sigalg|openidmode|openidreturnto|openidclaimedid|openididentity|openidrealm|openidassochandle|openidresponse(?:nonce)?|samlrequest|oauthnonce|oauthcallback)$/.test(
+      normalized
+    ) ||
+    /^(?:prompt|codechallengemethod|responsemode|wresult|wctx|wreply|wtrealm|wa)$/.test(
+      normalized
+    ) ||
+    /^(?:csrf|csrftoken|xcsrftoken|csrfmiddlewaretoken|xsrf|xsrftoken|formkey|requestverificationtoken|antiforgerytoken|anticsrftoken|authenticitytoken|verificationtoken|checkoutsessionid|paymentintent|orderid|transactionid|invoiceid|cartid)$/.test(
+      normalized
+    ) ||
+    /(?:password|credential|signature|authorization|assertion|relaystate)/.test(
+      normalized
+    )
+  );
+}
+
+function isContextualSensitiveManualUrlParameter(key: string, value: string, url: URL) {
+  const normalizedKey = key
+    .normalize("NFKC")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+  if (!/^(?:code|state|key)$/.test(normalizedKey)) {
+    return false;
+  }
+  const hasAuthenticationContext = `${url.hostname}/${url.pathname}`
+    .split(/[./_-]+/u)
+    .map((segment) => segment.replace(/[^a-z0-9]/gi, "").toLowerCase())
+    .some((segment) =>
+      /^(?:callback(?:v?\d+)?|(?:auth(?:entication|orization|enticate|orize|n|z)?|oauth\d*|oidc|openid|saml|sso|signin|login)(?:callback(?:v?\d+)?)?)$/.test(
+        segment
+      )
+    );
+  const hasSensitiveCompanion = [...url.searchParams.keys()].some((candidate) => {
+    const normalizedCandidate = candidate
+      .normalize("NFKC")
+      .replace(/[^a-z0-9]/gi, "")
+      .toLowerCase();
+    return normalizedCandidate !== normalizedKey && isSensitiveManualUrlKey(candidate);
+  });
+  const hasSecretShapedValue = /(?:^|[^a-z0-9])(?:private|secret|token|credential|signature|session|nonce|ticket|auth)(?:[^a-z0-9]|$)/i.test(
+    value
+  );
+  return hasAuthenticationContext || hasSensitiveCompanion || hasSecretShapedValue;
+}
+
+function isOpaqueCredentialValue(value: string) {
+  return (
+    /^(?:sk|pk|rk)_(?:test|live)_[A-Za-z0-9_-]{12,}$/i.test(value) ||
+    /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/.test(value) ||
+    /^[A-Za-z0-9+/_-]{16,}={1,2}$/.test(value) ||
+    (/^[A-Za-z0-9]{19,}$/.test(value) &&
+      /[A-Za-z]/.test(value) &&
+      /\d/.test(value)) ||
+    (/^[A-Za-z]{19,}$/.test(value) &&
+      /[a-z]/.test(value) &&
+      /[A-Z]/.test(value))
+  );
+}
+
+function isAllowedPublicOpaquePathSegment(segments: string[], index: number) {
+  return (
+    /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.test(
+      segments[index] ?? ""
+    ) &&
+    /^(?:programs?|courses?)$/i.test(segments[index - 1] ?? "")
+  );
+}
+
+function isOpaqueManualRedirectPathSegment(segments: string[], index: number) {
+  return (
+    /^(?:go|r|redirect|link|magic|invite|token)$/i.test(segments[index - 1] ?? "") &&
+    /^[A-Za-z0-9_-]{16,}$/.test(segments[index] ?? "")
+  );
+}
+
+function isPrivateManualHostname(hostname: string) {
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "");
+  if (
+    !normalized.includes(".") ||
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized.endsWith(".local") ||
+    normalized.endsWith(".internal") ||
+    normalized.endsWith(".lan") ||
+    normalized.endsWith(".home") ||
+    normalized.endsWith(".corp") ||
+    normalized === "::1" ||
+    (normalized.includes(":") &&
+      (normalized.startsWith("fc") ||
+        normalized.startsWith("fd") ||
+        normalized.startsWith("fe80:"))) ||
+    /^\d+$|^0x[\da-f]+$/i.test(normalized)
+  ) {
+    return true;
+  }
+  const ipv4 = normalized.split(".").map(Number);
+  if (
+    ipv4.length !== 4 ||
+    ipv4.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
+    return false;
+  }
+  const [first, second] = ipv4;
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    first >= 224
+  );
+}
+
+function isForbiddenManualSurfaceHostname(hostname: string) {
+  const normalized = hostname.toLowerCase().replace(/\.+$/u, "");
+  const hasForbiddenLabel = normalized.split(".").some((label) => {
+    const compact = label.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    const tokens = getManualSecurityTokens(label);
+    return (
+      isForbiddenCompactManualSecurityRoute(compact) ||
+      /^(?:(?:secure|portal|customer|member|user|prod|tenant)?(?:accounts?|myaccount|login|signin|auth\d*|authentication|authorize|sso\d*|oauth\d*|oidc|idp|identity|checkout|queue|captcha|challenge|verify|register|registration)(?:secure|portal|gateway|provider|login)?|(?:accounts?|myaccount|login|signin|auth\d*|authentication|authorize|sso\d*|oauth\d*|oidc|idp|identity|checkout|queue|captcha|challenge|verify|register|registration)(?:secure|portal|gateway|provider))$/.test(
+        compact
+      ) ||
+      tokens.some((token) =>
+        /^(?:accounts?|myaccount|login\d*|signin|auth\d*|authentication|authorization|authorize|sso\d*|oauth\d*|openid|oidc|saml|adfs|idp|identity|identityserver|checkout|queue|queueit|waitingroom|captcha|recaptcha|hcaptcha|funcaptcha|turnstile|mfa|2fa|webauthn|verify|verification|register|registration)$/i.test(
+          token
+        )
+      ) ||
+      /^(?:(?:admin|staff|member|customer|user|secure|portal|prod|tenant)?(?:login\d*|accounts?|myaccount|auth\d*|authentication|authorization|authorize|sso\d*|oauth\d*|openid|oidc|saml|adfs|idp|identity(?:server|provider)?|checkout|queue|queueit|waitingroom|captcha|recaptcha|hcaptcha|funcaptcha|turnstile|challenge|mfa|2fa|webauthn|verify|verification|register|registration)(?:us|eu|prod|dev|stage|staging|secure|portal|gateway|provider|server|callback|redirect|flow|session|step|start|connect|progress|challenge|platform|dashboard|settings|acs|authnrequest|request|response|confirm|confirmation|verification|verify|\d*)?)$/.test(
+        compact
+      ) ||
+      /^(?:admin|staff|member|customer|user)(?:account|dashboard|portal|profile|settings|login|signin)[a-z0-9]*$/.test(
+        compact
+      ) ||
+      /^(?:arkose|arkoselabs|okta|onelogin|cloudflareaccess)$/.test(
+        compact
+      )
+    );
+  });
+  return (
+    hasForbiddenLabel ||
+    normalized === "queue-it.net" ||
+    normalized.endsWith(".queue-it.net") ||
+    normalized === "challenges.cloudflare.com" ||
+    normalized === "hcaptcha.com" ||
+    normalized.endsWith(".hcaptcha.com") ||
+    normalized === "funcaptcha.com" ||
+    normalized.endsWith(".funcaptcha.com") ||
+    normalized === "arkoselabs.com" ||
+    normalized.endsWith(".arkoselabs.com") ||
+    normalized === "auth0.com" ||
+    normalized.endsWith(".auth0.com") ||
+    normalized === "okta.com" ||
+    normalized.endsWith(".okta.com") ||
+    normalized === "onelogin.com" ||
+    normalized.endsWith(".onelogin.com") ||
+    normalized === "cloudflareaccess.com" ||
+    normalized.endsWith(".cloudflareaccess.com")
+  );
+}
+
+function canonicalizeManualUrl(value: string) {
+  const parsed = parseUrl(value);
+  if (!parsed || parsed.protocol !== "https:" || !isSafeManualEvidenceUrl(parsed)) {
+    return null;
+  }
+  return `${parsed.origin}${parsed.pathname || "/"}`;
+}
+
+function buildRejectedManualDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[],
+  reason: string
+): BrowserDiscovery | null {
+  const safeSourceUrl = canonicalizeRejectedManualSource(
+    evidence.finalUrl ?? evidence.sourceUrl
+  ) ?? canonicalizeRejectedManualSource(evidence.sourceUrl);
+  if (!safeSourceUrl) {
+    return null;
+  }
+  const safeObservedUrls = [
+    ...new Set(
+      uniqueUrls(observedUrls).flatMap((url) => {
+        const sanitized = canonicalizeManualUrl(url);
+        return sanitized ? [sanitized] : [];
+      })
+    )
+  ];
+  return {
+    courseId: evidence.courseId,
+    status: "INSPECTED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: safeSourceUrl,
+    confidence: 0.25,
+    evidence: {
+      finalUrl: safeSourceUrl,
+      observedUrls: safeObservedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: `official-phone-reservation-rejected:${reason}`
+    }
+  };
+}
+
+function canonicalizeRejectedManualSource(value: string) {
+  const parsed = parseUrl(value);
+  if (
+    !parsed ||
+    parsed.protocol !== "https:" ||
+    (parsed.port && parsed.port !== "443") ||
+    parsed.hostname.endsWith(".") ||
+    isPrivateManualHostname(parsed.hostname) ||
+    isForbiddenManualSurfaceHostname(parsed.hostname)
+  ) {
+    return null;
+  }
+  return `${parsed.origin}/`;
+}
+
+function hasPositiveOnlineBookingText(value: string) {
+  return normalizeTeeTimeTypography(value).split(/[.!?\n]+/).some((statement) => {
+    const normalized = statement.replace(/\s+/g, " ").trim();
+    const hasExplicitTeeTimeBookingText =
+      /\btee\s*times?\b/i.test(normalized) &&
+      /\b(?:book|booking|reserve|reservation|schedule|online|availability)\b/i.test(
+        normalized
+      );
+    if (
+      /\b(?:no|not|never|without|do\s+not|does\s+not|cannot|can['’]t)\b.{0,60}\bonline\b/i.test(
+        normalized
+      ) ||
+      /\bonline\s+(?:booking|reservations?|tee\s*times?)\b.{0,40}\b(?:not\s+available|unavailable|disabled)\b/i.test(
+        normalized
+      )
+    ) {
+      return false;
+    }
+    if (
+      !hasExplicitTeeTimeBookingText &&
+      hasClearlyUnrelatedBookingCategory(normalized)
+    ) {
+      return false;
+    }
+    if (!hasExplicitTeeTimeBookingText) {
+      return false;
+    }
+    if (
+      /\b(?:call(?:ing)?|phone)\b/i.test(normalized) &&
+      !/\bonline\b/i.test(normalized)
+    ) {
+      return false;
+    }
+    return (
+      /\bonline\b/i.test(normalized) ||
+      /\b(?:book|reserve|schedule)\b.{0,80}\bnow\b/i.test(normalized) ||
+      /^(?:book|reserve|schedule|view|see|search|find|check)\b.{0,80}\btee\s*times?\b/i.test(
+        normalized
+      )
+    );
+  });
+}
+
+function normalizeTeeTimeTypography(value: string) {
+  return value.replace(
+    /\btee(?:[\s\x2d\u00ad\u2010-\u2015\u2212])+(times?)\b/giu,
+    "tee $1"
+  );
+}
+
+function normalizeHostname(value: string) {
+  return value.toLowerCase().replace(/^www\./, "");
+}
+
+function learnOfficialContactOnlyClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const scopedEvidence = findTargetCourseContactEvidence(
+    evidence.courseName,
+    visibleText
+  );
+  if (!scopedEvidence) {
+    return null;
+  }
+  const { phone, scopedText } = scopedEvidence;
+  const identifiesPhysicalCourse =
+    /\b(?:nine|eighteen|9|18)[- ]hole\b[^.]{0,100}\bgolf course\b/i.test(
+      scopedText
+    ) || /\bpar\s*3\s+golf course\b/i.test(scopedText);
+  const postsPublicPrice =
+    /\bprices?\b/i.test(scopedText) &&
+    /\b(?:adult|senior|junior|weekdays?|weekends?|holidays?)\b[^$]{0,80}\$\s*\d/i.test(
+      scopedText
+    );
+
+  if (!identifiesPhysicalCourse || !postsPublicPrice) {
+    return null;
+  }
+  if (hasUnsafeManualEvidenceUrl(evidence, observedUrls)) {
+    return null;
+  }
+  const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
+  if (
+    !manualEvidence ||
+    hasCurrentOnlineBookingEvidence(
+      evidence,
+      observedUrls,
+      manualEvidence.evidenceUrl,
+      false
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: manualEvidence.evidenceUrl,
+    bookingUrl: manualEvidence.evidenceUrl,
     bookingMethod: "CONTACT_COURSE",
-    bookingPhone: phoneMatch[0].replace(/\s+/g, " ").trim(),
+    bookingPhone: phone,
     automationEligibility: "BLOCKED",
     automationReason: "NO_ONLINE_BOOKING",
     policyNotes:
@@ -1026,12 +2295,101 @@ function learnOfficialContactOnlyClassification(
     intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
     confidence: 0.9,
     evidence: {
-      finalUrl: evidence.finalUrl,
-      observedUrls,
+      finalUrl: manualEvidence.evidenceUrl,
+      observedUrls: manualEvidence.observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "official-contact-only-course-access"
     }
   };
+}
+
+function findTargetCourseContactEvidence(courseName: string, visibleText: string) {
+  const targetName = courseName.trim();
+  if (!targetName || !visibleText) {
+    return null;
+  }
+  const normalizedTarget = targetName.toLocaleLowerCase("en-US");
+  const normalizedText = visibleText.toLocaleLowerCase("en-US");
+  const contactMatches = [
+    ...visibleText.matchAll(
+      /\bhours? of operation may vary by season\b[^.]{0,180}\bplease contact us for details\b|\bplease contact us for (?:current )?(?:hours?|details|availability)\b/gi
+    )
+  ];
+  const phoneMatches = [
+    ...visibleText.matchAll(
+      /(?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}\b/g
+    )
+  ];
+
+  const candidates = contactMatches.flatMap((contact) => {
+    const contactStart = contact.index ?? -1;
+    const contactEnd = contactStart + contact[0].length;
+    if (contactStart < 0) {
+      return [];
+    }
+    return phoneMatches.flatMap((phoneMatch) => {
+      const phoneStart = phoneMatch.index ?? -1;
+      const phoneEnd = phoneStart + phoneMatch[0].length;
+      if (phoneStart < 0) {
+        return [];
+      }
+      const distance = phoneEnd <= contactStart
+        ? contactStart - phoneEnd
+        : phoneStart >= contactEnd
+          ? phoneStart - contactEnd
+          : 0;
+      if (distance > 320) {
+        return [];
+      }
+      const evidenceEnd = Math.max(phoneEnd, contactEnd);
+      const targetStart = normalizedText.lastIndexOf(normalizedTarget, evidenceEnd);
+      if (targetStart < 0 || Math.min(phoneStart, contactStart) - targetStart > 900) {
+        return [];
+      }
+      const scopedText = visibleText.slice(targetStart, evidenceEnd);
+      if (
+        hasDifferentExplicitCourseIdentity(
+          scopedText.slice(targetName.length),
+          targetName
+        )
+      ) {
+        return [];
+      }
+      const phoneLead = visibleText.slice(
+        Math.max(targetStart, phoneStart - 140),
+        phoneStart
+      );
+      const phoneContext = visibleText.slice(
+        Math.max(targetStart, phoneStart - 180),
+        Math.min(visibleText.length, phoneEnd + 80)
+      );
+      if (
+        /\b(?:parks? (?:department|office)|city hall|administration|general inquiries?|sitewide|footer)\b/i.test(
+          phoneContext
+        )
+      ) {
+        return [];
+      }
+      const coursePhoneLabel =
+        /\b(?:pro shop|golf shop|course office|tee[- ]time reservations?)\b/i.test(
+          phoneLead
+        );
+      if (phoneStart > contactEnd && !coursePhoneLabel && distance > 80) {
+        return [];
+      }
+      return [{
+        associationRank: coursePhoneLabel ? 0 : phoneStart <= contactEnd ? 1 : 2,
+        distance,
+        phone: phoneMatch[0].replace(/\s+/g, " ").trim(),
+        scopedText
+      }];
+    });
+  });
+
+  return candidates.sort(
+    (left, right) =>
+      left.associationRank - right.associationRank || left.distance - right.distance
+  )[0] ?? null;
 }
 
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
@@ -1051,20 +2409,16 @@ function learnPrivateClubClassification(
   observedUrls: string[]
 ): BrowserDiscovery | null {
   const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
-  const explicitlyPrivateGolfAccess =
-    /\bprivate (?:golf )?club\b/i.test(visibleText) ||
-    /\bprivate(?:[\s,-]+(?:award-winning|challenging|championship|\d{1,2}[- ]hole))*[\s,-]+golf course\b/i.test(
-      visibleText
-    );
-  const privateMemberGuestClub =
-    /\bis a private club available to\b/i.test(visibleText) ||
-    (explicitlyPrivateGolfAccess &&
-      /\bmembers? and (?:their )?guests?\b/i.test(visibleText));
-  const residentMemberClub =
-    /\bneighborhood (?:social )?club for residents?\b/i.test(visibleText) &&
-    /\boffers? (?:its )?members? the use of\b[^.]{0,220}\bgolf course\b/i.test(visibleText);
-
-  if (!privateMemberGuestClub && !residentMemberClub) {
+  const scopedAccess = findTargetScopedPrivateClubAccess(
+    evidence.courseName,
+    visibleText
+  );
+  if (!scopedAccess) {
+    return null;
+  }
+  const { residentMemberClub, scopedText } = scopedAccess;
+  const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
+  if (!manualEvidence) {
     return null;
   }
 
@@ -1072,8 +2426,8 @@ function learnPrivateClubClassification(
     courseId: evidence.courseId,
     status: "VERIFIED",
     detectedPlatform: "UNKNOWN",
-    sourceUrl: evidence.sourceUrl,
-    bookingUrl: evidence.finalUrl ?? evidence.sourceUrl,
+    sourceUrl: manualEvidence.evidenceUrl,
+    bookingUrl: manualEvidence.evidenceUrl,
     bookingMethod: "CONTACT_COURSE",
     automationEligibility: "BLOCKED",
     automationReason: "OTHER",
@@ -1083,14 +2437,56 @@ function learnPrivateClubClassification(
     intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
     confidence: 0.98,
     evidence: {
-      finalUrl: evidence.finalUrl,
-      observedUrls,
-      visibleText: summarizeVisibleText(evidence.visibleText),
+      finalUrl: manualEvidence.evidenceUrl,
+      observedUrls: manualEvidence.observedUrls,
+      visibleText: summarizeVisibleText(scopedText),
       learnedFrom: residentMemberClub
         ? "official-resident-member-access"
         : "official-private-club-access"
     }
   };
+}
+
+function findTargetScopedPrivateClubAccess(courseName: string, visibleText: string) {
+  const sentences = visibleText.match(/[^.!?]+[.!?]?/gu) ?? [];
+  for (let index = 0; index < sentences.length; index += 1) {
+    const anchor = sentences[index] ?? "";
+    if (
+      !/\b(?:private|members?|residents?|neighborhood (?:social )?club)\b/i.test(
+        anchor
+      )
+    ) {
+      continue;
+    }
+    const scopedText = sentences.slice(
+      Math.max(0, index - 1),
+      Math.min(sentences.length, index + 3)
+    ).join(" ");
+    if (
+      !hasTargetCourseIdentity(scopedText, courseName) ||
+      hasDifferentNamedCourseIdentity(scopedText, courseName)
+    ) {
+      continue;
+    }
+    const explicitlyPrivateGolfAccess =
+      /\bprivate (?:golf )?club\b/i.test(scopedText) ||
+      /\bprivate(?:[\s,-]+(?:award-winning|challenging|championship|\d{1,2}[- ]hole))*[\s,-]+golf course\b/i.test(
+        scopedText
+      );
+    const privateMemberGuestClub =
+      /\bis a private club available to\b/i.test(scopedText) ||
+      (explicitlyPrivateGolfAccess &&
+        /\bmembers? and (?:their )?guests?\b/i.test(scopedText));
+    const residentMemberClub =
+      /\bneighborhood (?:social )?club for residents?\b/i.test(scopedText) &&
+      /\boffers? (?:its )?members? the use of\b[^.]{0,220}\bgolf course\b/i.test(
+        scopedText
+      );
+    if (privateMemberGuestClub || residentMemberClub) {
+      return { privateMemberGuestClub, residentMemberClub, scopedText };
+    }
+  }
+  return null;
 }
 
 function learnChelseaDiscovery(
@@ -1767,7 +3163,15 @@ function learnTeeItUpDiscovery(
 }
 
 export function getBestProbeUrl(course: Pick<BrowserProbeCourseInput, "website" | "detectedBookingUrl">) {
-  return course.detectedBookingUrl?.trim() || course.website?.trim() || null;
+  return (
+    getSafeBrowserProbeUrl(course.detectedBookingUrl) ??
+    getSafeBrowserProbeUrl(course.website)
+  );
+}
+
+function getSafeBrowserProbeUrl(value: string | null | undefined) {
+  const parsed = parseUrl(value?.trim());
+  return parsed && isSafeManualEvidenceUrl(parsed) ? parsed.toString() : null;
 }
 
 function learnForeupDiscovery(
@@ -1917,7 +3321,8 @@ function pickBookingLikeUrl(urls: string[]) {
       !parsed ||
       isNonBookingHost(parsed.hostname) ||
       isStaticAssetPath(parsed.pathname) ||
-      isEditorialContentPath(parsed.pathname)
+      isEditorialContentPath(parsed.pathname) ||
+      isClearlyUnrelatedBookingUrl(parsed)
     ) {
       return false;
     }

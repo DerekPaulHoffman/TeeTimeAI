@@ -1,9 +1,12 @@
+import { EventEmitter } from "node:events";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   applyBrowserDiscoveryToCourse: vi.fn(),
   listRecentCourseAutomationDiscoveries: vi.fn(),
-  recordBrowserDiscovery: vi.fn()
+  recordBrowserDiscovery: vi.fn(),
+  retireLegacyPolicyOnlyCourseBlock: vi.fn()
 }));
 const providerLeaseMocks = vi.hoisted(() => ({
   runWithProviderRequestLease: vi.fn()
@@ -14,6 +17,7 @@ vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 
 import {
   collectOfficialSiteEvidence,
+  createAddressPinnedPublicFetch,
   prepareSearchMonitoring,
   shouldAttemptMonitoringDiscovery
 } from "./search-monitoring-discovery";
@@ -26,6 +30,7 @@ describe("search monitoring discovery", () => {
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([]);
     dbMocks.recordBrowserDiscovery.mockResolvedValue({ id: "discovery-1" });
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue({ id: "course-1" });
+    dbMocks.retireLegacyPolicyOnlyCourseBlock.mockResolvedValue({ id: "course-1" });
     providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
         acquired: true,
@@ -436,7 +441,297 @@ describe("search monitoring discovery", () => {
     );
   });
 
-  it("does not let auxiliary FAQ wording override an ungated Whoosh booking surface", async () => {
+  it("does not treat persisted runnable adapter metadata as current working evidence", async () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes";
+    const updatedAt = new Date("2026-07-13T18:00:00.000Z");
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("Current public evidence is unavailable");
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "runnable-policy-course",
+          name: "Runnable Policy Golf Course",
+          website: "https://runnable.example/",
+          detectedBookingUrl: bookingUrl,
+          detectedPlatform: "FOREUP",
+          providerFamilyKey: "FOREUP",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: {
+            scheduleId: 6123,
+            bookingBaseUrl: bookingUrl
+          },
+          updatedAt
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "runnable-policy-course",
+        status: "FAILED"
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.retireLegacyPolicyOnlyCourseBlock).toHaveBeenCalledWith(
+      "runnable-policy-course",
+      {
+        updatedAt,
+        detectedBookingUrl: bookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED"
+      },
+      {
+        preserveWebsite: true,
+        preserveDetectedBookingUrl: true,
+        preserveBookingMetadata: true
+      }
+    );
+    expect(result.appliedCourseIds).toEqual(["runnable-policy-course"]);
+    expect(result.failedCourseIds).toEqual(["runnable-policy-course"]);
+    expect(result.attemptedCourseIds).toEqual(["runnable-policy-course"]);
+  });
+
+  it("does not persist a sensitive booking URL when discovery fails", async () => {
+    const unsafeBookingUrl =
+      "https://booking.example/checkout?session_token=synthetic-secret-value";
+    const safeWebsite = "https://course.example/";
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("Current public evidence is unavailable");
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "sensitive-booking-url",
+          name: "Safe Evidence Golf Course",
+          website: safeWebsite,
+          detectedBookingUrl: unsafeBookingUrl,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      safeWebsite,
+      expect.any(Object)
+    );
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "sensitive-booking-url",
+        status: "FAILED",
+        sourceUrl: safeWebsite,
+        evidence: expect.objectContaining({ observedUrls: [safeWebsite] })
+      })
+    );
+    expect(
+      JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls)
+    ).not.toContain(unsafeBookingUrl);
+  });
+
+  it("does not preserve cross-origin CPS endpoint overrides", async () => {
+    const bookingUrl = "https://tenant.cps.golf/";
+    const updatedAt = new Date("2026-07-13T18:00:00.000Z");
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("Current public evidence is unavailable");
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "cross-origin-cps-policy",
+          name: "CPS Policy Golf Course",
+          website: bookingUrl,
+          detectedBookingUrl: bookingUrl,
+          detectedPlatform: "CUSTOM",
+          providerFamilyKey: "CPS",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: {
+            provider: "CPS",
+            siteName: "tenant",
+            bookingBaseUrl: bookingUrl,
+            courseIds: [1],
+            websiteId: "1",
+            authorityBaseUrl: "https://tenant.cps.golf/identityapi",
+            onlineApi: "https://unrelated.example/public-api"
+          },
+          updatedAt
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(dbMocks.retireLegacyPolicyOnlyCourseBlock).toHaveBeenCalledWith(
+      "cross-origin-cps-policy",
+      expect.any(Object),
+      {
+        preserveWebsite: true,
+        preserveDetectedBookingUrl: true,
+        preserveBookingMetadata: false
+      }
+    );
+  });
+
+  it("retires a legacy policy-only block that has no safe public source", async () => {
+    const updatedAt = new Date("2026-07-13T18:00:00.000Z");
+    const unsafeBookingUrl =
+      "https://booking.example/checkout?session_token=synthetic-secret-value";
+    const unsafeWebsite =
+      "https://course.example/account/session/synthetic-secret-value";
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "unsafe-policy-source",
+          name: "Unsafe Policy Source Golf Course",
+          website: unsafeWebsite,
+          detectedBookingUrl: unsafeBookingUrl,
+          detectedPlatform: "CUSTOM",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: { bookingBaseUrl: unsafeBookingUrl },
+          updatedAt
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.retireLegacyPolicyOnlyCourseBlock).toHaveBeenCalledWith(
+      "unsafe-policy-source",
+      {
+        updatedAt,
+        detectedBookingUrl: unsafeBookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED"
+      },
+      {
+        preserveWebsite: false,
+        preserveDetectedBookingUrl: false,
+        preserveBookingMetadata: false
+      }
+    );
+    expect(result.appliedCourseIds).toEqual(["unsafe-policy-source"]);
+  });
+
+  it("retains credential-free customer account links without probing them", async () => {
+    const updatedAt = new Date("2026-07-13T18:00:00.000Z");
+    const website = "https://course.example/members/tee-times";
+    const bookingUrl = "https://booking.example/account/tee-times";
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "account-link-policy-source",
+          name: "Account Link Golf Course",
+          website,
+          detectedBookingUrl: bookingUrl,
+          detectedPlatform: "CUSTOM",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null,
+          updatedAt
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.retireLegacyPolicyOnlyCourseBlock).toHaveBeenCalledWith(
+      "account-link-policy-source",
+      expect.any(Object),
+      {
+        preserveWebsite: true,
+        preserveDetectedBookingUrl: true,
+        preserveBookingMetadata: false
+      }
+    );
+    expect(result.appliedCourseIds).toEqual(["account-link-policy-source"]);
+  });
+
+  it.each([
+    "/checkout-session/start",
+    "/payment-flow/start",
+    "/cart-checkout/start",
+    "/order-confirmation/start",
+    "/session-id/opaque-state",
+    "/signed-link/opaque-state",
+    "/magic-link/opaque-state",
+    "/oauth/callback/opaque-code",
+    "/login/callback/opaque-ticket"
+  ])("clears compound transaction or credential state at %s", async (path) => {
+    const updatedAt = new Date("2026-07-13T18:00:00.000Z");
+    const bookingUrl = `https://booking.example${path}`;
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "unsafe-customer-state",
+          name: "Unsafe Customer State Golf Course",
+          website: null,
+          detectedBookingUrl: bookingUrl,
+          detectedPlatform: "CUSTOM",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null,
+          updatedAt
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, vi.fn() as typeof fetch, now);
+
+    expect(dbMocks.retireLegacyPolicyOnlyCourseBlock).toHaveBeenCalledWith(
+      "unsafe-customer-state",
+      expect.any(Object),
+      {
+        preserveWebsite: false,
+        preserveDetectedBookingUrl: false,
+        preserveBookingMetadata: false
+      }
+    );
+  });
+
+  it("reconciles a legacy policy-only Whoosh block from current public evidence", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "yale",
+        status: "FAILED",
+        sourceUrl: "https://yalebulldogs.com/golf",
+        createdAt: new Date("2026-07-13T19:30:00.000Z"),
+        evidence: null
+      },
+      {
+        courseId: "yale",
+        status: "FAILED",
+        sourceUrl: "https://yalebulldogs.com/golf",
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: null
+      }
+    ]);
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();
       if (value === "https://yalebulldogs.com/golf") {
@@ -472,14 +767,17 @@ describe("search monitoring discovery", () => {
             website: "https://yalebulldogs.com/golf",
             detectedBookingUrl: null,
             detectedPlatform: "UNKNOWN",
-            automationEligibility: "UNKNOWN",
-            bookingMetadata: null
+            automationEligibility: "BLOCKED",
+            automationReason: "AUTOMATION_PROHIBITED",
+            bookingMethod: "PUBLIC_ONLINE",
+            bookingMetadata: null,
+            updatedAt: new Date("2026-07-14T00:00:00.000Z")
           }
         }
       ]
     } as never;
 
-    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
       "https://yalebulldogs.com/golf",
@@ -492,15 +790,160 @@ describe("search monitoring discovery", () => {
         status: "VERIFIED",
         detectedPlatform: "CUSTOM",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "BLOCKED",
-        automationReason: "AUTOMATION_PROHIBITED",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "UNSUPPORTED_PLATFORM",
         bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
         evidence: expect.objectContaining({
           observedUrls: expect.arrayContaining(["https://www.whoosh.io/terms"]),
-          learnedFrom: "whoosh-automation-prohibited-booking"
+          learnedFrom:
+            "official-whoosh-booking-policy-evidence:legacy-policy-reconciliation"
         })
       })
     );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "VERIFIED",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "UNSUPPORTED_PLATFORM"
+      }),
+      {
+        updatedAt: new Date("2026-07-14T00:00:00.000Z"),
+        detectedBookingUrl: null,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "BLOCKED"
+      }
+    );
+    expect(result.attemptedCourseIds).toEqual(["yale"]);
+    expect(result.appliedCourseIds).toEqual(["yale"]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not bypass the daily cap again after a marked policy reconciliation", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "legacy-policy-course",
+        status: "FAILED",
+        sourceUrl: "https://course.example/golf",
+        createdAt: new Date("2026-07-13T19:30:00.000Z"),
+        evidence: {
+          learnedFrom:
+            "browser-discovery-failed:legacy-policy-reconciliation"
+        }
+      },
+      {
+        courseId: "legacy-policy-course",
+        status: "FAILED",
+        sourceUrl: "https://course.example/golf",
+        createdAt: new Date("2026-07-13T18:30:00.000Z"),
+        evidence: null
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "legacy-policy-course",
+          name: "Legacy Policy Golf Course",
+          website: "https://course.example/golf",
+          detectedBookingUrl: null,
+          detectedPlatform: "CUSTOM",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("waits for the retry interval before the one-time policy reconciliation", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "recent-policy-course",
+        status: "FAILED",
+        sourceUrl: "https://recent.example/golf",
+        createdAt: new Date("2026-07-13T19:50:00.000Z"),
+        evidence: null
+      },
+      {
+        courseId: "recent-policy-course",
+        status: "FAILED",
+        sourceUrl: "https://recent.example/golf",
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: null
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "recent-policy-course",
+          name: "Recent Policy Golf Course",
+          website: "https://recent.example/golf",
+          detectedBookingUrl: null,
+          detectedPlatform: "CUSTOM",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual(["recent-policy-course"]);
+  });
+
+  it("schedules the bounded reconciliation after the second ordinary attempt", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "second-attempt-policy-course",
+        status: "FAILED",
+        sourceUrl: "https://second-attempt.example/golf",
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: null
+      }
+    ]);
+    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValueOnce(null);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response("<html><body>Public golf course information.</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "second-attempt-policy-course",
+          name: "Second Attempt Golf Course",
+          website: "https://second-attempt.example/golf",
+          detectedBookingUrl: null,
+          detectedPlatform: "CUSTOM",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(result.attemptedCourseIds).toEqual(["second-attempt-policy-course"]);
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual(["second-attempt-policy-course"]);
   });
 
   it("follows the official club overview when a private-club shell hides access details", async () => {
@@ -580,6 +1023,833 @@ describe("search monitoring discovery", () => {
 
     expect(result.attemptedCourseIds).toEqual(["course-1"]);
     expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("reclassifies capped durable evidence without fetching the provider again", async () => {
+    const sourceUrl = "http://www.knightsplay.com";
+    const finalUrl = "https://www.knightsplay.com/";
+    const ratesUrl = "https://www.knightsplay.com/rates";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "knights-play",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl,
+          observedUrls: [sourceUrl, finalUrl, "https://static.wixstatic.com/media/logo.png"],
+          visibleText:
+            "Knights Play Golf Center does not offer online booking. General course information."
+        }
+      },
+      {
+        courseId: "knights-play",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: ratesUrl,
+          observedUrls: [sourceUrl, finalUrl, ratesUrl],
+          visibleText:
+            "Knights Play Golf Center is a 27-hole public golf course. Please call 919-303-4653 to reserve your tee time. Tee times are taken one week in advance."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "knights-play",
+          name: "Knights Play Golf Center",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:50:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "knights-play",
+        status: "VERIFIED",
+        sourceUrl: ratesUrl,
+        bookingMethod: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        evidence: expect.objectContaining({
+          learnedFrom: "official-phone-reservation-contact"
+        })
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "knights-play",
+        status: "VERIFIED",
+        bookingMethod: "CONTACT_COURSE"
+      }),
+      {
+        updatedAt: new Date("2026-07-13T19:50:00.000Z"),
+        detectedBookingUrl: null,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN"
+      }
+    );
+    expect(result).toEqual({
+      attemptedCourseIds: [],
+      appliedCourseIds: ["knights-play"],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: []
+    });
+  });
+
+  it("does not replay a manual classification rejected for unsafe URL evidence", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "rejected-manual-replay",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Valley Golf Course. Please call 919-303-4653 to reserve your tee time.",
+          learnedFrom: "official-phone-reservation-rejected:unsafe-url-evidence"
+        }
+      },
+      {
+        courseId: "rejected-manual-replay",
+        status: "FAILED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: { observedUrls: [sourceUrl] }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "rejected-manual-replay",
+          name: "Example Valley Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+  });
+
+  it("does not record a replayed classification when the guarded apply loses", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "apply-race",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText: "Example Valley Golf Course"
+        }
+      },
+      {
+        courseId: "apply-race",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Valley Golf Course. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "apply-race",
+          name: "Example Valley Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not replay a sibling course's walk-in policy onto the selected course", async () => {
+    const sourceUrl = "https://parks.example/golf/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "target-walk-in-replay",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText: "Target Municipal Golf Course offers public play."
+        }
+      },
+      {
+        courseId: "target-walk-in-replay",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Target Municipal Golf Course offers public play. Tee times are not required at Sibling Hills Golf Course, where golf is first come, first served."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "target-walk-in-replay",
+          name: "Target Municipal Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:50:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not replay older manual evidence over a current custom online booking URL", async () => {
+    const website = "https://course.example/";
+    const bookingUrl = "https://course.example/tee-times";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "current-online-course",
+        status: "INSPECTED",
+        sourceUrl: website,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: website,
+          observedUrls: [website],
+          visibleText:
+            "Current Online Golf Course is an 18-hole public golf course. Please call 919-303-4653 to reserve your tee time."
+        }
+      },
+      {
+        courseId: "current-online-course",
+        status: "INSPECTED",
+        sourceUrl: website,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: website,
+          observedUrls: [website],
+          visibleText: "Current Online Golf Course"
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "current-online-course",
+          name: "Current Online Golf Course",
+          website,
+          detectedBookingUrl: bookingUrl,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:50:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("requires a current custom booking URL to be represented by replay evidence", async () => {
+    const website = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "changed-booking-url",
+        status: "INSPECTED",
+        sourceUrl: website,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: website,
+          observedUrls: [website],
+          visibleText:
+            "Changed Booking Golf Course is an 18-hole public golf course. Please call 919-303-4653 to reserve your tee time."
+        }
+      },
+      {
+        courseId: "changed-booking-url",
+        status: "INSPECTED",
+        sourceUrl: website,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: website,
+          observedUrls: [website],
+          visibleText: "Changed Booking Golf Course"
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "changed-booking-url",
+          name: "Changed Booking Golf Course",
+          website,
+          detectedBookingUrl: "https://course.example/reserve",
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:50:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("uses deterministic input order for equal-time online and manual evidence", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "provider-contradiction",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl, "https://course.example/go/42"],
+          visibleText: "Example Golf Course. Book tee times online."
+        }
+      },
+      {
+        courseId: "provider-contradiction",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Golf Course is an 18-hole public golf course. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "provider-contradiction",
+          name: "Example Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not trust a legacy bare booking-call boolean as tee-time proof", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "bare-booking-boolean",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl, "https://course.example/go/42"],
+          visibleText: "Example Night Golf Center",
+          bookingCallToAction: true
+        }
+      },
+      {
+        courseId: "bare-booking-boolean",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Night Golf Center. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "bare-booking-boolean",
+          name: "Example Night Golf Center",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(result.appliedCourseIds).toEqual(["bare-booking-boolean"]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not treat unrelated reservation URLs as replay contradictions", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "unrelated-replay-url",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl, "https://course.example/restaurant/reservations"],
+          visibleText: "Example Valley Golf Course. Restaurant reservations."
+        }
+      },
+      {
+        courseId: "unrelated-replay-url",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Valley Golf Course is an 18-hole public golf course. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "unrelated-replay-url",
+          name: "Example Valley Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(result.appliedCourseIds).toEqual(["unrelated-replay-url"]);
+  });
+
+  it.each([
+    "Book your tee time now",
+    "Book your tee-time now",
+    "Book your tee‑time now",
+    "Book your tee–time now",
+    "Reserve Your Tee Time",
+    "Schedule Tee Times",
+    "View Tee Times",
+    "Find Tee Times",
+    "See Tee Times",
+    "Search Tee Times",
+    "Make a Tee Time",
+    "Online Tee Times",
+    "Book tee times online or call the pro shop",
+    "Tee times are available online and by phone"
+  ])(
+    "keeps legacy visible %s evidence from exposing an older manual classification",
+    async (bookingAction) => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "visible-cta-contradiction",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl, "https://course.example/go/42"],
+          visibleText: `Example Night Golf Center. ${bookingAction}.`
+        }
+      },
+      {
+        courseId: "visible-cta-contradiction",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Night Golf Center. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "visible-cta-contradiction",
+          name: "Example Night Golf Center",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+    }
+  );
+
+  it.each([
+    "Book Now",
+    "Reservations",
+    "Check Availability",
+    "Find a Time",
+    "Manage Reservations",
+    "Schedule Your Reservation",
+    "Golf Reservations",
+    "Upcoming Reservations",
+    "My Reservations",
+    "Manage All Reservations",
+    "Your Reservations",
+    "Existing Reservations",
+    "Manage Existing Reservations",
+    "Change Reservations",
+    "Tee Time Reservations",
+    "Current Tee Times",
+    "Available Tee Times",
+    "Public Tee Times",
+    "Tee Time Booking",
+    "Today's Tee Times",
+    "Tomorrow's Tee Times",
+    "Weekend Tee Times",
+    "Evening Tee Times",
+    "Daily Tee Times",
+    "Member Tee Times",
+    "Customer Tee Times",
+    "User Tee Times",
+    "Book a tee time by calling the pro shop at 919-555-0142",
+    "Reserve tee times by calling 919-555-0142"
+  ])(
+    "does not let ambiguous legacy %s copy hide trusted manual evidence",
+    async (bookingAction) => {
+      const sourceUrl = "https://course.example/";
+      dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+        {
+          courseId: "ambiguous-visible-copy",
+          status: "INSPECTED",
+          sourceUrl,
+          createdAt: new Date("2026-07-13T19:45:00.000Z"),
+          evidence: {
+            finalUrl: sourceUrl,
+            observedUrls: [sourceUrl, "https://course.example/go/42"],
+            visibleText: `Example Night Golf Center. ${bookingAction}.`
+          }
+        },
+        {
+          courseId: "ambiguous-visible-copy",
+          status: "INSPECTED",
+          sourceUrl,
+          createdAt: new Date("2026-07-13T19:00:00.000Z"),
+          evidence: {
+            finalUrl: sourceUrl,
+            observedUrls: [sourceUrl],
+            visibleText:
+              "Example Night Golf Center. Please call 919-303-4653 to reserve your tee time."
+          }
+        }
+      ]);
+      const fetchImpl = vi.fn();
+      const search = {
+        preferences: [{
+          rank: 1,
+          course: {
+            id: "ambiguous-visible-copy",
+            name: "Example Night Golf Center",
+            website: sourceUrl,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }]
+      } as never;
+
+      const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+      expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+      expect(result.appliedCourseIds).toEqual(["ambiguous-visible-copy"]);
+      expect(result.retryCourseIds).toEqual([]);
+    }
+  );
+
+  it("does not let malformed newer evidence expose an older manual classification", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "inspected-only",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: sourceUrl,
+          visibleText: "Malformed persisted evidence"
+        }
+      },
+      {
+        courseId: "inspected-only",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Golf Course. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "inspected-only",
+          name: "Example Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not let newer session-bearing evidence expose an older manual classification", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "session-evidence",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl: "https://course.example/session/private",
+          observedUrls: ["https://course.example/session/private"],
+          visibleText:
+            "Example Valley Golf Course. Please call 919-303-4653 to reserve your tee time."
+        }
+      },
+      {
+        courseId: "session-evidence",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Valley Golf Course. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "session-evidence",
+          name: "Example Valley Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
+  });
+
+  it("does not treat evidence at the twenty-four-hour boundary as current", async () => {
+    const sourceUrl = "https://course.example/";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "stale-evidence",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText: "Example Golf Course"
+        }
+      },
+      {
+        courseId: "stale-evidence",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-12T20:00:00.000Z"),
+        evidence: {
+          finalUrl: sourceUrl,
+          observedUrls: [sourceUrl],
+          visibleText:
+            "Example Golf Course is an 18-hole public golf course. Please call 919-303-4653 to reserve your tee time."
+        }
+      }
+    ]);
+    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response("<html><body>Example Golf Course</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "stale-evidence",
+          name: "Example Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "INSPECTED" })
+    );
   });
 
   it("preserves the official TenFore link even when a later simulator page is inspected", async () => {
@@ -855,5 +2125,748 @@ describe("search monitoring discovery", () => {
       collectOfficialSiteEvidence("http://127.0.0.1/admin", fetchImpl as typeof fetch)
     ).rejects.toThrow("safe public HTTP address");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { address: "127.0.0.1", family: 4 as const },
+    { address: "10.20.30.40", family: 4 as const },
+    { address: "169.254.169.254", family: 4 as const },
+    { address: "::1", family: 6 as const },
+    { address: "::ffff:127.0.0.1", family: 6 as const },
+    { address: "64:ff9b::a9fe:a9fe", family: 6 as const },
+    { address: "fd00::1", family: 6 as const },
+    { address: "fe80::1", family: 6 as const },
+    { address: "ff02::1", family: 6 as const }
+  ])("rejects a DNS alias resolving to non-public $address", async (target) => {
+    const requestPinned = vi.fn();
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([target]),
+      requestPinned
+    });
+
+    await expect(pinnedFetch("https://public-name.example/")).rejects.toThrow(
+      "non-public network address"
+    );
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("stops waiting for DNS resolution when the request signal aborts", async () => {
+    const controller = new AbortController();
+    const resolveAddresses = vi.fn(
+      () => new Promise<Array<{ address: string; family: 4 | 6 }>>(() => undefined)
+    );
+    const requestPinned = vi.fn();
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses,
+      requestPinned
+    });
+    const pending = pinnedFetch("https://slow-dns.example/", {
+      signal: controller.signal
+    });
+
+    controller.abort(new DOMException("timed out", "TimeoutError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(resolveAddresses).toHaveBeenCalledOnce();
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("applies a default deadline to a stalled pinned request without a caller signal", async () => {
+    const requestPinned = vi.fn(
+      () => new Promise<Response>(() => undefined)
+    );
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([
+        { address: "8.8.8.8", family: 4 }
+      ]),
+      requestPinned,
+      timeoutMs: 20
+    });
+
+    await expect(
+      pinnedFetch("https://stalled-public-course.example/")
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(requestPinned).toHaveBeenCalledOnce();
+  });
+
+  it("rejects mixed public and private DNS answers", async () => {
+    const requestPinned = vi.fn();
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([
+        { address: "8.8.8.8", family: 4 },
+        { address: "192.168.1.5", family: 4 }
+      ]),
+      requestPinned
+    });
+
+    await expect(pinnedFetch("https://mixed-answer.example/")).rejects.toThrow(
+      "non-public network address"
+    );
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("requests the original host with a validated pinned public address", async () => {
+    const requestPinned = vi.fn().mockResolvedValue(
+      new Response("<html>Public course</html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([
+        { address: "2606:4700:4700::1111", family: 6 },
+        { address: "8.8.8.8", family: 4 }
+      ]),
+      requestPinned
+    });
+
+    const response = await pinnedFetch("https://public-course.example/rates");
+
+    expect(response.status).toBe(200);
+    expect(requestPinned).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: expect.objectContaining({
+          hostname: "public-course.example",
+          pathname: "/rates"
+        }),
+        address: "8.8.8.8",
+        family: 4,
+        method: "GET"
+      })
+    );
+  });
+
+  it("drops caller-supplied Host before the pinned Node request", async () => {
+    let requestHeaders: Record<string, string> | undefined;
+    const requestNode = vi.fn((_url, options, callback) => {
+      requestHeaders = options.headers as Record<string, string>;
+      const incoming = Object.assign(new EventEmitter(), {
+        headers: {},
+        statusCode: 204,
+        statusMessage: "No Content",
+        destroy: vi.fn()
+      });
+      const client = Object.assign(new EventEmitter(), {
+        end: () => queueMicrotask(() => {
+          callback(incoming as never);
+          queueMicrotask(() => incoming.emit("end"));
+        })
+      });
+      return client as never;
+    });
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([
+        { address: "8.8.8.8", family: 4 }
+      ]),
+      requestNode
+    });
+
+    await expect(
+      pinnedFetch("https://public-course.example/rates", {
+        headers: { Host: "internal.example" }
+      })
+    ).resolves.toMatchObject({ status: 204 });
+    expect(requestHeaders).not.toHaveProperty("host");
+    expect(requestHeaders).not.toHaveProperty("Host");
+  });
+
+  it("rejects and closes an attempted protocol upgrade", async () => {
+    const destroy = vi.fn();
+    const requestNode = vi.fn(() => {
+      const client = Object.assign(new EventEmitter(), {
+        end: () => queueMicrotask(() => {
+          client.emit("upgrade", {}, { destroy }, Buffer.alloc(0));
+        })
+      });
+      return client as never;
+    });
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([
+        { address: "8.8.8.8", family: 4 }
+      ]),
+      requestNode
+    });
+
+    await expect(
+      pinnedFetch("https://public-course.example/upgrade")
+    ).rejects.toThrow("unsupported protocol upgrade");
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an invalid remote status without throwing outside the request promise", async () => {
+    const requestNode = vi.fn((_url, _options, callback) => {
+      const incoming = Object.assign(new EventEmitter(), {
+        headers: {},
+        statusCode: 700,
+        statusMessage: "Invalid",
+        destroy: vi.fn()
+      });
+      const client = Object.assign(new EventEmitter(), {
+        end: () => queueMicrotask(() => {
+          callback(incoming as never);
+          queueMicrotask(() => incoming.emit("end"));
+        })
+      });
+      return client as never;
+    });
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses: vi.fn().mockResolvedValue([
+        { address: "8.8.8.8", family: 4 }
+      ]),
+      requestNode
+    });
+
+    await expect(
+      pinnedFetch("https://public-course.example/status")
+    ).rejects.toThrow("invalid HTTP status");
+  });
+
+  it("re-resolves a manual redirect and blocks a private destination before request", async () => {
+    const resolveAddresses = vi.fn().mockImplementation(async (hostname: string) =>
+      hostname === "public-course.example"
+        ? [{ address: "8.8.8.8", family: 4 as const }]
+        : [{ address: "127.0.0.1", family: 4 as const }]
+    );
+    const requestPinned = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://private-alias.example/admin" }
+      })
+    );
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses,
+      requestPinned
+    });
+
+    await expect(
+      collectOfficialSiteEvidence("https://public-course.example/", pinnedFetch)
+    ).rejects.toThrow("non-public network address");
+    expect(resolveAddresses).toHaveBeenCalledTimes(2);
+    expect(requestPinned).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-resolves followed redirects and blocks a private destination", async () => {
+    const resolveAddresses = vi.fn().mockImplementation(async (hostname: string) =>
+      hostname === "public-course.example"
+        ? [{ address: "8.8.8.8", family: 4 as const }]
+        : [{ address: "fd00::1", family: 6 as const }]
+    );
+    const requestPinned = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://private-alias.example/admin" }
+      })
+    );
+    const pinnedFetch = createAddressPinnedPublicFetch({
+      resolveAddresses,
+      requestPinned
+    });
+
+    await expect(
+      pinnedFetch("https://public-course.example/", { redirect: "follow" })
+    ).rejects.toThrow("non-public network address");
+    expect(resolveAddresses).toHaveBeenCalledTimes(2);
+    expect(requestPinned).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "https://localhost./rates/",
+    "https://[::ffff:127.0.0.1]/rates/",
+    "https://course.internal./rates/",
+    "https://course.local./rates/",
+    "https://accounts.safe-course.example/rates/",
+    "https://tenant.accounts.safe-course.example/rates/",
+    "https://tenant.login.safe-course.example/rates/",
+    "https://tenant.auth.safe-course.example/rates/",
+    "https://secure-login.safe-course.example/rates/",
+    "https://portal.auth.safe-course.example/rates/",
+    "https://course.queue-it.net/rates/",
+    "https://challenges.cloudflare.com/turnstile/v0/",
+    "https://www.google.com/recaptcha/api2/anchor",
+    "https://sso.safe-course.example/",
+    "https://oauth.safe-course.example/",
+    "https://oauth2.safe-course.example/",
+    "https://auth0.safe-course.example/",
+    "https://oidc.safe-course.example/",
+    "https://idp.safe-course.example/",
+    "https://identity.safe-course.example/",
+    "https://identity-provider.safe-course.example/",
+    "https://member-login.safe-course.example/",
+    "https://customer-login.safe-course.example/",
+    "https://prod-login.safe-course.example/",
+    "https://login-us.safe-course.example/",
+    "https://auth-prod.safe-course.example/",
+    "https://sso2.safe-course.example/",
+    "https://myaccount.safe-course.example/",
+    "https://adminlogin.safe-course.example/",
+    "https://stafflogin.safe-course.example/",
+    "https://login2.safe-course.example/",
+    "https://waitingroom.safe-course.example/",
+    "https://turnstile.safe-course.example/",
+    "https://recaptcha.safe-course.example/",
+    "https://mfa.safe-course.example/",
+    "https://identityserver.safe-course.example/",
+    "https://saml.safe-course.example/",
+    "https://openid.safe-course.example/",
+    "https://adfs.safe-course.example/",
+    "https://authorization.safe-course.example/",
+    "https://openidconnect.safe-course.example/",
+    "https://samlauthnrequest.safe-course.example/",
+    "https://samlacs.safe-course.example/",
+    "https://queueprogress.safe-course.example/",
+    "https://captchachallenge.safe-course.example/",
+    "https://challengeplatform.safe-course.example/",
+    "https://memberdashboard.safe-course.example/",
+    "https://accountsettings.safe-course.example/",
+    "https://clientlogin.safe-course.example/",
+    "https://partnerlogin.safe-course.example/",
+    "https://employeelogin.safe-course.example/",
+    "https://regionallogin.safe-course.example/",
+    "https://authservice.safe-course.example/",
+    "https://accountrecovery.safe-course.example/",
+    "https://forgotpassword.safe-course.example/",
+    "https://passwordreset.safe-course.example/",
+    "https://resetpassword.safe-course.example/",
+    "https://passwordless.safe-course.example/",
+    "https://emailverification.safe-course.example/",
+    "https://verifyemail.safe-course.example/",
+    "https://magiclink.safe-course.example/",
+    "https://invite.safe-course.example/",
+    "https://session.safe-course.example/",
+    "https://token.safe-course.example/",
+    "https://arkose.safe-course.example/",
+    "https://arkoselabs.safe-course.example/",
+    "https://okta.safe-course.example/",
+    "https://onelogin.safe-course.example/",
+    "https://cloudflareaccess.safe-course.example/",
+    "https://credential.safe-course.example/",
+    "https://credentials.safe-course.example/",
+    "https://secret.safe-course.example/",
+    "https://signature.safe-course.example/",
+    "https://signed.safe-course.example/",
+    "https://ticket.safe-course.example/",
+    "https://assertion.safe-course.example/",
+    "https://relaystate.safe-course.example/",
+    "https://consent.safe-course.example/",
+    "https://jsessionid.safe-course.example/",
+    "https://authcode.safe-course.example/",
+    "https://nonce.safe-course.example/",
+    "https://jwt.safe-course.example/",
+    "https://signedurl.safe-course.example/",
+    "https://serviceticket.safe-course.example/",
+    "https://accesstoken.safe-course.example/",
+    "https://clientsecret.safe-course.example/",
+    "https://apikey.safe-course.example/",
+    "https://safe-course.example:80/rates/"
+  ])("refuses unsafe public-looking hosts before fetch: %s", async (unsafeUrl) => {
+    const fetchImpl = vi.fn();
+
+    await expect(
+      collectOfficialSiteEvidence(unsafeUrl, fetchImpl as typeof fetch)
+    ).rejects.toThrow("safe public HTTP address");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://safe-course.example/members/tee-times",
+    "https://safe-course.example/member/book/tee-times",
+    "https://safe-course.example/member/reserve/tee-times",
+    "https://safe-course.example/members/golf/tee-times",
+    "https://safe-course.example/secure/tee-times",
+    "https://safe-course.example/customer/book/tee-times",
+    "https://safe-course.example/user/reserve/tee-times",
+    "https://safe-course.example/members/tee-times.aspx",
+    "https://safe-course.example/member/book.php",
+    "https://safe-course.example/secure/teetimes.html",
+    "https://safe-course.example/customer/reserve.aspx",
+    "https://safe-course.example/user/schedule.php",
+    "https://safe-course.example/member/book.do",
+    "https://safe-course.example/customer/reserve.action",
+    "https://safe-course.example/user/schedule.do",
+    "https://safe-course.example/members/tee-time-booking",
+    "https://safe-course.example/customer/tee-time-search",
+    "https://safe-course.example/user/online-tee-times",
+    "https://safe-course.example/members2/tee/time",
+    "https://safe-course.example/secure-v2/online/tee/times",
+    "https://safe-course.example/rates?nextUrl=%2Faccount%2Flogin",
+    "https://safe-course.example/rates?nextPath=%2Fcheckout%2Fstart",
+    "https://safe-course.example/rates?continueUrl=%2Fqueue%2Fwait",
+    "https://safe-course.example/rates?continueTo=%2Fcaptcha%2Fverify",
+    "https://safe-course.example/rates?returnPath=%2Faccount%2Flogin",
+    "https://safe-course.example/rates?redirectPath=%2Fcheckout%2Fstart",
+    "https://safe-course.example/rates?successUrl=%2Faccount%2Fportal",
+    "https://safe-course.example/rates?cancelUrl=%2Fcheckout%2Fcancel",
+    "https://safe-course.example/rates?callbackTo=login",
+    "https://safe-course.example/rates?destinationUrl=checkout",
+    "https://safe-course.example/rates?next=ftp%3A%2F%2Fpublic.vendor.example%2Frates",
+    "https://safe-course.example/callback2?code=PUBLIC",
+    "https://safe-course.example/callbackv2?state=NC",
+    "https://safe-course.example/ssocallback2?code=PUBLIC",
+    "https://safe-course.example/rates?key=sk_test_abc123def456ghi789",
+    "https://safe-course.example/rates?key=pk_live_abc123def456ghi789"
+  ])("refuses sensitive public paths before fetch: %s", async (unsafeUrl) => {
+    const fetchImpl = vi.fn();
+
+    await expect(
+      collectOfficialSiteEvidence(unsafeUrl, fetchImpl as typeof fetch)
+    ).rejects.toThrow("safe public HTTP address");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://safe-course.example/golf-cart-rates/",
+    "https://safe-course.example/the-challenge-at-manele/",
+    "https://safe-course.example/missouri-golf-courses/",
+    "https://safe-course.example/cartwright-golf-course/",
+    "https://safe-course.example/billings-golf-course/",
+    "https://billings.example/golf/",
+    "https://safe-course.example/key-west-golf-club/",
+    "https://safe-course.example/keystone-golf-course/",
+    "https://safe-course.example/key-largo-golf/",
+    "https://keywestgolf.example/",
+    "https://keystonegolf.example/",
+    "https://key-largo-golf.example/",
+    "https://safe-course.example/rates?state=NC",
+    "https://safe-course.example/rates?code=PUBLIC",
+    "https://safe-course.example/rates?key=course",
+    "https://safe-course.example/rates?destination=Raleigh",
+    "https://safe-course.example/rates?target=public",
+    "https://safe-course.example/public/tee-times.html",
+    "https://safe-course.example/public/tee-times.do",
+    "https://safe-course.example/programs/493b6c83-491b-4243-b9a1-f0090f288fb2",
+    "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d",
+    "https://safe-course.example/#/the-challenge-at-manele",
+    "https://safe-course.example/#/author-information"
+  ])("fetches legitimate public course paths at %s", async (publicUrl) => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      expect(url.toString()).toBe(publicUrl);
+      return new Response("<html><body>Public golf course</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    await collectOfficialSiteEvidence(publicUrl, fetchImpl as typeof fetch);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not follow unsafe or sensitive booking links from a safe official page", async () => {
+    const sourceUrl = "https://safe-course.example/";
+    const blockedLinks = [
+      "https://localhost./tee-times",
+      "https://course.internal./tee-times",
+      "https://safe-course.example/account/login",
+      "https://safe-course.example/checkout/start",
+      "https://safe-course.example/queue/wait",
+      "https://safe-course.example/oauth/callback?ticket=private",
+      "https://safe-course.example/secure-checkout/start",
+      "https://safe-course.example/user-login/start",
+      "https://safe-course.example/auth0/callback?auth_code=private",
+      "https://safe-course.example/queueit/wait",
+      "https://safe-course.example/captchaChallenge/start",
+      "https://safe-course.example/magic-link/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+      "https://safe-course.example/reset-password/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+      "https://safe-course.example/invite/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+      "https://safe-course.example/go/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+      "https://safe-course.example/callback?client_id=course&response_type=code",
+      "https://safe-course.example/callback?%2563ode=private",
+      "https://safe-course.example/callback?%2563lient_id=course&%2572esponse_type=code",
+      "https://safe-course.example/callback?oauth_verifier=private",
+      "https://safe-course.example/callback?session_state=private",
+      "https://safe-course.example/callback?SAMLart=private",
+      "https://safe-course.example/callback?login_ticket=private",
+      "https://safe-course.example/%2561ccount%252Flogin",
+      "https://safe-course.example/forgot-password/start",
+      "https://safe-course.example/account-recovery/start",
+      "https://safe-course.example/login-callback",
+      "https://safe-course.example/signin-oidc",
+      "https://safe-course.example/oauth2-callback",
+      "https://safe-course.example/checkout-flow/start",
+      "https://safe-course.example/captcha-v2/start",
+      "https://safe-course.example/queue-status",
+      "https://safe-course.example/checkout-session/start",
+      "https://safe-course.example/payment-confirm",
+      "https://safe-course.example/account-settings",
+      "https://safe-course.example/forgot-my-password",
+      "https://safe-course.example/password-reset-confirm",
+      "https://safe-course.example/captcha-verify",
+      "https://safe-course.example/queue-redirect",
+      "https://safe-course.example/challenge-response",
+      "https://safe-course.example/authentication-callback",
+      "https://safe-course.example/authorize-callback",
+      "https://safe-course.example/saml-acs",
+      "https://safe-course.example/openid-connect",
+      "https://safe-course.example/login-flow",
+      "https://safe-course.example/checkout-step",
+      "https://safe-course.example/payment-flow",
+      "https://safe-course.example/cart-checkout",
+      "https://safe-course.example/queue-progress",
+      "https://safe-course.example/authorizecallback",
+      "https://safe-course.example/checkoutstep",
+      "https://safe-course.example/checkoutstart",
+      "https://safe-course.example/loginflow",
+      "https://safe-course.example/queueprogress",
+      "https://safe-course.example/paymentstep",
+      "https://safe-course.example/samlauthnrequest",
+      "https://safe-course.example/openidconnect",
+      "https://safe-course.example/mfachallenge",
+      "https://safe-course.example/hcaptcha/start",
+      "https://safe-course.example/funcaptcha/start",
+      "https://safe-course.example/member-dashboard",
+      "https://safe-course.example/forgot-username",
+      "https://safe-course.example/confirm-email",
+      "https://safe-course.example/booking-payment",
+      "https://safe-course.example/clientlogin",
+      "https://safe-course.example/partnerlogin",
+      "https://safe-course.example/regionallogin",
+      "https://safe-course.example/authservice",
+      "https://safe-course.example/authproxy",
+      "https://safe-course.example/billing",
+      "https://safe-course.example/billingportal",
+      "https://safe-course.example/payment-method",
+      "https://safe-course.example/paymentmethod",
+      "https://safe-course.example/order-review",
+      "https://safe-course.example/cartreview",
+      "https://safe-course.example/members/booking",
+      "https://safe-course.example/member/center",
+      "https://safe-course.example/secure/portal",
+      "https://safe-course.example/shopping/bag",
+      "https://safe-course.example/place/order",
+      "https://safe-course.example/complete/purchase",
+      "https://safe-course.example/order/history",
+      "https://safe-course.example/transaction/history",
+      "https://safe-course.example/members/tee-times",
+      "https://safe-course.example/member/book/tee-times",
+      "https://safe-course.example/member/reserve/tee-times",
+      "https://safe-course.example/members/golf/tee-times",
+      "https://safe-course.example/secure/tee-times",
+      "https://safe-course.example/customer/book/tee-times",
+      "https://safe-course.example/user/reserve/tee-times",
+      "https://safe-course.example/callback?SAMLRequest=private",
+      "https://safe-course.example/callback?oauth_nonce=private",
+      "https://safe-course.example/callback?oauth_callback=private",
+      "https://safe-course.example/callback?openid.mode=private",
+      "https://safe-course.example/callback?SigAlg=private",
+      "https://safe-course.example/rates?next=https%3A%2F%2Fmember-login.vendor.example%2Fstart",
+      "https://safe-course.example/rates#access_token=private",
+      "https://safe-course.example/rates#oauth_nonce=private",
+      "https://safe-course.example/rates?prompt=login",
+      "https://safe-course.example/rates?code_challenge_method=S256",
+      "https://safe-course.example/rates?response_mode=query",
+      "https://safe-course.example/rates?returnUrl=%2Faccount%2Flogin",
+      "https://safe-course.example/rates?next=%2Fcheckout%2Fstart",
+      "https://safe-course.example/rates?redirect=%2Fcaptcha%2Fverify",
+      "https://safe-course.example/rates?continue=%2Fqueue%2Fwait",
+      "https://safe-course.example/rates?returnUrl=%2F%2Faccounts.vendor.example%2Flogin",
+      "https://safe-course.example/rates?nextUrl=%2Faccount%2Flogin",
+      "https://safe-course.example/rates?nextPath=%2Fcheckout%2Fstart",
+      "https://safe-course.example/rates?continueUrl=%2Fqueue%2Fwait",
+      "https://safe-course.example/rates?continueTo=%2Fcaptcha%2Fverify",
+      "https://safe-course.example/rates?returnPath=%2Faccount%2Flogin",
+      "https://safe-course.example/rates?redirectPath=%2Fcheckout%2Fstart",
+      "https://safe-course.example/rates?successUrl=%2Faccount%2Fportal",
+      "https://safe-course.example/rates?cancelUrl=%2Fcheckout%2Fcancel",
+      "https://safe-course.example/rates#wresult",
+      "https://safe-course.example/rates?view=AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEf",
+      "https://safe-course.example/rates?view=AbCdEfGhIjKlMnOpQrS",
+      "https://safe-course.example/rates?csrf=private",
+      "https://safe-course.example/rates?xsrf=private",
+      "https://safe-course.example/rates?form_key=private",
+      "https://safe-course.example/rates?__RequestVerificationToken=private",
+      "https://safe-course.example/rates?csrfmiddlewaretoken=private",
+      "https://safe-course.example/rates?x-csrf-token=private",
+      "https://safe-course.example/rates?anti_csrf_token=private",
+      "https://safe-course.example/rates?verification_token=private",
+      "https://safe-course.example/rates?checkout_session_id=private",
+      "https://safe-course.example/rates?payment_intent=private",
+      "https://safe-course.example/rates?order_id=private",
+      "https://safe-course.example/rates?transaction_id=private",
+      "https://safe-course.example/rates?invoice_id=private",
+      "https://safe-course.example/rates?cart_id=private",
+      "https://safe-course.example/rates?s=AbCdEfGhIjKlMnOpQrSt%3D%3D",
+      "https://safe-course.example/rates?view=AbCdEfGhIjKlMnOp-_%3D%3D",
+      "https://member-login.vendor.example/rates",
+      "https://login-us.vendor.example/rates",
+      "https://knights-play.book.teeitup.golf/go/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "https://knights-play.book.teeitup.golf/go/a1b2c3d4e5f6g7h8i9j0",
+      "https://knights-play.book.teeitup.golf/go/a1b2c3d4e5f6g7h8i9j",
+      "https://knights-play.book.teeitup.golf/go/AbCdEfGhIjKlMnOpQrSt",
+      "https://knights-play.book.teeitup.golf/go/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+      "https://example.queue-it.net/",
+      "https://challenges.cloudflare.com/turnstile/v0/",
+      "https://www.google.com/recaptcha/api2/anchor"
+    ];
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      expect(url.toString()).toBe(sourceUrl);
+      return new Response(
+        `<html>${blockedLinks
+          .map((href) => `<a href="${href}">Book Tee Times</a>`)
+          .join("")}</html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evidence.linkCandidates).toEqual([]);
+    for (const blockedLink of blockedLinks) {
+      expect(JSON.stringify(evidence)).not.toContain(blockedLink);
+    }
+  });
+
+  it.each([
+    "https://localhost./tee-times",
+    "https://example.queue-it.net/",
+    "https://challenges.cloudflare.com/turnstile/v0/",
+    "https://www.google.com/recaptcha/api2/anchor",
+    "https://safe-course.example/secure-checkout/start",
+    "https://safe-course.example/user-login/start",
+    "https://safe-course.example/auth0/callback?auth_code=private",
+    "https://safe-course.example/queueit/wait",
+    "https://safe-course.example/captchaChallenge/start",
+    "https://safe-course.example/magic-link/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "https://safe-course.example/reset-password/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "https://safe-course.example/callback?client_id=course&response_type=code",
+    "https://safe-course.example/callback?%2563ode=private",
+    "https://safe-course.example/callback?%2563lient_id=course&%2572esponse_type=code",
+    "https://safe-course.example/callback?oauth_verifier=private",
+    "https://safe-course.example/callback?session_state=private",
+    "https://safe-course.example/callback?SAMLart=private",
+    "https://safe-course.example/callback?login_ticket=private",
+    "https://safe-course.example/forgot-password/start",
+    "https://safe-course.example/account-recovery/start",
+    "https://safe-course.example/login-callback",
+    "https://safe-course.example/signin-oidc",
+    "https://safe-course.example/oauth2-callback",
+    "https://safe-course.example/checkout-flow/start",
+    "https://safe-course.example/captcha-v2/start",
+    "https://safe-course.example/queue-status",
+    "https://safe-course.example/checkout-session/start",
+    "https://safe-course.example/payment-confirm",
+    "https://safe-course.example/account-settings",
+    "https://safe-course.example/forgot-my-password",
+    "https://safe-course.example/password-reset-confirm",
+    "https://safe-course.example/captcha-verify",
+    "https://safe-course.example/queue-redirect",
+    "https://safe-course.example/challenge-response",
+    "https://safe-course.example/authentication-callback",
+    "https://safe-course.example/authorize-callback",
+    "https://safe-course.example/saml-acs",
+    "https://safe-course.example/openid-connect",
+    "https://safe-course.example/login-flow",
+    "https://safe-course.example/checkout-step",
+    "https://safe-course.example/payment-flow",
+    "https://safe-course.example/cart-checkout",
+    "https://safe-course.example/queue-progress",
+    "https://safe-course.example/authorizecallback",
+    "https://safe-course.example/checkoutstep",
+    "https://safe-course.example/checkoutstart",
+    "https://safe-course.example/loginflow",
+    "https://safe-course.example/queueprogress",
+    "https://safe-course.example/paymentstep",
+    "https://safe-course.example/samlauthnrequest",
+    "https://safe-course.example/openidconnect",
+    "https://safe-course.example/mfachallenge",
+    "https://safe-course.example/hcaptcha/start",
+    "https://safe-course.example/funcaptcha/start",
+    "https://safe-course.example/member-dashboard",
+    "https://safe-course.example/forgot-username",
+    "https://safe-course.example/confirm-email",
+    "https://safe-course.example/booking-payment",
+    "https://safe-course.example/clientlogin",
+    "https://safe-course.example/partnerlogin",
+    "https://safe-course.example/regionallogin",
+    "https://safe-course.example/authservice",
+    "https://safe-course.example/authproxy",
+    "https://safe-course.example/billing",
+    "https://safe-course.example/billingportal",
+    "https://safe-course.example/payment-method",
+    "https://safe-course.example/paymentmethod",
+    "https://safe-course.example/order-review",
+    "https://safe-course.example/cartreview",
+    "https://safe-course.example/members/booking",
+    "https://safe-course.example/member/center",
+    "https://safe-course.example/secure/portal",
+    "https://safe-course.example/shopping/bag",
+    "https://safe-course.example/place/order",
+    "https://safe-course.example/complete/purchase",
+    "https://safe-course.example/order/history",
+    "https://safe-course.example/transaction/history",
+    "https://safe-course.example/members/tee-times",
+    "https://safe-course.example/member/book/tee-times",
+    "https://safe-course.example/member/reserve/tee-times",
+    "https://safe-course.example/members/golf/tee-times",
+    "https://safe-course.example/secure/tee-times",
+    "https://safe-course.example/customer/book/tee-times",
+    "https://safe-course.example/user/reserve/tee-times",
+    "https://safe-course.example/callback?SAMLRequest=private",
+    "https://safe-course.example/callback?oauth_nonce=private",
+    "https://safe-course.example/callback?oauth_callback=private",
+    "https://safe-course.example/callback?openid.mode=private",
+    "https://safe-course.example/callback?SigAlg=private",
+    "https://safe-course.example/rates?next=https%3A%2F%2Fmember-login.vendor.example%2Fstart",
+    "https://safe-course.example/rates#access_token=private",
+    "https://safe-course.example/rates#oauth_nonce=private",
+    "https://safe-course.example/rates?prompt=login",
+    "https://safe-course.example/rates?code_challenge_method=S256",
+    "https://safe-course.example/rates?response_mode=query",
+    "https://safe-course.example/rates?returnUrl=%2Faccount%2Flogin",
+    "https://safe-course.example/rates?next=%2Fcheckout%2Fstart",
+    "https://safe-course.example/rates?redirect=%2Fcaptcha%2Fverify",
+    "https://safe-course.example/rates?continue=%2Fqueue%2Fwait",
+    "https://safe-course.example/rates?returnUrl=%2F%2Faccounts.vendor.example%2Flogin",
+    "https://safe-course.example/rates?nextUrl=%2Faccount%2Flogin",
+    "https://safe-course.example/rates?nextPath=%2Fcheckout%2Fstart",
+    "https://safe-course.example/rates?continueUrl=%2Fqueue%2Fwait",
+    "https://safe-course.example/rates?continueTo=%2Fcaptcha%2Fverify",
+    "https://safe-course.example/rates?returnPath=%2Faccount%2Flogin",
+    "https://safe-course.example/rates?redirectPath=%2Fcheckout%2Fstart",
+    "https://safe-course.example/rates?successUrl=%2Faccount%2Fportal",
+    "https://safe-course.example/rates?cancelUrl=%2Fcheckout%2Fcancel",
+    "https://safe-course.example/rates#wresult",
+    "https://safe-course.example/rates?view=AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEf",
+    "https://safe-course.example/rates?view=AbCdEfGhIjKlMnOpQrS",
+    "https://safe-course.example/rates?csrf=private",
+    "https://safe-course.example/rates?xsrf=private",
+    "https://safe-course.example/rates?form_key=private",
+    "https://safe-course.example/rates?__RequestVerificationToken=private",
+    "https://safe-course.example/rates?csrfmiddlewaretoken=private",
+    "https://safe-course.example/rates?x-csrf-token=private",
+    "https://safe-course.example/rates?anti_csrf_token=private",
+    "https://safe-course.example/rates?verification_token=private",
+    "https://safe-course.example/rates?checkout_session_id=private",
+    "https://safe-course.example/rates?payment_intent=private",
+    "https://safe-course.example/rates?order_id=private",
+    "https://safe-course.example/rates?transaction_id=private",
+    "https://safe-course.example/rates?invoice_id=private",
+    "https://safe-course.example/rates?cart_id=private",
+    "https://safe-course.example/rates?s=AbCdEfGhIjKlMnOpQrSt%3D%3D",
+    "https://safe-course.example/rates?view=AbCdEfGhIjKlMnOp-_%3D%3D",
+    "https://member-login.vendor.example/rates",
+    "https://login-us.vendor.example/rates",
+    "https://knights-play.book.teeitup.golf/go/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "https://knights-play.book.teeitup.golf/go/a1b2c3d4e5f6g7h8i9j0",
+    "https://knights-play.book.teeitup.golf/go/a1b2c3d4e5f6g7h8i9j",
+    "https://knights-play.book.teeitup.golf/go/AbCdEfGhIjKlMnOpQrSt",
+    "https://knights-play.book.teeitup.golf/go/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+  ])("rejects unsafe redirect %s before making the redirected request", async (unsafeRedirect) => {
+    const sourceUrl = "https://safe-course.example/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      expect(url.toString()).toBe(sourceUrl);
+      return new Response(null, {
+        status: 302,
+        headers: { location: unsafeRedirect }
+      });
+    });
+
+    await expect(
+      collectOfficialSiteEvidence(sourceUrl, fetchImpl as typeof fetch)
+    ).rejects.toThrow("safe public HTTP address");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

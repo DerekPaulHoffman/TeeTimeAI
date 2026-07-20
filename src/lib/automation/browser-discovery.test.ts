@@ -909,7 +909,7 @@ describe("buildBrowserDiscovery", () => {
   it("classifies an official private golf course limited to members and guests", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "great-neck",
-      courseName: "New London Golf Course",
+      courseName: "Great Neck Country Club",
       sourceUrl: "https://www.greatneckgolf.com/",
       observedUrls: [
         "https://www.greatneckgolf.com/",
@@ -931,7 +931,7 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("blocks automated Whoosh retrieval under the current provider terms while preserving direct booking", () => {
+  it("retains Whoosh terms as evidence without blocking public read-only monitoring", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "yale",
       courseName: "Yale University Golf Course",
@@ -952,11 +952,11 @@ describe("buildBrowserDiscovery", () => {
       status: "VERIFIED",
       detectedPlatform: "CUSTOM",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "BLOCKED",
-      automationReason: "AUTOMATION_PROHIBITED",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
       bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
-      confidence: 0.99,
-      evidence: { learnedFrom: "whoosh-automation-prohibited-booking" }
+      confidence: 0.9,
+      evidence: { learnedFrom: "official-whoosh-booking-policy-evidence" }
     });
   });
 
@@ -981,7 +981,7 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
-  it("preserves direct public Whoosh booking while blocking prohibited automated retrieval", () => {
+  it("preserves direct public Whoosh booking while keeping policy evidence non-terminal", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "public-whoosh",
       courseName: "Example Public Golf Course",
@@ -996,9 +996,9 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery).toMatchObject({
       status: "VERIFIED",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "BLOCKED",
-      automationReason: "AUTOMATION_PROHIBITED",
-      evidence: { learnedFrom: "whoosh-automation-prohibited-booking" }
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      evidence: { learnedFrom: "official-whoosh-booking-policy-evidence" }
     });
   });
 
@@ -1291,18 +1291,28 @@ describe("buildBrowserDiscovery", () => {
 
     expect(policyDiscovery).toMatchObject({
       status: "VERIFIED",
-      automationEligibility: "BLOCKED",
-      automationReason: "AUTOMATION_PROHIBITED"
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM"
     });
 
-    expect(keepPolicyOnlyDiscoveryActionable(policyDiscovery)).toMatchObject({
-      status: "INSPECTED",
+    const legacyPolicyBlock = {
+      ...policyDiscovery,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "AUTOMATION_PROHIBITED" as const,
+      confidence: 0.99,
+      evidence: {
+        ...policyDiscovery.evidence,
+        learnedFrom: "legacy-policy-block"
+      }
+    };
+    expect(keepPolicyOnlyDiscoveryActionable(legacyPolicyBlock)).toMatchObject({
+      status: "VERIFIED",
       automationEligibility: "NEEDS_REVIEW",
       automationReason: "UNSUPPORTED_PLATFORM",
       bookingUrl: "https://app.whoosh.io/patron/club/public-course",
+      confidence: 0.95,
       evidence: {
-        learnedFrom:
-          "whoosh-automation-prohibited-booking:policy-evidence-only"
+        learnedFrom: "legacy-policy-block:policy-evidence-only"
       }
     });
   });
@@ -1349,7 +1359,7 @@ describe("buildBrowserDiscovery", () => {
         { url: "https://example-golf.test/contact/", label: "Contact Us" }
       ],
       visibleText:
-        "Our Eighteen Hole Par 3 Golf Course is open to the public. Prices Adult Weekdays - $17.00 Senior Weekdays - $13.00 Weekends and Holidays - $18.00. Location and Hours 112 Allen Street 413.525.4444. Hours of operation may vary by season. Please contact us for details."
+        "Example Executive Golf Course is an Eighteen Hole Par 3 Golf Course open to the public. Prices Adult Weekdays - $17.00 Senior Weekdays - $13.00 Weekends and Holidays - $18.00. Location and Hours 112 Allen Street 413.525.4444. Hours of operation may vary by season. Please contact us for details."
     });
 
     expect(discovery).toMatchObject({
@@ -1362,6 +1372,1218 @@ describe("buildBrowserDiscovery", () => {
       confidence: 0.9,
       evidence: { learnedFrom: "official-contact-only-course-access" }
     });
+  });
+
+  it("does not apply a sibling course's first-come policy to the selected course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-walk-in-page",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/access/"],
+      visibleText:
+        "Target Municipal Golf Course is next to Sibling Hills Golf Course, where tee times are not required and golf is first come, first served."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not apply a sibling course's contact-only evidence to the selected course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-municipal-page",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      finalUrl: "https://parks.example/golf/rates/",
+      observedUrls: ["https://parks.example/golf/rates/"],
+      visibleText:
+        "Target Municipal Golf Course is listed in our parks directory. Sibling Hills Golf Course is an Eighteen Hole Golf Course open to the public. Prices Adult Weekdays - $22.00. Call 413-555-0100. Hours of operation may vary by season. Please contact us for details."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("uses the target course phone instead of an earlier sibling or footer phone", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "scoped-contact-phone",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      finalUrl: "https://parks.example/golf/target/",
+      observedUrls: ["https://parks.example/golf/target/"],
+      visibleText:
+        "Parks office 413-555-0100. Sibling Hills Golf Course outings 413-555-0111. Target Municipal Golf Course is an Eighteen Hole Golf Course open to the public. Prices Adult Weekdays - $22.00. Call the pro shop at 413-555-0142 for seasonal hours. Hours of operation may vary by season. Please contact us for details."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "413-555-0142",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+  });
+
+  it("does not replace the target pro-shop phone with a later department footer phone", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "scoped-contact-footer-phone",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      finalUrl: "https://parks.example/golf/target/",
+      observedUrls: ["https://parks.example/golf/target/"],
+      visibleText:
+        "Target Municipal Golf Course is an Eighteen Hole Golf Course open to the public. Prices Adult Weekdays - $22.00. Call the pro shop at 413-555-0142 for seasonal hours. Hours of operation may vary by season. Please contact us for details. Parks Department footer 413-555-0199."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "413-555-0142",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+  });
+
+  it("does not classify contact-only evidence when the selected course identity is absent", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "missing-contact-identity",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/rates/"],
+      visibleText:
+        "An Eighteen Hole Golf Course is open to the public. Prices Adult Weekdays - $22.00. Call 413-555-0142. Hours of operation may vary by season. Please contact us for details."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("classifies nonexclusive official phone reservations as contact-course access", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "knights-play",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: [
+        "https://www.knightsplay.com/",
+        "https://www.knightsplay.com/rates/",
+        "https://static.wixstatic.com/media/course-photo.jpg"
+      ],
+      linkCandidates: [
+        { url: "https://www.knightsplay.com/rates/", label: "Rates" }
+      ],
+      visibleText:
+        "Knights Play Golf Center Rates. Tee times may be reserved one week in advance. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://www.knightsplay.com/rates/",
+      bookingUrl: "https://www.knightsplay.com/rates/",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "(919) 555-0142",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.92,
+      evidence: {
+        finalUrl: "https://www.knightsplay.com/rates/",
+        learnedFrom: "official-phone-reservation-contact"
+      }
+    });
+  });
+
+  it("preserves phone-only access when the official evidence is explicitly exclusive", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "phone-only-course",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: [
+        "https://night-golf.example/",
+        "https://night-golf.example/rates/"
+      ],
+      visibleText:
+        "Example Night Golf Center. Tee-time reservations are phone only and no online booking is offered. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PHONE_ONLY",
+      bookingPhone: "919-555-0142",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-phone-only-tee-time-access" }
+    });
+  });
+
+  it("canonicalizes manual evidence URLs and strips query and fragment data", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "canonical-phone-contact",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/?campaign=summer#top",
+      finalUrl: "https://night-golf.example/rates/?view=public#pricing",
+      observedUrls: [
+        "https://night-golf.example/?campaign=summer#top",
+        "https://night-golf.example/rates/?view=public#pricing",
+        "https://static.wixstatic.com/media/course.jpg?v=1#image"
+      ],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      sourceUrl: "https://night-golf.example/rates/",
+      bookingUrl: "https://night-golf.example/rates/",
+      bookingMethod: "CONTACT_COURSE",
+      evidence: {
+        finalUrl: "https://night-golf.example/rates/",
+        observedUrls: expect.arrayContaining([
+          "https://night-golf.example/",
+          "https://night-golf.example/rates/",
+          "https://static.wixstatic.com/media/course.jpg"
+        ])
+      }
+    });
+    expect(discovery.evidence.observedUrls).toHaveLength(3);
+    expect(JSON.stringify(discovery)).not.toContain("campaign=");
+    expect(JSON.stringify(discovery)).not.toContain("view=");
+  });
+
+  it("rejects credentialed manual evidence without persisting URL userinfo", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "credentialed-phone-contact",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://user:secret@night-golf.example/rates/?session=private#pricing",
+      observedUrls: [
+        "https://user:secret@night-golf.example/rates/?session=private#pricing"
+      ],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      evidence: {
+        learnedFrom:
+          "official-phone-reservation-rejected:unsafe-url-evidence"
+      }
+    });
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("user:secret");
+    expect(JSON.stringify(discovery)).not.toContain("session=private");
+  });
+
+  it("rejects session-bearing manual evidence instead of laundering its URL", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "session-phone-contact",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/?access_token=private-value",
+      observedUrls: [
+        "https://night-golf.example/rates/?access_token=private-value"
+      ],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      evidence: {
+        learnedFrom: "official-phone-reservation-rejected:unsafe-url-evidence"
+      }
+    });
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("access_token");
+    expect(JSON.stringify(discovery)).not.toContain("private-value");
+  });
+
+  it.each([
+    "https://night-golf.example/checkout/private",
+    "https://night-golf.example/account/login",
+    "https://night-golf.example/session/private",
+    "https://night-golf.example/signed/private",
+    "https://night-golf.example/queue/private",
+    "https://night-golf.example/captcha/private",
+    "https://night-golf.example/my-account/private",
+    "https://night-golf.example/waiting-room/private",
+    "https://night-golf.example/challenge-platform/private",
+    "https://night-golf.example/secure-checkout/private",
+    "https://night-golf.example/user-login/private",
+    "https://night-golf.example/auth0/callback",
+    "https://night-golf.example/queueit/private",
+    "https://night-golf.example/captchaChallenge/private",
+    "https://night-golf.example/authorize",
+    "https://night-golf.example/register",
+    "https://night-golf.example/sign-up",
+    "https://night-golf.example/forgot-password/start",
+    "https://night-golf.example/account-recovery/start",
+    "https://night-golf.example/login-callback",
+    "https://night-golf.example/signin-oidc",
+    "https://night-golf.example/oauth2-callback",
+    "https://night-golf.example/checkout-flow/start",
+    "https://night-golf.example/captcha-v2/start",
+    "https://night-golf.example/queue-status",
+    "https://night-golf.example/checkout-session/start",
+    "https://night-golf.example/payment-confirm",
+    "https://night-golf.example/account-settings",
+    "https://night-golf.example/forgot-my-password",
+    "https://night-golf.example/password-reset-confirm",
+    "https://night-golf.example/captcha-verify",
+    "https://night-golf.example/queue-redirect",
+    "https://night-golf.example/challenge-response",
+    "https://night-golf.example/authentication-callback",
+    "https://night-golf.example/authorize-callback",
+    "https://night-golf.example/saml-acs",
+    "https://night-golf.example/openid-connect",
+    "https://night-golf.example/login-flow",
+    "https://night-golf.example/checkout-step",
+    "https://night-golf.example/payment-flow",
+    "https://night-golf.example/cart-checkout",
+    "https://night-golf.example/queue-progress",
+    "https://night-golf.example/authorizecallback",
+    "https://night-golf.example/checkoutstep",
+    "https://night-golf.example/checkoutstart",
+    "https://night-golf.example/loginflow",
+    "https://night-golf.example/queueprogress",
+    "https://night-golf.example/paymentstep",
+    "https://night-golf.example/samlauthnrequest",
+    "https://night-golf.example/openidconnect",
+    "https://night-golf.example/mfachallenge",
+    "https://night-golf.example/hcaptcha/start",
+    "https://night-golf.example/funcaptcha/start",
+    "https://night-golf.example/member-dashboard",
+    "https://night-golf.example/forgot-username",
+    "https://night-golf.example/confirm-email",
+    "https://night-golf.example/booking-payment",
+    "https://night-golf.example/clientlogin",
+    "https://night-golf.example/partnerlogin",
+    "https://night-golf.example/regionallogin",
+    "https://night-golf.example/authservice",
+    "https://night-golf.example/authproxy",
+    "https://night-golf.example/billing",
+    "https://night-golf.example/billingportal",
+    "https://night-golf.example/payment-method",
+    "https://night-golf.example/paymentmethod",
+    "https://night-golf.example/order-review",
+    "https://night-golf.example/cartreview",
+    "https://night-golf.example/members/booking",
+    "https://night-golf.example/member/center",
+    "https://night-golf.example/secure/portal",
+    "https://night-golf.example/shopping/bag",
+    "https://night-golf.example/place/order",
+    "https://night-golf.example/complete/purchase",
+    "https://night-golf.example/order/history",
+    "https://night-golf.example/transaction/history",
+    "https://night-golf.example/members/tee-times",
+    "https://night-golf.example/member/book/tee-times",
+    "https://night-golf.example/member/reserve/tee-times",
+    "https://night-golf.example/members/golf/tee-times",
+    "https://night-golf.example/secure/tee-times",
+    "https://night-golf.example/customer/book/tee-times",
+    "https://night-golf.example/user/reserve/tee-times",
+    "https://night-golf.example/members/tee-times.aspx",
+    "https://night-golf.example/member/book.php",
+    "https://night-golf.example/secure/teetimes.html",
+    "https://night-golf.example/customer/reserve.aspx",
+    "https://night-golf.example/user/schedule.php",
+    "https://night-golf.example/member/book.do",
+    "https://night-golf.example/customer/reserve.action",
+    "https://night-golf.example/user/schedule.do",
+    "https://night-golf.example/members/tee-time-booking",
+    "https://night-golf.example/customer/tee-time-search",
+    "https://night-golf.example/user/online-tee-times",
+    "https://night-golf.example/members2/tee/time",
+    "https://night-golf.example/secure-v2/online/tee/times",
+    "https://night-golf.example/magic-link/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "https://night-golf.example/reset-password/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "https://night-golf.example/invite/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "https://night-golf.example/go/a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+    "https://night-golf.example/go/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "https://night-golf.example/go/a1b2c3d4e5f6g7h8i9j0",
+    "https://night-golf.example/go/a1b2c3d4e5f6g7h8i9j",
+    "https://night-golf.example/go/AbCdEfGhIjKlMnOpQrSt",
+    "https://night-golf.example/%2561ccount%252Flogin",
+    "https://night-golf.example/oauth/private-token",
+    "https://night-golf.example/saml/private-assertion",
+    "https://night-golf.example/ticket/private-ticket",
+    "https://night-golf.example/password/reset-secret",
+    "https://night-golf.example/rates;jsessionid=private"
+  ])("rejects sensitive manual evidence paths at %s", (unsafeUrl) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "sensitive-path-phone-contact",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: unsafeUrl,
+      observedUrls: [unsafeUrl],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      evidence: {
+        learnedFrom: "official-phone-reservation-rejected:unsafe-url-evidence"
+      }
+    });
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain(new URL(unsafeUrl).pathname);
+  });
+
+  it.each([
+    "https://night-golf.example/rates?ticket=private-ticket",
+    "https://night-golf.example/rates?SAMLResponse=private-assertion",
+    "https://night-golf.example/rates?apiKey=private-key",
+    "https://night-golf.example/rates?authorization=private-authorization",
+    "https://night-golf.example/callback?client_id=course&response_type=code",
+    "https://night-golf.example/callback?%2563ode=private",
+    "https://night-golf.example/callback?%2563lient_id=course&%2572esponse_type=code",
+    "https://night-golf.example/callback?oauth_verifier=private",
+    "https://night-golf.example/callback?session_state=private",
+    "https://night-golf.example/callback?SAMLart=private",
+    "https://night-golf.example/callback?login_ticket=private",
+    "https://night-golf.example/callback2?code=PUBLIC",
+    "https://night-golf.example/callbackv2?state=NC",
+    "https://night-golf.example/ssocallback2?code=PUBLIC",
+    "https://night-golf.example/callback?SAMLRequest=private",
+    "https://night-golf.example/callback?oauth_nonce=private",
+    "https://night-golf.example/callback?oauth_callback=private",
+    "https://night-golf.example/callback?openid.mode=private",
+    "https://night-golf.example/callback?SigAlg=private",
+    "https://night-golf.example/rates?next=https%3A%2F%2Fmember-login.vendor.example%2Fstart",
+    "https://night-golf.example/rates#access_token=private",
+    "https://night-golf.example/rates#oauth_nonce=private",
+    "https://night-golf.example/rates?prompt=login",
+    "https://night-golf.example/rates?code_challenge_method=S256",
+    "https://night-golf.example/rates?response_mode=query",
+    "https://night-golf.example/rates?returnUrl=%2Faccount%2Flogin",
+    "https://night-golf.example/rates?next=%2Fcheckout%2Fstart",
+    "https://night-golf.example/rates?redirect=%2Fcaptcha%2Fverify",
+    "https://night-golf.example/rates?continue=%2Fqueue%2Fwait",
+    "https://night-golf.example/rates?returnUrl=%2F%2Faccounts.vendor.example%2Flogin",
+    "https://night-golf.example/rates?nextUrl=%2Faccount%2Flogin",
+    "https://night-golf.example/rates?nextPath=%2Fcheckout%2Fstart",
+    "https://night-golf.example/rates?continueUrl=%2Fqueue%2Fwait",
+    "https://night-golf.example/rates?continueTo=%2Fcaptcha%2Fverify",
+    "https://night-golf.example/rates?returnPath=%2Faccount%2Flogin",
+    "https://night-golf.example/rates?redirectPath=%2Fcheckout%2Fstart",
+    "https://night-golf.example/rates?successUrl=%2Faccount%2Fportal",
+    "https://night-golf.example/rates?cancelUrl=%2Fcheckout%2Fcancel",
+    "https://night-golf.example/rates?callbackTo=login",
+    "https://night-golf.example/rates?destinationUrl=checkout",
+    "https://night-golf.example/rates?next=ftp%3A%2F%2Fpublic.vendor.example%2Frates",
+    "https://night-golf.example/rates#wresult",
+    "https://night-golf.example/rates?view=AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEf",
+    "https://night-golf.example/rates?view=AbCdEfGhIjKlMnOpQrS",
+    "https://night-golf.example/rates?csrf=private",
+    "https://night-golf.example/rates?xsrf=private",
+    "https://night-golf.example/rates?form_key=private",
+    "https://night-golf.example/rates?__RequestVerificationToken=private",
+    "https://night-golf.example/rates?csrfmiddlewaretoken=private",
+    "https://night-golf.example/rates?x-csrf-token=private",
+    "https://night-golf.example/rates?anti_csrf_token=private",
+    "https://night-golf.example/rates?verification_token=private",
+    "https://night-golf.example/rates?checkout_session_id=private",
+    "https://night-golf.example/rates?payment_intent=private",
+    "https://night-golf.example/rates?order_id=private",
+    "https://night-golf.example/rates?transaction_id=private",
+    "https://night-golf.example/rates?invoice_id=private",
+    "https://night-golf.example/rates?cart_id=private",
+    "https://night-golf.example/rates?s=AbCdEfGhIjKlMnOpQrSt%3D%3D",
+    "https://night-golf.example/rates?view=AbCdEfGhIjKlMnOp-_%3D%3D",
+    "https://night-golf.example/rates?key=sk_test_abc123def456ghi789",
+    "https://night-golf.example/rates?key=pk_live_abc123def456ghi789",
+    "https://night-golf.example/rates?view=abcdefgh.ijklmnop.qrstuvwx"
+  ])("rejects credential-like manual query evidence at %s", (unsafeUrl) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "sensitive-query-phone-contact",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: unsafeUrl,
+      observedUrls: [unsafeUrl],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    const unsafeState = `${new URL(unsafeUrl).search}${new URL(unsafeUrl).hash}`;
+    expect(JSON.stringify(discovery)).not.toContain(unsafeState);
+  });
+
+  it.each([
+    "https://night-golf.example/golf-cart-rates/",
+    "https://night-golf.example/the-challenge-at-manele/",
+    "https://night-golf.example/missouri-golf-courses/",
+    "https://night-golf.example/cartwright-golf-course/",
+    "https://night-golf.example/key-west-golf-club/",
+    "https://night-golf.example/keystone-golf-course/",
+    "https://night-golf.example/key-largo-golf/",
+    "https://keywestgolf.example/",
+    "https://keystonegolf.example/",
+    "https://key-largo-golf.example/",
+    "https://night-golf.example/rates?state=NC",
+    "https://night-golf.example/rates?code=PUBLIC",
+    "https://night-golf.example/rates?key=course",
+    "https://night-golf.example/rates?destination=Raleigh",
+    "https://night-golf.example/rates?target=public"
+  ])("keeps legitimate public course paths eligible at %s", (publicUrl) => {
+    const expectedBookingUrl = new URL(publicUrl);
+    expectedBookingUrl.search = "";
+    expectedBookingUrl.hash = "";
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-course-path",
+      courseName: "Example Night Golf Center",
+      sourceUrl: `${new URL(publicUrl).origin}/`,
+      finalUrl: publicUrl,
+      observedUrls: [publicUrl],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingUrl: expectedBookingUrl.toString()
+    });
+  });
+
+  it.each([
+    "https://localhost/rates/",
+    "https://localhost./rates/",
+    "https://10.0.0.1/rates/",
+    "https://course.internal/rates/",
+    "https://course.internal./rates/",
+    "https://foo.local./rates/",
+    "https://accounts.night-golf.example/rates/",
+    "https://tenant.accounts.night-golf.example/rates/",
+    "https://tenant.login.night-golf.example/rates/",
+    "https://tenant.auth.night-golf.example/rates/",
+    "https://secure-login.night-golf.example/rates/",
+    "https://portal.auth.night-golf.example/rates/",
+    "https://course.queue-it.net/rates/",
+    "https://challenges.cloudflare.com/turnstile/v0/",
+    "https://www.google.com/recaptcha/api2/anchor",
+    "https://sso.night-golf.example/",
+    "https://oauth.night-golf.example/",
+    "https://oauth2.night-golf.example/",
+    "https://auth0.night-golf.example/",
+    "https://oidc.night-golf.example/",
+    "https://idp.night-golf.example/",
+    "https://identity.night-golf.example/",
+    "https://identity-provider.night-golf.example/",
+    "https://member-login.night-golf.example/",
+    "https://customer-login.night-golf.example/",
+    "https://prod-login.night-golf.example/",
+    "https://login-us.night-golf.example/",
+    "https://auth-prod.night-golf.example/",
+    "https://sso2.night-golf.example/",
+    "https://myaccount.night-golf.example/",
+    "https://adminlogin.night-golf.example/",
+    "https://stafflogin.night-golf.example/",
+    "https://login2.night-golf.example/",
+    "https://waitingroom.night-golf.example/",
+    "https://turnstile.night-golf.example/",
+    "https://recaptcha.night-golf.example/",
+    "https://mfa.night-golf.example/",
+    "https://identityserver.night-golf.example/",
+    "https://saml.night-golf.example/",
+    "https://openid.night-golf.example/",
+    "https://adfs.night-golf.example/",
+    "https://authorization.night-golf.example/",
+    "https://openidconnect.night-golf.example/",
+    "https://samlauthnrequest.night-golf.example/",
+    "https://samlacs.night-golf.example/",
+    "https://queueprogress.night-golf.example/",
+    "https://captchachallenge.night-golf.example/",
+    "https://challengeplatform.night-golf.example/",
+    "https://memberdashboard.night-golf.example/",
+    "https://accountsettings.night-golf.example/",
+    "https://clientlogin.night-golf.example/",
+    "https://partnerlogin.night-golf.example/",
+    "https://employeelogin.night-golf.example/",
+    "https://regionallogin.night-golf.example/",
+    "https://authservice.night-golf.example/",
+    "https://accountrecovery.night-golf.example/",
+    "https://forgotpassword.night-golf.example/",
+    "https://passwordreset.night-golf.example/",
+    "https://resetpassword.night-golf.example/",
+    "https://passwordless.night-golf.example/",
+    "https://emailverification.night-golf.example/",
+    "https://verifyemail.night-golf.example/",
+    "https://magiclink.night-golf.example/",
+    "https://invite.night-golf.example/",
+    "https://session.night-golf.example/",
+    "https://token.night-golf.example/",
+    "https://arkose.night-golf.example/",
+    "https://arkoselabs.night-golf.example/",
+    "https://okta.night-golf.example/",
+    "https://onelogin.night-golf.example/",
+    "https://cloudflareaccess.night-golf.example/",
+    "https://credential.night-golf.example/",
+    "https://credentials.night-golf.example/",
+    "https://secret.night-golf.example/",
+    "https://signature.night-golf.example/",
+    "https://signed.night-golf.example/",
+    "https://ticket.night-golf.example/",
+    "https://assertion.night-golf.example/",
+    "https://relaystate.night-golf.example/",
+    "https://consent.night-golf.example/",
+    "https://jsessionid.night-golf.example/",
+    "https://authcode.night-golf.example/",
+    "https://nonce.night-golf.example/",
+    "https://jwt.night-golf.example/",
+    "https://signedurl.night-golf.example/",
+    "https://serviceticket.night-golf.example/",
+    "https://accesstoken.night-golf.example/",
+    "https://clientsecret.night-golf.example/",
+    "https://apikey.night-golf.example/",
+    "https://night-golf.example:8443/rates/"
+  ])("does not terminally classify unsafe manual host evidence at %s", (unsafeUrl) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unsafe-host-phone-contact",
+      courseName: "Example Night Golf Center",
+      sourceUrl: unsafeUrl,
+      finalUrl: unsafeUrl,
+      observedUrls: [unsafeUrl],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not treat a neutral Book Now link as tee-time evidence", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "neutral-book-now",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: [
+        "https://night-golf.example/rates/",
+        "https://night-golf.example/go/42"
+      ],
+      linkCandidates: [
+        { url: "https://night-golf.example/go/42", label: "Book Now" }
+      ],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+    expect(discovery.evidence.bookingCallToAction).toBeUndefined();
+  });
+
+  it.each([
+    "Check Availability",
+    "View Availability",
+    "Find a Time",
+    "Choose a Time",
+    "Select a Time",
+    "See Openings",
+    "Availability",
+    "Openings",
+    "Search Availability",
+    "Find Availability",
+    "Reserve",
+    "Tee Time Reservations",
+    "Current Tee Times",
+    "Available Tee Times",
+    "Public Tee Times",
+    "Tee Time Booking",
+    "Today's Tee Times",
+    "Tomorrow's Tee Times",
+    "Weekend Tee Times",
+    "Evening Tee Times",
+    "Daily Tee Times",
+    "Member Tee Times",
+    "Customer Tee Times",
+    "User Tee Times",
+    "Call to Book Tee Times",
+    "Phone to Reserve a Tee Time"
+  ])("does not treat the ambiguous opaque %s label as tee-time evidence", (label) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "opaque-booking-action",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: [
+        "https://night-golf.example/rates/",
+        "https://night-golf.example/go/42"
+      ],
+      linkCandidates: [
+        { url: "https://night-golf.example/go/42", label }
+      ],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+    expect(discovery.evidence.bookingCallToAction).toBeUndefined();
+  });
+
+  it.each([
+    { label: "Continue", url: "https://night-golf.example/privacy/" },
+    { label: "Get Started", url: "https://night-golf.example/membership/" },
+    { label: "Availability", url: "https://night-golf.example/careers/" },
+    { label: "Choose a Time", url: "https://night-golf.example/lessons/" },
+    { label: "Book", url: "https://night-golf.example/lessons/book" },
+    { label: "Reservations", url: "https://night-golf.example/restaurant/reservations" },
+    { label: "Availability", url: "https://night-golf.example/lodging/availability" },
+    { label: "Appointments", url: "https://night-golf.example/spa/appointments" },
+    { label: "Book Now", url: "https://night-golf.example/pro-shop/fittings" },
+    { label: "Tee Times Hat", url: "https://night-golf.example/store/tee-times-hat" },
+    { label: "Reserve", url: "https://night-golf.example/banquets/reserve" },
+    { label: "Reservations", url: "https://restaurant.night-golf.example/reservations" },
+    { label: "Book", url: "https://lessons.night-golf.example/book" },
+    { label: "Availability", url: "https://lodging.night-golf.example/availability" },
+    { label: "Appointments", url: "https://spa.night-golf.example/appointments" },
+    { label: "Book Now", url: "https://proshop.night-golf.example/fittings" },
+    { label: "Reserve", url: "https://banquets.night-golf.example/reserve" },
+    { label: "Reservations", url: "https://night-golf.example/go/42?service=restaurant" },
+    { label: "Book Now", url: "https://night-golf.example/go/42?service=lessons" },
+    { label: "Availability", url: "https://night-golf.example/go/42?service=lodging" },
+    { label: "Book Now", url: "https://night-golf.example/go/42?service=spa" },
+    { label: "Book Now", url: "https://night-golf.example/go/42?service=proshop" },
+    { label: "Reserve", url: "https://night-golf.example/go/42?service=banquets" },
+    { label: "Book Now", url: "https://academy.night-golf.example/book" },
+    { label: "Book Now", url: "https://night-golf.example/go/42?service=simulator" },
+    { label: "Reservations", url: "https://night-golf.example/driving-range/reservations" },
+    { label: "Reservations", url: "https://night-golf.example/mini-golf/reservations" },
+    { label: "Reservations", url: "https://toptracer.night-golf.example/reservations" },
+    { label: "Restaurant Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Reserve Now - Lodging", url: "https://night-golf.example/go/42" },
+    { label: "Book Now - Spa", url: "https://night-golf.example/go/42" },
+    { label: "Book Now - Pro Shop", url: "https://night-golf.example/go/42" },
+    { label: "Banquet/Wedding/Hotel Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Restaurant and Tee Time Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Academy Lessons", url: "https://night-golf.example/go/42" },
+    { label: "Book a Simulator", url: "https://night-golf.example/go/42" },
+    { label: "Pickleball Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Tennis Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Cabin Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Room Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Golf School Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Clinic Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Driving Range Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Mini Golf Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Toptracer Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Top-Tracer Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Pickle-Ball Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Practice Range Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Golf Range Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Golf Academy Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Indoor Golf Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Miniature Golf Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Stay Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Reservations", url: "https://top-tracer.night-golf.example/reservations" },
+    { label: "Reservations", url: "https://pickle-ball.night-golf.example/reservations" },
+    { label: "Book Now", url: "https://golfacademy.night-golf.example/book" },
+    { label: "Reservations", url: "https://night-golf.example/practice-range/reservations" },
+    { label: "Reservations", url: "https://night-golf.example/miniature-golf/reservations" },
+    { label: "Reservations", url: "https://night-golf.example/stay/reservations" },
+    { label: "Book Now", url: "https://night-golf.example/golf-camps/book" },
+    { label: "Reservations", url: "https://night-golf.example/leagues/reservations" },
+    { label: "Book Now", url: "https://night-golf.example/tournaments/book" },
+    { label: "Book Now", url: "https://night-golf.example/gift-cards/book" },
+    { label: "Reservations", url: "https://night-golf.example/pool/reservations" },
+    { label: "Reserve", url: "https://night-golf.example/rv-sites/reserve" },
+    { label: "Reserve", url: "https://night-golf.example/club-rentals/reserve" },
+    { label: "Boat Rental Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Bike Rental Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Kayak Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Campsite Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Conference Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Bowling Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Cabana Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Fishing Charter Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Horseback Riding Reservations", url: "https://night-golf.example/go/42" },
+    { label: "Ski Rental Reservations", url: "https://night-golf.example/go/42" }
+  ])("does not treat unrelated $label navigation as booking evidence", ({ label, url }) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unrelated-action-link",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/", url],
+      linkCandidates: [{ url, label }],
+      visibleText:
+        "Example Night Golf Center. Tee-time reservations are phone only and no online booking is offered. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PHONE_ONLY",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+  });
+
+  it.each([
+    "Restaurant reservations: book now online",
+    "Golf lessons: schedule online",
+    "Lodging reservations: reserve online",
+    "Spa appointments: book now online",
+    "Simulator reservations: book online",
+    "Top Tracer reservations: book online",
+    "Pickle ball reservations: book online",
+    "Banquet reservations: book online",
+    "Pro shop appointments: book online",
+    "Golf camps: book now online",
+    "League reservations: book online",
+    "Tournament registration: book online",
+    "Gift cards: buy online",
+    "Pool reservations: book online",
+    "RV sites: reserve online",
+    "Club rentals: reserve online"
+  ])("does not treat unrelated visible copy as tee-time evidence: %s", (copy) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unrelated-visible-booking-copy",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        `${copy}. Example Night Golf Center. Tee-time reservations are phone only and no online booking is offered. Call the Pro Shop at 919-555-0142 to reserve a tee time.`
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PHONE_ONLY",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+  });
+
+  it.each([
+    "Academy course guests can Book Tee Times Online",
+    "Academy course guests can Book Tee-Times Online",
+    "Academy course guests can Book Tee‑Times Online",
+    "Academy course guests can Book Tee–Times Online",
+    "Resort golf tee times are available online",
+    "View tee times online",
+    "Search tee times online",
+    "Current tee time availability is online"
+  ])("keeps explicit online tee-time text stronger than auxiliary wording: %s", (copy) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "explicit-visible-tee-time-copy",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        `${copy}. Example Night Golf Center. Tee-time reservations are phone only. Call the Pro Shop at 919-555-0142 to reserve a tee time.`
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it.each([
+    "Book a tee time by calling the pro shop at 919-555-0142",
+    "Reserve tee times by calling 919-555-0142"
+  ])("keeps an explicit phone tee-time action manual: %s", (copy) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "explicit-phone-tee-time-action",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText: `Example Night Golf Center. ${copy}.`
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+  });
+
+  it.each([
+    "https://academy-course.example/tee-times",
+    "https://night-golf.example/academy-course/tee-times",
+    "https://golf-and-lodging.example/tee-times",
+    "https://night-golf.example/tee-times?source=lodging",
+    "https://academy-course.example/book-a-tee-time",
+    "https://golf-and-lodging.example/book-tee-times",
+    "https://night-golf.example/academy-course/tee-time-booking",
+    "https://night-golf.example/public/tee-times.html",
+    "https://night-golf.example/public/tee-times.do",
+    "https://great-resort.example/golf/booking/42",
+    "https://great-resort.example/go/42",
+    "https://academy-course.example/go/42"
+  ])("keeps an explicit tee-time destination as online evidence at %s", (url) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "explicit-tee-time-action",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/", url],
+      linkCandidates: [{ url, label: "Book Tee Times Online" }],
+      visibleText:
+        "Example Night Golf Center. Tee-time reservations are phone only and no online booking is offered. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.evidence.bookingCallToAction).toBe(true);
+  });
+
+  it.each([
+    "Book Tee-Times Online",
+    "Book Tee‑Times Online",
+    "Book Tee–Times Online"
+  ])("keeps the explicit hyphenated %s label as online evidence", (label) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "hyphenated-tee-time-action",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: [
+        "https://night-golf.example/rates/",
+        "https://night-golf.example/go/42"
+      ],
+      linkCandidates: [{ url: "https://night-golf.example/go/42", label }],
+      visibleText:
+        "Example Night Golf Center. Tee-time reservations are phone only. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.evidence.bookingCallToAction).toBe(true);
+  });
+
+  it("ignores telephone and email anchors while preserving safe manual evidence", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "phone-contact-anchors",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: [
+        "https://www.knightsplay.com/rates/",
+        "tel:+19195550142",
+        "mailto:proshop@knightsplay.example"
+      ],
+      linkCandidates: [
+        { url: "tel:+19195550142", label: "Call the Pro Shop" },
+        { url: "mailto:proshop@knightsplay.example", label: "Email the Pro Shop" }
+      ],
+      visibleText:
+        "Knights Play Golf Center. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "(919) 555-0142",
+      evidence: {
+        observedUrls: expect.arrayContaining([
+          "https://www.knightsplay.com/",
+          "https://www.knightsplay.com/rates/"
+        ])
+      }
+    });
+    expect(discovery.evidence.observedUrls).toHaveLength(2);
+    expect(JSON.stringify(discovery)).not.toContain("tel:");
+    expect(JSON.stringify(discovery)).not.toContain("mailto:");
+  });
+
+  it("treats visible Book your tee time now copy as online-booking evidence", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "visible-book-now",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        "Example Night Golf Center. Book your tee time now. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.evidence.bookingCallToAction).toBe(true);
+  });
+
+  it("rejects generic course names as terminal phone-reservation identity", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "generic-phone-contact",
+      courseName: "Golf Course",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        "Golf Course rates. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not classify phone instructions when a known online provider is present", () => {
+    const bookingUrl = "https://knights-play.book.teeitup.golf/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "provider-and-phone",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: ["https://www.knightsplay.com/rates/", bookingUrl],
+      linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Online" }],
+      visibleText:
+        "Knights Play Golf Center. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl
+    });
+    expect(discovery.bookingMethod).not.toBe("PHONE_ONLY");
+  });
+
+  it("does not let ambiguous phone evidence suppress a known provider", () => {
+    const bookingUrl = "https://knights-play.book.teeitup.golf/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "provider-and-ambiguous-phone",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: ["https://www.knightsplay.com/rates/", bookingUrl],
+      linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Online" }],
+      visibleText:
+        "Knights Play Golf Center. Call 919-555-0142 to reserve a tee time. Call 919-555-0199 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl
+    });
+  });
+
+  it("does not classify phone-only access when the official page advertises online booking", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "online-and-phone",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: [
+        "https://www.knightsplay.com/rates/",
+        "https://www.knightsplay.com/book-online/"
+      ],
+      linkCandidates: [
+        {
+          url: "https://www.knightsplay.com/book-online/",
+          label: "Book Tee Times Online"
+        }
+      ],
+      visibleText:
+        "Knights Play Golf Center. Online booking is available, or call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.bookingMethod).not.toBe("PHONE_ONLY");
+    expect(discovery.status).toBe("INSPECTED");
+  });
+
+  it("treats a same-host tee-time URL as contradictory booking evidence", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "same-host-booking-signal",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: [
+        "https://www.knightsplay.com/rates/",
+        "https://www.knightsplay.com/tee-times/"
+      ],
+      visibleText:
+        "Knights Play Golf Center. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("takes the booking phone only from the direct reservation phrase", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "separate-event-phone",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        "Example Night Golf Center. Events and outings: call 919-555-0100. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "919-555-0142"
+    });
+  });
+
+  it("does not reuse an event phone from a separate sentence as the booking phone", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "event-phone-only",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        "Example Night Golf Center. Tee times may be reserved one week in advance. For events and outings call 919-555-0100."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not attribute a sibling course phone instruction to the target course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-course-phone",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: ["https://www.knightsplay.com/rates/"],
+      visibleText:
+        "Knights Play Golf Center offers several facilities. Sibling Hills Golf Course. Call the Pro Shop at 919-555-0199 to reserve a tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.bookingPhone).toBeUndefined();
+  });
+
+  it.each([
+    "Knights Play Golf Center offers several facilities. sibling hills golf course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center offers several facilities. For Sibling Hills, call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center offers several facilities. Call the Pro Shop at 919-555-0199 to reserve a tee time at Sibling Hills Golf Course.",
+    "Knights Play Golf Center. The Lakes. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Executive Nine. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. RIVER BEND. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. The Lakes Golf. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. The Lakes Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Executive Nine Rates. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. River Bend 18 Holes. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Executive Nine Tee Times. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. South Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Pines Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Par 3 Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Green Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Night Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Day Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. The Greens. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Night Golf. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. The Green Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Public Golf Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Night Golf Rates. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Rates Green Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Rates for The Green Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Tee times are taken by phone at The Public Course. Call the Pro Shop at 919-555-0199 to reserve a tee time.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time (Green Course).",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time - Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time — Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time, Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time / Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time [Green Course].",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time on Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time with Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time, for Green Course.",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time\nThe Public Course",
+    "Knights Play Golf Center. Call the Pro Shop at 919-555-0199 to reserve a tee time | The Public Course",
+    "Example Valley Golf Course. Example Valley Pines Golf Course. Call the Pro Shop at 919-555-0199 to reserve a tee time."
+  ])("fails closed for shared-page phone copy: %s", (visibleText) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-course-phone-adversarial",
+      courseName: visibleText.startsWith("Example Valley")
+        ? "Example Valley Golf Course"
+        : "Knights Play Golf Center",
+      sourceUrl: "https://shared-golf.example/",
+      finalUrl: "https://shared-golf.example/rates/",
+      observedUrls: ["https://shared-golf.example/rates/"],
+      visibleText
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.bookingPhone).toBeUndefined();
+  });
+
+  it("rejects ambiguous direct tee-time phone instructions", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "ambiguous-booking-phones",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time. Call 919-555-0199 to book a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      evidence: {
+        learnedFrom: "official-phone-reservation-rejected:ambiguous-phone-evidence"
+      }
+    });
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("rejects weak or mismatched identity evidence for phone-only access", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "generic-course",
+      courseName: "Municipal Golf Course",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://www.knightsplay.com/rates/",
+      observedUrls: ["https://www.knightsplay.com/rates/"],
+      visibleText:
+        "Knights Play Golf Center. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.bookingMethod).not.toBe("PHONE_ONLY");
+    expect(discovery.status).toBe("INSPECTED");
+  });
+
+  it("keeps non-reservation phone copy in the contact-course classification", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "seasonal-contact",
+      courseName: "Example Executive Golf Course",
+      sourceUrl: "https://example-golf.test/",
+      finalUrl: "https://example-golf.test/rates/",
+      observedUrls: [
+        "https://example-golf.test/",
+        "https://example-golf.test/rates/"
+      ],
+      visibleText:
+        "Example Executive Golf Course is an Eighteen Hole Golf Course open to the public. Prices Adult Weekdays - $17.00. Call the pro shop at 413.555.0142 for seasonal hours. Hours of operation may vary by season. Please contact us for details."
+    });
+
+    expect(discovery).toMatchObject({
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-contact-only-course-access" }
+    });
+  });
+
+  it("requires the final phone-reservation evidence page to stay on the official host", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "cross-host-phone-copy",
+      courseName: "Knights Play Golf Center",
+      sourceUrl: "https://www.knightsplay.com/",
+      finalUrl: "https://unverified.example/rates/",
+      observedUrls: ["https://unverified.example/rates/"],
+      visibleText:
+        "Knights Play Golf Center. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
+    });
+
+    expect(discovery.bookingMethod).not.toBe("PHONE_ONLY");
+    expect(discovery.status).toBe("INSPECTED");
   });
 
   it("preserves online booking when a priced course page also lists seasonal contact details", () => {
@@ -1467,6 +2689,108 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.automationEligibility).toBeUndefined();
   });
 
+  it("does not apply a sibling club's private access rules to the selected public course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-private-page",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/clubs/"],
+      visibleText:
+        "Target Municipal Golf Course is open to the public. sibling hills country club is a private golf club. The sibling Hills golf course is available only to members and their guests."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not treat a longer sibling name containing the target name as equivalent", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "superset-private-page",
+      courseName: "Valley Hills Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/clubs/"],
+      visibleText:
+        "Valley Hills Golf Course is open to the public. Pine Valley Hills Golf Course is a private golf club available only to members and their guests."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("keeps an exact three-token private-course identity distinct from its suffix", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "three-token-private-course",
+      courseName: "Pine Valley Hills Golf Course",
+      sourceUrl: "https://pinevalley.example/",
+      observedUrls: ["https://pinevalley.example/membership/"],
+      visibleText:
+        "Pine Valley Hills Golf Course is a private golf club available only to members and their guests."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER"
+    });
+  });
+
+  it("ignores approved and hole-count descriptors before the exact private-course identity", () => {
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes";
+    const discovery = buildBrowserDiscovery({
+      courseId: "descriptor-private-course",
+      courseName: "Pine Valley Hills Golf Course",
+      sourceUrl: "https://pinevalley.example/",
+      observedUrls: [bookingUrl],
+      visibleText:
+        "Our championship award-winning 18-hole Pine Valley Hills Golf Course is a private golf club available only to members and their guests."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER"
+    });
+    expect(discovery.status).not.toBe("LEARNED");
+  });
+
+  it("recognizes an explicit one-token sibling course identity", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "one-token-sibling-page",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/clubs/"],
+      visibleText:
+        "Target Municipal Golf Course is open to the public. Yale Golf Course is a private golf club available only to members and their guests."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("classifies an exact one-token target course identity", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shennecossett-private-course",
+      courseName: "Shennecossett Golf Course",
+      sourceUrl: "https://shennecossett.example/",
+      observedUrls: ["https://shennecossett.example/membership/"],
+      visibleText:
+        "Shennecossett Golf Course is a private golf club available only to members and their guests."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER"
+    });
+  });
+
   it("classifies an official resident social-club course as member access", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "oswegatchie-hills",
@@ -1530,6 +2854,44 @@ describe("browser probe target selection", () => {
         bookingMetadata: null
       })
     ).toBe(true);
+  });
+
+  it("keeps all blocked courses out of the interactive browser probe", () => {
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED",
+        website: "https://example.com",
+        detectedBookingUrl: null,
+        bookingMetadata: null
+      })
+    ).toBe(false);
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "FOREUP",
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED",
+        website: "https://example.com",
+        detectedBookingUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+        bookingMetadata: {
+          scheduleId: 6123,
+          bookingBaseUrl:
+            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        }
+      })
+    ).toBe(false);
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED",
+        website: "https://example.com",
+        detectedBookingUrl: null,
+        bookingMetadata: null
+      })
+    ).toBe(false);
   });
 
   it("skips courses that already have deterministic adapter metadata", () => {
@@ -1616,6 +2978,38 @@ describe("browser probe target selection", () => {
         detectedBookingUrl: "https://booking.example.com/tee-times"
       })
     ).toBe("https://booking.example.com/tee-times");
+  });
+
+  it("falls back to the official website instead of probing an unsafe booking surface", () => {
+    expect(
+      getBestProbeUrl({
+        website: "https://example.com/",
+        detectedBookingUrl:
+          "https://booking.example.com/checkout?session_token=synthetic-secret"
+      })
+    ).toBe("https://example.com/");
+
+    expect(
+      getBestProbeUrl({
+        website: null,
+        detectedBookingUrl:
+          "https://booking.example.com/account/session/synthetic-secret"
+      })
+    ).toBeNull();
+  });
+
+  it("does not queue a legacy policy row whose only source is unsafe", () => {
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED",
+        website: null,
+        detectedBookingUrl:
+          "https://booking.example.com/checkout?session_token=synthetic-secret",
+        bookingMetadata: null
+      })
+    ).toBe(false);
   });
 });
 
