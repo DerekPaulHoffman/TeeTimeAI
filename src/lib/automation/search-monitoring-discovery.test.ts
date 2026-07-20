@@ -381,7 +381,8 @@ describe("search monitoring discovery", () => {
           siteName: "colonie",
           bookingBaseUrl: "https://colonie.cps.golf/",
           courseIds: [0],
-          holes: [18, 9]
+          holes: [18, 9],
+          resolvePlaceholderCourseIds: true
         },
         evidence: expect.objectContaining({
           learnedFrom: "cps-public-configuration"

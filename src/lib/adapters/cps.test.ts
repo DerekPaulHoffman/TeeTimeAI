@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchCpsSlots,
   fetchCpsTeeSheet,
-  isCpsMetadata
+  isCpsMetadata,
+  resolveCpsRuntimeCourseIds
 } from "./cps";
 
 describe("isCpsMetadata", () => {
@@ -31,6 +32,108 @@ describe("isCpsMetadata", () => {
       ).toBe(false);
     }
   );
+
+  it("accepts only a boolean placeholder-resolution opt-in", () => {
+    const metadata = {
+      provider: "CPS",
+      siteName: "traditionoaklane",
+      bookingBaseUrl: "https://traditionoaklane.cps.golf/",
+      courseIds: [0]
+    };
+    expect(
+      isCpsMetadata({ ...metadata, resolvePlaceholderCourseIds: true })
+    ).toBe(true);
+    expect(
+      isCpsMetadata({ ...metadata, resolvePlaceholderCourseIds: "true" })
+    ).toBe(false);
+  });
+});
+
+describe("resolveCpsRuntimeCourseIds", () => {
+  it.each([
+    {
+      name: "requires an explicit opt-in",
+      configured: [0],
+      options: [{ courseId: 41 }],
+      allow: false,
+      expected: [0]
+    },
+    {
+      name: "preserves an explicit course id",
+      configured: [7],
+      options: [{ courseId: 41 }],
+      allow: true,
+      expected: [7]
+    },
+    {
+      name: "preserves a mixed placeholder list",
+      configured: [0, 41],
+      options: [{ courseId: 42 }],
+      allow: true,
+      expected: [0, 41]
+    },
+    {
+      name: "ignores zero while resolving one positive id",
+      configured: [0],
+      options: [{ courseId: 0 }, { courseId: 41 }],
+      allow: true,
+      expected: [41]
+    },
+    {
+      name: "accepts deduplicated color-layout ids",
+      configured: [0],
+      options: [
+        { courseId: 42, courseName: " Blue " },
+        { courseId: 41, courseName: "Red" },
+        { courseId: 42, courseName: "blue" },
+        { courseId: 43, courseName: "White 9" }
+      ],
+      allow: true,
+      expected: [41, 42, 43]
+    },
+    {
+      name: "rejects directional sibling labels",
+      configured: [0],
+      options: [
+        { courseId: 41, courseName: "North" },
+        { courseId: 42, courseName: "South" }
+      ],
+      allow: true,
+      expected: [0]
+    },
+    {
+      name: "rejects conflicting labels for one published id",
+      configured: [0],
+      options: [
+        { courseId: 41, courseName: "Red" },
+        { courseId: 41, courseName: "Blue" },
+        { courseId: 42, courseName: "White" }
+      ],
+      allow: true,
+      expected: [0]
+    },
+    {
+      name: "rejects a missing label in a multi-id tenant",
+      configured: [0],
+      options: [
+        { courseId: 41, courseName: "Red" },
+        { courseId: 42 }
+      ],
+      allow: true,
+      expected: [0]
+    },
+    {
+      name: "handles malformed options without throwing",
+      configured: [0],
+      options: [null, 17, "invalid", [], {}, { courseId: "41" }],
+      allow: true,
+      expected: [0]
+    }
+  ])("$name", ({ configured, options, allow, expected }) => {
+    expect(resolveCpsRuntimeCourseIds(configured, options, allow)).toEqual(
+      expected
+    );
+  });
 });
 
 describe("fetchCpsSlots", () => {
@@ -153,6 +256,198 @@ describe("fetchCpsSlots", () => {
       "CPS configuration returned 302"
     );
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("resolves a published placeholder course id through public course options", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input, init) => {
+        const url = input.toString();
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return jsonResponse({
+            authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+            onlineApi:
+              "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            websiteId: "configuration-website",
+            siteName: "traditionoaklane",
+            courseId: 0,
+            apiKey: "provider-published-key"
+          });
+        }
+        if (url.includes("/GetAllOptions/traditionoaklane?")) {
+          return jsonResponse({
+            webSiteId: "public-website",
+            reservationOptions: { terminalId: 3 },
+            courseOptions: [
+              { courseId: 0, courseName: "Placeholder" },
+              { courseId: 42, courseName: "Blue" },
+              { courseId: 41, courseName: "Red" },
+              { courseId: 42, courseName: "Blue" },
+              { courseId: -1 },
+              { courseId: "43" },
+              null,
+              17,
+              "invalid"
+            ]
+          });
+        }
+        if (url.includes("/TeeTimes?")) {
+          const teeTimesUrl = new URL(url);
+          expect(teeTimesUrl.searchParams.get("courseIds")).toBe("41,42");
+          expect(teeTimesUrl.searchParams.get("holes")).toBe("0");
+          expect((init?.headers as Record<string, string>)["x-apikey"]).toBe(
+            "provider-published-key"
+          );
+          return jsonResponse([]);
+        }
+        if (url.includes("/BookingRuleModels?")) {
+          expect(new URL(url).searchParams.get("courseIds")).toBe("41,42");
+          return jsonResponse({ bookingRuleByCourses: [] });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(
+      fetchCpsTeeSheet({
+        ...cpsInput({
+          courseIds: [0],
+          resolvePlaceholderCourseIds: true
+        }),
+        discoverBookingWindow: true
+      })
+    ).resolves.toEqual({
+      slots: [],
+      targetDateStatus: "UNKNOWN",
+      bookingWindowEvidence: null
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("resolves an opted-in placeholder before token-authenticated availability", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input, init) => {
+        const url = input.toString();
+        requestedUrls.push(url);
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return jsonResponse({
+            authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+            onlineApi:
+              "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            websiteId: "configuration-website",
+            siteName: "traditionoaklane"
+          });
+        }
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return jsonResponse({ access_token: "token" });
+        }
+        if (url.includes("/GetAllOptions/traditionoaklane?")) {
+          expect((init?.headers as Record<string, string>).authorization).toBe(
+            "Bearer token"
+          );
+          return jsonResponse({
+            webSiteId: "public-website",
+            courseOptions: [{ courseId: 41 }]
+          });
+        }
+        if (url.endsWith("/RegisterTransactionId")) {
+          return jsonResponse(true);
+        }
+        if (url.includes("/TeeTimes?")) {
+          expect(new URL(url).searchParams.get("courseIds")).toBe("41");
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(
+      fetchCpsSlots(
+        cpsInput({
+          courseIds: [0],
+          holes: [18],
+          resolvePlaceholderCourseIds: true
+        })
+      )
+    ).resolves.toEqual([]);
+    expect(
+      requestedUrls.findIndex((url) => url.includes("/GetAllOptions/"))
+    ).toBeLessThan(
+      requestedUrls.findIndex((url) => url.includes("/TeeTimes?"))
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("fails closed when public options describe sibling named courses", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return jsonResponse({
+            authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+            onlineApi:
+              "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            websiteId: "configuration-website",
+            siteName: "traditionoaklane",
+            apiKey: "provider-published-key"
+          });
+        }
+        if (url.includes("/GetAllOptions/traditionoaklane?")) {
+          return jsonResponse({
+            webSiteId: "public-website",
+            courseOptions: [
+              { courseId: 41, courseName: "Lakeside Golf Club" },
+              { courseId: 42, courseName: "Woodland Golf Club" }
+            ]
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(
+      fetchCpsSlots(
+        cpsInput({
+          courseIds: [0],
+          resolvePlaceholderCourseIds: true
+        })
+      )
+    ).rejects.toThrow("CPS public options did not resolve a course id");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not replace a placeholder without the exact-identity opt-in", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return jsonResponse({
+            authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
+            onlineApi:
+              "https://traditionoaklane.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            websiteId: "configuration-website",
+            siteName: "traditionoaklane",
+            apiKey: "provider-published-key"
+          });
+        }
+        if (url.includes("/GetAllOptions/traditionoaklane?")) {
+          return jsonResponse({
+            webSiteId: "public-website",
+            courseOptions: [{ courseId: 41 }]
+          });
+        }
+        if (url.includes("/TeeTimes?")) {
+          expect(new URL(url).searchParams.get("courseIds")).toBe("0");
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(
+      fetchCpsSlots(cpsInput({ courseIds: [0] }))
+    ).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it.each([
