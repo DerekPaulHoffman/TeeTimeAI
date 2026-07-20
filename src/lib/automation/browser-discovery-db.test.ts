@@ -938,7 +938,7 @@ describe("browser discovery persistence", () => {
     );
   });
 
-  it("automatically targets a runnable provider after current repeated failures", async () => {
+  it("keeps repeated runnable-provider failures on the non-interactive adapter path", async () => {
     mockedPrisma.teeSearch.findMany.mockResolvedValue([]);
     mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([
       {
@@ -974,17 +974,7 @@ describe("browser discovery persistence", () => {
 
     const targets = await listBrowserProbeTargets();
 
-    expect(targets).toEqual([
-      expect.objectContaining({
-        probeUrl: "https://course.example/",
-        course: expect.objectContaining({
-          id: "course-1",
-          monitoringFailureEvidence: expect.objectContaining({
-            occurrenceCount: 3
-          })
-        })
-      })
-    ]);
+    expect(targets).toEqual([]);
   });
 
   it("limits a targeted browser probe to the exact requested course", async () => {
@@ -1011,7 +1001,7 @@ describe("browser discovery persistence", () => {
     expect(targets[0]?.searchId).toBeUndefined();
   });
 
-  it("targets a completed-search incident when its stored block is policy-only", async () => {
+  it("keeps a policy-only stored block off the interactive browser path", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         id: "policy-course",
@@ -1034,15 +1024,7 @@ describe("browser discovery persistence", () => {
 
     const targets = await listBrowserProbeTargets(1, "Policy Course");
 
-    expect(targets).toEqual([
-      expect.objectContaining({
-        searchId: undefined,
-        course: expect.objectContaining({
-          id: "policy-course",
-          automationReason: "AUTOMATION_PROHIBITED"
-        })
-      })
-    ]);
+    expect(targets).toEqual([]);
   });
 
   it("does not target a current corroborated technical final", async () => {

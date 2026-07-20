@@ -59,6 +59,7 @@ export type SearchStatusCourseReport = {
     exactTime: boolean;
   };
   matchingTimes?: Array<{
+    matchId?: string;
     startsAt: string;
     availableSpots: number;
     priceCents?: number;

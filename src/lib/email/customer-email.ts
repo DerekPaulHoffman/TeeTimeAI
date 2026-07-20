@@ -1,4 +1,5 @@
 import type { EmailStopUrls } from "@/lib/email/search-actions";
+import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { absoluteUrl } from "@/lib/seo";
 import {
   DEFAULT_TIME_ZONE,
@@ -286,7 +287,7 @@ function renderAvailabilityCard(
 ) {
   const timeZone = normalizeTimeZone(course.courseTimeZone, DEFAULT_TIME_ZONE);
   const rows = buildAvailabilityRows(course.times, timeZone);
-  const visibleRows = rows.slice(0, MAX_EMAIL_AVAILABILITY_ROWS_PER_COURSE);
+  const visibleRows = selectVisibleAvailabilityRows(rows);
   const hiddenRowCount = rows.length - visibleRows.length;
   const date = visibleRows[0]?.startsAt.toLocaleDateString("en-US", {
     weekday: "long",
@@ -300,14 +301,15 @@ function renderAvailabilityCard(
   const overflow = hiddenRowCount > 0
     ? `<p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:10px 20px 0">${hiddenRowCount} more time window${hiddenRowCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
     : "";
-  const cta = course.bookingUrl
+  const safeBookingUrl = getSafeCustomerBookingUrl(course.bookingUrl);
+  const cta = safeBookingUrl
     ? `
       <tr>
         <td style="padding:16px 20px">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
             <tr>
               <td align="center" bgcolor="${EMAIL_COLORS.orange}" style="background:${EMAIL_COLORS.orange};border-radius:14px">
-                <a href="${escapeHtml(course.bookingUrl)}" style="color:#1d1309;display:block;font-family:Inter,Arial,sans-serif;font-size:14px;font-weight:800;line-height:21px;padding:12px 16px;text-decoration:none">${course.times.length === 1 ? "Book this tee time" : "Open official booking page"}</a>
+                <a href="${escapeHtml(safeBookingUrl)}" style="color:#1d1309;display:block;font-family:Inter,Arial,sans-serif;font-size:14px;font-weight:800;line-height:21px;padding:12px 16px;text-decoration:none">${course.times.length === 1 ? "Book this tee time" : "Open official booking page"}</a>
               </td>
             </tr>
           </table>
@@ -432,8 +434,9 @@ function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUr
     retrying: "#e28b82",
     direct: "#e3b566"
   }[course.tone];
-  const bookingLink = course.bookingUrl
-    ? `<a href="${escapeHtml(course.bookingUrl)}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;margin:10px 16px 0 0;text-decoration:none">${escapeHtml(course.bookingLinkLabel ?? "Open official site")} &rarr;</a>`
+  const safeBookingUrl = getSafeCustomerBookingUrl(course.bookingUrl);
+  const bookingLink = safeBookingUrl
+    ? `<a href="${escapeHtml(safeBookingUrl)}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;margin:10px 16px 0 0;text-decoration:none">${escapeHtml(course.bookingLinkLabel ?? "Open official site")} &rarr;</a>`
     : "";
   const phoneHref = course.phone ? formatTelephoneHref(course.phone) : "";
   const phoneLink = phoneHref
@@ -548,6 +551,17 @@ function buildAvailabilityRows(
   );
 }
 
+function selectVisibleAvailabilityRows(rows: CustomerEmailAvailabilityWindow[]) {
+  return [...rows]
+    .sort(
+      (left, right) =>
+        Number(right.isNew) - Number(left.isNew) ||
+        left.startsAt.getTime() - right.startsAt.getTime()
+    )
+    .slice(0, MAX_EMAIL_AVAILABILITY_ROWS_PER_COURSE)
+    .sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
+}
+
 export function getRenderedAvailabilityStartTimes(
   times: CustomerEmailAvailabilityTime[],
   timeZone?: string
@@ -561,8 +575,9 @@ export function getRenderedAvailabilityTimes<
   T extends CustomerEmailAvailabilityTime
 >(times: T[], timeZone?: string) {
   const normalizedTimeZone = normalizeTimeZone(timeZone, DEFAULT_TIME_ZONE);
-  return buildAvailabilityRows(times, normalizedTimeZone)
-    .slice(0, MAX_EMAIL_AVAILABILITY_ROWS_PER_COURSE)
+  return selectVisibleAvailabilityRows(
+    buildAvailabilityRows(times, normalizedTimeZone)
+  )
     .flatMap((row) => row.matches) as Array<T & { startsAtDate: Date }>;
 }
 

@@ -200,12 +200,17 @@ enum CourseProfileSourceType {
 }
 
 model User {
-  id          String      @id @default(cuid())
-  clerkUserId String      @unique
-  email       String
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
-  teeSearches TeeSearch[]
+  id                     String      @id @default(cuid())
+  clerkUserId            String      @unique
+  email                  String
+  clerkUserUpdatedAt     DateTime?
+  pendingEmail           String?
+  pendingEmailObservedAt DateTime?
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+  teeSearches            TeeSearch[]
+
+  @@index([pendingEmailObservedAt])
 }
 
 model Course {

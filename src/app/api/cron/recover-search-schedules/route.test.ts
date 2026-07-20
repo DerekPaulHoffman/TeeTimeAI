@@ -8,6 +8,7 @@ import { GET } from "./route";
 const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
   listSearchesNeedingScheduleRecovery: vi.fn(),
+  recoverPendingClerkEmailUpdates: vi.fn(),
   startSearchSchedule: vi.fn()
 }));
 
@@ -17,6 +18,10 @@ vi.mock("@/lib/automation/db-service", () => ({
 
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: mocks.startSearchSchedule
+}));
+
+vi.mock("@/lib/users/pending-email", () => ({
+  recoverPendingClerkEmailUpdates: mocks.recoverPendingClerkEmailUpdates
 }));
 
 vi.mock("@/lib/env", () => ({
@@ -30,6 +35,12 @@ describe("GET /api/cron/recover-search-schedules", () => {
     vi.clearAllMocks();
     process.env.CRON_SECRET = "test-cron-secret";
     mocks.hasDatabaseConfig.mockReturnValue(false);
+    mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
+      considered: 0,
+      applied: 0,
+      deferred: 0,
+      failed: 0
+    });
   });
 
   afterEach(() => {
@@ -52,11 +63,18 @@ describe("GET /api/cron/recover-search-schedules", () => {
       error: "Search schedule recovery is temporarily unavailable."
     });
     expect(mocks.listSearchesNeedingScheduleRecovery).not.toHaveBeenCalled();
+    expect(mocks.recoverPendingClerkEmailUpdates).not.toHaveBeenCalled();
     expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
   it("restarts every eligible schedule independently", async () => {
     mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
+      considered: 3,
+      applied: 2,
+      deferred: 1,
+      failed: 0
+    });
     mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
       { id: "search-1" },
       { id: "search-2" },
@@ -75,6 +93,12 @@ describe("GET /api/cron/recover-search-schedules", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
+      pendingEmailRecovery: {
+        considered: 3,
+        applied: 2,
+        deferred: 1,
+        failed: 0
+      },
       considered: 3,
       restarted: 2,
       failed: 1
@@ -83,6 +107,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(1, "search-1");
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(2, "search-2");
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(3, "search-3");
+    expect(mocks.recoverPendingClerkEmailUpdates).toHaveBeenCalledTimes(1);
   });
 
   it("configures a Pro recovery heartbeat every five minutes", () => {

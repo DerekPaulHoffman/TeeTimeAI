@@ -6,6 +6,8 @@ import {
   closeHourlyImprovementRun,
   completeScheduledSearchCheck,
   failScheduledSearchCheck,
+  markMatchAlertSent,
+  markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
   listSearchesNeedingScheduleRecovery,
   queueSearchCheck,
@@ -656,13 +658,87 @@ describe("recordTeeTimeMatch", () => {
   });
 });
 
+describe("match alert cycle finalization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("does not let a delayed old-cycle send consume a reopened cycle", async () => {
+    mockedPrisma.teeTimeMatch.updateMany
+      .mockResolvedValueOnce({ count: 0 } as never)
+      .mockResolvedValueOnce({ count: 1 } as never);
+
+    await expect(
+      markMatchAlertSent({ matchId: "match-1", availabilityCycle: 0 })
+    ).resolves.toBeNull();
+    await expect(
+      markMatchAlertSent({ matchId: "match-1", availabilityCycle: 1 })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        id: "match-1",
+        availabilityCycle: 1,
+        alertStatus: "SENT"
+      })
+    );
+
+    expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: {
+          id: "match-1",
+          availabilityCycle: 0,
+          alertStatus: "PENDING"
+        }
+      })
+    );
+    expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: {
+          id: "match-1",
+          availabilityCycle: 1,
+          alertStatus: "PENDING"
+        }
+      })
+    );
+  });
+
+  it("suppresses only the exact pending availability cycle", async () => {
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(
+      markMatchAlertSuppressed({ matchId: "match-1", availabilityCycle: 4 })
+    ).resolves.toEqual(
+      expect.objectContaining({
+        id: "match-1",
+        availabilityCycle: 4,
+        alertStatus: "SUPPRESSED"
+      })
+    );
+
+    expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "match-1",
+        availabilityCycle: 4,
+        alertStatus: "PENDING"
+      },
+      data: {
+        alertStatus: "SUPPRESSED",
+        sentAt: expect.any(Date)
+      }
+    });
+  });
+});
+
 describe("markMissingMatchesUnavailable", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
       (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
     );
-    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([{ id: "match-1" }] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { id: "match-1", availabilityCycle: 3 }
+    ] as never);
     mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
     deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue({
       id: "search-1"
@@ -723,7 +799,7 @@ describe("markMissingMatchesUnavailable", () => {
     expect(deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches).toHaveBeenCalledWith(
       expect.objectContaining({
         searchId: "search-1",
-        matchIds: ["match-1"],
+        matchRefs: [{ matchId: "match-1", availabilityCycle: 3 }],
         transaction: prisma
       })
     );

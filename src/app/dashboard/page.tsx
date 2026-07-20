@@ -31,6 +31,7 @@ import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
+import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
 
@@ -58,7 +59,15 @@ export default async function DashboardPage() {
     return <SignedOutState />;
   }
 
-  const user = await getRequiredAppUser();
+  let user: Awaited<ReturnType<typeof getRequiredAppUser>>;
+  try {
+    user = await getRequiredAppUser();
+  } catch (error) {
+    if (error instanceof SearchEmailDeliveryInProgressError) {
+      return <EmailTransitionState />;
+    }
+    throw error;
+  }
   const searches = await listTeeSearchesForUser(user.id);
 
   return <DashboardView searches={searches} canManage showRecipientEmail />;
@@ -502,6 +511,24 @@ function SignedOutState() {
         </p>
         <DashboardSignInActions />
       </section>
+    </main>
+  );
+}
+
+function EmailTransitionState() {
+  return (
+    <main className="dashboard-page">
+      <div className="empty-state">
+        <Mail size={30} />
+        <h1>Updating your alert email</h1>
+        <p className="meta">
+          An alert was already being finalized, so Tee Time Spot is safely finishing it before
+          switching future messages to your new account email.
+        </p>
+        <Link className="button button-dark" href="/dashboard">
+          Refresh dashboard
+        </Link>
+      </div>
     </main>
   );
 }

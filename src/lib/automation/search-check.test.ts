@@ -23,7 +23,7 @@ const dbMocks = vi.hoisted(() => ({
 }));
 
 const emailMocks = vi.hoisted(() => ({
-  getRenderedTeeTimeAlertMatchIds: vi.fn((matches) =>
+  getRenderedTeeTimeAlertMatchIds: vi.fn((matches: Array<{ matchId: string }>) =>
     matches.slice(0, 8).map((match) => match.matchId)
   ),
   sendSearchStatusEmail: vi.fn(),
@@ -33,13 +33,16 @@ const emailMocks = vi.hoisted(() => ({
 const deliveryOutboxMocks = vi.hoisted(() => ({
   drainSearchEmailDeliveryGroup: vi.fn(),
   finalizeSearchEmailDeliveryGroup: vi.fn(),
+  getPendingStatusEmailReplacement: vi.fn(),
   getSafeOfficialBookingUrl: vi.fn((value: unknown) =>
     typeof value === "string" ? value : undefined
   ),
   hydrateMatchAlertPayload: vi.fn(),
   hydrateSearchStatusEmailPayload: vi.fn(),
   listRetryableSearchEmailDeliveryGroups: vi.fn(),
+  prepareRecipientMatchDeliveryGroups: vi.fn(),
   prepareSearchEmailDeliveryGroup: vi.fn(),
+  satisfyPendingDailyStatusReplacementWithMatch: vi.fn(),
   suppressSearchEmailDeliveriesForMatches: vi.fn(),
   toSearchEmailJson: vi.fn(),
   preparedPayload: undefined as unknown
@@ -143,6 +146,7 @@ const search = {
 
 const pendingMatch = {
   id: "match-1",
+  alertStatus: "PENDING",
   availabilityCycle: 0,
   course: {
     id: "course-1",
@@ -185,6 +189,7 @@ describe("buildMatchDeliveryGroupKey", () => {
       ])
     );
   });
+
 });
 
 describe("runSearchCheck email cadence", () => {
@@ -210,6 +215,11 @@ describe("runSearchCheck email cadence", () => {
       async (_providerFamily, worker) => ({ acquired: true, value: await worker() })
     );
     dbMocks.recordCourseProbeIfChanged.mockResolvedValue(undefined);
+    dbMocks.recordTeeTimeMatch.mockImplementation(async (input) => ({
+      id: String(input.sourceId).replace(/^slot-/, "match-"),
+      alertStatus: "PENDING",
+      availabilityCycle: 0
+    }));
     dbMocks.listPendingMatchAlerts.mockResolvedValue([pendingMatch]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([pendingMatch]);
     dbMocks.markMatchAlertSent.mockResolvedValue(undefined);
@@ -230,10 +240,24 @@ describe("runSearchCheck email cadence", () => {
       typeof value === "string" ? value : undefined
     );
     deliveryOutboxMocks.listRetryableSearchEmailDeliveryGroups.mockResolvedValue([]);
+    deliveryOutboxMocks.getPendingStatusEmailReplacement.mockResolvedValue(null);
+    deliveryOutboxMocks.satisfyPendingDailyStatusReplacementWithMatch.mockResolvedValue({
+      current: true,
+      count: 1
+    });
     deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mockImplementation(
       async (input) => {
         deliveryOutboxMocks.preparedPayload = input.payload;
-        return { prepared: true, deliveries: [] };
+        return { prepared: true, deliveries: [], continuationGroups: [] };
+      }
+    );
+    deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mockImplementation(
+      async (input) => {
+        deliveryOutboxMocks.preparedPayload = input.payload;
+        return {
+          prepared: true,
+          groups: [{ groupKey: `recipient-${input.sourceGroupKey}`, recipient: "player@resend.dev" }]
+        };
       }
     );
     deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
@@ -241,7 +265,8 @@ describe("runSearchCheck email cadence", () => {
         await input.send({
           recipient: "player@resend.dev",
           idempotencyKey: "tee-search-delivery-delivery-1",
-          payload: deliveryOutboxMocks.preparedPayload
+          payload: deliveryOutboxMocks.preparedPayload,
+          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
         });
         return [{ id: "delivery-1", status: "SENT" }];
       }
@@ -374,6 +399,38 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
+  it("replaces a stale attempted setup with current content and a distinct logical key", async () => {
+    deliveryOutboxMocks.getPendingStatusEmailReplacement.mockResolvedValue({
+      kind: "SETUP",
+      groups: [
+        { kind: "SETUP", groupKey: "stale-setup-group" },
+        { kind: "DAILY", groupKey: "stale-daily-group" }
+      ],
+      anyRecipientReached: false,
+      ownerSent: false
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "SETUP",
+        groupKey: expect.stringMatching(
+          /^setup-[a-f0-9]+-replacement-[a-f0-9]+$/
+        ),
+        supersededStatusGroups: [
+          { kind: "SETUP", groupKey: "stale-setup-group" },
+          { kind: "DAILY", groupKey: "stale-daily-group" }
+        ]
+      })
+    );
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
+    expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({ statusEmailOutcome: "sent" })
+    );
+  });
+
   it("flows the persisted pending state into setup-report NEW rows", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
@@ -484,10 +541,6 @@ describe("runSearchCheck email cadence", () => {
       targetDateStatus: "OPEN",
       bookingWindowEvidence: null
     });
-    dbMocks.recordTeeTimeMatch.mockResolvedValue({
-      id: "persisted-match",
-      alertStatus: "PENDING"
-    });
     dbMocks.listPendingMatchAlerts.mockResolvedValue(
       localStartsAt.map((startsAt, index) => ({
         ...pendingMatch,
@@ -565,9 +618,8 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalled();
-    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+    expect(deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "MATCH",
         payload: expect.objectContaining({
           satisfiesStatusReport: true,
           statusSnapshot: expect.any(Array)
@@ -581,6 +633,74 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({
         newlyAlertedMatches: 1,
         statusEmailOutcome: "covered_by_match_alert"
+      })
+    );
+  });
+
+  it("uses the persisted match id when two rows share one course and tee time", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Available Course",
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "slot-current",
+          courseId: "course-1",
+          startsAt: "2026-07-12T08:00:00-04:00",
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          priceCents: 6100,
+          bookableHoleCounts: [9, 18]
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    dbMocks.recordTeeTimeMatch.mockResolvedValue({
+      id: "match-current",
+      alertStatus: "PENDING",
+      availabilityCycle: 2
+    });
+    const sharedStart = new Date("2026-07-12T12:00:00.000Z");
+    const stale = {
+      ...pendingMatch,
+      id: "match-stale",
+      availabilityCycle: 1,
+      startsAt: sharedStart
+    };
+    const current = {
+      ...pendingMatch,
+      id: "match-current",
+      availabilityCycle: 2,
+      startsAt: sharedStart
+    };
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([stale, current]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([stale, current]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          matchIds: ["match-current"],
+          matchRefs: [{ matchId: "match-current", availabilityCycle: 2 }],
+          displayMatchIds: ["match-current"]
+        })
       })
     );
   });
@@ -623,10 +743,6 @@ describe("runSearchCheck email cadence", () => {
       targetDateStatus: "OPEN",
       bookingWindowEvidence: null
     });
-    dbMocks.recordTeeTimeMatch.mockResolvedValue({
-      id: "persisted-match",
-      alertStatus: "PENDING"
-    });
     const matches = localStartsAt.map((startsAt, index) => ({
       ...pendingMatch,
       id: `match-${index + 1}`,
@@ -647,9 +763,8 @@ describe("runSearchCheck email cadence", () => {
     const renderedIds = localStartsAt
       .slice(0, 8)
       .map((_, index) => `match-${index + 1}`);
-    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
+    expect(deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "MATCH",
         payload: expect.objectContaining({
           matchIds: renderedIds,
           displayMatchIds: renderedIds,
@@ -661,8 +776,9 @@ describe("runSearchCheck email cadence", () => {
         })
       })
     );
-    const preparedPayload = deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mock
-      .calls.find(([input]) => input.kind === "MATCH")?.[0].payload;
+    const preparedPayload =
+      deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mock.calls[0]?.[0]
+        .payload;
     expect(preparedPayload.matchReport.matches).toHaveLength(8);
     expect(preparedPayload.matchIds).not.toContain("match-9");
     expect(result).toEqual(
@@ -718,7 +834,8 @@ describe("runSearchCheck email cadence", () => {
         await input.send({
           recipient: "player@resend.dev",
           idempotencyKey: "tee-search-delivery-daily",
-          payload: deliveryOutboxMocks.preparedPayload
+          payload: deliveryOutboxMocks.preparedPayload,
+          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
         });
         return [{ id: "daily-delivery", status: "SENT" }];
       }
@@ -746,6 +863,228 @@ describe("runSearchCheck email cadence", () => {
 
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
     expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
+    expect(result).toEqual(
+      expect.objectContaining({
+        newlyAlertedMatches: 0,
+        statusEmailOutcome: "sent"
+      })
+    );
+  });
+
+  it("does not duplicate a daily update while an owner match obligation is still retryable", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z"),
+      additionalEmails: ["friend@resend.dev"],
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "FOREUP",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: { courseId: "course-1" }
+          }
+        }
+      ]
+    });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "slot-1",
+          courseId: "course-1",
+          startsAt: "2026-07-12T08:00:00-04:00",
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          priceCents: 6100,
+          bookableHoleCounts: [18]
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mockImplementation(
+      async (input) => {
+        deliveryOutboxMocks.preparedPayload = input.payload;
+        return {
+          prepared: true,
+          hasExistingObligation: false,
+          groups: [
+            { groupKey: "owner-match", recipient: "player@resend.dev" },
+            { groupKey: "friend-match", recipient: "friend@resend.dev" }
+          ]
+        };
+      }
+    );
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
+      async (input) => {
+        if (input.groupKey === "owner-match") {
+          throw new Error("owner delivery pending");
+        }
+        await input.send({
+          recipient: "friend@resend.dev",
+          idempotencyKey: "friend-match-key",
+          payload: deliveryOutboxMocks.preparedPayload,
+          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+        });
+        return [{ id: "friend-delivery", status: "SENT" }];
+      }
+    );
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockResolvedValue({
+      finalized: true,
+      status: "SENT",
+      ownerSent: false,
+      retainedMatchCount: 1,
+      sentMatchCount: 0
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(emailMocks.sendTeeTimeAlert).toHaveBeenCalledOnce();
+    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        newlyAlertedMatches: 0,
+        statusEmailOutcome: "covered_by_match_alert"
+      })
+    );
+  });
+
+  it("lets a freshly sent owner MATCH retry satisfy and retire the pending daily replacement", async () => {
+    dbMocks.getActiveSearchForAutomation
+      .mockResolvedValueOnce({
+        ...search,
+        statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z")
+      })
+      .mockResolvedValue({
+        ...search,
+        statusEmailSentAt: new Date("2026-07-11T12:10:00.000Z")
+      });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    deliveryOutboxMocks.listRetryableSearchEmailDeliveryGroups
+      .mockResolvedValueOnce([
+        {
+          kind: "MATCH",
+          groupKey: "owner-retry",
+          createdAt: new Date("2026-07-11T11:00:00.000Z"),
+          ownerRetryable: true
+        }
+      ])
+      .mockResolvedValue([]);
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
+      async (input) => {
+        await input.send({
+          recipient: "player@resend.dev",
+          idempotencyKey: "owner-retry-key",
+          payload: { schemaVersion: 2, checkedAt: "2026-07-11T12:10:00.000Z" },
+          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+        });
+        return [{ id: "owner-retry", status: "SENT" }];
+      }
+    );
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockResolvedValue({
+      finalized: true,
+      status: "SENT",
+      ownerSent: true,
+      retainedMatchCount: 1,
+      sentMatchCount: 1
+    });
+    deliveryOutboxMocks.getPendingStatusEmailReplacement.mockResolvedValue({
+      kind: "DAILY",
+      groups: [{ kind: "DAILY", groupKey: "stale-daily" }],
+      anyRecipientReached: false,
+      ownerSent: false
+    });
+    dbMocks.markSearchStatusEmailSent.mockResolvedValue({ count: 1 });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(emailMocks.sendTeeTimeAlert).toHaveBeenCalledOnce();
+    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalled();
+    expect(dbMocks.markSearchStatusEmailSent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchId: "search-1",
+        alertGeneration: 0,
+        checkLeaseToken: "check-lease",
+        snapshot: expect.any(Array)
+      })
+    );
+    expect(
+      deliveryOutboxMocks.satisfyPendingDailyStatusReplacementWithMatch
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        groups: [{ kind: "DAILY", groupKey: "stale-daily" }]
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        newlyAlertedMatches: 1,
+        statusEmailOutcome: "covered_by_match_alert"
+      })
+    );
+  });
+
+  it("does not treat an already-sent owner as newly delivered when only a friend retry runs", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z")
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    deliveryOutboxMocks.listRetryableSearchEmailDeliveryGroups
+      .mockResolvedValueOnce([
+        {
+          kind: "MATCH",
+          groupKey: "friend-retry",
+          createdAt: new Date("2026-07-11T11:00:00.000Z"),
+          ownerRetryable: false
+        }
+      ])
+      .mockResolvedValue([]);
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
+      async (input) => {
+        await input.send({
+          recipient:
+            input.kind === "MATCH"
+              ? "friend@resend.dev"
+              : "player@resend.dev",
+          idempotencyKey: `${input.kind.toLowerCase()}-retry-key`,
+          payload:
+            input.kind === "MATCH"
+              ? { schemaVersion: 2, checkedAt: "2026-07-11T12:10:00.000Z" }
+              : deliveryOutboxMocks.preparedPayload,
+          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+        });
+        return [{ id: `${input.kind.toLowerCase()}-delivery`, status: "SENT" }];
+      }
+    );
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(
+      async (input) =>
+        input.kind === "MATCH"
+          ? {
+              finalized: true,
+              status: "SENT",
+              ownerSent: true,
+              retainedMatchCount: 1,
+              sentMatchCount: 1
+            }
+          : {
+              finalized: true,
+              status: "SENT",
+              ownerSent: true,
+              retainedMatchCount: 0,
+              sentMatchCount: 0
+            }
+    );
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(emailMocks.sendTeeTimeAlert).toHaveBeenCalledOnce();
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
+    expect(dbMocks.markSearchStatusEmailSent).not.toHaveBeenCalled();
     expect(result).toEqual(
       expect.objectContaining({
         newlyAlertedMatches: 0,
@@ -893,7 +1232,7 @@ describe("runSearchCheck email cadence", () => {
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
 
-  it("keeps a provider-policy failure in engineering instead of closing monitoring", async () => {
+  it("keeps a CPS access failure in engineering instead of creating a policy block", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -919,15 +1258,9 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
-    const policyError = Object.assign(
-      new Error("Official robots policy blocks required endpoints"),
-      {
-        name: "CpsAutomationPolicyBlockedError",
-        bookingUrl: "https://policy-blocked.cps.golf/",
-        policyUrl: "https://policy-blocked.cps.golf/robots.txt"
-      }
+    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(
+      new Error("CPS configuration returned 403")
     );
-    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(policyError);
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -940,8 +1273,13 @@ describe("runSearchCheck email cadence", () => {
       })
     ]);
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: "FETCH_FAILED" })
+      expect.objectContaining({
+        outcome: "FETCH_FAILED",
+        message: "CPS configuration returned 403"
+      })
     );
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         course: expect.objectContaining({ id: "course-1" }),
@@ -1001,7 +1339,8 @@ describe("runSearchCheck email cadence", () => {
         await input.send({
           recipient: "player@resend.dev",
           idempotencyKey: "tee-search-delivery-delivery-1",
-          payload: deliveryOutboxMocks.preparedPayload
+          payload: deliveryOutboxMocks.preparedPayload,
+          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
         });
         return [{ id: "delivery-1", status: "SENT" }];
       }
@@ -1049,7 +1388,7 @@ describe("runSearchCheck email cadence", () => {
     }
   });
 
-  it("tries every old delivery group but blocks newer delivery while an owner remains unresolved", async () => {
+  it("tries every old delivery group without blocking newer delivery on one unresolved owner", async () => {
     deliveryOutboxMocks.listRetryableSearchEmailDeliveryGroups.mockResolvedValue([
       {
         kind: "MATCH",
@@ -1087,16 +1426,20 @@ describe("runSearchCheck email cadence", () => {
             }
     );
 
-    await expect(runSearchCheck("search-1", "test")).rejects.toThrow(
-      "owner delivery failed"
-    );
+    const result = await runSearchCheck("search-1", "test");
 
     expect(
       deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mock.calls.map(
         ([input]) => input.groupKey
       )
-    ).toEqual(["unresolved-owner-group", "independent-retry-group"]);
-    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalled();
+    ).toEqual([
+      "unresolved-owner-group",
+      "independent-retry-group",
+      expect.stringMatching(/^setup-/)
+    ]);
+    expect(result).toEqual(
+      expect.objectContaining({ outcome: "success", statusEmailOutcome: "sent" })
+    );
   });
 
   it("does not fetch or alert a legacy course with a verified incompatible layout", async () => {
@@ -1218,7 +1561,7 @@ describe("runSearchCheck email cadence", () => {
     expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
   });
 
-  it("preserves a pending available match for a current technical final", async () => {
+  it("reconciles a pending match before reporting a current technical final", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -1247,7 +1590,15 @@ describe("runSearchCheck email cadence", () => {
 
     expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
     expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
-    expect(dbMocks.markMissingMatchesUnavailable).not.toHaveBeenCalled();
+    expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith({
+      searchId: "search-1",
+      alertGeneration: 0,
+      checkLeaseToken: "check-lease",
+      courseId: "course-1",
+      date: "2026-07-12",
+      timeZone: "America/New_York",
+      confirmedMatches: []
+    });
     expect(dbMocks.listPendingMatchAlerts).toHaveBeenCalledWith("search-1");
     expect(dbMocks.markMatchAlertSuppressed).not.toHaveBeenCalled();
     expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
@@ -1374,6 +1725,13 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchId: "search-1",
+        courseId: "course-1",
+        confirmedMatches: []
+      })
+    );
     expect(result.courseResults[0]).toMatchObject({
       outcome: "BLOCKED_POLICY",
       automationReason: "NO_ONLINE_BOOKING",

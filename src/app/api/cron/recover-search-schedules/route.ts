@@ -1,6 +1,7 @@
 import { listSearchesNeedingScheduleRecovery } from "@/lib/automation/db-service";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasDatabaseConfig } from "@/lib/env";
+import { recoverPendingClerkEmailUpdates } from "@/lib/users/pending-email";
 
 export async function GET(request: Request) {
   const authorization = request.headers.get("authorization");
@@ -15,12 +16,14 @@ export async function GET(request: Request) {
     );
   }
 
+  const pendingEmailRecovery = await recoverPendingClerkEmailUpdates();
   const searches = await listSearchesNeedingScheduleRecovery();
   const results = await Promise.allSettled(
     searches.map((search) => startSearchSchedule(search.id))
   );
 
   return Response.json({
+    pendingEmailRecovery,
     considered: searches.length,
     restarted: results.filter((result) => result.status === "fulfilled").length,
     failed: results.filter((result) => result.status === "rejected").length

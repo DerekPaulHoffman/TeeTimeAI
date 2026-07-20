@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 
 import { assertAutomationRequest } from "@/lib/api/automation-auth";
 import { markMatchAlertSent } from "@/lib/automation/db-service";
 import { hasDatabaseConfig } from "@/lib/env";
+
+const sentAlertSchema = z.object({
+  availabilityCycle: z.number().int().min(0)
+});
 
 export async function POST(
   request: NextRequest,
@@ -21,6 +26,23 @@ export async function POST(
   }
 
   const { id } = await context.params;
-  const match = await markMatchAlertSent(id);
+  const parsed = sentAlertSchema.safeParse(await request.json().catch(() => null));
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "A valid availability cycle is required." },
+      { status: 400 }
+    );
+  }
+
+  const match = await markMatchAlertSent({
+    matchId: id,
+    availabilityCycle: parsed.data.availabilityCycle
+  });
+  if (!match) {
+    return NextResponse.json(
+      { error: "The alert is no longer pending for that availability cycle." },
+      { status: 409 }
+    );
+  }
   return NextResponse.json({ match });
 }

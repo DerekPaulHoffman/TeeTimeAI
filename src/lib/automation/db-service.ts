@@ -964,13 +964,16 @@ export async function markMissingMatchesUnavailable(input: {
         ...missingMatchWhere,
         alertStatus: "PENDING"
       },
-      select: { id: true }
+      select: { id: true, availabilityCycle: true }
     });
     await suppressSearchEmailDeliveriesForMatches({
       searchId: input.searchId,
       alertGeneration: input.alertGeneration,
       checkLeaseToken: input.checkLeaseToken,
-      matchIds: pendingMatches.map((match) => match.id),
+      matchRefs: pendingMatches.map((match) => ({
+        matchId: match.id,
+        availabilityCycle: match.availabilityCycle
+      })),
       now: unavailableAt,
       transaction
     });
@@ -1608,33 +1611,57 @@ export async function listSearchesNeedingScheduleRecovery() {
   });
 }
 
-export async function markMatchAlertSent(matchId: string) {
-  return prisma.teeTimeMatch.update({
-    where: { id: matchId },
-    data: {
-      alertStatus: "SENT",
-      sentAt: new Date()
-    }
+type MatchAlertCycleRef = {
+  matchId: string;
+  availabilityCycle: number;
+};
+
+async function markMatchAlertStatus(
+  input: MatchAlertCycleRef,
+  alertStatus: "SENT" | "SUPPRESSED"
+) {
+  const sentAt = new Date();
+  const updated = await prisma.teeTimeMatch.updateMany({
+    where: {
+      id: input.matchId,
+      availabilityCycle: input.availabilityCycle,
+      alertStatus: "PENDING"
+    },
+    data: { alertStatus, sentAt }
   });
+  return updated.count === 1
+    ? {
+        id: input.matchId,
+        availabilityCycle: input.availabilityCycle,
+        alertStatus,
+        sentAt
+      }
+    : null;
 }
 
-export async function markMatchAlertSuppressed(matchId: string) {
-  return prisma.teeTimeMatch.update({
-    where: { id: matchId },
-    data: {
-      alertStatus: "SUPPRESSED",
-      sentAt: new Date()
-    }
-  });
+export async function markMatchAlertSent(input: MatchAlertCycleRef) {
+  return markMatchAlertStatus(input, "SENT");
+}
+
+export async function markMatchAlertSuppressed(input: MatchAlertCycleRef) {
+  return markMatchAlertStatus(input, "SUPPRESSED");
 }
 
 export async function markSearchStatusEmailSent(input: {
   searchId: string;
   sentAt: Date;
   snapshot: Prisma.InputJsonValue;
+  alertGeneration: number;
+  checkLeaseToken: string;
 }) {
-  return prisma.teeSearch.update({
-    where: { id: input.searchId },
+  return prisma.teeSearch.updateMany({
+    where: {
+      id: input.searchId,
+      alertGeneration: input.alertGeneration,
+      checkLeaseToken: input.checkLeaseToken,
+      checkLeaseExpiresAt: { gt: input.sentAt },
+      status: "ACTIVE"
+    },
     data: {
       statusEmailSentAt: input.sentAt,
       statusEmailSnapshot: input.snapshot

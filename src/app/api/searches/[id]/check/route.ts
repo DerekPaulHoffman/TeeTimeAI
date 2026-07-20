@@ -4,6 +4,7 @@ import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getTeeSearchForUser } from "@/lib/searches/service";
+import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 
 export async function POST(
   _request: NextRequest,
@@ -35,6 +36,12 @@ export async function POST(
       { status: 202 }
     );
   } catch (error) {
+    if (error instanceof SearchEmailDeliveryInProgressError) {
+      return NextResponse.json(
+        { error: error.message, retryable: true },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not start search check" },
       { status: 400 }

@@ -95,6 +95,16 @@ export class EmailDeliveryConfigurationError extends Error {
   }
 }
 
+export class EmailDeliveryNotAcceptedError extends Error {
+  readonly code = "EMAIL_DELIVERY_NOT_ACCEPTED";
+  readonly retryable = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "EmailDeliveryNotAcceptedError";
+  }
+}
+
 export type CourseSupportOperatorEmailInput = {
   event: "opened" | "escalated" | "resolved";
   incidentId: string;
@@ -189,7 +199,7 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   );
 
   if (result.error) {
-    throw new Error(result.error.message);
+    throw new EmailDeliveryNotAcceptedError(result.error.message);
   }
 
   return { ...result.data, deliveryStatus: "sent" };
@@ -250,7 +260,7 @@ export async function sendSearchStatusEmail(
   );
 
   if (result.error) {
-    throw new Error(result.error.message);
+    throw new EmailDeliveryNotAcceptedError(result.error.message);
   }
 
   return { ...result.data, deliveryStatus: "sent" };

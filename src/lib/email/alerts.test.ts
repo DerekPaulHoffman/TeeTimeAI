@@ -146,11 +146,11 @@ describe("renderAlertHtml", () => {
     expect(getMatchAlertSubject(matches)).toBe(
       "New tee time windows opened at Blue Rock Golf Course"
     );
-    expect(html).toContain("9:00 AM EDT – 9:50 AM EDT");
-    expect(html.match(/6 time slots available/g)).toHaveLength(2);
-    expect(html.match(/>NEW<\/span>/g)).toHaveLength(6);
+    expect(html).not.toContain("9:00 AM EDT – 9:50 AM EDT");
+    expect(html.match(/6 time slots available/g)).toBeNull();
+    expect(html.match(/>NEW<\/span>/g)).toHaveLength(8);
     expect(html).toContain("36 more time windows are available on the official booking page");
-    expect(html).not.toContain("12:00 PM EDT");
+    expect(html).toContain("12:00 PM EDT");
   });
 
   it("returns only the exact match IDs rendered within each course row cap", () => {
@@ -168,6 +168,30 @@ describe("renderAlertHtml", () => {
     expect(getRenderedTeeTimeAlertMatchIds(matches)).toEqual(
       matches.slice(0, 8).map((match) => match.matchId)
     );
+  });
+
+  it("keeps a later new opening when eight older hourly windows fill the row cap", () => {
+    const older = Array.from({ length: 8 }, (_, index) => ({
+      matchId: `old-${index + 1}`,
+      courseId: "course-1",
+      courseName: "Blue Rock Golf Course",
+      courseTimeZone: "America/New_York",
+      startsAt: new Date(Date.parse("2026-08-15T11:00:00.000Z") + index * 60 * 60 * 1000),
+      availableSpots: 4,
+      bookingUrl: "https://example.com/blue-rock",
+      isNew: false
+    }));
+    const opening = {
+      ...older[0],
+      matchId: "new-opening",
+      startsAt: new Date("2026-08-15T20:00:00.000Z"),
+      isNew: true
+    };
+
+    const rendered = getRenderedTeeTimeAlertMatchIds([...older, opening]);
+
+    expect(rendered).toContain("new-opening");
+    expect(rendered).not.toContain("old-8");
   });
 });
 

@@ -26,6 +26,11 @@ describe("POST /api/automation/alerts/[id]/sent", () => {
     vi.clearAllMocks();
     mocks.assertAutomationRequest.mockReturnValue(null);
     mocks.hasDatabaseConfig.mockReturnValue(false);
+    mocks.markMatchAlertSent.mockResolvedValue({
+      id: "match-1",
+      availabilityCycle: 2,
+      alertStatus: "SENT"
+    });
   });
 
   it("returns 503 before updating alert state when the database is unavailable", async () => {
@@ -41,5 +46,60 @@ describe("POST /api/automation/alerts/[id]/sent", () => {
       error: "Alert status updates are temporarily unavailable."
     });
     expect(mocks.markMatchAlertSent).not.toHaveBeenCalled();
+  });
+
+  it("requires an exact non-negative availability cycle", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    const response = await POST(
+      new NextRequest("http://localhost/api/automation/alerts/match-1/sent", {
+        method: "POST",
+        body: JSON.stringify({ availabilityCycle: -1 })
+      }),
+      { params: Promise.resolve({ id: "match-1" }) }
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.markMatchAlertSent).not.toHaveBeenCalled();
+  });
+
+  it("marks only the requested availability cycle sent", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    const response = await POST(
+      new NextRequest("http://localhost/api/automation/alerts/match-1/sent", {
+        method: "POST",
+        body: JSON.stringify({ availabilityCycle: 2 })
+      }),
+      { params: Promise.resolve({ id: "match-1" }) }
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.markMatchAlertSent).toHaveBeenCalledWith({
+      matchId: "match-1",
+      availabilityCycle: 2
+    });
+    await expect(response.json()).resolves.toEqual({
+      match: {
+        id: "match-1",
+        availabilityCycle: 2,
+        alertStatus: "SENT"
+      }
+    });
+  });
+
+  it("rejects a delayed update after the match cycle changes", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.markMatchAlertSent.mockResolvedValue(null);
+    const response = await POST(
+      new NextRequest("http://localhost/api/automation/alerts/match-1/sent", {
+        method: "POST",
+        body: JSON.stringify({ availabilityCycle: 1 })
+      }),
+      { params: Promise.resolve({ id: "match-1" }) }
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "The alert is no longer pending for that availability cycle."
+    });
   });
 });

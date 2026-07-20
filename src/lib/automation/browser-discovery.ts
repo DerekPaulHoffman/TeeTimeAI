@@ -1911,6 +1911,9 @@ function hasSensitiveManualFragmentState(
   parentUrl: URL,
   nestingDepth: number
 ) {
+  if (hasUnsafeNestedManualUrl(value, parentUrl, nestingDepth)) {
+    return true;
+  }
   const fragment = value.replace(/^\/+/, "");
   const queryLike = fragment.includes("?")
     ? fragment.slice(fragment.indexOf("?") + 1)
@@ -1943,15 +1946,17 @@ function hasUnsafeNestedManualUrl(
   parameterKey?: string
 ) {
   const trimmed = value.trim();
-  if (
-    nestingDepth >= 2 ||
-    !(
-      /^(?:https?:\/\/|\/\/|\/|\.\.?(?:\/|$))/i.test(trimmed) ||
+  const isUrlLike = Boolean(
+    /^(?:https?:\/\/|\/\/|\/|\.\.?(?:\/|$))/i.test(trimmed) ||
+      /^(?:https?:)?[\\/]{2}/i.test(trimmed) ||
       /^[^?#\s]+\/[^\s]*$/.test(trimmed) ||
       (parameterKey && isNavigationManualUrlKey(parameterKey))
-    )
-  ) {
+  );
+  if (!isUrlLike) {
     return false;
+  }
+  if (nestingDepth >= 2) {
+    return true;
   }
   try {
     const nested = new URL(trimmed, parentUrl);
@@ -1963,6 +1968,7 @@ function hasUnsafeNestedManualUrl(
       )
     );
     return (
+      nested.origin !== parentUrl.origin ||
       !["http:", "https:"].includes(nested.protocol) ||
       Boolean(nested.username || nested.password) ||
       hasInvalidPort ||
@@ -2118,6 +2124,9 @@ function getManualSecurityTokens(value: string) {
 function isSensitiveManualUrlKey(value: string) {
   const normalized = value.normalize("NFKC").replace(/[^a-z0-9]/gi, "").toLowerCase();
   return (
+    /^(?:sid|cfid|cftoken|oscsid|connectsid|j(?:ava)?sessionid[a-z0-9]*|php(?:sess|session)id[a-z0-9]*|asp(?:net)?sessionid[a-z0-9]*|sessionid[a-z0-9]*)$/.test(
+      normalized
+    ) ||
     /^(?:token|secret|nonce|jwt|ticket|loginticket|serviceticket|authorization|signature|signed|sig|credential|password|expires?|expiry|expiration|assertion|relaystate|saml(?:response|art)?|oauth(?:token|code|state|verifier)?|authcode|verificationcode|session(?:id|token|key|state)?|clientid|responsetype|redirecturi|granttype|scope|codechallenge|codeverifier|(?:access|auth|id|api|client)(?:token|key|secret))$/.test(
       normalized
     ) ||
@@ -2212,11 +2221,7 @@ function isPrivateManualHostname(hostname: string) {
     normalized.endsWith(".lan") ||
     normalized.endsWith(".home") ||
     normalized.endsWith(".corp") ||
-    normalized === "::1" ||
-    (normalized.includes(":") &&
-      (normalized.startsWith("fc") ||
-        normalized.startsWith("fd") ||
-        normalized.startsWith("fe80:"))) ||
+    normalized.includes(":") ||
     /^\d+$|^0x[\da-f]+$/i.test(normalized)
   ) {
     return true;
@@ -2228,7 +2233,7 @@ function isPrivateManualHostname(hostname: string) {
   ) {
     return false;
   }
-  const [first, second] = ipv4;
+  const [first, second, third] = ipv4;
   return (
     first === 0 ||
     first === 10 ||
@@ -2237,6 +2242,11 @@ function isPrivateManualHostname(hostname: string) {
     (first === 169 && second === 254) ||
     (first === 172 && second >= 16 && second <= 31) ||
     (first === 192 && second === 168) ||
+    (first === 192 && second === 0 && (third === 0 || third === 2)) ||
+    (first === 192 && second === 88 && third === 99) ||
+    (first === 198 && (second === 18 || second === 19)) ||
+    (first === 198 && second === 51 && third === 100) ||
+    (first === 203 && second === 0 && third === 113) ||
     first >= 224
   );
 }
@@ -2555,14 +2565,18 @@ function findTargetCourseContactEvidence(courseName: string, visibleText: string
 }
 
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
+  // Stored blocks and structurally runnable providers stay on the non-interactive,
+  // address-pinned remediation path. The Playwright probe follows page links and
+  // must not be used to reclassify access controls or retry a known adapter.
+  if (course.automationEligibility === "BLOCKED") {
+    return false;
+  }
+
   if (!evaluateMonitoringGate(course).adapterAllowed) {
     return false;
   }
 
-  if (
-    resolveProviderCapability(course).isRunnable &&
-    !hasCurrentRepeatedMonitoringFailure(course.monitoringFailureEvidence)
-  ) {
+  if (resolveProviderCapability(course).isRunnable) {
     return false;
   }
 

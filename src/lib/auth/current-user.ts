@@ -14,5 +14,9 @@ export async function getRequiredAppUser() {
     throw new Error("Current Clerk user does not have a primary email");
   }
 
-  return upsertClerkUser({ clerkUserId: userId, email });
+  return upsertClerkUser({
+    clerkUserId: userId,
+    email,
+    clerkUpdatedAt: new Date(clerkUser.updatedAt)
+  });
 }

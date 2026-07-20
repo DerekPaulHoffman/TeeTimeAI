@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchCpsSlots,
   fetchCpsTeeSheet,
-  isCpsAutomationPolicyBlockedError,
   isCpsMetadata
 } from "./cps";
 
@@ -542,26 +541,29 @@ describe("fetchCpsSlots", () => {
       })
     );
 
-    const error = await fetchCpsTeeSheet(
+    const outcome = await fetchCpsTeeSheet(
       persistedCpsInput({ holes: [18] })
-    ).catch((caught) => caught as Error);
+    ).catch((caught: unknown) => caught);
+    if (!(outcome instanceof Error)) {
+      throw new Error("Expected the malformed CPS response to fail");
+    }
 
-    expect(error.message).toContain(
+    expect(outcome.message).toContain(
       "topLevel=object;topKeys=content,transactionId,+1;content=object"
     );
-    expect(error.message).toContain(
+    expect(outcome.message).toContain(
       `messageKey=string:length=${secretMessageKey.length}`
     );
-    expect(error.message).toContain(
+    expect(outcome.message).toContain(
       `messageDetail=string:length=${secretDetail.length}`
     );
-    expect(error.message).not.toContain(secretDetail);
-    expect(error.message).not.toContain(secretMessageKey);
-    expect(error.message).not.toContain("PROVIDER_SECRET_FIELD_ABC123");
-    expect(error.message).not.toContain("PROVIDER_SECRET_PROPERTY_ABC123");
-    expect(error.message).not.toContain("private-transaction-value");
-    expect(error.message).not.toContain("provider-secret-value");
-    expect(error.message.length).toBeLessThan(400);
+    expect(outcome.message).not.toContain(secretDetail);
+    expect(outcome.message).not.toContain(secretMessageKey);
+    expect(outcome.message).not.toContain("PROVIDER_SECRET_FIELD_ABC123");
+    expect(outcome.message).not.toContain("PROVIDER_SECRET_PROPERTY_ABC123");
+    expect(outcome.message).not.toContain("private-transaction-value");
+    expect(outcome.message).not.toContain("provider-secret-value");
+    expect(outcome.message.length).toBeLessThan(400);
   });
 
   it("records only the allowlisted no-tee-times protocol code", async () => {
@@ -575,12 +577,15 @@ describe("fetchCpsSlots", () => {
       })
     );
 
-    const error = await fetchCpsTeeSheet(
+    const outcome = await fetchCpsTeeSheet(
       persistedCpsInput({ holes: [18] })
-    ).catch((caught) => caught as Error);
+    ).catch((caught: unknown) => caught);
+    if (!(outcome instanceof Error)) {
+      throw new Error("Expected the invalid CPS response to fail");
+    }
 
-    expect(error.message).toContain("messageKey=NO_TEETIMES");
-    expect(error.message).toContain("messageDetail=null");
+    expect(outcome.message).toContain("messageKey=NO_TEETIMES");
+    expect(outcome.message).toContain("messageDetail=null");
   });
 
   it("rejects the whole CPS result when 18 holes succeed but 9 holes return invalid schema", async () => {
@@ -1261,80 +1266,39 @@ describe("fetchCpsSlots", () => {
     });
   });
 
-  it("stops after an access denial when the official robots policy blocks the required endpoint", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = input.toString();
-      if (url.endsWith("/onlineresweb/Home/Configuration")) {
-        return new Response("Forbidden", { status: 403 });
-      }
-      if (url.endsWith("/robots.txt")) {
-        return new Response(
-          [
-            "User-agent: *",
-            "Disallow: /",
-            "Allow: /onlineresweb/index.html"
-          ].join("\n"),
-          { status: 200 }
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
+  it.each([401, 403])(
+    "preserves the CPS configuration HTTP %i failure without fetching policy text",
+    async (status) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input) => {
+          const url = input.toString();
+          if (url.endsWith("/onlineresweb/Home/Configuration")) {
+            return new Response("Access denied", { status });
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
+        });
 
-    const error = await fetchCpsSlots({
-      courseId: "policy-blocked",
-      date: new Date("2026-07-18T00:00:00.000Z"),
-      players: 2,
-      metadata: {
-        provider: "CPS",
-        siteName: "policy-blocked",
-        bookingBaseUrl: "https://policy-blocked.cps.golf/",
-        courseIds: [1]
-      }
-    }).catch((caught) => caught);
+      await expect(
+        fetchCpsSlots({
+          courseId: "access-failed",
+          date: new Date("2026-07-18T00:00:00.000Z"),
+          players: 2,
+          metadata: {
+            provider: "CPS",
+            siteName: "access-failed",
+            bookingBaseUrl: "https://access-failed.cps.golf/",
+            courseIds: [1]
+          }
+        })
+      ).rejects.toThrow(`CPS configuration returned ${status}`);
 
-    expect(isCpsAutomationPolicyBlockedError(error)).toBe(true);
-    expect(error).toEqual(
-      expect.objectContaining({
-        bookingUrl: "https://policy-blocked.cps.golf/",
-        policyUrl: "https://policy-blocked.cps.golf/robots.txt"
-      })
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("preserves the provider auth failure when robots explicitly allows the configuration path", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = input.toString();
-      if (url.endsWith("/onlineresweb/Home/Configuration")) {
-        return new Response("Forbidden", { status: 403 });
-      }
-      if (url.endsWith("/robots.txt")) {
-        return new Response(
-          [
-            "User-agent: *",
-            "Disallow: /",
-            "Allow: /onlineresweb/Home/Configuration"
-          ].join("\n"),
-          { status: 200 }
-        );
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
-
-    await expect(
-      fetchCpsSlots({
-        courseId: "auth-failed",
-        date: new Date("2026-07-18T00:00:00.000Z"),
-        players: 2,
-        metadata: {
-          provider: "CPS",
-          siteName: "auth-failed",
-          bookingBaseUrl: "https://auth-failed.cps.golf/",
-          courseIds: [1]
-        }
-      })
-    ).rejects.toThrow("CPS configuration returned 403");
-  });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0].toString()).toBe(
+        "https://access-failed.cps.golf/onlineresweb/Home/Configuration"
+      );
+    }
+  );
 });
 
 function cpsNoTeeTimesResponse(input?: {

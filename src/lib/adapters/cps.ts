@@ -128,26 +128,6 @@ export type CpsTeeSheetResult = {
   bookingWindowEvidence: BookingWindowEvidence | null;
 };
 
-export class CpsAutomationPolicyBlockedError extends Error {
-  readonly bookingUrl: string;
-  readonly policyUrl: string;
-
-  constructor(input: { bookingUrl: string; policyUrl: string }) {
-    super(
-      "The official CPS robots policy disallows automated access to the required reservation endpoint"
-    );
-    this.name = "CpsAutomationPolicyBlockedError";
-    this.bookingUrl = input.bookingUrl;
-    this.policyUrl = input.policyUrl;
-  }
-}
-
-export function isCpsAutomationPolicyBlockedError(
-  error: unknown
-): error is CpsAutomationPolicyBlockedError {
-  return error instanceof CpsAutomationPolicyBlockedError;
-}
-
 export function isCpsMetadata(value: unknown): value is CpsMetadata {
   if (!value || typeof value !== "object") {
     return false;
@@ -413,15 +393,6 @@ async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguratio
   return retryCpsReadOnTimeout(async () => {
     const response = await fetchWithProviderTimeout(url);
     if (!response.ok) {
-      if (
-        (response.status === 401 || response.status === 403) &&
-        (await isCpsPathBlockedByOfficialRobots(metadata.bookingBaseUrl, url.pathname))
-      ) {
-        throw new CpsAutomationPolicyBlockedError({
-          bookingUrl: metadata.bookingBaseUrl,
-          policyUrl: new URL("/robots.txt", metadata.bookingBaseUrl).toString()
-        });
-      }
       throw providerHttpError("CPS configuration", response);
     }
 
@@ -568,97 +539,6 @@ function isPublicHostname(value: string) {
       !hostname.endsWith(".internal") &&
       !hostname.endsWith(".lan")
   );
-}
-
-async function isCpsPathBlockedByOfficialRobots(
-  bookingBaseUrl: string,
-  requestPath: string
-) {
-  try {
-    const robotsUrl = new URL("/robots.txt", bookingBaseUrl);
-    const response = await fetchWithProviderTimeout(robotsUrl, {
-      headers: { accept: "text/plain" }
-    });
-    if (!response.ok) {
-      return false;
-    }
-    const robotsText = await response.text();
-    return isPathDisallowedForWildcardAgent(robotsText, requestPath);
-  } catch {
-    return false;
-  }
-}
-
-function isPathDisallowedForWildcardAgent(robotsText: string, requestPath: string) {
-  const groups: Array<{
-    agents: string[];
-    rules: Array<{ kind: "allow" | "disallow"; pattern: string }>;
-  }> = [];
-  let agents: string[] = [];
-  let rules: Array<{ kind: "allow" | "disallow"; pattern: string }> = [];
-  const flushGroup = () => {
-    if (agents.length > 0) {
-      groups.push({ agents, rules });
-    }
-    agents = [];
-    rules = [];
-  };
-
-  for (const rawLine of robotsText.split(/\r?\n/)) {
-    const line = rawLine.replace(/#.*$/, "").trim();
-    if (!line) {
-      continue;
-    }
-    const separator = line.indexOf(":");
-    if (separator < 0) {
-      continue;
-    }
-    const field = line.slice(0, separator).trim().toLowerCase();
-    const value = line.slice(separator + 1).trim();
-    if (field === "user-agent") {
-      if (rules.length > 0) {
-        flushGroup();
-      }
-      agents.push(value.toLowerCase());
-      continue;
-    }
-    if ((field === "allow" || field === "disallow") && agents.length > 0) {
-      if (field === "allow" || value) {
-        rules.push({ kind: field, pattern: value });
-      }
-    }
-  }
-  flushGroup();
-
-  const matchingRules = groups
-    .filter((group) => group.agents.includes("*"))
-    .flatMap((group) => group.rules)
-    .filter((rule) => robotsPatternMatches(rule.pattern, requestPath))
-    .sort((left, right) => {
-      const specificity = robotsPatternSpecificity(right.pattern) - robotsPatternSpecificity(left.pattern);
-      if (specificity !== 0) {
-        return specificity;
-      }
-      return left.kind === right.kind ? 0 : left.kind === "allow" ? -1 : 1;
-    });
-
-  return matchingRules[0]?.kind === "disallow";
-}
-
-function robotsPatternMatches(pattern: string, requestPath: string) {
-  if (!pattern) {
-    return false;
-  }
-  const endAnchored = pattern.endsWith("$");
-  const sourcePattern = endAnchored ? pattern.slice(0, -1) : pattern;
-  const source = sourcePattern
-    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*");
-  return new RegExp(`^${source}${endAnchored ? "$" : ""}`).test(requestPath);
-}
-
-function robotsPatternSpecificity(pattern: string) {
-  return pattern.replace(/[*$]/g, "").length;
 }
 
 async function fetchShortLivedToken(configuration: CpsConfiguration) {

@@ -9,6 +9,7 @@ import {
   listPendingMatchAlerts,
   markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
+  markSearchStatusEmailSent,
   recordCourseBookingWindowEvidence,
   recordCourseProbe,
   recordCourseProbeIfChanged,
@@ -69,15 +70,18 @@ import {
   sendSearchStatusEmail,
   sendTeeTimeAlert
 } from "@/lib/email/alerts";
-import { getRenderedAvailabilityStartTimes } from "@/lib/email/customer-email";
+import { getRenderedAvailabilityTimes } from "@/lib/email/customer-email";
 import {
   drainSearchEmailDeliveryGroup,
   finalizeSearchEmailDeliveryGroup,
+  getPendingStatusEmailReplacement,
   getSafeOfficialBookingUrl,
   hydrateMatchAlertPayload,
   hydrateSearchStatusEmailPayload,
   listRetryableSearchEmailDeliveryGroups,
+  prepareRecipientMatchDeliveryGroups,
   prepareSearchEmailDeliveryGroup,
+  satisfyPendingDailyStatusReplacementWithMatch,
   toSearchEmailJson
 } from "@/lib/email/search-delivery-outbox";
 import {
@@ -303,17 +307,15 @@ async function checkSearch(
       const technicalFinal = monitoringGate.disposition === "TECHNICAL_FINAL";
       const outcome = technicalFinal ? "BLOCKED_AUTH" : "BLOCKED_POLICY";
       const message = getFinalMonitoringMessage(course, monitoringGate.disposition);
-      if (monitoringGate.disposition === "IDENTITY_FINAL") {
-        await markMissingMatchesUnavailable({
-          searchId: search.id,
-          alertGeneration: search.alertGeneration,
-          checkLeaseToken: lease.token,
-          courseId: course.id,
-          date: searchWindow.date,
-          timeZone: course.timeZone,
-          confirmedMatches: []
-        });
-      }
+      await markMissingMatchesUnavailable({
+        searchId: search.id,
+        alertGeneration: search.alertGeneration,
+        checkLeaseToken: lease.token,
+        courseId: course.id,
+        date: searchWindow.date,
+        timeZone: course.timeZone,
+        confirmedMatches: []
+      });
       await recordCourseProbeIfChanged({
         searchId: search.id,
         courseId: course.id,
@@ -546,18 +548,26 @@ async function checkSearch(
         courseResults.push(buildBookingWindowCourseReport(course, bookingWindow));
         return;
       }
-      const availability = summarizeSearchStatusAvailability(searchWindow, rawSlots);
-      const bookableHoleCounts = summarizeBookableHoleCounts(rawSlots);
-      const pricing = summarizeCourseSlotPrices(rawSlots);
+      const safeRawSlots = rawSlots.flatMap((slot) => {
+        const bookingUrl = getSafeOfficialBookingUrl(slot.bookingUrl);
+        return bookingUrl ? [{ ...slot, bookingUrl }] : [];
+      });
+      const unsafeBookingUrlCount = rawSlots.length - safeRawSlots.length;
+      const availability = summarizeSearchStatusAvailability(searchWindow, safeRawSlots);
+      const bookableHoleCounts = summarizeBookableHoleCounts(safeRawSlots);
+      const pricing = summarizeCourseSlotPrices(safeRawSlots);
       const currentMatches = rankMatches(
         searchWindow,
-        dedupeMatches(filterSlotsForSearch(searchWindow, rawSlots), [])
+        dedupeMatches(filterSlotsForSearch(searchWindow, safeRawSlots), [])
       );
       const normalizedCurrentMatches = currentMatches.map((match) => ({
         match,
         startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone)
       }));
-      const persistedPendingStates: boolean[] = [];
+      const persistedMatchStates: Array<{
+        matchId?: string;
+        isPending: boolean;
+      }> = [];
 
       for (const { match, startsAt } of normalizedCurrentMatches) {
         const persistedMatch = await recordTeeTimeMatch({
@@ -571,7 +581,10 @@ async function checkSearch(
           holes: match.holes,
           evidenceUrl: match.evidenceUrl
         });
-        persistedPendingStates.push(persistedMatch?.alertStatus === "PENDING");
+        persistedMatchStates.push({
+          matchId: persistedMatch?.id,
+          isPending: persistedMatch?.alertStatus === "PENDING"
+        });
       }
 
       await markMissingMatchesUnavailable({
@@ -587,6 +600,47 @@ async function checkSearch(
         }))
       });
 
+      if (unsafeBookingUrlCount > 0) {
+        const unsafeBookingMessage =
+          "The provider returned a non-direct or unsafe booking destination; unsafe rows were excluded.";
+        const supportIssue = await reportCourseSupportIssue({
+          course,
+          searchId: search.id,
+          kind: "FETCH_FAILED",
+          message: unsafeBookingMessage,
+          error: new Error(unsafeBookingMessage),
+          nextAction:
+            "Verify the provider adapter returns only direct public booking destinations."
+        });
+        supportIssues.push({ courseId: course.id, ...supportIssue });
+        if (safeRawSlots.length === 0) {
+          await recordCourseProbe({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId,
+            outcome: "FETCH_FAILED",
+            message: unsafeBookingMessage,
+            rawSummary: {
+              providerExecution: "RUNNABLE_PROVIDER_CHECK",
+              unsafeBookingUrlCount
+            }
+          });
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome: "FETCH_FAILED",
+            availableMatches: 0,
+            message: unsafeBookingMessage,
+            bookingUrl: getCustomerBookingUrl(course),
+            phone: course.bookingPhone ?? course.phone ?? undefined,
+            bookingMethod: course.bookingMethod,
+            bookingAccess: getCourseBookingAccess(course)
+          });
+          return;
+        }
+      }
+
       const outcome = currentMatches.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
       await recordCourseProbe({
         searchId: search.id,
@@ -601,14 +655,17 @@ async function checkSearch(
           providerExecution: "RUNNABLE_PROVIDER_CHECK",
           ...availability,
           ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
-          ...(pricing ? { pricing } : {})
+          ...(pricing ? { pricing } : {}),
+          ...(unsafeBookingUrlCount > 0 ? { unsafeBookingUrlCount } : {})
         }
       });
-      await resolveCourseSupportIncident({
-        courseId: course.id,
-        resolution: "MONITORING_RESTORED",
-        message: `${course.name} completed a public read-only tee-sheet check with outcome ${outcome}.`
-      });
+      if (unsafeBookingUrlCount === 0) {
+        await resolveCourseSupportIncident({
+          courseId: course.id,
+          resolution: "MONITORING_RESTORED",
+          message: `${course.name} completed a public read-only tee-sheet check with outcome ${outcome}.`
+        });
+      }
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -616,25 +673,25 @@ async function checkSearch(
         outcome,
         availableMatches: currentMatches.length,
         bookingUrl:
-          rawSlots[0]?.bookingUrl ??
-          course.detectedBookingUrl ??
-          course.website ??
-          undefined,
+          safeRawSlots[0]?.bookingUrl ?? getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: rawSlots[0]?.bookingUrl
+        bookingMethod: safeRawSlots[0]?.bookingUrl
           ? "PUBLIC_ONLINE"
           : course.bookingMethod,
-        bookingAccess: rawSlots[0]?.bookingUrl
+        bookingAccess: safeRawSlots[0]?.bookingUrl
           ? "BOOKING_PAGE"
           : getCourseBookingAccess(course),
         availability,
         matchingTimes: currentMatches.map((match, index) => ({
+          ...(persistedMatchStates[index]?.matchId
+            ? { matchId: persistedMatchStates[index].matchId }
+            : {}),
           startsAt: match.startsAt,
           availableSpots: match.availableSpots,
           priceCents: match.priceCents,
           holes: match.holes,
           bookableHoleCounts: match.bookableHoleCounts,
-          isNew: persistedPendingStates[index] === true
+          isNew: persistedMatchStates[index]?.isPending === true
         }))
       });
     } catch (error) {
@@ -719,29 +776,114 @@ async function checkSearch(
     supportIssues.some((issue) => issue.status === "UNRECORDED");
 
   await maintainSearchCheckLease(lease);
-  await retryExistingSearchEmailDeliveryGroups({
+  const checkedAt = new Date();
+  const statusKindBeforeRetry = getSearchStatusEmailKind(
+    search.statusEmailSentAt,
+    checkedAt,
+    search.userTimeZone
+  );
+  const retriedDeliveries = await retryExistingSearchEmailDeliveryGroups({
     searchId: search.id,
     alertGeneration: search.alertGeneration,
     lease,
     assertCurrent: () => maintainSearchCheckLease(lease)
   });
+  const retriedMatchCoveredDaily =
+    statusKindBeforeRetry === "daily" &&
+    retriedDeliveries.ownerSentMatchCount > 0;
+  if (retriedMatchCoveredDaily) {
+    const updated = await markSearchStatusEmailSent({
+      searchId: search.id,
+      alertGeneration: search.alertGeneration,
+      checkLeaseToken: lease.token,
+      sentAt: checkedAt,
+      snapshot: toSearchEmailJson(buildSearchStatusSnapshot(courseResults))
+    });
+    if (updated.count !== 1) {
+      throw new SearchCheckLeaseLostError();
+    }
+    newlyAlertedMatches += retriedDeliveries.ownerSentMatchCount;
+  }
+  let pendingStatusReplacement = await getPendingStatusEmailReplacement({
+    searchId: search.id,
+    alertGeneration: search.alertGeneration
+  });
+  if (
+    retriedMatchCoveredDaily &&
+    pendingStatusReplacement?.kind === "DAILY"
+  ) {
+    const satisfied = await satisfyPendingDailyStatusReplacementWithMatch({
+      searchId: search.id,
+      alertGeneration: search.alertGeneration,
+      checkLeaseToken: lease.token,
+      groups: pendingStatusReplacement.groups,
+      now: checkedAt
+    });
+    if (!satisfied.current) {
+      throw new SearchCheckLeaseLostError();
+    }
+    pendingStatusReplacement = null;
+  }
   search = (await getActiveSearchForAutomation(searchId)) ?? search;
-  const checkedAt = new Date();
   await maintainSearchCheckLease(lease);
-  const statusEmailKind = getSearchStatusEmailKind(
-    search.statusEmailSentAt,
-    checkedAt,
-    search.userTimeZone
-  );
-  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = "skipped";
+  const statusEmailKind = pendingStatusReplacement
+    ? pendingStatusReplacement.kind === "SETUP"
+      ? "setup"
+      : "daily"
+    : getSearchStatusEmailKind(
+        search.statusEmailSentAt,
+        checkedAt,
+        search.userTimeZone
+      );
+  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
+    retriedMatchCoveredDaily ? "covered_by_match_alert" : "skipped";
 
-  if (statusEmailKind === "setup") {
+  if (pendingStatusReplacement) {
+    try {
+      const pendingMatches = await listPendingMatchAlerts(searchId);
+      const renderedPendingMatchIds = getRenderedPendingMatchIds(
+        pendingMatches,
+        courseResults
+      );
+      const coveredMatchIds = renderedPendingMatchIds;
+      const renderedPendingMatchIdSet = new Set(renderedPendingMatchIds);
+      statusEmailOutcome = await deliverSearchStatusReport({
+        search,
+        searchWindow,
+        courseResults,
+        checkedAt,
+        kind: statusEmailKind ?? "daily",
+        coveredMatchIds,
+        coveredMatchRefs: pendingMatches
+          .filter((match) => renderedPendingMatchIdSet.has(match.id))
+          .map((match) => ({
+            matchId: match.id,
+            availabilityCycle: match.availabilityCycle
+          })),
+        supersededStatusGroups: pendingStatusReplacement.groups,
+        lease,
+        assertCurrent: () => maintainSearchCheckLease(lease)
+      });
+      newlyAlertedMatches =
+        coveredMatchIds.length > 0 &&
+        (statusEmailOutcome === "sent" || statusEmailOutcome === "dry_run")
+          ? coveredMatchIds.length
+          : 0;
+    } catch (error) {
+      statusEmailOutcome = "failed";
+      console.error("[email:status-replacement-failed]", {
+        searchRef: createSearchLogReference(search.id),
+        message: error instanceof Error ? error.message : "Unknown status email failure"
+      });
+    }
+  } else if (statusEmailKind === "setup") {
     try {
       const setupPendingMatches = await listPendingMatchAlerts(searchId);
       const renderedPendingMatchIds = getRenderedPendingMatchIds(
         setupPendingMatches,
         courseResults
       );
+      const renderedPendingMatchIdSet = new Set(renderedPendingMatchIds);
       statusEmailOutcome = await deliverSearchStatusReport({
         search,
         searchWindow,
@@ -749,6 +891,12 @@ async function checkSearch(
         checkedAt,
         kind: statusEmailKind,
         coveredMatchIds: renderedPendingMatchIds,
+        coveredMatchRefs: setupPendingMatches
+          .filter((match) => renderedPendingMatchIdSet.has(match.id))
+          .map((match) => ({
+            matchId: match.id,
+            availabilityCycle: match.availabilityCycle
+          })),
         lease,
         assertCurrent: () => maintainSearchCheckLease(lease)
       });
@@ -764,7 +912,7 @@ async function checkSearch(
       });
     }
   } else {
-    newlyAlertedMatches = await sendPendingMatchAlerts(searchId, {
+    const matchDelivery = await sendPendingMatchAlerts(searchId, {
       searchWindow,
       courseResults,
       checkedAt,
@@ -773,8 +921,12 @@ async function checkSearch(
       lease,
       assertCurrent: () => maintainSearchCheckLease(lease)
     });
+    newlyAlertedMatches += matchDelivery.ownerSentMatchCount;
 
-    if (statusEmailKind === "daily" && newlyAlertedMatches > 0) {
+    if (
+      statusEmailKind === "daily" &&
+      (newlyAlertedMatches > 0 || matchDelivery.hasDurableMatchObligation)
+    ) {
       statusEmailOutcome = "covered_by_match_alert";
     } else if (statusEmailKind === "daily") {
       try {
@@ -811,24 +963,23 @@ async function checkSearch(
 function getRenderedPendingMatchIds(
   pendingMatches: Array<{
     id: string;
-    startsAt: Date;
     course: { id: string };
   }>,
   courseResults: SearchCheckCourseResult[]
 ) {
-  const renderedMatchKeys = new Set(
-    courseResults.flatMap((course) =>
-      getRenderedAvailabilityStartTimes(
-        course.matchingTimes ?? [],
-        course.timeZone
-      ).map((startsAt) => `${course.courseId}:${startsAt}`)
+  const pendingMatchIds = new Set(pendingMatches.map((match) => match.id));
+  return [
+    ...new Set(
+      courseResults.flatMap((course) =>
+        getRenderedAvailabilityTimes(course.matchingTimes ?? [], course.timeZone)
+          .map((match) => match.matchId)
+          .filter(
+            (matchId): matchId is string =>
+              typeof matchId === "string" && pendingMatchIds.has(matchId)
+          )
+      )
     )
-  );
-  return pendingMatches
-    .filter((match) =>
-      renderedMatchKeys.has(`${match.course.id}:${match.startsAt.getTime()}`)
-    )
-    .map((match) => match.id);
+  ];
 }
 
 async function retryExistingSearchEmailDeliveryGroups(input: {
@@ -837,12 +988,20 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
   lease: SearchCheckLease;
   assertCurrent: () => Promise<void>;
 }) {
-  const groups = await listRetryableSearchEmailDeliveryGroups({
-    searchId: input.searchId,
-    alertGeneration: input.alertGeneration
-  });
-  let blockingError: unknown;
-  for (const group of groups) {
+  const seen = new Set<string>();
+  let ownerSentMatchCount = 0;
+  for (let pass = 0; pass < 100; pass += 1) {
+    const groups = await listRetryableSearchEmailDeliveryGroups({
+      searchId: input.searchId,
+      alertGeneration: input.alertGeneration
+    });
+    const group = groups.find(
+      (candidate) => !seen.has(`${candidate.kind}\u0000${candidate.groupKey}`)
+    );
+    if (!group) {
+      return { ownerSentMatchCount };
+    }
+    seen.add(`${group.kind}\u0000${group.groupKey}`);
     await input.assertCurrent();
     let deliveryError: unknown;
     try {
@@ -852,7 +1011,12 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
         checkLeaseToken: input.lease.token,
         kind: group.kind,
         groupKey: group.groupKey,
-        send: async ({ recipient, idempotencyKey, payload }) => {
+        send: async ({
+          recipient,
+          idempotencyKey,
+          payload,
+          assertCurrentDelivery
+        }) => {
           await input.assertCurrent();
           if (group.kind === "MATCH") {
             const alert = await hydrateMatchAlertPayload({
@@ -860,6 +1024,8 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
               alertGeneration: input.alertGeneration,
               payload
             });
+            await input.assertCurrent();
+            await assertCurrentDelivery();
             return sendTeeTimeAlert({
               searchId: input.searchId,
               to: recipient,
@@ -868,6 +1034,8 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
             });
           }
           const report = await hydrateSearchStatusEmailPayload(payload);
+          await input.assertCurrent();
+          await assertCurrentDelivery();
           return sendSearchStatusEmail({
             searchId: input.searchId,
             to: recipient,
@@ -893,6 +1061,15 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
       const ownerFinalized =
         finalized.finalized ||
         ("ownerFinalized" in finalized && finalized.ownerFinalized === true);
+      if (
+        group.kind === "MATCH" &&
+        group.ownerRetryable === true &&
+        finalized.finalized &&
+        finalized.ownerSent &&
+        (finalized.sentMatchCount ?? 0) > 0
+      ) {
+        ownerSentMatchCount += finalized.sentMatchCount ?? 0;
+      }
       if (ownerFinalized) {
         if (!finalized.finalized) {
           console.warn("[email:additional-recipient-retry-pending]", {
@@ -902,20 +1079,23 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
         }
         continue;
       }
-      blockingError ??=
-        deliveryError ??
-        new Error("Existing search email delivery owner did not reach a terminal state");
     } catch (error) {
       if (error instanceof SearchCheckLeaseLostError) {
         throw error;
       }
-      blockingError ??= deliveryError ?? error;
-      continue;
+      deliveryError ??= error;
+    }
+    if (deliveryError) {
+      console.warn("[email:existing-delivery-pending]", {
+        searchRef: createSearchLogReference(input.searchId),
+        kind: group.kind
+      });
     }
   }
-  if (blockingError) {
-    throw blockingError;
-  }
+  console.warn("[email:delivery-retry-pass-limit]", {
+    searchRef: createSearchLogReference(input.searchId)
+  });
+  return { ownerSentMatchCount };
 }
 
 function getCourseBookingAccess(
@@ -958,6 +1138,11 @@ async function deliverSearchStatusReport(input: {
   checkedAt: Date;
   kind: "setup" | "daily";
   coveredMatchIds?: string[];
+  coveredMatchRefs?: Array<{ matchId: string; availabilityCycle: number }>;
+  supersededStatusGroups?: Array<{
+    kind: "SETUP" | "DAILY";
+    groupKey: string;
+  }>;
   lease: SearchCheckLease;
   assertCurrent?: () => Promise<void>;
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
@@ -981,10 +1166,23 @@ async function deliverSearchStatusReport(input: {
     input.search.user.email,
     input.search.additionalEmails
   );
-  const periodKey =
+  const availableMatches = await listAvailableMatchAlerts(input.search.id);
+  const displayMatchIds = getRenderedPendingMatchIds(
+    availableMatches,
+    input.courseResults
+  );
+  const basePeriodKey =
     input.kind === "setup"
       ? `setup-${createEmailSnapshotKey(persistedStatusReport)}`
       : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}-${createEmailSnapshotKey(persistedStatusReport)}`;
+  const replacementSuffix = input.supersededStatusGroups?.length
+    ? `-replacement-${createEmailSnapshotKey(
+        input.supersededStatusGroups
+          .map((group) => `${group.kind}:${group.groupKey}`)
+          .sort()
+      )}`
+    : "";
+  const periodKey = `${basePeriodKey}${replacementSuffix}`;
   await input.assertCurrent?.();
   const deliveryKind = input.kind === "setup" ? "SETUP" : "DAILY";
   const prepared = await prepareSearchEmailDeliveryGroup({
@@ -995,26 +1193,81 @@ async function deliverSearchStatusReport(input: {
     groupKey: periodKey,
     recipients,
     ownerRecipient: input.search.user.email,
+    supersededStatusGroups: input.supersededStatusGroups,
     payload: {
       schemaVersion: 2,
       checkedAt: input.checkedAt.toISOString(),
       statusSnapshot: snapshot,
       statusReport: persistedStatusReport,
-      ...(input.coveredMatchIds ? { matchIds: input.coveredMatchIds } : {})
+      displayMatchIds,
+      matchIds: input.coveredMatchIds ?? [],
+      matchRefs: input.coveredMatchRefs ?? []
     }
   });
   if (!prepared.prepared) {
     throw new SearchCheckLeaseLostError();
   }
-  const deliveries = await drainSearchEmailDeliveryGroup({
+  for (const continuation of prepared.continuationGroups ?? []) {
+    try {
+      await drainSearchEmailDeliveryGroup({
+        searchId: input.search.id,
+        alertGeneration: input.search.alertGeneration,
+        checkLeaseToken: input.lease.token,
+        kind: "MATCH",
+        groupKey: continuation.groupKey,
+        send: async ({
+          recipient,
+          idempotencyKey,
+          payload,
+          assertCurrentDelivery
+        }) => {
+          await input.assertCurrent?.();
+          const alert = await hydrateMatchAlertPayload({
+            searchId: input.search.id,
+            alertGeneration: input.search.alertGeneration,
+            payload
+          });
+          await input.assertCurrent?.();
+          await assertCurrentDelivery();
+          return sendTeeTimeAlert({
+            searchId: input.search.id,
+            to: recipient,
+            ...alert,
+            stableIdempotencyKey: idempotencyKey
+          });
+        }
+      });
+      await finalizeSearchEmailDeliveryGroup({
+        searchId: input.search.id,
+        alertGeneration: input.search.alertGeneration,
+        kind: "MATCH",
+        groupKey: continuation.groupKey
+      });
+    } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
+      console.warn("[email:status-match-continuation-pending]", {
+        searchRef: createSearchLogReference(input.search.id)
+      });
+    }
+  }
+  await drainSearchEmailDeliveryGroup({
     searchId: input.search.id,
     alertGeneration: input.search.alertGeneration,
     checkLeaseToken: input.lease.token,
     kind: deliveryKind,
     groupKey: periodKey,
-    send: async ({ recipient, idempotencyKey, payload }) => {
+    send: async ({
+      recipient,
+      idempotencyKey,
+      payload,
+      assertCurrentDelivery
+    }) => {
       await input.assertCurrent?.();
       const report = await hydrateSearchStatusEmailPayload(payload);
+      await input.assertCurrent?.();
+      await assertCurrentDelivery();
       return sendSearchStatusEmail({
         searchId: input.search.id,
         to: recipient,
@@ -1035,9 +1288,16 @@ async function deliverSearchStatusReport(input: {
     throw new Error("Search status email delivery group did not reach a terminal state");
   }
 
-  return deliveries.every((delivery) => delivery.status === "SUPPRESSED")
-    ? "dry_run"
-    : "sent";
+  if (finalized.ownerSent || finalized.ownerDeliveryOutcome === "SENT") {
+    return "sent";
+  }
+  if (finalized.ownerDeliveryOutcome === "DRY_RUN") {
+    return "dry_run";
+  }
+  if (finalized.ownerDeliveryOutcome === "PRIOR_REACHED") {
+    return "skipped";
+  }
+  return "failed";
 }
 
 async function sendPendingMatchAlerts(
@@ -1059,28 +1319,27 @@ async function sendPendingMatchAlerts(
 ) {
   const pendingMatches = await listPendingMatchAlerts(searchId);
   if (pendingMatches.length === 0) {
-    return 0;
+    return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
   const search = pendingMatches[0].teeSearch;
 
   const allAvailableMatches = await listAvailableMatchAlerts(searchId);
-  const currentMatchKeys = new Set(
+  const currentMatchIds = new Set(
     input.courseResults.flatMap((course) =>
-      (course.matchingTimes ?? []).map(
-        (time) =>
-          `${course.courseId}:${parseCourseLocalDateTime(time.startsAt, course.timeZone).getTime()}`
+      (course.matchingTimes ?? []).flatMap((time) =>
+        typeof time.matchId === "string" ? [time.matchId] : []
       )
     )
   );
   const availableMatches = allAvailableMatches.filter((match) =>
-    currentMatchKeys.has(`${match.course.id}:${match.startsAt.getTime()}`)
+    currentMatchIds.has(match.id)
   );
   const currentAvailableIds = new Set(availableMatches.map((match) => match.id));
   const currentPendingMatches = pendingMatches.filter((match) =>
     currentAvailableIds.has(match.id)
   );
   if (availableMatches.length === 0 || currentPendingMatches.length === 0) {
-    return 0;
+    return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
 
   const currentPendingIds = new Set(currentPendingMatches.map((match) => match.id));
@@ -1104,9 +1363,7 @@ async function sendPendingMatchAlerts(
       input.courseResults
         .find((course) => course.courseId === match.course.id)
         ?.matchingTimes?.find(
-          (time) =>
-            parseCourseLocalDateTime(time.startsAt, match.course.timeZone).getTime() ===
-            match.startsAt.getTime()
+          (time) => time.matchId === match.id
         )?.bookableHoleCounts ?? [],
     isNew: currentPendingIds.has(match.id)
   }));
@@ -1118,24 +1375,27 @@ async function sendPendingMatchAlerts(
     renderedMatchIds.has(match.id)
   );
   if (renderedPendingMatches.length === 0) {
-    return 0;
+    return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
 
   const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
   const batchKey = buildMatchDeliveryGroupKey(renderedPendingMatches);
   await input.assertCurrent?.();
-  const prepared = await prepareSearchEmailDeliveryGroup({
+  const prepared = await prepareRecipientMatchDeliveryGroups({
     searchId,
     alertGeneration: search.alertGeneration,
     checkLeaseToken: input.lease.token,
-    kind: "MATCH",
-    groupKey: batchKey,
+    sourceGroupKey: batchKey,
     recipients,
     ownerRecipient: search.user.email,
     payload: {
       schemaVersion: 2,
       checkedAt: input.checkedAt.toISOString(),
       matchIds: renderedPendingMatches.map((match) => match.id),
+      matchRefs: renderedPendingMatches.map((match) => ({
+        matchId: match.id,
+        availabilityCycle: match.availabilityCycle
+      })),
       displayMatchIds: renderedMatches.map((match) => match.matchId),
       satisfiesStatusReport: input.satisfiesStatusReport,
       statusSnapshot: buildSearchStatusSnapshot(input.courseResults),
@@ -1156,40 +1416,73 @@ async function sendPendingMatchAlerts(
   if (!prepared.prepared) {
     throw new SearchCheckLeaseLostError();
   }
-  const deliveries = await drainSearchEmailDeliveryGroup({
-    searchId,
-    alertGeneration: search.alertGeneration,
-    checkLeaseToken: input.lease.token,
-    kind: "MATCH",
-    groupKey: batchKey,
-    send: async ({ recipient, idempotencyKey, payload }) => {
-      await input.assertCurrent?.();
-      const alert = await hydrateMatchAlertPayload({
+  let ownerSentMatchCount = 0;
+  let hasDurableMatchObligation = prepared.hasExistingObligation;
+  const ownerRecipient = search.user.email.trim().toLowerCase();
+  for (const group of prepared.groups) {
+    try {
+      const deliveries = await drainSearchEmailDeliveryGroup({
         searchId,
         alertGeneration: search.alertGeneration,
-        payload
+        checkLeaseToken: input.lease.token,
+        kind: "MATCH",
+        groupKey: group.groupKey,
+        send: async ({
+          recipient,
+          idempotencyKey,
+          payload,
+          assertCurrentDelivery
+        }) => {
+          await input.assertCurrent?.();
+          const alert = await hydrateMatchAlertPayload({
+            searchId,
+            alertGeneration: search.alertGeneration,
+            payload
+          });
+          await input.assertCurrent?.();
+          await assertCurrentDelivery();
+          return sendTeeTimeAlert({
+            searchId,
+            to: recipient,
+            ...alert,
+            stableIdempotencyKey: idempotencyKey
+          });
+        }
       });
-      return sendTeeTimeAlert({
+      await input.assertCurrent?.();
+      const finalized = await finalizeSearchEmailDeliveryGroup({
         searchId,
-        to: recipient,
-        ...alert,
-        stableIdempotencyKey: idempotencyKey
+        alertGeneration: search.alertGeneration,
+        kind: "MATCH",
+        groupKey: group.groupKey
+      });
+      if (
+        deliveries.some((delivery) => delivery.status === "SENT") ||
+        (finalized.retainedMatchCount ?? 0) > 0 ||
+        finalized.ownerDeliveryOutcome === "AMBIGUOUS"
+      ) {
+        hasDurableMatchObligation = true;
+      }
+      if (
+        group.recipient === ownerRecipient &&
+        finalized.finalized &&
+        finalized.ownerSent &&
+        deliveries.length > 0
+      ) {
+        ownerSentMatchCount += finalized.sentMatchCount;
+      }
+    } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
+      hasDurableMatchObligation = true;
+      console.warn("[email:match-recipient-pending]", {
+        searchRef: createSearchLogReference(searchId)
       });
     }
-  });
-
-  await input.assertCurrent?.();
-  const finalized = await finalizeSearchEmailDeliveryGroup({
-    searchId,
-    alertGeneration: search.alertGeneration,
-    kind: "MATCH",
-    groupKey: batchKey
-  });
-  if (!finalized.finalized || deliveries.length === 0) {
-    throw new Error("Match email delivery group did not reach a terminal state");
   }
 
-  return finalized.ownerSent ? finalized.sentMatchCount : 0;
+  return { ownerSentMatchCount, hasDurableMatchObligation };
 }
 
 export function buildMatchDeliveryGroupKey(

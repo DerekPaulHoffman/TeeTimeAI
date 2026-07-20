@@ -1868,6 +1868,20 @@ describe("buildBrowserDiscovery", () => {
     "https://night-golf.example/callback?%2563lient_id=course&%2572esponse_type=code",
     "https://night-golf.example/callback?oauth_verifier=private",
     "https://night-golf.example/callback?session_state=private",
+    "https://night-golf.example/rates?next=/hop-one?next=/hop-two?next=http://127.0.0.1/private",
+    "https://night-golf.example/rates?next=/hop-one?next=/hop-two?next=/openings?JSESSIONID=private",
+    "https://night-golf.example/rates?redirect=https://provider.example/tee-times",
+    "https://night-golf.example/rates?JSESSIONID=private",
+    "https://night-golf.example/rates?PHPSESSID=private",
+    "https://night-golf.example/rates?PHPSESSIONID=private",
+    "https://night-golf.example/rates?ASPSESSIONIDABC123=private",
+    "https://night-golf.example/rates?ASP.NET_SessionId=private",
+    "https://night-golf.example/rates?SESSION_ID=private",
+    "https://night-golf.example/rates?sid=private",
+    "https://night-golf.example/rates?CFID=private",
+    "https://night-golf.example/rates?CFTOKEN=private",
+    "https://night-golf.example/rates?osCsid=private",
+    "https://night-golf.example/rates?connect.sid=private",
     "https://night-golf.example/callback?SAMLart=private",
     "https://night-golf.example/callback?login_ticket=private",
     "https://night-golf.example/callback2?code=PUBLIC",
@@ -1881,6 +1895,12 @@ describe("buildBrowserDiscovery", () => {
     "https://night-golf.example/rates?next=https%3A%2F%2Fmember-login.vendor.example%2Fstart",
     "https://night-golf.example/rates#access_token=private",
     "https://night-golf.example/rates#oauth_nonce=private",
+    "https://night-golf.example/rates#https://evil.example/login",
+    "https://night-golf.example/rates#//evil.example/path",
+    "https://night-golf.example/rates#https:%5C%5Cevil.example%2Fpath",
+    "https://night-golf.example/rates#%5C%5Cevil.example%5Cpath",
+    "https://night-golf.example/rates?campaign=%5C%5Cevil.example%5Cpath",
+    "https://night-golf.example/rates?redirect=https:%5C%5Cevil.example%2Fpath",
     "https://night-golf.example/rates?prompt=login",
     "https://night-golf.example/rates?code_challenge_method=S256",
     "https://night-golf.example/rates?response_mode=query",
@@ -1953,6 +1973,9 @@ describe("buildBrowserDiscovery", () => {
     "https://night-golf.example/rates?state=NC",
     "https://night-golf.example/rates?code=PUBLIC",
     "https://night-golf.example/rates?key=course",
+    "https://night-golf.example/rates?mapsId=public-course-map",
+    "https://night-golf.example/rates?note=front%5Cnine",
+    "https://night-golf.example/rates?redirect=/tee-times?date=2026-07-16",
     "https://night-golf.example/rates?destination=Raleigh",
     "https://night-golf.example/rates?target=public"
   ])("keeps legitimate public course paths eligible at %s", (publicUrl) => {
@@ -1980,6 +2003,19 @@ describe("buildBrowserDiscovery", () => {
     "https://localhost/rates/",
     "https://localhost./rates/",
     "https://10.0.0.1/rates/",
+    "https://[::1]/rates/",
+    "https://[fd00::1]/rates/",
+    "https://[2001:4860:4860::8888]/rates/",
+    "https://[::ffff:127.0.0.1]/rates/",
+    "https://[::ffff:10.0.0.1]/rates/",
+    "https://[::ffff:c0a8:101]/rates/",
+    "https://198.18.0.1/rates/",
+    "https://198.19.255.255/rates/",
+    "https://192.0.0.1/rates/",
+    "https://192.0.2.1/rates/",
+    "https://192.88.99.1/rates/",
+    "https://198.51.100.1/rates/",
+    "https://203.0.113.1/rates/",
     "https://course.internal/rates/",
     "https://course.internal./rates/",
     "https://foo.local./rates/",
@@ -2983,7 +3019,7 @@ describe("browser probe target selection", () => {
     ).toBe(true);
   });
 
-  it("requeues policy-only blocks while preserving current technical finals", () => {
+  it("keeps every stored block out of the interactive browser probe", () => {
     expect(
       shouldQueueBrowserProbe({
         detectedPlatform: "CUSTOM",
@@ -2993,7 +3029,7 @@ describe("browser probe target selection", () => {
         detectedBookingUrl: null,
         bookingMetadata: null
       })
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldQueueBrowserProbe({
         detectedPlatform: "FOREUP",
@@ -3055,7 +3091,7 @@ describe("browser probe target selection", () => {
     ).toBe(false);
   });
 
-  it("requeues structurally runnable metadata after a current repeated failure", () => {
+  it("keeps repeated runnable-provider failures on non-interactive remediation", () => {
     const course = {
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED",
@@ -3074,7 +3110,7 @@ describe("browser probe target selection", () => {
       }
     };
 
-    expect(shouldQueueBrowserProbe(course)).toBe(true);
+    expect(shouldQueueBrowserProbe(course)).toBe(false);
     expect(getBestProbeUrl(course)).toBe("https://course.example/");
   });
 
@@ -3174,6 +3210,28 @@ describe("browser probe target selection", () => {
           "https://booking.example.com/account/session/synthetic-secret"
       })
     ).toBeNull();
+  });
+
+  it.each([
+    "https://[::1]/rates/",
+    "https://[2001:4860:4860::8888]/rates/",
+    "https://[::ffff:127.0.0.1]/rates/",
+    "https://[::ffff:10.0.0.1]/rates/",
+    "https://198.18.0.1/rates/",
+    "https://198.19.255.255/rates/"
+  ])("keeps an unsafe literal host out of the browser probe: %s", (unsafeUrl) => {
+    expect(
+      getBestProbeUrl({ website: null, detectedBookingUrl: unsafeUrl })
+    ).toBeNull();
+  });
+
+  it("keeps a public IPv4 address outside the benchmark range eligible", () => {
+    expect(
+      getBestProbeUrl({
+        website: null,
+        detectedBookingUrl: "https://198.20.0.1/rates/"
+      })
+    ).toBe("https://198.20.0.1/rates/");
   });
 
   it("does not queue a legacy policy row whose only source is unsafe", () => {

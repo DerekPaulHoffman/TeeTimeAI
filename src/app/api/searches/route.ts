@@ -11,6 +11,7 @@ import {
   WEBSITE_TRAFFIC_CLASS_HEADER
 } from "@/lib/engagement/traffic-class";
 import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/service";
+import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { teeSearchInputSchema } from "@/lib/validation/search";
 
 export async function GET() {
@@ -148,6 +149,21 @@ function accountSetupError() {
 }
 
 function handleAppError(error: unknown) {
+  if (error instanceof SearchEmailDeliveryInProgressError) {
+    return NextResponse.json(
+      { error: error.message, retryable: true },
+      {
+        status: 409,
+        headers: error.retryAt
+          ? {
+              "Retry-After": String(
+                Math.max(1, Math.ceil((error.retryAt.getTime() - Date.now()) / 1000))
+              )
+            }
+          : undefined
+      }
+    );
+  }
   const message = getErrorMessage(error);
   const status = message === "Unauthorized" ? 401 : 400;
   return NextResponse.json({ error: message }, { status });
