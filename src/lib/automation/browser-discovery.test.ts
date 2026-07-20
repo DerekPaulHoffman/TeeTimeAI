@@ -1208,10 +1208,23 @@ describe("buildBrowserDiscovery", () => {
         {
           url: "https://www.delcopa.gov/parks/permits-forms",
           label: "Reservations and Permits"
+        },
+        {
+          url: "https://www.delcopa.gov/parks/permits-forms/reservations",
+          label: "Book a pavilion online"
         }
       ],
+      officialPage: {
+        url: "https://www.delcopa.gov/parks/clayton",
+        linkCandidates: [
+          {
+            url: "https://www.delcopa.gov/parks/permits-forms",
+            label: "Reservations and Permits"
+          }
+        ]
+      },
       visibleText:
-        "Clayton Park Golf Course The fairways of Clayton Golf Course provide a challenging round for players of all levels. Golfers can sneak in a quick round of 9 holes. The course is open daily, weather permitting. Clayton Golf Course is open to the public. Only golfers are permitted on the course. Every golfer must have their own bag of clubs. No tee times. Call 267-386-1969 with questions."
+        "Clayton Park Golf Course The fairways of Clayton Golf Course provide a challenging round for players of all levels. Golfers can sneak in a quick round of 9 holes. The course is open daily, weather permitting. Clayton Golf Course is open to the public. Only golfers are permitted on the course. Every golfer must have their own bag of clubs. No tee times. Call 267-386-1969 with questions. Pavilion reservations can be booked online from the permits page."
     });
 
     expect(discovery).toMatchObject({
@@ -3407,6 +3420,22 @@ describe("browser probe target selection", () => {
         detectedBookingUrl: "https://booking.example.com/tee-times"
       })
     ).toBe("https://booking.example.com/tee-times");
+  });
+
+  it("prefers the official course page over a same-host generic permits page", () => {
+    expect(
+      getBestProbeUrl({
+        website: "https://parks.example/courses/clayton",
+        detectedBookingUrl: "https://parks.example/parks/permits-forms"
+      })
+    ).toBe("https://parks.example/courses/clayton");
+
+    expect(
+      getBestProbeUrl({
+        website: "https://parks.example/courses/clayton",
+        detectedBookingUrl: "https://parks.example/golf/tee-time-forms"
+      })
+    ).toBe("https://parks.example/golf/tee-time-forms");
   });
 
   it("falls back to the official website instead of probing an unsafe booking surface", () => {

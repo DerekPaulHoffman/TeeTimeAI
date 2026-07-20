@@ -1093,23 +1093,28 @@ function learnWalkInClassification(
   }
 
   if (noTeeTimeEvidence) {
+    const officialSourceEvidence = getOfficialSourceScopedEvidence(
+      evidence,
+      noTeeTimeEvidence
+    );
+    const officialSourceUrls = officialSourceEvidence.observedUrls;
     if (
       evidence.bookingCallToAction ||
-      hasBookingCallToActionEvidence(evidence) ||
-      hasTransientTeeTimeRouteEvidence(evidence) ||
-      hasUnsafeManualEvidenceUrl(evidence, observedUrls)
+      hasBookingCallToActionEvidence(officialSourceEvidence) ||
+      hasTransientTeeTimeRouteEvidence(officialSourceEvidence) ||
+      hasUnsafeManualEvidenceUrl(officialSourceEvidence, officialSourceUrls)
     ) {
       return null;
     }
     const manualEvidence = getSafeCourseSourceManualEvidence(
-      evidence,
-      observedUrls
+      officialSourceEvidence,
+      officialSourceUrls
     );
     if (
       !manualEvidence ||
       hasCurrentOnlineBookingEvidence(
-        evidence,
-        observedUrls,
+        officialSourceEvidence,
+        officialSourceUrls,
         manualEvidence.evidenceUrl,
         true
       )
@@ -1296,6 +1301,27 @@ function getSafeCourseSourceManualEvidence(
     evidenceUrl: sourceUrl,
     observedUrls: [...new Set([sourceUrl, ...manualEvidence.observedUrls])]
   } satisfies SafeManualEvidence;
+}
+
+function getOfficialSourceScopedEvidence(
+  evidence: BrowserDiscoveryEvidence,
+  visibleText: string
+): BrowserDiscoveryEvidence {
+  const sourceUrl = evidence.officialPage?.url ?? evidence.sourceUrl;
+  const linkCandidates =
+    evidence.officialPage?.linkCandidates ?? evidence.linkCandidates ?? [];
+  const observedUrls = uniqueUrls([
+    sourceUrl,
+    ...linkCandidates.map(({ url }) => url)
+  ]);
+  return {
+    ...evidence,
+    sourceUrl,
+    finalUrl: sourceUrl,
+    observedUrls,
+    linkCandidates,
+    visibleText
+  };
 }
 
 function hasInterveningNamedSection(value: string, courseName: string) {
@@ -3643,7 +3669,34 @@ export function getBestProbeUrl(
   ) {
     return website;
   }
+  if (
+    website &&
+    bookingUrl &&
+    isSameHostGenericPermitDestination(website, bookingUrl)
+  ) {
+    return website;
+  }
   return bookingUrl ?? website;
+}
+
+function isSameHostGenericPermitDestination(website: string, bookingUrl: string) {
+  const official = parseUrl(website);
+  const detected = parseUrl(bookingUrl);
+  if (
+    !official ||
+    !detected ||
+    normalizeHostname(official.hostname) !== normalizeHostname(detected.hostname)
+  ) {
+    return false;
+  }
+  const route = `${detected.pathname} ${detected.search}`
+    .normalize("NFKC")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .trim();
+  return (
+    /\b(?:permits?|forms?)\b/i.test(route) &&
+    !/\b(?:golf|tee\s*times?)\b/i.test(route)
+  );
 }
 
 function getSafeBrowserProbeUrl(value: string | null | undefined) {
