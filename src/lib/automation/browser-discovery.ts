@@ -1080,9 +1080,46 @@ function learnWalkInClassification(
   observedUrls: string[]
 ): BrowserDiscovery | null {
   const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const noTeeTimeEvidence = findExplicitNoTeeTimeEvidence(
+    evidence.courseName,
+    visibleText
+  );
   const noReservationMatch = /\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b/i.exec(
     visibleText
   );
+
+  if (!noReservationMatch && !noTeeTimeEvidence) {
+    return null;
+  }
+
+  if (noTeeTimeEvidence) {
+    if (
+      evidence.bookingCallToAction ||
+      hasBookingCallToActionEvidence(evidence) ||
+      hasTransientTeeTimeRouteEvidence(evidence) ||
+      hasUnsafeManualEvidenceUrl(evidence, observedUrls)
+    ) {
+      return null;
+    }
+    const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
+    if (
+      !manualEvidence ||
+      hasCurrentOnlineBookingEvidence(
+        evidence,
+        observedUrls,
+        manualEvidence.evidenceUrl,
+        true
+      )
+    ) {
+      return null;
+    }
+
+    return buildWalkInDiscovery(evidence, manualEvidence, {
+      policyNotes:
+        "The course's official site says it does not use tee times. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+      learnedFrom: "official-no-tee-times-access"
+    });
+  }
 
   if (!noReservationMatch) {
     return null;
@@ -1131,6 +1168,154 @@ function learnWalkInClassification(
     return null;
   }
 
+  return buildWalkInDiscovery(evidence, manualEvidence, {
+    policyNotes:
+      "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+    learnedFrom: "official-walk-in-access"
+  });
+}
+
+function findExplicitNoTeeTimeEvidence(courseName: string, visibleText: string) {
+  const targetName = courseName.trim();
+  if (!targetName || !visibleText) {
+    return null;
+  }
+
+  const normalizedTarget = targetName.toLocaleLowerCase("en-US");
+  const normalizedText = visibleText.toLocaleLowerCase("en-US");
+  const matches = [
+    ...visibleText.matchAll(
+      /(?:^|[.!?;:]\s+|\n)no\s+tee\s+times?(?=\s*(?:[.!?;:]|$))(?!\s+(?:available|found|left|remaining)\b)/gi
+    )
+  ];
+
+  for (const match of matches) {
+    const matchStart = match.index ?? -1;
+    if (matchStart < 0) {
+      continue;
+    }
+    const targetStart = normalizedText.lastIndexOf(normalizedTarget, matchStart);
+    if (targetStart < 0 || matchStart - targetStart > 900) {
+      continue;
+    }
+    const betweenTargetAndStatement = visibleText.slice(
+      targetStart + targetName.length,
+      matchStart
+    );
+    const targetSectionBeforeStatement = visibleText.slice(
+      targetStart,
+      matchStart
+    );
+    const afterStatement = visibleText.slice(
+      matchStart + match[0].length,
+      Math.min(visibleText.length, matchStart + match[0].length + 180)
+    );
+    const immediateContactSentence = afterStatement
+      .replace(/^[\s.!?;:-]+/, "")
+      .split(/[.!?]/, 1)[0] ?? "";
+    const scopedText = visibleText.slice(
+      targetStart,
+      Math.min(visibleText.length, matchStart + match[0].length + 300)
+    );
+    const identifiesPublicPhysicalCourse =
+      /\bpublic\b[^.]{0,120}\b(?:nine|9|eighteen|18)[- ]hole\b/i.test(
+        targetSectionBeforeStatement
+      ) ||
+      /\b(?:nine|9|eighteen|18)[- ]hole\b[^.]{0,120}\bpublic\b/i.test(
+        targetSectionBeforeStatement
+      );
+    const questionOnlyContact =
+      /^(?:please\s+)?(?:call|contact)\b.{0,140}\b(?:with|for)\s+(?:any\s+)?questions?\b/i.test(
+        immediateContactSentence
+      ) &&
+      !/\b(?:book(?:ed|ing|ings|s)?|reserv(?:e|ed|es|ing|ation|ations)|tee\s+times?)\b/i.test(
+        immediateContactSentence
+      );
+    if (
+      !/\bopen\s+daily\b/i.test(betweenTargetAndStatement) ||
+      !identifiesPublicPhysicalCourse ||
+      !questionOnlyContact ||
+      hasInterveningNamedSection(betweenTargetAndStatement) ||
+      /\b(?:another\s+date|availability|choose|driving\s+range|inventory|practice\s+range|results?|search|selected\s+date|sold\s+out|try\s+again)\b/i.test(
+        betweenTargetAndStatement
+      ) ||
+      hasDifferentExplicitCourseIdentity(
+        scopedText.slice(targetName.length),
+        targetName
+      ) ||
+      /\b(?:search|results?|inventory|availability)\b[^.]{0,120}\bno\s+tee\s+times?\b/i.test(
+        scopedText
+      )
+    ) {
+      continue;
+    }
+    return scopedText;
+  }
+  return null;
+}
+
+function hasTransientTeeTimeRouteEvidence(evidence: BrowserDiscoveryEvidence) {
+  return [evidence.sourceUrl, evidence.finalUrl].some((value) => {
+    const url = parseUrl(value);
+    if (!url) {
+      return true;
+    }
+    const encodedRouteState = `${url.hostname} ${url.pathname} ${url.search}`;
+    let decodedRouteState = encodedRouteState;
+    try {
+      decodedRouteState = decodeURIComponent(encodedRouteState);
+    } catch {
+      // A malformed escape keeps the original bounded route text actionable.
+    }
+    const routeState = decodedRouteState
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    return /\b(?:book\w*|reserv\w*|search\w*|result\w*|availab\w*|calendar\w*|inventor\w*|schedul\w*|slots?|tee\s*times?)\b/i.test(
+      routeState
+    );
+  });
+}
+
+function hasInterveningNamedSection(value: string) {
+  const nonIdentityTokens = new Set([
+    "and",
+    "call",
+    "course",
+    "daily",
+    "fees",
+    "golf",
+    "hole",
+    "hours",
+    "nine",
+    "open",
+    "park",
+    "permitting",
+    "play",
+    "public",
+    "questions",
+    "rates",
+    "season",
+    "seasonal",
+    "the",
+    "to",
+    "weather"
+  ]);
+  return [...value.matchAll(/\b((?:[A-Z][\p{L}\p{N}'â€™&-]*\s+){0,5}[A-Z][\p{L}\p{N}'â€™&-]*)\b/gu)]
+    .some((match) => {
+      const tokens = normalizeCourseIdentityName(match[1] ?? "")
+        .split(" ")
+        .filter(Boolean);
+      return tokens.length >= 1 && tokens.some((token) => !nonIdentityTokens.has(token));
+    });
+}
+
+function buildWalkInDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  manualEvidence: NonNullable<ReturnType<typeof getSafeManualEvidence>>,
+  input: { policyNotes: string; learnedFrom: string }
+): BrowserDiscovery {
   return {
     courseId: evidence.courseId,
     status: "VERIFIED",
@@ -1140,15 +1325,14 @@ function learnWalkInClassification(
     bookingMethod: "WALK_IN",
     automationEligibility: "BLOCKED",
     automationReason: "NO_ONLINE_BOOKING",
-    policyNotes:
-      "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+    policyNotes: input.policyNotes,
     intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
     confidence: 0.98,
     evidence: {
       finalUrl: manualEvidence.evidenceUrl,
       observedUrls: manualEvidence.observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "official-walk-in-access"
+      learnedFrom: input.learnedFrom
     }
   };
 }
@@ -1633,7 +1817,34 @@ function hasCurrentOnlineBookingEvidence(
 }
 
 function hasBookingCallToActionEvidence(evidence: BrowserDiscoveryEvidence) {
-  return (evidence.linkCandidates ?? []).some(isBookingCallToActionCandidate);
+  return (evidence.linkCandidates ?? []).some(
+    (candidate) =>
+      isBookingCallToActionCandidate(candidate) ||
+      isGenericOnlineBookingCallToAction(candidate)
+  );
+}
+
+function isGenericOnlineBookingCallToAction(candidate: {
+  url: string;
+  label: string;
+}) {
+  const parsed = parseUrl(candidate.url);
+  if (
+    !parsed ||
+    isClearlyUnrelatedBookingLabel(candidate.label) ||
+    isClearlyUnrelatedBookingUrl(parsed)
+  ) {
+    return false;
+  }
+  const label = normalizeTeeTimeTypography(candidate.label)
+    .replace(/\s+/g, " ")
+    .trim();
+  return Boolean(
+    /\b(?:book(?:ing)?\s+online|online\s+booking)\b/i.test(label) &&
+      /(?:^|\/)(?:book|booking|reserve|reservation)(?:\/|$)/i.test(
+        parsed.pathname
+      )
+  );
 }
 
 function isBookingCallToActionCandidate(candidate: { url: string; label: string }) {

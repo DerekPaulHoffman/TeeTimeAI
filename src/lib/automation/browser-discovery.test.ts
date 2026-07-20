@@ -1172,6 +1172,172 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official course page that explicitly uses no tee times", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://www.delcopa.gov/parks/clayton",
+      finalUrl: "https://www.delcopa.gov/parks/clayton",
+      observedUrls: ["https://www.delcopa.gov/parks/clayton"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-no-tee-times-access" }
+    });
+  });
+
+  it("does not treat a temporary empty tee-time result as a walk-in course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://booking.example/search",
+      finalUrl: "https://booking.example/search",
+      observedUrls: ["https://booking.example/search"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily. Choose another date. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not terminally classify bare no-tee-times copy on a search route", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://booking.example/search",
+      finalUrl: "https://booking.example/search",
+      observedUrls: ["https://booking.example/search"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it.each([
+    "https://booking.example/golf",
+    "https://parks.example/calendar",
+    "https://parks.example/%73%6c%6f%74%73",
+    "https://parks.example/onlineBooking",
+    "https://parks.example/teeTimeSearch"
+  ])("does not terminally classify no-tee-times copy on booking state %s", (url) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: url,
+      finalUrl: url,
+      observedUrls: [url],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not apply a sibling course's no-tee-times rule to the target course", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-municipal",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf",
+      finalUrl: "https://parks.example/golf",
+      observedUrls: ["https://parks.example/golf"],
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole course. Westwoods is open daily. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not classify no-tee-times copy when the page exposes a booking call to action", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://parks.example/clayton",
+      finalUrl: "https://parks.example/clayton",
+      observedUrls: ["https://parks.example/clayton"],
+      linkCandidates: [
+        { url: "https://parks.example/booking", label: "Book Online" }
+      ],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not apply no-tee-times copy from a driving-range section", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://parks.example/clayton",
+      finalUrl: "https://parks.example/clayton",
+      observedUrls: ["https://parks.example/clayton"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Driving range open daily. No tee times. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not borrow no-tee-times corroboration from the following sibling section", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-municipal",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf",
+      finalUrl: "https://parks.example/golf",
+      observedUrls: ["https://parks.example/golf"],
+      visibleText:
+        "Target Municipal Golf Course is open daily. No tee times. Westwoods is a public nine-hole course. Call the course office with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not treat a booking instruction as question-only contact", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://parks.example/clayton",
+      finalUrl: "https://parks.example/clayton",
+      observedUrls: ["https://parks.example/clayton"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office to book a tee time or with questions."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("does not treat phone-reservation copy as question-only contact", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "clayton-park",
+      courseName: "Clayton Park Golf Course",
+      sourceUrl: "https://parks.example/clayton",
+      finalUrl: "https://parks.example/clayton",
+      observedUrls: ["https://parks.example/clayton"],
+      visibleText:
+        "Clayton Park Golf Course is a public nine-hole course. Open daily, weather permitting. No tee times. Call the course office with questions or reservations."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
   it("does not mistake a one-segment ForeUP booking id for a schedule id", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-westwoods",
