@@ -18,6 +18,14 @@ This file is the operating contract for Codex and other coding agents working in
 - Use `apply_patch` for manual file edits.
 - Keep the repo as a Next.js/TypeScript/Postgres app. The legacy Python crawler is reference-only.
 
+## Human-Readable Git And Vercel Names
+
+- Write branch names and commit titles in plain language that explains the visible product or operational outcome. A person scanning Vercel releases should understand what changed without knowing the provider, database model, internal workflow, or incident terminology.
+- Name branches after the outcome, such as `fix/show-correct-booking-links`, `feature/pause-alerts`, or `chore/improve-release-names`. Avoid opaque names such as `fix/cps-course-review` when a clearer outcome-based name is available.
+- Because Vercel displays the Git commit title in its deployment list, make every production-bound commit title a concise explanation of the change. Prefer `Show the correct booking links for public courses` over `fix: update CPS course review`.
+- Put useful technical detail in the commit body: why the change was needed, what behavior changed, and any important provider or implementation context. Do not force that detail into the title.
+- Use acronyms or internal system names in a branch or commit title only when they are widely understood and essential to identifying the change.
+
 ## Product Contract
 
 Tee Time Spot is an alert-only tee-time waitlist assistant for public golf courses.
