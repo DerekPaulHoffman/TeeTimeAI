@@ -18,6 +18,7 @@ export type CpsMetadata = {
   websiteId?: string;
   onlineApi?: string;
   authorityBaseUrl?: string;
+  resolvePlaceholderCourseIds?: boolean;
 };
 
 type CpsConfiguration = {
@@ -106,6 +107,8 @@ const CPS_NO_TEE_TIMES_MESSAGE_DETAIL =
   "No tee times available,please try different criteria.";
 const CPS_NO_TEE_TIMES_MESSAGE_TYPE = "Attention";
 const CPS_NO_TEE_TIMES_TRANSACTION_ID_MAX_LENGTH = 128;
+const CPS_LAYOUT_OPTION_NAME =
+  /^(?:red|white|blue|green|black|gold|silver|orange|yellow|purple)(?:\s+(?:nine|9))?$/i;
 const CPS_RESPONSE_DIAGNOSTIC_KEY_LIMIT = 8;
 const CPS_RESPONSE_DIAGNOSTIC_KEYS = new Set([
   "content",
@@ -148,6 +151,8 @@ export function isCpsMetadata(value: unknown): value is CpsMetadata {
     metadata.courseIds.every(
       (courseId) => Number.isSafeInteger(courseId) && courseId >= 0
     ) &&
+    (metadata.resolvePlaceholderCourseIds === undefined ||
+      typeof metadata.resolvePlaceholderCourseIds === "boolean") &&
     (metadata.holes === undefined ||
       (Array.isArray(metadata.holes) &&
         metadata.holes.length > 0 &&
@@ -166,6 +171,8 @@ export async function fetchCpsTeeSheet(
     throw new Error("CPS metadata is invalid");
   }
   let configuration = await loadConfiguration(input.metadata);
+  let courseIds = [...input.metadata.courseIds];
+  let publicOptionsLoaded = false;
   let credential: { token?: string; apiKey?: string };
   let recoveredTokenError: { error: unknown } | null = null;
   const publishedApiKey = normalizeCpsApiKey(configuration.apiKey);
@@ -189,14 +196,22 @@ export async function fetchCpsTeeSheet(
       recoveredTokenError = { error: tokenError };
     }
   }
-  if (credential.apiKey) {
+  if (
+    credential.apiKey ||
+    shouldResolveCpsPlaceholderCourseIds(input.metadata, courseIds)
+  ) {
     try {
-      configuration = await loadPublicOptions(
+      const publicOptions = await loadPublicOptions(
         configuration,
         credential,
         input.timeZone ?? "America/New_York",
-        input.date
+        input.date,
+        courseIds,
+        input.metadata.resolvePlaceholderCourseIds === true
       );
+      configuration = publicOptions.configuration;
+      courseIds = publicOptions.courseIds;
+      publicOptionsLoaded = true;
     } catch (setupError) {
       if (recoveredTokenError) {
         throw recoveredTokenError.error;
@@ -212,7 +227,13 @@ export async function fetchCpsTeeSheet(
   );
   let slots: TeeTimeSlot[];
   try {
-    slots = await fetchCpsAvailability(input, configuration, credential, headers);
+    slots = await fetchCpsAvailability(
+      input,
+      configuration,
+      credential,
+      headers,
+      courseIds
+    );
   } catch (availabilityError) {
     if (
       !credential.token ||
@@ -229,17 +250,24 @@ export async function fetchCpsTeeSheet(
     }
     const recoveredCredential = { apiKey: recoveredApiKey };
     let recoveredConfiguration: CpsConfiguration;
+    let recoveredCourseIds: number[];
     try {
-      recoveredConfiguration = await loadPublicOptions(
+      const publicOptions = await loadPublicOptions(
         configuration,
         recoveredCredential,
         input.timeZone ?? "America/New_York",
-        input.date
+        input.date,
+        courseIds,
+        input.metadata.resolvePlaceholderCourseIds === true
       );
+      recoveredConfiguration = publicOptions.configuration;
+      recoveredCourseIds = publicOptions.courseIds;
     } catch {
       throw availabilityError;
     }
     configuration = recoveredConfiguration;
+    courseIds = recoveredCourseIds;
+    publicOptionsLoaded = true;
     credential = recoveredCredential;
     headers = cpsHeaders(
       configuration,
@@ -247,10 +275,22 @@ export async function fetchCpsTeeSheet(
       input.timeZone ?? "America/New_York",
       input.date
     );
-    slots = await fetchCpsAvailability(input, configuration, credential, headers);
+    slots = await fetchCpsAvailability(
+      input,
+      configuration,
+      credential,
+      headers,
+      courseIds
+    );
   }
   const bookingWindowEvidence = input.discoverBookingWindow
-    ? await fetchCpsBookingWindow(input, configuration, credential)
+    ? await fetchCpsBookingWindow(
+        input,
+        configuration,
+        credential,
+        courseIds,
+        publicOptionsLoaded
+      )
     : null;
 
   return {
@@ -264,7 +304,8 @@ async function fetchCpsAvailability(
   input: CpsFetchInput,
   configuration: CpsConfiguration,
   credential: { token?: string; apiKey?: string },
-  headers: Record<string, string>
+  headers: Record<string, string>,
+  courseIds: number[]
 ) {
   const slots: TeeTimeSlot[] = [];
   const seen = new Set<string>();
@@ -278,7 +319,7 @@ async function fetchCpsAvailability(
     const url = buildTeeTimesUrl(configuration.onlineApi, {
       date: input.date,
       players: credential.apiKey ? 0 : input.players,
-      cpsCourseIds: input.metadata.courseIds,
+      cpsCourseIds: courseIds,
       holes,
       transactionId
     });
@@ -331,16 +372,27 @@ async function fetchCpsAvailability(
 async function fetchCpsBookingWindow(
   input: CpsFetchInput,
   configuration: CpsConfiguration,
-  credential: { token?: string; apiKey?: string }
+  credential: { token?: string; apiKey?: string },
+  courseIds: number[],
+  publicOptionsLoaded: boolean
 ): Promise<BookingWindowEvidence | null> {
   try {
     const timeZone = input.timeZone ?? "America/New_York";
-    const optionsConfiguration = credential.token
-      ? await loadPublicOptions(configuration, credential, timeZone, input.date)
-      : configuration;
+    const publicOptions = credential.token && !publicOptionsLoaded
+      ? await loadPublicOptions(
+          configuration,
+          credential,
+          timeZone,
+          input.date,
+          courseIds,
+          input.metadata.resolvePlaceholderCourseIds === true
+        )
+      : { configuration, courseIds };
+    const optionsConfiguration = publicOptions.configuration;
+    const resolvedCourseIds = publicOptions.courseIds;
     const url = new URL(`${optionsConfiguration.onlineApi}/BookingRuleModels`);
     url.searchParams.set("classcode", "R");
-    url.searchParams.set("courseIds", input.metadata.courseIds.join(","));
+    url.searchParams.set("courseIds", resolvedCourseIds.join(","));
     url.searchParams.set("searchDate", formatCpsDate(input.date));
 
     const payload = await retryCpsReadOnTimeout(async () => {
@@ -363,7 +415,7 @@ async function fetchCpsBookingWindow(
     const normalizedRules = rules
       .filter(
         (rule) =>
-          rule.courseId === undefined || input.metadata.courseIds.includes(rule.courseId)
+          rule.courseId === undefined || resolvedCourseIds.includes(rule.courseId)
       )
       .map((rule) => normalizeCpsBookingRule(rule, payload.weekends, input.date))
       .filter((rule): rule is { daysAhead: number; releaseTimeLocal: string | null } => Boolean(rule));
@@ -823,7 +875,9 @@ async function loadPublicOptions(
   configuration: CpsConfiguration,
   credential: { token?: string; apiKey?: string },
   timeZone: string,
-  date: Date
+  date: Date,
+  configuredCourseIds: number[],
+  allowPlaceholderResolution: boolean
 ) {
   const url = new URL(`${configuration.onlineApi}/GetAllOptions/${configuration.siteName}`);
   if (configuration.buildNumber?.trim()) {
@@ -840,16 +894,115 @@ async function loadPublicOptions(
     return (await response.json()) as {
       webSiteId?: string;
       reservationOptions?: { terminalId?: number };
+      courseOptions?: unknown;
     };
   });
   if (!payload.webSiteId) {
     throw new Error("CPS public options did not include a website id");
   }
+  const courseIds = resolveCpsRuntimeCourseIds(
+    configuredCourseIds,
+    payload.courseOptions,
+    allowPlaceholderResolution
+  );
+  if (
+    allowPlaceholderResolution &&
+    isCpsPlaceholderCourseIds(courseIds)
+  ) {
+    throw new Error("CPS public options did not resolve a course id");
+  }
   return {
-    ...configuration,
-    websiteId: payload.webSiteId,
-    terminalId: payload.reservationOptions?.terminalId ?? configuration.terminalId ?? 1
+    configuration: {
+      ...configuration,
+      websiteId: payload.webSiteId,
+      terminalId:
+        payload.reservationOptions?.terminalId ?? configuration.terminalId ?? 1
+    },
+    courseIds
   };
+}
+
+export function resolveCpsRuntimeCourseIds(
+  configuredCourseIds: number[],
+  courseOptions: unknown,
+  allowPlaceholderResolution: boolean
+) {
+  if (
+    !allowPlaceholderResolution ||
+    configuredCourseIds.length !== 1 ||
+    configuredCourseIds[0] !== 0 ||
+    !Array.isArray(courseOptions)
+  ) {
+    return configuredCourseIds;
+  }
+
+  const publishedCourseNames = new Map<number, Set<string>>();
+  const unsafeCourseNames = new Set<number>();
+  for (const option of courseOptions) {
+    if (!option || typeof option !== "object" || Array.isArray(option)) {
+      continue;
+    }
+    const courseId = (option as { courseId?: unknown }).courseId;
+    if (!Number.isSafeInteger(courseId) || (courseId as number) <= 0) {
+      continue;
+    }
+    const numericCourseId = courseId as number;
+    let courseNames = publishedCourseNames.get(numericCourseId);
+    if (!courseNames) {
+      courseNames = new Set<string>();
+      publishedCourseNames.set(numericCourseId, courseNames);
+    }
+    const rawCourseName = (option as { courseName?: unknown }).courseName;
+    if (typeof rawCourseName === "string") {
+      const courseName = rawCourseName.trim().replace(/\s+/g, " ");
+      if (courseName && courseName.length <= 80) {
+        courseNames.add(courseName.toLowerCase());
+      } else {
+        unsafeCourseNames.add(numericCourseId);
+      }
+    } else {
+      unsafeCourseNames.add(numericCourseId);
+    }
+  }
+
+  const publishedCourseIds = [...publishedCourseNames.keys()].sort(
+    (left, right) => left - right
+  );
+  if (publishedCourseIds.length === 1) {
+    return publishedCourseIds;
+  }
+  if (
+    publishedCourseIds.length > 1 &&
+    publishedCourseIds.every((courseId) => {
+      const courseNames = publishedCourseNames.get(courseId);
+      if (
+        unsafeCourseNames.has(courseId) ||
+        !courseNames ||
+        courseNames.size !== 1
+      ) {
+        return false;
+      }
+      const [courseName] = courseNames;
+      return Boolean(courseName && CPS_LAYOUT_OPTION_NAME.test(courseName));
+    })
+  ) {
+    return publishedCourseIds;
+  }
+  return configuredCourseIds;
+}
+
+function shouldResolveCpsPlaceholderCourseIds(
+  metadata: CpsMetadata,
+  courseIds: number[]
+) {
+  return (
+    metadata.resolvePlaceholderCourseIds === true &&
+    isCpsPlaceholderCourseIds(courseIds)
+  );
+}
+
+function isCpsPlaceholderCourseIds(courseIds: number[]) {
+  return courseIds.length === 1 && courseIds[0] === 0;
 }
 
 async function registerTransactionId(onlineApi: string, headers: Record<string, string>, transactionId: string) {

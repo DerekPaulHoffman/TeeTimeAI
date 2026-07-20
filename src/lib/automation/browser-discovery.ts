@@ -66,6 +66,7 @@ export type BrowserDiscovery = {
     bookingBaseUrl: string;
     courseIds: number[];
     holes?: number[];
+    resolvePlaceholderCourseIds?: boolean;
     clientId?: string;
     websiteId?: string;
     onlineApi?: string;
@@ -3831,7 +3832,10 @@ export async function enrichCpsDiscovery(
       siteName: configuration.siteName,
       bookingBaseUrl,
       courseIds: [configuration.courseId],
-      holes: [18, 9]
+      holes: [18, 9],
+      ...(configuration.courseId === 0
+        ? { resolvePlaceholderCourseIds: true }
+        : {})
     },
     confidence: 0.95,
     evidence: {

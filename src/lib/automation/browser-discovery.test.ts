@@ -3743,12 +3743,36 @@ describe("CPS public configuration enrichment", () => {
         siteName: "colonie",
         bookingBaseUrl: "https://colonie.cps.golf/",
         courseIds: [0],
-        holes: [18, 9]
+        holes: [18, 9],
+        resolvePlaceholderCourseIds: true
       },
       confidence: 0.95,
       evidence: { learnedFrom: "cps-public-configuration" }
     });
     expect(JSON.stringify(enriched)).not.toContain("must-not-be-persisted");
+  });
+
+  it("does not opt a concrete configuration course id into placeholder resolution", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      cpsJsonResponse(configurationUrl, {
+        ...validConfiguration,
+        courseId: 7
+      })
+    );
+
+    const enriched = await enrichCpsDiscovery(
+      missingCourseIdDiscovery(),
+      "Colonie Golf Course",
+      fetchImpl as typeof fetch
+    );
+
+    expect(enriched.apiMetadata).toMatchObject({
+      provider: "CPS",
+      courseIds: [7]
+    });
+    expect(enriched.apiMetadata).not.toHaveProperty(
+      "resolvePlaceholderCourseIds"
+    );
   });
 
   it("leases the configuration read under the CPS family", async () => {
