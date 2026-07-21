@@ -275,6 +275,268 @@ describe("fetchClubCaddieTeeSheet", () => {
     });
   });
 
+  it("follows a bounded same-origin trailing-slash redirect for a public GET", async () => {
+    const bookingUrl = new URL(metadata.bookingBaseUrl);
+    const bootstrapRedirect = `${bookingUrl.pathname}/?SetSessionIdInLocalStorage=true`;
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: { Location: bootstrapRedirect }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response("bootstrap", {
+          status: 200,
+          headers: { "Session-Id": "request-local-session" }
+        })
+      )
+      .mockResolvedValueOnce(new Response(publicSearchPage, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response("<div>No tee times available for this date.</div>", { status: 200 })
+      );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata
+        },
+        fetchImpl
+      )
+    ).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "GET", redirect: "manual" });
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "GET", redirect: "manual" });
+    expect(new URL(fetchImpl.mock.calls[1][0].toString()).pathname).toBe(
+      `${bookingUrl.pathname}/`
+    );
+  });
+
+  it("treats the same course landing with or without the slots suffix as one identity", async () => {
+    const suffixlessMetadata: ClubCaddieMetadata = {
+      ...metadata,
+      bookingBaseUrl:
+        "https://apimanager-cc28.clubcaddie.com/webapi/view/public-resource"
+    };
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: {
+            Location:
+              "/webapi/view/public-resource/slots?SetSessionIdInLocalStorage=true"
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response("bootstrap", {
+          status: 200,
+          headers: { "Session-Id": "request-local-session" }
+        })
+      )
+      .mockResolvedValueOnce(new Response(publicSearchPage, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response("<div>No tee times available for this date.</div>", { status: 200 })
+      );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata: suffixlessMetadata
+        },
+        fetchImpl
+      )
+    ).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+    expect(new URL(fetchImpl.mock.calls[1][0].toString()).pathname).toBe(
+      "/webapi/view/public-resource/slots"
+    );
+  });
+
+  it.each([
+    ["cross-origin", "https://public.example/webapi/view/public-resource/slots"],
+    [
+      "credentials",
+      "https://user:password@apimanager-cc28.clubcaddie.com/webapi/view/public-resource/slots"
+    ],
+    [
+      "nondefault port",
+      "https://apimanager-cc28.clubcaddie.com:444/webapi/view/public-resource/slots"
+    ],
+    [
+      "sibling course path",
+      "https://apimanager-cc28.clubcaddie.com/webapi/view/sibling-resource/slots"
+    ],
+    [
+      "account or checkout path",
+      "https://apimanager-cc28.clubcaddie.com/authorization/signin"
+    ],
+    [
+      "query growth",
+      "/webapi/view/public-resource/slots?SetSessionIdInLocalStorage=true&returnUrl=%2Fcheckout"
+    ],
+    [
+      "fragment state",
+      "/webapi/view/public-resource/slots?SetSessionIdInLocalStorage=true#request-state"
+    ]
+  ])("rejects an unsafe %s redirect before a second request", async (_case, location) => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(null, { status: 302, headers: { Location: location } })
+    );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata
+        },
+        fetchImpl
+      )
+    ).rejects.toMatchObject({ failureClass: "SCHEMA" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a canonical redirect loop", async () => {
+    const bookingUrl = new URL(metadata.bookingBaseUrl);
+    const query = "SetSessionIdInLocalStorage=true";
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: { Location: `${bookingUrl.pathname}/?${query}` }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: { Location: `${bookingUrl.pathname}?${query}` }
+        })
+      );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata
+        },
+        fetchImpl
+      )
+    ).rejects.toMatchObject({
+      failureClass: "SCHEMA",
+      message: expect.stringContaining("redirect loop")
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects more than two safe canonical redirects", async () => {
+    const bookingUrl = new URL(metadata.bookingBaseUrl);
+    const query = "SetSessionIdInLocalStorage=true";
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: { Location: `${bookingUrl.pathname}/?${query}` }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: { Location: `${bookingUrl.pathname}/` }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 308,
+          headers: { Location: bookingUrl.pathname }
+        })
+      );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata
+        },
+        fetchImpl
+      )
+    ).rejects.toMatchObject({
+      failureClass: "SCHEMA",
+      message: expect.stringContaining("redirect limit")
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("never follows a redirect from the availability POST", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response("bootstrap", {
+          status: 200,
+          headers: { "Session-Id": "request-local-session" }
+        })
+      )
+      .mockResolvedValueOnce(new Response(publicSearchPage, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 307,
+          headers: { Location: "/webapi/TeeTimes/" }
+        })
+      );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata
+        },
+        fetchImpl
+      )
+    ).rejects.toMatchObject({
+      failureClass: "SCHEMA",
+      message: expect.stringContaining("method-preserving redirect not allowed")
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls[2][1]).toMatchObject({ method: "POST", redirect: "manual" });
+  });
+
+  it("reports only an allowlisted nested transport cause and safe request phase", async () => {
+    const cause = Object.assign(
+      new Error("connection reset while requesting https://private.example/?token=secret"),
+      { code: "ECONNRESET" }
+    );
+    const transportFailure = Object.assign(new TypeError("fetch failed"), { cause });
+    const failure = await fetchClubCaddieTeeSheet(
+      {
+        courseId: "course-1",
+        date: new Date("2026-07-19T00:00:00.000Z"),
+        players: 2,
+        metadata
+      },
+      vi.fn().mockRejectedValue(transportFailure)
+    ).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      failureClass: "NETWORK",
+      category: "CONNECTION",
+      code: "ECONNRESET",
+      message: "Club Caddie public session transport failed (CONNECTION:ECONNRESET)"
+    });
+    expect((failure as Error).message).not.toMatch(/private\.example|token|secret/i);
+  });
+
   it("uses a valid public search form even when the provider page contains unrelated rendering warnings", async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(

@@ -6,6 +6,43 @@ import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeou
 const CLUB_CADDIE_HOSTNAME = /^apimanager-cc\d{1,4}\.clubcaddie\.com$/i;
 const CLUB_CADDIE_BOOKING_PATH = /^\/webapi\/view\/[a-z0-9_-]{4,128}(?:\/slots)?\/?$/i;
 const MAX_PUBLIC_PAGE_BYTES = 2_000_000;
+const MAX_PUBLIC_GET_REDIRECTS = 2;
+const UNSAFE_PUBLIC_REDIRECT_PATH =
+  /\/(?:account|auth|authorization|book|booking|cart|checkout|login|pay|payment|purchase|queue|reserve|reservation|sign-?in|sign-?up|verify)(?:\/|$)/i;
+
+const SAFE_TRANSPORT_CODES = new Set<string>([
+  "CERT_HAS_EXPIRED",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ERR_FR_TOO_MANY_REDIRECTS",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "ETIMEDOUT",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+
+type ClubCaddieFetchLabel =
+  | "Club Caddie public session"
+  | "Club Caddie public booking page"
+  | "Club Caddie tee times";
+
+type ClubCaddieTransportCategory =
+  | "CONNECTION"
+  | "DNS"
+  | "NETWORK"
+  | "REDIRECT"
+  | "TIMEOUT"
+  | "TLS";
 
 export type ClubCaddieMetadata = {
   provider: "CLUB_CADDIE";
@@ -25,6 +62,28 @@ class ClubCaddieResponseError extends Error {
     super(message);
     this.name = "ClubCaddieResponseError";
     this.failureClass = failureClass;
+  }
+}
+
+class ClubCaddieTransportError extends Error {
+  readonly failureClass: "NETWORK" | "TIMEOUT";
+  readonly category: ClubCaddieTransportCategory;
+  readonly code?: string;
+
+  constructor(
+    label: ClubCaddieFetchLabel,
+    detail: { category: ClubCaddieTransportCategory; code: string | null }
+  ) {
+    const safeDetail = detail.code
+      ? `${detail.category}:${detail.code}`
+      : detail.category;
+    super(`${label} transport failed (${safeDetail})`);
+    this.name = "ClubCaddieTransportError";
+    this.failureClass = detail.category === "TIMEOUT" ? "TIMEOUT" : "NETWORK";
+    this.category = detail.category;
+    if (detail.code) {
+      this.code = detail.code;
+    }
   }
 }
 
@@ -74,16 +133,19 @@ export async function fetchClubCaddieTeeSheet(
   const bookingUrl = new URL(input.metadata.bookingBaseUrl);
   const bootstrapUrl = new URL(bookingUrl);
   bootstrapUrl.searchParams.set("SetSessionIdInLocalStorage", "true");
-  const bootstrapResponse = await fetchWithProviderTimeout(
+  const bootstrapResponse = await fetchClubCaddiePublicResponse(
     bootstrapUrl,
     {
       method: "GET",
       headers: publicHtmlHeaders(),
       credentials: "omit",
-      cache: "no-store",
-      redirect: "error"
+      cache: "no-store"
     },
-    fetchImpl
+    fetchImpl,
+    {
+      label: "Club Caddie public session",
+      maxRedirects: MAX_PUBLIC_GET_REDIRECTS
+    }
   );
   if (!bootstrapResponse.ok) {
     await throwForProviderResponse(
@@ -106,16 +168,19 @@ export async function fetchClubCaddieTeeSheet(
 
   const bookingPageUrl = new URL(bookingUrl);
   bookingPageUrl.searchParams.set("Interaction", interaction);
-  const bookingPageResponse = await fetchWithProviderTimeout(
+  const bookingPageResponse = await fetchClubCaddiePublicResponse(
     bookingPageUrl,
     {
       method: "GET",
       headers: publicHtmlHeaders(),
       credentials: "omit",
-      cache: "no-store",
-      redirect: "error"
+      cache: "no-store"
     },
-    fetchImpl
+    fetchImpl,
+    {
+      label: "Club Caddie public booking page",
+      maxRedirects: MAX_PUBLIC_GET_REDIRECTS
+    }
   );
   if (!bookingPageResponse.ok) {
     await throwForProviderResponse(
@@ -132,7 +197,7 @@ export async function fetchClubCaddieTeeSheet(
   const publicForm = parsePublicSearchForm(bookingPageHtml);
 
   const availabilityUrl = new URL("/webapi/TeeTimes", bookingUrl);
-  const availabilityResponse = await fetchWithProviderTimeout(
+  const availabilityResponse = await fetchClubCaddiePublicResponse(
     availabilityUrl,
     {
       method: "POST",
@@ -143,10 +208,13 @@ export async function fetchClubCaddieTeeSheet(
       },
       body: buildAvailabilityBody(input, publicForm, interaction),
       credentials: "omit",
-      cache: "no-store",
-      redirect: "error"
+      cache: "no-store"
     },
-    fetchImpl
+    fetchImpl,
+    {
+      label: "Club Caddie tee times",
+      maxRedirects: 0
+    }
   );
   if (!availabilityResponse.ok) {
     await throwForProviderResponse("Club Caddie tee times", availabilityResponse);
@@ -405,6 +473,219 @@ function extractDivElementsByClasses(html: string, requiredClasses: string[]) {
     }
   }
   return results;
+}
+
+async function fetchClubCaddiePublicResponse(
+  input: URL,
+  init: RequestInit,
+  fetchImpl: typeof fetch,
+  options: {
+    label: ClubCaddieFetchLabel;
+    maxRedirects: number;
+  }
+) {
+  const initialUrl = new URL(input);
+  const expectedOrigin = initialUrl.origin;
+  const expectedPath = normalizeCanonicalPath(initialUrl.pathname);
+  const visited = new Set([getRedirectVisitKey(initialUrl)]);
+  let currentUrl = initialUrl;
+
+  for (let redirectCount = 0; ; redirectCount += 1) {
+    let response: Response;
+    try {
+      response = await fetchWithProviderTimeout(
+        currentUrl,
+        { ...init, redirect: "manual" },
+        fetchImpl
+      );
+    } catch (error) {
+      throw new ClubCaddieTransportError(
+        options.label,
+        classifyClubCaddieTransportFailure(error)
+      );
+    }
+
+    if (response.status < 300 || response.status >= 400) {
+      return response;
+    }
+    if (options.maxRedirects === 0) {
+      throw unsafeRedirectError(options.label, "method-preserving redirect not allowed");
+    }
+    if (redirectCount >= options.maxRedirects) {
+      throw unsafeRedirectError(options.label, "redirect limit exceeded");
+    }
+
+    const location = response.headers.get("location");
+    if (!location) {
+      throw unsafeRedirectError(options.label, "redirect location missing");
+    }
+    const redirectUrl = parseSafeClubCaddieRedirect({
+      location,
+      currentUrl,
+      expectedOrigin,
+      expectedPath,
+      label: options.label
+    });
+    const visitKey = getRedirectVisitKey(redirectUrl);
+    if (visited.has(visitKey)) {
+      throw unsafeRedirectError(options.label, "redirect loop detected");
+    }
+    visited.add(visitKey);
+    await response.body?.cancel().catch(() => undefined);
+    currentUrl = redirectUrl;
+  }
+}
+
+function parseSafeClubCaddieRedirect(input: {
+  location: string;
+  currentUrl: URL;
+  expectedOrigin: string;
+  expectedPath: string;
+  label: ClubCaddieFetchLabel;
+}) {
+  let redirectUrl: URL;
+  try {
+    redirectUrl = new URL(input.location, input.currentUrl);
+  } catch {
+    throw unsafeRedirectError(input.label, "redirect location invalid");
+  }
+
+  if (
+    redirectUrl.protocol !== "https:" ||
+    redirectUrl.username ||
+    redirectUrl.password ||
+    redirectUrl.port ||
+    redirectUrl.origin !== input.expectedOrigin ||
+    !CLUB_CADDIE_HOSTNAME.test(redirectUrl.hostname)
+  ) {
+    throw unsafeRedirectError(input.label, "redirect origin changed");
+  }
+  if (
+    UNSAFE_PUBLIC_REDIRECT_PATH.test(redirectUrl.pathname) ||
+    normalizeCanonicalPath(redirectUrl.pathname) !== input.expectedPath
+  ) {
+    throw unsafeRedirectError(input.label, "redirect path changed");
+  }
+  if (redirectUrl.hash || !isSafeRedirectQueryTransition(input.currentUrl, redirectUrl)) {
+    throw unsafeRedirectError(input.label, "redirect state changed");
+  }
+  return redirectUrl;
+}
+
+function normalizeCanonicalPath(pathname: string) {
+  const withoutTrailingSlash = pathname.length > 1
+    ? pathname.replace(/\/+$/u, "")
+    : pathname;
+  return CLUB_CADDIE_BOOKING_PATH.test(pathname)
+    ? withoutTrailingSlash.replace(/\/slots$/iu, "")
+    : withoutTrailingSlash;
+}
+
+function isSafeRedirectQueryTransition(currentUrl: URL, redirectUrl: URL) {
+  const availableEntries = new Map<string, number>();
+  for (const [key, value] of currentUrl.searchParams) {
+    const entry = `${key}\u0000${value}`;
+    availableEntries.set(entry, (availableEntries.get(entry) ?? 0) + 1);
+  }
+  for (const [key, value] of redirectUrl.searchParams) {
+    const entry = `${key}\u0000${value}`;
+    const remaining = availableEntries.get(entry) ?? 0;
+    if (remaining === 0) {
+      return false;
+    }
+    availableEntries.set(entry, remaining - 1);
+  }
+  return true;
+}
+
+function getRedirectVisitKey(url: URL) {
+  const query = [...url.searchParams.entries()]
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
+    )
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join("&");
+  return `${url.origin}${url.pathname}${query ? `?${query}` : ""}`;
+}
+
+function unsafeRedirectError(label: ClubCaddieFetchLabel, reason: string) {
+  return new ClubCaddieResponseError(`${label} rejected an unsafe redirect (${reason})`);
+}
+
+function classifyClubCaddieTransportFailure(error: unknown): {
+  category: ClubCaddieTransportCategory;
+  code: string | null;
+} {
+  const records = getNestedErrorRecords(error);
+  const code = records
+    .map((record) => typeof record.code === "string" ? record.code.toUpperCase() : "")
+    .find((candidate) => SAFE_TRANSPORT_CODES.has(candidate)) ?? null;
+  const names = records
+    .map((record) => typeof record.name === "string" ? record.name : "")
+    .join(" ");
+  const messages = records
+    .map((record) => typeof record.message === "string" ? record.message : "")
+    .join(" ");
+  const searchable = `${names} ${messages}`;
+
+  if (
+    code === "ETIMEDOUT" ||
+    code?.includes("_TIMEOUT") ||
+    /\b(?:abort|timeout|timed out)\b/i.test(searchable)
+  ) {
+    return { category: "TIMEOUT", code };
+  }
+  if (code === "EAI_AGAIN" || code === "ENOTFOUND" || /\bgetaddrinfo\b/i.test(searchable)) {
+    return { category: "DNS", code };
+  }
+  if (
+    code?.includes("CERT") ||
+    code?.startsWith("ERR_TLS_") ||
+    code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+    /\b(?:certificate|ssl|tls)\b/i.test(searchable)
+  ) {
+    return { category: "TLS", code };
+  }
+  if (
+    code === "ERR_FR_TOO_MANY_REDIRECTS" ||
+    /\b(?:redirect|location header)\b/i.test(searchable)
+  ) {
+    return { category: "REDIRECT", code };
+  }
+  if (
+    code === "ECONNABORTED" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "EPIPE" ||
+    code === "UND_ERR_SOCKET" ||
+    /\b(?:connection|network|socket)\b/i.test(searchable)
+  ) {
+    return { category: "CONNECTION", code };
+  }
+  return { category: "NETWORK", code };
+}
+
+function getNestedErrorRecords(error: unknown) {
+  const records: Record<string, unknown>[] = [];
+  const seen = new Set<object>();
+  let current = asErrorRecord(error);
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (seen.has(current)) {
+      break;
+    }
+    seen.add(current);
+    records.push(current);
+    current = asErrorRecord(current.cause);
+  }
+  return records;
+}
+
+function asErrorRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 async function readBoundedHtml(response: Response, label: string) {
