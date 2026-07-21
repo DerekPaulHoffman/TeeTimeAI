@@ -726,6 +726,7 @@ export async function prepareSearchMonitoring(
   });
   const evidenceBySource = new Map<string, Promise<CollectedPageEvidence>>();
   const pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>();
+  const wordpressContentFetches = new Map<string, Promise<string | null>>();
 
   await runProviderFamilyTasks(
     dueCandidates,
@@ -751,7 +752,8 @@ export async function prepareSearchMonitoring(
             sourceUrl,
             leasedFetch,
             course.name,
-            pageFetches
+            pageFetches,
+            wordpressContentFetches
           );
           evidenceBySource.set(sourceKey, evidencePromise);
         }
@@ -1528,7 +1530,8 @@ export async function collectOfficialSiteEvidence(
   sourceUrl: string,
   fetchImpl: typeof fetch | undefined = undefined,
   courseName?: string,
-  pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>()
+  pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>(),
+  wordpressContentFetches = new Map<string, Promise<string | null>>()
 ): Promise<CollectedPageEvidence> {
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   const fetchPage = (url: string) => {
@@ -1556,6 +1559,7 @@ export async function collectOfficialSiteEvidence(
     url: string;
     label: string;
   }> = [];
+  let wordpressContentAttempted = false;
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
     const linkCandidates = pages.flatMap((page) => page.evidence.linkCandidates);
@@ -1582,18 +1586,24 @@ export async function collectOfficialSiteEvidence(
     if (!followupCandidate) {
       break;
     }
-    const exactTargetOfficialRedirect = courseName
-      ? linkCandidates.find(
-          (candidate) =>
-            normalizeSourceKey(candidate.url) ===
-              normalizeSourceKey(followupCandidate) &&
-            haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
-            doesProviderLinkLabelExactlyIdentifyCourse(
-              candidate.label,
-              courseName
-            )
-        )
-      : undefined;
+    const followedLinkCandidate = linkCandidates.find(
+      (candidate) =>
+        normalizeSourceKey(candidate.url) ===
+        normalizeSourceKey(followupCandidate)
+    );
+    const exactTargetOfficialRedirect =
+      courseName &&
+      followedLinkCandidate &&
+      haveSameReplayHostname(
+        firstPage.finalUrl,
+        followedLinkCandidate.url
+      ) &&
+      doesProviderLinkLabelExactlyIdentifyCourse(
+        followedLinkCandidate.label,
+        courseName
+      )
+        ? followedLinkCandidate
+        : undefined;
     const identifiesTargetCourse = Boolean(
       courseName &&
         doesFollowupIdentifyCourse(
@@ -1606,9 +1616,40 @@ export async function collectOfficialSiteEvidence(
 
     try {
       const fetched = await fetchPage(followupCandidate);
+      let extractedEvidence = extractHtmlEvidence(
+        fetched.html,
+        fetched.finalUrl
+      );
+      if (
+        followedLinkCandidate &&
+        !wordpressContentAttempted &&
+        haveSameReplayHostname(firstPage.finalUrl, fetched.finalUrl) &&
+        isBookingLikeOfficialFollowup(followedLinkCandidate)
+      ) {
+        wordpressContentAttempted = true;
+        try {
+          const renderedContent = await fetchWordPressRenderedPageContent(
+            fetched.html,
+            fetched.finalUrl,
+            publicFetch,
+            wordpressContentFetches
+          );
+          if (renderedContent) {
+            extractedEvidence = mergeHtmlEvidence(
+              extractedEvidence,
+              extractHtmlEvidence(renderedContent, fetched.finalUrl)
+            );
+          }
+        } catch (error) {
+          if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+            throw error;
+          }
+          // WordPress content enrichment is optional; the fetched HTML remains valid evidence.
+        }
+      }
       const page = {
         ...fetched,
-        evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
+        evidence: extractedEvidence
       };
       pages.push(page);
       if (
@@ -1827,6 +1868,153 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
   }
 
   throw new Error("Official site exceeded the redirect limit");
+}
+
+async function fetchWordPressRenderedPageContent(
+  sourceHtml: string,
+  sourcePageUrl: string,
+  fetchImpl: typeof fetch,
+  contentFetches: Map<string, Promise<string | null>>
+) {
+  const apiUrl = findWordPressRenderedPageContentUrl(
+    sourceHtml,
+    sourcePageUrl
+  );
+  if (!apiUrl) {
+    return null;
+  }
+
+  const cacheKey = `${normalizeSourceKey(apiUrl)}\u0000${normalizeSourceKey(sourcePageUrl)}`;
+  let renderedContent = contentFetches.get(cacheKey);
+  if (!renderedContent) {
+    renderedContent = fetchWordPressRenderedPageContentFromUrl(
+      apiUrl,
+      sourcePageUrl,
+      fetchImpl
+    );
+    contentFetches.set(cacheKey, renderedContent);
+  }
+  return renderedContent;
+}
+
+async function fetchWordPressRenderedPageContentFromUrl(
+  apiUrl: string,
+  sourcePageUrl: string,
+  fetchImpl: typeof fetch
+) {
+  const response = await fetchImpl(apiUrl, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)"
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  });
+  if (!response.ok) {
+    throw new Error(`Official WordPress content returned HTTP ${response.status}`);
+  }
+  const contentType = response.headers.get("content-type")?.toLowerCase();
+  if (!contentType?.includes("application/json")) {
+    throw new Error("Official WordPress content did not return JSON");
+  }
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (contentLength > MAX_HTML_BYTES) {
+    throw new Error("Official WordPress content is too large to inspect safely");
+  }
+  const body = await response.text();
+  if (body.length > MAX_HTML_BYTES) {
+    throw new Error("Official WordPress content exceeded the inspection limit");
+  }
+  const payload: unknown = JSON.parse(body);
+  if (
+    !isPlainRecord(payload) ||
+    typeof payload.link !== "string" ||
+    normalizeSourceKey(payload.link) !== normalizeSourceKey(sourcePageUrl) ||
+    !isPlainRecord(payload.content) ||
+    payload.content.protected !== false ||
+    typeof payload.content.rendered !== "string"
+  ) {
+    throw new Error("Official WordPress content did not match the source page");
+  }
+  return payload.content.rendered;
+}
+
+function findWordPressRenderedPageContentUrl(
+  sourceHtml: string,
+  sourcePageUrl: string
+) {
+  const source = parseSafePublicUrl(sourcePageUrl);
+  const decodedHtml = decodeHtmlEntities(sourceHtml);
+  const candidates: string[] = [];
+  for (const match of decodedHtml.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = readHtmlTagAttribute(tag, "rel")?.toLowerCase();
+    const type = readHtmlTagAttribute(tag, "type")?.toLowerCase();
+    const href = readHtmlTagAttribute(tag, "href");
+    if (
+      !rel?.split(/\s+/u).includes("alternate") ||
+      type !== "application/json" ||
+      !href
+    ) {
+      continue;
+    }
+    const resolved = resolveHttpUrl(href, source.toString());
+    if (!resolved) {
+      continue;
+    }
+    const candidate = parseSafePublicUrl(resolved);
+    if (
+      candidate.origin === source.origin &&
+      /^\/wp-json\/wp\/v2\/pages\/[1-9]\d*\/?$/iu.test(candidate.pathname) &&
+      !candidate.search &&
+      !candidate.hash
+    ) {
+      candidates.push(candidate.toString());
+    }
+  }
+  const uniqueCandidates = uniqueStrings(candidates);
+  return uniqueCandidates.length === 1 ? uniqueCandidates[0] : null;
+}
+
+function readHtmlTagAttribute(tag: string, attribute: string) {
+  const escapedAttribute = attribute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = tag.match(
+    new RegExp(
+      `(?:^|\\s)${escapedAttribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+      "i"
+    )
+  );
+  return match?.[1] ?? match?.[2] ?? match?.[3];
+}
+
+function isBookingLikeOfficialFollowup(candidate: {
+  url: string;
+  label: string;
+}) {
+  const parsed = parseSafePublicUrl(candidate.url);
+  return /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
+    `${candidate.label} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
+  );
+}
+
+function mergeHtmlEvidence(
+  left: ReturnType<typeof extractHtmlEvidence>,
+  right: ReturnType<typeof extractHtmlEvidence>
+) {
+  return {
+    observedUrls: uniqueStrings([
+      ...left.observedUrls,
+      ...right.observedUrls
+    ]),
+    linkCandidates: uniqueLinkCandidates([
+      ...left.linkCandidates,
+      ...right.linkCandidates
+    ]),
+    visibleText: [left.visibleText, right.visibleText]
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 12_000)
+  };
 }
 
 function extractHtmlEvidence(html: string, pageUrl: string) {

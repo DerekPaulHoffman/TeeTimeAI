@@ -2878,6 +2878,8 @@ describe("search monitoring discovery", () => {
     const sourceUrl =
       "https://www.playdcgolf.example/rock-creek-park-golf-course/";
     const bookingIndexUrl = "https://www.playdcgolf.example/book-online/";
+    const bookingContentUrl =
+      "https://www.playdcgolf.example/wp-json/wp/v2/pages/21";
     const targetTeeTimesUrl =
       "https://www.playdcgolf.example/rock-creek-tee-times/";
     const publicBookingUrl =
@@ -2891,9 +2893,17 @@ describe("search monitoring discovery", () => {
           );
         case bookingIndexUrl:
           return new Response(
-            `<html><a href="${targetTeeTimesUrl}">Rock Creek Park Golf Tee Times</a></html>`,
+            `<html><link rel="alternate" type="application/json" href="${bookingContentUrl}"></html>`,
             { status: 200, headers: { "content-type": "text/html" } }
           );
+        case bookingContentUrl:
+          return Response.json({
+            link: bookingIndexUrl,
+            content: {
+              protected: false,
+              rendered: `<a href="${targetTeeTimesUrl}">Rock Creek Park Golf Tee Times</a>`
+            }
+          });
         case targetTeeTimesUrl:
           return new Response(null, {
             status: 302,
@@ -2918,6 +2928,7 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
       sourceUrl,
       bookingIndexUrl,
+      bookingContentUrl,
       targetTeeTimesUrl,
       publicBookingUrl
     ]);
@@ -2945,6 +2956,184 @@ describe("search monitoring discovery", () => {
         facilityIds: [24680]
       }
     });
+  });
+
+  it("does not load cross-origin WordPress content metadata", async () => {
+    const sourceUrl = "https://official.example/target-golf-course/";
+    const bookingIndexUrl = "https://official.example/book-online/";
+    const externalContentUrl =
+      "https://untrusted.example/wp-json/wp/v2/pages/21";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingIndexUrl:
+          return new Response(
+            `<html><link rel="alternate" type="application/json" href="${externalContentUrl}"></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Golf Course"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingIndexUrl
+    ]);
+    expect(evidence.observedUrls).toContain(externalContentUrl);
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: externalContentUrl })
+    );
+  });
+
+  it("does not load ambiguous WordPress rendered-content endpoints", async () => {
+    const sourceUrl = "https://official.example/target-golf-course/";
+    const bookingIndexUrl = "https://official.example/book-online/";
+    const firstContentUrl =
+      "https://official.example/wp-json/wp/v2/pages/21";
+    const secondContentUrl =
+      "https://official.example/wp-json/wp/v2/pages/22";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingIndexUrl:
+          return new Response(
+            `<html><link rel="alternate" type="application/json" href="${firstContentUrl}"><link type="application/json" href="${secondContentUrl}" rel="alternate"></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Golf Course"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingIndexUrl
+    ]);
+  });
+
+  it("binds cached WordPress rendered content to the exact source page", async () => {
+    const firstSourceUrl = "https://official.example/first-course/";
+    const secondSourceUrl = "https://official.example/second-course/";
+    const firstBookingUrl = "https://official.example/first-book-online/";
+    const secondBookingUrl = "https://official.example/second-book-online/";
+    const sharedContentUrl =
+      "https://official.example/wp-json/wp/v2/pages/21";
+    const targetBookingUrl =
+      "https://first-course.book.teeitup.com/?course=24680";
+    const contentFetches = new Map<string, Promise<string | null>>();
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === firstSourceUrl) {
+        return new Response(
+          `<html><a href="${firstBookingUrl}">Book Tee Times</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === secondSourceUrl) {
+        return new Response(
+          `<html><a href="${secondBookingUrl}">Book Tee Times</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === firstBookingUrl || value === secondBookingUrl) {
+        return new Response(
+          `<html><link rel="alternate" type="application/json" href="${sharedContentUrl}"></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === sharedContentUrl) {
+        return Response.json({
+          link: firstBookingUrl,
+          content: {
+            protected: false,
+            rendered: `<a href="${targetBookingUrl}">First Course Tee Times</a>`
+          }
+        });
+      }
+      if (value === targetBookingUrl) {
+        return new Response("<html><body>Public tee times</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+
+    const firstEvidence = await collectOfficialSiteEvidence(
+      firstSourceUrl,
+      fetchImpl as typeof fetch,
+      "First Course",
+      new Map(),
+      contentFetches
+    );
+    const secondEvidence = await collectOfficialSiteEvidence(
+      secondSourceUrl,
+      fetchImpl as typeof fetch,
+      "Second Course",
+      new Map(),
+      contentFetches
+    );
+
+    expect(firstEvidence.linkCandidates).toContainEqual({
+      url: targetBookingUrl,
+      label: "First Course Tee Times"
+    });
+    expect(secondEvidence.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: targetBookingUrl })
+    );
+    expect(
+      fetchImpl.mock.calls.filter(([url]) => url.toString() === sharedContentUrl)
+    ).toHaveLength(2);
+  });
+
+  it("does not treat data attributes as WordPress link attributes", async () => {
+    const sourceUrl = "https://official.example/target-course/";
+    const bookingIndexUrl = "https://official.example/book-online/";
+    const contentUrl = "https://official.example/wp-json/wp/v2/pages/21";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (url.toString() === bookingIndexUrl) {
+        return new Response(
+          `<html><link data-rel="alternate" data-type="application/json" data-href="${contentUrl}"></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${url.toString()}`);
+    });
+
+    await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Course"
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("rejects an overlapping sibling name on a shared official booking page", async () => {
