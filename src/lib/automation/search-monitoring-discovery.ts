@@ -1614,6 +1614,22 @@ export async function collectOfficialSiteEvidence(
   }
 
   const finalPage = pages.at(-1)!;
+  const targetScopedOfficialLinks = matchedCoursePage && courseName
+    ? uniqueLinkCandidates(
+        pages
+          .filter((page) =>
+            haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
+          )
+          .flatMap((page) => page.evidence.linkCandidates)
+          .filter((candidate) =>
+            !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
+            doesProviderLinkLabelExactlyIdentifyCourse(
+              candidate.label,
+              courseName
+            )
+          )
+      )
+    : [];
   return {
     sourceUrl,
     finalUrl: finalPage.finalUrl,
@@ -1628,7 +1644,10 @@ export async function collectOfficialSiteEvidence(
           officialPage: {
             url: matchedCoursePage.finalUrl,
             linkCandidates: uniqueLinkCandidates(
-              matchedCoursePage.evidence.linkCandidates
+              [
+                ...matchedCoursePage.evidence.linkCandidates,
+                ...targetScopedOfficialLinks
+              ]
             ).slice(0, 200),
             courseName
           }
@@ -1907,6 +1926,25 @@ function pickOfficialCourseDetailCandidate(
 
 function normalizeCourseLinkName(value: string) {
   return value.normalize("NFKD").replace(/[^a-z0-9]+/gi, "").toLowerCase();
+}
+
+function doesProviderLinkLabelExactlyIdentifyCourse(
+  label: string,
+  courseName: string
+) {
+  const courseLabel = label
+    .replace(
+      /^\s*(?:book(?:ing)?|reserve)(?:\s+(?:a|your))?\s+tee\s*times?(?:\s+(?:at|for))?(?:\s*[-:|]\s*|\s+)/i,
+      ""
+    )
+    .replace(
+      /\s*(?:[-:|]\s*)?(?:(?:general\s+public)\s+)?(?:tee\s*times?|online\s+booking|book\s+online|reservations?)\s*$/i,
+      ""
+    );
+  return (
+    Boolean(courseLabel.trim()) &&
+    normalizeCourseLinkName(courseLabel) === normalizeCourseLinkName(courseName)
+  );
 }
 
 function pickOfficialPolicyCandidate(
