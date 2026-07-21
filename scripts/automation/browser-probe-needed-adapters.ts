@@ -267,7 +267,9 @@ async function collectBrowserEvidence(
     ],
     officialPage: {
       url: landingPageUrl,
-      linkCandidates: landingPageEvidence.linkCandidates
+      linkCandidates: landingPageEvidence.linkCandidates,
+      courseName: input.courseName,
+      visibleText: landingPageEvidence.visibleText.slice(0, 12_000)
     },
     accessBarrierUrls: [...accessBarrierUrls],
     accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),

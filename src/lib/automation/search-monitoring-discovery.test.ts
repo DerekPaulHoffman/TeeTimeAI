@@ -2414,6 +2414,162 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("replays corroborated weekday and weekend walk-in evidence without a request", async () => {
+    const sourceUrl = "http://www.quarry-view.example/";
+    const finalUrl = "https://www.quarry-view.example/";
+    const visibleText =
+      "Quarry View Golf Course. Welcome to Quarry View Public Golf Course, Driving Range and Practice Center. This nine-hole course is open for daily-fee public play. Directions to Quarry View Golf Course. For Directions: Go. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. Weekdays. 9 Holes 15.00. 18 Holes 20.00. Weekends. 9 Holes 17.00. 18 Holes 22.00.";
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "quarry-view",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: {
+          finalUrl,
+          observedUrls: [sourceUrl, finalUrl],
+          visibleText
+        }
+      },
+      {
+        courseId: "quarry-view",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:15:00.000Z"),
+        evidence: {
+          finalUrl,
+          observedUrls: [sourceUrl, finalUrl],
+          visibleText
+        }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "quarry-view",
+          name: "Quarry View Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:50:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "quarry-view",
+        status: "VERIFIED",
+        bookingMethod: "WALK_IN",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        evidence: expect.objectContaining({
+          learnedFrom: "official-day-scoped-walk-in-access"
+        })
+      }),
+      {
+        updatedAt: new Date("2026-07-13T19:50:00.000Z"),
+        detectedBookingUrl: null,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN"
+      }
+    );
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      attemptedCourseIds: [],
+      appliedCourseIds: ["quarry-view"],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: []
+    });
+  });
+
+  it.each([
+    {
+      label: "an observed tee-time route is present without a link label",
+      observedUrls: [
+        "http://www.quarry-view.example/",
+        "https://www.quarry-view.example/",
+        "https://www.quarry-view.example/tee-times"
+      ],
+      suffix: ""
+    },
+    {
+      label: "the full evidence contains a later online-booking CTA",
+      observedUrls: [
+        "http://www.quarry-view.example/",
+        "https://www.quarry-view.example/"
+      ],
+      suffix:
+        `${" Course conditions and public-play details.".repeat(40)} Book tee times online now.`
+    }
+  ])("does not replay walk-in evidence when $label", async ({
+    observedUrls,
+    suffix
+  }) => {
+    const sourceUrl = "http://www.quarry-view.example/";
+    const finalUrl = "https://www.quarry-view.example/";
+    const visibleText =
+      `Quarry View Golf Course. Welcome to Quarry View Public Golf Course. This nine-hole course is open for daily-fee public play. Directions to Quarry View Golf Course. For Directions: Go. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. Weekdays. 9 Holes 15.00. 18 Holes 20.00. Weekends. 9 Holes 17.00. 18 Holes 22.00.${suffix}`;
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "quarry-view",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:45:00.000Z"),
+        evidence: { finalUrl, observedUrls, visibleText }
+      },
+      {
+        courseId: "quarry-view",
+        status: "INSPECTED",
+        sourceUrl,
+        createdAt: new Date("2026-07-13T19:15:00.000Z"),
+        evidence: { finalUrl, observedUrls, visibleText }
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "quarry-view",
+          name: "Quarry View Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:50:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(result.appliedCourseIds).toEqual([]);
+  });
+
   it("does not replay a manual classification rejected for unsafe URL evidence", async () => {
     const sourceUrl = "https://course.example/";
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
@@ -4101,7 +4257,8 @@ describe("search monitoring discovery", () => {
     expect(evidence.officialPage).toEqual({
       url: targetTeeTimesUrl,
       linkCandidates: [{ url: publicBookingUrl, label: "General Public" }],
-      courseName: "Rock Creek Park Golf"
+      courseName: "Rock Creek Park Golf",
+      visibleText: "General Public"
     });
 
     const discovery = buildBrowserDiscovery({
@@ -4297,7 +4454,8 @@ describe("search monitoring discovery", () => {
         { url: bookingIndexUrl, label: "Book Tee Times" },
         { url: publicBookingUrl, label: "Rock Creek Park Golf Tee Times" }
       ],
-      courseName: "Rock Creek Park Golf"
+      courseName: "Rock Creek Park Golf",
+      visibleText: "Book Tee Times"
     });
 
     const discovery = buildBrowserDiscovery({
@@ -4381,7 +4539,8 @@ describe("search monitoring discovery", () => {
         { url: bookingIndexUrl, label: "Book Tee Times" },
         { url: publicBookingUrl, label: "Rock Creek Park Golf Tee Times" }
       ],
-      courseName: "Rock Creek Park Golf"
+      courseName: "Rock Creek Park Golf",
+      visibleText: "Book Tee Times"
     });
 
     const discovery = buildBrowserDiscovery({
@@ -4615,7 +4774,8 @@ describe("search monitoring discovery", () => {
     expect(evidence.officialPage).toEqual({
       url: sourceUrl,
       linkCandidates: [{ url: bookingIndexUrl, label: "Book Tee Times" }],
-      courseName: "Rock Creek Park Golf"
+      courseName: "Rock Creek Park Golf",
+      visibleText: "Book Tee Times"
     });
 
     const discovery = buildBrowserDiscovery({
@@ -4741,7 +4901,8 @@ describe("search monitoring discovery", () => {
     expect(evidence.officialPage).toEqual({
       url: sourceUrl,
       linkCandidates: [{ url: bookingIndexUrl, label: "Book Tee Times" }],
-      courseName: "Rock Creek Park Golf"
+      courseName: "Rock Creek Park Golf",
+      visibleText: "Book Tee Times"
     });
 
     const discovery = buildBrowserDiscovery({

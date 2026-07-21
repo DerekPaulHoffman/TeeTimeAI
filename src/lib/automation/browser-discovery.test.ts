@@ -1752,6 +1752,332 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies repeated weekday and weekend no-tee-time access as walk-in", () => {
+    const sourceUrl = "http://www.quarry-view.example/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "quarry-view",
+      courseName: "Quarry View Golf Course",
+      sourceUrl,
+      finalUrl: "https://www.quarry-view.example/",
+      observedUrls: [sourceUrl, "https://www.quarry-view.example/"],
+      visibleText:
+        "Quarry View Golf Course. Welcome to Quarry View Public Golf Course, Driving Range and Practice Center. This nine-hole course is open for daily-fee public play. Directions to Quarry View Golf Course. For Directions: Go. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. Weekdays. 9 Holes 15.00. 18 Holes 20.00. Weekends. 9 Holes 17.00. 18 Holes 22.00."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      sourceUrl: "https://www.quarry-view.example/",
+      bookingUrl: "https://www.quarry-view.example/",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: {
+        learnedFrom: "official-day-scoped-walk-in-access"
+      }
+    });
+    expect(discovery.evidence.visibleText).toContain(
+      "Weekdays: Tee times not needed"
+    );
+    expect(discovery.evidence.visibleText).toContain(
+      "Weekends: Tee times not needed"
+    );
+  });
+
+  it.each([
+    {
+      label: "only one day is corroborated",
+      visibleText:
+        "Quarry View Golf Course is a public nine-hole daily-fee course. Starting Times. Weekdays: Tee times not needed; play is first-come, first-served. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "the statements belong to a sibling course",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Sibling Hills Golf Course Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "the statements describe a practice range",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Driving Range Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "an abbreviated sibling section intervenes",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. South Course Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a non-directional sibling section intervenes",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Lakeside Course Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling title omits the word course",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. River Bend Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a lowercase sibling heading intervenes",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. lakes course Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a numeric sibling heading intervenes",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. South 9 Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a numbered course heading intervenes",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Course No. 2 Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling owner follows the heading",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Starting Times: Executive Course. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a single-word sibling owner precedes the heading",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Lakeside Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a punctuated sibling owner precedes the heading",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. South Course. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a semicolon-terminated sibling owner precedes the heading",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. river bend; Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a punctuated numbered owner precedes the heading",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Course No. 2. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a named sibling has a generic physical-course description",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. South Course is a public nine-hole daily-fee course. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling description begins with the word the",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. The Lakes is a public eighteen-hole course. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling name follows the generic word course",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. The course at South Park is a public nine-hole daily-fee course. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling owner is followed by a generic navigation label",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. South Course. Home. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling heading is separated only by HTML text lines",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course\nSouth Course\nStarting Times\nWeekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling and target share one owner segment",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. South Course at Target Municipal Golf Course Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a sibling heading uses pipe boundaries",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course | South Course | Starting Times | Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "weekday and weekend statements belong to different owners",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Directions to Target Municipal Golf Course. Starting Times. Weekdays: Tee times not needed. South Course. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "a second starting-times section separates the statements",
+      visibleText:
+        "Target Municipal Golf Course is a public nine-hole daily-fee course. Directions to Target Municipal Golf Course. Starting Times. Weekdays: Tee times not needed. South Course. Starting Times. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    },
+    {
+      label: "the statements contain time-of-day qualifiers",
+      visibleText:
+        "Quarry View Golf Course is a public nine-hole daily-fee course. Starting Times. Weekdays: Tee times not needed after 5 PM. Weekends: Tee times not needed before noon. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    }
+  ])("does not infer walk-in course access when $label", ({ visibleText }) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-negative",
+      courseName: visibleText.startsWith("Quarry")
+        ? "Quarry View Golf Course"
+        : "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      finalUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/"],
+      visibleText
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("keeps online booking stronger than repeated no-tee-time wording", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-online",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: "https://quarry-view.example/",
+      finalUrl: "https://quarry-view.example/",
+      observedUrls: [
+        "https://quarry-view.example/",
+        "https://quarry-view.example/tee-times"
+      ],
+      linkCandidates: [{
+        url: "https://quarry-view.example/tee-times",
+        label: "Book Tee Times Online"
+      }],
+      visibleText:
+        "Quarry View Golf Course is a public nine-hole daily-fee course. Directions to Quarry View Golf Course. For Directions: Go. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it.each([
+    {
+      label: "an observed tee-time route has no link label",
+      observedUrls: [
+        "https://quarry-view.example/",
+        "https://quarry-view.example/tee-times"
+      ],
+      suffix: ""
+    },
+    {
+      label: "a full-page online CTA falls outside the persisted proof excerpt",
+      observedUrls: ["https://quarry-view.example/"],
+      suffix:
+        `${" Course conditions and public-play details.".repeat(40)} Book tee times online now.`
+    }
+  ])("does not hide online booking when $label", ({ observedUrls, suffix }) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-online-contradiction",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: "https://quarry-view.example/",
+      finalUrl: "https://quarry-view.example/",
+      observedUrls,
+      visibleText:
+        `Quarry View Golf Course is a public nine-hole daily-fee course. Directions to Quarry View Golf Course. For Directions: Go. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00.${suffix}`
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it.each([
+    {
+      label: "an account route is redirected to the homepage",
+      sourceUrl: "http://quarry-view.example/account/login",
+      finalUrl: "https://quarry-view.example/"
+    },
+    {
+      label: "a sensitive query is redirected to the homepage",
+      sourceUrl: "http://quarry-view.example/?session_id=example-value",
+      finalUrl: "https://quarry-view.example/"
+    },
+    {
+      label: "an HTTP course route redirects to a different facility route",
+      sourceUrl: "http://quarry-view.example/course",
+      finalUrl: "https://quarry-view.example/practice-range"
+    },
+    {
+      label: "an HTTPS course route redirects to an events route",
+      sourceUrl: "https://quarry-view.example/course",
+      finalUrl: "https://quarry-view.example/events"
+    },
+    {
+      label: "an HTTPS course page is downgraded to HTTP",
+      sourceUrl: "https://quarry-view.example/",
+      finalUrl: "http://quarry-view.example/"
+    }
+  ])("does not trust walk-in evidence when $label", ({ sourceUrl, finalUrl }) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-untrusted-transition",
+      courseName: "Quarry View Golf Course",
+      sourceUrl,
+      finalUrl,
+      observedUrls: [sourceUrl, finalUrl],
+      visibleText:
+        "Quarry View Golf Course is a public nine-hole daily-fee course. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not borrow walk-in text from a cross-host page labeled by an official URL", () => {
+    const sourceUrl = "https://quarry-view.example/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-cross-host",
+      courseName: "Quarry View Golf Course",
+      sourceUrl,
+      finalUrl: "https://unrelated.example/events",
+      observedUrls: [sourceUrl, "https://unrelated.example/events"],
+      officialPage: {
+        url: sourceUrl,
+        courseName: "Quarry View Golf Course",
+        linkCandidates: [],
+        visibleText:
+          "Quarry View Golf Course is a public nine-hole daily-fee course."
+      },
+      visibleText:
+        "Quarry View Golf Course is a public nine-hole daily-fee course. Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+
+    const replayed = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-cross-host",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: discovery.sourceUrl,
+      ...(discovery.evidence.finalUrl
+        ? { finalUrl: discovery.evidence.finalUrl }
+        : {}),
+      observedUrls: discovery.evidence.observedUrls,
+      ...(discovery.evidence.visibleText
+        ? { visibleText: discovery.evidence.visibleText }
+        : {}),
+      ...(discovery.evidence.bookingCallToAction !== undefined
+        ? { bookingCallToAction: discovery.evidence.bookingCallToAction }
+        : {})
+    });
+    expect(replayed.status).toBe("INSPECTED");
+    expect(replayed.bookingMethod).toBeUndefined();
+    expect(replayed.automationEligibility).toBeUndefined();
+  });
+
+  it("does not borrow a distant practice-range starting-times section", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "day-scoped-walk-in-distant-range",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: "https://quarry-view.example/",
+      finalUrl: "https://quarry-view.example/",
+      observedUrls: ["https://quarry-view.example/"],
+      visibleText:
+        `Quarry View Golf Course is a public nine-hole daily-fee course. Driving Range ${"Range access details ".repeat(20)} Starting Times. Weekdays: Tee times not needed. Weekends: Tee times not needed. Fees. 9 Holes 15.00. 18 Holes 20.00.`
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it.each([
     "Sibling Hills Golf Course",
     "sibling hills golf course"
@@ -1818,6 +2144,7 @@ describe("buildBrowserDiscovery", () => {
       ],
       officialPage: {
         url: "https://www.delcopa.gov/parks/clayton",
+        courseName: "Clayton Park Golf Course",
         linkCandidates: [
           {
             url: "https://www.delcopa.gov/parks/permits-forms",
@@ -1827,7 +2154,9 @@ describe("buildBrowserDiscovery", () => {
             url: "https://accounts.example.gov/login?session=synthetic-session",
             label: "Employee login"
           }
-        ]
+        ],
+        visibleText:
+          "Clayton Park Golf Course The fairways of Clayton Golf Course provide a challenging round for players of all levels. Golfers can sneak in a quick round of 9 holes. The course is open daily, weather permitting. Clayton Golf Course is open to the public. Only golfers are permitted on the course. Every golfer must have their own bag of clubs. No tee times. Call 267-386-1969 with questions."
       },
       visibleText:
         "Clayton Park Golf Course The fairways of Clayton Golf Course provide a challenging round for players of all levels. Golfers can sneak in a quick round of 9 holes. The course is open daily, weather permitting. Clayton Golf Course is open to the public. Only golfers are permitted on the course. Every golfer must have their own bag of clubs. No tee times. Call 267-386-1969 with questions. Pavilion reservations can be booked online from the permits page."

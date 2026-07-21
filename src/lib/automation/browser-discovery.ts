@@ -30,6 +30,7 @@ export type BrowserDiscoveryEvidence = {
     linkCandidates: Array<{ url: string; label: string }>;
     observedUrls?: string[];
     courseName?: string;
+    visibleText?: string;
   };
   visibleText?: string;
   bookingSurfaceText?: string;
@@ -1191,24 +1192,48 @@ function learnWalkInClassification(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
+  const authoritativeVisibleText = evidence.officialPage?.visibleText ??
+    evidence.visibleText;
+  const visibleText = authoritativeVisibleText
+    ?.replace(/\s+/g, " ")
+    .trim() ?? "";
   const noTeeTimeEvidence = findExplicitNoTeeTimeEvidence(
     evidence.courseName,
     visibleText
+  );
+  const dayScopedNoTeeTimeEvidence = findRepeatedDayScopedNoTeeTimeEvidence(
+    evidence.courseName,
+    authoritativeVisibleText ?? ""
   );
   const noReservationMatch =
     /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\b(?:do|does)\s+not\s+(?:take|accept)\s+tee times?\b)/i.exec(
       visibleText
     );
 
-  if (!noReservationMatch && !noTeeTimeEvidence) {
+  if (!noReservationMatch && !noTeeTimeEvidence && !dayScopedNoTeeTimeEvidence) {
     return null;
   }
 
-  if (noTeeTimeEvidence) {
+  if (noTeeTimeEvidence || dayScopedNoTeeTimeEvidence) {
+    if (
+      hasUnsafePrimaryManualEvidenceUrl(evidence) ||
+      hasUntrustedPrimaryManualEvidenceTransition(evidence) ||
+      evidence.bookingCallToAction ||
+      hasBookingCallToActionEvidence(evidence) ||
+      hasTransientTeeTimeRouteEvidence(evidence) ||
+      hasCurrentOnlineBookingEvidence(
+        evidence,
+        observedUrls,
+        evidence.sourceUrl,
+        false
+      )
+    ) {
+      return null;
+    }
+    const scopedVisibleText = noTeeTimeEvidence ?? dayScopedNoTeeTimeEvidence!;
     const officialSourceEvidence = getOfficialSourceScopedEvidence(
       evidence,
-      noTeeTimeEvidence
+      scopedVisibleText
     );
     const officialSourceUrls = officialSourceEvidence.observedUrls;
     if (
@@ -1234,10 +1259,13 @@ function learnWalkInClassification(
       return null;
     }
 
-    return buildWalkInDiscovery(evidence, manualEvidence, {
-      policyNotes:
-        "The course's official site says it does not use tee times. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
-      learnedFrom: "official-no-tee-times-access"
+    return buildWalkInDiscovery(officialSourceEvidence, manualEvidence, {
+      policyNotes: dayScopedNoTeeTimeEvidence
+        ? "The course's official site says ordinary weekday and weekend play does not require tee times. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval."
+        : "The course's official site says it does not use tee times. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+      learnedFrom: dayScopedNoTeeTimeEvidence
+        ? "official-day-scoped-walk-in-access"
+        : "official-no-tee-times-access"
     });
   }
 
@@ -1449,7 +1477,21 @@ function getOfficialSourceScopedEvidence(
   evidence: BrowserDiscoveryEvidence,
   visibleText: string
 ): BrowserDiscoveryEvidence {
-  const sourceUrl = evidence.officialPage?.url ?? evidence.sourceUrl;
+  const source = parseUrl(evidence.sourceUrl);
+  const final = parseUrl(evidence.finalUrl);
+  const secureSameHostFinal = Boolean(
+    source &&
+      final &&
+      source.protocol === "http:" &&
+      final.protocol === "https:" &&
+      normalizeHostname(source.hostname) === normalizeHostname(final.hostname) &&
+      normalizeManualEvidencePath(source.pathname) ===
+        normalizeManualEvidencePath(final.pathname) &&
+      isSafeManualEvidenceUrl(source) &&
+      isSafeManualEvidenceUrl(final)
+  );
+  const sourceUrl = evidence.officialPage?.url ??
+    (secureSameHostFinal && final ? final.toString() : evidence.sourceUrl);
   const linkCandidates =
     evidence.officialPage?.linkCandidates ?? evidence.linkCandidates ?? [];
   const observedUrls = uniqueUrls([
@@ -1465,6 +1507,53 @@ function getOfficialSourceScopedEvidence(
     linkCandidates,
     visibleText
   };
+}
+
+function normalizeManualEvidencePath(value: string) {
+  const normalized = value.replace(/\/{2,}/gu, "/").replace(/\/+$/u, "");
+  return normalized || "/";
+}
+
+function hasUnsafePrimaryManualEvidenceUrl(evidence: BrowserDiscoveryEvidence) {
+  return [evidence.sourceUrl, evidence.finalUrl]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => {
+      const parsed = parseUrl(value);
+      return !parsed || !isSafeManualEvidenceUrl(parsed);
+    });
+}
+
+function hasUntrustedPrimaryManualEvidenceTransition(
+  evidence: BrowserDiscoveryEvidence
+) {
+  if (!evidence.finalUrl) {
+    return false;
+  }
+  const source = parseUrl(evidence.sourceUrl);
+  const final = parseUrl(evidence.finalUrl);
+  const officialPage = parseUrl(evidence.officialPage?.url);
+  if (!source || !final || final.protocol !== "https:") {
+    return true;
+  }
+  if (
+    officialPage &&
+    evidence.officialPage?.courseName &&
+    haveCompatibleCourseNames(
+      evidence.courseName,
+      evidence.officialPage.courseName
+    ) &&
+    evidence.officialPage.visibleText?.trim() &&
+    isSafeManualEvidenceUrl(officialPage) &&
+    normalizeHostname(source.hostname) ===
+      normalizeHostname(officialPage.hostname)
+  ) {
+    return false;
+  }
+  return (
+    normalizeHostname(source.hostname) !== normalizeHostname(final.hostname) ||
+    normalizeManualEvidencePath(source.pathname) !==
+      normalizeManualEvidencePath(final.pathname)
+  );
 }
 
 function hasInterveningNamedSection(value: string, courseName: string) {
@@ -2752,6 +2841,285 @@ function canonicalizeManualUrl(value: string) {
   return `${parsed.origin}${parsed.pathname || "/"}`;
 }
 
+function findRepeatedDayScopedNoTeeTimeEvidence(
+  courseName: string,
+  visibleText: string
+) {
+  const targetName = courseName.trim();
+  const normalizedText = visibleText
+    .replace(/\r\n?/gu, "\n")
+    .replace(/[^\S\n]+/gu, " ")
+    .replace(/ *\n+ */gu, "\n")
+    .trim();
+  if (!targetName || !normalizedText) {
+    return null;
+  }
+
+  const noTeeTimeWording =
+    "tee\\s*times?\\s+(?:are\\s+)?not\\s+(?:needed|nec{1,2}essary|required)(?=\\s*(?:[.!?;]|$))";
+  const weekdayMatch = new RegExp(
+    `\\bweekdays?\\s*:?\\s*${noTeeTimeWording}`,
+    "i"
+  ).exec(normalizedText);
+  const weekendMatch = new RegExp(
+    `\\bweekends?\\s*:?\\s*${noTeeTimeWording}`,
+    "i"
+  ).exec(normalizedText);
+  if (!weekdayMatch || !weekendMatch) {
+    return null;
+  }
+
+  const firstMatch = weekdayMatch.index <= weekendMatch.index
+    ? weekdayMatch
+    : weekendMatch;
+  const lastMatch = firstMatch === weekdayMatch ? weekendMatch : weekdayMatch;
+  const firstStart = firstMatch.index;
+  const firstEnd = firstStart + firstMatch[0].length;
+  const lastStart = lastMatch.index;
+  const lastEnd = lastMatch.index + lastMatch[0].length;
+  const betweenStatements = normalizedText.slice(firstEnd, lastStart);
+  if (
+    lastEnd - firstStart > 600 ||
+    /[\p{L}\p{N}]/u.test(betweenStatements)
+  ) {
+    return null;
+  }
+
+  const headingMatches = [
+    ...normalizedText
+      .slice(0, firstStart)
+      .matchAll(/\bstarting\s+times?\b/gi)
+  ];
+  const startingTimesHeading = headingMatches.at(-1);
+  const headingStart = startingTimesHeading?.index ?? -1;
+  const headingEnd = headingStart + (startingTimesHeading?.[0].length ?? 0);
+  if (
+    !startingTimesHeading ||
+    headingStart < 0 ||
+    firstStart - headingEnd > 240
+  ) {
+    return null;
+  }
+
+  const normalizedTarget = targetName.toLocaleLowerCase("en-US");
+  const normalizedLowerText = normalizedText.toLocaleLowerCase("en-US");
+  const targetStart = normalizedLowerText.lastIndexOf(
+    normalizedTarget,
+    firstStart
+  );
+  if (targetStart < 0 || firstStart - targetStart > 4_000) {
+    return null;
+  }
+  const corroborationTargetStart = normalizedLowerText.indexOf(
+    normalizedTarget,
+    Math.max(0, firstStart - 4_000)
+  );
+  if (corroborationTargetStart < 0) {
+    return null;
+  }
+
+  const feeEvidenceEnd = Math.min(normalizedText.length, lastEnd + 700);
+  const feeEvidence = normalizedText.slice(lastEnd, feeEvidenceEnd);
+  const corroboration = normalizedText.slice(
+    corroborationTargetStart,
+    feeEvidenceEnd
+  );
+  const identityContext = normalizedText.slice(
+    corroborationTargetStart,
+    lastEnd
+  );
+  const sectionOwnerContext = normalizedText.slice(
+    Math.max(corroborationTargetStart, headingStart - 600),
+    firstStart
+  );
+  const policyContext = normalizedText.slice(headingStart, feeEvidenceEnd);
+  const identifiesPublicPhysicalCourse =
+    hasTargetCourseIdentity(corroboration, targetName) &&
+    /\bpublic\b/i.test(corroboration) &&
+    /\b(?:nine|9|eighteen|18)[- ]?holes?\b/i.test(corroboration);
+  const publishesDailyFees =
+    /\b(?:green\s+)?fees?\b/i.test(feeEvidence) &&
+    /\b9\s*holes?\b/i.test(feeEvidence) &&
+    /\b18\s*holes?\b/i.test(feeEvidence) &&
+    /\b\d{1,3}\.\d{2}\b/.test(feeEvidence);
+  if (
+    !identifiesPublicPhysicalCourse ||
+    !publishesDailyFees ||
+    hasDifferentNoTeeTimeCourseIdentity(identityContext, targetName) ||
+    hasAmbiguousStartingTimesSectionOwner(
+      sectionOwnerContext,
+      targetName
+    ) ||
+    hasNonCourseFacilityStartingTimesOwner(
+      sectionOwnerContext,
+      targetName
+    ) ||
+    /\b(?:availability|inventory|results?|search|selected\s+date|sold\s+out|try\s+again)\b/i.test(
+      policyContext
+    )
+  ) {
+    return null;
+  }
+
+  const identityExcerpt = normalizedText.slice(
+    corroborationTargetStart,
+    Math.min(firstStart, corroborationTargetStart + 360)
+  );
+  const targetIdentityProof = normalizedText.slice(
+    targetStart,
+    targetStart + targetName.length
+  );
+  const feeStartOffset = feeEvidence.search(/\b(?:green\s+)?fees?\b/i);
+  const feeStart = feeStartOffset >= 0 ? lastEnd + feeStartOffset : lastEnd;
+  const feeExcerpt = normalizedText.slice(
+    feeStart,
+    Math.min(feeEvidenceEnd, feeStart + 420)
+  );
+  return [
+    identityExcerpt,
+    targetIdentityProof,
+    startingTimesHeading[0],
+    firstMatch[0],
+    lastMatch[0],
+    feeExcerpt
+  ]
+    .filter(Boolean)
+    .join(". ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 1_200);
+}
+
+function hasAmbiguousStartingTimesSectionOwner(
+  value: string,
+  courseName: string
+) {
+  const headings = [...value.matchAll(/\bstarting\s+times?\b/gi)];
+  const heading = headings.at(-1);
+  if (!heading || heading.index === undefined) {
+    return true;
+  }
+
+  const beforeHeading = value.slice(0, heading.index);
+  const withoutTrailingBoundary = beforeHeading.replace(
+    /[\s.!?;:|•–—-]+$/gu,
+    ""
+  );
+  const ownerSegments = withoutTrailingBoundary
+    .split(/[.!?;:\n|•]+/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  let ownerIndex = ownerSegments.length - 1;
+  while (
+    ownerIndex >= 0 &&
+    isGenericStartingTimesNavigation(ownerSegments[ownerIndex] ?? "")
+  ) {
+    ownerIndex -= 1;
+  }
+  const ownerSegment = ownerSegments[ownerIndex] ?? "";
+  if (!isExactTargetStartingTimesOwner(ownerSegment, courseName)) {
+    return true;
+  }
+
+  const afterHeading = value.slice(heading.index + heading[0].length);
+  const afterWithoutContact = afterHeading
+    .replace(
+      /\b(?:call|phone|telephone|tel)\b\s*:?\s*(?:\+?\d[\d().\s-]{5,}\d)?/gi,
+      ""
+    )
+    .replace(/[\d()+.\s:;|–—-]+/gu, "");
+  return afterWithoutContact.length > 0;
+}
+
+function isExactTargetStartingTimesOwner(
+  value: string,
+  courseName: string
+) {
+  const normalizedValue = normalizeExactCourseNamePhrase(value);
+  const normalizedTarget = normalizeExactCourseNamePhrase(courseName);
+  if (!normalizedValue || !normalizedTarget) {
+    return false;
+  }
+  const haystack = ` ${normalizedValue} `;
+  const needle = ` ${normalizedTarget} `;
+  const firstTarget = haystack.indexOf(needle);
+  if (
+    firstTarget < 0 ||
+    haystack.indexOf(needle, firstTarget + needle.length) >= 0
+  ) {
+    return false;
+  }
+  const wrapperTokens = `${haystack.slice(0, firstTarget)} ${haystack.slice(
+    firstTarget + needle.length
+  )}`
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
+  const allowedWrapperTokens = new Set([
+    "direction",
+    "directions",
+    "for",
+    "home",
+    "official",
+    "page",
+    "the",
+    "to"
+  ]);
+  return (
+    wrapperTokens.length <= 6 &&
+    wrapperTokens.every((token) => allowedWrapperTokens.has(token))
+  );
+}
+
+function isGenericStartingTimesNavigation(value: string) {
+  const tokens = value
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return false;
+  }
+  const genericTokens = new Set([
+    "back",
+    "contact",
+    "direction",
+    "directions",
+    "for",
+    "go",
+    "home",
+    "to",
+    "top",
+    "us"
+  ]);
+  return tokens.every((token) => genericTokens.has(token));
+}
+
+function hasNonCourseFacilityStartingTimesOwner(
+  value: string,
+  courseName: string
+) {
+  const matches = [
+    ...value.matchAll(
+      /\b(?:driving|practice)\s+(?:range|facility|center|centre|stalls?)\b/gi
+    )
+  ];
+  const lastMatch = matches.at(-1);
+  if (!lastMatch) {
+    return false;
+  }
+  const afterFacility = value.slice(
+    (lastMatch.index ?? 0) + lastMatch[0].length
+  );
+  return !(
+    hasTargetCourseIdentity(afterFacility, courseName) ||
+    /\b(?:nine|9|eighteen|18)[- ]?holes?\s+(?:public\s+)?(?:golf\s+)?course\b/i.test(
+      afterFacility
+    )
+  );
+}
+
 function canonicalizeUnavailableOfficialUrl(value: string) {
   const parsed = parseUrl(value);
   if (!parsed || !isSafeManualEvidenceUrl(parsed)) {
@@ -3935,7 +4303,7 @@ function getTargetScopedProviderEvidence(
   }
   return getOfficialSourceScopedEvidence(
     evidence,
-    evidence.visibleText ?? ""
+    evidence.officialPage.visibleText ?? evidence.visibleText ?? ""
   );
 }
 

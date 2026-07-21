@@ -1558,11 +1558,11 @@ function replayRecentInspectedDiscovery(
         return null;
       }
       const rebuilt = buildBrowserDiscovery(evidence);
-      if (isTrustedReplayClassification(rebuilt)) {
-        return rebuilt;
-      }
       if (hasNewerOnlineBookingContradiction(rebuilt, evidence)) {
         return null;
+      }
+      if (isTrustedReplayClassification(rebuilt)) {
+        return rebuilt;
       }
     } catch {
       // A corrupt durable snapshot is not proof and must not fail the live search check.
@@ -2190,9 +2190,10 @@ export async function collectOfficialSiteEvidence(
             url: matchedCoursePage.finalUrl,
             linkCandidates: officialPageLinkCandidates,
             ...(officialPageUnlabeledObservedUrls.length > 0
-              ? { observedUrls: officialPageUnlabeledObservedUrls }
-              : {}),
-            courseName
+                ? { observedUrls: officialPageUnlabeledObservedUrls }
+                : {}),
+            courseName,
+            visibleText: matchedCoursePage.evidence.visibleText.slice(0, 12_000)
           }
         }
       : {}),
