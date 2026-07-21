@@ -3115,7 +3115,7 @@ describe("search monitoring discovery", () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       if (input.toString() === sourceUrl) {
         return new Response(
-          '<html><title>Simsbury Farms Golf Course</title><a href="/contact">Book A Tee Time</a></html>',
+          '<html><title>Home</title><h1>Golf Like No Other</h1><h3>Simsbury Farms Golf Course</h3><a href="https://friendsofsimsbury.example/">Friends of Simsbury Farms</a><a href="/contact">Book A Tee Time</a></html>',
           { status: 200, headers: { "content-type": "text/html" } }
         );
       }
@@ -3220,6 +3220,25 @@ describe("search monitoring discovery", () => {
     );
     expect(result.attemptedCourseIds).toEqual(["simsbury-farms"]);
     expect(result.appliedCourseIds).toEqual(["simsbury-farms"]);
+  });
+
+  it("does not grant target-page authority to a shared multi-course heading list", async () => {
+    const sourceUrl = "https://shared.example/";
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        '<html><title>Public Golf</title><h3>Target Golf Course</h3><h3>North Meadows</h3></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Golf Course"
+    );
+
+    expect(evidence.officialPage).toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("rejects unsafe or ambiguous legacy Prophet widget roots", async () => {

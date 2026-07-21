@@ -401,6 +401,7 @@ type CollectedLinkCandidate = {
   url: string;
   label: string;
   targetScopedRedirect?: boolean;
+  inferredCourseBookingRoute?: boolean;
 };
 
 type RecentCourseAutomationDiscovery = Awaited<
@@ -1662,6 +1663,11 @@ export async function collectOfficialSiteEvidence(
   )
     ? pages[0]
     : undefined;
+  const sourcePageSupportsBookingRouteInference = Boolean(
+    courseName &&
+      (matchedCoursePage ||
+        doesSecondaryHeadingIdentifyCourse(firstPage.html, courseName))
+  );
   const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
   const targetScopedOfficialRedirects: Array<{
     url: string;
@@ -1674,17 +1680,23 @@ export async function collectOfficialSiteEvidence(
       (page) => page.evidence.linkCandidates
     );
     const linkCandidates = uniqueLinkCandidates<CollectedLinkCandidate>([
-      ...deriveSameOriginBookingRouteCandidates(
-        observedLinkCandidates,
-        firstPage.finalUrl
-      ),
+      ...(sourcePageSupportsBookingRouteInference
+        ? deriveSameOriginBookingRouteCandidates(
+            observedLinkCandidates,
+            firstPage.finalUrl
+          )
+        : []),
       ...observedLinkCandidates
     ]);
     const unvisitedCandidates = linkCandidates.filter(
       (candidate) => !visited.has(normalizeSourceKey(candidate.url))
     );
+    const inferredBookingRoute = unvisitedCandidates.find(
+      (candidate) => candidate.inferredCourseBookingRoute
+    )?.url;
     const followupCandidate =
       pickExactCourseBookingCandidate(unvisitedCandidates, courseName) ??
+      inferredBookingRoute ??
       (matchedCoursePage
         ? pickBookingSurfaceCandidate(
             unvisitedCandidates,
@@ -1789,11 +1801,15 @@ export async function collectOfficialSiteEvidence(
         });
       }
       if (
-        identifiesTargetCourse &&
         courseName &&
-        (doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
-          doesPageMarkupIdentifyCourse(fetched.html, courseName)) &&
-        haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
+        haveSameReplayHostname(firstPage.finalUrl, page.finalUrl) &&
+        ((identifiesTargetCourse &&
+          (doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
+            doesPageMarkupIdentifyCourse(fetched.html, courseName))) ||
+          (followedLinkCandidate?.inferredCourseBookingRoute &&
+            page.evidence.linkCandidates.some(
+              (candidate) => candidate.targetScopedRedirect
+            )))
       ) {
         matchedCoursePage = page;
       }
@@ -2041,6 +2057,18 @@ function doesPageMarkupIdentifyCourse(html: string, courseName: string) {
   );
 }
 
+function doesSecondaryHeadingIdentifyCourse(
+  html: string,
+  courseName: string
+) {
+  return [
+    ...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/giu)
+  ]
+    .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
+    .filter(Boolean)
+    .some((identity) => haveCompatibleCourseNames(courseName, identity));
+}
+
 async function fetchWordPressRenderedPageContent(
   sourceHtml: string,
   sourcePageUrl: string,
@@ -2212,7 +2240,7 @@ function deriveSameOriginBookingRouteCandidates(
     if (normalizeSourceKey(inferred) === normalizeSourceKey(candidate.url)) {
       return [];
     }
-    return [{ url: inferred, label }];
+    return [{ url: inferred, label, inferredCourseBookingRoute: true }];
   });
 }
 
