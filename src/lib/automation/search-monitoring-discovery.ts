@@ -383,6 +383,37 @@ class ProviderDiscoveryLeaseDeferredError extends Error {
   }
 }
 
+class OfficialSiteHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly finalUrl: string
+  ) {
+    super(`Official site returned HTTP ${status}`);
+    this.name = "OfficialSiteHttpError";
+  }
+}
+
+type LegacyProphetWidgetConfiguration = {
+  providerUrl: string;
+  courseName: string;
+  courseIds: number[];
+};
+
+type LegacyProphetFollowupOutcome = {
+  providerUrl: string;
+  outcome:
+    | "MANAGED_CHALLENGE"
+    | "MODERN_CPS_TENANT"
+    | "NO_MODERN_CPS_TENANT"
+    | "HTTP_ACCESS"
+    | "HTTP_5XX"
+    | "HTTP_ERROR"
+    | "TIMEOUT"
+    | "FETCH_FAILED";
+  status?: number;
+  modernCpsUrl?: string;
+};
+
 type CollectedPageEvidence = Pick<
   BrowserDiscoveryEvidence,
   | "sourceUrl"
@@ -395,13 +426,17 @@ type CollectedPageEvidence = Pick<
   | "accessBarriers"
   | "corroboratedAccessBarrier"
   | "teeItUpLegacyConfigurations"
->;
+> & {
+  legacyProphetConfigurations: LegacyProphetWidgetConfiguration[];
+  legacyProphetFollowupOutcomes: LegacyProphetFollowupOutcome[];
+};
 
 type CollectedLinkCandidate = {
   url: string;
   label: string;
   targetScopedRedirect?: boolean;
   inferredCourseBookingRoute?: boolean;
+  legacyProphetConfiguration?: LegacyProphetWidgetConfiguration;
 };
 
 type RecentCourseAutomationDiscovery = Awaited<
@@ -813,8 +848,16 @@ export async function prepareSearchMonitoring(
           courseId: course.id,
           courseName: course.name
         };
+        const initialDiscovery = buildBrowserDiscovery(
+          collectedWithCorroboration
+        );
+        const legacyProphetAwareDiscovery =
+          buildLegacyProphetFallbackDiscovery(
+            initialDiscovery,
+            collectedWithCorroboration
+          );
         const chronogolfDiscovery = await enrichChronogolfDiscovery(
-          buildBrowserDiscovery(collectedWithCorroboration),
+          legacyProphetAwareDiscovery,
           leasedFetch
         );
         const cpsDiscovery = await enrichCpsDiscovery(
@@ -822,10 +865,12 @@ export async function prepareSearchMonitoring(
           course.name,
           leasedFetch
         );
+        const reviewableCpsDiscovery =
+          keepIncompleteCpsDiscoveryActionable(cpsDiscovery);
         const reasonAwareDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
           keepPolicyOnlyDiscoveryActionable(
             await enrichTeesnapDiscovery(
-              cpsDiscovery,
+              reviewableCpsDiscovery,
               course.name,
               leasedFetch
             )
@@ -933,6 +978,159 @@ export async function prepareSearchMonitoring(
     deferredCourseIds,
     retryCourseIds
   };
+}
+
+function buildLegacyProphetFallbackDiscovery(
+  discovery: BrowserDiscovery,
+  evidence: CollectedPageEvidence &
+    Pick<BrowserDiscoveryEvidence, "courseId" | "courseName">
+): BrowserDiscovery {
+  if (
+    discovery.detectedPlatform !== "UNKNOWN" ||
+    !evidence.officialPage ||
+    evidence.legacyProphetConfigurations.length !== 1
+  ) {
+    return discovery;
+  }
+
+  const configuration = evidence.legacyProphetConfigurations[0];
+  const exactOfficialWidget = evidence.officialPage.linkCandidates.some(
+    (candidate) =>
+      normalizeSourceKey(candidate.url) ===
+        normalizeSourceKey(configuration.providerUrl) &&
+      candidate.label === `Book tee times at ${evidence.courseName}`
+  );
+  const followup = evidence.legacyProphetFollowupOutcomes.find(
+    (candidate) =>
+      normalizeSourceKey(candidate.providerUrl) ===
+      normalizeSourceKey(configuration.providerUrl)
+  );
+  if (
+    !exactOfficialWidget ||
+    !followup ||
+    followup.outcome === "MODERN_CPS_TENANT"
+  ) {
+    return discovery;
+  }
+
+  const corroboratedManagedChallenge = Boolean(
+    followup.outcome === "MANAGED_CHALLENGE" &&
+      evidence.corroboratedAccessBarrier &&
+      evidence.corroboratedAccessBarrier.status === 403 &&
+      normalizeSourceKey(evidence.corroboratedAccessBarrier.url) ===
+        normalizeSourceKey(configuration.providerUrl)
+  );
+  const observedUrls = uniqueStrings([
+    evidence.sourceUrl,
+    evidence.officialPage.url,
+    configuration.providerUrl,
+    followup.modernCpsUrl
+  ]);
+  const learnedFrom = getLegacyProphetFallbackEvidenceKind(
+    followup,
+    corroboratedManagedChallenge
+  );
+
+  if (corroboratedManagedChallenge) {
+    return {
+      courseId: evidence.courseId,
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: evidence.officialPage.url,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      policyNotes:
+        "The official course page exposes a course-scoped legacy Club Prophet tee-time widget, but repeated signed-out reads reach a managed access challenge. Tee Time Spot does not bypass challenges, queues, or other access controls.",
+      intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      confidence: 0.98,
+      evidence: {
+        finalUrl: evidence.officialPage.url,
+        observedUrls,
+        visibleText:
+          "Official course page exposes one course-scoped legacy Club Prophet tee-time widget; repeated public reads reached a managed access challenge.",
+        accessBarriers: evidence.accessBarriers,
+        learnedFrom
+      }
+    };
+  }
+
+  const automationReason =
+    followup.outcome === "NO_MODERN_CPS_TENANT"
+      ? "UNSUPPORTED_PLATFORM"
+      : followup.outcome === "MANAGED_CHALLENGE"
+        ? "CAPTCHA_OR_QUEUE"
+        : "TEMPORARILY_UNAVAILABLE";
+  return {
+    courseId: evidence.courseId,
+    status: "INSPECTED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: evidence.officialPage.url,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason,
+    confidence: 0.9,
+    evidence: {
+      finalUrl: evidence.officialPage.url,
+      observedUrls,
+      visibleText:
+        "Official course page exposes one course-scoped legacy Club Prophet tee-time widget, but no validated modern public read-only tenant was observed.",
+      ...(followup.outcome === "MANAGED_CHALLENGE" && evidence.accessBarriers
+        ? { accessBarriers: evidence.accessBarriers }
+        : {}),
+      learnedFrom
+    }
+  };
+}
+
+function keepIncompleteCpsDiscoveryActionable(
+  discovery: BrowserDiscovery
+): BrowserDiscovery {
+  const learnedFrom = discovery.evidence.learnedFrom;
+  if (
+    discovery.detectedPlatform !== "CUSTOM" ||
+    discovery.status !== "LEARNED" ||
+    ![
+      "cps-public-configuration-invalid",
+      "cps-public-configuration-redirected",
+      "cps-public-configuration-unavailable"
+    ].includes(learnedFrom)
+  ) {
+    return discovery;
+  }
+  return {
+    ...discovery,
+    status: "INSPECTED",
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason:
+      learnedFrom === "cps-public-configuration-unavailable"
+        ? "TEMPORARILY_UNAVAILABLE"
+        : "UNSUPPORTED_PLATFORM",
+    confidence: Math.max(discovery.confidence, 0.9)
+  };
+}
+
+function getLegacyProphetFallbackEvidenceKind(
+  followup: LegacyProphetFollowupOutcome,
+  corroboratedManagedChallenge: boolean
+) {
+  if (followup.outcome === "MANAGED_CHALLENGE") {
+    return corroboratedManagedChallenge
+      ? "legacy-prophet-managed-challenge-confirmed"
+      : "legacy-prophet-managed-challenge-unconfirmed";
+  }
+  return {
+    NO_MODERN_CPS_TENANT: "legacy-prophet-widget-without-modern-tenant",
+    HTTP_ACCESS: "legacy-prophet-http-access-unavailable",
+    HTTP_5XX: "legacy-prophet-provider-5xx",
+    HTTP_ERROR: "legacy-prophet-provider-http-error",
+    TIMEOUT: "legacy-prophet-provider-timeout",
+    FETCH_FAILED: "legacy-prophet-provider-fetch-failed",
+    MODERN_CPS_TENANT: "legacy-prophet-modern-tenant"
+  }[followup.outcome];
 }
 
 function getSafeMonitoringProbeUrl(
@@ -1673,6 +1871,9 @@ export async function collectOfficialSiteEvidence(
     url: string;
     label: string;
   }> = [];
+  const legacyProphetFollowupOutcomes: LegacyProphetFollowupOutcome[] = [];
+  const legacyProphetAccessBarriers: Array<{ url: string; status: 403 }> = [];
+  const failedFollowupObservedUrls: string[] = [];
   let wordpressContentAttempted = false;
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
@@ -1790,6 +1991,29 @@ export async function collectOfficialSiteEvidence(
         ...fetched,
         evidence: extractedEvidence
       };
+      if (followedLinkCandidate?.legacyProphetConfiguration) {
+        const modernCpsUrl = findStrictModernCpsUrl([page.finalUrl]);
+        legacyProphetFollowupOutcomes.push({
+          providerUrl: followedLinkCandidate.url,
+          outcome: modernCpsUrl
+            ? "MODERN_CPS_TENANT"
+            : page.accessBarrier === "MANAGED_CHALLENGE"
+              ? "MANAGED_CHALLENGE"
+              : "NO_MODERN_CPS_TENANT",
+          status: page.status,
+          ...(modernCpsUrl ? { modernCpsUrl } : {})
+        });
+        if (!modernCpsUrl) {
+          if (page.accessBarrier === "MANAGED_CHALLENGE") {
+            legacyProphetAccessBarriers.push({
+              url: page.finalUrl,
+              status: 403
+            });
+          }
+          visited.add(normalizeSourceKey(page.finalUrl));
+          continue;
+        }
+      }
       pages.push(page);
       if (
         exactTargetOfficialRedirect &&
@@ -1817,6 +2041,20 @@ export async function collectOfficialSiteEvidence(
     } catch (error) {
       if (error instanceof ProviderDiscoveryLeaseDeferredError) {
         throw error;
+      }
+      if (followedLinkCandidate?.legacyProphetConfiguration) {
+        const outcome = classifyLegacyProphetFollowupFailure(
+          followedLinkCandidate.url,
+          error
+        );
+        legacyProphetFollowupOutcomes.push(outcome);
+        if (outcome.modernCpsUrl) {
+          failedFollowupObservedUrls.push(outcome.modernCpsUrl);
+          targetScopedOfficialRedirects.push({
+            url: outcome.modernCpsUrl,
+            label: followedLinkCandidate.label
+          });
+        }
       }
       // A failed PDF or booking shell must not prevent inspection of another official policy page.
       continue;
@@ -1875,7 +2113,10 @@ export async function collectOfficialSiteEvidence(
     sourceUrl,
     finalUrl: finalPage.finalUrl,
     observedUrls: uniqueStrings(
-      pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls])
+      [
+        ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
+        ...failedFollowupObservedUrls
+      ]
     ),
     linkCandidates: uniqueLinkCandidates(
       pages.flatMap((page) => page.evidence.linkCandidates)
@@ -1907,9 +2148,22 @@ export async function collectOfficialSiteEvidence(
     teeItUpLegacyConfigurations: uniqueTeeItUpLegacyConfigurations(
       pages.flatMap((page) => page.evidence.teeItUpLegacyConfigurations)
     ),
-    accessBarriers: pages
-      .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
-      .map((page) => ({ url: page.finalUrl, status: 403 as const }))
+    legacyProphetConfigurations: uniqueLegacyProphetConfigurations(
+      pages.flatMap((page) =>
+        page.evidence.linkCandidates.flatMap((candidate) =>
+          candidate.legacyProphetConfiguration
+            ? [candidate.legacyProphetConfiguration]
+            : []
+        )
+      )
+    ),
+    legacyProphetFollowupOutcomes,
+    accessBarriers: [
+      ...pages
+        .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
+        .map((page) => ({ url: page.finalUrl, status: 403 as const })),
+      ...legacyProphetAccessBarriers
+    ]
   };
 }
 
@@ -2019,7 +2273,7 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
       response.status === 403 &&
       response.headers.get("cf-mitigated")?.toLowerCase() === "challenge";
     if (!response.ok && !managedChallenge) {
-      throw new Error(`Official site returned HTTP ${response.status}`);
+      throw new OfficialSiteHttpError(response.status, currentUrl);
     }
     const contentType = response.headers.get("content-type")?.toLowerCase();
     if (
@@ -2038,6 +2292,7 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
     return {
       finalUrl: parseSafePublicUrl(response.url || currentUrl).toString(),
       html: (await response.text()).slice(0, MAX_HTML_BYTES),
+      status: response.status,
       accessBarrier: managedChallenge ? ("MANAGED_CHALLENGE" as const) : undefined
     };
   }
@@ -3227,6 +3482,73 @@ function decodeWidgetConfig(value: string) {
   }
 }
 
+function findStrictModernCpsUrl(values: Array<string | undefined>) {
+  for (const value of values) {
+    const safeValue = value ? readSafePublicUrl(value) : null;
+    if (!safeValue) {
+      continue;
+    }
+    const url = new URL(safeValue);
+    if (
+      url.protocol === "https:" &&
+      /^[a-z0-9](?:[a-z0-9-]{0,62})\.cps\.golf$/iu.test(url.hostname) &&
+      url.hostname.toLowerCase() !== "sc.cps.golf" &&
+      (url.pathname === "/" ||
+        /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/iu.test(
+          url.pathname
+        ))
+    ) {
+      return url.toString();
+    }
+  }
+  return undefined;
+}
+
+function classifyLegacyProphetFollowupFailure(
+  providerUrl: string,
+  error: unknown
+): LegacyProphetFollowupOutcome {
+  if (error instanceof OfficialSiteHttpError) {
+    const modernCpsUrl = findStrictModernCpsUrl([error.finalUrl]);
+    return {
+      providerUrl,
+      outcome:
+        error.status === 401 || error.status === 403
+          ? "HTTP_ACCESS"
+          : error.status >= 500
+            ? "HTTP_5XX"
+            : "HTTP_ERROR",
+      status: error.status,
+      ...(modernCpsUrl ? { modernCpsUrl } : {})
+    };
+  }
+  if (
+    error instanceof Error &&
+    /(?:abort|timeout)/iu.test(`${error.name} ${error.message}`)
+  ) {
+    return { providerUrl, outcome: "TIMEOUT" };
+  }
+  return { providerUrl, outcome: "FETCH_FAILED" };
+}
+
+function uniqueLegacyProphetConfigurations(
+  values: LegacyProphetWidgetConfiguration[]
+) {
+  const seen = new Set<string>();
+  return values.filter((configuration) => {
+    const key = [
+      normalizeSourceKey(configuration.providerUrl),
+      normalizeCourseLinkName(configuration.courseName),
+      [...configuration.courseIds].sort((left, right) => left - right).join(",")
+    ].join("\u0000");
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 function extractLegacyProphetWidgetBookingCandidates(
   configs: string[],
   courseName?: string
@@ -3269,10 +3591,16 @@ function extractLegacyProphetWidgetBookingCandidates(
     }
     const url = getSafeLegacyProphetWidgetRoot(parsed.baseURL);
     if (url) {
+      const matchingLocation = matchingLocations[0];
       candidates.push({
         url,
         label: `Book tee times at ${courseName}`,
-        targetScopedRedirect: true
+        targetScopedRedirect: true,
+        legacyProphetConfiguration: {
+          providerUrl: url,
+          courseName: matchingLocation.name,
+          courseIds: [Number(matchingLocation.courseId)]
+        }
       });
     }
   }

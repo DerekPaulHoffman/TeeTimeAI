@@ -3222,6 +3222,216 @@ describe("search monitoring discovery", () => {
     expect(result.appliedCourseIds).toEqual(["simsbury-farms"]);
   });
 
+  it.each([
+    {
+      label: "a provider HTTP block",
+      providerResponse: () => new Response("Denied", { status: 403 }),
+      automationReason: "TEMPORARILY_UNAVAILABLE",
+      learnedFrom: "legacy-prophet-http-access-unavailable"
+    },
+    {
+      label: "a legacy page without a modern tenant",
+      providerResponse: () =>
+        new Response(
+          '<html>Legacy booking shell<a href="https://sibling.cps.golf/">Sibling course</a></html>',
+          {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          }
+        ),
+      automationReason: "UNSUPPORTED_PLATFORM",
+      learnedFrom: "legacy-prophet-widget-without-modern-tenant"
+    }
+  ])(
+    "persists bounded course-scoped legacy Prophet evidence for $label",
+    async ({ providerResponse, automationReason, learnedFrom }) => {
+      const sourceUrl = "https://simsbury.example/";
+      const bookingPageUrl = "https://simsbury.example/book-a-tee-time";
+      const legacyRoot =
+        "https://secure.east.prophetservices.com/SimsburyFarmsV3";
+      const widgetConfig = Buffer.from(
+        JSON.stringify({
+          baseURL: legacyRoot,
+          newBookingEngine: false,
+          locations: [{ name: "simsbury farms", courseId: "1" }]
+        })
+      ).toString("base64");
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        if (input.toString() === sourceUrl) {
+          return new Response(
+            '<html><title>Home</title><h3>Simsbury Farms Golf Course</h3><a href="/contact">Book A Tee Time</a></html>',
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        }
+        if (input.toString() === bookingPageUrl) {
+          return new Response(
+            `<html><title>Book A Tee Time</title><div data-widget-config="${widgetConfig}"></div></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        }
+        if (input.toString() === legacyRoot) {
+          return providerResponse();
+        }
+        throw new Error(`Unexpected URL ${input.toString()}`);
+      });
+      const search = {
+        preferences: [{
+          rank: 1,
+          course: {
+            id: "simsbury-farms",
+            name: "Simsbury Farms Golf Course",
+            website: sourceUrl,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "simsbury.example",
+            bookingMethod: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            automationReason: "NONE",
+            bookingMetadata: null,
+            isPublic: true,
+            intelligenceVerifiedAt: null,
+            intelligenceReviewAt: null,
+            intelligenceConfidence: null,
+            updatedAt: now
+          }
+        }]
+      } as never;
+
+      await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+      expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+        sourceUrl,
+        bookingPageUrl,
+        legacyRoot
+      ]);
+      expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          courseId: "simsbury-farms",
+          status: "INSPECTED",
+          detectedPlatform: "CUSTOM",
+          bookingUrl: bookingPageUrl,
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "NEEDS_REVIEW",
+          automationReason,
+          evidence: expect.objectContaining({ learnedFrom })
+        })
+      );
+      expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "INSPECTED",
+          detectedPlatform: "CUSTOM",
+          bookingUrl: bookingPageUrl,
+          automationReason
+        }),
+        expect.objectContaining({
+          detectedBookingUrl: null,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN"
+        })
+      );
+    }
+  );
+
+  it("retains a strict CPS redirect when its public configuration is unavailable", async () => {
+    const sourceUrl = "https://simsbury.example/";
+    const bookingPageUrl = "https://simsbury.example/book-a-tee-time";
+    const legacyRoot =
+      "https://secure.east.prophetservices.com/SimsburyFarmsV3";
+    const bookingUrl =
+      "https://simsbury.cps.golf/onlineresweb/search-teetime?CourseId=1";
+    const configurationUrl =
+      "https://simsbury.cps.golf/onlineresweb/Home/Configuration";
+    const widgetConfig = Buffer.from(
+      JSON.stringify({
+        baseURL: legacyRoot,
+        newBookingEngine: false,
+        locations: [{ name: "simsbury farms", courseId: "1" }]
+      })
+    ).toString("base64");
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (input.toString() === sourceUrl) {
+        return new Response(
+          '<html><title>Home</title><h3>Simsbury Farms Golf Course</h3><a href="/contact">Book A Tee Time</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (input.toString() === bookingPageUrl) {
+        return new Response(
+          `<html><title>Book A Tee Time</title><div data-widget-config="${widgetConfig}"></div></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (input.toString() === legacyRoot) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: bookingUrl }
+        });
+      }
+      if (input.toString() === bookingUrl || input.toString() === configurationUrl) {
+        return new Response("Denied", { status: 403 });
+      }
+      throw new Error(`Unexpected URL ${input.toString()}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "simsbury-farms",
+          name: "Simsbury Farms Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "simsbury.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null,
+          isPublic: true,
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          updatedAt: now
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      legacyRoot,
+      bookingUrl,
+      configurationUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "simsbury-farms",
+        status: "INSPECTED",
+        detectedPlatform: "CUSTOM",
+        bookingUrl: "https://simsbury.cps.golf/",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "TEMPORARILY_UNAVAILABLE",
+        apiMetadata: expect.objectContaining({
+          provider: "CPS",
+          courseIds: [1]
+        }),
+        evidence: expect.objectContaining({
+          learnedFrom: "cps-public-configuration-unavailable"
+        })
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "INSPECTED",
+        bookingUrl: "https://simsbury.cps.golf/",
+        automationEligibility: "NEEDS_REVIEW"
+      }),
+      expect.any(Object)
+    );
+  });
+
   it("does not grant target-page authority to a shared multi-course heading list", async () => {
     const sourceUrl = "https://shared.example/";
     const fetchImpl = vi.fn(async () =>
