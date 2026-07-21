@@ -5,8 +5,11 @@ import {
   classifyProviderFailure,
   deriveConsumerDisposition,
   getKnownProviderFamilyForHostname,
+  getProviderPublicBookingLandingIdentity,
   getProviderReadinessFailure,
   isEffectiveConsumerCoverage,
+  isProviderInfrastructureUrl,
+  isProviderPublicBookingLandingUrl,
   isProviderMetadataReady,
   normalizeProviderFamilyKey,
   PROVIDER_CAPABILITIES,
@@ -69,6 +72,249 @@ const runnableMetadata = {
 } as const;
 
 describe("provider capability registry", () => {
+  it.each([
+    "https://api.ezlinksgolf.com/v1/public-tee-times",
+    "https://public-api.ezlinksgolf.com/tee-times",
+    "https://booking-api.ezlinksgolf.com/",
+    "https://public-course.ezlinksgolf.com/api.php",
+    "https://public-course.ezlinksgolf.com/api-v1/public-tee-times",
+    "https://public-course.ezlinksgolf.com/api2/public-tee-times",
+    "https://public-course.ezlinksgolf.com/openapi/tee-times",
+    "https://public-course.ezlinksgolf.com/swagger/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times.json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=json",
+    "https://apiqa.ezlinksgolf.com/tee-times",
+    "https://adminportal.ezlinksgolf.com/tee-times",
+    "https://devportal.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/configprod/tee-times",
+    "https://public-course.ezlinksgolf.com/%2561pi/tee-times",
+    "https://apipublic.ezlinksgolf.com/tee-times",
+    "https://adminpanel.ezlinksgolf.com/tee-times",
+    "https://authcallback.ezlinksgolf.com/tee-times",
+    "https://configstore.ezlinksgolf.com/tee-times",
+    "https://graphqlproxy.ezlinksgolf.com/tee-times",
+    "https://swaggerui.ezlinksgolf.com/tee-times",
+    "https://openapiexplorer.ezlinksgolf.com/tee-times",
+    "https://restendpoint.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?response=application%2Fxml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=%256ason",
+    "https://public-course.ezlinksgolf.com/v2beta/tee-times",
+    "https://public-course.ezlinksgolf.com/v1alpha1/tee-times",
+    "https://public-course.ezlinksgolf.com/restpublic/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?response=jsonp",
+    "https://public-course.ezlinksgolf.com/tee-times?response_format=json",
+    "https://public-course.ezlinksgolf.com/tee-times?responseFormat=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?contentType=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?mime=application%2Fxml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fvnd.api%2Bjson",
+    "https://public-course.ezlinksgolf.com/tee-times.jsonp",
+    "https://public-course.ezlinksgolf.com/jsonp/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times.geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?endpoint=api-v1",
+    "https://public-course.ezlinksgolf.com/tee-times?api=v2",
+    "https://public-course.ezlinksgolf.com/tee-times?route=%2Fapi%2Fv1",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%252Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-xml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=text%2Fx-yaml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-ndjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?output=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?callback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?jsoncallback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?f=pjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson-seq",
+    "https://public-course.ezlinksgolf.com/tee-times?jsonp=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?path=%2Fapi%2Fv1",
+    "https://public-course.ezlinksgolf.com/tee-times#/api/config",
+    "https://foreupsoftware.com/index.php/booking/21017#/api/config"
+  ])("rejects provider infrastructure discovery URL %s", (url) => {
+    expect(isProviderInfrastructureUrl(url)).toBe(true);
+  });
+
+  it.each([
+    "https://public-course.book.teeitup.golf/?course=24680&course=99999",
+    "https://public-course.book.teeitup.golf/?course=24680&date=2026-99-99",
+    "https://public-course.book.teeitup.golf/?course=24680&players=999999999&holes=999&max=999999999",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&module=XX&secondarycode=25&secondarycode=99",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&utm_source=course",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=999999999999999999999999"
+  ])("rejects invalid provider booking query shape %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
+  });
+
+  it.each([
+    "https://public-course.ezlinksgolf.com/",
+    "https://public-course.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/public-booking",
+    "https://forest.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/oak-forest/tee-times",
+    "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+    "https://fox.tenfore.golf/gainfieldfarms",
+    "https://dennis.chelseareservations.com/GPInprocess"
+  ])("keeps public booking landing URL %s", (url) => {
+    expect(isProviderInfrastructureUrl(url)).toBe(false);
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+  });
+
+  it.each([
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=7",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25&interfaceparameter=webtrac_se",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=course-code-123456789012",
+    "https://public-course.book.teeitup.golf/?course=24680&date=2026-07-24&max=10"
+  ])("keeps an explicit provider-family booking query shape %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+  });
+
+  it.each([
+    "https://public-course.ezlinksgolf.com/?utm_source=json&utm_medium=course",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=7&utm_source=course",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25&gclid=tracking",
+    "https://public-course.book.teeitup.golf/?course=24680&date=2026-07-24&fbclid=tracking",
+    "https://fox.tenfore.golf/gainfieldfarms?utm_campaign=summer",
+    "https://dennis.chelseareservations.com/GPInprocess?_gl=tracking"
+  ])("ignores tracking-only query parameters on a valid provider landing %s", (url) => {
+    expect(isProviderInfrastructureUrl(url)).toBe(false);
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+  });
+
+  it("allows tracking-only state on the exact Club Caddie public view exception", () => {
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots?utm_source=course"
+      )
+    ).toBe(true);
+  });
+
+  it("keeps provider landing identity stable across harmless variants but distinct across course selectors", () => {
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/?utm_source=course"
+      )
+    ).toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/"
+      )
+    );
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://foreupsoftware.com/index.php/booking/21017/6654#teetimes"
+      )
+    ).toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://foreupsoftware.com/index.php/booking/21017/6654#/teetimes"
+      )
+    );
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course"
+      )
+    ).toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots"
+      )
+    );
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/sibling/tee-times"
+      )
+    ).not.toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/target/tee-times"
+      )
+    );
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://target.book.teeitup.golf/?course=111"
+      )
+    ).not.toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://target.book.teeitup.golf/?course=222"
+      )
+    );
+  });
+
+  it.each([
+    "https://public-course.ezlinksgolf.com/?utm_source=course&date=2026-07-24",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=7&CourseId=8&utm_source=course",
+    "https://public-course.book.teeitup.golf/?course=24680&unexpected=value&utm_source=course"
+  ])("still rejects functional unknowns or duplicates beside tracking %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
+  });
+
+  it.each([
+    "https://public-course.ezlinksgolf.com/tee-times/checkout",
+    "https://public-course.ezlinksgolf.com/tee-times/account",
+    "https://public-course.ezlinksgolf.com/tee-times/cart",
+    "https://public-course.ezlinksgolf.com/tee-times/payment",
+    "https://course.whoosh.io/patron/club/public-course/checkout",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime/checkout?CourseId=7",
+    "https://foreupsoftware.com/index.php/booking/21017/checkout#/teetimes",
+    "https://public-course.ezlinksgolf.com/tee-times#checkout",
+    "https://public-course.ezlinksgolf.com/booking/transaction",
+    "https://public-course.ezlinksgolf.com/tee-times/confirm",
+    "https://public-course.ezlinksgolf.com/tee-times/confirmation",
+    "https://public-course.ezlinksgolf.com/tee-times/complete",
+    "https://public-course.ezlinksgolf.com/tee-times/success",
+    "https://public-course.ezlinksgolf.com/members/tee-times",
+    "https://public-course.ezlinksgolf.com/profile/tee-times",
+    "https://public-course.ezlinksgolf.com/sign-in/tee-times",
+    "https://public-course.ezlinksgolf.com/log-in/tee-times",
+    "https://public-course.ezlinksgolf.com/my-account/tee-times",
+    "https://public-course.ezlinksgolf.com/session/tee-times",
+    "https://cart.ezlinksgolf.com/tee-times",
+    "https://transaction.ezlinksgolf.com/tee-times",
+    "https://order.ezlinksgolf.com/tee-times",
+    "https://purchase.ezlinksgolf.com/tee-times"
+  ])("rejects provider transaction or access surface %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
+  });
+
+  it.each([
+    "https://finalize.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/submit/tee-times",
+    "https://www.chronogolf.com/club/commit",
+    "https://public.navyaims.com/completion/webtrac/web/search.html?module=GR&secondarycode=25",
+    "https://www.golfnow.com/course/finish",
+    "https://www.golfnow.com/tee-times/facility/finished",
+    "https://app.whoosh.io/patron/club/done",
+    "https://fox.tenfore.golf/finalise",
+    "https://apimanager-cc12.clubcaddie.com/webapi/view/completion"
+  ])("rejects provider action aliases in tenant or course identifier slots %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
+  });
+
+  it.each([
+    "https://www.chronogolf.com/club/donegal",
+    "https://fox.tenfore.golf/donegal",
+    "https://apimanager-cc12.clubcaddie.com/webapi/view/donegal"
+  ])("does not reject a real identifier merely because it contains an action substring %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+  });
+
+  it.each([
+    "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course",
+    "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots"
+  ])("keeps the exact public Club Caddie view surface %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+  });
+
+  it("keeps a plausible Gateway course tenant while rejecting technical gateway query routes", () => {
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://gateway.ezlinksgolf.com/tee-times"
+      )
+    ).toBe(true);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://gateway.ezlinksgolf.com/tee-times?endpoint=gateway"
+      )
+    ).toBe(false);
+  });
+
   it("keeps every current adapter distinct while preserving the external platform enum", () => {
     expect(
       Object.fromEntries(
@@ -115,6 +361,15 @@ describe("provider capability registry", () => {
         metadataReady: true,
         isRunnable: true
       });
+    }
+  );
+
+  it.each(Object.keys(runnableMetadata))(
+    "keeps the production %s schema responsible for requiring a booking base URL",
+    (family) => {
+      expect(isProviderMetadataReady(family, { courseId: "test-only" })).toBe(
+        false
+      );
     }
   );
 

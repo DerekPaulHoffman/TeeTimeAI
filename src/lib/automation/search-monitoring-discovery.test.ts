@@ -1251,7 +1251,7 @@ describe("search monitoring discovery", () => {
           bookingBaseUrl: bookingUrl
         }),
         evidence: expect.objectContaining({
-          observedUrls: expect.arrayContaining([detailUrl, bookingUrl])
+          observedUrls: expect.arrayContaining([bookingUrl])
         })
       })
     );
@@ -1296,7 +1296,7 @@ describe("search monitoring discovery", () => {
 
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
         status: "LEARNED",
@@ -4563,11 +4563,13 @@ describe("search monitoring discovery", () => {
     });
   });
 
-  it("keeps one recognized provider handoff scoped to the official course booking page", async () => {
+  it("inspects one recognized provider handoff before an unrelated policy page", async () => {
     const sourceUrl = "https://public-course.example/";
     const bookingPageUrl = "https://public-course.example/book-now/";
     const policyUrl = "https://public-course.example/faq/";
     const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const providerApiUrl =
+      "https://api.ezlinksgolf.com/v1/public-tee-times";
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       switch (url.toString()) {
         case sourceUrl:
@@ -4578,6 +4580,11 @@ describe("search monitoring discovery", () => {
         case bookingPageUrl:
           return new Response(
             `<html><title>Book now</title><h1>Reserve a tee time</h1><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(
+            `<html><title>Public tee times</title><a href="${providerApiUrl}">Public tee-time data</a></html>`,
             { status: 200, headers: { "content-type": "text/html" } }
           );
         case policyUrl:
@@ -4599,12 +4606,15 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
       sourceUrl,
       bookingPageUrl,
-      policyUrl
+      providerUrl
     ]);
     expect(evidence.officialPage?.linkCandidates).toContainEqual({
       url: providerUrl,
       label: "Book now"
     });
+    expect(evidence.officialPage?.observedUrls ?? []).not.toContain(
+      providerApiUrl
+    );
 
     const discovery = buildBrowserDiscovery({
       ...evidence,
@@ -4621,7 +4631,202 @@ describe("search monitoring discovery", () => {
     expect(discovery.automationEligibility).toBeUndefined();
   });
 
-  it("records a scoped provider handoff without fetching the provider", async () => {
+  it("does not leave the provider family after a direct provider source", async () => {
+    const sourceUrl = "https://public-course.ezlinksgolf.com/";
+    const foreignUrl =
+      "https://foreupsoftware.com/index.php/booking/21017/6654#/teetimes";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() !== sourceUrl) {
+        throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+      return new Response(
+        `<html><a href="${foreignUrl}">Book now</a></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl
+    ]);
+    expect(JSON.stringify(evidence)).not.toContain("foreupsoftware.com");
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "public-course",
+      courseName: "Public Course Golf Club"
+    });
+    expect(discovery.detectedPlatform).toBe("CUSTOM");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not fetch or learn a sibling TeeItUp tenant from a provider page", async () => {
+    const sourceUrl =
+      "https://target-course.book.teeitup.golf/?course=111";
+    const siblingUrl =
+      "https://sibling-course.book.teeitup.golf/?course=222";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() !== sourceUrl) {
+        throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+      return new Response(
+        `<html><a href="${siblingUrl}">Book tee times</a></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Course Golf Club"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "target-course",
+      courseName: "Target Course Golf Club"
+    });
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl
+    ]);
+    expect(JSON.stringify(evidence)).not.toContain("sibling-course");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("222");
+  });
+
+  it("locks a provider handoff reached through an official redirect", async () => {
+    const sourceUrl = "https://public-course.example/book";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const unsafeUrl = "https://public-course.ezlinksgolf.com/submit/tee-times";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: providerUrl }
+          });
+        case providerUrl:
+          return new Response(
+            `<html><a href="${unsafeUrl}">Continue</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      providerUrl
+    ]);
+    expect(JSON.stringify(evidence)).not.toContain("submit/tee-times");
+  });
+
+  it("locks a provider handoff reached through an official page link", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const foreignUrl =
+      "https://www.chronogolf.com/club/foreign-course";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(
+            `<html><a href="${foreignUrl}">Continue</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      providerUrl
+    ]);
+    expect(JSON.stringify(evidence)).not.toContain("chronogolf.com");
+  });
+
+  it("upgrades a recognized provider source to HTTPS before the only request", async () => {
+    const sourceUrl = "http://public-course.ezlinksgolf.com/";
+    const secureUrl = "https://public-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() !== secureUrl) {
+        throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+      return new Response("<html><title>Public tee times</title></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      secureUrl
+    ]);
+  });
+
+  it("follows a tracking-only provider landing but not a later unsafe redirect", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const providerUrl =
+      "https://public-course.ezlinksgolf.com/?utm_source=course";
+    const unsafeUrl = "https://public-course.ezlinksgolf.com/finish/tee-times";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: unsafeUrl }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      providerUrl
+    ]);
+    expect(JSON.stringify(evidence)).not.toContain("finish/tee-times");
+  });
+
+  it("uses the second bounded followup for a validated provider landing page", async () => {
     const sourceUrl = "https://public-course.example/";
     const bookingPageUrl = "https://public-course.example/book-now/";
     const providerUrl = "https://public-course.ezlinksgolf.com/";
@@ -4637,8 +4842,13 @@ describe("search monitoring discovery", () => {
             `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
             { status: 200, headers: { "content-type": "text/html" } }
           );
+        case providerUrl:
+          return new Response("<html><title>Public tee times</title></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
         default:
-          throw new Error(`Unexpected provider fetch ${url.toString()}`);
+          throw new Error(`Unexpected URL ${url.toString()}`);
       }
     });
 
@@ -4650,12 +4860,455 @@ describe("search monitoring discovery", () => {
 
     expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
       sourceUrl,
-      bookingPageUrl
+      bookingPageUrl,
+      providerUrl
     ]);
     expect(evidence.officialPage?.linkCandidates).toContainEqual({
       url: providerUrl,
       label: "Book now"
     });
+  });
+
+  it("follows a provider landing that differs only by tracking parameters", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl =
+      "https://public-course.ezlinksgolf.com/?utm_source=course&utm_medium=official";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response("<html><title>Public tee times</title></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      providerUrl
+    ]);
+  });
+
+  it.each([
+    "https://booking-api.ezlinksgolf.com/",
+    "https://public-course.ezlinksgolf.com/api.php",
+    "https://public-course.ezlinksgolf.com/api-v1/public-tee-times",
+    "https://public-course.ezlinksgolf.com/api2/public-tee-times",
+    "https://public-course.ezlinksgolf.com/openapi/public-tee-times",
+    "https://public-course.ezlinksgolf.com/swagger/public-tee-times",
+    "https://apiqa.ezlinksgolf.com/tee-times",
+    "https://adminportal.ezlinksgolf.com/tee-times",
+    "https://devportal.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/configprod/tee-times",
+    "https://public-course.ezlinksgolf.com/%2561pi/tee-times",
+    "https://apipublic.ezlinksgolf.com/tee-times",
+    "https://adminpanel.ezlinksgolf.com/tee-times",
+    "https://authcallback.ezlinksgolf.com/tee-times",
+    "https://configstore.ezlinksgolf.com/tee-times",
+    "https://graphqlproxy.ezlinksgolf.com/tee-times",
+    "https://swaggerui.ezlinksgolf.com/tee-times",
+    "https://openapiexplorer.ezlinksgolf.com/tee-times",
+    "https://restendpoint.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=%256ason",
+    "https://public-course.ezlinksgolf.com/v2beta/tee-times",
+    "https://public-course.ezlinksgolf.com/v1alpha1/tee-times",
+    "https://public-course.ezlinksgolf.com/restpublic/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?response=jsonp",
+    "https://public-course.ezlinksgolf.com/tee-times?response_format=json",
+    "https://public-course.ezlinksgolf.com/tee-times?responseFormat=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?contentType=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?mime=application%2Fxml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fvnd.api%2Bjson",
+    "https://public-course.ezlinksgolf.com/tee-times.jsonp",
+    "https://public-course.ezlinksgolf.com/jsonp/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times.geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?endpoint=api-v1",
+    "https://public-course.ezlinksgolf.com/tee-times?api=v2",
+    "https://public-course.ezlinksgolf.com/tee-times?route=%2Fapi%2Fv1",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%252Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-xml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=text%2Fx-yaml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?output=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?callback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?jsoncallback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?f=pjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson-seq",
+    "https://public-course.ezlinksgolf.com/tee-times?jsonp=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?path=%2Fapi%2Fv1",
+    "https://public-course.book.teeitup.golf/?course=24680&course=99999",
+    "https://public-course.book.teeitup.golf/?course=24680&date=2026-99-99",
+    "https://public-course.book.teeitup.golf/?course=24680&players=999999999&holes=999&max=999999999",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&module=XX&secondarycode=25&secondarycode=99",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=999999999999999999999999",
+    "https://public-course.ezlinksgolf.com/tee-times/checkout",
+    "https://course.whoosh.io/patron/club/public-course/checkout",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime/checkout?CourseId=7",
+    "https://foreupsoftware.com/index.php/booking/21017/checkout#/teetimes"
+  ])(
+    "does not request provider infrastructure presented as a booking call to action: %s",
+    async (providerApiUrl) => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const policyUrl = "https://public-course.example/faq/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a><a href="${policyUrl}">FAQs</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerApiUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case policyUrl:
+          return new Response("<html><title>FAQs</title></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      policyUrl
+    ]);
+    }
+  );
+
+  it.each([
+    "https://booking-api.ezlinksgolf.com/",
+    "https://public-course.ezlinksgolf.com/api.php",
+    "https://public-course.ezlinksgolf.com/api-v1/public-tee-times",
+    "https://public-course.ezlinksgolf.com/api2/public-tee-times",
+    "https://public-course.ezlinksgolf.com/openapi/public-tee-times",
+    "https://public-course.ezlinksgolf.com/swagger/public-tee-times",
+    "https://apiqa.ezlinksgolf.com/tee-times",
+    "https://adminportal.ezlinksgolf.com/tee-times",
+    "https://devportal.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/configprod/tee-times",
+    "https://public-course.ezlinksgolf.com/%2561pi/tee-times",
+    "https://apipublic.ezlinksgolf.com/tee-times",
+    "https://adminpanel.ezlinksgolf.com/tee-times",
+    "https://authcallback.ezlinksgolf.com/tee-times",
+    "https://configstore.ezlinksgolf.com/tee-times",
+    "https://graphqlproxy.ezlinksgolf.com/tee-times",
+    "https://swaggerui.ezlinksgolf.com/tee-times",
+    "https://openapiexplorer.ezlinksgolf.com/tee-times",
+    "https://restendpoint.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?response=application%2Fxml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=%256ason",
+    "https://public-course.ezlinksgolf.com/v2beta/tee-times",
+    "https://public-course.ezlinksgolf.com/v1alpha1/tee-times",
+    "https://public-course.ezlinksgolf.com/restpublic/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?response=jsonp",
+    "https://public-course.ezlinksgolf.com/tee-times?response_format=json",
+    "https://public-course.ezlinksgolf.com/tee-times?responseFormat=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?contentType=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?mime=application%2Fxml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fvnd.api%2Bjson",
+    "https://public-course.ezlinksgolf.com/tee-times.jsonp",
+    "https://public-course.ezlinksgolf.com/jsonp/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times.geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?endpoint=api-v1",
+    "https://public-course.ezlinksgolf.com/tee-times?api=v2",
+    "https://public-course.ezlinksgolf.com/tee-times?route=%2Fapi%2Fv1",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%252Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-xml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=text%2Fx-yaml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?output=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?callback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?jsoncallback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?f=pjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson-seq",
+    "https://public-course.ezlinksgolf.com/tee-times?jsonp=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?path=%2Fapi%2Fv1",
+    "https://public-course.book.teeitup.golf/?course=24680&course=99999",
+    "https://public-course.book.teeitup.golf/?course=24680&date=2026-99-99",
+    "https://public-course.book.teeitup.golf/?course=24680&players=999999999&holes=999&max=999999999",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&module=XX&secondarycode=25&secondarycode=99",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=999999999999999999999999",
+    "https://public-course.ezlinksgolf.com/tee-times/checkout",
+    "https://course.whoosh.io/patron/club/public-course/checkout",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime/checkout?CourseId=7",
+    "https://foreupsoftware.com/index.php/booking/21017/checkout#/teetimes"
+  ])(
+    "stops a provider landing redirect before requesting provider infrastructure: %s",
+    async (providerApiUrl) => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: providerApiUrl }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      providerUrl
+    ]);
+    expect(evidence.officialPage?.observedUrls ?? []).not.toContain(
+      providerApiUrl
+    );
+    }
+  );
+
+  it("rejects cross-provider redirects before sibling evidence becomes target scoped", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const siblingProviderUrl =
+      "https://foreupsoftware.com/index.php/booking/00000/0000";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: siblingProviderUrl }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "public-course",
+      courseName: "Public Course Golf Club"
+    });
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      providerUrl
+    ]);
+    expect(evidence.officialPage?.observedUrls ?? []).not.toContain(
+      siblingProviderUrl
+    );
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: providerUrl
+    });
+  });
+
+  it("filters sibling-provider URLs and metadata embedded in a validated provider landing", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const siblingProviderUrl =
+      "https://foreupsoftware.com/index.php/booking/00000/0000#/teetimes";
+    const siblingApiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?schedule_id=0000";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(
+            `<html><title>Public tee times</title><a href="${siblingProviderUrl}">Book now</a><script>window.schedule_id = 0000; window.baseURL = "${siblingApiUrl}"; foreign-provider-marker</script ><style>foreign-style-marker ${siblingApiUrl}</style ></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "public-course",
+      courseName: "Public Course Golf Club"
+    });
+
+    expect(evidence.observedUrls).not.toContain(siblingProviderUrl);
+    expect(evidence.observedUrls).not.toContain(siblingApiUrl);
+    expect(evidence.linkCandidates).not.toContainEqual({
+      url: siblingProviderUrl,
+      label: "Book now"
+    });
+    expect(evidence.visibleText).not.toContain(siblingProviderUrl);
+    expect(evidence.visibleText).not.toContain(siblingApiUrl);
+    expect(evidence.visibleText).not.toContain("foreign-provider-marker");
+    expect(evidence.visibleText).not.toContain("foreign-style-marker");
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: providerUrl
+    });
+  });
+
+  it("does not leak an unclosed provider script into global evidence", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const siblingProviderUrl =
+      "https://foreupsoftware.com/index.php/booking/00000/0000#/teetimes";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(
+            `<html><title>Public tee times</title><script>window.baseURL = "${siblingProviderUrl}"; unclosed-provider-marker`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(evidence.observedUrls).not.toContain(siblingProviderUrl);
+    expect(evidence.visibleText).not.toContain(siblingProviderUrl);
+    expect(evidence.visibleText).not.toContain("unclosed-provider-marker");
+  });
+
+  it("permits only a same-tenant public landing redirect", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const providerLandingUrl =
+      "https://public-course.ezlinksgolf.com/tee-times";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: providerLandingUrl }
+          });
+        case providerLandingUrl:
+          return new Response("<html><title>Public tee times</title></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      providerUrl,
+      providerLandingUrl
+    ]);
+    expect(evidence.officialPage?.observedUrls).toContain(providerLandingUrl);
   });
 
   it("does not trust one generic provider link from a shared booking index", async () => {

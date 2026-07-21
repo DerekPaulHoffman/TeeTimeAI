@@ -784,6 +784,33 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).toBeUndefined();
   });
 
+  it.each([
+    "https://shared-public.book.teeitup.com/?course=2147483648",
+    "https://shared-public.book.teeitup.com/?course=24680&unexpected=value",
+    "https://shared-public.book.teeitup.com/?course=24680&date=2026-99-99"
+  ])("does not learn target-scoped TeeItUp metadata from an invalid landing %s", (invalidUrl) => {
+    const officialUrl = "https://shared.example/tee-times";
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-teeitup-course",
+      courseName: "Shared TeeItUp Course",
+      sourceUrl: officialUrl,
+      observedUrls: [invalidUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Shared TeeItUp Course",
+        linkCandidates: [{ url: invalidUrl, label: "General Public Tee Times" }]
+      },
+      visibleText: "Shared TeeItUp Course public tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: officialUrl
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("suppresses an ambiguous provider booking URL when no official course page is known", () => {
     const ambiguousProviderUrl =
       "https://shared-public.book.teeitup.com/?course=24680&course=13579";
@@ -828,7 +855,7 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).toBeUndefined();
   });
 
-  it("canonicalizes TeeItUp store links to the provider booking root", () => {
+  it("does not turn a TeeItUp gift-store link into booking metadata", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "little-harbor",
       courseName: "Little Harbor Golf Course",
@@ -852,14 +879,11 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
-      status: "LEARNED",
+      status: "INSPECTED",
       detectedPlatform: "TEEITUP",
-      bookingUrl: "https://little-harbor-country-club.book.teeitup.com/",
-      apiMetadata: {
-        aliases: ["little-harbor-country-club"],
-        bookingBaseUrl: "https://little-harbor-country-club.book.teeitup.com/"
-      }
+      bookingUrl: "https://littleharborgolf.com/"
     });
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("recognizes a CPS tenant without inventing course ids", () => {
@@ -905,6 +929,23 @@ describe("buildBrowserDiscovery", () => {
         holes: [18, 9]
       }
     });
+  });
+
+  it.each([
+    "https://examplepublic.cps.golf/onlineresweb/search-teetime?CourseId=2147483648",
+    "https://examplepublic.cps.golf/onlineresweb/search-teetime?CourseId=7&CourseId=8",
+    "https://examplepublic.cps.golf/onlineresweb/search-teetime?CourseId=7&date=2026-07-24"
+  ])("does not learn CPS metadata from an invalid public landing %s", (invalidUrl) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-with-provider-id",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.test/golf",
+      observedUrls: [invalidUrl],
+      linkCandidates: [{ url: invalidUrl, label: "Example Public Golf Course" }]
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("selects the unique course-matching CPS tenant at a shared facility", () => {
@@ -1395,8 +1436,231 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.status).toBe("INSPECTED");
     expect(discovery.apiMetadata).toBeUndefined();
     expect(discovery.evidence.learnedFrom).toBe(
-      "teesnap-url-without-course-id:observed-course-config-mismatch"
+      "teesnap-technical-evidence-without-public-landing:observed-course-config-mismatch"
     );
+  });
+
+  it.each([
+    "https://evilforeupsoftware.com/api/booking/times?schedule_id=123",
+    "https://public-course.teesnap.net/customer-api/teetimes-day?course=123",
+    "https://golfback.com/?unexpected=value#/course/123e4567-e89b-42d3-a456-426614174000",
+    "https://public-course.chelseareservations.com/api/config",
+    "https://app.whoosh.io/patron/club/public-course?unexpected=value",
+    "https://fox.tenfore.golf/public-course/checkout",
+    "https://www.chronogolf.com/club/checkout",
+    "https://public-course.cps.golf/onlineres/onlineapi/checkout?courseId=123",
+    "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course?unexpected=value"
+  ])("never turns unsafe specialized-provider evidence into runnable metadata: %s", (unsafeUrl) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unsafe-provider-evidence",
+      courseName: "Public Course Golf Club",
+      sourceUrl: "https://public-course.example/",
+      observedUrls: [unsafeUrl],
+      linkCandidates: [{ url: unsafeUrl, label: "Book now" }]
+    });
+
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.automationEligibility).not.toBe("ALLOWED");
+    expect(discovery.status).not.toBe("LEARNED");
+  });
+
+  it("does not let mixed raw provider evidence replace the source provider family", () => {
+    const sourceUrl = "https://public-course.ezlinksgolf.com/";
+    const foreignUrl =
+      "https://foreupsoftware.com/index.php/booking/21017/6654#/teetimes";
+    const discovery = buildBrowserDiscovery({
+      courseId: "mixed-provider-evidence",
+      courseName: "Public Course Golf Club",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl, foreignUrl],
+      linkCandidates: [{ url: foreignUrl, label: "Book now" }]
+    });
+
+    expect(discovery.detectedPlatform).toBe("CUSTOM");
+    expect(discovery.bookingUrl).toBe(sourceUrl);
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("foreupsoftware.com");
+  });
+
+  it("does not let a sibling TeeItUp tenant become the target course", () => {
+    const sourceUrl =
+      "https://target-course.book.teeitup.golf/?course=111";
+    const siblingUrl =
+      "https://sibling-course.book.teeitup.golf/?course=222";
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-course",
+      courseName: "Target Course Golf Club",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl, siblingUrl],
+      linkCandidates: [{ url: siblingUrl, label: "Book tee times" }]
+    });
+
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("sibling-course");
+    expect(JSON.stringify(discovery)).not.toContain("222");
+  });
+
+  it("drops a foreign provider access barrier from provider-scoped evidence", () => {
+    const sourceUrl = "https://target-course.ezlinksgolf.com/";
+    const foreignBarrierUrl = "https://sibling-course.cps.golf/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-course",
+      courseName: "Target Course Golf Club",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl],
+      accessBarriers: [{ url: foreignBarrierUrl, status: 403 }],
+      corroboratedAccessBarrier: { url: foreignBarrierUrl, status: 403 }
+    });
+
+    expect(discovery.detectedPlatform).toBe("CUSTOM");
+    expect(discovery.automationReason).not.toBe("CAPTCHA_OR_QUEUE");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("sibling-course.cps.golf");
+  });
+
+  it("fails closed when an official packet contains multiple unresolved provider families", () => {
+    const foreupUrl =
+      "https://foreupsoftware.com/index.php/booking/21017/6654#/teetimes";
+    const teeItUpUrl =
+      "https://public-course.book.teeitup.golf/?course=24680";
+    const discovery = buildBrowserDiscovery({
+      courseId: "provider-conflict",
+      courseName: "Public Course Golf Club",
+      sourceUrl: "https://public-course.example/",
+      finalUrl: "https://public-course.example/",
+      observedUrls: [foreupUrl, teeItUpUrl],
+      linkCandidates: [
+        { url: foreupUrl, label: "Book now" },
+        { url: teeItUpUrl, label: "Book now" }
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      evidence: { learnedFrom: "provider-evidence-conflict" }
+    });
+    expect(discovery.bookingUrl).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "FOREUP",
+      "https://foreupsoftware.com/index.php/booking/21017/11#/teetimes",
+      "https://foreupsoftware.com/index.php/booking/21017/22#/teetimes"
+    ],
+    [
+      "CHELSEA",
+      "https://sibling.chelseareservations.com/",
+      "https://target.chelseareservations.com/"
+    ],
+    [
+      "TEESNAP",
+      "https://sibling.teesnap.net/",
+      "https://target.teesnap.net/"
+    ],
+    [
+      "WEBTRAC",
+      "https://sibling.navyaims.com/webtrac/web/search.html?module=GR&secondarycode=11",
+      "https://target.navyaims.com/webtrac/web/search.html?module=GR&secondarycode=22"
+    ]
+  ])("fails closed on unresolved same-family %s sibling landings", (_family, siblingUrl, targetUrl) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "same-family-conflict",
+      courseName: "Target Course Golf Club",
+      sourceUrl: "https://target-course.example/",
+      finalUrl: "https://target-course.example/",
+      observedUrls: [siblingUrl, targetUrl],
+      linkCandidates: [
+        { url: siblingUrl, label: "Sibling Golf Course" },
+        { url: targetUrl, label: "Target Course Golf Club" }
+      ],
+      visibleText:
+        'window.courses = [{"id":123,"name":"Target Course Golf Club"}]'
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      evidence: { learnedFrom: "provider-evidence-conflict" }
+    });
+    expect(discovery.bookingUrl).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("fails closed when ForeUp API evidence disagrees with the target landing selector", () => {
+    const targetUrl =
+      "https://foreupsoftware.com/index.php/booking/222/22#/teetimes";
+    const conflictingApiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?schedule_id=11&booking_class=111";
+    const discovery = buildBrowserDiscovery({
+      courseId: "foreup-selector-conflict",
+      courseName: "Target Course Golf Club",
+      sourceUrl: "https://target-course.example/",
+      observedUrls: [targetUrl, conflictingApiUrl],
+      linkCandidates: [{ url: targetUrl, label: "Target Course Golf Club" }]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "FOREUP",
+      bookingUrl: targetUrl,
+      evidence: { learnedFrom: "foreup-selector-conflict" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not transfer a sibling ForeUp access barrier to the scoped target landing", () => {
+    const targetUrl =
+      "https://foreupsoftware.com/index.php/booking/222/22#/teetimes";
+    const siblingUrl =
+      "https://foreupsoftware.com/index.php/booking/111/11#/teetimes";
+    const discovery = buildBrowserDiscovery({
+      courseId: "foreup-barrier-scope",
+      courseName: "Target Course Golf Club",
+      sourceUrl: targetUrl,
+      finalUrl: targetUrl,
+      observedUrls: [targetUrl],
+      accessBarriers: [{ url: siblingUrl, status: 403 }],
+      corroboratedAccessBarrier: { url: siblingUrl, status: 403 }
+    });
+
+    expect(discovery.automationReason).not.toBe("CAPTCHA_OR_QUEUE");
+    expect(JSON.stringify(discovery)).not.toContain("/booking/111/11");
+    expect(discovery.apiMetadata).toEqual(
+      expect.objectContaining({ scheduleId: 22, bookingBaseUrl: targetUrl })
+    );
+  });
+
+  it("fails closed on two course paths inside one EZLinks tenant", () => {
+    const siblingUrl =
+      "https://public-course.ezlinksgolf.com/sibling/tee-times";
+    const targetUrl =
+      "https://public-course.ezlinksgolf.com/target/tee-times";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ezlinks-path-conflict",
+      courseName: "Target Course Golf Club",
+      sourceUrl: "https://target-course.example/",
+      observedUrls: [siblingUrl, targetUrl],
+      linkCandidates: [
+        { url: siblingUrl, label: "Sibling Golf Course" },
+        { url: targetUrl, label: "Target Course Golf Club" }
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      evidence: { learnedFrom: "provider-evidence-conflict" }
+    });
+    expect(discovery.bookingUrl).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("does not treat social media links as booking pages just because facebook contains book", () => {
@@ -1485,10 +1749,53 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.bookingUrl).not.toContain("checkout");
   });
 
-  it("does not select a labeled provider API or configuration endpoint", () => {
+  it.each([
+    "https://config-qa.ezlinksgolf.com/v1/config",
+    "https://apiqa.ezlinksgolf.com/tee-times",
+    "https://adminportal.ezlinksgolf.com/tee-times",
+    "https://devportal.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/configprod/tee-times",
+    "https://public-course.ezlinksgolf.com/%2561pi/tee-times",
+    "https://apipublic.ezlinksgolf.com/tee-times",
+    "https://adminpanel.ezlinksgolf.com/tee-times",
+    "https://authcallback.ezlinksgolf.com/tee-times",
+    "https://configstore.ezlinksgolf.com/tee-times",
+    "https://graphqlproxy.ezlinksgolf.com/tee-times",
+    "https://swaggerui.ezlinksgolf.com/tee-times",
+    "https://openapiexplorer.ezlinksgolf.com/tee-times",
+    "https://restendpoint.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=%256ason",
+    "https://public-course.ezlinksgolf.com/v2beta/tee-times",
+    "https://public-course.ezlinksgolf.com/v1alpha1/tee-times",
+    "https://public-course.ezlinksgolf.com/restpublic/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times?response=jsonp",
+    "https://public-course.ezlinksgolf.com/tee-times?response_format=json",
+    "https://public-course.ezlinksgolf.com/tee-times?responseFormat=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?contentType=application%2Fjson",
+    "https://public-course.ezlinksgolf.com/tee-times?mime=application%2Fxml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fvnd.api%2Bjson",
+    "https://public-course.ezlinksgolf.com/tee-times.jsonp",
+    "https://public-course.ezlinksgolf.com/jsonp/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times.geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?endpoint=api-v1",
+    "https://public-course.ezlinksgolf.com/tee-times?api=v2",
+    "https://public-course.ezlinksgolf.com/tee-times?route=%2Fapi%2Fv1",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%252Fx-json",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fx-xml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=text%2Fx-yaml",
+    "https://public-course.ezlinksgolf.com/tee-times?format=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?output=geojson",
+    "https://public-course.ezlinksgolf.com/tee-times?callback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?jsoncallback=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?f=pjson",
+    "https://public-course.ezlinksgolf.com/tee-times?format=application%2Fjson-seq",
+    "https://public-course.ezlinksgolf.com/tee-times?jsonp=handleResponse",
+    "https://public-course.ezlinksgolf.com/tee-times?path=%2Fapi%2Fv1"
+  ])("does not select labeled provider infrastructure %s", (providerConfigUrl) => {
     const sourceUrl = "https://public-course.example/";
     const bookingWrapperUrl = "https://public-course.example/book-now/";
-    const providerConfigUrl = "https://config-qa.ezlinksgolf.com/v1/config";
     const discovery = buildBrowserDiscovery({
       courseId: "public-course",
       courseName: "Public Course Golf Club",
@@ -1509,6 +1816,40 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.bookingUrl).toBe(bookingWrapperUrl);
     expect(discovery.bookingUrl).not.toBe(providerConfigUrl);
   });
+
+  it.each([
+    "https://apipublic.ezlinksgolf.com/tee-times",
+    "https://public-course.ezlinksgolf.com/tee-times.jsonp",
+    "https://public-course.ezlinksgolf.com/tee-times?endpoint=api-v1",
+    "https://public-course.book.teeitup.golf/?course=24680&course=99999",
+    "https://public-course.book.teeitup.golf/?course=24680&date=2026-99-99",
+    "https://public-course.book.teeitup.golf/?course=24680&players=999999999&holes=999&max=999999999",
+    "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&module=XX&secondarycode=25&secondarycode=99",
+    "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=999999999999999999999999"
+  ])(
+    "does not let generic URL scoring select a direct provider infrastructure CTA %s",
+    (providerInfrastructureUrl) => {
+      const sourceUrl = "https://public-course.example/";
+      const discovery = buildBrowserDiscovery({
+        courseId: "public-course",
+        courseName: "Public Course Golf Club",
+        sourceUrl,
+        finalUrl: sourceUrl,
+        observedUrls: [sourceUrl, providerInfrastructureUrl],
+        officialPage: {
+          url: sourceUrl,
+          linkCandidates: [
+            { url: providerInfrastructureUrl, label: "Book now" }
+          ],
+          courseName: "Public Course Golf Club",
+          visibleText: "Public Course Golf Club tee times"
+        },
+        visibleText: "Book tee times online"
+      });
+
+      expect(discovery.bookingUrl).not.toBe(providerInfrastructureUrl);
+    }
+  );
 
   it("prefers a Chelsea reservation surface over tee-time wording in event URLs", () => {
     const discovery = buildBrowserDiscovery({
@@ -1647,7 +1988,7 @@ describe("buildBrowserDiscovery", () => {
           Accept: "text/html,application/xhtml+xml;q=0.9",
           "User-Agent": expect.stringContaining("Mozilla/5.0")
         }),
-        redirect: "follow"
+        redirect: "manual"
       })
     );
     expect(enriched).toMatchObject({
@@ -5238,7 +5579,7 @@ describe("Chronogolf public profile enrichment", () => {
 
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://www.chronogolf.com/club/3563",
-      expect.objectContaining({ redirect: "follow" })
+      expect.objectContaining({ redirect: "manual" })
     );
     expect(enriched).toEqual(
       expect.objectContaining({
@@ -5276,7 +5617,7 @@ describe("Chronogolf public profile enrichment", () => {
 
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://www.chronogolf.com/club/public-chrono",
-      expect.objectContaining({ redirect: "follow" })
+      expect.objectContaining({ redirect: "manual" })
     );
     expect(enriched).toEqual(
       expect.objectContaining({
@@ -5471,7 +5812,9 @@ describe("CPS public configuration enrichment", () => {
       courseName: "Example Public Golf Course",
       sourceUrl: "https://example.test/golf",
       observedUrls: [
-        `https://examplepublic.cps.golf/onlineresweb/search-teetime?courseIds=${existingCourseIds.join(",")}`
+        existingCourseIds[0] > 0
+          ? `https://examplepublic.cps.golf/onlineresweb/search-teetime?CourseId=${existingCourseIds[0]}`
+          : "https://examplepublic.cps.golf/onlineresweb/search-teetime"
       ]
     });
     const enriched = await enrichCpsDiscovery(

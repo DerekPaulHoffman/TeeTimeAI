@@ -5,6 +5,10 @@ import type {
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import {
   getKnownProviderFamilyForHostname,
+  getProviderPublicBookingLandingIdentity,
+  isProviderInfrastructureUrl,
+  isProviderPublicBookingLandingUrl,
+  isProviderTrackingQueryParameter,
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
@@ -310,6 +314,7 @@ export type BrowserProbeCourseInput = {
 
 export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): BrowserDiscovery {
   evidence = sanitizeClubCaddieDiscoveryEvidence(evidence);
+  evidence = scopeBrowserDiscoveryProviderEvidence(evidence);
   const observedUrls = uniqueUrls([
     evidence.finalUrl,
     evidence.sourceUrl,
@@ -358,6 +363,25 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return withCourseIdentityCorroboration(contactOnlyClassification, evidence);
   }
 
+  if (hasUnresolvedProviderEvidenceConflict(providerEvidence)) {
+    return withCourseIdentityCorroboration(
+      {
+        courseId: evidence.courseId,
+        status: "INSPECTED",
+        detectedPlatform: "UNKNOWN",
+        sourceUrl: providerEvidence.sourceUrl,
+        confidence: 0.2,
+        evidence: {
+          finalUrl: providerEvidence.finalUrl,
+          observedUrls: providerObservedUrls,
+          visibleText: summarizeVisibleText(providerEvidence.visibleText),
+          learnedFrom: "provider-evidence-conflict"
+        }
+      },
+      evidence
+    );
+  }
+
   const accountRequiredClassification = learnAccountRequiredClassification(
     providerEvidence,
     providerObservedUrls
@@ -393,13 +417,16 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     providerObservedUrls
   );
   const bookingUrl = clubCaddieCandidates.length > 0
-    ? providerEvidence.sourceUrl
+    ? pickSafeBrowserDiscoveryFallbackUrl([providerEvidence.sourceUrl])
     : pickBookingLikeUrl(
         providerObservedUrls,
         providerEvidence.linkCandidates ?? []
       ) ??
-      providerEvidence.finalUrl ??
-      providerEvidence.sourceUrl;
+      pickSafeBrowserDiscoveryFallbackUrl([
+        providerEvidence.finalUrl,
+        providerEvidence.sourceUrl,
+        getSafeNonProviderBarrierFallback(providerEvidence.accessBarriers)
+      ]);
 
   return withCourseIdentityCorroboration({
     courseId: evidence.courseId,
@@ -407,7 +434,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     detectedPlatform: detectPlatform(observedUrls),
     sourceUrl: providerEvidence.sourceUrl,
     bookingUrl,
-    confidence: bookingUrl === evidence.sourceUrl ? 0.25 : 0.45,
+    confidence: !bookingUrl || bookingUrl === evidence.sourceUrl ? 0.25 : 0.45,
     evidence: {
       finalUrl: providerEvidence.finalUrl,
       observedUrls: providerObservedUrls,
@@ -419,6 +446,42 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       learnedFrom: "browser-visible-links"
     }
   }, evidence);
+}
+
+function getSafeNonProviderBarrierFallback(
+  barriers: BrowserAccessBarrier[] | undefined
+) {
+  for (const barrier of barriers ?? []) {
+    const normalized = normalizeAccessBarrierUrl(barrier.url);
+    const url = parseUrl(normalized);
+    if (url && !getKnownProviderFamilyForHostname(url.hostname)) {
+      return url.toString();
+    }
+  }
+  return undefined;
+}
+
+function pickSafeBrowserDiscoveryFallbackUrl(
+  values: Array<string | undefined>
+) {
+  for (const value of values) {
+    const url = parseUrl(value);
+    if (
+      !url ||
+      !isSafeManualEvidenceUrl(url) ||
+      isClearlyUnrelatedBookingUrl(url)
+    ) {
+      continue;
+    }
+    if (
+      getKnownProviderFamilyForHostname(url.hostname) &&
+      !isProviderPublicBookingLandingUrl(url)
+    ) {
+      continue;
+    }
+    return url.toString();
+  }
+  return undefined;
 }
 
 function learnUnavailableOfficialSiteClassification(
@@ -536,14 +599,15 @@ function canonicalizeClubCaddieBookingUrl(value: string) {
     url.username ||
     url.password ||
     url.port ||
-    url.search ||
-    url.hash ||
     !/^apimanager-cc\d{1,4}\.clubcaddie\.com$/i.test(url.hostname) ||
-    !/^\/webapi\/view\/[a-z0-9_-]{4,128}(?:\/slots)?\/?$/i.test(url.pathname)
+    !/^\/webapi\/view\/[a-z0-9_-]{4,128}(?:\/slots)?\/?$/i.test(url.pathname) ||
+    !isProviderPublicBookingLandingUrl(url)
   ) {
     return null;
   }
 
+  url.search = "";
+  url.hash = "";
   url.pathname = url.pathname.replace(/\/$/, "");
   return url.toString();
 }
@@ -698,9 +762,284 @@ function sanitizeClubCaddieEvidenceUrl(value: string) {
   if (!url || !/(^|\.)clubcaddie\.com$/i.test(url.hostname)) {
     return value;
   }
+  if (!url.search && !url.hash) {
+    return value;
+  }
+  const nonTrackingEntries = [...url.searchParams.entries()].filter(
+    ([key]) => !isProviderTrackingQueryParameter(key)
+  );
+  const hasOnlyKnownRequestLocalState = Boolean(
+    !url.hash &&
+      (nonTrackingEntries.length === 0 ||
+        (nonTrackingEntries.length === 1 &&
+          nonTrackingEntries[0][0].toLocaleLowerCase("en-US") ===
+            "interaction"))
+  );
   url.search = "";
   url.hash = "";
+  if (
+    hasOnlyKnownRequestLocalState &&
+    isProviderPublicBookingLandingUrl(url)
+  ) {
+    return url.toString();
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/u, "")}/redacted-provider-evidence`;
   return url.toString();
+}
+
+function scopeBrowserDiscoveryProviderEvidence(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscoveryEvidence {
+  const scopeUrl = [evidence.sourceUrl, evidence.finalUrl]
+    .map(parseUrl)
+    .find((url) => Boolean(url && isProviderPublicBookingLandingUrl(url)));
+  if (!scopeUrl) {
+    return evidence;
+  }
+  const scopeFamily = getKnownProviderFamilyForHostname(scopeUrl.hostname);
+  const scopeLandingIdentity = getProviderPublicBookingLandingIdentity(
+    scopeUrl
+  );
+  if (!scopeFamily || !scopeLandingIdentity) {
+    return evidence;
+  }
+  const hasScope = (value: string, allowTechnicalEvidence: boolean) => {
+    const url = parseUrl(value);
+    if (
+      !url ||
+      getKnownProviderFamilyForHostname(url.hostname) !== scopeFamily ||
+      !haveSameProviderReplayHostname(scopeUrl, url)
+    ) {
+      return false;
+    }
+    const landingIdentity = getProviderPublicBookingLandingIdentity(url);
+    if (landingIdentity) {
+      return landingIdentity === scopeLandingIdentity;
+    }
+    return Boolean(
+      allowTechnicalEvidence &&
+        isExactProviderTechnicalEvidenceUrl(scopeFamily, url) &&
+        isProviderTechnicalEvidenceCompatibleWithLanding(
+          scopeFamily,
+          scopeUrl,
+          url
+        )
+    );
+  };
+  const sanitizeProviderEndpoint = (
+    value: string | undefined,
+    preserveNonProvider: boolean
+  ) => {
+    if (!value) {
+      return value;
+    }
+    const url = parseUrl(value);
+    if (
+      preserveNonProvider &&
+      url &&
+      !getKnownProviderFamilyForHostname(url.hostname)
+    ) {
+      return value;
+    }
+    return hasScope(value, false) ? value : scopeUrl.toString();
+  };
+  const scopeLandingLinks = (
+    candidates: Array<{ url: string; label: string }> | undefined
+  ) => candidates?.filter((candidate) => hasScope(candidate.url, false));
+  const accessBarriers = evidence.accessBarriers?.filter((barrier) =>
+    hasScope(barrier.url, true)
+  );
+  const corroboratedAccessBarrier =
+    evidence.corroboratedAccessBarrier &&
+    accessBarriers?.some(
+      (barrier) =>
+        barrier.status === evidence.corroboratedAccessBarrier?.status &&
+        barrier.url === evidence.corroboratedAccessBarrier.url
+    )
+      ? evidence.corroboratedAccessBarrier
+      : undefined;
+
+  return {
+    ...evidence,
+    sourceUrl: sanitizeProviderEndpoint(evidence.sourceUrl, true)!,
+    finalUrl: sanitizeProviderEndpoint(evidence.finalUrl, false),
+    observedUrls: evidence.observedUrls.filter((url) => hasScope(url, true)),
+    linkCandidates: scopeLandingLinks(evidence.linkCandidates),
+    accessBarrierUrls: evidence.accessBarrierUrls?.filter((url) =>
+      hasScope(url, true)
+    ),
+    accessBarriers,
+    corroboratedAccessBarrier,
+    officialPage: evidence.officialPage
+      ? {
+          ...evidence.officialPage,
+          linkCandidates:
+            scopeLandingLinks(evidence.officialPage.linkCandidates) ?? [],
+          ...(evidence.officialPage.observedUrls
+            ? {
+                observedUrls: evidence.officialPage.observedUrls.filter((url) =>
+                  hasScope(url, true)
+                )
+              }
+            : {})
+        }
+      : undefined,
+    teeItUpLegacyConfigurations: evidence.teeItUpLegacyConfigurations?.filter(
+      (configuration) => hasScope(configuration.providerUrl, false)
+    )
+  };
+}
+
+function hasUnresolvedProviderEvidenceConflict(
+  evidence: BrowserDiscoveryEvidence
+) {
+  const ordinaryUrls = [
+    evidence.sourceUrl,
+    evidence.finalUrl,
+    ...evidence.observedUrls,
+    ...(evidence.linkCandidates ?? []).map((candidate) => candidate.url),
+    evidence.officialPage?.url,
+    ...(evidence.officialPage?.observedUrls ?? []),
+    ...(evidence.officialPage?.linkCandidates ?? []).map(
+      (candidate) => candidate.url
+    ),
+    ...(evidence.teeItUpLegacyConfigurations ?? []).map(
+      (configuration) => configuration.providerUrl
+    )
+  ];
+  const barrierUrls = [
+    ...(evidence.accessBarrierUrls ?? []),
+    ...(evidence.accessBarriers ?? []).map((barrier) => barrier.url),
+    evidence.corroboratedAccessBarrier?.url
+  ];
+  const families = new Set<string>();
+  const landingIdentities = new Map<string, Set<string>>();
+  const landingHosts = new Map<string, Set<string>>();
+  const technicalHosts = new Map<string, Set<string>>();
+  const barrierHosts = new Map<string, Set<string>>();
+  const addToFamilySet = (
+    target: Map<string, Set<string>>,
+    family: string,
+    value: string
+  ) => {
+    const values = target.get(family) ?? new Set<string>();
+    values.add(value);
+    target.set(family, values);
+  };
+  const addIdentity = (value: string | undefined, allowBarrier: boolean) => {
+    const url = parseUrl(value);
+    if (!url) {
+      return;
+    }
+    const family = getKnownProviderFamilyForHostname(url.hostname);
+    if (!family) {
+      return;
+    }
+    const replayHostname = url.hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./u, "");
+    if (allowBarrier) {
+      families.add(family);
+      const landingIdentity = getProviderPublicBookingLandingIdentity(url);
+      if (landingIdentity) {
+        addToFamilySet(landingHosts, family, replayHostname);
+        addToFamilySet(landingIdentities, family, landingIdentity);
+      } else {
+        addToFamilySet(barrierHosts, family, replayHostname);
+      }
+      return;
+    }
+    if (isProviderPublicBookingLandingUrl(url)) {
+      families.add(family);
+      addToFamilySet(landingHosts, family, replayHostname);
+      addToFamilySet(
+        landingIdentities,
+        family,
+        getProviderPublicBookingLandingIdentity(url)!
+      );
+      return;
+    }
+    if (isExactProviderTechnicalEvidenceUrl(family, url)) {
+      families.add(family);
+      addToFamilySet(technicalHosts, family, replayHostname);
+    }
+  };
+  ordinaryUrls.forEach((url) => addIdentity(url, false));
+  barrierUrls.forEach((url) => addIdentity(url, true));
+
+  if (families.size > 1) {
+    return true;
+  }
+  const family = [...families][0];
+  if (!family) {
+    return false;
+  }
+  const providerHosts = new Set([
+    ...(landingHosts.get(family) ?? []),
+    ...(technicalHosts.get(family) ?? []),
+    ...(barrierHosts.get(family) ?? [])
+  ]);
+  if ((barrierHosts.get(family)?.size ?? 0) > 0 && providerHosts.size > 1) {
+    return true;
+  }
+  const familiesRequiringOneUnscopedLanding = new Set([
+    "CHELSEA",
+    "CHRONOGOLF",
+    "EZLINKS",
+    "FOREUP",
+    "GOLFBACK",
+    "GOLFNOW",
+    "TEESNAP",
+    "TENFORE",
+    "WEBTRAC",
+    "WHOOSH"
+  ]);
+  return Boolean(
+    familiesRequiringOneUnscopedLanding.has(family) &&
+      (landingIdentities.get(family)?.size ?? 0) > 1
+  );
+}
+
+function haveSameProviderReplayHostname(left: URL, right: URL) {
+  const normalize = (hostname: string) =>
+    hostname.toLocaleLowerCase("en-US").replace(/^www\./u, "");
+  return normalize(left.hostname) === normalize(right.hostname);
+}
+
+function isProviderTechnicalEvidenceCompatibleWithLanding(
+  providerFamily: string,
+  landingUrl: URL,
+  technicalUrl: URL
+) {
+  if (providerFamily === "FOREUP") {
+    const landingScheduleId = getForeupScheduleId(landingUrl.toString());
+    const technicalScheduleId = getPositiveBoundedSearchParam(
+      technicalUrl,
+      "schedule_id"
+    );
+    return landingScheduleId
+      ? technicalScheduleId === landingScheduleId
+      : Boolean(technicalScheduleId);
+  }
+  return true;
+}
+
+function isExactProviderTechnicalEvidenceUrl(
+  providerFamily: string,
+  url: URL
+) {
+  switch (providerFamily) {
+    case "FOREUP":
+      return isForeupApiUrl(url.toString());
+    case "CPS":
+      return isCpsProviderEvidenceUrl(url);
+    case "TEESNAP":
+      return isTeesnapTechnicalEvidenceUrl(url.toString());
+    case "CHRONOGOLF":
+      return isExactChronogolfProfilePingUrl(url);
+    default:
+      return false;
+  }
 }
 
 const CLUB_CADDIE_GENERIC_COURSE_WORDS = new Set([
@@ -751,6 +1090,7 @@ function learnWebTracDiscovery(
       url &&
       (url.hostname === "navyaims.com" || url.hostname.endsWith(".navyaims.com")) &&
       /\/webtrac\/web\/search\.html$/i.test(url.pathname) &&
+      isProviderPublicBookingLandingUrl(url) &&
       url.searchParams.get("module")?.toUpperCase() === "GR" &&
       url.searchParams.get("secondarycode")
     ));
@@ -800,11 +1140,14 @@ function learnGolfBackDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const bookingUrl = observedUrls.find(isGolfBackBookingUrl);
-  const courseId = bookingUrl ? getGolfBackCourseId(bookingUrl) : null;
-  if (!bookingUrl || !courseId) {
+  const observedBookingUrl = observedUrls.find(isGolfBackBookingUrl);
+  const courseId = observedBookingUrl
+    ? getGolfBackCourseId(observedBookingUrl)
+    : null;
+  if (!observedBookingUrl || !courseId) {
     return null;
   }
+  const bookingUrl = `https://golfback.com/#/course/${courseId}`;
 
   return {
     courseId: evidence.courseId,
@@ -840,13 +1183,15 @@ function learnProtectedCpsDiscovery(
   const cpsAccessBarriers = evidence.accessBarriers?.filter((barrier) =>
     getCpsBookingCandidates(evidence, [barrier.url], {
       includeEvidenceLinks: false,
-      includeWidget: false
+      includeWidget: false,
+      includeInfrastructureEvidence: false
     }).length > 0
   ) ?? [];
   const barrierCandidate = selectCpsBookingCandidate(
     getCpsBookingCandidates(evidence, cpsAccessBarriers.map((barrier) => barrier.url), {
       includeEvidenceLinks: false,
-      includeWidget: false
+      includeWidget: false,
+      includeInfrastructureEvidence: false
     }),
     evidence.courseName
   );
@@ -1022,15 +1367,7 @@ function learnAccountRequiredClassification(
   observedUrls: string[]
 ): BrowserDiscovery | null {
   const bookingSurfaceText = evidence.bookingSurfaceText?.replace(/\s+/g, " ").trim() ?? "";
-  const whooshBookingUrl = observedUrls
-    .map(parseUrl)
-    .find((url) =>
-      Boolean(
-        url &&
-        /(^|\.)app\.whoosh\.io$/i.test(url.hostname) &&
-        /^\/patron\/club\/[^/]+/i.test(url.pathname)
-      )
-    );
+  const whooshBookingUrl = getWhooshPublicBookingUrl(observedUrls);
   const registrationRequired =
     /\bplayers? must register(?: in whoosh)? before booking\b/i.test(bookingSurfaceText);
   const availabilityRequiresConfirmation =
@@ -1076,15 +1413,7 @@ function learnWhooshBookingClassification(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const whooshBookingUrl = observedUrls
-    .map(parseUrl)
-    .find((url) =>
-      Boolean(
-        url &&
-        /(^|\.)app\.whoosh\.io$/i.test(url.hostname) &&
-        /^\/patron\/club\/[^/]+/i.test(url.pathname)
-      )
-    );
+  const whooshBookingUrl = getWhooshPublicBookingUrl(observedUrls);
 
   if (!whooshBookingUrl) {
     return null;
@@ -1123,6 +1452,26 @@ function learnWhooshBookingClassification(
         : "official-whoosh-booking"
     }
   };
+}
+
+function getWhooshPublicBookingUrl(values: string[]) {
+  const observed = values
+    .map(parseUrl)
+    .find((url) =>
+      Boolean(
+        url &&
+          url.hostname.toLocaleLowerCase("en-US") === "app.whoosh.io" &&
+          isProviderPublicBookingLandingUrl(url)
+      )
+    );
+  if (!observed || observed.hostname.toLocaleLowerCase("en-US") !== "app.whoosh.io") {
+    return null;
+  }
+  const canonical = new URL(observed);
+  canonical.search = "";
+  canonical.hash = "";
+  canonical.pathname = canonical.pathname.replace(/\/+$/u, "");
+  return canonical;
 }
 
 function learnWalkInClassification(
@@ -3740,7 +4089,13 @@ function learnChelseaDiscovery(
 ): BrowserDiscovery | null {
   const chelseaUrl = observedUrls
     .map(parseUrl)
-    .find((url) => Boolean(url && /(^|\.)chelseareservations\.com$/i.test(url.hostname)));
+    .find((url) =>
+      Boolean(
+        url &&
+          /(^|\.)chelseareservations\.com$/i.test(url.hostname) &&
+          isProviderPublicBookingLandingUrl(url)
+      )
+    );
   const course = getChelseaCourse(evidence.courseName);
   if (!chelseaUrl || !course) {
     return null;
@@ -3871,28 +4226,50 @@ type CpsBookingCandidate = {
 function getCpsBookingCandidates(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[],
-  options: { includeEvidenceLinks?: boolean; includeWidget?: boolean } = {}
+  options: {
+    includeEvidenceLinks?: boolean;
+    includeWidget?: boolean;
+    includeInfrastructureEvidence?: boolean;
+  } = {}
 ): CpsBookingCandidate[] {
   const includeEvidenceLinks = options.includeEvidenceLinks ?? true;
   const includeWidget = options.includeWidget ?? true;
+  const includeInfrastructureEvidence =
+    options.includeInfrastructureEvidence ?? true;
   const rawCandidates: Array<{
     value: string;
     label: string;
+    source: "LINK" | "OBSERVED" | "WIDGET";
     courseIds?: number[];
     courseIdsAmbiguous?: boolean;
   }> = [
     ...(includeEvidenceLinks ? (evidence.linkCandidates ?? []).map((candidate) => ({
       value: candidate.url,
-      label: candidate.label
+      label: candidate.label,
+      source: "LINK" as const
     })) : []),
-    ...observedUrls.map((value) => ({ value, label: "" })),
-    ...(includeWidget ? getCpsWidgetCandidates(evidence.visibleText, evidence.courseName) : [])
+    ...observedUrls.map((value) => ({
+      value,
+      label: "",
+      source: "OBSERVED" as const
+    })),
+    ...(includeWidget
+      ? getCpsWidgetCandidates(evidence.visibleText, evidence.courseName).map(
+          (candidate) => ({ ...candidate, source: "WIDGET" as const })
+        )
+      : [])
   ];
   const candidates = new Map<string, CpsBookingCandidate>();
 
   for (const raw of rawCandidates) {
     const url = parseUrl(raw.value);
-    if (!isCpsBookingCandidateUrl(url)) {
+    const isPublicLanding = isCpsPublicBookingCandidateUrl(url);
+    const isInfrastructureEvidence = Boolean(
+      includeInfrastructureEvidence &&
+        raw.source !== "LINK" &&
+        isCpsProviderEvidenceUrl(url)
+    );
+    if (!isPublicLanding && !isInfrastructureEvidence) {
       continue;
     }
     const bookingBaseUrl = `${url!.origin}/`;
@@ -4003,17 +4380,52 @@ function normalizeCpsTenantIdentity(value: string) {
   ).replace(/\s+/g, "");
 }
 
-function isCpsBookingCandidateUrl(url: URL | null) {
+function isStrictCpsTenantUrl(url: URL | null) {
   return Boolean(
     url?.protocol === "https:" &&
       !url.username &&
       !url.password &&
       !url.port &&
       /^[a-z0-9](?:[a-z0-9-]{0,62})\.cps\.golf$/i.test(url.hostname) &&
-      url.hostname.toLowerCase() !== "sc.cps.golf" &&
-      (url.pathname === "/" ||
-        /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/i.test(url.pathname))
+      url.hostname.toLowerCase() !== "sc.cps.golf"
   );
+}
+
+function isCpsPublicBookingCandidateUrl(url: URL | null) {
+  return Boolean(
+    isStrictCpsTenantUrl(url) &&
+      url &&
+      isProviderPublicBookingLandingUrl(url)
+  );
+}
+
+function isCpsProviderEvidenceUrl(url: URL | null) {
+  return Boolean(
+    isStrictCpsTenantUrl(url) &&
+      url &&
+      /^\/onlineres\/onlineapi\/api\/v1\/onlinereservation(?:\/teetimes)?\/?$/iu.test(
+        url.pathname
+      ) &&
+      !url.hash &&
+      hasOnlyBoundedCpsEvidenceCourseQuery(url)
+  );
+}
+
+function hasOnlyBoundedCpsEvidenceCourseQuery(url: URL) {
+  if (!url.search) {
+    return true;
+  }
+  const keys = [...url.searchParams.keys()].map((key) =>
+    key.toLocaleLowerCase("en-US")
+  );
+  if (
+    new Set(keys).size !== keys.length ||
+    keys.some((key) => key !== "courseid" && key !== "courseids") ||
+    new Set(keys).size !== 1
+  ) {
+    return false;
+  }
+  return Boolean(readBoundedCpsCourseIds(url)?.length);
 }
 
 export async function enrichChronogolfDiscovery(
@@ -4029,11 +4441,13 @@ export async function enrichChronogolfDiscovery(
     return discovery;
   }
 
-  const response = await fetchImpl(profileUrl, {
-    headers: { Accept: "text/html" },
-    redirect: "follow"
-  });
-  if (!response.ok) {
+  const fetched = await fetchValidatedProviderLanding(
+    profileUrl,
+    fetchImpl,
+    { Accept: "text/html" },
+    true
+  );
+  if (!fetched?.response.ok) {
     return {
       ...discovery,
       evidence: {
@@ -4043,13 +4457,23 @@ export async function enrichChronogolfDiscovery(
     };
   }
 
-  const html = await response.text();
+  const html = await fetched.response.text();
   const club = parseChronogolfClubProfile(html);
   if (!club) {
     return discovery;
   }
+  const requestedNumericClubId = parseUrl(profileUrl)?.pathname.match(
+    /^\/club\/([1-9]\d{0,9})\/?$/u
+  )?.[1];
+  if (
+    getProviderPublicBookingLandingIdentity(profileUrl) !==
+      getProviderPublicBookingLandingIdentity(fetched.finalUrl) &&
+    (!requestedNumericClubId || club.id !== Number(requestedNumericClubId))
+  ) {
+    return discovery;
+  }
 
-  const canonicalUrl = response.url || profileUrl;
+  const canonicalUrl = fetched.finalUrl;
   const profileSummary = `Chronogolf public club profile ${canonicalUrl} reports onlineBookingEnabled=${String(
     club.onlineBookingEnabled
   )} and ${club.courseCount} public course records.`;
@@ -4115,15 +4539,16 @@ export async function enrichTeesnapDiscovery(
   }
 
   const bookingBaseUrl = new URL("/", discovery.bookingUrl).toString();
-  const response = await fetchImpl(bookingBaseUrl, {
-    headers: {
+  const fetched = await fetchValidatedProviderLanding(
+    bookingBaseUrl,
+    fetchImpl,
+    {
       Accept: "text/html,application/xhtml+xml;q=0.9",
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
-    },
-    redirect: "follow"
-  });
-  if (!response.ok) {
+    }
+  );
+  if (!fetched?.response.ok) {
     return {
       ...discovery,
       evidence: {
@@ -4133,7 +4558,7 @@ export async function enrichTeesnapDiscovery(
     };
   }
 
-  const html = await response.text();
+  const html = await fetched.response.text();
   const metadataResolution = resolveTeesnapCourseMetadata(
     discovery.evidence.observedUrls,
     html,
@@ -4150,7 +4575,7 @@ export async function enrichTeesnapDiscovery(
   }
   const courseMetadata = metadataResolution.metadata;
 
-  const canonicalUrl = response.url || bookingBaseUrl;
+  const canonicalUrl = fetched.finalUrl;
   return {
     ...discovery,
     status: "LEARNED",
@@ -4177,6 +4602,65 @@ export async function enrichTeesnapDiscovery(
   };
 }
 
+async function fetchValidatedProviderLanding(
+  sourceUrl: string,
+  fetchImpl: typeof fetch,
+  headers: HeadersInit,
+  allowSameHostIdentityChange = false
+) {
+  const source = parseUrl(sourceUrl);
+  if (!source || !isProviderPublicBookingLandingUrl(source)) {
+    return null;
+  }
+  const providerFamily = getKnownProviderFamilyForHostname(source.hostname);
+  const normalizeHostname = (hostname: string) =>
+    hostname.toLocaleLowerCase("en-US").replace(/^www\./u, "");
+  const sourceHostname = normalizeHostname(source.hostname);
+  let currentUrl = source.toString();
+
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    const response = await fetchImpl(currentUrl, {
+      headers,
+      redirect: "manual"
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location || redirectCount === 5) {
+        return null;
+      }
+      const redirectUrl = new URL(location, currentUrl);
+      if (
+        getKnownProviderFamilyForHostname(redirectUrl.hostname) !==
+          providerFamily ||
+        normalizeHostname(redirectUrl.hostname) !== sourceHostname ||
+        !isProviderPublicBookingLandingUrl(redirectUrl) ||
+        (!allowSameHostIdentityChange &&
+          getProviderPublicBookingLandingIdentity(redirectUrl) !==
+            getProviderPublicBookingLandingIdentity(source))
+      ) {
+        return null;
+      }
+      currentUrl = redirectUrl.toString();
+      continue;
+    }
+
+    const finalUrl = parseUrl(response.url || currentUrl);
+    if (
+      !finalUrl ||
+      getKnownProviderFamilyForHostname(finalUrl.hostname) !== providerFamily ||
+      normalizeHostname(finalUrl.hostname) !== sourceHostname ||
+      !isProviderPublicBookingLandingUrl(finalUrl) ||
+      (!allowSameHostIdentityChange &&
+        getProviderPublicBookingLandingIdentity(finalUrl) !==
+          getProviderPublicBookingLandingIdentity(source))
+    ) {
+      return null;
+    }
+    return { response, finalUrl: finalUrl.toString() };
+  }
+  return null;
+}
+
 function getChronogolfProfileUrl(discovery: BrowserDiscovery) {
   const profileUrl = discovery.evidence.observedUrls
     .map(parseUrl)
@@ -4184,20 +4668,60 @@ function getChronogolfProfileUrl(discovery: BrowserDiscovery) {
       Boolean(
         url &&
         /(^|\.)chronogolf\.com$/i.test(url.hostname) &&
-        /^\/club\/[^/]+/i.test(url.pathname)
+        isProviderPublicBookingLandingUrl(url)
       )
     );
   if (profileUrl) {
-    return `https://www.chronogolf.com${profileUrl.pathname.match(/^\/club\/[^/]+/i)?.[0]}`;
+    return `https://www.chronogolf.com${profileUrl.pathname.replace(/\/+$/u, "")}`;
+  }
+
+  const technicalProfileUrl = discovery.evidence.observedUrls
+    .map(parseUrl)
+    .find(isExactChronogolfProfilePingUrl);
+  if (technicalProfileUrl) {
+    const clubId = technicalProfileUrl.pathname.match(
+      /^\/club\/([1-9]\d{0,9})\/ping\/?$/u
+    )?.[1];
+    const derived = clubId
+      ? `https://www.chronogolf.com/club/${clubId}`
+      : null;
+    return derived && isProviderPublicBookingLandingUrl(derived)
+      ? derived
+      : null;
   }
 
   const textMatch = discovery.evidence.visibleText?.match(
     /(?:clubId|club_id)["'\s:=]+(\d+)/i
   )?.[1];
   const clubId = Number(textMatch);
-  return Number.isInteger(clubId) && clubId > 0
-    ? `https://www.chronogolf.com/club/${clubId}`
-    : null;
+  if (!Number.isSafeInteger(clubId) || clubId <= 0) {
+    return null;
+  }
+  const derived = `https://www.chronogolf.com/club/${clubId}`;
+  return isProviderPublicBookingLandingUrl(derived) ? derived : null;
+}
+
+function isExactChronogolfProfilePingUrl(url: URL | null) {
+  if (
+    !url ||
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !/^(?:www\.)?chronogolf\.com$/iu.test(url.hostname) ||
+    url.search ||
+    url.hash
+  ) {
+    return false;
+  }
+  const clubId = url.pathname.match(
+    /^\/club\/([1-9]\d{0,9})\/ping\/?$/u
+  )?.[1];
+  if (!clubId) {
+    return false;
+  }
+  const parsed = Number(clubId);
+  return Number.isSafeInteger(parsed) && parsed <= 2_147_483_647;
 }
 
 function parseChronogolfClubProfile(html: string) {
@@ -4273,7 +4797,11 @@ function getCpsWidgetLocations(text: string | undefined) {
       continue;
     }
     const courseId = Number(courseIdMatch[1]);
-    if (!Number.isInteger(courseId) || courseId < 0) {
+    if (
+      !Number.isSafeInteger(courseId) ||
+      courseId < 0 ||
+      courseId > 2_147_483_647
+    ) {
       continue;
     }
     let name = nameMatch[1];
@@ -4310,31 +4838,51 @@ function haveCompatibleCpsLocationName(courseName: string, locationName: string)
 }
 
 function getCpsCourseIdsFromUrl(url: URL) {
-  const courseIdFromUrl = getNumericSearchParam(url, "CourseId") ?? getNumericSearchParam(url, "courseId");
-  if (courseIdFromUrl !== undefined) {
-    return [courseIdFromUrl];
-  }
+  return readBoundedCpsCourseIds(url);
+}
 
-  const courseIdsFromUrl = url.searchParams
-    .get("courseIds")
-    ?.split(",")
-    .map((value) => Number(value.trim()))
-    .filter((value) => Number.isInteger(value) && value >= 0);
-  if (courseIdsFromUrl?.length) {
-    return courseIdsFromUrl;
+function readBoundedCpsCourseIds(url: URL) {
+  const directValues = [
+    ...url.searchParams.getAll("CourseId"),
+    ...url.searchParams.getAll("courseId")
+  ];
+  const pluralValues = url.searchParams.getAll("courseIds");
+  if (directValues.length > 1 || pluralValues.length > 1) {
+    return undefined;
   }
-
-  return undefined;
+  const rawValues = directValues.length === 1
+    ? directValues
+    : pluralValues.length === 1
+      ? pluralValues[0].split(",").map((value) => value.trim())
+      : [];
+  if (rawValues.length === 0 || rawValues.length > 20) {
+    return undefined;
+  }
+  const parsed = rawValues.map((value) =>
+    /^\d{1,10}$/u.test(value) ? Number(value) : Number.NaN
+  );
+  return parsed.every(
+    (value) =>
+      Number.isSafeInteger(value) && value >= 0 && value <= 2_147_483_647
+  )
+    ? [...new Set(parsed)]
+    : undefined;
 }
 
 function learnTeesnapDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const bookingUrl = observedUrls.find(isTeesnapBookingUrl);
-  if (!bookingUrl) {
+  const observedBookingUrl = observedUrls.find(isTeesnapBookingUrl);
+  const technicalEvidenceUrls = observedUrls.filter(
+    isTeesnapTechnicalEvidenceUrl
+  );
+  if (!observedBookingUrl && technicalEvidenceUrls.length === 0) {
     return null;
   }
+  const bookingUrl = observedBookingUrl
+    ? new URL("/", observedBookingUrl).toString()
+    : undefined;
 
   const metadataResolution = resolveTeesnapCourseMetadata(
     observedUrls,
@@ -4347,14 +4895,38 @@ function learnTeesnapDiscovery(
       status: "INSPECTED",
       detectedPlatform: "CUSTOM",
       sourceUrl: evidence.sourceUrl,
-      bookingUrl,
-      apiEndpoint: new URL("/customer-api/teetimes-day", bookingUrl).toString(),
+      ...(bookingUrl ? { bookingUrl } : {}),
+      ...(bookingUrl
+        ? {
+            apiEndpoint: new URL(
+              "/customer-api/teetimes-day",
+              bookingUrl
+            ).toString()
+          }
+        : {}),
       confidence: 0.55,
       evidence: {
         finalUrl: evidence.finalUrl,
         observedUrls,
         visibleText: summarizeVisibleText(evidence.visibleText),
-        learnedFrom: `teesnap-url-without-course-id:${metadataResolution.reason}`
+        learnedFrom: bookingUrl
+          ? `teesnap-url-without-course-id:${metadataResolution.reason}`
+          : `teesnap-technical-evidence-without-public-landing:${metadataResolution.reason}`
+      }
+    };
+  }
+  if (!bookingUrl) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: evidence.sourceUrl,
+      confidence: 0.5,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        learnedFrom: "teesnap-technical-evidence-without-public-landing"
       }
     };
   }
@@ -4624,7 +5196,10 @@ function uniqueTeeItUpLinkCandidates(
 ) {
   const seen = new Set<string>();
   return candidates.filter((candidate) => {
-    if (!isTeeItUpBookingUrl(candidate.url)) {
+    if (
+      !isTeeItUpBookingUrl(candidate.url) ||
+      !isTeeItUpPublicLandingCandidate(candidate.url)
+    ) {
       return false;
     }
     const key = `${candidate.url}\u0000${candidate.label}`;
@@ -4735,7 +5310,8 @@ function buildTeeItUpBookingUrl(
   if (
     !observedUrl ||
     !["http:", "https:"].includes(observedUrl.protocol) ||
-    !isTeeItUpBookingUrl(observedUrl.toString())
+    !isTeeItUpBookingUrl(observedUrl.toString()) ||
+    !isTeeItUpPublicLandingCandidate(observedUrl.toString())
   ) {
     return null;
   }
@@ -4747,7 +5323,9 @@ function buildTeeItUpBookingUrl(
   if (facilityId) {
     bookingUrl.searchParams.set("course", String(facilityId));
   }
-  return bookingUrl.toString();
+  return isProviderPublicBookingLandingUrl(bookingUrl)
+    ? bookingUrl.toString()
+    : null;
 }
 
 export function getBestProbeUrl(
@@ -5211,7 +5789,12 @@ function isSameHostGenericPermitDestination(website: string, bookingUrl: string)
 
 function getSafeBrowserProbeUrl(value: string | null | undefined) {
   const parsed = parseUrl(value?.trim());
-  return parsed && isSafeManualEvidenceUrl(parsed) ? parsed.toString() : null;
+  return parsed &&
+    isSafeManualEvidenceUrl(parsed) &&
+    (!getKnownProviderFamilyForHostname(parsed.hostname) ||
+      isProviderPublicBookingLandingUrl(parsed))
+    ? parsed.toString()
+    : null;
 }
 
 function isNonProviderWebsite(value: string) {
@@ -5223,13 +5806,52 @@ function learnForeupDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const foreupApiUrl = observedUrls
+  const foreupApiUrls = observedUrls
     .map(parseUrl)
-    .find((url) => url?.hostname.includes("foreupsoftware.com") && url.pathname.includes("/api/booking/times"));
-  const foreupBookingUrl = observedUrls.find((url) => isForeupBookingUrl(url));
+    .filter((url): url is URL => Boolean(url && isForeupApiUrl(url.toString())));
+  const foreupBookingUrls = observedUrls
+    .map(canonicalizeForeupBookingUrl)
+    .filter((url): url is string => Boolean(url));
+  const foreupApiUrl = foreupApiUrls[0];
+  const foreupBookingUrl = foreupBookingUrls[0];
 
   if (!foreupApiUrl && !foreupBookingUrl) {
     return null;
+  }
+
+  const apiScheduleIds = new Set(
+    foreupApiUrls
+      .map((url) => getPositiveBoundedSearchParam(url, "schedule_id"))
+      .filter((value): value is number => value !== undefined)
+  );
+  const landingScheduleIds = new Set(
+    foreupBookingUrls
+      .map(getForeupScheduleId)
+      .filter((value): value is number => value !== undefined)
+  );
+  const apiScheduleId = [...apiScheduleIds][0];
+  const landingScheduleId = [...landingScheduleIds][0];
+  if (
+    apiScheduleIds.size > 1 ||
+    landingScheduleIds.size > 1 ||
+    (apiScheduleId !== undefined &&
+      landingScheduleId !== undefined &&
+      apiScheduleId !== landingScheduleId)
+  ) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: evidence.sourceUrl,
+      bookingUrl: foreupBookingUrl,
+      confidence: 0.45,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls,
+        visibleText: summarizeVisibleText(evidence.visibleText),
+        learnedFrom: "foreup-selector-conflict"
+      }
+    };
   }
 
   const foreupAccessBarriers = evidence.accessBarriers?.filter(
@@ -5241,9 +5863,12 @@ function learnForeupDiscovery(
     foreupAccessBarriers
   );
   const scheduleId =
-    getNumericSearchParam(foreupApiUrl, "schedule_id") ??
-    getForeupScheduleId(foreupBookingUrl);
-  const bookingClassId = getNumericSearchParam(foreupApiUrl, "booking_class");
+    apiScheduleId ?? landingScheduleId;
+  const bookingClassId = getPositiveBoundedSearchParam(
+    foreupApiUrl,
+    "booking_class"
+  );
+  const canonicalBookingUrl = foreupBookingUrl;
   const accessBarrierProviderIds = {
     ...(scheduleId ? { scheduleId } : {}),
     ...(bookingClassId ? { bookingClassId } : {})
@@ -5262,7 +5887,7 @@ function learnForeupDiscovery(
         status: "INSPECTED",
         detectedPlatform: "FOREUP",
         sourceUrl: evidence.sourceUrl,
-        bookingUrl: foreupBookingUrl,
+        bookingUrl: canonicalBookingUrl,
         bookingMethod: "PUBLIC_ONLINE",
         automationEligibility: "NEEDS_REVIEW",
         automationReason: "NONE",
@@ -5285,7 +5910,7 @@ function learnForeupDiscovery(
       status: "VERIFIED",
       detectedPlatform: "FOREUP",
       sourceUrl: evidence.sourceUrl,
-      bookingUrl: foreupBookingUrl ?? accessBarrier.url,
+      bookingUrl: canonicalBookingUrl,
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason:
@@ -5307,13 +5932,13 @@ function learnForeupDiscovery(
     };
   }
 
-  if (!scheduleId) {
+  if (!scheduleId || !canonicalBookingUrl) {
     return {
       courseId: evidence.courseId,
       status: "INSPECTED",
       detectedPlatform: "FOREUP",
       sourceUrl: evidence.sourceUrl,
-      bookingUrl: foreupBookingUrl,
+      bookingUrl: canonicalBookingUrl,
       apiEndpoint: foreupApiUrl ? getOriginAndPath(foreupApiUrl) : undefined,
       confidence: 0.55,
       evidence: {
@@ -5325,8 +5950,7 @@ function learnForeupDiscovery(
     };
   }
 
-  const bookingBaseUrl =
-    foreupBookingUrl ?? `https://foreupsoftware.com/index.php/booking/${scheduleId}#/teetimes`;
+  const bookingBaseUrl = canonicalBookingUrl;
   return {
     courseId: evidence.courseId,
     status: "LEARNED",
@@ -5371,7 +5995,9 @@ function pickBookingLikeUrl(
       isNonBookingHost(parsed.hostname) ||
       isStaticAssetPath(parsed.pathname) ||
       isEditorialContentPath(parsed.pathname) ||
-      isClearlyUnrelatedBookingUrl(parsed)
+      isClearlyUnrelatedBookingUrl(parsed) ||
+      (getKnownProviderFamilyForHostname(parsed.hostname) &&
+        !isProviderPublicBookingLandingUrl(parsed))
     ) {
       return [];
     }
@@ -5415,6 +6041,7 @@ function isRecognizedProviderBookingLink(candidate: {
     !isSafeManualEvidenceUrl(parsed) ||
     !getKnownProviderFamilyForHostname(parsed.hostname) ||
     isProviderInfrastructureUrl(parsed) ||
+    !isProviderPublicBookingLandingUrl(parsed) ||
     isClearlyUnrelatedBookingLabel(candidate.label) ||
     isClearlyUnrelatedBookingUrl(parsed)
   ) {
@@ -5427,20 +6054,6 @@ function isRecognizedProviderBookingLink(candidate: {
     isBookingCallToActionCandidate(candidate) ||
       isGenericOnlineBookingCallToAction(candidate) ||
       /^(?:book|reserve)(?:\s+(?:now|online))?$/iu.test(label)
-  );
-}
-
-function isProviderInfrastructureUrl(url: URL) {
-  const firstHostnameLabel = url.hostname
-    .toLocaleLowerCase("en-US")
-    .split(".")[0] ?? "";
-  return Boolean(
-    /^(?:admin|api|assets?|auth|cdn|config|developer|docs?|static|status)(?:[-\d]|$)/iu.test(
-      firstHostnameLabel
-    ) ||
-      /(?:^|\/)(?:admin|api|auth|config(?:uration)?|developer|docs?|status)(?:\/|$)/iu.test(
-        url.pathname
-      )
   );
 }
 
@@ -5463,29 +6076,61 @@ function parseUrl(value?: string | null) {
 function isForeupBookingUrl(value?: string) {
   const url = parseUrl(value);
   return Boolean(
-    url?.hostname.includes("foreupsoftware.com") && url.pathname.includes("/index.php/booking/")
+    url &&
+      /^(?:www\.)?foreupsoftware\.com$/i.test(url.hostname) &&
+      isProviderPublicBookingLandingUrl(url)
   );
 }
 
-function getNumericSearchParam(url: URL | null | undefined, key: string) {
-  const value = url?.searchParams.get(key);
-  if (!value || !/^\d+$/.test(value)) {
+function canonicalizeForeupBookingUrl(value?: string) {
+  const url = parseUrl(value);
+  if (!url || !isForeupBookingUrl(url.toString())) {
+    return null;
+  }
+  url.search = "";
+  if (!url.hash) {
+    url.hash = "#/teetimes";
+  }
+  url.pathname = url.pathname.replace(/\/+$/u, "");
+  return url.toString();
+}
+
+function getPositiveBoundedSearchParam(
+  url: URL | null | undefined,
+  key: string
+) {
+  const values = url?.searchParams.getAll(key) ?? [];
+  if (values.length !== 1 || !/^[1-9]\d{0,9}$/u.test(values[0])) {
     return undefined;
   }
-
-  return Number(value);
+  const parsed = Number(values[0]);
+  return Number.isSafeInteger(parsed) && parsed <= 2_147_483_647
+    ? parsed
+    : undefined;
 }
 
 function getForeupScheduleId(value?: string) {
-  const match = value?.match(/\/booking\/\d+\/(\d+)(?:[/?#]|$)/);
-  return match ? Number(match[1]) : undefined;
+  const path = parseUrl(value)?.pathname;
+  const match = path?.match(
+    /^\/index\.php\/booking\/[1-9]\d{0,9}\/([1-9]\d{0,9})\/?$/u
+  );
+  const parsed = match?.[1] ? Number(match[1]) : undefined;
+  return parsed && Number.isSafeInteger(parsed) && parsed <= 2_147_483_647
+    ? parsed
+    : undefined;
 }
 
 function isForeupApiUrl(value?: string) {
   const url = parseUrl(value);
   return Boolean(
-    url?.hostname.includes("foreupsoftware.com") &&
-      url.pathname.includes("/api/booking/times")
+    url?.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      /^(?:www\.)?foreupsoftware\.com$/i.test(url.hostname) &&
+      url.pathname === "/index.php/api/booking/times" &&
+      !url.hash &&
+      isSafeManualEvidenceUrl(url)
   );
 }
 
@@ -5648,6 +6293,18 @@ function isTeeItUpBookingUrl(value: string) {
   );
 }
 
+function isTeeItUpPublicLandingCandidate(value: string) {
+  const url = parseUrl(value);
+  if (!url || !["http:", "https:"].includes(url.protocol)) {
+    return false;
+  }
+  if (url.protocol === "http:") {
+    url.protocol = "https:";
+    url.port = "";
+  }
+  return isProviderPublicBookingLandingUrl(url);
+}
+
 export function isLegacyTeeItUpPlayUrl(value: string) {
   const url = parseUrl(value);
   return Boolean(
@@ -5688,7 +6345,77 @@ function isPositiveSafeInteger(value: unknown): value is number {
 
 function isTeesnapBookingUrl(value: string) {
   const url = parseUrl(value);
-  return Boolean(url?.hostname.endsWith(".teesnap.net"));
+  return Boolean(
+    url &&
+      isTeesnapTenantHostname(url.hostname) &&
+      isProviderPublicBookingLandingUrl(url)
+  );
+}
+
+function isTeesnapTechnicalEvidenceUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(
+    url?.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      isTeesnapTenantHostname(url.hostname) &&
+      url.pathname.toLocaleLowerCase("en-US") ===
+        "/customer-api/teetimes-day" &&
+      !url.hash &&
+      readTeesnapTechnicalCourseId(url) !== undefined
+  );
+}
+
+function isTeesnapTenantHostname(hostname: string) {
+  const normalized = hostname.toLocaleLowerCase("en-US");
+  if (!normalized.endsWith(".teesnap.net")) {
+    return false;
+  }
+  const tenant = normalized.slice(0, -".teesnap.net".length);
+  return Boolean(tenant && !tenant.includes("."));
+}
+
+function readTeesnapTechnicalCourseId(url: URL) {
+  const allowedKeys = new Set([
+    "addons",
+    "course",
+    "date",
+    "holes",
+    "players",
+    "profileid"
+  ]);
+  const query = new Map<string, string>();
+  for (const [key, value] of url.searchParams) {
+    const normalizedKey = key.toLocaleLowerCase("en-US");
+    if (!allowedKeys.has(normalizedKey) || query.has(normalizedKey)) {
+      return undefined;
+    }
+    query.set(normalizedKey, value);
+  }
+  const course = query.get("course");
+  if (!course || !/^[1-9]\d{0,9}$/u.test(course)) {
+    return undefined;
+  }
+  const courseId = Number(course);
+  if (!Number.isSafeInteger(courseId) || courseId > 2_147_483_647) {
+    return undefined;
+  }
+  const players = query.get("players");
+  const holes = query.get("holes");
+  const addons = query.get("addons");
+  const date = query.get("date");
+  const profileId = query.get("profileid");
+  if (
+    (players && !/^[1-8]$/u.test(players)) ||
+    (holes && holes !== "9" && holes !== "18") ||
+    (addons && addons !== "on" && addons !== "off") ||
+    (date && !/^\d{4}-\d{2}-\d{2}$/u.test(date)) ||
+    (profileId !== undefined && !/^[a-z0-9_-]{0,64}$/iu.test(profileId))
+  ) {
+    return undefined;
+  }
+  return courseId;
 }
 
 type TeesnapDiscoveryCourseConfig = {
@@ -5721,7 +6448,7 @@ function resolveTeesnapCourseMetadata(
   const observedCourseIds = [...new Set(
     urls
       .map(parseUrl)
-      .map((url) => getNumericSearchParam(url, "course"))
+      .map((url) => (url ? readTeesnapTechnicalCourseId(url) : undefined))
       .filter((courseId): courseId is number => courseId !== undefined)
   )];
   const physicalConfigs = dedupeTeesnapCourseConfigs(
@@ -5792,13 +6519,19 @@ function isTenForeBookingUrl(value: string) {
   const url = parseUrl(value);
   return Boolean(
     url?.hostname.toLowerCase() === "fox.tenfore.golf" &&
-    /^\/[a-z0-9-]+\/?$/i.test(url.pathname)
+      /^\/[a-z0-9-]+\/?$/i.test(url.pathname) &&
+      isProviderPublicBookingLandingUrl(url)
   );
 }
 
 function isGolfBackBookingUrl(value: string) {
   const url = parseUrl(value);
-  return Boolean(url && isGolfBackHostname(url.hostname) && getGolfBackCourseId(value));
+  return Boolean(
+    url &&
+      isGolfBackHostname(url.hostname) &&
+      isProviderPublicBookingLandingUrl(url) &&
+      getGolfBackCourseId(value)
+  );
 }
 
 function isGolfBackHostname(hostname: string) {

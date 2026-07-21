@@ -31,7 +31,13 @@ import {
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
-import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import {
+  getProviderPublicBookingLandingIdentity,
+  isProviderInfrastructureUrl,
+  isProviderPublicBookingLandingUrl,
+  isProviderTrackingQueryParameter,
+  resolveProviderCapability
+} from "@/lib/automation/provider-capabilities";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
@@ -77,6 +83,8 @@ type AddressPinnedPublicFetchDependencies = {
   requestNode?: NodeRequest;
   timeoutMs?: number;
 };
+
+type PublicHtmlUrlPolicy = (url: URL) => boolean;
 
 const nonPublicNetworkBlockLists = buildNonPublicNetworkBlockLists();
 
@@ -1868,16 +1876,63 @@ export async function collectOfficialSiteEvidence(
   expectedOfficialWebsite: string | null | undefined = null
 ): Promise<CollectedPageEvidence> {
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
-  const fetchPage = (url: string) => {
+  let providerHandoffScopeUrl: string | null = null;
+  const lockProviderHandoff = (finalUrl: string) => {
+    if (!isProviderPublicBookingLandingUrl(finalUrl)) {
+      if (providerHandoffScopeUrl) {
+        throw new Error("Provider handoff left the validated booking surface");
+      }
+      return;
+    }
+    if (
+      providerHandoffScopeUrl &&
+      !isWithinProviderHandoffScope(providerHandoffScopeUrl, finalUrl)
+    ) {
+      throw new Error("Provider handoff changed provider scope");
+    }
+    providerHandoffScopeUrl ??= finalUrl;
+  };
+  const assertCollectionFetchScope = (url: string) => {
+    if (
+      providerHandoffScopeUrl &&
+      !isWithinProviderHandoffScope(providerHandoffScopeUrl, url)
+    ) {
+      throw new Error(
+        "Provider handoff follow-up left the validated booking surface"
+      );
+    }
+  };
+  const fetchPage = async (url: string) => {
+    assertCollectionFetchScope(url);
     const key = normalizeSourceKey(url);
     let page = pageFetches.get(key);
     if (!page) {
-      page = fetchPublicHtml(url, publicFetch);
+      page = fetchPublicHtmlWithProviderBoundary(url, publicFetch);
       pageFetches.set(key, page);
     }
-    return page;
+    const fetched = await page;
+    lockProviderHandoff(fetched.finalUrl);
+    return fetched;
   };
-  const firstPage = await fetchPage(sourceUrl);
+  const fetchTargetScopedProviderPage = async (url: string) => {
+    assertCollectionFetchScope(url);
+    const key = `target-provider:${normalizeSourceKey(url)}`;
+    let page = pageFetches.get(key);
+    if (!page) {
+      page = fetchPublicProviderLandingHtml(url, publicFetch);
+      pageFetches.set(key, page);
+    }
+    const fetched = await page;
+    lockProviderHandoff(fetched.finalUrl);
+    return fetched;
+  };
+  const parsedSource = parseSafePublicUrl(sourceUrl);
+  const sourceCapability = resolveProviderCapability({
+    detectedBookingUrl: parsedSource.toString()
+  });
+  const firstPage = await (sourceCapability.capability
+    ? fetchTargetScopedProviderPage(parsedSource.toString())
+    : fetchPage(parsedSource.toString()));
   if (isInitialOfficialSiteSoftNotFoundPage(firstPage.html)) {
     const canonicalSource = canonicalizeCollectedOfficialUrl(sourceUrl);
     const canonicalFinal = canonicalizeCollectedOfficialUrl(firstPage.finalUrl);
@@ -1902,11 +1957,18 @@ export async function collectOfficialSiteEvidence(
       accessBarriers: []
     };
   }
-  const firstPageEvidence = extractHtmlEvidence(
+  const rawFirstPageEvidence = extractHtmlEvidence(
     firstPage.html,
     firstPage.finalUrl,
     courseName
   );
+  const firstPageEvidence = providerHandoffScopeUrl
+    ? sanitizeTargetScopedProviderLandingEvidence(
+        rawFirstPageEvidence,
+        providerHandoffScopeUrl,
+        firstPage.html
+      )
+    : rawFirstPageEvidence;
   const pages = [{
     ...firstPage,
     evidence: firstPageEvidence
@@ -1931,6 +1993,7 @@ export async function collectOfficialSiteEvidence(
     label: string;
   }> = [];
   const targetScopedBookingProviderLinks: CollectedLinkCandidate[] = [];
+  const targetScopedProviderObservedUrls: string[] = [];
   const legacyProphetFollowupOutcomes: LegacyProphetFollowupOutcome[] = [];
   const legacyProphetAccessBarriers: Array<{ url: string; status: 403 }> = [];
   const failedFollowupObservedUrls: string[] = [];
@@ -1950,11 +2013,21 @@ export async function collectOfficialSiteEvidence(
       ...observedLinkCandidates
     ]);
     const unvisitedCandidates = linkCandidates.filter(
-      (candidate) => !visited.has(normalizeSourceKey(candidate.url))
+      (candidate) =>
+        !visited.has(normalizeSourceKey(candidate.url)) &&
+        isInspectablePublicHtmlLink(candidate.url)
     );
     const inferredBookingRoute = unvisitedCandidates.find(
       (candidate) => candidate.inferredCourseBookingRoute
     )?.url;
+    const targetScopedProviderFollowup =
+      targetScopedBookingProviderLinks.find((providerLink) =>
+        unvisitedCandidates.some(
+          (candidate) =>
+            normalizeSourceKey(candidate.url) ===
+            normalizeSourceKey(providerLink.url)
+        )
+      )?.url;
     const followupCandidate =
       pickExactCourseBookingCandidate(unvisitedCandidates, courseName) ??
       inferredBookingRoute ??
@@ -1965,6 +2038,7 @@ export async function collectOfficialSiteEvidence(
             courseName
           )
         : undefined) ??
+      targetScopedProviderFollowup ??
       pickOfficialPolicyCandidate(unvisitedCandidates, firstPage.finalUrl) ??
       pickOfficialCourseDetailCandidate(
         unvisitedCandidates,
@@ -1993,6 +2067,14 @@ export async function collectOfficialSiteEvidence(
       matchingFollowedLinkCandidates.find(
         (candidate) => candidate.legacyProphetConfiguration
       ) ?? matchingFollowedLinkCandidates[0];
+    const followsTargetScopedProviderLink = Boolean(
+      followedLinkCandidate &&
+        targetScopedBookingProviderLinks.some(
+          (providerLink) =>
+            normalizeSourceKey(providerLink.url) ===
+            normalizeSourceKey(followedLinkCandidate.url)
+        )
+    );
     const followsBookingPageFromMatchedCourse = Boolean(
       matchedCoursePage &&
         followedLinkCandidate &&
@@ -2032,7 +2114,16 @@ export async function collectOfficialSiteEvidence(
     visited.add(normalizeSourceKey(followupCandidate));
 
     try {
-      const fetched = await fetchPage(followupCandidate);
+      const fetched = await (followsTargetScopedProviderLink
+        ? fetchTargetScopedProviderPage(followupCandidate)
+        : fetchPage(followupCandidate));
+      const fetchedProviderHandoff = Boolean(
+        providerHandoffScopeUrl &&
+          isWithinProviderHandoffScope(
+            providerHandoffScopeUrl,
+            fetched.finalUrl
+          )
+      );
       let extractedEvidence = extractHtmlEvidence(
         fetched.html,
         fetched.finalUrl,
@@ -2041,6 +2132,7 @@ export async function collectOfficialSiteEvidence(
       if (
         followedLinkCandidate &&
         !wordpressContentAttempted &&
+        !fetchedProviderHandoff &&
         haveSameReplayHostname(firstPage.finalUrl, fetched.finalUrl) &&
         isBookingLikeOfficialFollowup(followedLinkCandidate)
       ) {
@@ -2067,7 +2159,13 @@ export async function collectOfficialSiteEvidence(
       }
       const page = {
         ...fetched,
-        evidence: extractedEvidence
+        evidence: fetchedProviderHandoff
+          ? sanitizeTargetScopedProviderLandingEvidence(
+              extractedEvidence,
+              providerHandoffScopeUrl!,
+              fetched.html
+            )
+          : extractedEvidence
       };
       if (
         followsBookingPageFromMatchedCourse &&
@@ -2083,14 +2181,13 @@ export async function collectOfficialSiteEvidence(
         );
         if (providerLink) {
           targetScopedBookingProviderLinks.push(providerLink);
-          if (
-            resolveProviderCapability({
-              detectedBookingUrl: providerLink.url
-            }).providerFamilyKey === "EZLINKS"
-          ) {
-            visited.add(normalizeSourceKey(providerLink.url));
-          }
         }
+      }
+      if (followsTargetScopedProviderLink) {
+        targetScopedProviderObservedUrls.push(
+          page.finalUrl,
+          ...page.evidence.observedUrls
+        );
       }
       if (followedLinkCandidate?.legacyProphetConfiguration) {
         const modernCpsUrl = findStrictModernCpsUrl([page.finalUrl]);
@@ -2208,7 +2305,10 @@ export async function collectOfficialSiteEvidence(
     )
   );
   const officialPageUnlabeledObservedUrls = matchedCoursePage
-    ? uniqueStrings(matchedCoursePage.evidence.observedUrls)
+    ? uniqueStrings([
+        ...matchedCoursePage.evidence.observedUrls,
+        ...targetScopedProviderObservedUrls
+      ])
         .filter(
           (url) => !officialPageLinkKeys.has(normalizeSourceKey(url))
         )
@@ -2333,8 +2433,13 @@ function doesPageUrlIdentifyCourse(value: string, courseName: string) {
   }
 }
 
-async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
+async function fetchPublicHtml(
+  sourceUrl: string,
+  fetchImpl: typeof fetch,
+  urlPolicy?: PublicHtmlUrlPolicy
+) {
   const parsedSource = parseSafePublicUrl(sourceUrl);
+  assertPublicHtmlUrlPolicy(parsedSource, urlPolicy);
   if (parsedSource.protocol === "http:") {
     const secureSource = new URL(parsedSource);
     secureSource.protocol = "https:";
@@ -2347,7 +2452,12 @@ async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
     }
     for (const candidate of secureCandidates) {
       try {
-        return await fetchPublicHtmlFromUrl(candidate.toString(), fetchImpl);
+        assertPublicHtmlUrlPolicy(candidate, urlPolicy);
+        return await fetchPublicHtmlFromUrl(
+          candidate.toString(),
+          fetchImpl,
+          urlPolicy
+        );
       } catch (error) {
         if (error instanceof ProviderDiscoveryLeaseDeferredError) {
           throw error;
@@ -2355,10 +2465,86 @@ async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
         // Try the equivalent secure apex before the stored HTTP URL.
       }
     }
-    return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl);
+    return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl, urlPolicy);
   }
 
-  return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl);
+  return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl, urlPolicy);
+}
+
+function fetchPublicHtmlWithProviderBoundary(
+  sourceUrl: string,
+  fetchImpl: typeof fetch
+) {
+  let scopedProviderFamily: string | null = null;
+  let scopedProviderUrl: string | null = null;
+  return fetchPublicHtml(sourceUrl, fetchImpl, (candidate) => {
+    const candidateCapability = resolveProviderCapability({
+      detectedBookingUrl: candidate.toString()
+    });
+    if (!candidateCapability.capability) {
+      return scopedProviderFamily === null;
+    }
+    if (!isProviderPublicBookingLandingUrl(candidate)) {
+      return false;
+    }
+    if (scopedProviderFamily === null) {
+      scopedProviderFamily = candidateCapability.providerFamilyKey;
+      scopedProviderUrl = candidate.toString();
+      return true;
+    }
+    return Boolean(
+      scopedProviderUrl &&
+        candidateCapability.providerFamilyKey === scopedProviderFamily &&
+        haveSameReplayHostname(scopedProviderUrl, candidate.toString()) &&
+        getProviderPublicBookingLandingIdentity(scopedProviderUrl) ===
+          getProviderPublicBookingLandingIdentity(candidate)
+    );
+  });
+}
+
+function fetchPublicProviderLandingHtml(
+  sourceUrl: string,
+  fetchImpl: typeof fetch
+) {
+  const parsedSource = parseSafePublicUrl(sourceUrl);
+  const source = new URL(parsedSource);
+  if (source.protocol === "http:") {
+    source.protocol = "https:";
+    source.port = "";
+  }
+  const sourceCapability = resolveProviderCapability({
+    detectedBookingUrl: source.toString()
+  });
+  if (
+    !sourceCapability.capability ||
+    !isProviderPublicBookingLandingUrl(source)
+  ) {
+    throw new Error("Provider handoff is not a public booking landing page");
+  }
+
+  return fetchPublicHtml(source.toString(), fetchImpl, (candidate) => {
+    const candidateCapability = resolveProviderCapability({
+      detectedBookingUrl: candidate.toString()
+    });
+    return Boolean(
+      candidateCapability.capability &&
+        candidateCapability.providerFamilyKey ===
+          sourceCapability.providerFamilyKey &&
+        haveSameReplayHostname(source.toString(), candidate.toString()) &&
+        isProviderPublicBookingLandingUrl(candidate) &&
+        getProviderPublicBookingLandingIdentity(source) ===
+          getProviderPublicBookingLandingIdentity(candidate)
+    );
+  });
+}
+
+function assertPublicHtmlUrlPolicy(
+  url: URL,
+  urlPolicy: PublicHtmlUrlPolicy | undefined
+) {
+  if (urlPolicy && !urlPolicy(url)) {
+    throw new Error("Provider landing page left the validated booking surface");
+  }
 }
 
 function createProviderLeasedDiscoveryFetch(fetchImpl: typeof fetch): typeof fetch {
@@ -2377,8 +2563,13 @@ function createProviderLeasedDiscoveryFetch(fetchImpl: typeof fetch): typeof fet
   }) as typeof fetch;
 }
 
-async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch) {
-  let currentUrl = sourceUrl;
+async function fetchPublicHtmlFromUrl(
+  sourceUrl: string,
+  fetchImpl: typeof fetch,
+  urlPolicy?: PublicHtmlUrlPolicy
+) {
+  let currentUrl = parseSafePublicUrl(sourceUrl).toString();
+  assertPublicHtmlUrlPolicy(new URL(currentUrl), urlPolicy);
 
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
     const response = await fetchImpl(currentUrl, {
@@ -2399,7 +2590,9 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
       if (isLegacyProphetCookielessSessionRedirect(sourceUrl, redirectUrl)) {
         throw new LegacyProphetCookielessSessionRedirectError();
       }
-      currentUrl = parseSafePublicUrl(redirectUrl.toString()).toString();
+      const safeRedirectUrl = parseSafePublicUrl(redirectUrl.toString());
+      assertPublicHtmlUrlPolicy(safeRedirectUrl, urlPolicy);
+      currentUrl = safeRedirectUrl.toString();
       continue;
     }
 
@@ -2423,8 +2616,10 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
       throw new Error("Official site page is too large to inspect safely");
     }
 
+    const finalUrl = parseSafePublicUrl(response.url || currentUrl);
+    assertPublicHtmlUrlPolicy(finalUrl, urlPolicy);
     return {
-      finalUrl: parseSafePublicUrl(response.url || currentUrl).toString(),
+      finalUrl: finalUrl.toString(),
       html: (await response.text()).slice(0, MAX_HTML_BYTES),
       status: response.status,
       accessBarrier: managedChallenge ? ("MANAGED_CHALLENGE" as const) : undefined
@@ -2755,9 +2950,7 @@ function getUniqueTargetScopedBookingProviderLink(
       providerLinks.some((providerLink) =>
         doesBookingLabelIdentifyAnotherCourse(providerLink.label, courseName)
       )) ||
-    !resolveProviderCapability({
-      detectedBookingUrl: providerLinks[0]?.url
-    }).capability
+    !isRecognizedProviderLandingUrl(providerLinks[0]?.url)
   ) {
     return undefined;
   }
@@ -2771,6 +2964,116 @@ function getUniqueTargetScopedBookingProviderLink(
         )
       : undefined) ?? providerLinks[0]
   );
+}
+
+function isInspectablePublicHtmlLink(value: string) {
+  try {
+    const url = parseSafePublicUrl(value);
+    const capability = resolveProviderCapability({
+      detectedBookingUrl: url.toString()
+    });
+    return Boolean(
+      !isProviderInfrastructureUrl(url) &&
+        (!capability.capability || isProviderPublicBookingLandingUrl(url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isRecognizedProviderLandingUrl(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+  try {
+    const url = parseSafePublicUrl(value);
+    return isProviderPublicBookingLandingUrl(url);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeTargetScopedProviderLandingEvidence(
+  evidence: ReturnType<typeof extractHtmlEvidence>,
+  providerUrl: string,
+  html: string
+) {
+  const providerFamilyKey = resolveProviderCapability({
+    detectedBookingUrl: providerUrl
+  }).providerFamilyKey;
+  const belongsToProviderHandoff = (value: string) => {
+    try {
+      const url = parseSafePublicUrl(value);
+      const capability = resolveProviderCapability({
+        detectedBookingUrl: url.toString()
+      });
+      return Boolean(
+        capability.capability &&
+          capability.providerFamilyKey === providerFamilyKey &&
+          haveSameReplayHostname(providerUrl, url.toString()) &&
+          isProviderPublicBookingLandingUrl(url) &&
+          getProviderPublicBookingLandingIdentity(providerUrl) ===
+            getProviderPublicBookingLandingIdentity(url)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  return {
+    observedUrls: evidence.observedUrls.filter(belongsToProviderHandoff),
+    linkCandidates: evidence.linkCandidates.filter((candidate) =>
+      belongsToProviderHandoff(candidate.url)
+    ),
+    visibleText: stripHtmlPreservingBlockBoundaries(
+      decodeHtmlEntities(html)
+        .replace(
+          /<script\b[^>]*>[\s\S]*?(?:<\/script\s*>|$)/giu,
+          " "
+        )
+        .replace(/<style\b[^>]*>[\s\S]*?(?:<\/style\s*>|$)/giu, " ")
+        .replace(
+          /<(nav|header)\b[^>]*>[\s\S]*?<\/\1\s*>/giu,
+          " "
+        )
+    )
+      .split(/\n+/u)
+      .map((line) => line.replace(/\s+/gu, " ").trim())
+      .filter(Boolean)
+      .join("\n")
+      .slice(0, 12_000),
+    teeItUpLegacyConfigurations:
+      providerFamilyKey === "TEEITUP"
+        ? evidence.teeItUpLegacyConfigurations.filter((configuration) =>
+            belongsToProviderHandoff(configuration.providerUrl)
+          )
+        : []
+  };
+}
+
+function isWithinProviderHandoffScope(scopeUrl: string, candidateUrl: string) {
+  try {
+    const scope = parseSafePublicUrl(scopeUrl);
+    const candidate = parseSafePublicUrl(candidateUrl);
+    const scopeCapability = resolveProviderCapability({
+      detectedBookingUrl: scope.toString()
+    });
+    const candidateCapability = resolveProviderCapability({
+      detectedBookingUrl: candidate.toString()
+    });
+    return Boolean(
+      scopeCapability.capability &&
+        candidateCapability.capability &&
+        scopeCapability.providerFamilyKey ===
+          candidateCapability.providerFamilyKey &&
+        haveSameReplayHostname(scope.toString(), candidate.toString()) &&
+        isProviderPublicBookingLandingUrl(candidate) &&
+        getProviderPublicBookingLandingIdentity(scope) ===
+          getProviderPublicBookingLandingIdentity(candidate)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function doesBookingLabelIdentifyAnotherCourse(
@@ -4199,9 +4502,7 @@ function normalizeSourceKey(value: string) {
 }
 
 function isTrackingQueryParameter(key: string) {
-  return /^(?:utm_(?:campaign|content|id|medium|source|term)|_gl|dclid|fbclid|gclid|mc_cid|mc_eid|msclkid)$/i.test(
-    key
-  );
+  return isProviderTrackingQueryParameter(key);
 }
 
 function uniqueStrings(values: Array<string | undefined>) {
