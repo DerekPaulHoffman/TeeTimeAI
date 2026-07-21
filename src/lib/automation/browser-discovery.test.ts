@@ -2516,6 +2516,31 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it.each([
+    "No tee times needed",
+    "No tee time reservation needed"
+  ])("classifies first-come official course copy phrased as %s", (noTeeTimeCopy) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "fairlawn",
+      courseName: "Fairlawn Golf Course",
+      sourceUrl: "https://www.fairlawngolfri.com/the-course/",
+      finalUrl: "https://www.fairlawngolfri.com/the-course/",
+      observedUrls: ["https://www.fairlawngolfri.com/the-course/"],
+      visibleText:
+        `Fairlawn Golf Course is a public 9-hole Executive course. First come, first serve, ${noTeeTimeCopy}.`
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-walk-in-access" }
+    });
+  });
+
   it("classifies the reviewed no-tee-times page without borrowing park or permit content", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "clayton-park",

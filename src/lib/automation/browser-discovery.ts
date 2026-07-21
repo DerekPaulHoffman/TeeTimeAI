@@ -1206,7 +1206,7 @@ function learnWalkInClassification(
     authoritativeVisibleText ?? ""
   );
   const noReservationMatch =
-    /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\b(?:do|does)\s+not\s+(?:take|accept)\s+tee times?\b)/i.exec(
+    /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\bno\s+tee\s+time(?:s|\s+reservations?)\s+(?:are\s+)?(?:needed|nec{1,2}essary|required)\b|\b(?:do|does)\s+not\s+(?:take|accept)\s+tee times?\b)/i.exec(
       visibleText
     );
   if (!noReservationMatch && !noTeeTimeEvidence && !dayScopedNoTeeTimeEvidence) {
