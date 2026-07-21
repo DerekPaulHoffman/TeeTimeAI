@@ -34,6 +34,7 @@ import {
   haveCompatibleCourseNames,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
+import { prisma } from "@/lib/prisma";
 
 const DISCOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_RETRY_DELAY_MS = 30 * 60 * 1000;
@@ -400,6 +401,155 @@ type MonitoringDiscoveryCandidate = {
   sourceUrl: string;
 };
 
+type RemediationDiscoveryContext = {
+  courseIds: string[];
+  dispatchedAt: Date;
+};
+
+async function resolveRemediationDiscoveryContext(
+  search: ActiveAutomationSearch,
+  now: Date
+): Promise<RemediationDiscoveryContext | null> {
+  const remediationDispatchVersion = search.remediationDispatchVersion;
+  const checkLeaseExpiresAt = search.checkLeaseExpiresAt;
+  if (
+    !search.remediationDispatchKey ||
+    remediationDispatchVersion === null ||
+    (search.scheduleVersion !== remediationDispatchVersion &&
+      search.scheduleVersion !== remediationDispatchVersion + 1) ||
+    !search.checkLeaseToken ||
+    !checkLeaseExpiresAt ||
+    checkLeaseExpiresAt.getTime() <= now.getTime()
+  ) {
+    return null;
+  }
+
+  const preferenceCourseIds = search.preferences.map(
+    (preference) => preference.course.id
+  );
+  if (preferenceCourseIds.length === 0) {
+    return null;
+  }
+
+  const dispatches = await prisma.courseSupportBatchSearch.findMany({
+    where: {
+      teeSearchId: search.id,
+      scheduleVersion: remediationDispatchVersion,
+      removedAt: null,
+      teeSearch: {
+        is: {
+          status: "ACTIVE",
+          scheduleVersion: search.scheduleVersion,
+          remediationDispatchKey: search.remediationDispatchKey,
+          remediationDispatchVersion,
+          checkLeaseToken: search.checkLeaseToken,
+          checkLeaseExpiresAt: {
+            equals: checkLeaseExpiresAt,
+            gt: now
+          }
+        }
+      },
+      batch: {
+        is: {
+          status: "VERIFYING",
+          recheckDispatchKey: search.remediationDispatchKey,
+          releaseSha: { not: null },
+          deployedAt: { not: null },
+          recheckDispatchStartedAt: { not: null },
+          recheckDispatchedAt: { not: null }
+        }
+      }
+    },
+    select: {
+      scheduleVersion: true,
+      removedAt: true,
+      teeSearch: {
+        select: {
+          id: true,
+          status: true,
+          scheduleVersion: true,
+          remediationDispatchKey: true,
+          remediationDispatchVersion: true,
+          checkLeaseToken: true,
+          checkLeaseExpiresAt: true,
+          preferences: {
+            where: { courseId: { in: preferenceCourseIds } },
+            select: { courseId: true }
+          }
+        }
+      },
+      batch: {
+        select: {
+          status: true,
+          releaseSha: true,
+          deployedAt: true,
+          recheckDispatchKey: true,
+          recheckDispatchStartedAt: true,
+          recheckDispatchedAt: true,
+          incidents: {
+            where: {
+              result: { not: "FINAL_DISPOSITION" },
+              courseId: { in: preferenceCourseIds }
+            },
+            select: {
+              courseId: true
+            }
+          }
+        }
+      }
+    },
+    take: 2
+  });
+  if (dispatches.length !== 1) {
+    return null;
+  }
+
+  const dispatch = dispatches[0];
+  const currentSearch = dispatch.teeSearch;
+  if (
+    dispatch.scheduleVersion !== remediationDispatchVersion ||
+    dispatch.removedAt !== null ||
+    !currentSearch ||
+    currentSearch.id !== search.id ||
+    currentSearch.status !== "ACTIVE" ||
+    currentSearch.scheduleVersion !== search.scheduleVersion ||
+    currentSearch.remediationDispatchKey !== search.remediationDispatchKey ||
+    currentSearch.remediationDispatchVersion !== remediationDispatchVersion ||
+    currentSearch.checkLeaseToken !== search.checkLeaseToken ||
+    !currentSearch.checkLeaseExpiresAt ||
+    currentSearch.checkLeaseExpiresAt.getTime() !==
+      checkLeaseExpiresAt.getTime() ||
+    currentSearch.checkLeaseExpiresAt.getTime() <= now.getTime() ||
+    dispatch.batch.status !== "VERIFYING" ||
+    dispatch.batch.recheckDispatchKey !== search.remediationDispatchKey ||
+    !dispatch.batch.releaseSha ||
+    !dispatch.batch.deployedAt ||
+    !dispatch.batch.recheckDispatchStartedAt ||
+    !dispatch.batch.recheckDispatchedAt
+  ) {
+    return null;
+  }
+
+  const currentPreferenceIds = new Set(
+    currentSearch.preferences.map((preference) => preference.courseId)
+  );
+  const courseIds = [
+    ...new Set(
+      dispatch.batch.incidents
+        .map((incident) => incident.courseId)
+        .filter((courseId) => currentPreferenceIds.has(courseId))
+    )
+  ];
+  if (courseIds.length === 0) {
+    return null;
+  }
+
+  return {
+    courseIds,
+    dispatchedAt: dispatch.batch.recheckDispatchStartedAt
+  };
+}
+
 export type SearchMonitoringDiscoveryResult = {
   attemptedCourseIds: string[];
   appliedCourseIds: string[];
@@ -458,9 +608,37 @@ export async function prepareSearchMonitoring(
     };
   }
 
+  const remediationContext = await resolveRemediationDiscoveryContext(
+    search,
+    now
+  );
+  const normalLookbackStartedAt = new Date(
+    now.getTime() - DISCOVERY_LOOKBACK_MS
+  );
+  const requestedLookbackStartedAt = remediationContext
+    ? new Date(
+        Math.min(
+          normalLookbackStartedAt.getTime(),
+          remediationContext.dispatchedAt.getTime()
+        ) - 1
+      )
+    : normalLookbackStartedAt;
   const recentDiscoveries = await listRecentCourseAutomationDiscoveries(
     candidates.map((candidate) => candidate.course.id),
-    new Date(now.getTime() - DISCOVERY_LOOKBACK_MS)
+    requestedLookbackStartedAt
+  );
+  const remediationCourseIds = new Set(remediationContext?.courseIds ?? []);
+  const postDispatchDiscoveryCourseIds = new Set(
+    remediationContext
+      ? recentDiscoveries
+          .filter(
+            (discovery) =>
+              remediationCourseIds.has(discovery.courseId) &&
+              discovery.createdAt.getTime() >=
+                remediationContext.dispatchedAt.getTime()
+          )
+          .map((discovery) => discovery.courseId)
+      : []
   );
   const discoveriesByCourse = new Map<string, Date[]>();
   const recentDiscoveriesByCourse = new Map<
@@ -486,6 +664,7 @@ export async function prepareSearchMonitoring(
   const failedCourseIds: string[] = [];
   const deferredCourseIds: string[] = [];
   const resolvedLegacyPolicyCourseIds = new Set<string>();
+  const replayAppliedCourseIds = new Set<string>();
 
   for (const candidate of candidates) {
     if (
@@ -509,6 +688,7 @@ export async function prepareSearchMonitoring(
     if (applied) {
       await recordBrowserDiscovery(replayed);
       appliedCourseIds.push(candidate.course.id);
+      replayAppliedCourseIds.add(candidate.course.id);
       if (
         isLegacyPolicyOnlyBlock(candidate.course) &&
         replacesLegacyPolicyOnlyBlock(replayed)
@@ -530,11 +710,20 @@ export async function prepareSearchMonitoring(
       )
       .map(({ course }) => course.id)
   );
-  const dueCandidates = candidates.filter(
-    ({ course }) =>
+  const dueCandidates = candidates.filter(({ course }) => {
+    const attempts = discoveriesByCourse.get(course.id) ?? [];
+    const remediationOverrideEligible = Boolean(
+      remediationContext &&
+        remediationCourseIds.has(course.id) &&
+        !postDispatchDiscoveryCourseIds.has(course.id) &&
+        !replayAppliedCourseIds.has(course.id)
+    );
+    return (
       forcedPolicyReconciliationCourseIds.has(course.id) ||
-      shouldAttemptMonitoringDiscovery(discoveriesByCourse.get(course.id) ?? [], now)
-  );
+      shouldAttemptMonitoringDiscovery(attempts, now) ||
+      remediationOverrideEligible
+    );
+  });
   const evidenceBySource = new Map<string, Promise<CollectedPageEvidence>>();
   const pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>();
 

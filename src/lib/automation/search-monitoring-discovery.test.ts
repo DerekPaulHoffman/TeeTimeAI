@@ -11,9 +11,13 @@ const dbMocks = vi.hoisted(() => ({
 const providerLeaseMocks = vi.hoisted(() => ({
   runWithProviderRequestLease: vi.fn()
 }));
+const prismaMocks = vi.hoisted(() => ({
+  courseSupportBatchSearch: { findMany: vi.fn() }
+}));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
+vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import { buildBrowserDiscovery } from "./browser-discovery";
 import {
@@ -24,6 +28,73 @@ import {
 } from "./search-monitoring-discovery";
 
 const now = new Date("2026-07-13T20:00:00.000Z");
+const remediationDispatchedAt = new Date("2026-07-13T19:30:00.000Z");
+const remediationLeaseExpiresAt = new Date("2026-07-13T20:15:00.000Z");
+
+function remediationPreference(courseId: string, rank: number) {
+  return {
+    rank,
+    course: {
+      id: courseId,
+      name: `${courseId} Golf Course`,
+      website: `https://${courseId}.example/`,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      bookingMetadata: null
+    }
+  };
+}
+
+function remediationSearch(
+  courseIds = ["remediated-course"],
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    id: "search-1",
+    scheduleVersion: 7,
+    remediationDispatchKey: "dispatch-key",
+    remediationDispatchVersion: 7,
+    checkLeaseToken: "check-lease",
+    checkLeaseExpiresAt: remediationLeaseExpiresAt,
+    preferences: courseIds.map((courseId, index) =>
+      remediationPreference(courseId, index + 1)
+    ),
+    ...overrides
+  } as never;
+}
+
+function remediationDispatchRow(
+  courseIds = ["remediated-course"],
+  scheduleVersion = 7
+) {
+  return {
+    scheduleVersion: 7,
+    removedAt: null,
+    teeSearch: {
+      id: "search-1",
+      status: "ACTIVE",
+      scheduleVersion,
+      remediationDispatchKey: "dispatch-key",
+      remediationDispatchVersion: 7,
+      checkLeaseToken: "check-lease",
+      checkLeaseExpiresAt: remediationLeaseExpiresAt,
+      preferences: courseIds.map((courseId) => ({ courseId }))
+    },
+    batch: {
+      status: "VERIFYING",
+      releaseSha: "release-sha",
+      deployedAt: new Date("2026-07-13T19:20:00.000Z"),
+      recheckDispatchKey: "dispatch-key",
+      recheckDispatchStartedAt: remediationDispatchedAt,
+      recheckDispatchedAt: new Date("2026-07-13T19:31:00.000Z"),
+      incidents: courseIds.map((courseId, index) => ({
+        id: `batch-incident-${index + 1}`,
+        courseId
+      }))
+    }
+  };
+}
 
 describe("search monitoring discovery", () => {
   beforeEach(() => {
@@ -32,6 +103,7 @@ describe("search monitoring discovery", () => {
     dbMocks.recordBrowserDiscovery.mockResolvedValue({ id: "discovery-1" });
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue({ id: "course-1" });
     dbMocks.retireLegacyPolicyOnlyCourseBlock.mockResolvedValue({ id: "course-1" });
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([]);
     providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
         acquired: true,
@@ -1187,7 +1259,436 @@ describe("search monitoring discovery", () => {
     expect(result.retryCourseIds).toEqual([]);
   });
 
-  it("reclassifies capped durable evidence without fetching the provider again", async () => {
+  it("gives one capped remediated course a fresh attempt without uncapping its sibling", async () => {
+    const dispatch = remediationDispatchRow([
+      "remediated-course",
+      "capped-sibling"
+    ]);
+    dispatch.batch.incidents = [
+      { id: "batch-incident-1", courseId: "remediated-course" }
+    ];
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([dispatch]);
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      },
+      {
+        courseId: "capped-sibling",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:15:00.000Z")
+      },
+      {
+        courseId: "capped-sibling",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T18:45:00.000Z")
+      }
+    ]);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response("<html><body>Public golf course</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+
+    const result = await prepareSearchMonitoring(
+      remediationSearch(["remediated-course", "capped-sibling"]),
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]?.[0].toString()).toBe(
+      "https://remediated-course.example/"
+    );
+    expect(result.attemptedCourseIds).toEqual(["remediated-course"]);
+    expect(dbMocks.listRecentCourseAutomationDiscoveries).toHaveBeenCalledWith(
+      ["remediated-course", "capped-sibling"],
+      new Date("2026-07-12T19:59:59.999Z")
+    );
+    expect(prismaMocks.courseSupportBatchSearch.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          teeSearchId: "search-1",
+          scheduleVersion: 7,
+          removedAt: null,
+          teeSearch: {
+            is: expect.objectContaining({
+              scheduleVersion: 7,
+              remediationDispatchKey: "dispatch-key",
+              remediationDispatchVersion: 7,
+              checkLeaseToken: "check-lease",
+              checkLeaseExpiresAt: {
+                equals: remediationLeaseExpiresAt,
+                gt: now
+              }
+            })
+          },
+          batch: {
+            is: expect.objectContaining({
+              status: "VERIFYING",
+              recheckDispatchKey: "dispatch-key",
+              releaseSha: { not: null },
+              deployedAt: { not: null },
+              recheckDispatchStartedAt: { not: null },
+              recheckDispatchedAt: { not: null }
+            })
+          }
+        }),
+        select: expect.objectContaining({
+          batch: {
+            select: expect.objectContaining({
+              incidents: {
+                where: {
+                  result: { not: "FINAL_DISPOSITION" },
+                  courseId: {
+                    in: ["remediated-course", "capped-sibling"]
+                  }
+                },
+                select: { courseId: true }
+              }
+            })
+          }
+        }),
+        take: 2
+      })
+    );
+  });
+
+  it.each([7, 8])(
+    "bypasses the retry delay for remediation schedule version %i",
+    async (scheduleVersion) => {
+      const dispatch = remediationDispatchRow(
+        ["remediated-course"],
+        scheduleVersion
+      );
+      dispatch.batch.recheckDispatchStartedAt = new Date(
+        "2026-07-13T19:50:00.000Z"
+      );
+      dispatch.batch.recheckDispatchedAt = new Date(
+        "2026-07-13T19:51:00.000Z"
+      );
+      prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([dispatch]);
+      dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+        {
+          courseId: "remediated-course",
+          status: "FAILED",
+          createdAt: new Date("2026-07-13T19:45:00.000Z")
+        }
+      ]);
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response("<html><body>Public golf course</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        })
+      );
+
+      const result = await prepareSearchMonitoring(
+        remediationSearch(["remediated-course"], { scheduleVersion }),
+        fetchImpl as typeof fetch,
+        now
+      );
+
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(result.attemptedCourseIds).toEqual(["remediated-course"]);
+    }
+  );
+
+  it.each(["LEARNED", "FAILED"])(
+    "treats a post-dispatch %s row as consuming the one-shot override",
+    async (status) => {
+      prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+        remediationDispatchRow()
+      ]);
+      dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+        {
+          courseId: "remediated-course",
+          status,
+          createdAt: new Date("2026-07-13T19:40:00.000Z")
+        },
+        {
+          courseId: "remediated-course",
+          status: "FAILED",
+          createdAt: new Date("2026-07-13T19:00:00.000Z")
+        }
+      ]);
+      const fetchImpl = vi.fn();
+
+      const result = await prepareSearchMonitoring(
+        remediationSearch(),
+        fetchImpl as typeof fetch,
+        now
+      );
+
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(result.attemptedCourseIds).toEqual([]);
+    }
+  );
+
+  it("keeps a lease-deferred remediation attempt eligible for the same generation", async () => {
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow()
+    ]);
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      }
+    ]);
+    providerLeaseMocks.runWithProviderRequestLease.mockResolvedValue({
+      acquired: false
+    });
+    const fetchImpl = vi.fn();
+    const search = remediationSearch();
+
+    const first = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+    const second = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(first.deferredCourseIds).toEqual(["remediated-course"]);
+    expect(second.deferredCourseIds).toEqual(["remediated-course"]);
+    expect(providerLeaseMocks.runWithProviderRequestLease).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+  });
+
+  it("does not query remediation state for an ordinary search without a dispatch key", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "ordinary-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "ordinary-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      }
+    ]);
+    const fetchImpl = vi.fn();
+    const search = {
+      ...remediationSearch(["ordinary-course"]),
+      remediationDispatchKey: null,
+      remediationDispatchVersion: null
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(prismaMocks.courseSupportBatchSearch.findMany).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+  });
+
+  it.each([
+    {
+      label: "dispatch key",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.batch.recheckDispatchKey = "other-key";
+      }
+    },
+    {
+      label: "dispatch version",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.scheduleVersion = 6;
+      }
+    },
+    {
+      label: "current remediation version",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.teeSearch.remediationDispatchVersion = 6;
+      }
+    },
+    {
+      label: "current schedule version",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.teeSearch.scheduleVersion = 8;
+      }
+    },
+    {
+      label: "removed row",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.removedAt = remediationDispatchedAt as never;
+      }
+    },
+    {
+      label: "final disposition",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.batch.incidents = [];
+      }
+    },
+    {
+      label: "current preference",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.teeSearch.preferences = [{ courseId: "different-course" }];
+      }
+    },
+    {
+      label: "check lease token",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.teeSearch.checkLeaseToken = "other-lease";
+      }
+    },
+    {
+      label: "check lease expiry",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.teeSearch.checkLeaseExpiresAt = new Date(
+          "2026-07-13T19:59:00.000Z"
+        );
+      }
+    },
+    {
+      label: "release deployment",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.batch.releaseSha = null as never;
+      }
+    },
+    {
+      label: "batch status",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.batch.status = "SUCCEEDED";
+      }
+    },
+    {
+      label: "recheck completion",
+      mutate: (dispatch: ReturnType<typeof remediationDispatchRow>) => {
+        dispatch.batch.recheckDispatchedAt = null as never;
+      }
+    }
+  ])("rejects a mismatched remediation $label", async ({ mutate }) => {
+    const dispatch = remediationDispatchRow();
+    mutate(dispatch);
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([dispatch]);
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      }
+    ]);
+    const fetchImpl = vi.fn();
+
+    const result = await prepareSearchMonitoring(
+      remediationSearch(),
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+  });
+
+  it("fails closed when two remediation dispatch rows match", async () => {
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(),
+      remediationDispatchRow()
+    ]);
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      }
+    ]);
+    const fetchImpl = vi.fn();
+
+    await prepareSearchMonitoring(
+      remediationSearch(),
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatchSearch.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 2 })
+    );
+  });
+
+  it("rejects schedule version vN+2 before querying remediation state", async () => {
+    const fetchImpl = vi.fn();
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      }
+    ]);
+
+    await prepareSearchMonitoring(
+      remediationSearch(["remediated-course"], { scheduleVersion: 9 }),
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(prismaMocks.courseSupportBatchSearch.findMany).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired loaded check lease before querying remediation state", async () => {
+    const fetchImpl = vi.fn();
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:20:00.000Z")
+      },
+      {
+        courseId: "remediated-course",
+        status: "FAILED",
+        createdAt: new Date("2026-07-13T19:00:00.000Z")
+      }
+    ]);
+
+    await prepareSearchMonitoring(
+      remediationSearch(["remediated-course"], {
+        checkLeaseExpiresAt: new Date("2026-07-13T19:59:00.000Z")
+      }),
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(prismaMocks.courseSupportBatchSearch.findMany).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("applies capped replay evidence without spending the remediation override", async () => {
     const sourceUrl = "http://www.knightsplay.com";
     const finalUrl = "https://www.knightsplay.com/";
     const ratesUrl = "https://www.knightsplay.com/rates";
@@ -1219,6 +1720,7 @@ describe("search monitoring discovery", () => {
     ]);
     const fetchImpl = vi.fn();
     const search = {
+      ...remediationSearch(["knights-play"]),
       preferences: [{
         rank: 1,
         course: {
@@ -1234,6 +1736,15 @@ describe("search monitoring discovery", () => {
         }
       }]
     } as never;
+
+    const dispatch = remediationDispatchRow(["knights-play"]);
+    dispatch.batch.recheckDispatchStartedAt = new Date(
+      "2026-07-13T19:50:00.000Z"
+    );
+    dispatch.batch.recheckDispatchedAt = new Date(
+      "2026-07-13T19:51:00.000Z"
+    );
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([dispatch]);
 
     const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
