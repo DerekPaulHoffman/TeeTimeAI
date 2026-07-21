@@ -2807,6 +2807,135 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("prioritizes the target course booking path over unrelated policy and academy pages", async () => {
+    const sourceUrl =
+      "https://www.playdcgolf.example/rock-creek-park-golf-course/";
+    const policyUrl = "https://www.playdcgolf.example/about-the-academy/";
+    const instructorUrl =
+      "https://www.playdcgolf.example/rock-creek-instructors/";
+    const bookingIndexUrl = "https://www.playdcgolf.example/book-online/";
+    const targetTeeTimesUrl =
+      "https://www.playdcgolf.example/rock-creek-tee-times/";
+    const publicBookingUrl =
+      "https://play-dc-golf-public.book.teeitup.com/?course=24680";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><a href="${policyUrl}">Overview &amp; FAQs</a><a href="${instructorUrl}">Rock Creek Instructors</a><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingIndexUrl:
+          return new Response(
+            `<html><a href="/east-potomac-tee-times/">East Potomac Golf Links Tee Times</a><a href="${targetTeeTimesUrl}">Rock Creek Park Golf Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case targetTeeTimesUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: publicBookingUrl }
+          });
+        case publicBookingUrl:
+          return new Response("<html><body>Public tee times</body></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Rock Creek Park Golf"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingIndexUrl,
+      targetTeeTimesUrl,
+      publicBookingUrl
+    ]);
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: publicBookingUrl,
+      label: "Rock Creek Park Golf Tee Times"
+    });
+    expect(
+      fetchImpl.mock.calls.some(([url]) =>
+        [policyUrl, instructorUrl].includes(url.toString())
+      )
+    ).toBe(false);
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf"
+    });
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: publicBookingUrl,
+      apiMetadata: {
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl: publicBookingUrl,
+        facilityIds: [24680]
+      }
+    });
+  });
+
+  it("does not learn a sibling provider from a shared booking index", async () => {
+    const sourceUrl =
+      "https://www.playdcgolf.example/rock-creek-park-golf-course/";
+    const policyUrl = "https://www.playdcgolf.example/about-the-academy/";
+    const instructorUrl =
+      "https://www.playdcgolf.example/rock-creek-instructors/";
+    const bookingIndexUrl = "https://www.playdcgolf.example/book-online/";
+    const siblingBookingUrl =
+      "https://foreupsoftware.com/index.php/booking/19333/145#teetimes";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><a href="${policyUrl}">Overview &amp; FAQs</a><a href="${instructorUrl}">Rock Creek Instructors</a><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingIndexUrl:
+          return new Response(
+            `<html><a href="${siblingBookingUrl}">East Potomac Golf Links Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case policyUrl:
+        case instructorUrl:
+          return new Response("<html><body>Official information</body></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Rock Creek Park Golf"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf"
+    });
+
+    expect(fetchImpl.mock.calls[1]?.[0].toString()).toBe(bookingIndexUrl);
+    expect(
+      fetchImpl.mock.calls.some(([url]) => url.toString() === siblingBookingUrl)
+    ).toBe(false);
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingUrl).not.toBe(siblingBookingUrl);
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("keeps an exact course-labeled TeeItUp link from a shared official booking page", async () => {
     const sourceUrl =
       "https://www.playdcgolf.example/rock-creek-park-golf-course/";

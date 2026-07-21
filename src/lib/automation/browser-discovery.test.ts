@@ -388,6 +388,109 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("keeps provider scope across a canonicalized target course URL", () => {
+    const siblingForeupUrl =
+      "https://foreupsoftware.com/index.php/booking/19333/145#teetimes";
+    const targetBookingUrl =
+      "https://play-dc-golf-public.book.teeitup.com/?course=24680";
+    const discovery = buildBrowserDiscovery({
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf",
+      sourceUrl:
+        "https://www.playdcgolf.com/rock-creek-park-golf-course/?utm_source=directory",
+      finalUrl: "https://playdcgolf.com/rock-creek-tee-times/",
+      observedUrls: [siblingForeupUrl, targetBookingUrl],
+      linkCandidates: [
+        { url: siblingForeupUrl, label: "East Potomac Golf Links Tee Times" },
+        { url: targetBookingUrl, label: "Rock Creek Park Golf Tee Times" }
+      ],
+      officialPage: {
+        url: "https://playdcgolf.com/rock-creek-tee-times/",
+        courseName: "Rock Creek Park Golf",
+        linkCandidates: [
+          { url: targetBookingUrl, label: "Rock Creek Park Golf Tee Times" }
+        ]
+      },
+      visibleText: "Rock Creek Park Golf public tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: targetBookingUrl,
+      apiMetadata: {
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl: targetBookingUrl,
+        facilityIds: [24680]
+      }
+    });
+    expect(discovery.bookingUrl).not.toBe(siblingForeupUrl);
+  });
+
+  it("keeps the source course provider authoritative over a later instructor page", () => {
+    const targetBookingUrl =
+      "https://foreupsoftware.com/index.php/booking/24680/975#teetimes";
+    const discovery = buildBrowserDiscovery({
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf",
+      sourceUrl:
+        "https://www.playdcgolf.com/rock-creek-park-golf-course/",
+      finalUrl: "https://www.playdcgolf.com/rock-creek-instructors/",
+      observedUrls: [targetBookingUrl],
+      linkCandidates: [
+        { url: targetBookingUrl, label: "Book Rock Creek Park Golf" }
+      ],
+      officialPage: {
+        url: "https://www.playdcgolf.com/rock-creek-instructors/",
+        courseName: "Rock Creek Park Golf",
+        linkCandidates: []
+      },
+      visibleText: "Rock Creek Park Golf public tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      bookingUrl: targetBookingUrl,
+      apiMetadata: {
+        scheduleId: 975,
+        bookingBaseUrl: targetBookingUrl
+      }
+    });
+  });
+
+  it("learns embedded provider evidence from the verified target course page", () => {
+    const targetBookingUrl =
+      "https://foreupsoftware.com/index.php/booking/24680/975#teetimes";
+    const sourceUrl =
+      "https://www.playdcgolf.com/rock-creek-park-golf-course/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [targetBookingUrl],
+      linkCandidates: [],
+      officialPage: {
+        url: sourceUrl,
+        courseName: "Rock Creek Park Golf",
+        linkCandidates: [],
+        observedUrls: [targetBookingUrl]
+      },
+      visibleText: "Rock Creek Park Golf public tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      bookingUrl: targetBookingUrl,
+      apiMetadata: {
+        scheduleId: 975,
+        bookingBaseUrl: targetBookingUrl
+      }
+    });
+  });
+
   it("fails closed when target TeeItUp links disagree on the facility selector", () => {
     const linkCandidates = [
       {

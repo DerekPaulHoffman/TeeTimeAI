@@ -24,6 +24,7 @@ export type BrowserDiscoveryEvidence = {
   officialPage?: {
     url: string;
     linkCandidates: Array<{ url: string; label: string }>;
+    observedUrls?: string[];
     courseName?: string;
   };
   visibleText?: string;
@@ -295,6 +296,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     evidence.sourceUrl,
     ...evidence.observedUrls
   ]);
+  const providerEvidence = getTargetScopedProviderEvidence(evidence);
+  const providerObservedUrls = uniqueUrls([
+    providerEvidence.finalUrl,
+    providerEvidence.sourceUrl,
+    ...providerEvidence.observedUrls
+  ]);
   const privateClubClassification = learnPrivateClubClassification(evidence, observedUrls);
 
   if (privateClubClassification) {
@@ -326,98 +333,136 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   }
 
   const accountRequiredClassification = learnAccountRequiredClassification(
-    evidence,
-    observedUrls
+    providerEvidence,
+    providerObservedUrls
   );
 
   if (accountRequiredClassification) {
     return withCourseIdentityCorroboration(accountRequiredClassification, evidence);
   }
 
-  const whooshDiscovery = learnWhooshBookingClassification(evidence, observedUrls);
+  const whooshDiscovery = learnWhooshBookingClassification(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (whooshDiscovery) {
     return withCourseIdentityCorroboration(whooshDiscovery, evidence);
   }
 
-  const foreupDiscovery = learnForeupDiscovery(evidence, observedUrls);
+  const foreupDiscovery = learnForeupDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (foreupDiscovery) {
     return withCourseIdentityCorroboration(foreupDiscovery, evidence);
   }
 
-  const teeItUpDiscovery = learnTeeItUpDiscovery(evidence, observedUrls);
+  const teeItUpDiscovery = learnTeeItUpDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (teeItUpDiscovery) {
     return withCourseIdentityCorroboration(teeItUpDiscovery, evidence);
   }
 
-  const chelseaDiscovery = learnChelseaDiscovery(evidence, observedUrls);
+  const chelseaDiscovery = learnChelseaDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (chelseaDiscovery) {
     return withCourseIdentityCorroboration(chelseaDiscovery, evidence);
   }
 
-  const golfBackDiscovery = learnGolfBackDiscovery(evidence, observedUrls);
+  const golfBackDiscovery = learnGolfBackDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (golfBackDiscovery) {
     return withCourseIdentityCorroboration(golfBackDiscovery, evidence);
   }
 
-  const webTracDiscovery = learnWebTracDiscovery(evidence, observedUrls);
+  const webTracDiscovery = learnWebTracDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (webTracDiscovery) {
     return withCourseIdentityCorroboration(webTracDiscovery, evidence);
   }
 
-  const clubCaddieDiscovery = learnClubCaddieDiscovery(evidence, observedUrls);
+  const clubCaddieDiscovery = learnClubCaddieDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (clubCaddieDiscovery) {
     return withCourseIdentityCorroboration(clubCaddieDiscovery, evidence);
   }
 
-  const protectedCpsDiscovery = learnProtectedCpsDiscovery(evidence, observedUrls);
+  const protectedCpsDiscovery = learnProtectedCpsDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (protectedCpsDiscovery) {
     return withCourseIdentityCorroboration(protectedCpsDiscovery, evidence);
   }
 
-  const cpsDiscovery = learnCpsDiscovery(evidence, observedUrls);
+  const cpsDiscovery = learnCpsDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (cpsDiscovery) {
     return withCourseIdentityCorroboration(cpsDiscovery, evidence);
   }
 
-  const teesnapDiscovery = learnTeesnapDiscovery(evidence, observedUrls);
+  const teesnapDiscovery = learnTeesnapDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (teesnapDiscovery) {
     return withCourseIdentityCorroboration(teesnapDiscovery, evidence);
   }
 
-  const tenForeDiscovery = learnTenForeDiscovery(evidence, observedUrls);
+  const tenForeDiscovery = learnTenForeDiscovery(
+    providerEvidence,
+    providerObservedUrls
+  );
 
   if (tenForeDiscovery) {
     return withCourseIdentityCorroboration(tenForeDiscovery, evidence);
   }
 
-  const clubCaddieCandidates = getClubCaddieCandidates(evidence, observedUrls);
+  const clubCaddieCandidates = getClubCaddieCandidates(
+    providerEvidence,
+    providerObservedUrls
+  );
   const bookingUrl = clubCaddieCandidates.length > 0
-    ? evidence.sourceUrl
-    : pickBookingLikeUrl(observedUrls) ?? evidence.finalUrl ?? evidence.sourceUrl;
+    ? providerEvidence.sourceUrl
+    : pickBookingLikeUrl(providerObservedUrls) ??
+      providerEvidence.finalUrl ??
+      providerEvidence.sourceUrl;
 
   return withCourseIdentityCorroboration({
     courseId: evidence.courseId,
     status: "INSPECTED",
     detectedPlatform: detectPlatform(observedUrls),
-    sourceUrl: evidence.sourceUrl,
+    sourceUrl: providerEvidence.sourceUrl,
     bookingUrl,
     confidence: bookingUrl === evidence.sourceUrl ? 0.25 : 0.45,
     evidence: {
-      finalUrl: evidence.finalUrl,
-      observedUrls,
-      visibleText: summarizeVisibleText(evidence.visibleText),
-      ...(hasBookingCallToActionEvidence(evidence) ||
-      hasPositiveOnlineBookingText(evidence.visibleText ?? "")
+      finalUrl: providerEvidence.finalUrl,
+      observedUrls: providerObservedUrls,
+      visibleText: summarizeVisibleText(providerEvidence.visibleText),
+      ...(hasBookingCallToActionEvidence(providerEvidence) ||
+      hasPositiveOnlineBookingText(providerEvidence.visibleText ?? "")
         ? { bookingCallToAction: true }
         : {}),
       learnedFrom: "browser-visible-links"
@@ -1350,6 +1395,7 @@ function getOfficialSourceScopedEvidence(
     evidence.officialPage?.linkCandidates ?? evidence.linkCandidates ?? [];
   const observedUrls = uniqueUrls([
     sourceUrl,
+    ...(evidence.officialPage?.observedUrls ?? []),
     ...linkCandidates.map(({ url }) => url)
   ]);
   return {
@@ -3801,6 +3847,81 @@ function learnTeeItUpDiscovery(
       learnedFrom: "teeitup-booking-url"
     }
   };
+}
+
+function getTargetScopedProviderEvidence(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscoveryEvidence {
+  if (
+    !evidence.officialPage?.courseName ||
+    !hasCanonicalTargetPageAuthority(evidence) ||
+    !haveCompatibleCourseNames(
+      evidence.courseName,
+      evidence.officialPage.courseName
+    )
+  ) {
+    return evidence;
+  }
+  return getOfficialSourceScopedEvidence(
+    evidence,
+    evidence.visibleText ?? ""
+  );
+}
+
+function hasCanonicalTargetPageAuthority(
+  evidence: BrowserDiscoveryEvidence
+) {
+  const sourcePage = parseUrl(evidence.sourceUrl);
+  const officialPage = parseUrl(evidence.officialPage?.url);
+  if (
+    !sourcePage ||
+    !officialPage ||
+    !haveSameWebsiteOrigin(sourcePage, officialPage) ||
+    isNonCourseInformationPage(sourcePage) ||
+    isNonCourseInformationPage(officialPage)
+  ) {
+    return false;
+  }
+  const normalizePath = (url: URL) =>
+    decodePagePath(url)
+      .replace(/\/+$/u, "")
+      .toLowerCase() || "/";
+  if (normalizePath(sourcePage) === normalizePath(officialPage)) {
+    return true;
+  }
+  return [sourcePage, officialPage].every((page) =>
+    doesPagePathIdentifyCourse(page, evidence.courseName)
+  );
+}
+
+function doesPagePathIdentifyCourse(page: URL, courseName: string) {
+  const pathSegment = decodePagePath(page)
+    .split("/")
+    .filter(Boolean)
+    .at(-1) ?? "";
+  const identity = pathSegment
+    .replace(/[-_]+/gu, " ")
+    .replace(/\btee\s*times?\b/giu, " ");
+  const targetIdentity = normalizeCourseIdentityName(courseName);
+  return Boolean(
+    targetIdentity &&
+    normalizeCourseIdentityName(identity) === targetIdentity
+  );
+}
+
+function isNonCourseInformationPage(page: URL) {
+  const path = decodePagePath(page).replace(/[-_]+/gu, " ");
+  return /\b(?:academy|events?|faqs?|instructors?|lessons?|simulators?|terms)\b/iu.test(
+    path
+  );
+}
+
+function decodePagePath(page: URL) {
+  try {
+    return decodeURIComponent(page.pathname);
+  } catch {
+    return page.pathname;
+  }
 }
 
 function buildRejectedTeeItUpDiscovery(

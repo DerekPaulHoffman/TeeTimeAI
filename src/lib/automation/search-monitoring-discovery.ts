@@ -1567,6 +1567,14 @@ export async function collectOfficialSiteEvidence(
       (candidate) => !visited.has(normalizeSourceKey(candidate.url))
     );
     const followupCandidate =
+      pickExactCourseBookingCandidate(unvisitedCandidates, courseName) ??
+      (matchedCoursePage
+        ? pickBookingSurfaceCandidate(
+            unvisitedCandidates,
+            firstPage.finalUrl,
+            courseName
+          )
+        : undefined) ??
       pickOfficialPolicyCandidate(unvisitedCandidates, firstPage.finalUrl) ??
       pickOfficialCourseDetailCandidate(
         unvisitedCandidates,
@@ -1699,6 +1707,26 @@ export async function collectOfficialSiteEvidence(
         ]
       )
     : [];
+  const officialPageLinkCandidates = matchedCoursePage && courseName
+    ? uniqueLinkCandidates(
+        [
+          ...matchedCoursePage.evidence.linkCandidates,
+          ...targetScopedOfficialLinks
+        ]
+      ).slice(0, 200)
+    : [];
+  const officialPageLinkKeys = new Set(
+    officialPageLinkCandidates.map((candidate) =>
+      normalizeSourceKey(candidate.url)
+    )
+  );
+  const officialPageUnlabeledObservedUrls = matchedCoursePage
+    ? uniqueStrings(matchedCoursePage.evidence.observedUrls)
+        .filter(
+          (url) => !officialPageLinkKeys.has(normalizeSourceKey(url))
+        )
+        .slice(0, 200)
+    : [];
   return {
     sourceUrl,
     finalUrl: finalPage.finalUrl,
@@ -1712,12 +1740,10 @@ export async function collectOfficialSiteEvidence(
       ? {
           officialPage: {
             url: matchedCoursePage.finalUrl,
-            linkCandidates: uniqueLinkCandidates(
-              [
-                ...matchedCoursePage.evidence.linkCandidates,
-                ...targetScopedOfficialLinks
-              ]
-            ).slice(0, 200),
+            linkCandidates: officialPageLinkCandidates,
+            ...(officialPageUnlabeledObservedUrls.length > 0
+              ? { observedUrls: officialPageUnlabeledObservedUrls }
+              : {}),
             courseName
           }
         }
@@ -1993,7 +2019,7 @@ function isBookingLikeOfficialFollowup(candidate: {
 }) {
   const parsed = parseSafePublicUrl(candidate.url);
   return /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
-    `${candidate.label} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
+    `${candidate.label} ${parsed.hostname.replace(/[._-]+/gu, " ")} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
   );
 }
 
@@ -2108,6 +2134,40 @@ function pickLikelyBookingCandidate(
     }))
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score)[0]?.url;
+}
+
+function pickBookingSurfaceCandidate(
+  candidates: Array<{ url: string; label: string }>,
+  currentUrl: string,
+  courseName: string | undefined
+) {
+  return pickLikelyBookingCandidate(
+    candidates.filter(
+      (candidate) =>
+        haveSameReplayHostname(currentUrl, candidate.url) &&
+        isBookingLikeOfficialFollowup(candidate)
+    ),
+    currentUrl,
+    courseName
+  );
+}
+
+function pickExactCourseBookingCandidate(
+  candidates: Array<{ url: string; label: string }>,
+  courseName: string | undefined
+) {
+  if (!courseName) {
+    return undefined;
+  }
+
+  return candidates.find(
+    (candidate) =>
+      isBookingLikeOfficialFollowup(candidate) &&
+      doesProviderLinkLabelExactlyIdentifyCourse(
+        candidate.label,
+        courseName
+      )
+  )?.url;
 }
 
 function pickOfficialCourseDetailCandidate(
