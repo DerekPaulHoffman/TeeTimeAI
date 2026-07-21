@@ -3007,6 +3007,274 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("classifies a course-scoped direct legacy Prophet link without following its cookieless session redirect", async () => {
+    const sourceUrl = "https://www.troyny.example/frear-park-golf-course";
+    const legacyRoot =
+      "https://secure.east.prophetservices.com/FrearParkV3";
+    const legacyLandingUrl =
+      "https://secure.east.prophetservices.com/FrearParkV3/Home";
+    const cookielessSessionUrl =
+      "https://secure.east.prophetservices.com/%28S%28anonymous-session-placeholder%29%29/Home/nIndex?theme=public#top";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === sourceUrl) {
+        return new Response(
+          `<html><title>Frear Park Golf Course</title><h1>Frear Park Golf Course</h1><h2>Reserve Tee Times</h2><p>Tee Times can be booked online or by calling the Pro Shop.</p><a href="${legacyRoot}">Book Online</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === legacyRoot) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: legacyLandingUrl }
+        });
+      }
+      if (value === legacyLandingUrl) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: cookielessSessionUrl }
+        });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "frear-park",
+          name: "Frear Park Municipal Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "www.troyny.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null,
+          isPublic: true,
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          updatedAt: now
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      sourceUrl,
+      legacyRoot,
+      legacyLandingUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "frear-park",
+        status: "INSPECTED",
+        detectedPlatform: "CUSTOM",
+        bookingUrl: sourceUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "UNSUPPORTED_PLATFORM",
+        evidence: expect.objectContaining({
+          learnedFrom:
+            "legacy-prophet-official-link-without-modern-tenant",
+          observedUrls: expect.arrayContaining([sourceUrl, legacyRoot])
+        })
+      })
+    );
+    expect(
+      JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls.at(-1)?.[0])
+    ).not.toContain("anonymous-session-placeholder");
+  });
+
+  it("promotes a target-scoped direct legacy link only after a strict modern CPS redirect validates", async () => {
+    const sourceUrl = "https://www.troyny.example/frear-park-golf-course";
+    const legacyRoot =
+      "https://secure.east.prophetservices.com/FrearParkV3";
+    const bookingUrl =
+      "https://frear.cps.golf/onlineresweb/search-teetime?CourseId=7";
+    const configurationUrl =
+      "https://frear.cps.golf/onlineresweb/Home/Configuration";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === sourceUrl) {
+        return new Response(
+          `<html><title>Frear Park Golf Course</title><h1>Frear Park Golf Course</h1><h2>Reserve Tee Times</h2><p>Tee Times can be booked online.</p><a href="${legacyRoot}">Book Online</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === legacyRoot) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: bookingUrl }
+        });
+      }
+      if (value === bookingUrl) {
+        return new Response("<html>Public tee time search</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (value === configurationUrl) {
+        return new Response(
+          JSON.stringify({
+            courseId: 7,
+            siteName: "frear",
+            websiteId: "public-website",
+            onlineApi:
+              "https://frear.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            authorityBaseUrl: "https://frear.cps.golf/identityapi"
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "frear-park-modern",
+          name: "Frear Park Municipal Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "www.troyny.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null,
+          isPublic: true,
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          updatedAt: now
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      sourceUrl,
+      legacyRoot,
+      bookingUrl,
+      configurationUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "frear-park-modern",
+        status: "LEARNED",
+        bookingUrl: "https://frear.cps.golf/",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        apiMetadata: expect.objectContaining({
+          provider: "CPS",
+          courseIds: [7]
+        })
+      })
+    );
+  });
+
+  it("coalesces an official legacy link with structured widget evidence for the same root", async () => {
+    const sourceUrl = "https://www.troyny.example/frear-park-golf-course";
+    const legacyRoot =
+      "https://secure.east.prophetservices.com/FrearParkV3";
+    const widgetConfig = Buffer.from(
+      JSON.stringify({
+        baseURL: legacyRoot,
+        newBookingEngine: false,
+        locations: [{
+          name: "Frear Park Municipal Golf Course",
+          courseId: "7"
+        }]
+      })
+    ).toString("base64");
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === sourceUrl) {
+        return new Response(
+          `<html><title>Frear Park Golf Course</title><h1>Frear Park Golf Course</h1><h2>Reserve Tee Times</h2><p>Tee Times can be booked online.</p><a href="${legacyRoot}">Book Online</a><div data-widget-config="${widgetConfig}"></div></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === legacyRoot) {
+        return new Response("Denied", { status: 403 });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Frear Park Municipal Golf Course"
+    );
+
+    expect(evidence.legacyProphetConfigurations).toEqual([
+      expect.objectContaining({
+        providerUrl: legacyRoot,
+        courseIds: [7],
+        sourceKind: "WIDGET"
+      })
+    ]);
+  });
+
+  it("does not give a sibling legacy Prophet root authority from a target course page", async () => {
+    const sourceUrl = "https://www.troyny.example/frear-park-golf-course";
+    const siblingRoot =
+      "https://secure.east.prophetservices.com/NorthFrearV3";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === sourceUrl) {
+        return new Response(
+          `<html><title>Municipal Course Directory</title><h1>Area Courses</h1><h2>Frear Park Golf Course</h2><p>Tee Times can be booked online.</p><a href="${siblingRoot}">Book Online</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === siblingRoot) {
+        return new Response("Denied", { status: 403 });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "frear-park-sibling",
+          name: "Frear Park Municipal Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "www.troyny.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null,
+          isPublic: true,
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          updatedAt: now
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "frear-park-sibling",
+        status: "INSPECTED",
+        detectedPlatform: "UNKNOWN",
+        evidence: expect.objectContaining({
+          learnedFrom: "browser-visible-links"
+        })
+      })
+    );
+  });
+
   it("learns reusable GolfBack metadata from an official course link", async () => {
     const bookingUrl =
       "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";

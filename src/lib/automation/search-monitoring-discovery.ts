@@ -393,10 +393,18 @@ class OfficialSiteHttpError extends Error {
   }
 }
 
-type LegacyProphetWidgetConfiguration = {
+class LegacyProphetCookielessSessionRedirectError extends Error {
+  constructor() {
+    super("Legacy Prophet returned a cookieless session redirect");
+    this.name = "LegacyProphetCookielessSessionRedirectError";
+  }
+}
+
+type LegacyProphetConfiguration = {
   providerUrl: string;
   courseName: string;
   courseIds: number[];
+  sourceKind: "WIDGET" | "OFFICIAL_LINK";
 };
 
 type LegacyProphetFollowupOutcome = {
@@ -427,7 +435,7 @@ type CollectedPageEvidence = Pick<
   | "corroboratedAccessBarrier"
   | "teeItUpLegacyConfigurations"
 > & {
-  legacyProphetConfigurations: LegacyProphetWidgetConfiguration[];
+  legacyProphetConfigurations: LegacyProphetConfiguration[];
   legacyProphetFollowupOutcomes: LegacyProphetFollowupOutcome[];
 };
 
@@ -436,7 +444,7 @@ type CollectedLinkCandidate = {
   label: string;
   targetScopedRedirect?: boolean;
   inferredCourseBookingRoute?: boolean;
-  legacyProphetConfiguration?: LegacyProphetWidgetConfiguration;
+  legacyProphetConfiguration?: LegacyProphetConfiguration;
 };
 
 type RecentCourseAutomationDiscovery = Awaited<
@@ -1028,7 +1036,8 @@ function buildLegacyProphetFallbackDiscovery(
   ]);
   const learnedFrom = getLegacyProphetFallbackEvidenceKind(
     followup,
-    corroboratedManagedChallenge
+    corroboratedManagedChallenge,
+    configuration.sourceKind
   );
 
   if (corroboratedManagedChallenge) {
@@ -1042,14 +1051,14 @@ function buildLegacyProphetFallbackDiscovery(
       automationEligibility: "BLOCKED",
       automationReason: "CAPTCHA_OR_QUEUE",
       policyNotes:
-        "The official course page exposes a course-scoped legacy Club Prophet tee-time widget, but repeated signed-out reads reach a managed access challenge. Tee Time Spot does not bypass challenges, queues, or other access controls.",
+        "The official course page exposes a course-scoped legacy Club Prophet tee-time booking surface, but repeated signed-out reads reach a managed access challenge. Tee Time Spot does not bypass challenges, queues, or other access controls.",
       intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       confidence: 0.98,
       evidence: {
         finalUrl: evidence.officialPage.url,
         observedUrls,
         visibleText:
-          "Official course page exposes one course-scoped legacy Club Prophet tee-time widget; repeated public reads reached a managed access challenge.",
+          "Official course page exposes one course-scoped legacy Club Prophet tee-time booking surface; repeated public reads reached a managed access challenge.",
         accessBarriers: evidence.accessBarriers,
         learnedFrom
       }
@@ -1076,7 +1085,7 @@ function buildLegacyProphetFallbackDiscovery(
       finalUrl: evidence.officialPage.url,
       observedUrls,
       visibleText:
-        "Official course page exposes one course-scoped legacy Club Prophet tee-time widget, but no validated modern public read-only tenant was observed.",
+        "Official course page exposes one course-scoped legacy Club Prophet tee-time booking surface, but no validated modern public read-only tenant was observed.",
       ...(followup.outcome === "MANAGED_CHALLENGE" && evidence.accessBarriers
         ? { accessBarriers: evidence.accessBarriers }
         : {}),
@@ -1115,12 +1124,19 @@ function keepIncompleteCpsDiscoveryActionable(
 
 function getLegacyProphetFallbackEvidenceKind(
   followup: LegacyProphetFollowupOutcome,
-  corroboratedManagedChallenge: boolean
+  corroboratedManagedChallenge: boolean,
+  sourceKind: LegacyProphetConfiguration["sourceKind"]
 ) {
   if (followup.outcome === "MANAGED_CHALLENGE") {
     return corroboratedManagedChallenge
       ? "legacy-prophet-managed-challenge-confirmed"
       : "legacy-prophet-managed-challenge-unconfirmed";
+  }
+  if (
+    followup.outcome === "NO_MODERN_CPS_TENANT" &&
+    sourceKind === "OFFICIAL_LINK"
+  ) {
+    return "legacy-prophet-official-link-without-modern-tenant";
   }
   return {
     NO_MODERN_CPS_TENANT: "legacy-prophet-widget-without-modern-tenant",
@@ -1857,7 +1873,10 @@ export async function collectOfficialSiteEvidence(
   }];
   let matchedCoursePage = courseName && (
     doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
-    doesPageMarkupIdentifyCourse(firstPage.html, courseName)
+    doesPageMarkupIdentifyCourse(firstPage.html, courseName) ||
+    hasTargetScopedDirectLegacyProphetLink(
+      pages[0].evidence.linkCandidates
+    )
   )
     ? pages[0]
     : undefined;
@@ -2029,7 +2048,10 @@ export async function collectOfficialSiteEvidence(
         haveSameReplayHostname(firstPage.finalUrl, page.finalUrl) &&
         ((identifiesTargetCourse &&
           (doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
-            doesPageMarkupIdentifyCourse(fetched.html, courseName))) ||
+            doesPageMarkupIdentifyCourse(fetched.html, courseName) ||
+            hasTargetScopedDirectLegacyProphetLink(
+              page.evidence.linkCandidates
+            ))) ||
           (followedLinkCandidate?.inferredCourseBookingRoute &&
             page.evidence.linkCandidates.some(
               (candidate) => candidate.targetScopedRedirect
@@ -2265,7 +2287,11 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
       if (!location || redirectCount === MAX_REDIRECTS) {
         throw new Error("Official site returned an incomplete redirect");
       }
-      currentUrl = parseSafePublicUrl(new URL(location, currentUrl).toString()).toString();
+      const redirectUrl = new URL(location, currentUrl);
+      if (isLegacyProphetCookielessSessionRedirect(sourceUrl, redirectUrl)) {
+        throw new LegacyProphetCookielessSessionRedirectError();
+      }
+      currentUrl = parseSafePublicUrl(redirectUrl.toString()).toString();
       continue;
     }
 
@@ -2643,10 +2669,16 @@ function extractHtmlEvidence(
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 12_000);
+  const courseScopedLinkCandidates = annotateDirectLegacyProphetBookingLinks({
+    candidates: linkCandidates,
+    decodedHtml,
+    visibleText,
+    courseName
+  });
 
   return {
     observedUrls: uniqueStrings(observedUrls),
-    linkCandidates,
+    linkCandidates: courseScopedLinkCandidates,
     visibleText,
     teeItUpLegacyConfigurations: extractTeeItUpLegacyConfigurations(
       embeddedContent,
@@ -3508,6 +3540,9 @@ function classifyLegacyProphetFollowupFailure(
   providerUrl: string,
   error: unknown
 ): LegacyProphetFollowupOutcome {
+  if (error instanceof LegacyProphetCookielessSessionRedirectError) {
+    return { providerUrl, outcome: "NO_MODERN_CPS_TENANT" };
+  }
   if (error instanceof OfficialSiteHttpError) {
     const modernCpsUrl = findStrictModernCpsUrl([error.finalUrl]);
     return {
@@ -3532,10 +3567,10 @@ function classifyLegacyProphetFollowupFailure(
 }
 
 function uniqueLegacyProphetConfigurations(
-  values: LegacyProphetWidgetConfiguration[]
+  values: LegacyProphetConfiguration[]
 ) {
   const seen = new Set<string>();
-  return values.filter((configuration) => {
+  const exactConfigurations = values.filter((configuration) => {
     const key = [
       normalizeSourceKey(configuration.providerUrl),
       normalizeCourseLinkName(configuration.courseName),
@@ -3547,6 +3582,16 @@ function uniqueLegacyProphetConfigurations(
     seen.add(key);
     return true;
   });
+  const widgetRoots = new Set(
+    exactConfigurations
+      .filter((configuration) => configuration.sourceKind === "WIDGET")
+      .map((configuration) => normalizeSourceKey(configuration.providerUrl))
+  );
+  return exactConfigurations.filter(
+    (configuration) =>
+      configuration.sourceKind === "WIDGET" ||
+      !widgetRoots.has(normalizeSourceKey(configuration.providerUrl))
+  );
 }
 
 function extractLegacyProphetWidgetBookingCandidates(
@@ -3599,12 +3644,165 @@ function extractLegacyProphetWidgetBookingCandidates(
         legacyProphetConfiguration: {
           providerUrl: url,
           courseName: matchingLocation.name,
-          courseIds: [Number(matchingLocation.courseId)]
+          courseIds: [Number(matchingLocation.courseId)],
+          sourceKind: "WIDGET"
         }
       });
     }
   }
   return uniqueLinkCandidates(candidates);
+}
+
+function annotateDirectLegacyProphetBookingLinks(input: {
+  candidates: CollectedLinkCandidate[];
+  decodedHtml: string;
+  visibleText: string;
+  courseName?: string;
+}) {
+  const courseName = input.courseName?.trim();
+  if (
+    !courseName ||
+    !doesLegacyProphetPageMarkupIdentifyCourse(
+      input.decodedHtml,
+      courseName
+    ) ||
+    !hasDirectLegacyProphetTeeTimeContext(input.visibleText)
+  ) {
+    return input.candidates;
+  }
+
+  return input.candidates.map((candidate) => {
+    const providerUrl = getSafeLegacyProphetWidgetRoot(candidate.url);
+    if (
+      !providerUrl ||
+      !isDirectLegacyProphetBookingLabel(candidate.label) ||
+      !doesLegacyProphetRootIdentifyCourse(providerUrl, courseName)
+    ) {
+      return candidate;
+    }
+    return {
+      ...candidate,
+      url: providerUrl,
+      label: `Book tee times at ${courseName}`,
+      targetScopedRedirect: true,
+      legacyProphetConfiguration: {
+        providerUrl,
+        courseName,
+        courseIds: [],
+        sourceKind: "OFFICIAL_LINK" as const
+      }
+    };
+  });
+}
+
+function hasTargetScopedDirectLegacyProphetLink(
+  candidates: CollectedLinkCandidate[]
+) {
+  return candidates.some(
+    (candidate) =>
+      candidate.legacyProphetConfiguration?.sourceKind === "OFFICIAL_LINK"
+  );
+}
+
+function doesLegacyProphetPageMarkupIdentifyCourse(
+  html: string,
+  courseName: string
+) {
+  const targetKey = normalizeLegacyProphetCourseKey(courseName);
+  if (targetKey.length < 5) {
+    return false;
+  }
+  return [
+    ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
+    ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
+  ]
+    .map((match) =>
+      normalizeLegacyProphetCourseKey(
+        stripHtml(decodeHtmlEntities(match[1] ?? ""))
+      )
+    )
+    .some(
+      (identityKey) =>
+        identityKey.length >= 5 &&
+        identityKey === targetKey
+    );
+}
+
+function hasDirectLegacyProphetTeeTimeContext(visibleText: string) {
+  return (
+    /\b(?:book|reserve)\s+(?:a\s+)?tee\s*times?\b/iu.test(visibleText) ||
+    /\btee\s*times?\b[\s\S]{0,180}\b(?:book(?:ed|ing)?\s+online|online\s+booking)\b/iu.test(
+      visibleText
+    ) ||
+    /\bbook\s+online\s+tee\s*times?\b/iu.test(visibleText)
+  );
+}
+
+function isDirectLegacyProphetBookingLabel(label: string) {
+  return /^(?:book(?:\s+(?:a|your))?\s+)?(?:online\s+)?tee\s*times?$|^book\s+online(?:\s+tee\s*times?)?$|^reserve(?:\s+(?:a|your))?\s+tee\s*times?$/iu.test(
+    label.replace(/\s+/gu, " ").trim()
+  );
+}
+
+function doesLegacyProphetRootIdentifyCourse(
+  providerUrl: string,
+  courseName: string
+) {
+  const segment = new URL(providerUrl).pathname.split("/").filter(Boolean)[0];
+  const providerKey = normalizeLegacyProphetCourseKey(
+    segment.replace(/v\d+$/iu, "")
+  );
+  const courseKey = normalizeLegacyProphetCourseKey(courseName);
+  return Boolean(
+    providerKey.length >= 5 &&
+      courseKey.length >= 5 &&
+      providerKey === courseKey
+  );
+}
+
+function normalizeLegacyProphetCourseKey(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLocaleLowerCase("en-US")
+    .split(/[^a-z0-9]+/gu)
+    .filter(
+      (token) =>
+        token &&
+        ![
+          "club",
+          "cc",
+          "course",
+          "country",
+          "gc",
+          "golf",
+          "municipal",
+          "park",
+          "the"
+        ].includes(token)
+    )
+    .join("");
+}
+
+function isLegacyProphetCookielessSessionRedirect(
+  sourceUrl: string,
+  redirectUrl: URL
+) {
+  const decodedPath = decodePublicUrlPath(redirectUrl.pathname);
+  return Boolean(
+    getSafeLegacyProphetWidgetRoot(sourceUrl) &&
+      redirectUrl.protocol === "https:" &&
+      redirectUrl.hostname.toLowerCase() ===
+        "secure.east.prophetservices.com" &&
+      !redirectUrl.username &&
+      !redirectUrl.password &&
+      !redirectUrl.port &&
+      decodedPath &&
+      /^\/\(S\([^/]{8,512}\)\)(?:\/|$)/iu.test(
+        decodedPath
+      )
+  );
 }
 
 function getSafeLegacyProphetWidgetRoot(value: string) {
