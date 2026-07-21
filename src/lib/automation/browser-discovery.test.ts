@@ -1173,6 +1173,46 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official public course that does not take tee times", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "sunset-hill",
+      courseName: "Sunset Hill Golf Club",
+      sourceUrl: "https://www.sunsethillgolfclub.com/",
+      finalUrl: "https://www.sunsethillgolfclub.com/",
+      observedUrls: ["https://www.sunsethillgolfclub.com/"],
+      visibleText:
+        "Home - Sunset Hill Golf Club. Skip to content. Sunset Hill Golf Club. The Friendly Place to Play. 9 Hole Public Golf Course. We are open for the 2026 Season! Please Note: We do not take tee times, but are on a first come, first served basis."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-walk-in-access" }
+    });
+  });
+
+  it.each([
+    "Sibling Hills Golf Course",
+    "sibling hills golf course"
+  ])("does not borrow a sibling course's no-tee-time statement (%s)", (siblingName) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-municipal",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/"],
+      visibleText:
+        `Target Municipal Golf Course is a public nine-hole course. ${siblingName} does not take tee times and is first come, first served.`
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it("classifies an official course page that explicitly uses no tee times", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "clayton-park",

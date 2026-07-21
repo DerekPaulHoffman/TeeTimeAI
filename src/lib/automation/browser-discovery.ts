@@ -1089,9 +1089,10 @@ function learnWalkInClassification(
     evidence.courseName,
     visibleText
   );
-  const noReservationMatch = /\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b/i.exec(
-    visibleText
-  );
+  const noReservationMatch =
+    /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\b(?:do|does)\s+not\s+(?:take|accept)\s+tee times?\b)/i.exec(
+      visibleText
+    );
 
   if (!noReservationMatch && !noTeeTimeEvidence) {
     return null;
@@ -1137,16 +1138,42 @@ function learnWalkInClassification(
     return null;
   }
 
-  const statementStart = Math.max(0, visibleText.lastIndexOf(".", noReservationMatch.index) + 1);
-  const nextPeriod = visibleText.indexOf(
-    ".",
-    noReservationMatch.index + noReservationMatch[0].length
+  const statementStart = Math.max(
+    0,
+    ...[".", "!", "?"].map(
+      (punctuation) =>
+        visibleText.lastIndexOf(punctuation, noReservationMatch.index) + 1
+    )
   );
-  const statementEnd = nextPeriod === -1
+  const statementRemainderStart =
+    noReservationMatch.index + noReservationMatch[0].length;
+  const nextPunctuationOffset = visibleText
+    .slice(statementRemainderStart)
+    .search(/[.!?]/);
+  const statementEnd = nextPunctuationOffset === -1
     ? Math.min(visibleText.length, noReservationMatch.index + 320)
-    : Math.min(visibleText.length, nextPeriod + 1);
+    : Math.min(
+        visibleText.length,
+        statementRemainderStart + nextPunctuationOffset + 1
+      );
   const statement = visibleText.slice(statementStart, statementEnd);
-  const identifiesTargetCourse = hasTargetCourseIdentity(statement, evidence.courseName);
+  const statementContext = visibleText.slice(
+    Math.max(0, statementStart - 600),
+    statementEnd
+  );
+  const normalizedStatementContext = statementContext.toLocaleLowerCase("en-US");
+  const normalizedCourseName = evidence.courseName.toLocaleLowerCase("en-US");
+  const targetContextStart = normalizedStatementContext.lastIndexOf(
+    normalizedCourseName
+  );
+  const courseScopedStatementContext = targetContextStart >= 0
+    ? statementContext.slice(targetContextStart)
+    : statementContext;
+  const identifiesTargetCourse =
+    hasTargetCourseIdentity(statement, evidence.courseName) ||
+    (hasTargetCourseIdentity(statementContext, evidence.courseName) &&
+      /\bpublic\b/i.test(statementContext) &&
+      /\b(?:nine|9|eighteen|18)[- ]holes?\b/i.test(statementContext));
   const explicitlyFirstCome = /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
     statement
   );
@@ -1158,6 +1185,10 @@ function learnWalkInClassification(
   if (
     !identifiesTargetCourse ||
     hasDifferentExplicitCourseIdentity(statement, evidence.courseName) ||
+    hasDifferentNoTeeTimeCourseIdentity(
+      courseScopedStatementContext,
+      evidence.courseName
+    ) ||
     !explicitlyFirstCome ||
     scopedToNonCourseFacility ||
     contradictsWalkInOnly
@@ -1341,7 +1372,17 @@ function hasDifferentNoTeeTimeCourseIdentity(value: string, courseName: string) 
     ...value.matchAll(
       /\b((?:[A-Z][\p{L}\p{N}'â€™&-]*\s+){0,6}(?:Golf\s+(?:Course|Club|Center|Centre|Links)|Country\s+Club))\b/gu
     )
-  ].some((match) => !isLikelyTargetCourseAlias(match[1] ?? "", courseName));
+  ].some((match) => {
+    const candidate = match[1] ?? "";
+    if (
+      /^(?:(?:nine|9|eighteen|18)[- ]?)?holes?\s+public\s+golf\s+(?:course|club|center|centre|links)$/i.test(
+        candidate
+      )
+    ) {
+      return false;
+    }
+    return !isLikelyTargetCourseAlias(candidate, courseName);
+  });
 }
 
 function isLikelyTargetCourseAlias(candidate: string, courseName: string) {
