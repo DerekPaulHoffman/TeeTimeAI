@@ -157,6 +157,16 @@ describe("fetchCpsSlots", () => {
 
       if (url.endsWith("/onlineresweb/Home/Configuration")) {
         expect(init?.redirect).toBe("manual");
+        const headers = new Headers(init?.headers);
+        expect(headers.get("accept")).toBe("application/json");
+        expect(headers.get("referer")).toBe(
+          "https://traditionoaklane.cps.golf/"
+        );
+        expect(headers.get("user-agent")).toBe(
+          "TeeTimeSpot/1.0 (+https://teetimespot.com)"
+        );
+        expect(headers.get("authorization")).toBeNull();
+        expect(headers.get("cookie")).toBeNull();
         return jsonResponse({
           authorityBaseUrl: "https://traditionoaklane.cps.golf/identityapi",
           onlineApi:
@@ -386,6 +396,57 @@ describe("fetchCpsSlots", () => {
       requestedUrls.findIndex((url) => url.includes("/TeeTimes?"))
     );
     expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("preserves persisted public build and terminal configuration", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input, init) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return jsonResponse({ access_token: "token" });
+        }
+        if (url.includes("/GetAllOptions/traditionoaklane?")) {
+          expect(new URL(url).searchParams.get("version")).toBe("2026.07.21");
+          expect((init?.headers as Record<string, string>)["x-terminalid"]).toBe(
+            "9"
+          );
+          return jsonResponse({
+            webSiteId: "public-website",
+            courseOptions: [{ courseId: 41 }]
+          });
+        }
+        if (url.endsWith("/RegisterTransactionId")) {
+          expect((init?.headers as Record<string, string>)["x-terminalid"]).toBe(
+            "9"
+          );
+          return jsonResponse(true);
+        }
+        if (url.includes("/TeeTimes?")) {
+          expect((init?.headers as Record<string, string>)["x-terminalid"]).toBe(
+            "9"
+          );
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(
+      fetchCpsSlots(
+        persistedCpsInput({
+          courseIds: [0],
+          holes: [18],
+          resolvePlaceholderCourseIds: true,
+          buildNumber: "2026.07.21",
+          terminalId: 9
+        })
+      )
+    ).resolves.toEqual([]);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        input.toString().endsWith("/onlineresweb/Home/Configuration")
+      )
+    ).toBe(false);
   });
 
   it("fails closed when one published id describes sibling named courses", async () => {
@@ -1149,6 +1210,16 @@ describe("fetchCpsSlots", () => {
       }
       if (url.endsWith("/onlineresweb/Home/Configuration")) {
         expect(init?.redirect).toBe("manual");
+        const headers = new Headers(init?.headers);
+        expect(headers.get("accept")).toBe("application/json");
+        expect(headers.get("referer")).toBe(
+          "https://traditionoaklane.cps.golf/"
+        );
+        expect(headers.get("user-agent")).toBe(
+          "TeeTimeSpot/1.0 (+https://teetimespot.com)"
+        );
+        expect(headers.get("authorization")).toBeNull();
+        expect(headers.get("cookie")).toBeNull();
         const configuration = cpsConfiguration();
         return jsonResponse({
           ...configuration,

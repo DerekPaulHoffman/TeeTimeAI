@@ -585,6 +585,8 @@ describe("search monitoring discovery", () => {
             onlineApi:
               "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
             authorityBaseUrl: "https://colonie.cps.golf/identityapi",
+            buildNumber: "2026.07.21",
+            terminalId: 9,
             apiKey: "must-not-be-persisted"
           }),
           { status: 200, headers: { "content-type": "application/json" } }
@@ -630,7 +632,14 @@ describe("search monitoring discovery", () => {
           bookingBaseUrl: "https://colonie.cps.golf/",
           courseIds: [0],
           holes: [18, 9],
-          resolvePlaceholderCourseIds: true
+          resolvePlaceholderCourseIds: true,
+          clientId: "onlineresweb",
+          websiteId: "public-website",
+          onlineApi:
+            "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          authorityBaseUrl: "https://colonie.cps.golf/identityapi",
+          buildNumber: "2026.07.21",
+          terminalId: 9
         },
         evidence: expect.objectContaining({
           learnedFrom: "cps-public-configuration"

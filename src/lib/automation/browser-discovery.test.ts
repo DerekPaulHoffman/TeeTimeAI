@@ -4244,7 +4244,13 @@ describe("CPS public configuration enrichment", () => {
     onlineApi:
       "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
     authorityBaseUrl: "https://colonie.cps.golf/identityapi",
-    apiKey: "must-not-be-persisted"
+    buildNumber: "2026.07.21",
+    terminalId: 9,
+    apiKey: "must-not-be-persisted",
+    accessToken: "must-not-persist-access-token",
+    clientSecret: "must-not-persist-client-secret",
+    cookies: ["must-not-persist-cookie"],
+    nested: { credential: "must-not-persist-nested-secret" }
   };
 
   it("learns exact same-tenant metadata without persisting the published key", async () => {
@@ -4261,7 +4267,11 @@ describe("CPS public configuration enrichment", () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       new URL("https://colonie.cps.golf/onlineresweb/Home/Configuration"),
       {
-        headers: { Accept: "application/json" },
+        headers: {
+          Accept: "application/json",
+          Referer: "https://colonie.cps.golf/",
+          "User-Agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)"
+        },
         redirect: "manual"
       }
     );
@@ -4279,12 +4289,158 @@ describe("CPS public configuration enrichment", () => {
         bookingBaseUrl: "https://colonie.cps.golf/",
         courseIds: [0],
         holes: [18, 9],
-        resolvePlaceholderCourseIds: true
+        resolvePlaceholderCourseIds: true,
+        clientId: "onlineresweb",
+        websiteId: "public-website",
+        onlineApi:
+          "https://colonie.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+        authorityBaseUrl: "https://colonie.cps.golf/identityapi",
+        buildNumber: "2026.07.21",
+        terminalId: 9
       },
       confidence: 0.95,
       evidence: { learnedFrom: "cps-public-configuration" }
     });
-    expect(JSON.stringify(enriched)).not.toContain("must-not-be-persisted");
+    expect(JSON.stringify(enriched)).not.toMatch(/must-not-persist/i);
+  });
+
+  it("adds safe configuration to an exact CPS course without replacing its course id", async () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "capital-hills",
+      courseName: "Capital Hills at Albany",
+      sourceUrl: "https://www.caphills.com/bookteetimes",
+      observedUrls: [
+        "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=7"
+      ]
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      cpsJsonResponse(
+        "https://capitalhillsny.cps.golf/onlineresweb/Home/Configuration",
+        {
+          ...validConfiguration,
+          courseId: 0,
+          siteName: "capitalhillsny",
+          websiteId: "capital-public-website",
+          onlineApi:
+            "https://capitalhillsny.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          authorityBaseUrl: "https://capitalhillsny.cps.golf/identityapi"
+        }
+      )
+    );
+
+    const enriched = await enrichCpsDiscovery(
+      discovery,
+      "Capital Hills at Albany",
+      fetchImpl as typeof fetch
+    );
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      apiMetadata: { provider: "CPS", courseIds: [7] }
+    });
+    expect(enriched.apiMetadata).toEqual({
+      provider: "CPS",
+      siteName: "capitalhillsny",
+      bookingBaseUrl: "https://capitalhillsny.cps.golf/",
+      courseIds: [7],
+      holes: [18, 9],
+      clientId: "onlineresweb",
+      websiteId: "capital-public-website",
+      onlineApi:
+        "https://capitalhillsny.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+      authorityBaseUrl: "https://capitalhillsny.cps.golf/identityapi",
+      buildNumber: "2026.07.21",
+      terminalId: 9
+    });
+    expect(JSON.stringify(enriched)).not.toMatch(/must-not-persist/i);
+  });
+
+  it.each([
+    {
+      name: "keeps a matching concrete course id",
+      existingCourseIds: [7],
+      configurationCourseId: 7,
+      expectedCourseIds: [7],
+      resolvesPlaceholder: false,
+      accepted: true
+    },
+    {
+      name: "rejects a conflicting concrete course id",
+      existingCourseIds: [7],
+      configurationCourseId: 8,
+      expectedCourseIds: [7],
+      resolvesPlaceholder: false,
+      accepted: false
+    },
+    {
+      name: "replaces a legacy placeholder with a concrete course id",
+      existingCourseIds: [0],
+      configurationCourseId: 7,
+      expectedCourseIds: [7],
+      resolvesPlaceholder: false,
+      accepted: true
+    },
+    {
+      name: "marks a configuration placeholder for runtime resolution",
+      existingCourseIds: [0],
+      configurationCourseId: 0,
+      expectedCourseIds: [0],
+      resolvesPlaceholder: true,
+      accepted: true
+    }
+  ])("$name", async ({
+    existingCourseIds,
+    configurationCourseId,
+    expectedCourseIds,
+    resolvesPlaceholder,
+    accepted
+  }) => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "example-course",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://example.test/golf",
+      observedUrls: [
+        `https://examplepublic.cps.golf/onlineresweb/search-teetime?courseIds=${existingCourseIds.join(",")}`
+      ]
+    });
+    const enriched = await enrichCpsDiscovery(
+      discovery,
+      "Example Public Golf Course",
+      vi.fn().mockResolvedValue(
+        cpsJsonResponse(
+          "https://examplepublic.cps.golf/onlineresweb/Home/Configuration",
+          {
+            ...validConfiguration,
+            courseId: configurationCourseId,
+            siteName: "examplepublic",
+            websiteId: "example-public-website",
+            onlineApi:
+              "https://examplepublic.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            authorityBaseUrl: "https://examplepublic.cps.golf/identityapi"
+          }
+        )
+      ) as typeof fetch
+    );
+
+    expect(enriched.apiMetadata).toMatchObject({
+      provider: "CPS",
+      courseIds: expectedCourseIds
+    });
+    if (resolvesPlaceholder) {
+      expect(enriched.apiMetadata).toHaveProperty(
+        "resolvePlaceholderCourseIds",
+        true
+      );
+    } else {
+      expect(enriched.apiMetadata).not.toHaveProperty(
+        "resolvePlaceholderCourseIds"
+      );
+    }
+    expect(enriched.evidence.learnedFrom).toBe(
+      accepted
+        ? "cps-public-configuration"
+        : "cps-public-configuration-invalid"
+    );
   });
 
   it("does not opt a concrete configuration course id into placeholder resolution", async () => {

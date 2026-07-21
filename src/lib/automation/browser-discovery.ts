@@ -82,6 +82,8 @@ export type BrowserDiscovery = {
     websiteId?: string;
     onlineApi?: string;
     authorityBaseUrl?: string;
+    buildNumber?: string;
+    terminalId?: number;
   } | {
     provider: "TEESNAP";
     courseId: number;
@@ -4144,12 +4146,17 @@ export function getBestProbeUrl(
 type CpsDiscoveryConfiguration = {
   courseId?: unknown;
   siteName?: unknown;
+  clientId?: unknown;
   websiteId?: unknown;
   onlineApi?: unknown;
   authorityBaseUrl?: unknown;
+  buildNumber?: unknown;
+  terminalId?: unknown;
 };
 
 const CPS_CONFIGURATION_MAX_BYTES = 64 * 1024;
+const CPS_PUBLIC_MONITOR_USER_AGENT =
+  "TeeTimeSpot/1.0 (+https://teetimespot.com)";
 
 export async function enrichCpsDiscovery(
   discovery: BrowserDiscovery,
@@ -4157,12 +4164,25 @@ export async function enrichCpsDiscovery(
   fetchImpl: typeof fetch = fetch
 ): Promise<BrowserDiscovery> {
   const bookingBase = parseUrl(discovery.bookingUrl);
+  const existingMetadata = bookingBase
+    ? getExistingCpsDiscoveryMetadata(discovery.apiMetadata, bookingBase)
+    : null;
+  const missingCourseId =
+    discovery.status === "INSPECTED" &&
+    discovery.evidence.learnedFrom === "cps-course-id-missing" &&
+    discovery.apiMetadata === undefined;
+  const missingPersistedConfiguration = Boolean(
+    discovery.status === "LEARNED" &&
+      discovery.evidence.learnedFrom === "cps-booking-url" &&
+      existingMetadata &&
+      (!existingMetadata.clientId ||
+        !existingMetadata.websiteId ||
+        !existingMetadata.onlineApi ||
+        !existingMetadata.authorityBaseUrl)
+  );
   if (
-    discovery.status !== "INSPECTED" ||
+    (!missingCourseId && !missingPersistedConfiguration) ||
     discovery.detectedPlatform !== "CUSTOM" ||
-    discovery.evidence.learnedFrom !== "cps-course-id-missing" ||
-    discovery.bookingMethod !== "PUBLIC_ONLINE" ||
-    discovery.apiMetadata !== undefined ||
     Boolean(discovery.evidence.accessBarriers?.length) ||
     !bookingBase ||
     !isStrictCpsTenantRoot(bookingBase)
@@ -4176,7 +4196,11 @@ export async function enrichCpsDiscovery(
     bookingBaseUrl
   );
   const response = await fetchImpl(configurationUrl, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      Referer: bookingBaseUrl,
+      "User-Agent": CPS_PUBLIC_MONITOR_USER_AGENT
+    },
     redirect: "manual"
   });
   if (
@@ -4208,9 +4232,16 @@ export async function enrichCpsDiscovery(
   const configuration = parseCpsDiscoveryConfiguration(
     rawConfiguration,
     bookingBase,
-    courseName
+    missingCourseId ? courseName : null
   );
   if (!configuration) {
+    return withCpsConfigurationResult(discovery, "invalid");
+  }
+  const courseIdentity = resolveEnrichedCpsCourseIdentity(
+    existingMetadata,
+    configuration.courseId
+  );
+  if (!courseIdentity) {
     return withCpsConfigurationResult(discovery, "invalid");
   }
 
@@ -4228,10 +4259,20 @@ export async function enrichCpsDiscovery(
       provider: "CPS",
       siteName: configuration.siteName,
       bookingBaseUrl,
-      courseIds: [configuration.courseId],
-      holes: [18, 9],
-      ...(configuration.courseId === 0
+      courseIds: courseIdentity.courseIds,
+      holes: existingMetadata?.holes ?? [18, 9],
+      ...(courseIdentity.resolvePlaceholderCourseIds
         ? { resolvePlaceholderCourseIds: true }
+        : {}),
+      clientId: configuration.clientId,
+      websiteId: configuration.websiteId,
+      onlineApi: configuration.onlineApi,
+      authorityBaseUrl: configuration.authorityBaseUrl,
+      ...(configuration.buildNumber
+        ? { buildNumber: configuration.buildNumber }
+        : {}),
+      ...(configuration.terminalId !== undefined
+        ? { terminalId: configuration.terminalId }
         : {})
     },
     confidence: 0.95,
@@ -4262,7 +4303,7 @@ function withCpsConfigurationResult(
 function parseCpsDiscoveryConfiguration(
   value: unknown,
   bookingBase: URL,
-  courseName: string
+  courseName: string | null
 ) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -4273,6 +4314,12 @@ function parseCpsDiscoveryConfiguration(
     typeof configuration.siteName === "string"
       ? configuration.siteName.trim()
       : "";
+  const clientId =
+    configuration.clientId === undefined
+      ? "onlineresweb"
+      : typeof configuration.clientId === "string"
+        ? configuration.clientId.trim()
+        : "";
   const websiteId =
     typeof configuration.websiteId === "string"
       ? configuration.websiteId.trim()
@@ -4287,21 +4334,36 @@ function parseCpsDiscoveryConfiguration(
     bookingBase,
     /^\/identityapi\/?$/i
   );
+  const buildNumber =
+    typeof configuration.buildNumber === "string" &&
+    configuration.buildNumber.trim().length > 0 &&
+    configuration.buildNumber.trim().length <= 200
+      ? configuration.buildNumber.trim()
+      : undefined;
+  const terminalId =
+    Number.isSafeInteger(configuration.terminalId) &&
+    (configuration.terminalId as number) >= 0
+      ? (configuration.terminalId as number)
+      : undefined;
   const tenantName = bookingBase.hostname.split(".")[0] ?? "";
   const tenantIdentity = normalizeCpsTenantIdentity(tenantName);
   const siteIdentity = normalizeCpsTenantIdentity(siteName);
-  const courseIdentity = normalizeCpsTenantIdentity(courseName);
+  const courseIdentity = courseName
+    ? normalizeCpsTenantIdentity(courseName)
+    : null;
 
   if (
     !Number.isSafeInteger(courseId) ||
     (courseId as number) < 0 ||
     !/^[a-z0-9_-]{1,80}$/i.test(siteName) ||
+    clientId.length < 1 ||
+    clientId.length > 200 ||
     websiteId.length < 1 ||
     websiteId.length > 200 ||
     !tenantIdentity ||
     tenantIdentity !== siteIdentity ||
-    !courseIdentity ||
-    tenantIdentity !== courseIdentity ||
+    (courseName !== null &&
+      (!courseIdentity || tenantIdentity !== courseIdentity)) ||
     !onlineApi ||
     !authorityBaseUrl
   ) {
@@ -4310,8 +4372,78 @@ function parseCpsDiscoveryConfiguration(
 
   return {
     courseId: courseId as number,
-    siteName
+    siteName,
+    clientId,
+    websiteId,
+    onlineApi,
+    authorityBaseUrl,
+    ...(buildNumber ? { buildNumber } : {}),
+    ...(terminalId !== undefined ? { terminalId } : {})
   };
+}
+
+function resolveEnrichedCpsCourseIdentity(
+  existingMetadata: ReturnType<typeof getExistingCpsDiscoveryMetadata>,
+  configurationCourseId: number
+) {
+  if (!existingMetadata) {
+    return {
+      courseIds: [configurationCourseId],
+      resolvePlaceholderCourseIds: configurationCourseId === 0
+    };
+  }
+  const hasOnlyPlaceholder =
+    existingMetadata.courseIds.length === 1 &&
+    existingMetadata.courseIds[0] === 0;
+  if (hasOnlyPlaceholder) {
+    return configurationCourseId === 0
+      ? { courseIds: [0], resolvePlaceholderCourseIds: true }
+      : {
+          courseIds: [configurationCourseId],
+          resolvePlaceholderCourseIds: false
+        };
+  }
+  if (
+    configurationCourseId !== 0 &&
+    !existingMetadata.courseIds.includes(configurationCourseId)
+  ) {
+    return null;
+  }
+  return {
+    courseIds: existingMetadata.courseIds,
+    resolvePlaceholderCourseIds: false
+  };
+}
+
+function getExistingCpsDiscoveryMetadata(
+  value: BrowserDiscovery["apiMetadata"],
+  bookingBase: URL
+) {
+  if (!value || !("provider" in value) || value.provider !== "CPS") {
+    return null;
+  }
+  const tenantName = bookingBase.hostname.split(".")[0]?.toLowerCase();
+  if (
+    !tenantName ||
+    value.siteName.trim().toLowerCase() !== tenantName ||
+    value.bookingBaseUrl !== `${bookingBase.origin}/` ||
+    value.courseIds.length === 0 ||
+    !value.courseIds.every(
+      (courseId) => Number.isSafeInteger(courseId) && courseId >= 0
+    ) ||
+    (value.holes !== undefined &&
+      (value.holes.length === 0 ||
+        !value.holes.every((holes) => holes === 9 || holes === 18))) ||
+    (value.buildNumber !== undefined &&
+      (typeof value.buildNumber !== "string" ||
+        value.buildNumber.trim().length === 0 ||
+        value.buildNumber.trim().length > 200)) ||
+    (value.terminalId !== undefined &&
+      (!Number.isSafeInteger(value.terminalId) || value.terminalId < 0))
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function isStrictCpsTenantRoot(url: URL) {

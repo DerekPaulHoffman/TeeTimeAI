@@ -18,6 +18,8 @@ export type CpsMetadata = {
   websiteId?: string;
   onlineApi?: string;
   authorityBaseUrl?: string;
+  buildNumber?: string;
+  terminalId?: number;
   resolvePlaceholderCourseIds?: boolean;
 };
 
@@ -87,6 +89,8 @@ type CpsFetchInput = {
 
 const CPS_READ_ATTEMPTS = 2;
 const CPS_CONFIGURATION_MAX_BYTES = 64 * 1024;
+const CPS_PUBLIC_MONITOR_USER_AGENT =
+  "TeeTimeSpot/1.0 (+https://teetimespot.com)";
 const CPS_AUTHORITY_PATH = "/identityapi";
 const CPS_ONLINE_API_PATH =
   "/onlineres/onlineapi/api/v1/onlinereservation";
@@ -153,6 +157,12 @@ export function isCpsMetadata(value: unknown): value is CpsMetadata {
     ) &&
     (metadata.resolvePlaceholderCourseIds === undefined ||
       typeof metadata.resolvePlaceholderCourseIds === "boolean") &&
+    (metadata.buildNumber === undefined ||
+      (typeof metadata.buildNumber === "string" &&
+        metadata.buildNumber.trim().length > 0 &&
+        metadata.buildNumber.trim().length <= 200)) &&
+    (metadata.terminalId === undefined ||
+      (Number.isSafeInteger(metadata.terminalId) && metadata.terminalId >= 0)) &&
     (metadata.holes === undefined ||
       (Array.isArray(metadata.holes) &&
         metadata.holes.length > 0 &&
@@ -486,7 +496,9 @@ async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguratio
         authorityBaseUrl: metadata.authorityBaseUrl,
         onlineApi: metadata.onlineApi,
         websiteId: metadata.websiteId,
-        siteName: metadata.siteName
+        siteName: metadata.siteName,
+        buildNumber: metadata.buildNumber,
+        terminalId: metadata.terminalId
       },
       metadata
     );
@@ -505,9 +517,10 @@ async function loadConfiguration(metadata: CpsMetadata): Promise<CpsConfiguratio
   }
   const url = new URL("/onlineresweb/Home/Configuration", bookingBase);
   return retryCpsReadOnTimeout(async () => {
-    const response = await fetchWithProviderTimeout(url, {
-      redirect: "manual"
-    });
+    const response = await fetchWithProviderTimeout(
+      url,
+      getCpsConfigurationRequestInit(bookingBase)
+    );
     if (!response.ok) {
       throw providerHttpError("CPS configuration", response);
     }
@@ -539,7 +552,10 @@ async function tryLoadPublishedCpsApiKey(
     if (!url) {
       return null;
     }
-    const response = await fetchWithProviderTimeout(url, { redirect: "manual" });
+    const response = await fetchWithProviderTimeout(
+      url,
+      getCpsConfigurationRequestInit(new URL("/", url))
+    );
     if (
       !response.ok ||
       response.status !== 200 ||
@@ -579,6 +595,17 @@ function getSafeCpsConfigurationUrl(
     return null;
   }
   return new URL("/onlineresweb/Home/Configuration", bookingBase);
+}
+
+function getCpsConfigurationRequestInit(bookingBase: URL): RequestInit {
+  return {
+    headers: {
+      accept: "application/json",
+      referer: bookingBase.href,
+      "user-agent": CPS_PUBLIC_MONITOR_USER_AGENT
+    },
+    redirect: "manual"
+  };
 }
 
 function getMatchingPublishedCpsApiKey(
