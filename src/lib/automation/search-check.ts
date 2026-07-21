@@ -26,6 +26,10 @@ import {
   classifyProviderFailure,
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
+import {
+  fetchCourseTeeSheet,
+  type AutomationCourseProviderRead
+} from "@/lib/automation/course-provider-read";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
@@ -37,26 +41,10 @@ import {
   resolveCourseSupportIncident
 } from "@/lib/automation/support-incidents";
 import {
-  fetchCpsTeeSheet,
-  isCpsMetadata
-} from "@/lib/adapters/cps";
-import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
-import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
-import {
-  fetchClubCaddieTeeSheet,
-  isClubCaddieMetadata
-} from "@/lib/adapters/clubcaddie";
-import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
-import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
-import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
-import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
-import { fetchWebTracTeeSheet, isWebTracMetadata } from "@/lib/adapters/webtrac";
-import {
   getBookingWindowForTargetDate,
   getBookingWindowFromEvidence,
   shouldRetryBookingWindowDiscovery,
   shouldRefreshBookingWindow,
-  type BookingWindowEvidence,
   type BookingWindowEvidenceSource,
   type TargetBookingWindow
 } from "@/lib/courses/booking-window";
@@ -100,7 +88,6 @@ import {
   parseCourseLocalDateTime,
   rankMatches
 } from "@/lib/tee-times/matching";
-import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
 const SHORT_SEARCH_RETRY_FAILURES = new Set([
@@ -110,17 +97,12 @@ const SHORT_SEARCH_RETRY_FAILURES = new Set([
   "UNKNOWN"
 ]);
 
-type AutomationCourse = {
-  id: string;
+type AutomationCourse = AutomationCourseProviderRead & {
   name: string;
   address: string | null;
-  timeZone: string;
   phone: string | null;
   bookingPhone: string | null;
   isPublic: boolean;
-  website: string | null;
-  detectedBookingUrl: string | null;
-  providerFamilyKey: string;
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
@@ -128,20 +110,10 @@ type AutomationCourse = {
   intelligenceReviewAt: Date | null;
   intelligenceConfidence: number | null;
   policyNotes: string | null;
-  detectedPlatform:
-    | "UNKNOWN"
-    | "FOREUP"
-    | "GOLFNOW"
-    | "TEEITUP"
-    | "CHRONOGOLF"
-    | "CLUB_CADDIE"
-    | "CUSTOM";
-  bookingMetadata: unknown;
   bookingWindowDaysAhead: number | null;
   bookingReleaseTimeLocal: string | null;
   bookingWindowSource: BookingWindowEvidenceSource | null;
   bookingWindowConfidence: number | null;
-  bookingWindowEvidenceUrl: string | null;
   bookingWindowCheckedAt: Date | null;
   bookingWindowObservedAt: Date | null;
   layoutHoleCounts: number[];
@@ -1564,114 +1536,6 @@ function getFinalMonitoringMessage(
     return `${course.name} currently uses walk-in or first-come availability.`;
   }
   return `${course.name} has current verified evidence that no online booking surface is available.`;
-}
-
-type CourseTeeSheetResult = {
-  slots: TeeTimeSlot[];
-  targetDateStatus: "OPEN" | "NOT_OPEN" | "UNKNOWN";
-  bookingWindowEvidence: BookingWindowEvidence | null;
-};
-
-function fetchCourseTeeSheet(
-  course: AutomationCourse,
-  date: Date,
-  players: number,
-  discoverBookingWindow: boolean
-): Promise<CourseTeeSheetResult> {
-  const providerFamily = resolveProviderCapability(course).providerFamilyKey;
-  if (providerFamily === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
-    const metadata = course.bookingWindowEvidenceUrl
-      ? {
-          ...course.bookingMetadata,
-          bookingWindowEvidenceUrl: course.bookingWindowEvidenceUrl
-        }
-      : course.bookingMetadata;
-    return fetchForeupTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      metadata,
-      discoverBookingWindow
-    });
-  }
-  if (providerFamily === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
-    return fetchTeeItUpTeeSheet({ courseId: course.id, date, metadata: course.bookingMetadata });
-  }
-  if (providerFamily === "CHRONOGOLF" && isChronogolfMetadata(course.bookingMetadata)) {
-    return fetchChronogolfSlots({
-      courseId: course.id,
-      date,
-      players,
-      metadata: course.bookingMetadata
-    }).then((slots) => ({
-      slots,
-      targetDateStatus: slots.length > 0 ? "OPEN" as const : "UNKNOWN" as const,
-      bookingWindowEvidence: null
-    }));
-  }
-  if (providerFamily === "CPS" && isCpsMetadata(course.bookingMetadata)) {
-    return fetchCpsTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      timeZone: course.timeZone,
-      metadata: course.bookingMetadata,
-      discoverBookingWindow
-    });
-  }
-  if (providerFamily === "CHELSEA" && isChelseaMetadata(course.bookingMetadata)) {
-    return fetchChelseaTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      timeZone: course.timeZone,
-      metadata: course.bookingMetadata
-    });
-  }
-  if (providerFamily === "GOLFBACK" && isGolfBackMetadata(course.bookingMetadata)) {
-    return fetchGolfBackTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      timeZone: course.timeZone,
-      metadata: course.bookingMetadata,
-      discoverBookingWindow
-    });
-  }
-  if (providerFamily === "WEBTRAC" && isWebTracMetadata(course.bookingMetadata)) {
-    return fetchWebTracTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      metadata: course.bookingMetadata,
-      discoverBookingWindow
-    });
-  }
-  if (
-    providerFamily === "CLUB_CADDIE" &&
-    isClubCaddieMetadata(course.bookingMetadata)
-  ) {
-    return fetchClubCaddieTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      metadata: course.bookingMetadata
-    });
-  }
-  if (providerFamily === "TEESNAP" && isTeesnapMetadata(course.bookingMetadata)) {
-    return fetchTeesnapTeeSheet({
-      courseId: course.id,
-      date,
-      players,
-      metadata: course.bookingMetadata,
-      discoverBookingWindow
-    });
-  }
-  return Promise.resolve({
-    slots: [],
-    targetDateStatus: "UNKNOWN",
-    bookingWindowEvidence: null
-  });
 }
 
 async function recordBookingWindowWaitingProbe(input: {

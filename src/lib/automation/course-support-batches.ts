@@ -12,9 +12,19 @@ import type {
   ProbeOutcome
 } from "@prisma/client";
 
-import { isCoherentManualDisposition } from "@/lib/automation/policy";
+import {
+  evaluateMonitoringGate,
+  isCoherentManualDisposition
+} from "@/lib/automation/policy";
 import { prisma } from "@/lib/prisma";
+import { normalizeTimeZone } from "@/lib/timezones";
 
+import {
+  buildCourseSupportProviderSnapshotFingerprint,
+  getCurrentCourseSupportVerificationFailure,
+  getEligibleCourseSupportVerificationProof,
+  scheduleCourseSupportVerificationRequests
+} from "./course-support-verification";
 import {
   enqueueRemediatedCourseRechecks
 } from "./search-recheck-queue";
@@ -48,6 +58,7 @@ const HOURLY_PROMPT_PREFIX = "tee-time-spot-improvement-loop-v";
 const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const SEARCH_TIMELINESS_GRACE_MS = 15 * 60 * 1000;
 const RECHECK_HEALTH_FRESHNESS_MS = 2 * 60 * 1000;
+const DETACHED_FAILURE_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = [
   "CLAIMED",
   "IMPLEMENTING",
@@ -110,6 +121,42 @@ const COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUSES = [
 const COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUS_SET = new Set<string>(
   COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUSES
 );
+const DETACHED_VERIFICATION_COURSE_SELECT = {
+  timeZone: true,
+  isPublic: true,
+  website: true,
+  detectedBookingUrl: true,
+  detectedPlatform: true,
+  providerFamilyKey: true,
+  bookingMethod: true,
+  bookingWindowDaysAhead: true,
+  bookingReleaseTimeLocal: true,
+  bookingWindowSource: true,
+  bookingWindowEvidenceUrl: true,
+  automationEligibility: true,
+  automationReason: true,
+  intelligenceVerifiedAt: true,
+  intelligenceReviewAt: true,
+  intelligenceConfidence: true,
+  bookingMetadata: true
+} satisfies Prisma.CourseSelect;
+const DETACHED_VERIFICATION_REQUEST_STATE_SELECT = {
+  batchIncidentId: true,
+  releaseSha: true,
+  runtimeVersion: true,
+  status: true,
+  outcome: true,
+  failureClass: true,
+  evidence: true,
+  providerSnapshotFingerprint: true,
+  nextAttemptAt: true,
+  completedAt: true
+} satisfies Prisma.CourseSupportVerificationRequestSelect;
+
+type DetachedVerificationRequestState =
+  Prisma.CourseSupportVerificationRequestGetPayload<{
+    select: typeof DETACHED_VERIFICATION_REQUEST_STATE_SELECT;
+  }>;
 
 export type CourseSupportCandidate = {
   id: string;
@@ -184,6 +231,23 @@ export type BatchIncidentVerification = {
   message: string;
   proofSnapshot: Prisma.InputJsonValue | null;
 };
+
+type CurrentProviderEvidenceSource =
+  | "WORKFLOW"
+  | "DETACHED_VERIFICATION"
+  | "DETACHED_FAILURE";
+
+const CURRENT_PROVIDER_EVIDENCE_KIND = {
+  WORKFLOW: "PROVIDER_PROBE",
+  DETACHED_VERIFICATION: "PROVIDER_VERIFICATION",
+  DETACHED_FAILURE: "PROVIDER_VERIFICATION_FAILURE"
+} as const satisfies Record<CurrentProviderEvidenceSource, string>;
+
+const CURRENT_PROVIDER_EVIDENCE_TIE_PRIORITY = {
+  WORKFLOW: 1,
+  DETACHED_VERIFICATION: 2,
+  DETACHED_FAILURE: 3
+} as const satisfies Record<CurrentProviderEvidenceSource, number>;
 
 export function runWithRepositoryWriterTransitionLease<T>(
   worker: () => Promise<T>
@@ -424,6 +488,180 @@ export function classifyFreshBatchEvidence(input: {
       "The newest per-course workflow observation from the claimed release is still not runnable.",
     proofSnapshot: buildProbeProofSnapshot(newestProbe)
   };
+}
+
+export function classifyDetachedVerificationEvidence(input: {
+  proof: Awaited<
+    ReturnType<typeof getEligibleCourseSupportVerificationProof>
+  > | null;
+  deployedAt?: Date | null;
+  recheckDispatchStartedAt?: Date | null;
+  incidentLastSeenAt: Date;
+}): BatchIncidentVerification | null {
+  if (!input.proof?.eligible) {
+    return null;
+  }
+  const evidence = asJsonObject(input.proof.evidence);
+  const observedAt = parseProofDate(evidence.observedAt);
+  const completedAt = input.proof.completedAt;
+  const current = Boolean(
+    input.deployedAt &&
+      input.recheckDispatchStartedAt &&
+      observedAt &&
+      evidence.kind === "PROVIDER_VERIFICATION" &&
+      evidence.providerExecution === true &&
+      evidence.runtimeVersion === input.proof.releaseSha &&
+      evidence.outcome === input.proof.outcome &&
+      observedAt.getTime() >= input.deployedAt.getTime() &&
+      observedAt.getTime() >= input.recheckDispatchStartedAt.getTime() &&
+      observedAt.getTime() >= input.incidentLastSeenAt.getTime() &&
+      completedAt.getTime() >= observedAt.getTime()
+  );
+  const proofSnapshot = {
+    kind: "PROVIDER_VERIFICATION",
+    outcome: input.proof.outcome,
+    observedAt: observedAt?.toISOString() ?? null,
+    completedAt: completedAt.toISOString(),
+    runtimeVersion: input.proof.runtimeVersion,
+    providerExecution: evidence.providerExecution === true,
+    providerSnapshotFingerprint: input.proof.providerSnapshotFingerprint
+  } satisfies Prisma.InputJsonObject;
+
+  if (
+    current &&
+    SUCCESSFUL_PROBE_OUTCOMES.has(input.proof.outcome)
+  ) {
+    return {
+      result: "RESTORED",
+      postProbeId: null,
+      message:
+        "A current exact-runtime provider verification completed without customer search or delivery side effects.",
+      proofSnapshot
+    };
+  }
+  return {
+    result: current ? "RETRY_SCHEDULED" : "STALE_EVIDENCE",
+    postProbeId: null,
+    message: current
+      ? "The exact-runtime provider verification did not prove runnable monitoring."
+      : "No current exact-runtime detached provider verification proves the remediation yet.",
+    proofSnapshot
+  };
+}
+
+export function classifyDetachedVerificationFailure(input: {
+  failure: Awaited<
+    ReturnType<typeof getCurrentCourseSupportVerificationFailure>
+  > | null;
+  deployedAt?: Date | null;
+  recheckDispatchStartedAt?: Date | null;
+  incidentLastSeenAt: Date;
+}): BatchIncidentVerification | null {
+  if (!input.failure?.current) {
+    return null;
+  }
+  const current = Boolean(
+    input.deployedAt &&
+      input.recheckDispatchStartedAt &&
+      input.failure.runtimeVersion === input.failure.releaseSha &&
+      input.failure.observedAt.getTime() >= input.deployedAt.getTime() &&
+      input.failure.observedAt.getTime() >=
+        input.recheckDispatchStartedAt.getTime() &&
+      input.failure.observedAt.getTime() >= input.incidentLastSeenAt.getTime()
+  );
+  if (!current) {
+    return null;
+  }
+  return {
+    result: "RETRY_SCHEDULED",
+    postProbeId: null,
+    message:
+      "The current exact-runtime detached provider verification remains non-runnable.",
+    proofSnapshot: {
+      kind: "PROVIDER_VERIFICATION_FAILURE",
+      status: input.failure.status,
+      outcome: input.failure.outcome,
+      failureClass: input.failure.failureClass,
+      observedAt: input.failure.observedAt.toISOString(),
+      completedAt: input.failure.completedAt?.toISOString() ?? null,
+      nextAttemptAt: input.failure.nextAttemptAt?.toISOString() ?? null,
+      providerRetryNotBeforeAt:
+        input.failure.providerRetryNotBeforeAt?.toISOString() ?? null,
+      runtimeVersion: input.failure.runtimeVersion,
+      providerExecution: input.failure.providerExecution,
+      providerSnapshotFingerprint:
+        input.failure.providerSnapshotFingerprint
+    } satisfies Prisma.InputJsonObject
+  };
+}
+
+export function chooseNewestProviderVerificationEvidence(input: {
+  workflow: BatchIncidentVerification | null;
+  detachedVerification: BatchIncidentVerification | null;
+  detachedFailure: BatchIncidentVerification | null;
+}) {
+  const candidates = [
+    toCurrentProviderEvidenceCandidate("WORKFLOW", input.workflow),
+    toCurrentProviderEvidenceCandidate(
+      "DETACHED_VERIFICATION",
+      input.detachedVerification
+    ),
+    toCurrentProviderEvidenceCandidate(
+      "DETACHED_FAILURE",
+      input.detachedFailure
+    )
+  ].filter(
+    (
+      candidate
+    ): candidate is NonNullable<ReturnType<typeof toCurrentProviderEvidenceCandidate>> =>
+      candidate !== null
+  );
+
+  candidates.sort((left, right) => {
+    const observedAtOrder =
+      right.observedAt.getTime() - left.observedAt.getTime();
+    if (observedAtOrder !== 0) {
+      return observedAtOrder;
+    }
+
+    const safetyOrder =
+      Number(right.verification.result !== "RESTORED") -
+      Number(left.verification.result !== "RESTORED");
+    if (safetyOrder !== 0) {
+      return safetyOrder;
+    }
+
+    return (
+      CURRENT_PROVIDER_EVIDENCE_TIE_PRIORITY[right.source] -
+      CURRENT_PROVIDER_EVIDENCE_TIE_PRIORITY[left.source]
+    );
+  });
+
+  return candidates[0]?.verification ?? null;
+}
+
+function toCurrentProviderEvidenceCandidate(
+  source: CurrentProviderEvidenceSource,
+  verification: BatchIncidentVerification | null
+) {
+  if (
+    !verification ||
+    (verification.result !== "RESTORED" &&
+      verification.result !== "RETRY_SCHEDULED")
+  ) {
+    return null;
+  }
+  const proof = asJsonObject(
+    verification.proofSnapshot as Prisma.JsonValue | null
+  );
+  const observedAt = parseProofDate(proof.observedAt);
+  if (
+    proof.kind !== CURRENT_PROVIDER_EVIDENCE_KIND[source] ||
+    !observedAt
+  ) {
+    return null;
+  }
+  return { source, verification, observedAt };
 }
 
 export function preserveExplicitHumanVerification(input: {
@@ -1623,8 +1861,40 @@ export async function verifyCourseSupportBatch(input: {
   const newestProbeByCourse =
     persistedSearchHealth?.freshProviderProofByCourse ??
     new Map<string, FreshProbeEvidence>();
+  const detachedProofByBatchIncident = new Map(
+    releaseSha && deployedAt
+      ? await Promise.all(
+          batch.incidents.map(async (entry) => [
+            entry.id,
+            await getEligibleCourseSupportVerificationProof({
+              batchIncidentId: entry.id,
+              releaseSha,
+              now
+            })
+          ] as const)
+        )
+      : []
+  );
+  const detachedFailureByBatchIncident = new Map(
+    releaseSha && deployedAt
+      ? await Promise.all(
+          batch.incidents.map(async (entry) => [
+            entry.id,
+            await getCurrentCourseSupportVerificationFailure({
+              batchIncidentId: entry.id,
+              releaseSha,
+              now
+            })
+          ] as const)
+        )
+      : []
+  );
 
-  const verifications = batch.incidents.map((entry) => {
+  const currentDetachedFailureBatchIncidentIds = new Set<string>();
+  const verifications: Array<{
+    entry: (typeof batch.incidents)[number];
+    verification: BatchIncidentVerification;
+  }> = batch.incidents.map((entry) => {
     const incidentCurrent =
       entry.incident.cycle === entry.cycle &&
       entry.incident.activeBatchId === batch.id &&
@@ -1638,26 +1908,64 @@ export async function verifyCourseSupportBatch(input: {
           message: entry.message
         })
       : null;
+    const detachedVerification = incidentCurrent
+      ? classifyDetachedVerificationEvidence({
+          proof: detachedProofByBatchIncident.get(entry.id) ?? null,
+          deployedAt,
+          recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+          incidentLastSeenAt: entry.incident.lastSeenAt
+        })
+      : null;
+    const detachedFailure = incidentCurrent
+      ? classifyDetachedVerificationFailure({
+          failure: detachedFailureByBatchIncident.get(entry.id) ?? null,
+          deployedAt,
+          recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+          incidentLastSeenAt: entry.incident.lastSeenAt
+        })
+      : null;
+    if (detachedFailure) {
+      currentDetachedFailureBatchIncidentIds.add(entry.id);
+    }
+    const currentCourseVerification = incidentCurrent
+      ? classifyFreshBatchEvidence({
+          batchCreatedAt: batch.createdAt,
+          deployedAt,
+          releaseSha,
+          recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+          preProbeId: entry.preProbeId,
+          newestProbe: newestProbeByCourse.get(entry.courseId),
+          course: {
+            ...entry.course,
+            latestDiscovery,
+            latestPlaceReview: entry.course.googlePlaceId
+              ? (placeReviewByGooglePlaceId.get(entry.course.googlePlaceId) ?? null)
+              : null
+          },
+          incidentFirstSeenAt: entry.incident.firstSeenAt,
+          incidentLastSeenAt: entry.incident.lastSeenAt
+        })
+      : null;
+    const newestProviderVerification = incidentCurrent
+      ? chooseNewestProviderVerificationEvidence({
+          workflow: currentCourseVerification,
+          detachedVerification,
+          detachedFailure
+        })
+      : null;
     return {
       entry,
       verification: incidentCurrent
-        ? (explicitHumanVerification ?? classifyFreshBatchEvidence({
-            batchCreatedAt: batch.createdAt,
-            deployedAt,
-            releaseSha,
-            recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
-            preProbeId: entry.preProbeId,
-            newestProbe: newestProbeByCourse.get(entry.courseId),
-            course: {
-              ...entry.course,
-              latestDiscovery,
-              latestPlaceReview: entry.course.googlePlaceId
-                ? (placeReviewByGooglePlaceId.get(entry.course.googlePlaceId) ?? null)
-                : null
-            },
-            incidentFirstSeenAt: entry.incident.firstSeenAt,
-            incidentLastSeenAt: entry.incident.lastSeenAt
-          }))
+        ? (currentCourseVerification?.result === "FINAL_DISPOSITION"
+            ? currentCourseVerification
+            : explicitHumanVerification ??
+              newestProviderVerification ??
+              currentCourseVerification ?? {
+                result: "STALE_EVIDENCE" as const,
+                postProbeId: null,
+                message: "Current course verification evidence is unavailable.",
+                proofSnapshot: null
+              })
         : {
             result: "STALE_EVIDENCE" as const,
             postProbeId: null,
@@ -1666,19 +1974,20 @@ export async function verifyCourseSupportBatch(input: {
         }
     };
   });
-  const recheckCourseIds = verifications
-    .filter(
-      ({ entry, verification }) =>
-        entry.incident.cycle === entry.cycle &&
-        entry.incident.activeBatchId === batch.id &&
-        entry.incident.status === "AUTO_INVESTIGATING" &&
-        verification.result !== "FINAL_DISPOSITION"
-    )
-    .map(({ entry }) => entry.courseId);
+  const preliminaryRecheckVerifications = verifications.filter(
+    ({ entry, verification }) =>
+      entry.incident.cycle === entry.cycle &&
+      entry.incident.activeBatchId === batch.id &&
+      entry.incident.status === "AUTO_INVESTIGATING" &&
+      !["FINAL_DISPOSITION", "RESTORED"].includes(verification.result)
+  );
+  const preliminaryRecheckCourseIds = preliminaryRecheckVerifications.map(
+    ({ entry }) => entry.courseId
+  );
   const shouldOwnRecheckDispatch = Boolean(
     releaseSha &&
       deployedAt &&
-      recheckCourseIds.length > 0 &&
+      preliminaryRecheckCourseIds.length > 0 &&
       !batch.recheckDispatchedAt
   );
   const recheckDispatchKey =
@@ -1714,7 +2023,36 @@ export async function verifyCourseSupportBatch(input: {
     if (updated.count !== 1) {
       throw new Error("Responder batch ownership changed during verification.");
     }
-    for (const { entry, verification } of verifications) {
+    for (const candidate of verifications) {
+      const { entry } = candidate;
+      let verification = candidate.verification;
+      if (isDetachedRestoredVerification(verification)) {
+        const detachedProofIsCurrent = await revalidateDetachedVerificationProof(
+          tx,
+          {
+            batchId: batch.id,
+            batchIncidentId: entry.id,
+            incidentId: entry.incidentId,
+            courseId: entry.courseId,
+            cycle: entry.cycle,
+            releaseSha: releaseSha ?? "",
+            leaseToken: input.leaseToken,
+            ownerThreadId: input.ownerThreadId,
+            proofSnapshot: verification.proofSnapshot,
+            now
+          }
+        );
+        if (!detachedProofIsCurrent) {
+          verification = {
+            result: "STALE_EVIDENCE",
+            postProbeId: null,
+            message:
+              "Detached provider verification changed before its atomic proof could be recorded.",
+            proofSnapshot: null
+          };
+          candidate.verification = verification;
+        }
+      }
       const entryUpdated = await tx.courseSupportBatchIncident.updateMany({
         where: {
           id: entry.id,
@@ -1737,10 +2075,77 @@ export async function verifyCourseSupportBatch(input: {
         throw new Error("Responder evidence changed during verification.");
       }
     }
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+  const recheckVerifications = verifications.filter(
+    ({ entry, verification }) =>
+      entry.incident.cycle === entry.cycle &&
+      entry.incident.activeBatchId === batch.id &&
+      entry.incident.status === "AUTO_INVESTIGATING" &&
+      !["FINAL_DISPOSITION", "RESTORED"].includes(verification.result)
+  );
+  const recheckCourseIds = recheckVerifications.map(
+    ({ entry }) => entry.courseId
+  );
+  const recheckBatchIncidentIds = recheckVerifications.map(
+    ({ entry }) => entry.id
+  );
 
   let recheckDispatch = getPersistedRecheckDispatch(batch.summary);
   let recheckDispatchedAt = batch.recheckDispatchedAt;
+  let detachedDispatch: {
+    attempted: boolean;
+    eligibleCount: number;
+    createdCount: number;
+    ineligibleCount: number;
+    dispatchError: boolean;
+  } | null = null;
+  if (
+    releaseSha &&
+    deployedAt &&
+    recheckBatchIncidentIds.length > 0
+  ) {
+    try {
+      const scheduled = await scheduleCourseSupportVerificationRequests({
+        batchId: batch.id,
+        releaseSha,
+        batchIncidentIds: recheckBatchIncidentIds,
+        now
+      });
+      detachedDispatch = {
+        attempted: true,
+        eligibleCount: scheduled.eligibleCount,
+        createdCount: scheduled.createdCount,
+        ineligibleCount: scheduled.ineligibleCount,
+        dispatchError: false
+      };
+    } catch {
+      detachedDispatch = {
+        attempted: true,
+        eligibleCount: 0,
+        createdCount: 0,
+        ineligibleCount: recheckBatchIncidentIds.length,
+        dispatchError: true
+      };
+    }
+  }
+  const detachedRequestStates = releaseSha
+    ? await prisma.courseSupportVerificationRequest.findMany({
+        where: {
+          batchIncidentId: { in: batch.incidents.map((entry) => entry.id) },
+          releaseSha
+        },
+        select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT
+      })
+    : [];
+  const detachedVerificationRerun = summarizeDetachedVerificationRerun({
+    requests: detachedRequestStates,
+    verificationByBatchIncidentId: new Map(
+      verifications.map(({ entry, verification }) => [entry.id, verification])
+    ),
+    currentFailureBatchIncidentIds:
+      currentDetachedFailureBatchIncidentIds
+  });
   const shouldDispatch = Boolean(
     recheckDispatchKey &&
       recheckDispatchStartedAt &&
@@ -1762,7 +2167,8 @@ export async function verifyCourseSupportBatch(input: {
       );
       const dispatchComplete =
         dispatched.queuedCount === dispatched.affectedSearchCount &&
-        dispatched.queueFailureCount === dispatched.directStartCount;
+        dispatched.queueFailureCount === dispatched.directStartCount &&
+        detachedDispatch?.dispatchError !== true;
       scheduledSearches = dispatched.scheduledSearches;
       recheckDispatch = {
         attempted: true,
@@ -1772,6 +2178,18 @@ export async function verifyCourseSupportBatch(input: {
         queuedCount: dispatched.queuedCount,
         queueFailureCount: dispatched.queueFailureCount,
         directStartCount: dispatched.directStartCount,
+        detachedVerificationEligibleCount:
+          detachedDispatch?.eligibleCount ?? 0,
+        detachedVerificationCreatedCount:
+          detachedDispatch?.createdCount ?? 0,
+        detachedVerificationIneligibleCount:
+          detachedDispatch?.ineligibleCount ?? recheckCourseIds.length,
+        detachedVerificationDispatchError:
+          detachedDispatch?.dispatchError ?? false,
+        detachedVerificationPendingCount:
+          detachedVerificationRerun.pendingCount,
+        detachedVerificationRerunNeeded:
+          detachedVerificationRerun.rerunNeeded,
         affectedSearchRefs: dispatched.affectedSearchRefs,
         dispatchError: !dispatchComplete
       };
@@ -1785,6 +2203,18 @@ export async function verifyCourseSupportBatch(input: {
         affectedSearchCount: 0,
         queuedCount: 0,
         queueFailureCount: 0,
+        detachedVerificationEligibleCount:
+          detachedDispatch?.eligibleCount ?? 0,
+        detachedVerificationCreatedCount:
+          detachedDispatch?.createdCount ?? 0,
+        detachedVerificationIneligibleCount:
+          detachedDispatch?.ineligibleCount ?? recheckCourseIds.length,
+        detachedVerificationDispatchError:
+          detachedDispatch?.dispatchError ?? false,
+        detachedVerificationPendingCount:
+          detachedVerificationRerun.pendingCount,
+        detachedVerificationRerunNeeded:
+          detachedVerificationRerun.rerunNeeded,
         dispatchError: true,
         error: sanitizeResponderText(
           error instanceof Error
@@ -1839,12 +2269,37 @@ export async function verifyCourseSupportBatch(input: {
       throw new Error("Responder recheck dispatch ownership changed.");
     }
     expectedRevision += 1;
+  } else if (recheckDispatch) {
+    recheckDispatch = {
+      ...recheckDispatch,
+      ...(detachedDispatch
+        ? {
+            detachedVerificationEligibleCount: detachedDispatch.eligibleCount,
+            detachedVerificationCreatedCount: detachedDispatch.createdCount,
+            detachedVerificationIneligibleCount:
+              detachedDispatch.ineligibleCount,
+            detachedVerificationDispatchError:
+              detachedDispatch.dispatchError
+          }
+        : {}),
+      detachedVerificationPendingCount:
+        detachedVerificationRerun.pendingCount,
+      detachedVerificationRerunNeeded:
+        detachedVerificationRerun.rerunNeeded,
+      dispatchError:
+        recheckDispatch.dispatchError === true ||
+        detachedDispatch?.dispatchError === true
+    };
   } else if (!recheckDispatch && recheckCourseIds.length === 0) {
     recheckDispatch = {
       attempted: false,
       affectedSearchCount: 0,
       queuedCount: 0,
       queueFailureCount: 0,
+      detachedVerificationPendingCount:
+        detachedVerificationRerun.pendingCount,
+      detachedVerificationRerunNeeded:
+        detachedVerificationRerun.rerunNeeded,
       dispatchError: false,
       reason: "FINAL_DISPOSITION_ONLY"
     };
@@ -1863,6 +2318,19 @@ export async function verifyCourseSupportBatch(input: {
     const restoredCourseIds = verifications
       .filter(({ verification }) => verification.result === "RESTORED")
       .map(({ entry }) => entry.courseId);
+    const detachedRestoredCourseIds = new Set(
+      verifications
+        .filter(
+          ({ verification }) =>
+            verification.result === "RESTORED" &&
+            verification.proofSnapshot !== null &&
+            typeof verification.proofSnapshot === "object" &&
+            !Array.isArray(verification.proofSnapshot) &&
+            (verification.proofSnapshot as Prisma.InputJsonObject).kind ===
+              "PROVIDER_VERIFICATION"
+        )
+        .map(({ entry }) => entry.courseId)
+    );
     const affectedCourseSearchPairCount = restoredCourseIds.reduce(
       (total, courseId) =>
         total + (health.affectedCourseSearchPairCountByCourse.get(courseId) ?? 0),
@@ -1873,8 +2341,10 @@ export async function verifyCourseSupportBatch(input: {
         total + (health.healthyCourseSearchPairCountByCourse.get(courseId) ?? 0),
       0
     );
-    const provenRunnableCourseCount = restoredCourseIds.filter((courseId) =>
-      health.freshProviderProofByCourse.has(courseId)
+    const provenRunnableCourseCount = restoredCourseIds.filter(
+      (courseId) =>
+        health.freshProviderProofByCourse.has(courseId) ||
+        detachedRestoredCourseIds.has(courseId)
     ).length;
     recheckDispatch = {
       ...(recheckDispatch ?? {}),
@@ -1931,6 +2401,7 @@ export async function verifyCourseSupportBatch(input: {
     releaseSha: releaseSha ?? null,
     deployedAt: deployedAt?.toISOString() ?? null,
     counts,
+    detachedVerification: detachedVerificationRerun,
     recheckDispatch,
     leaseExpiresAt: leaseExpiresAt.toISOString(),
     threadDisposition: "KEEP_VISIBLE" as const,
@@ -2234,7 +2705,14 @@ export async function closeoutCourseSupportBatch(input: {
       leaseExpiresAt: { gte: now }
     },
     include: {
-      incidents: { include: { incident: true } }
+      incidents: {
+        include: {
+          incident: true,
+          course: {
+            select: DETACHED_VERIFICATION_COURSE_SELECT
+          }
+        }
+      }
     }
   });
   if (!batch) {
@@ -2251,14 +2729,49 @@ export async function closeoutCourseSupportBatch(input: {
     throw new Error("A responder batch without incident evidence cannot be closed.");
   }
 
+  const currentDetachedFailureBatchIncidentIds = new Set(
+    batch.releaseSha
+      ? (
+          await Promise.all(
+            batch.incidents.map(async (entry) => {
+              const failure =
+                await getCurrentCourseSupportVerificationFailure({
+                  batchIncidentId: entry.id,
+                  releaseSha: batch.releaseSha!,
+                  now
+                });
+              return classifyDetachedVerificationFailure({
+                failure,
+                deployedAt: batch.deployedAt,
+                recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+                incidentLastSeenAt: entry.incident.lastSeenAt
+              })
+                ? entry.id
+                : null;
+            })
+          )
+        ).filter((entryId): entryId is string => entryId !== null)
+      : []
+  );
+
   const normalizedEntries = batch.incidents.map((entry) => {
+    const currentProviderSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(entry.course);
     if (entry.result === "PENDING" || entry.result === "STALE_EVIDENCE") {
-      return { ...entry, normalizedResult: "RETRY_SCHEDULED" as const };
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        normalizedResult: "RETRY_SCHEDULED" as const
+      };
     }
     if (entry.result === "NEEDS_HUMAN" && entry.incident.engineeringOnly) {
-      return { ...entry, normalizedResult: "RETRY_SCHEDULED" as const };
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        normalizedResult: "RETRY_SCHEDULED" as const
+      };
     }
-    return { ...entry, normalizedResult: entry.result };
+    return { ...entry, currentProviderSnapshotFingerprint, normalizedResult: entry.result };
   });
   for (const entry of normalizedEntries) {
     if (
@@ -2340,6 +2853,61 @@ export async function closeoutCourseSupportBatch(input: {
   const safeSummary = sanitizeResponderCloseoutSummary(input.summary);
 
   await prisma.$transaction(async (tx) => {
+    const detachedRequestStates = batch.releaseSha
+      ? await tx.courseSupportVerificationRequest.findMany({
+          where: {
+            batchIncident: { batchId: batch.id },
+            releaseSha: batch.releaseSha
+          },
+          select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT
+        })
+      : [];
+    assertDetachedVerificationReadyForCloseout({
+      requests: detachedRequestStates,
+      verificationByBatchIncidentId: new Map(
+        normalizedEntries.map((entry) => [
+          entry.id,
+          {
+            result: entry.normalizedResult,
+            postProbeId: entry.postProbeId,
+            message: entry.message ?? "",
+            proofSnapshot: entry.proofSnapshot
+          } satisfies BatchIncidentVerification
+        ])
+      ),
+      currentFailureBatchIncidentIds:
+        currentDetachedFailureBatchIncidentIds
+    });
+
+    for (const entry of normalizedEntries) {
+      const proof = asJsonObject(entry.proofSnapshot);
+      if (
+        entry.normalizedResult === "RESTORED" &&
+        proof.kind === "PROVIDER_VERIFICATION"
+      ) {
+        const detachedProofIsCurrent = await revalidateDetachedVerificationProof(
+          tx,
+          {
+            batchId: batch.id,
+            batchIncidentId: entry.id,
+            incidentId: entry.incidentId,
+            courseId: entry.courseId,
+            cycle: entry.cycle,
+            releaseSha: batch.releaseSha ?? "",
+            leaseToken: input.leaseToken,
+            ownerThreadId: input.ownerThreadId,
+            proofSnapshot: proof,
+            now
+          }
+        );
+        if (!detachedProofIsCurrent) {
+          throw new Error(
+            "Detached provider verification changed before terminal closeout."
+          );
+        }
+      }
+    }
+
     const ownership = await tx.courseSupportBatch.updateMany({
       where: {
         id: batch.id,
@@ -2438,13 +3006,24 @@ export async function closeoutCourseSupportBatch(input: {
           }
         });
       } else {
-        const nextAttemptAt = computeCourseSupportNextAttemptAt({
+        const normalNextAttemptAt = computeCourseSupportNextAttemptAt({
           failureClass: entry.incident.failureClass,
           failureFingerprint: entry.incident.failureFingerprint,
           attemptCount: Math.max(1, entry.incident.attemptCount),
           retryAfterSeconds: input.retryAfterSeconds,
           now
         });
+        const detachedFailureNotBefore =
+          getDetachedFailureRetryNotBefore({
+            proofSnapshot: entry.proofSnapshot,
+            releaseSha: batch.releaseSha,
+            now
+          });
+        const nextAttemptAt =
+          detachedFailureNotBefore &&
+          detachedFailureNotBefore.getTime() > normalNextAttemptAt.getTime()
+            ? detachedFailureNotBefore
+            : normalNextAttemptAt;
         retryTimes.push(nextAttemptAt);
         incidentUpdated = await tx.courseSupportIncident.updateMany({
           where: {
@@ -2481,6 +3060,23 @@ export async function closeoutCourseSupportBatch(input: {
       }
     }
 
+    await tx.courseSupportVerificationRequest.updateMany({
+      where: {
+        batchIncident: { batchId: batch.id },
+        status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
+      },
+      data: {
+        status: "STALE",
+        revision: { increment: 1 },
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        completedAt: now,
+        lastError: "batch_closed",
+        updatedAt: now
+      }
+    });
+
     if (batch.ownerAutomationRunId) {
       await tx.automationRun.updateMany({
         where: { id: batch.ownerAutomationRunId, completedAt: null },
@@ -2500,7 +3096,7 @@ export async function closeoutCourseSupportBatch(input: {
         }
       });
     }
-  });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
   let notificationPendingCount = 0;
   for (const entry of normalizedEntries.filter((candidate) =>
@@ -3476,7 +4072,8 @@ function isRecheckDispatchHealthy(
     dispatch.attempted !== true ||
     dispatch.dispatchError !== false ||
     dispatch.schedulerHealthComplete !== true ||
-    dispatch.courseOutcomeHealthComplete !== true
+    dispatch.courseOutcomeHealthComplete !== true ||
+    dispatch.detachedVerificationDispatchError === true
   ) {
     return false;
   }
@@ -3541,12 +4138,194 @@ function getAffectedSearchRefs(dispatch: Record<string, unknown> | null) {
   return refs;
 }
 
+function isDetachedRestoredVerification(
+  verification: BatchIncidentVerification
+): verification is BatchIncidentVerification & {
+  proofSnapshot: Prisma.InputJsonObject;
+} {
+  if (
+    verification.result !== "RESTORED" ||
+    !verification.proofSnapshot ||
+    typeof verification.proofSnapshot !== "object" ||
+    Array.isArray(verification.proofSnapshot)
+  ) {
+    return false;
+  }
+  return (
+    verification.proofSnapshot as Prisma.InputJsonObject
+  ).kind === "PROVIDER_VERIFICATION";
+}
+
+async function revalidateDetachedVerificationProof(
+  transaction: Prisma.TransactionClient,
+  input: {
+    batchId: string;
+    batchIncidentId: string;
+    incidentId: string;
+    courseId: string;
+    cycle: number;
+    releaseSha: string;
+    leaseToken: string;
+    ownerThreadId: string;
+    proofSnapshot: unknown;
+    now: Date;
+  }
+) {
+  if (!/^[a-f0-9]{40}$/i.test(input.releaseSha)) {
+    return false;
+  }
+  const request = await transaction.courseSupportVerificationRequest.findUnique({
+    where: {
+      batchIncidentId_releaseSha: {
+        batchIncidentId: input.batchIncidentId,
+        releaseSha: input.releaseSha
+      }
+    },
+    select: {
+      courseId: true,
+      releaseSha: true,
+      runtimeVersion: true,
+      status: true,
+      leaseToken: true,
+      leaseExpiresAt: true,
+      outcome: true,
+      evidence: true,
+      providerSnapshotFingerprint: true,
+      completedAt: true,
+      batchIncident: {
+        select: {
+          id: true,
+          batchId: true,
+          incidentId: true,
+          courseId: true,
+          cycle: true,
+          batch: {
+            select: {
+              id: true,
+              status: true,
+              ownerThreadId: true,
+              leaseToken: true,
+              leaseExpiresAt: true,
+              releaseSha: true,
+              completedAt: true
+            }
+          },
+          incident: {
+            select: {
+              id: true,
+              cycle: true,
+              status: true,
+              activeBatchId: true,
+              engineeringOnly: true
+            }
+          },
+          course: { select: DETACHED_VERIFICATION_COURSE_SELECT }
+        }
+      }
+    }
+  });
+  if (!request) {
+    return false;
+  }
+
+  const proof = asJsonObject(input.proofSnapshot as Prisma.JsonValue);
+  const evidence = asJsonObject(request.evidence);
+  const batchIncident = request.batchIncident;
+  const activeBatch = batchIncident.batch;
+  const incident = batchIncident.incident;
+  const currentFingerprint = buildCourseSupportProviderSnapshotFingerprint(
+    batchIncident.course
+  );
+  const currentMonitoringGate = evaluateMonitoringGate({
+    ...batchIncident.course,
+    now: input.now
+  });
+  const successfulOutcome =
+    request.outcome === "MATCH_FOUND" || request.outcome === "NO_MATCH";
+  const requestIsCurrent = Boolean(
+    request.status === "SUCCEEDED" &&
+      request.releaseSha === input.releaseSha &&
+      request.runtimeVersion === input.releaseSha &&
+      request.leaseToken === null &&
+      request.leaseExpiresAt === null &&
+      request.completedAt &&
+      successfulOutcome &&
+      request.courseId === input.courseId &&
+      batchIncident.id === input.batchIncidentId &&
+      batchIncident.batchId === input.batchId &&
+      batchIncident.incidentId === input.incidentId &&
+      batchIncident.courseId === input.courseId &&
+      batchIncident.cycle === input.cycle &&
+      activeBatch.id === input.batchId &&
+      activeBatch.status === "VERIFYING" &&
+      activeBatch.ownerThreadId === input.ownerThreadId &&
+      activeBatch.leaseToken === input.leaseToken &&
+      activeBatch.leaseExpiresAt.getTime() >= input.now.getTime() &&
+      activeBatch.releaseSha === input.releaseSha &&
+      activeBatch.completedAt === null &&
+      incident.id === input.incidentId &&
+      incident.cycle === input.cycle &&
+      incident.status === "AUTO_INVESTIGATING" &&
+      incident.activeBatchId === input.batchId &&
+      incident.engineeringOnly === true &&
+      currentMonitoringGate.disposition === "ACTIONABLE" &&
+      currentMonitoringGate.adapterAllowed === true &&
+      evidence.kind === "PROVIDER_VERIFICATION" &&
+      evidence.providerExecution === true &&
+      evidence.releaseSha === input.releaseSha &&
+      evidence.runtimeVersion === input.releaseSha &&
+      evidence.outcome === request.outcome &&
+      evidence.providerSnapshotFingerprint ===
+        request.providerSnapshotFingerprint &&
+      proof.kind === "PROVIDER_VERIFICATION" &&
+      proof.providerExecution === true &&
+      proof.runtimeVersion === input.releaseSha &&
+      proof.outcome === request.outcome &&
+      proof.observedAt === evidence.observedAt &&
+      proof.completedAt === request.completedAt?.toISOString() &&
+      proof.providerSnapshotFingerprint ===
+        request.providerSnapshotFingerprint &&
+      request.providerSnapshotFingerprint === currentFingerprint
+  );
+  if (!requestIsCurrent) {
+    return false;
+  }
+
+  const liveFutureDemand = await transaction.teeSearch.count({
+    where: {
+      status: "ACTIVE",
+      date: {
+        gte: getCourseLocalDateStorageBoundary(
+          batchIncident.course.timeZone,
+          input.now
+        )
+      },
+      preferences: { some: { courseId: input.courseId } }
+    }
+  });
+  return liveFutureDemand === 0;
+}
+
+function getCourseLocalDateStorageBoundary(timeZone: string, value: Date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: normalizeTimeZone(timeZone),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(value);
+  const byType = new Map(parts.map((part) => [part.type, part.value]));
+  return new Date(
+    `${byType.get("year")}-${byType.get("month")}-${byType.get("day")}T00:00:00.000Z`
+  );
+}
+
 export function isDurableTerminalProof(
   entry: {
     normalizedResult: CourseSupportBatchIncidentResult;
     proofSnapshot: Prisma.JsonValue | null;
     verifiedAt: Date | null;
     verifiedIncidentUpdatedAt: Date | null;
+    currentProviderSnapshotFingerprint?: string | null;
     incident: { firstSeenAt: Date; lastSeenAt: Date };
   },
   batch: {
@@ -3562,6 +4341,28 @@ export function isDurableTerminalProof(
   const proof = asJsonObject(entry.proofSnapshot);
   if (entry.normalizedResult === "RESTORED") {
     const observedAt = parseProofDate(proof.observedAt);
+    if (proof.kind === "PROVIDER_VERIFICATION") {
+      const completedAt = parseProofDate(proof.completedAt);
+      const notBefore = batch.deployedAt ?? batch.createdAt;
+      return Boolean(
+        proof.providerExecution === true &&
+          (proof.outcome === "MATCH_FOUND" || proof.outcome === "NO_MATCH") &&
+          batch.releaseSha &&
+          batch.recheckDispatchStartedAt &&
+          proof.runtimeVersion === batch.releaseSha &&
+          typeof proof.providerSnapshotFingerprint === "string" &&
+          /^[a-f0-9]{64}$/i.test(proof.providerSnapshotFingerprint) &&
+          proof.providerSnapshotFingerprint ===
+            entry.currentProviderSnapshotFingerprint &&
+          observedAt &&
+          completedAt &&
+          completedAt.getTime() >= observedAt.getTime() &&
+          observedAt.getTime() >= notBefore.getTime() &&
+          observedAt.getTime() >=
+            batch.recheckDispatchStartedAt.getTime() &&
+          observedAt.getTime() >= entry.incident.lastSeenAt.getTime()
+      );
+    }
     const freshSearchCheckedAt = parseProofDate(proof.freshSearchCheckedAt);
     const notBefore = batch.deployedAt ?? batch.createdAt;
     return Boolean(
@@ -3689,6 +4490,236 @@ function finiteCount(value: unknown) {
     value >= 0
     ? value
     : null;
+}
+
+function getDetachedFailureRetryNotBefore(input: {
+  proofSnapshot: unknown;
+  releaseSha: string | null;
+  now: Date;
+}) {
+  const proof = asJsonObject(input.proofSnapshot as Prisma.JsonValue | null);
+  const observedAt = parseProofDate(proof.observedAt);
+  if (
+    !input.releaseSha ||
+    proof.kind !== "PROVIDER_VERIFICATION_FAILURE" ||
+    (proof.status !== "RETRYABLE_FAILED" && proof.status !== "STALE") ||
+    proof.runtimeVersion !== input.releaseSha ||
+    proof.outcome === "MATCH_FOUND" ||
+    proof.outcome === "NO_MATCH" ||
+    typeof proof.failureClass !== "string" ||
+    typeof proof.providerExecution !== "boolean" ||
+    typeof proof.providerSnapshotFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(proof.providerSnapshotFingerprint) ||
+    !observedAt ||
+    observedAt.getTime() > input.now.getTime() + 60_000
+  ) {
+    return null;
+  }
+
+  const persistedRetryAt = parseProofDate(proof.nextAttemptAt);
+  const providerRetryNotBeforeAt = parseProofDate(
+    proof.providerRetryNotBeforeAt
+  );
+  const validRetryTimestamps = [
+    persistedRetryAt,
+    providerRetryNotBeforeAt
+  ].filter((value): value is Date => value !== null);
+  const futureRetryTimestamps = validRetryTimestamps.filter(
+    (value) => value.getTime() > input.now.getTime()
+  );
+  if (futureRetryTimestamps.length > 0) {
+    return futureRetryTimestamps.reduce((latest, value) =>
+      value.getTime() > latest.getTime() ? value : latest
+    );
+  }
+
+  if (
+    proof.failureClass === "RATE_LIMIT" &&
+    proof.status === "STALE" &&
+    validRetryTimestamps.length === 0
+  ) {
+    return new Date(
+      input.now.getTime() + DETACHED_FAILURE_FALLBACK_COOLDOWN_MS
+    );
+  }
+  return null;
+}
+
+function detachedFailureProofMatchesRequest(
+  proofSnapshot: unknown,
+  request: DetachedVerificationRequestState
+) {
+  const proof = asJsonObject(proofSnapshot as Prisma.JsonValue | null);
+  const evidence = asJsonObject(request.evidence);
+  const providerRetryNotBeforeAt =
+    typeof evidence.providerRetryNotBeforeAt === "string"
+      ? evidence.providerRetryNotBeforeAt
+      : null;
+  const completedAt = request.completedAt?.toISOString() ?? null;
+  const nextAttemptAt = request.nextAttemptAt?.toISOString() ?? null;
+  return Boolean(
+    (request.status === "RETRYABLE_FAILED" || request.status === "STALE") &&
+      request.runtimeVersion === request.releaseSha &&
+      request.outcome &&
+      request.outcome !== "MATCH_FOUND" &&
+      request.outcome !== "NO_MATCH" &&
+      request.failureClass &&
+      proof.kind === "PROVIDER_VERIFICATION_FAILURE" &&
+      proof.status === request.status &&
+      proof.outcome === request.outcome &&
+      proof.failureClass === request.failureClass &&
+      proof.observedAt === evidence.observedAt &&
+      proof.completedAt === completedAt &&
+      proof.nextAttemptAt === nextAttemptAt &&
+      proof.providerRetryNotBeforeAt === providerRetryNotBeforeAt &&
+      proof.runtimeVersion === request.runtimeVersion &&
+      proof.providerExecution === evidence.providerExecution &&
+      proof.providerSnapshotFingerprint ===
+        request.providerSnapshotFingerprint
+  );
+}
+
+function detachedSuccessIsReflected(
+  verification: BatchIncidentVerification | undefined,
+  request: DetachedVerificationRequestState
+) {
+  if (verification?.result !== "RESTORED") {
+    return false;
+  }
+  const proof = asJsonObject(
+    verification.proofSnapshot as Prisma.JsonValue | null
+  );
+  if (proof.kind !== "PROVIDER_VERIFICATION") {
+    return true;
+  }
+  const evidence = asJsonObject(request.evidence);
+  return Boolean(
+    request.status === "SUCCEEDED" &&
+      request.runtimeVersion === request.releaseSha &&
+      request.outcome &&
+      (request.outcome === "MATCH_FOUND" || request.outcome === "NO_MATCH") &&
+      request.completedAt &&
+      proof.outcome === request.outcome &&
+      proof.observedAt === evidence.observedAt &&
+      proof.completedAt === request.completedAt.toISOString() &&
+      proof.runtimeVersion === request.runtimeVersion &&
+      proof.providerExecution === true &&
+      evidence.providerExecution === true &&
+      proof.providerSnapshotFingerprint === request.providerSnapshotFingerprint
+  );
+}
+
+function summarizeDetachedVerificationRerun(input: {
+  requests: DetachedVerificationRequestState[];
+  verificationByBatchIncidentId: Map<string, BatchIncidentVerification>;
+  currentFailureBatchIncidentIds: Set<string>;
+}) {
+  const pendingCount = input.requests.filter(
+    (request) => request.status === "QUEUED" || request.status === "CHECKING"
+  ).length;
+  const rerunNeeded = input.requests.some((request) => {
+    const verification = input.verificationByBatchIncidentId.get(
+      request.batchIncidentId
+    );
+    if (request.status === "QUEUED" || request.status === "CHECKING") {
+      return true;
+    }
+    if (request.status === "SUCCEEDED") {
+      return !detachedSuccessIsReflected(verification, request);
+    }
+    if (request.status === "RETRYABLE_FAILED") {
+      return !detachedFailureProofMatchesRequest(
+        verification?.proofSnapshot,
+        request
+      );
+    }
+    return (
+      request.status === "STALE" &&
+      (input.currentFailureBatchIncidentIds.has(request.batchIncidentId) ||
+        detachedStaleRequestCarriesCooldownEvidence(request)) &&
+      !detachedFailureProofMatchesRequest(
+        verification?.proofSnapshot,
+        request
+      )
+    );
+  });
+  return { pendingCount, rerunNeeded };
+}
+
+function assertDetachedVerificationReadyForCloseout(input: {
+  requests: DetachedVerificationRequestState[];
+  verificationByBatchIncidentId: Map<string, BatchIncidentVerification>;
+  currentFailureBatchIncidentIds: Set<string>;
+}) {
+  for (const request of input.requests) {
+    const verification = input.verificationByBatchIncidentId.get(
+      request.batchIncidentId
+    );
+    if (request.status === "QUEUED" || request.status === "CHECKING") {
+      throw new Error(
+        "Detached provider verification is still pending; rerun verification before closeout."
+      );
+    }
+    if (
+      request.status === "SUCCEEDED" &&
+      !detachedSuccessIsReflected(verification, request)
+    ) {
+      throw new Error(
+        "Detached provider verification completed after the last evidence read; rerun verification before closeout."
+      );
+    }
+    if (
+      request.status === "RETRYABLE_FAILED" &&
+      (!input.currentFailureBatchIncidentIds.has(request.batchIncidentId) ||
+        !detachedFailureProofMatchesRequest(
+          verification?.proofSnapshot,
+          request
+        ))
+    ) {
+      throw new Error(
+        "Detached provider failure changed after the last evidence read; rerun verification before closeout."
+      );
+    }
+    if (
+      request.status === "STALE" &&
+      (input.currentFailureBatchIncidentIds.has(request.batchIncidentId) ||
+        detachedStaleRequestCarriesCooldownEvidence(request)) &&
+      !detachedFailureProofMatchesRequest(
+        verification?.proofSnapshot,
+        request
+      )
+    ) {
+      throw new Error(
+        "Detached provider cooldown evidence has not been recorded; rerun verification before closeout."
+      );
+    }
+  }
+}
+
+function detachedStaleRequestCarriesCooldownEvidence(
+  request: DetachedVerificationRequestState
+) {
+  if (request.status !== "STALE") {
+    return false;
+  }
+  if (request.failureClass === "RATE_LIMIT") {
+    return true;
+  }
+  const evidence = asJsonObject(request.evidence);
+  if (typeof evidence.providerRetryNotBeforeAt !== "string") {
+    return false;
+  }
+  const observedAt = parseProofDate(evidence.observedAt);
+  const providerRetryNotBeforeAt = parseProofDate(
+    evidence.providerRetryNotBeforeAt
+  );
+  return Boolean(
+    observedAt &&
+      providerRetryNotBeforeAt &&
+      providerRetryNotBeforeAt.toISOString() ===
+        evidence.providerRetryNotBeforeAt &&
+      providerRetryNotBeforeAt.getTime() > observedAt.getTime()
+  );
 }
 
 function parseProofDate(value: unknown) {

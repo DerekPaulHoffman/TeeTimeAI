@@ -61,6 +61,12 @@ Every new `CourseProbe` records `runtimeVersion`, normally the deployed Git comm
 - its `runtimeVersion` exactly matches the claimed release SHA; and
 - its outcome is `MATCH_FOUND` or `NO_MATCH`.
 
+When an engineering-only incident no longer has any active future search for its course, the five-minute deployed recovery cron may run one standalone `CourseSupportVerificationRequest` for the claimed release. This is not a synthetic customer search: it stores no user, recipient, search, match, slot, booking URL, or delivery row and cannot send email. It uses the same shared provider dispatcher and provider-family lease with one player and a bounded course-local daylight window. The request rechecks exact release/runtime ownership, incident state, current active demand, and the provider snapshot before discovery, before adapter I/O, at completion, and again when proof is consumed. Any active future course/search pair invalidates detached proof so the normal golfer Workflow remains authoritative.
+
+Detached success is accepted only for an exact-release `MATCH_FOUND` or `NO_MATCH` with `providerExecution=true`, a safe provider response, an unchanged provider fingerprint, and evidence newer than deployment, dispatch, and the incident's newest failure. It proves reusable provider readiness only; it never means a golfer received an alert. Unsupported metadata, account/CAPTCHA/queue barriers, unsafe booking destinations, and provider failures remain honest non-success evidence.
+
+The first post-deploy `verify` may create a detached request and report only aggregate `detachedVerification.pendingCount` plus `detachedVerification.rerunNeeded`. When a rerun is needed, do not close the batch: keep the lease alive, wait for the deployed five-minute recovery cron, and run `verify` again. Closeout fails closed while the exact-release request is queued or checking, when a success has not yet been consumed, or when current retry/cooldown evidence has not been copied into the batch proof. This prevents an immediate closeout from cancelling the check or discarding a provider `Retry-After`.
+
 If the same owned batch needs a follow-up release after an earlier deployment, the release fence may advance only during an explicit `VERIFYING` heartbeat. The checkout must be clean on the claimed branch, the persisted release must be an ancestor of the new HEAD, and both the cumulative and incremental diffs must contain only already planned paths. The transition preserves the prior deployment, recheck, and ordinal verification evidence in bounded `releaseHistory`, then atomically clears the current deployment/recheck fields and non-human machine proof. Verification cannot continue until the descendant SHA has its own deployment proof. Recovery may preserve a clean planned descendant only for the original owner task; it never advances the release by itself.
 
 An older success, a local check, a Workflow id by itself, or a new probe from a different runtime cannot resolve the incident. A persisted final classification uses the classification-only path and does not pretend an adapter ran.
@@ -126,6 +132,11 @@ npm run automation:course-support -- verify --batch-ref <batch-ref>
 npm run deployment:wait -- --sha <git-sha>
 npm run automation:course-support -- verify --batch-ref <batch-ref> --release-sha <git-sha> --deployed-at <iso-timestamp>
 
+# If detachedVerification.rerunNeeded is true, heartbeat, wait for the deployed
+# recovery cron, and rerun verify before closeout.
+npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING
+npm run automation:course-support -- verify --batch-ref <batch-ref>
+
 # Only real-demand incidents may record a concrete unavoidable external action.
 npm run automation:course-support -- mark-needs-human --batch-ref <batch-ref> --ordinal 01 --evidence "<bounded evidence>" --next-action "<one exact action>"
 
@@ -145,7 +156,7 @@ Do not paste task ids, batch references, database ids, or workflow ids into cust
 
 ## Migration And Rollout
 
-The dispatcher schema change is additive: it adds provider-family/failure/retry fields, search lease/recheck and alert-generation fields, probe runtime versions, the generation-scoped email outbox, provider request leases, and versioned batch/proof tables and indexes. Apply the production migration before deploying application code that depends on it. Use the direct production Neon connection for `prisma migrate deploy`, inspect migration status, and never print the resolved URL.
+The dispatcher schema change is additive: it adds provider-family/failure/retry fields, search lease/recheck and alert-generation fields, probe runtime versions, the generation-scoped email outbox, provider request leases, versioned batch/proof tables and indexes, and the isolated engineering-only provider-verification request table. Apply the production migration before deploying application code that depends on it. Use the direct production Neon connection for `prisma migrate deploy`, inspect migration status, and never print the resolved URL.
 
 Roll out in this order:
 

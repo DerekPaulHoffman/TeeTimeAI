@@ -8,6 +8,7 @@ import { GET } from "./route";
 const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
   listSearchesNeedingScheduleRecovery: vi.fn(),
+  recoverDueCourseSupportVerificationRequests: vi.fn(),
   recoverPendingClerkEmailUpdates: vi.fn(),
   startSearchSchedule: vi.fn()
 }));
@@ -18,6 +19,11 @@ vi.mock("@/lib/automation/db-service", () => ({
 
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: mocks.startSearchSchedule
+}));
+
+vi.mock("@/lib/automation/course-support-verification-scheduler", () => ({
+  recoverDueCourseSupportVerificationRequests:
+    mocks.recoverDueCourseSupportVerificationRequests
 }));
 
 vi.mock("@/lib/users/pending-email", () => ({
@@ -39,6 +45,12 @@ describe("GET /api/cron/recover-search-schedules", () => {
       considered: 0,
       applied: 0,
       deferred: 0,
+      failed: 0
+    });
+    mocks.recoverDueCourseSupportVerificationRequests.mockResolvedValue({
+      considered: 0,
+      started: 0,
+      skipped: 0,
       failed: 0
     });
   });
@@ -64,6 +76,9 @@ describe("GET /api/cron/recover-search-schedules", () => {
     });
     expect(mocks.listSearchesNeedingScheduleRecovery).not.toHaveBeenCalled();
     expect(mocks.recoverPendingClerkEmailUpdates).not.toHaveBeenCalled();
+    expect(
+      mocks.recoverDueCourseSupportVerificationRequests
+    ).not.toHaveBeenCalled();
     expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
@@ -99,6 +114,12 @@ describe("GET /api/cron/recover-search-schedules", () => {
         deferred: 1,
         failed: 0
       },
+      courseSupportVerification: {
+        considered: 0,
+        started: 0,
+        skipped: 0,
+        failed: 0
+      },
       considered: 3,
       restarted: 2,
       failed: 1
@@ -108,6 +129,79 @@ describe("GET /api/cron/recover-search-schedules", () => {
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(2, "search-2");
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(3, "search-3");
     expect(mocks.recoverPendingClerkEmailUpdates).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.recoverDueCourseSupportVerificationRequests
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues customer schedule recovery when provider verification recovery fails", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.recoverDueCourseSupportVerificationRequests.mockRejectedValue(
+      new Error("verification recovery unavailable")
+    );
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      { id: "search-1" }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      courseSupportVerification: {
+        considered: 0,
+        started: 0,
+        skipped: 0,
+        failed: 1
+      },
+      considered: 1,
+      restarted: 1,
+      failed: 0
+    });
+  });
+
+  it("starts customer schedule recovery before awaiting detached verification", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      { id: "search-1" }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
+    let releaseDetachedRecovery!: (value: {
+      considered: number;
+      started: number;
+      skipped: number;
+      failed: number;
+    }) => void;
+    mocks.recoverDueCourseSupportVerificationRequests.mockReturnValue(
+      new Promise((resolve) => {
+        releaseDetachedRecovery = resolve;
+      })
+    );
+
+    const responsePromise = GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+    await vi.waitFor(() => {
+      expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
+      expect(
+        mocks.recoverDueCourseSupportVerificationRequests
+      ).toHaveBeenCalledTimes(1);
+    });
+
+    releaseDetachedRecovery({
+      considered: 0,
+      started: 0,
+      skipped: 0,
+      failed: 0
+    });
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
   });
 
   it("configures a Pro recovery heartbeat every five minutes", () => {

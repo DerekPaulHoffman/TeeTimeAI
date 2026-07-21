@@ -12,7 +12,9 @@ const providerLeaseMocks = vi.hoisted(() => ({
   runWithProviderRequestLease: vi.fn()
 }));
 const prismaMocks = vi.hoisted(() => ({
-  courseSupportBatchSearch: { findMany: vi.fn() }
+  course: { findUnique: vi.fn() },
+  courseSupportBatchSearch: { findMany: vi.fn() },
+  courseSupportIncident: { findMany: vi.fn() }
 }));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
@@ -23,6 +25,7 @@ import { buildBrowserDiscovery } from "./browser-discovery";
 import {
   collectOfficialSiteEvidence,
   createAddressPinnedPublicFetch,
+  prepareCourseSupportVerificationMonitoring,
   prepareSearchMonitoring,
   shouldAttemptMonitoringDiscovery
 } from "./search-monitoring-discovery";
@@ -104,6 +107,8 @@ describe("search monitoring discovery", () => {
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue({ id: "course-1" });
     dbMocks.retireLegacyPolicyOnlyCourseBlock.mockResolvedValue({ id: "course-1" });
     prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([]);
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
+    prismaMocks.course.findUnique.mockResolvedValue(null);
     providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
         acquired: true,
@@ -263,6 +268,102 @@ describe("search monitoring discovery", () => {
       deferredCourseIds: [],
       retryCourseIds: ["dennis-highlands", "dennis-pines"]
     });
+  });
+
+  it("forces one fresh owned-course discovery for detached production verification", async () => {
+    const course = {
+      id: "detached-course",
+      name: "Detached Golf Course",
+      website: "https://detached.example/book",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "detached.example",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingMethod: "PUBLIC_ONLINE",
+      bookingMetadata: { courseId: "12345" },
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      updatedAt: now
+    };
+    prismaMocks.course.findUnique.mockResolvedValue(course);
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: course.id,
+        createdAt: new Date("2026-07-13T19:30:00.000Z"),
+        evidence: null
+      },
+      {
+        courseId: course.id,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: null
+      }
+    ]);
+    const fetchImpl = vi.fn(async () =>
+      new Response("<html>Official public golf course booking page</html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+
+    const result = await prepareCourseSupportVerificationMonitoring(
+      course.id,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.attemptedCourseIds).toEqual([course.id]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors the normal discovery cap after a detached request used its one-shot attempt", async () => {
+    const course = {
+      id: "detached-course",
+      name: "Detached Golf Course",
+      website: "https://detached.example/book",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingMethod: "PUBLIC_ONLINE",
+      bookingMetadata: { courseId: "12345" },
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      updatedAt: now
+    };
+    prismaMocks.course.findUnique.mockResolvedValue(course);
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: course.id,
+        createdAt: new Date("2026-07-13T19:30:00.000Z"),
+        evidence: null
+      },
+      {
+        courseId: course.id,
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: null
+      }
+    ]);
+    const fetchImpl = vi.fn();
+
+    const result = await prepareCourseSupportVerificationMonitoring(
+      course.id,
+      fetchImpl as typeof fetch,
+      now,
+      { forceFresh: false }
+    );
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+    expect(result.retryCourseIds).toEqual([]);
   });
 
   it("repairs missing TeeItUp metadata from the course-owned official page", async () => {
@@ -656,6 +757,106 @@ describe("search monitoring discovery", () => {
       deferredCourseIds: [],
       retryCourseIds: ["colonie"]
     });
+  });
+
+  it("rediscovers safe CPS configuration after repeated runnable-provider failures", async () => {
+    const officialUrl = "https://capital.example/bookteetimes";
+    const bookingUrl =
+      "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=7";
+    const configurationUrl =
+      "https://capitalhillsny.cps.golf/onlineresweb/Home/Configuration";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === officialUrl) {
+        return new Response(
+          `<html><a href="${bookingUrl}">Capital Hills at Albany Book a Tee Time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === bookingUrl) {
+        return new Response("<html><body>Public tee time search</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (value === configurationUrl) {
+        return new Response(
+          JSON.stringify({
+            courseId: 7,
+            siteName: "capitalhillsny",
+            websiteId: "public-website",
+            onlineApi:
+              "https://capitalhillsny.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            authorityBaseUrl: "https://capitalhillsny.cps.golf/identityapi",
+            apiKey: "must-not-be-persisted"
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "capital-hills",
+          name: "Capital Hills at Albany",
+          website: officialUrl,
+          detectedBookingUrl: "https://capitalhillsny.cps.golf/",
+          detectedPlatform: "CUSTOM",
+          providerFamilyKey: "CPS",
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          bookingMetadata: {
+            provider: "CPS",
+            siteName: "capitalhillsny",
+            bookingBaseUrl: "https://capitalhillsny.cps.golf/",
+            courseIds: [7],
+            holes: [18, 9]
+          },
+        }
+      }]
+    } as never;
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValueOnce([
+      {
+        courseId: "capital-hills",
+        occurrenceCount: 3,
+        lastSeenAt: new Date("2026-07-13T19:55:00.000Z"),
+        course: { probes: [] }
+      }
+    ]);
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      officialUrl,
+      bookingUrl,
+      configurationUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        apiMetadata: expect.objectContaining({
+          provider: "CPS",
+          courseIds: [7],
+          clientId: "onlineresweb",
+          websiteId: "public-website",
+          onlineApi:
+            "https://capitalhillsny.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          authorityBaseUrl: "https://capitalhillsny.cps.golf/identityapi"
+        })
+      })
+    );
+    expect(JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls)).not.toContain(
+      "must-not-be-persisted"
+    );
+    expect(result.attemptedCourseIds).toEqual(["capital-hills"]);
+    expect(result.appliedCourseIds).toEqual(["capital-hills"]);
   });
 
   it("defers CPS enrichment without recording partial metadata when its lease is busy", async () => {
@@ -2894,6 +3095,182 @@ describe("search monitoring discovery", () => {
       { url: amherstUrl, label: "Book @ ACC" },
       { url: ponemahUrl, label: "Book @ PG" }
     ]));
+  });
+
+  it("keeps a validated legacy Prophet redirect course-scoped through provider apply", async () => {
+    const sourceUrl = "https://simsbury.example/book-a-tee-time";
+    const legacyRoot = "https://secure.east.prophetservices.com/PublicCourse";
+    const bookingUrl =
+      "https://simsbury.cps.golf/onlineresweb/search-teetime?CourseId=1";
+    const configurationUrl =
+      "https://simsbury.cps.golf/onlineresweb/Home/Configuration";
+    const widgetConfig = Buffer.from(
+      JSON.stringify({
+        baseURL: legacyRoot,
+        newBookingEngine: false,
+        locations: [{ name: "Simsbury Farms Golf Course", courseId: "1" }]
+      })
+    ).toString("base64");
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (input.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Simsbury Farms Golf Course</title><div data-widget-config="${widgetConfig}"></div></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (input.toString() === legacyRoot) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: bookingUrl }
+        });
+      }
+      if (input.toString() === bookingUrl) {
+        return new Response("<html>Public tee time search</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      if (input.toString() === configurationUrl) {
+        return new Response(
+          JSON.stringify({
+            courseId: 1,
+            siteName: "simsbury",
+            websiteId: "public-website",
+            onlineApi:
+              "https://simsbury.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            authorityBaseUrl: "https://simsbury.cps.golf/identityapi"
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${input.toString()}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "simsbury-farms",
+          name: "Simsbury Farms Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "simsbury.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null,
+          isPublic: true,
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          updatedAt: now
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      sourceUrl,
+      legacyRoot,
+      bookingUrl,
+      configurationUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "simsbury-farms",
+        status: "LEARNED",
+        bookingUrl: "https://simsbury.cps.golf/",
+        apiMetadata: expect.objectContaining({
+          provider: "CPS",
+          siteName: "simsbury",
+          courseIds: [1],
+          bookingBaseUrl: "https://simsbury.cps.golf/",
+          clientId: "onlineresweb",
+          websiteId: "public-website",
+          onlineApi:
+            "https://simsbury.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+          authorityBaseUrl: "https://simsbury.cps.golf/identityapi"
+        })
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "simsbury-farms",
+        status: "LEARNED",
+        bookingUrl: "https://simsbury.cps.golf/"
+      }),
+      expect.objectContaining({
+        detectedBookingUrl: null,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN"
+      })
+    );
+    expect(result.attemptedCourseIds).toEqual(["simsbury-farms"]);
+    expect(result.appliedCourseIds).toEqual(["simsbury-farms"]);
+  });
+
+  it("rejects unsafe or ambiguous legacy Prophet widget roots", async () => {
+    const sourceUrl = "https://course.example/book";
+    const configs = [
+      {
+        baseURL: "http://secure.east.prophetservices.com/PublicCourse",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL: "https://secure.east.prophetservices.com/PublicCourse?session=1",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL: "https://secure.east.prophetservices.com/PublicCourse",
+        newBookingEngine: true,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL: "https://secure.east.prophetservices.com/PublicCourse",
+        newBookingEngine: false,
+        locations: [
+          { name: "Target Golf Course", courseId: "1" },
+          { name: "Target Golf Course", courseId: "2" }
+        ]
+      },
+      {
+        baseURL: "https://secure.east.prophetservices.com/checkout",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      }
+    ];
+    const attributes = configs
+      .map(
+        (config) =>
+          `<div data-widget-config="${Buffer.from(JSON.stringify(config)).toString("base64")}"></div>`
+      )
+      .join("");
+    const fetchImpl = vi.fn(async () =>
+      new Response(`<html><title>Target Golf Course</title>${attributes}</html>`, {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Golf Course"
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evidence.linkCandidates).not.toContainEqual(
+      expect.objectContaining({
+        url: expect.stringContaining("prophetservices.com")
+      })
+    );
   });
 
   it("deduplicates a UTM-tagged self link and follows the matching course tee-time page", async () => {

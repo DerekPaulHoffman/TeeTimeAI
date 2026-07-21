@@ -22,10 +22,12 @@ import {
   enrichTeesnapDiscovery,
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
+  hasCurrentRepeatedMonitoringFailure,
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
+  type BrowserProbeCourseInput,
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
@@ -395,12 +397,22 @@ type CollectedPageEvidence = Pick<
   | "teeItUpLegacyConfigurations"
 >;
 
+type CollectedLinkCandidate = {
+  url: string;
+  label: string;
+  targetScopedRedirect?: boolean;
+};
+
 type RecentCourseAutomationDiscovery = Awaited<
   ReturnType<typeof listRecentCourseAutomationDiscoveries>
 >[number];
 
+type MonitoringDiscoveryCourse =
+  ActiveAutomationSearch["preferences"][number]["course"] &
+    Pick<BrowserProbeCourseInput, "monitoringFailureEvidence">;
+
 type MonitoringDiscoveryCandidate = {
-  course: ActiveAutomationSearch["preferences"][number]["course"];
+  course: MonitoringDiscoveryCourse;
   sourceUrl: string;
 };
 
@@ -561,17 +573,42 @@ export type SearchMonitoringDiscoveryResult = {
   retryCourseIds: string[];
 };
 
+type SearchMonitoringDiscoveryOptions = {
+  includeCourseIds?: readonly string[];
+  forceFreshCourseIds?: readonly string[];
+};
+
 export async function prepareSearchMonitoring(
   search: ActiveAutomationSearch,
   fetchImpl: typeof fetch | undefined = undefined,
-  now = new Date()
+  now = new Date(),
+  options: SearchMonitoringDiscoveryOptions = {}
 ): Promise<SearchMonitoringDiscoveryResult> {
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
+  const includeCourseIds = new Set(options.includeCourseIds ?? []);
+  const forceFreshCourseIds = new Set(options.forceFreshCourseIds ?? []);
+  const repeatedFailureEvidenceByCourse =
+    await listRepeatedMonitoringFailureEvidence(
+      search.preferences.map((preference) => preference.course.id)
+    );
   const probeCourses = search.preferences
-    .map((preference) => preference.course)
+    .map((preference) => ({
+      ...preference.course,
+      monitoringFailureEvidence: repeatedFailureEvidenceByCourse.get(
+        preference.course.id
+      )
+    }))
     .filter(
       (course) =>
-        shouldQueueBrowserProbe(course) || isLegacyPolicyOnlyBlock(course)
+        includeCourseIds.has(course.id) ||
+        forceFreshCourseIds.has(course.id) ||
+        shouldQueueBrowserProbe(course) ||
+        shouldRediscoverFailedRunnableProvider(
+          course,
+          repeatedFailureEvidenceByCourse.get(course.id),
+          now
+        ) ||
+        isLegacyPolicyOnlyBlock(course)
     );
   const candidateInputs = probeCourses
     .map((course) => ({
@@ -670,6 +707,9 @@ export async function prepareSearchMonitoring(
   const replayAppliedCourseIds = new Set<string>();
 
   for (const candidate of candidates) {
+    if (forceFreshCourseIds.has(candidate.course.id)) {
+      continue;
+    }
     if (
       (discoveriesByCourse.get(candidate.course.id)?.length ?? 0) <
       MAX_DISCOVERY_ATTEMPTS_PER_DAY
@@ -722,6 +762,7 @@ export async function prepareSearchMonitoring(
         !replayAppliedCourseIds.has(course.id)
     );
     return (
+      forceFreshCourseIds.has(course.id) ||
       forcedPolicyReconciliationCourseIds.has(course.id) ||
       shouldAttemptMonitoringDiscovery(attempts, now) ||
       remediationOverrideEligible
@@ -898,6 +939,75 @@ function getSafeMonitoringProbeUrl(
 ) {
   const safeUrl = readSafePublicUrl(getBestProbeUrl(course));
   return safeUrl ? parseSafePublicUrl(safeUrl).toString() : null;
+}
+
+function shouldRediscoverFailedRunnableProvider(
+  course: MonitoringDiscoveryCourse,
+  monitoringFailureEvidence: BrowserProbeCourseInput["monitoringFailureEvidence"],
+  now: Date
+) {
+  return Boolean(
+    course.automationEligibility !== "BLOCKED" &&
+      resolveProviderCapability(course).isRunnable &&
+      hasCurrentRepeatedMonitoringFailure(
+        monitoringFailureEvidence,
+        now
+      ) &&
+      getBestProbeUrl(course)
+  );
+}
+
+async function listRepeatedMonitoringFailureEvidence(courseIds: string[]) {
+  const uniqueCourseIds = [...new Set(courseIds)];
+  if (uniqueCourseIds.length === 0) {
+    return new Map<
+      string,
+      BrowserProbeCourseInput["monitoringFailureEvidence"]
+    >();
+  }
+  const incidents = await prisma.courseSupportIncident.findMany({
+    where: {
+      courseId: { in: uniqueCourseIds },
+      status: { not: "RESOLVED" },
+      kind: "FETCH_FAILED",
+      occurrenceCount: { gte: 2 }
+    },
+    select: {
+      courseId: true,
+      occurrenceCount: true,
+      lastSeenAt: true,
+      course: {
+        select: {
+          probes: {
+            orderBy: { observedAt: "desc" },
+            take: 1,
+            select: { outcome: true, observedAt: true }
+          }
+        }
+      }
+    }
+  });
+
+  return new Map(
+    incidents.map((incident) => {
+      const latestProbe = incident.course.probes[0];
+      const latestSuccessfulAt =
+        latestProbe &&
+        (latestProbe.outcome === "MATCH_FOUND" ||
+          latestProbe.outcome === "NO_MATCH")
+          ? latestProbe.observedAt
+          : null;
+      return [
+        incident.courseId,
+        {
+          kind: "FETCH_FAILED" as const,
+          occurrenceCount: incident.occurrenceCount,
+          latestFailureAt: incident.lastSeenAt,
+          latestSuccessfulAt
+        }
+      ];
+    })
+  );
 }
 
 function getMonitoringCourseExpectation(
@@ -1544,7 +1654,7 @@ export async function collectOfficialSiteEvidence(
   const firstPage = await fetchPage(sourceUrl);
   const pages = [{
     ...firstPage,
-    evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl)
+    evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl, courseName)
   }];
   let matchedCoursePage = courseName && (
     doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
@@ -1600,10 +1710,11 @@ export async function collectOfficialSiteEvidence(
     const exactTargetOfficialRedirect =
       courseName &&
       followedLinkCandidate &&
-      haveSameReplayHostname(
-        firstPage.finalUrl,
-        followedLinkCandidate.url
-      ) &&
+      (followedLinkCandidate.targetScopedRedirect ||
+        haveSameReplayHostname(
+          firstPage.finalUrl,
+          followedLinkCandidate.url
+        )) &&
       doesProviderLinkLabelExactlyIdentifyCourse(
         followedLinkCandidate.label,
         courseName
@@ -1624,7 +1735,8 @@ export async function collectOfficialSiteEvidence(
       const fetched = await fetchPage(followupCandidate);
       let extractedEvidence = extractHtmlEvidence(
         fetched.html,
-        fetched.finalUrl
+        fetched.finalUrl,
+        courseName
       );
       if (
         followedLinkCandidate &&
@@ -1643,7 +1755,7 @@ export async function collectOfficialSiteEvidence(
           if (renderedContent) {
             extractedEvidence = mergeHtmlEvidence(
               extractedEvidence,
-              extractHtmlEvidence(renderedContent, fetched.finalUrl)
+              extractHtmlEvidence(renderedContent, fetched.finalUrl, courseName)
             );
           }
         } catch (error) {
@@ -1718,7 +1830,9 @@ export async function collectOfficialSiteEvidence(
           ...matchedCoursePage.evidence.linkCandidates,
           ...targetScopedOfficialLinks
         ]
-      ).slice(0, 200)
+      )
+        .slice(0, 200)
+        .map(({ url, label }) => ({ url, label }))
     : [];
   const officialPageLinkKeys = new Set(
     officialPageLinkCandidates.map((candidate) =>
@@ -1740,7 +1854,9 @@ export async function collectOfficialSiteEvidence(
     ),
     linkCandidates: uniqueLinkCandidates(
       pages.flatMap((page) => page.evidence.linkCandidates)
-    ).slice(0, 200),
+    )
+      .slice(0, 200)
+      .map(({ url, label }) => ({ url, label })),
     ...(matchedCoursePage && courseName
       ? {
           officialPage: {
@@ -2067,9 +2183,40 @@ function mergeHtmlEvidence(
   };
 }
 
-function extractHtmlEvidence(html: string, pageUrl: string) {
+export async function prepareCourseSupportVerificationMonitoring(
+  courseId: string,
+  fetchImpl: typeof fetch | undefined = undefined,
+  now = new Date(),
+  options: { forceFresh?: boolean } = {}
+): Promise<SearchMonitoringDiscoveryResult> {
+  const course = await prisma.course.findUnique({ where: { id: courseId } });
+  if (!course) {
+    throw new Error("Course-support verification course was not found.");
+  }
+
+  const detachedSearch = {
+    id: "course-support-verification",
+    scheduleVersion: 0,
+    remediationDispatchKey: null,
+    remediationDispatchVersion: null,
+    checkLeaseToken: null,
+    checkLeaseExpiresAt: null,
+    preferences: [{ course }]
+  } as ActiveAutomationSearch;
+  const forceFresh = options.forceFresh ?? true;
+  return prepareSearchMonitoring(detachedSearch, fetchImpl, now, {
+    includeCourseIds: [courseId],
+    forceFreshCourseIds: forceFresh ? [courseId] : []
+  });
+}
+
+function extractHtmlEvidence(
+  html: string,
+  pageUrl: string,
+  courseName?: string
+) {
   const observedUrls: string[] = [];
-  const linkCandidates: Array<{ url: string; label: string }> = [];
+  const linkCandidates: CollectedLinkCandidate[] = [];
   const decodedHtml = decodeHtmlEntities(html);
   const embeddedContent = decodeEmbeddedContent(decodedHtml);
 
@@ -2122,12 +2269,19 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     }
   }
 
-  const widgetConfigs = [...decodedHtml.matchAll(
+  const decodedWidgetConfigs = [...decodedHtml.matchAll(
     /\bdata-widget-config\s*=\s*(?:"([^"]+)"|'([^']+)')/gi
   )]
     .map((match) => decodeWidgetConfig(match[1] ?? match[2]))
-    .filter(Boolean)
-    .join("\n");
+    .filter(Boolean);
+  for (const candidate of extractLegacyProphetWidgetBookingCandidates(
+    decodedWidgetConfigs,
+    courseName
+  )) {
+    observedUrls.push(candidate.url);
+    linkCandidates.push(candidate);
+  }
+  const widgetConfigs = decodedWidgetConfigs.join("\n");
   const relevantScripts = [...decodedHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
     .map((match) => match[1] ?? "")
     .filter((script) =>
@@ -2988,6 +3142,85 @@ function decodeWidgetConfig(value: string) {
   }
 }
 
+function extractLegacyProphetWidgetBookingCandidates(
+  configs: string[],
+  courseName?: string
+) {
+  if (!courseName) {
+    return [];
+  }
+  const candidates: CollectedLinkCandidate[] = [];
+  for (const config of configs) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(config);
+    } catch {
+      continue;
+    }
+    if (
+      !isPlainRecord(parsed) ||
+      parsed.newBookingEngine !== false ||
+      typeof parsed.baseURL !== "string" ||
+      !Array.isArray(parsed.locations) ||
+      parsed.locations.length === 0 ||
+      parsed.locations.length > 20
+    ) {
+      continue;
+    }
+    const matchingLocations = parsed.locations.filter((location) => {
+      if (
+        !isPlainRecord(location) ||
+        typeof location.name !== "string" ||
+        location.name.length > 160 ||
+        typeof location.courseId !== "string" ||
+        !/^[1-9]\d{0,9}$/u.test(location.courseId)
+      ) {
+        return false;
+      }
+      return haveCompatibleCourseNames(location.name, courseName);
+    });
+    if (matchingLocations.length !== 1) {
+      continue;
+    }
+    const url = getSafeLegacyProphetWidgetRoot(parsed.baseURL);
+    if (url) {
+      candidates.push({
+        url,
+        label: `Book tee times at ${matchingLocations[0]!.name}`,
+        targetScopedRedirect: true
+      });
+    }
+  }
+  return uniqueLinkCandidates(candidates);
+}
+
+function getSafeLegacyProphetWidgetRoot(value: string) {
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname.toLowerCase() !== "secure.east.prophetservices.com" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.search ||
+      url.hash ||
+      segments.length !== 1 ||
+      !/^[a-z0-9][a-z0-9_-]{0,79}$/iu.test(segments[0]) ||
+      /(?:account|auth|captcha|checkout|login|queue|session|webstore)/iu.test(
+        segments[0]
+      )
+    ) {
+      return null;
+    }
+    url.pathname = `/${segments[0]}`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function decodeHtmlEntities(value: string) {
   return value
     .replaceAll("&amp;", "&")
@@ -3034,7 +3267,7 @@ function uniqueStrings(values: Array<string | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
-function uniqueLinkCandidates(values: Array<{ url: string; label: string }>) {
+function uniqueLinkCandidates<T extends { url: string; label: string }>(values: T[]) {
   const seen = new Set<string>();
   return values.filter((candidate) => {
     const key = `${candidate.url}\u0000${candidate.label}`;

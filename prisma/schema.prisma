@@ -171,6 +171,14 @@ enum CourseSupportBatchIncidentResult {
   STALE_EVIDENCE
 }
 
+enum CourseSupportVerificationStatus {
+  QUEUED
+  CHECKING
+  SUCCEEDED
+  RETRYABLE_FAILED
+  STALE
+}
+
 enum CourseProfileStatus {
   PENDING
   PUBLISHED
@@ -214,57 +222,58 @@ model User {
 }
 
 model Course {
-  id                       String                       @id @default(cuid())
-  googlePlaceId            String?                      @unique
-  name                     String
-  address                  String?
-  city                     String?
-  stateCode                String?
-  stateName                String?
-  county                   String?
-  countryCode              String?
-  latitude                 Float
-  longitude                Float
-  timeZone                 String                       @default("America/New_York")
-  rating                   Float?
-  website                  String?
-  phone                    String?
-  isPublic                 Boolean                      @default(true)
-  isManual                 Boolean                      @default(false)
-  detectedBookingUrl       String?
-  detectedPlatform         DetectedPlatform             @default(UNKNOWN)
-  providerFamilyKey        String                       @default("SOURCE_MISSING")
-  bookingMethod            BookingMethod                @default(UNKNOWN)
-  bookingPhone             String?
-  bookingWindowDaysAhead   Int?
-  bookingReleaseTimeLocal  String?
-  bookingWindowSource      BookingWindowSource?
-  bookingWindowConfidence  Float?
-  bookingWindowEvidenceUrl String?
-  bookingWindowCheckedAt   DateTime?
-  bookingWindowObservedAt  DateTime?
-  automationEligibility    AutomationEligibility        @default(UNKNOWN)
-  automationReason         AutomationReason             @default(NONE)
-  policyNotes              String?
-  bookingMetadata          Json?
-  intelligenceVerifiedAt   DateTime?
-  intelligenceReviewAt     DateTime?
-  intelligenceConfidence   Float?
-  layoutHoleCounts         Int[]                        @default([])
-  layoutHolesEvidenceUrl   String?
-  layoutHolesVerifiedAt    DateTime?
-  par                      Int?
-  parEvidenceUrl           String?
-  parVerifiedAt            DateTime?
-  createdAt                DateTime                     @default(now())
-  updatedAt                DateTime                     @updatedAt
-  preferences              CoursePreference[]
-  probes                   CourseProbe[]
-  matches                  TeeTimeMatch[]
-  automationDiscoveries    CourseAutomationDiscovery[]
-  supportIncident          CourseSupportIncident?
-  supportBatchIncidents    CourseSupportBatchIncident[]
-  profile                  CourseProfile?
+  id                          String                             @id @default(cuid())
+  googlePlaceId               String?                            @unique
+  name                        String
+  address                     String?
+  city                        String?
+  stateCode                   String?
+  stateName                   String?
+  county                      String?
+  countryCode                 String?
+  latitude                    Float
+  longitude                   Float
+  timeZone                    String                             @default("America/New_York")
+  rating                      Float?
+  website                     String?
+  phone                       String?
+  isPublic                    Boolean                            @default(true)
+  isManual                    Boolean                            @default(false)
+  detectedBookingUrl          String?
+  detectedPlatform            DetectedPlatform                   @default(UNKNOWN)
+  providerFamilyKey           String                             @default("SOURCE_MISSING")
+  bookingMethod               BookingMethod                      @default(UNKNOWN)
+  bookingPhone                String?
+  bookingWindowDaysAhead      Int?
+  bookingReleaseTimeLocal     String?
+  bookingWindowSource         BookingWindowSource?
+  bookingWindowConfidence     Float?
+  bookingWindowEvidenceUrl    String?
+  bookingWindowCheckedAt      DateTime?
+  bookingWindowObservedAt     DateTime?
+  automationEligibility       AutomationEligibility              @default(UNKNOWN)
+  automationReason            AutomationReason                   @default(NONE)
+  policyNotes                 String?
+  bookingMetadata             Json?
+  intelligenceVerifiedAt      DateTime?
+  intelligenceReviewAt        DateTime?
+  intelligenceConfidence      Float?
+  layoutHoleCounts            Int[]                              @default([])
+  layoutHolesEvidenceUrl      String?
+  layoutHolesVerifiedAt       DateTime?
+  par                         Int?
+  parEvidenceUrl              String?
+  parVerifiedAt               DateTime?
+  createdAt                   DateTime                           @default(now())
+  updatedAt                   DateTime                           @updatedAt
+  preferences                 CoursePreference[]
+  probes                      CourseProbe[]
+  matches                     TeeTimeMatch[]
+  automationDiscoveries       CourseAutomationDiscovery[]
+  supportIncident             CourseSupportIncident?
+  supportBatchIncidents       CourseSupportBatchIncident[]
+  supportVerificationRequests CourseSupportVerificationRequest[]
+  profile                     CourseProfile?
 
   @@index([latitude, longitude])
   @@index([stateCode, county, automationEligibility])
@@ -610,28 +619,74 @@ model CourseSupportBatch {
 }
 
 model CourseSupportBatchIncident {
-  id                        String                           @id @default(cuid())
+  id                        String                             @id @default(cuid())
   batchId                   String
   incidentId                String
   courseId                  String
   cycle                     Int
-  result                    CourseSupportBatchIncidentResult @default(PENDING)
+  result                    CourseSupportBatchIncidentResult   @default(PENDING)
   preProbeId                String?
   postProbeId               String?
   message                   String?
   proofSnapshot             Json?
   verifiedIncidentUpdatedAt DateTime?
   verifiedAt                DateTime?
-  createdAt                 DateTime                         @default(now())
-  updatedAt                 DateTime                         @updatedAt
-  batch                     CourseSupportBatch               @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  incident                  CourseSupportIncident            @relation(fields: [incidentId], references: [id], onDelete: Restrict)
-  course                    Course                           @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  createdAt                 DateTime                           @default(now())
+  updatedAt                 DateTime                           @updatedAt
+  batch                     CourseSupportBatch                 @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  incident                  CourseSupportIncident              @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+  course                    Course                             @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  verificationRequests      CourseSupportVerificationRequest[]
 
   @@unique([batchId, incidentId])
   @@index([incidentId])
   @@index([courseId])
   @@index([result, updatedAt])
+}
+
+model CourseSupportVerificationRequest {
+  id                            String                          @id @default(cuid())
+  batchIncidentId               String
+  courseId                      String
+  releaseSha                    String
+  runtimeVersion                String?
+  status                        CourseSupportVerificationStatus @default(QUEUED)
+  revision                      Int                             @default(0)
+  leaseToken                    String?
+  leaseExpiresAt                DateTime?
+  workflowRunId                 String?
+  nextAttemptAt                 DateTime?
+  attemptCount                  Int                             @default(0)
+  targetDateLocal               String
+  startTimeLocal                String                          @default("06:00")
+  endTimeLocal                  String                          @default("20:00")
+  timeZone                      String
+  players                       Int                             @default(1)
+  providerFamilyKeySnapshot     String
+  platformSnapshot              DetectedPlatform
+  bookingMethodSnapshot         BookingMethod
+  automationEligibilitySnapshot AutomationEligibility
+  automationReasonSnapshot      AutomationReason
+  providerSnapshotFingerprint   String
+  providerSnapshotAt            DateTime
+  discoveryAttemptedAt          DateTime?
+  discoveryVerifiedAt           DateTime?
+  outcome                       ProbeOutcome?
+  failureClass                  CourseSupportFailureClass?
+  evidence                      Json?
+  lastError                     String?
+  startedAt                     DateTime?
+  completedAt                   DateTime?
+  createdAt                     DateTime                        @default(now())
+  updatedAt                     DateTime                        @updatedAt
+  batchIncident                 CourseSupportBatchIncident      @relation(fields: [batchIncidentId], references: [id], onDelete: Cascade)
+  course                        Course                          @relation(fields: [courseId], references: [id], onDelete: Restrict)
+
+  @@unique([batchIncidentId, releaseSha], map: "CourseSupportVerification_batchIncident_release_key")
+  @@index([status, nextAttemptAt], map: "CourseSupportVerification_status_nextAttempt_idx")
+  @@index([leaseExpiresAt], map: "CourseSupportVerification_leaseExpiresAt_idx")
+  @@index([courseId, status], map: "CourseSupportVerification_course_status_idx")
+  @@index([releaseSha, status], map: "CourseSupportVerification_release_status_idx")
 }
 
 model CourseSupportBatchSearch {

@@ -4,15 +4,31 @@ const prismaMocks = vi.hoisted(() => ({
   batchFindFirst: vi.fn(),
   batchUpdateMany: vi.fn(),
   incidentUpdateMany: vi.fn(),
+  supportIncidentUpdateMany: vi.fn(),
+  verificationRequestFindUnique: vi.fn(),
+  verificationRequestFindMany: vi.fn(),
+  verificationRequestUpdateMany: vi.fn(),
+  teeSearchCount: vi.fn(),
   transaction: vi.fn()
+}));
+const verificationMocks = vi.hoisted(() => ({
+  buildCourseSupportProviderSnapshotFingerprint: vi.fn(),
+  getCurrentCourseSupportVerificationFailure: vi.fn(),
+  getEligibleCourseSupportVerificationProof: vi.fn(),
+  scheduleCourseSupportVerificationRequests: vi.fn()
 }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     courseSupportBatch: { findFirst: prismaMocks.batchFindFirst },
+    courseSupportVerificationRequest: {
+      findMany: prismaMocks.verificationRequestFindMany
+    },
     $transaction: prismaMocks.transaction
   }
 }));
+
+vi.mock("./course-support-verification", () => verificationMocks);
 
 import {
   assessCourseSupportRecovery,
@@ -20,7 +36,11 @@ import {
   buildFailureFingerprint,
   buildCourseSupportReleaseHistory,
   canCloseCourseSupportRetry,
+  chooseNewestProviderVerificationEvidence,
+  classifyDetachedVerificationFailure,
+  classifyDetachedVerificationEvidence,
   classifyFreshBatchEvidence,
+  closeoutCourseSupportBatch,
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
   heartbeatCourseSupportBatch,
@@ -40,7 +60,14 @@ const now = new Date("2026-07-15T20:00:00.000Z");
 
 const transactionClient = {
   courseSupportBatch: { updateMany: prismaMocks.batchUpdateMany },
-  courseSupportBatchIncident: { updateMany: prismaMocks.incidentUpdateMany }
+  courseSupportBatchIncident: { updateMany: prismaMocks.incidentUpdateMany },
+  courseSupportIncident: { updateMany: prismaMocks.supportIncidentUpdateMany },
+  courseSupportVerificationRequest: {
+    findUnique: prismaMocks.verificationRequestFindUnique,
+    findMany: prismaMocks.verificationRequestFindMany,
+    updateMany: prismaMocks.verificationRequestUpdateMany
+  },
+  teeSearch: { count: prismaMocks.teeSearchCount }
 };
 
 beforeEach(() => {
@@ -50,6 +77,26 @@ beforeEach(() => {
       worker: (transaction: typeof transactionClient) => Promise<unknown>
     ) => worker(transactionClient)
   );
+  verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue({
+    eligible: false,
+    reason: "not_found"
+  });
+  verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue({
+    current: false,
+    reason: "not_found"
+  });
+  verificationMocks.scheduleCourseSupportVerificationRequests.mockResolvedValue({
+    createdCount: 0,
+    eligibleCount: 0,
+    ineligibleCount: 0,
+    requests: []
+  });
+  verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+    "b".repeat(64)
+  );
+  prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
+  prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
+  prismaMocks.teeSearchCount.mockResolvedValue(0);
 });
 
 function candidate(
@@ -223,6 +270,232 @@ describe("fresh runtime verification", () => {
     automationEligibility: "ALLOWED" as const,
     automationReason: "NONE" as const
   };
+
+  it("accepts fresh no-email provider verification from the exact release", () => {
+    const releaseSha = "a".repeat(40);
+    expect(
+      classifyDetachedVerificationEvidence({
+        deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+        recheckDispatchStartedAt: new Date("2026-07-15T20:05:30.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T20:04:00.000Z"),
+        proof: {
+          eligible: true,
+          releaseSha,
+          runtimeVersion: releaseSha,
+          outcome: "NO_MATCH",
+          completedAt: new Date("2026-07-15T20:06:30.000Z"),
+          providerSnapshotFingerprint: "b".repeat(64),
+          evidence: {
+            kind: "PROVIDER_VERIFICATION",
+            runtimeVersion: releaseSha,
+            outcome: "NO_MATCH",
+            observedAt: "2026-07-15T20:06:00.000Z",
+            providerExecution: true
+          }
+        }
+      })
+    ).toMatchObject({
+      result: "RESTORED",
+      postProbeId: null,
+      proofSnapshot: { kind: "PROVIDER_VERIFICATION" }
+    });
+  });
+
+  it("rejects detached proof observed before the remediation dispatch", () => {
+    const releaseSha = "a".repeat(40);
+    expect(
+      classifyDetachedVerificationEvidence({
+        deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+        recheckDispatchStartedAt: new Date("2026-07-15T20:10:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T20:04:00.000Z"),
+        proof: {
+          eligible: true,
+          releaseSha,
+          runtimeVersion: releaseSha,
+          outcome: "NO_MATCH",
+          completedAt: new Date("2026-07-15T20:06:30.000Z"),
+          providerSnapshotFingerprint: "b".repeat(64),
+          evidence: {
+            kind: "PROVIDER_VERIFICATION",
+            runtimeVersion: releaseSha,
+            outcome: "NO_MATCH",
+            observedAt: "2026-07-15T20:06:00.000Z",
+            providerExecution: true
+          }
+        }
+      })?.result
+    ).toBe("STALE_EVIDENCE");
+  });
+
+  it("persists current exact-runtime detached failure evidence as retryable", () => {
+    const releaseSha = "a".repeat(40);
+    expect(
+      classifyDetachedVerificationFailure({
+        deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+        recheckDispatchStartedAt: new Date("2026-07-15T20:05:30.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T20:04:00.000Z"),
+        failure: {
+          current: true,
+          releaseSha,
+          runtimeVersion: releaseSha,
+          status: "RETRYABLE_FAILED",
+          outcome: "FETCH_FAILED",
+          failureClass: "RATE_LIMIT",
+          providerExecution: true,
+          observedAt: new Date("2026-07-15T20:06:00.000Z"),
+          completedAt: null,
+          nextAttemptAt: new Date("2026-07-15T20:21:00.000Z"),
+          providerRetryNotBeforeAt: new Date("2026-07-15T22:00:00.000Z"),
+          providerSnapshotFingerprint: "b".repeat(64),
+          evidence: {
+            kind: "PROVIDER_VERIFICATION",
+            runtimeVersion: releaseSha,
+            outcome: "FETCH_FAILED",
+            failureClass: "RATE_LIMIT",
+            providerExecution: true,
+            observedAt: "2026-07-15T20:06:00.000Z"
+          }
+        }
+      })
+    ).toMatchObject({
+      result: "RETRY_SCHEDULED",
+      proofSnapshot: {
+        kind: "PROVIDER_VERIFICATION_FAILURE",
+        outcome: "FETCH_FAILED",
+        failureClass: "RATE_LIMIT",
+        providerExecution: true,
+        providerRetryNotBeforeAt: "2026-07-15T22:00:00.000Z"
+      }
+    });
+  });
+
+  it("keeps a newer detached failure over an older workflow success", () => {
+    const selected = chooseNewestProviderVerificationEvidence({
+      workflow: {
+        result: "RESTORED",
+        postProbeId: "probe-success",
+        message: "Older workflow success.",
+        proofSnapshot: {
+          kind: "PROVIDER_PROBE",
+          outcome: "NO_MATCH",
+          observedAt: "2026-07-15T20:06:00.000Z"
+        }
+      },
+      detachedVerification: null,
+      detachedFailure: {
+        result: "RETRY_SCHEDULED",
+        postProbeId: null,
+        message: "Newer detached failure.",
+        proofSnapshot: {
+          kind: "PROVIDER_VERIFICATION_FAILURE",
+          outcome: "FETCH_FAILED",
+          observedAt: "2026-07-15T20:07:00.000Z"
+        }
+      }
+    });
+
+    expect(selected).toMatchObject({
+      result: "RETRY_SCHEDULED",
+      message: "Newer detached failure.",
+      proofSnapshot: { kind: "PROVIDER_VERIFICATION_FAILURE" }
+    });
+  });
+
+  it("keeps a newer workflow success over an older detached failure", () => {
+    const selected = chooseNewestProviderVerificationEvidence({
+      workflow: {
+        result: "RESTORED",
+        postProbeId: "probe-success",
+        message: "Newer workflow success.",
+        proofSnapshot: {
+          kind: "PROVIDER_PROBE",
+          outcome: "NO_MATCH",
+          observedAt: "2026-07-15T20:07:00.000Z"
+        }
+      },
+      detachedVerification: null,
+      detachedFailure: {
+        result: "RETRY_SCHEDULED",
+        postProbeId: null,
+        message: "Older detached failure.",
+        proofSnapshot: {
+          kind: "PROVIDER_VERIFICATION_FAILURE",
+          outcome: "FETCH_FAILED",
+          observedAt: "2026-07-15T20:06:00.000Z"
+        }
+      }
+    });
+
+    expect(selected).toMatchObject({
+      result: "RESTORED",
+      message: "Newer workflow success.",
+      proofSnapshot: { kind: "PROVIDER_PROBE" }
+    });
+  });
+
+  it("fails safe when success and failure observations have the same timestamp", () => {
+    const selected = chooseNewestProviderVerificationEvidence({
+      workflow: null,
+      detachedVerification: {
+        result: "RESTORED",
+        postProbeId: null,
+        message: "Tied detached success.",
+        proofSnapshot: {
+          kind: "PROVIDER_VERIFICATION",
+          outcome: "NO_MATCH",
+          observedAt: "2026-07-15T20:06:00.000Z"
+        }
+      },
+      detachedFailure: {
+        result: "RETRY_SCHEDULED",
+        postProbeId: null,
+        message: "Tied detached failure.",
+        proofSnapshot: {
+          kind: "PROVIDER_VERIFICATION_FAILURE",
+          outcome: "FETCH_FAILED",
+          observedAt: "2026-07-15T20:06:00.000Z"
+        }
+      }
+    });
+
+    expect(selected).toMatchObject({
+      result: "RETRY_SCHEDULED",
+      message: "Tied detached failure."
+    });
+  });
+
+  it("does not carry detached failure evidence from before dispatch", () => {
+    const releaseSha = "a".repeat(40);
+    expect(
+      classifyDetachedVerificationFailure({
+        deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+        recheckDispatchStartedAt: new Date("2026-07-15T20:10:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T20:04:00.000Z"),
+        failure: {
+          current: true,
+          releaseSha,
+          runtimeVersion: releaseSha,
+          status: "STALE",
+          outcome: "FETCH_FAILED",
+          failureClass: "SCHEMA",
+          providerExecution: false,
+          observedAt: new Date("2026-07-15T20:06:00.000Z"),
+          completedAt: new Date("2026-07-15T20:06:30.000Z"),
+          nextAttemptAt: null,
+          providerRetryNotBeforeAt: null,
+          providerSnapshotFingerprint: "b".repeat(64),
+          evidence: {
+            kind: "PROVIDER_VERIFICATION",
+            runtimeVersion: releaseSha,
+            outcome: "FETCH_FAILED",
+            failureClass: "SCHEMA",
+            providerExecution: false,
+            observedAt: "2026-07-15T20:06:00.000Z"
+          }
+        }
+      })
+    ).toBeNull();
+  });
 
   it("rejects an older successful probe from another runtime", () => {
     expect(
@@ -735,6 +1008,39 @@ describe("fresh runtime verification", () => {
         }
       )
     ).toBe(false);
+  });
+
+  it("accepts durable no-email provider proof after deployment and dispatch", () => {
+    const releaseSha = "a".repeat(40);
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "RESTORED",
+          proofSnapshot: {
+            kind: "PROVIDER_VERIFICATION",
+            outcome: "NO_MATCH",
+            observedAt: "2026-07-15T20:06:00.000Z",
+            completedAt: "2026-07-15T20:06:30.000Z",
+            runtimeVersion: releaseSha,
+            providerExecution: true,
+            providerSnapshotFingerprint: "b".repeat(64)
+          },
+          verifiedAt: new Date("2026-07-15T20:07:00.000Z"),
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T20:04:00.000Z"),
+          currentProviderSnapshotFingerprint: "b".repeat(64),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T20:04:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T20:00:00.000Z"),
+          releaseSha,
+          deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+          recheckDispatchStartedAt: new Date("2026-07-15T20:05:30.000Z")
+        }
+      )
+    ).toBe(true);
   });
 
   it("rejects contradictory online metadata for a no-online-booking disposition", () => {
@@ -1472,6 +1778,865 @@ describe("course-support release heartbeat persistence", () => {
       })
     ).rejects.toThrow("requires deployment proof");
     expect(prismaMocks.transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("detached verification atomic batch fences", () => {
+  const releaseSha = "a".repeat(40);
+  const providerFingerprint = "b".repeat(64);
+  const observedAt = new Date("2026-07-15T19:56:00.000Z");
+  const completedAt = new Date("2026-07-15T19:57:00.000Z");
+  const incidentUpdatedAt = new Date("2026-07-15T19:45:00.000Z");
+
+  function providerCourse(
+    overrides: Partial<{
+      isPublic: boolean;
+      bookingMethod: "PUBLIC_ONLINE" | "PHONE_ONLY";
+      automationEligibility: "ALLOWED" | "BLOCKED";
+      automationReason: "NONE" | "ACCOUNT_REQUIRED" | "NO_ONLINE_BOOKING";
+      intelligenceVerifiedAt: Date | null;
+      intelligenceReviewAt: Date | null;
+      intelligenceConfidence: number | null;
+    }> = {}
+  ) {
+    return {
+      timeZone: "America/Los_Angeles",
+      isPublic: true,
+      website: "https://course.example/",
+      detectedBookingUrl: "https://booking.example/tee-times",
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "booking.example",
+      bookingMethod: "PUBLIC_ONLINE",
+      bookingWindowDaysAhead: 7,
+      bookingReleaseTimeLocal: "07:00",
+      bookingWindowSource: "COURSE_POLICY",
+      bookingWindowEvidenceUrl: "https://course.example/booking-policy",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: { adapter: "example" },
+      ...overrides
+    };
+  }
+
+  function proofEvidence() {
+    return {
+      schemaVersion: 1,
+      kind: "PROVIDER_VERIFICATION",
+      releaseSha,
+      runtimeVersion: releaseSha,
+      providerExecution: true,
+      outcome: "NO_MATCH",
+      observedAt: observedAt.toISOString(),
+      providerSnapshotFingerprint: providerFingerprint
+    };
+  }
+
+  function eligibleProof() {
+    return {
+      eligible: true as const,
+      releaseSha,
+      runtimeVersion: releaseSha,
+      outcome: "NO_MATCH" as const,
+      providerExecution: true,
+      completedAt,
+      providerSnapshotFingerprint: providerFingerprint,
+      evidence: proofEvidence()
+    };
+  }
+
+  function atomicRequest(course = providerCourse()) {
+    return {
+      courseId: "course-1",
+      releaseSha,
+      runtimeVersion: releaseSha,
+      status: "SUCCEEDED",
+      leaseToken: null,
+      leaseExpiresAt: null,
+      outcome: "NO_MATCH",
+      evidence: proofEvidence(),
+      providerSnapshotFingerprint: providerFingerprint,
+      completedAt,
+      batchIncident: {
+        id: "entry-1",
+        batchId: "batch-1",
+        incidentId: "incident-1",
+        courseId: "course-1",
+        cycle: 1,
+        batch: {
+          id: "batch-1",
+          status: "VERIFYING",
+          ownerThreadId: "owner-thread",
+          leaseToken: "lease-1",
+          leaseExpiresAt: new Date("2026-07-15T21:00:00.000Z"),
+          releaseSha,
+          completedAt: null
+        },
+        incident: {
+          id: "incident-1",
+          cycle: 1,
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: "batch-1",
+          engineeringOnly: true
+        },
+        course
+      }
+    };
+  }
+
+  function verificationBatch() {
+    return {
+      id: "batch-1",
+      status: "VERIFYING",
+      revision: 7,
+      releaseSha,
+      deployedAt: new Date("2026-07-15T19:50:00.000Z"),
+      recheckDispatchKey: null,
+      recheckDispatchStartedAt: new Date("2026-07-15T19:51:00.000Z"),
+      recheckDispatchedAt: null,
+      summary: null,
+      createdAt: new Date("2026-07-15T18:00:00.000Z"),
+      incidents: [
+        {
+          id: "entry-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          result: "PENDING",
+          preProbeId: null,
+          postProbeId: null,
+          message: null,
+          proofSnapshot: null,
+          updatedAt: incidentUpdatedAt,
+          incident: {
+            cycle: 1,
+            status: "AUTO_INVESTIGATING",
+            engineeringOnly: true,
+            activeBatchId: "batch-1",
+            firstSeenAt: new Date("2026-07-15T18:30:00.000Z"),
+            lastSeenAt: incidentUpdatedAt,
+            updatedAt: incidentUpdatedAt
+          },
+          course: {
+            googlePlaceId: null,
+            isPublic: true,
+            bookingMethod: "PUBLIC_ONLINE",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            automationDiscoveries: []
+          }
+        }
+      ]
+    };
+  }
+
+  function healthyDetachedDispatch() {
+    return {
+      recheckDispatch: {
+        attempted: true,
+        dispatchError: false,
+        detachedVerificationDispatchError: false,
+        schedulerHealthComplete: true,
+        courseOutcomeHealthComplete: true,
+        affectedSearchCount: 0,
+        currentAffectedSearchCount: 0,
+        queuedCount: 0,
+        queueFailureCount: 0,
+        directStartCount: 0,
+        healthySchedulerCount: 0,
+        freshSearchCheckCount: 0,
+        restoredCourseCount: 1,
+        provenRunnableCourseCount: 1,
+        affectedCourseSearchPairCount: 0,
+        healthyCourseSearchPairCount: 0,
+        schedulerHealthObservedAt: now.toISOString()
+      }
+    };
+  }
+
+  function detachedFailureProof(
+    overrides: Partial<{
+      status: "RETRYABLE_FAILED" | "STALE";
+      nextAttemptAt: string | null;
+      providerRetryNotBeforeAt: string | null;
+    }> = {}
+  ) {
+    return {
+      kind: "PROVIDER_VERIFICATION_FAILURE",
+      status: "RETRYABLE_FAILED" as const,
+      outcome: "FETCH_FAILED",
+      failureClass: "RATE_LIMIT",
+      observedAt: observedAt.toISOString(),
+      completedAt: null,
+      nextAttemptAt: null,
+      providerRetryNotBeforeAt: null,
+      runtimeVersion: releaseSha,
+      providerExecution: true,
+      providerSnapshotFingerprint: providerFingerprint,
+      ...overrides
+    };
+  }
+
+  function detachedRequestState(
+    status:
+      | "QUEUED"
+      | "CHECKING"
+      | "SUCCEEDED"
+      | "RETRYABLE_FAILED"
+      | "STALE",
+    overrides: Record<string, unknown> = {}
+  ) {
+    const failed = status === "RETRYABLE_FAILED" || status === "STALE";
+    return {
+      batchIncidentId: "entry-1",
+      releaseSha,
+      runtimeVersion: status === "QUEUED" ? null : releaseSha,
+      status,
+      outcome: failed
+        ? "FETCH_FAILED"
+        : status === "SUCCEEDED"
+          ? "NO_MATCH"
+          : null,
+      failureClass: failed ? "RATE_LIMIT" : null,
+      evidence: failed
+        ? {
+            ...proofEvidence(),
+            outcome: "FETCH_FAILED",
+            failureClass: "RATE_LIMIT",
+            providerRetryNotBeforeAt: "2026-07-16T02:00:00.000Z"
+          }
+        : status === "SUCCEEDED"
+          ? proofEvidence()
+          : null,
+      providerSnapshotFingerprint: providerFingerprint,
+      nextAttemptAt:
+        status === "RETRYABLE_FAILED"
+          ? new Date("2026-07-15T22:00:00.000Z")
+          : null,
+      completedAt: status === "SUCCEEDED" || status === "STALE" ? completedAt : null,
+      ...overrides
+    };
+  }
+
+  function currentDetachedFailure(
+    status: "RETRYABLE_FAILED" | "STALE" = "RETRYABLE_FAILED"
+  ) {
+    const request = detachedRequestState(status);
+    return {
+      current: true as const,
+      releaseSha,
+      runtimeVersion: releaseSha,
+      status,
+      outcome: "FETCH_FAILED" as const,
+      failureClass: "RATE_LIMIT" as const,
+      providerExecution: true,
+      observedAt,
+      completedAt: request.completedAt as Date | null,
+      nextAttemptAt: request.nextAttemptAt as Date | null,
+      providerRetryNotBeforeAt: new Date("2026-07-16T02:00:00.000Z"),
+      providerSnapshotFingerprint: providerFingerprint,
+      evidence: request.evidence as Record<string, unknown>
+    };
+  }
+
+  function closeoutBatch(
+    result: "RESTORED" | "RETRY_SCHEDULED",
+    retryProofSnapshot: Record<string, unknown> | null = null
+  ) {
+    const proofSnapshot =
+      result === "RESTORED"
+        ? {
+            kind: "PROVIDER_VERIFICATION",
+            outcome: "NO_MATCH",
+            observedAt: observedAt.toISOString(),
+            completedAt: completedAt.toISOString(),
+            runtimeVersion: releaseSha,
+            providerExecution: true,
+            providerSnapshotFingerprint: providerFingerprint
+          }
+        : retryProofSnapshot;
+    return {
+      id: "batch-1",
+      status: "VERIFYING",
+      revision: 8,
+      releaseSha,
+      deployedAt: new Date("2026-07-15T19:50:00.000Z"),
+      recheckDispatchStartedAt: new Date("2026-07-15T19:51:00.000Z"),
+      leaseToken: "lease-1",
+      leaseExpiresAt: new Date("2026-07-15T21:00:00.000Z"),
+      ownerThreadId: "owner-thread",
+      ownerAutomationRunId: null,
+      summary: healthyDetachedDispatch(),
+      createdAt: new Date("2026-07-15T18:00:00.000Z"),
+      incidents: [
+        {
+          id: "entry-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          result,
+          message: "Current verification recorded.",
+          proofSnapshot,
+          verifiedAt: new Date("2026-07-15T19:58:00.000Z"),
+          verifiedIncidentUpdatedAt: incidentUpdatedAt,
+          updatedAt: new Date("2026-07-15T19:58:00.000Z"),
+          course: providerCourse(),
+          incident: {
+            cycle: 1,
+            status: "AUTO_INVESTIGATING",
+            engineeringOnly: true,
+            activeBatchId: "batch-1",
+            firstSeenAt: new Date("2026-07-15T18:30:00.000Z"),
+            lastSeenAt: incidentUpdatedAt,
+            updatedAt: incidentUpdatedAt,
+            failureClass: "UNSUPPORTED_FAMILY",
+            failureFingerprint: "fingerprint",
+            attemptCount: 1,
+            escalatedAt: null
+          }
+        }
+      ]
+    };
+  }
+
+  it("downgrades detached success when live demand appears before atomic persistence", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest());
+    prismaMocks.teeSearchCount.mockResolvedValue(1);
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
+      eligibleProof()
+    );
+
+    await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: "STALE_EVIDENCE",
+          proofSnapshot: expect.anything()
+        })
+      })
+    );
+    expect(prismaMocks.teeSearchCount).toHaveBeenCalledWith({
+      where: {
+        status: "ACTIVE",
+        date: { gte: new Date("2026-07-15T00:00:00.000Z") },
+        preferences: { some: { courseId: "course-1" } }
+      }
+    });
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: "Serializable" }
+    );
+  });
+
+  it.each([
+    ["private identity", providerCourse({ isPublic: false })],
+    [
+      "current technical gate",
+      providerCourse({
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED",
+        intelligenceVerifiedAt: new Date("2026-07-15T19:59:00.000Z"),
+        intelligenceReviewAt: new Date("2026-07-16T20:00:00.000Z"),
+        intelligenceConfidence: 0.95
+      })
+    ],
+    [
+      "current manual gate",
+      providerCourse({
+        bookingMethod: "PHONE_ONLY",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        intelligenceVerifiedAt: new Date("2026-07-15T19:59:00.000Z"),
+        intelligenceReviewAt: new Date("2026-07-16T20:00:00.000Z"),
+        intelligenceConfidence: 0.95
+      })
+    ]
+  ])(
+    "downgrades detached success when the course changes to a %s before atomic persistence",
+    async (_label, currentCourse) => {
+      prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.verificationRequestFindUnique.mockResolvedValue(
+        atomicRequest(currentCourse)
+      );
+      verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
+        eligibleProof()
+      );
+
+      await verifyCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        releaseSha,
+        now
+      });
+
+      expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ result: "STALE_EVIDENCE" })
+        })
+      );
+      expect(prismaMocks.teeSearchCount).not.toHaveBeenCalled();
+      expect(
+        verificationMocks.buildCourseSupportProviderSnapshotFingerprint
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isPublic: currentCourse.isPublic,
+          intelligenceVerifiedAt: currentCourse.intelligenceVerifiedAt,
+          intelligenceReviewAt: currentCourse.intelligenceReviewAt,
+          intelligenceConfidence: currentCourse.intelligenceConfidence
+        })
+      );
+    }
+  );
+
+  it("persists detached success only after the atomic request and fingerprint pass", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest());
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
+      eligibleProof()
+    );
+
+    await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RESTORED" })
+      })
+    );
+    expect(
+      verificationMocks.buildCourseSupportProviderSnapshotFingerprint
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bookingWindowEvidenceUrl: "https://course.example/booking-policy"
+      })
+    );
+  });
+
+  it("reports aggregate pending detached verification and requires a verify rerun", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("QUEUED")
+    ]);
+    verificationMocks.scheduleCourseSupportVerificationRequests.mockResolvedValue({
+      createdCount: 1,
+      eligibleCount: 1,
+      ineligibleCount: 0,
+      requests: []
+    });
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: { pendingCount: 1, rerunNeeded: true },
+      recheckDispatch: {
+        detachedVerificationPendingCount: 1,
+        detachedVerificationRerunNeeded: true
+      }
+    });
+  });
+
+  it("carries current detached fetch failure evidence without restoring", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue({
+      current: true,
+      releaseSha,
+      runtimeVersion: releaseSha,
+      status: "RETRYABLE_FAILED",
+      outcome: "FETCH_FAILED",
+      failureClass: "RATE_LIMIT",
+      providerExecution: true,
+      observedAt,
+      completedAt: null,
+      nextAttemptAt: new Date("2026-07-15T20:15:00.000Z"),
+      providerRetryNotBeforeAt: new Date("2026-07-15T22:00:00.000Z"),
+      providerSnapshotFingerprint: providerFingerprint,
+      evidence: {
+        ...proofEvidence(),
+        outcome: "FETCH_FAILED",
+        failureClass: "RATE_LIMIT"
+      }
+    });
+
+    await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: "RETRY_SCHEDULED",
+          proofSnapshot: expect.objectContaining({
+            kind: "PROVIDER_VERIFICATION_FAILURE",
+            outcome: "FETCH_FAILED",
+            failureClass: "RATE_LIMIT",
+            providerRetryNotBeforeAt: "2026-07-15T22:00:00.000Z"
+          })
+        })
+      })
+    );
+  });
+
+  it("rejects terminal detached closeout when live demand appears after verification", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RESTORED"));
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest());
+    prismaMocks.teeSearchCount.mockResolvedValue(1);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "success",
+        now
+      })
+    ).rejects.toThrow("changed before terminal closeout");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects terminal detached closeout when current access intelligence becomes terminal", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RESTORED"));
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(
+      atomicRequest(
+        providerCourse({
+          automationEligibility: "BLOCKED",
+          automationReason: "ACCOUNT_REQUIRED",
+          intelligenceVerifiedAt: new Date("2026-07-15T19:59:00.000Z"),
+          intelligenceReviewAt: new Date("2026-07-16T20:00:00.000Z"),
+          intelligenceConfidence: 0.95
+        })
+      )
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "success",
+        now
+      })
+    ).rejects.toThrow("changed before terminal closeout");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearchCount).not.toHaveBeenCalled();
+  });
+
+  it.each(["QUEUED", "CHECKING"] as const)(
+    "refuses closeout while detached verification is %s",
+    async (status) => {
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        closeoutBatch("RETRY_SCHEDULED")
+      );
+      prismaMocks.verificationRequestFindMany.mockResolvedValue([
+        detachedRequestState(status)
+      ]);
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "retryable_failed",
+          now
+        })
+      ).rejects.toThrow("still pending");
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    }
+  );
+
+  it("refuses closeout when detached success finished after the last verify read", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch("RETRY_SCHEDULED")
+    );
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("SUCCEEDED")
+    ]);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        now
+      })
+    ).rejects.toThrow("completed after the last evidence read");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses closeout until a current retryable failure is copied by verify", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch("RETRY_SCHEDULED")
+    );
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("RETRYABLE_FAILED")
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      currentDetachedFailure()
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        now
+      })
+    ).rejects.toThrow("failure changed after the last evidence read");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses closeout until current stale cooldown evidence is copied by verify", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch("RETRY_SCHEDULED")
+    );
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("STALE")
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      currentDetachedFailure("STALE")
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        now
+      })
+    ).rejects.toThrow("cooldown evidence has not been recorded");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("catches a rate-limit request that becomes stale after the pre-closeout evidence read", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch("RETRY_SCHEDULED")
+    );
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("STALE")
+    ]);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        now
+      })
+    ).rejects.toThrow("cooldown evidence has not been recorded");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("allows retry closeout after verify copied the exact current detached failure", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch(
+        "RETRY_SCHEDULED",
+        detachedFailureProof({
+          nextAttemptAt: "2026-07-15T22:00:00.000Z",
+          providerRetryNotBeforeAt: "2026-07-16T02:00:00.000Z"
+        })
+      )
+    );
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("RETRYABLE_FAILED")
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      currentDetachedFailure()
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      durableCloseoutRecorded: true
+    });
+  });
+
+  it("preserves the later detached provider cooldown during retry closeout", async () => {
+    const persistedRetryAt = new Date("2026-07-15T22:00:00.000Z");
+    const providerRetryNotBeforeAt = new Date("2026-07-16T02:00:00.000Z");
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch(
+        "RETRY_SCHEDULED",
+        detachedFailureProof({
+          nextAttemptAt: persistedRetryAt.toISOString(),
+          providerRetryNotBeforeAt: providerRetryNotBeforeAt.toISOString()
+        })
+      )
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "retryable_failed",
+      now
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextAttemptAt: providerRetryNotBeforeAt
+        })
+      })
+    );
+  });
+
+  it("preserves a valid detached provider cooldown beyond the request horizon", async () => {
+    const providerRetryNotBeforeAt = new Date("2026-07-17T02:00:00.000Z");
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch(
+        "RETRY_SCHEDULED",
+        detachedFailureProof({
+          status: "STALE",
+          nextAttemptAt: null,
+          providerRetryNotBeforeAt: providerRetryNotBeforeAt.toISOString()
+        })
+      )
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "retryable_failed",
+      now
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextAttemptAt: providerRetryNotBeforeAt
+        })
+      })
+    );
+  });
+
+  it("uses a 24-hour fail-safe for current detached rate limits without a valid cooldown", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch(
+        "RETRY_SCHEDULED",
+        detachedFailureProof({
+          status: "STALE",
+          nextAttemptAt: null,
+          providerRetryNotBeforeAt: null
+        })
+      )
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "retryable_failed",
+      now
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextAttemptAt: new Date("2026-07-16T20:00:00.000Z")
+        })
+      })
+    );
+  });
+
+  it("allows closeout for stale requests without current eligible failure evidence", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch("RETRY_SCHEDULED")
+    );
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("STALE", {
+        failureClass: "SCHEMA",
+        evidence: {
+          ...proofEvidence(),
+          outcome: "FETCH_FAILED",
+          failureClass: "SCHEMA"
+        }
+      })
+    ]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 2 });
+
+    const result = await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "retryable_failed",
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "retryable_failed",
+      durableCloseoutRecorded: true
+    });
+    expect(prismaMocks.verificationRequestUpdateMany).toHaveBeenCalledWith({
+      where: {
+        batchIncident: { batchId: "batch-1" },
+        status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
+      },
+      data: expect.objectContaining({
+        status: "STALE",
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        completedAt: now,
+        lastError: "batch_closed"
+      })
+    });
   });
 });
 

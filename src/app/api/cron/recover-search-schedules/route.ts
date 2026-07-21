@@ -1,5 +1,6 @@
 import { listSearchesNeedingScheduleRecovery } from "@/lib/automation/db-service";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
+import { recoverDueCourseSupportVerificationRequests } from "@/lib/automation/course-support-verification-scheduler";
 import { hasDatabaseConfig } from "@/lib/env";
 import { recoverPendingClerkEmailUpdates } from "@/lib/users/pending-email";
 
@@ -22,8 +23,22 @@ export async function GET(request: Request) {
     searches.map((search) => startSearchSchedule(search.id))
   );
 
+  let courseSupportVerification = {
+    considered: 0,
+    started: 0,
+    skipped: 0,
+    failed: 1
+  };
+  try {
+    courseSupportVerification =
+      await recoverDueCourseSupportVerificationRequests();
+  } catch {
+    // Provider-verification recovery must not suppress customer schedule recovery.
+  }
+
   return Response.json({
     pendingEmailRecovery,
+    courseSupportVerification,
     considered: searches.length,
     restarted: results.filter((result) => result.status === "fulfilled").length,
     failed: results.filter((result) => result.status === "rejected").length
