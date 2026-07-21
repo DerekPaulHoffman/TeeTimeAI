@@ -22,6 +22,7 @@ import {
   enrichTeesnapDiscovery,
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
+  isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
@@ -391,6 +392,7 @@ type CollectedPageEvidence = Pick<
   | "bookingSurfaceText"
   | "accessBarriers"
   | "corroboratedAccessBarrier"
+  | "teeItUpLegacyConfigurations"
 >;
 
 type RecentCourseAutomationDiscovery = Awaited<
@@ -1688,18 +1690,24 @@ export async function collectOfficialSiteEvidence(
   const targetScopedOfficialLinks = matchedCoursePage && courseName
     ? uniqueLinkCandidates(
         [
-          ...pages
-            .filter((page) =>
-              haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
-            )
-            .flatMap((page) => page.evidence.linkCandidates)
-            .filter((candidate) =>
-              !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
-              doesProviderLinkLabelExactlyIdentifyCourse(
-                candidate.label,
-                courseName
-              )
-            ),
+          ...pages.flatMap((page) => {
+            if (!haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)) {
+              return [];
+            }
+            const pageIdentifiesCourse =
+              doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
+              doesPageMarkupIdentifyCourse(page.html, courseName);
+            return page.evidence.linkCandidates.filter(
+              (candidate) =>
+                !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
+                (doesProviderLinkLabelExactlyIdentifyCourse(
+                  candidate.label,
+                  courseName
+                ) ||
+                  (pageIdentifiesCourse &&
+                    isLegacyTeeItUpPlayUrl(candidate.url)))
+            );
+          }),
           ...targetScopedOfficialRedirects
         ]
       )
@@ -1755,6 +1763,9 @@ export async function collectOfficialSiteEvidence(
       .filter(Boolean)
       .join("\n")
       .slice(0, 4_000),
+    teeItUpLegacyConfigurations: uniqueTeeItUpLegacyConfigurations(
+      pages.flatMap((page) => page.evidence.teeItUpLegacyConfigurations)
+    ),
     accessBarriers: pages
       .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
       .map((page) => ({ url: page.finalUrl, status: 403 as const }))
@@ -2048,7 +2059,11 @@ function mergeHtmlEvidence(
     visibleText: [left.visibleText, right.visibleText]
       .filter(Boolean)
       .join("\n")
-      .slice(0, 12_000)
+      .slice(0, 12_000),
+    teeItUpLegacyConfigurations: uniqueTeeItUpLegacyConfigurations([
+      ...left.teeItUpLegacyConfigurations,
+      ...right.teeItUpLegacyConfigurations
+    ])
   };
 }
 
@@ -2067,6 +2082,17 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
     }
     observedUrls.push(url);
     linkCandidates.push({ url, label: stripHtml(match[4] ?? "") });
+  }
+
+  for (const match of decodedHtml.matchAll(
+    /<iframe\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi
+  )) {
+    const url = resolveHttpUrl(match[1] ?? match[2] ?? match[3], pageUrl);
+    if (!url || !isLegacyTeeItUpPlayUrl(url)) {
+      continue;
+    }
+    observedUrls.push(url);
+    linkCandidates.push({ url, label: "Book tee times" });
   }
 
   for (const match of decodedHtml.matchAll(
@@ -2127,8 +2153,83 @@ function extractHtmlEvidence(html: string, pageUrl: string) {
   return {
     observedUrls: uniqueStrings(observedUrls),
     linkCandidates,
-    visibleText
+    visibleText,
+    teeItUpLegacyConfigurations: extractTeeItUpLegacyConfigurations(
+      embeddedContent,
+      pageUrl
+    )
   };
+}
+
+function extractTeeItUpLegacyConfigurations(
+  embeddedContent: string,
+  pageUrl: string
+) {
+  if (!isLegacyTeeItUpPlayUrl(pageUrl)) {
+    return [];
+  }
+  const providerUrl = new URL(pageUrl);
+  const alias = providerUrl.hostname.match(
+    /^(.+)\.play\.teeitup\.(?:golf|com)$/i
+  )?.[1];
+  if (!alias) {
+    return [];
+  }
+
+  const configurations = [
+    ...embeddedContent.matchAll(
+      /"alias"\s*:\s*"([^"]+)"[\s\S]{0,600}?"gnFacilityIds"\s*:\s*\[([^\]]*)\][\s\S]{0,600}?"name"\s*:\s*"([^"]{1,160})"/gi
+    )
+  ].flatMap((match) => {
+    const observedAlias = match[1]?.trim();
+    const facilityIds = (match[2] ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .map(Number);
+    const courseName = match[3]?.trim();
+    if (
+      !observedAlias ||
+      observedAlias.toLocaleLowerCase("en-US") !==
+        alias.toLocaleLowerCase("en-US") ||
+      !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(observedAlias) ||
+      facilityIds.length === 0 ||
+      facilityIds.length > 20 ||
+      facilityIds.some(
+        (facilityId) =>
+          !Number.isSafeInteger(facilityId) || facilityId <= 0
+      ) ||
+      new Set(facilityIds).size !== facilityIds.length ||
+      !courseName
+    ) {
+      return [];
+    }
+    return [{
+      providerUrl: `https://${providerUrl.hostname.toLocaleLowerCase("en-US")}/`,
+      alias: observedAlias,
+      facilityIds,
+      courseName
+    }];
+  });
+
+  return uniqueTeeItUpLegacyConfigurations(configurations);
+}
+
+function uniqueTeeItUpLegacyConfigurations<T extends {
+  providerUrl: string;
+  alias: string;
+  facilityIds: number[];
+  courseName: string;
+}>(configurations: T[]) {
+  const seen = new Set<string>();
+  return configurations.filter((configuration) => {
+    const key = JSON.stringify(configuration);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function pickLikelyBookingCandidate(

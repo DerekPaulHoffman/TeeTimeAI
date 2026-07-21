@@ -9,6 +9,7 @@ import {
   evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
+  isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
@@ -265,6 +266,126 @@ describe("buildBrowserDiscovery", () => {
       aliases: ["richter-park-golf-course"],
       bookingBaseUrl: "https://richter-park-golf-course.book.teeitup.com/"
     });
+  });
+
+  it("learns course-scoped TeeItUp metadata from a legacy play embed", () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const providerUrl = `https://${alias}.play.teeitup.golf/`;
+    const bookingUrl =
+      `https://${alias}.book.teeitup.golf/?course=24680`;
+    const discovery = buildBrowserDiscovery({
+      courseId: "wampanoag",
+      courseName: "Wampanoag Golf Course",
+      sourceUrl:
+        "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      finalUrl:
+        "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      observedUrls: [providerUrl],
+      officialPage: {
+        url: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+        courseName: "Wampanoag Golf Course",
+        linkCandidates: [{ url: providerUrl, label: "Book tee times" }]
+      },
+      visibleText: "Wampanoag Golf Course Book Tee Times Online",
+      teeItUpLegacyConfigurations: [{
+        providerUrl,
+        alias,
+        facilityIds: [24680],
+        courseName: "Wampanoag Golf Course"
+      }]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl,
+      apiMetadata: {
+        aliases: [alias],
+        bookingBaseUrl: bookingUrl,
+        facilityIds: [24680]
+      },
+      evidence: {
+        learnedFrom: "teeitup-legacy-play-configuration"
+      }
+    });
+  });
+
+  it("accepts only a credential-free HTTPS root for legacy TeeItUp play embeds", () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    expect(
+      isLegacyTeeItUpPlayUrl(`https://${alias}.play.teeitup.golf/`)
+    ).toBe(true);
+    for (const unsafeUrl of [
+      `http://${alias}.play.teeitup.golf/`,
+      `https://user:password@${alias}.play.teeitup.golf/`,
+      `https://${alias}.play.teeitup.golf:8443/`,
+      `https://${alias}.play.teeitup.golf/account`,
+      `https://${alias}.play.teeitup.golf/?date=2026-07-24`,
+      `https://${alias}.play.teeitup.golf/#checkout`,
+      `https://sibling.${alias}.play.teeitup.golf/`,
+      `https://${alias}.play.teeitup.golf.example/`
+    ]) {
+      expect(isLegacyTeeItUpPlayUrl(unsafeUrl)).toBe(false);
+    }
+  });
+
+  it("rejects a legacy TeeItUp play embed whose provider identity names another course", () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const providerUrl = `https://${alias}.play.teeitup.golf/`;
+    const discovery = buildBrowserDiscovery({
+      courseId: "wampanoag",
+      courseName: "Wampanoag Golf Course",
+      sourceUrl:
+        "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      observedUrls: [providerUrl],
+      officialPage: {
+        url: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+        courseName: "Wampanoag Golf Course",
+        linkCandidates: [{ url: providerUrl, label: "Book tee times" }]
+      },
+      teeItUpLegacyConfigurations: [{
+        providerUrl,
+        alias,
+        facilityIds: [24680],
+        courseName: "Different Golf Course"
+      }]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl:
+        "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("rejects a legacy TeeItUp play embed with multiple provider facilities", () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const providerUrl = `https://${alias}.play.teeitup.golf/`;
+    const discovery = buildBrowserDiscovery({
+      courseId: "wampanoag",
+      courseName: "Wampanoag Golf Course",
+      sourceUrl:
+        "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      observedUrls: [providerUrl],
+      officialPage: {
+        url: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+        courseName: "Wampanoag Golf Course",
+        linkCandidates: [{ url: providerUrl, label: "Book tee times" }]
+      },
+      teeItUpLegacyConfigurations: [{
+        providerUrl,
+        alias,
+        facilityIds: [24680, 13579],
+        courseName: "Wampanoag Golf Course"
+      }]
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("does not trust TeeItUp links from an official page without an explicit course identity", () => {

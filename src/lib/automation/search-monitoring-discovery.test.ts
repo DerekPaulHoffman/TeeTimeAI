@@ -337,6 +337,90 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("learns TeeItUp metadata from a course-owned legacy play embed", async () => {
+    const officialUrl =
+      "https://www.wampanoaggolfcourseswansea.com/";
+    const teeTimesUrl =
+      "https://www.wampanoaggolfcourseswansea.com/teetimes/";
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const legacyProviderUrl = `https://${alias}.play.teeitup.golf/`;
+    const canonicalBookingUrl =
+      `https://${alias}.book.teeitup.golf/?course=24680`;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === officialUrl) {
+        return new Response(
+          '<html><head><title>Wampanoag Golf Course</title></head><body><a href="/teetimes/">Book Tee Times</a></body></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === teeTimesUrl) {
+        return new Response(
+          `<html><head><title>Wampanoag Golf Course Tee Times</title></head><body><h1>Wampanoag Golf Course</h1><iframe src="${legacyProviderUrl}"></iframe></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === legacyProviderUrl) {
+        return new Response(
+          String.raw`<html><script>self.__next_f.push([1,"{\"alias\":\"${alias}\",\"gnFacilityIds\":[24680],\"name\":\"Wampanoag Golf Course\",\"rates\":[{\"golfFacilityId\":24680}]}"])</script></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "wampanoag",
+          name: "Wampanoag Golf Course",
+          website: officialUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      officialUrl,
+      teeTimesUrl,
+      legacyProviderUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "wampanoag",
+        status: "LEARNED",
+        detectedPlatform: "TEEITUP",
+        bookingUrl: canonicalBookingUrl,
+        apiMetadata: {
+          aliases: [alias],
+          bookingBaseUrl: canonicalBookingUrl,
+          facilityIds: [24680]
+        },
+        evidence: expect.objectContaining({
+          learnedFrom: "teeitup-legacy-play-configuration"
+        })
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      attemptedCourseIds: ["wampanoag"],
+      appliedCourseIds: ["wampanoag"],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: ["wampanoag"]
+    });
+  });
+
   it("learns ForeUp metadata from Apptegy embedded content links", async () => {
     const bookingUrl =
       "https://foreupsoftware.com/index.php/booking/19333/145#teetimes";

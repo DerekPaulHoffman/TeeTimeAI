@@ -35,6 +35,14 @@ export type BrowserDiscoveryEvidence = {
   accessBarriers?: BrowserAccessBarrier[];
   corroboratedAccessBarrier?: BrowserAccessBarrier;
   bookingCallToAction?: boolean;
+  teeItUpLegacyConfigurations?: TeeItUpLegacyConfigurationEvidence[];
+};
+
+export type TeeItUpLegacyConfigurationEvidence = {
+  providerUrl: string;
+  alias: string;
+  facilityIds: number[];
+  courseName: string;
 };
 
 export type BrowserAccessBarrier = {
@@ -3784,7 +3792,9 @@ function learnTeeItUpDiscovery(
   }
 
   const selectorResolution = resolveTeeItUpFacilitySelector(
-    selectedBookingUrls
+    selectedBookingUrls,
+    evidence.teeItUpLegacyConfigurations,
+    evidence.courseName
   );
   if (selectorResolution.status === "INVALID") {
     return buildRejectedTeeItUpDiscovery(
@@ -3844,7 +3854,9 @@ function learnTeeItUpDiscovery(
       finalUrl: evidence.finalUrl,
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "teeitup-booking-url"
+      learnedFrom: selectedBookingUrls.some(isLegacyTeeItUpPlayUrl)
+        ? "teeitup-legacy-play-configuration"
+        : "teeitup-booking-url"
     }
   };
 }
@@ -3983,9 +3995,41 @@ function isRestrictedTeeItUpLabel(label: string) {
   );
 }
 
-function resolveTeeItUpFacilitySelector(urls: string[]):
+function resolveTeeItUpFacilitySelector(
+  urls: string[],
+  legacyConfigurations: TeeItUpLegacyConfigurationEvidence[] | undefined,
+  courseName: string
+):
   | { status: "VALID"; facilityId?: number }
   | { status: "INVALID" } {
+  const legacyUrls = urls.filter(isLegacyTeeItUpPlayUrl);
+  if (legacyUrls.length > 0) {
+    if (legacyUrls.length !== 1 || urls.length !== 1) {
+      return { status: "INVALID" };
+    }
+    const legacyUrl = legacyUrls[0];
+    const alias = getTeeItUpAlias(legacyUrl);
+    const matchingConfigurations = (legacyConfigurations ?? []).filter(
+      (configuration) =>
+        normalizeTeeItUpSourceUrl(configuration.providerUrl) ===
+          normalizeTeeItUpSourceUrl(legacyUrl) &&
+        alias &&
+        configuration.alias.toLocaleLowerCase("en-US") ===
+          alias.toLocaleLowerCase("en-US") &&
+        configuration.facilityIds.length === 1 &&
+        isPositiveSafeInteger(configuration.facilityIds[0]) &&
+        haveCompatibleCourseNames(courseName, configuration.courseName)
+    );
+    const uniqueFacilityIds = new Set(
+      matchingConfigurations.map(
+        (configuration) => configuration.facilityIds[0]
+      )
+    );
+    return matchingConfigurations.length > 0 && uniqueFacilityIds.size === 1
+      ? { status: "VALID", facilityId: [...uniqueFacilityIds][0] }
+      : { status: "INVALID" };
+  }
+
   const facilityIds = new Set<number>();
   const scopedAliases = new Set<string>();
   let scopedUrlCount = 0;
@@ -4044,7 +4088,11 @@ function buildTeeItUpBookingUrl(
   ) {
     return null;
   }
-  const bookingUrl = new URL(`https://${observedUrl.hostname}/`);
+  const legacyHost = getLegacyTeeItUpHost(observedUrl.hostname);
+  const bookingHostname = legacyHost
+    ? `${legacyHost.alias}.book.teeitup.${legacyHost.domain}`
+    : observedUrl.hostname;
+  const bookingUrl = new URL(`https://${bookingHostname}/`);
   if (facilityId) {
     bookingUrl.searchParams.set("course", String(facilityId));
   }
@@ -4735,6 +4783,11 @@ function getTeeItUpAlias(value: string) {
     return bookingHostMatch[1];
   }
 
+  const legacyHost = getLegacyTeeItUpHost(url.hostname);
+  if (legacyHost && isLegacyTeeItUpPlayUrl(value)) {
+    return legacyHost.alias;
+  }
+
   if (url.hostname === "phx-api-be-east-1b.kenna.io") {
     const aliasMatch = url.pathname.match(/^\/alias\/([^/]+)\/facilities$/);
     if (aliasMatch?.[1]) {
@@ -4747,7 +4800,48 @@ function getTeeItUpAlias(value: string) {
 
 function isTeeItUpBookingUrl(value: string) {
   const url = parseUrl(value);
-  return Boolean(url?.hostname.match(/^.+\.book\.teeitup\.(?:golf|com)$/i));
+  return Boolean(
+    url?.hostname.match(/^.+\.book\.teeitup\.(?:golf|com)$/i) ||
+      isLegacyTeeItUpPlayUrl(value)
+  );
+}
+
+export function isLegacyTeeItUpPlayUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(
+    url &&
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
+      !url.hash &&
+      url.pathname === "/" &&
+      !url.search &&
+      getLegacyTeeItUpHost(url.hostname)
+  );
+}
+
+function getLegacyTeeItUpHost(hostname: string) {
+  const match = hostname.match(
+    /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.play\.teeitup\.(golf|com)$/i
+  );
+  return match?.[1] && match[2]
+    ? {
+        alias: match[1],
+        domain: match[2].toLocaleLowerCase("en-US")
+      }
+    : null;
+}
+
+function normalizeTeeItUpSourceUrl(value: string) {
+  const url = parseUrl(value);
+  return url && isLegacyTeeItUpPlayUrl(value)
+    ? `https://${url.hostname.toLocaleLowerCase("en-US")}/`
+    : null;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function isTeesnapBookingUrl(value: string) {
