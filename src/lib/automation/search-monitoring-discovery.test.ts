@@ -3098,7 +3098,8 @@ describe("search monitoring discovery", () => {
   });
 
   it("keeps a validated legacy Prophet redirect course-scoped through provider apply", async () => {
-    const sourceUrl = "https://simsbury.example/book-a-tee-time";
+    const sourceUrl = "https://simsbury.example/";
+    const bookingPageUrl = "https://simsbury.example/book-a-tee-time";
     const legacyRoot = "https://secure.east.prophetservices.com/PublicCourse";
     const bookingUrl =
       "https://simsbury.cps.golf/onlineresweb/search-teetime?CourseId=1";
@@ -3108,13 +3109,19 @@ describe("search monitoring discovery", () => {
       JSON.stringify({
         baseURL: legacyRoot,
         newBookingEngine: false,
-        locations: [{ name: "Simsbury Farms Golf Course", courseId: "1" }]
+        locations: [{ name: "simsbury farms", courseId: "1" }]
       })
     ).toString("base64");
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       if (input.toString() === sourceUrl) {
         return new Response(
-          `<html><title>Simsbury Farms Golf Course</title><div data-widget-config="${widgetConfig}"></div></html>`,
+          '<html><title>Simsbury Farms Golf Course</title><a href="/contact">Book A Tee Time</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (input.toString() === bookingPageUrl) {
+        return new Response(
+          `<html><title>Book A Tee Time</title><div data-widget-config="${widgetConfig}"></div></html>`,
           { status: 200, headers: { "content-type": "text/html" } }
         );
       }
@@ -3176,6 +3183,7 @@ describe("search monitoring discovery", () => {
 
     expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
       sourceUrl,
+      bookingPageUrl,
       legacyRoot,
       bookingUrl,
       configurationUrl
@@ -3231,6 +3239,11 @@ describe("search monitoring discovery", () => {
         baseURL: "https://secure.east.prophetservices.com/PublicCourse",
         newBookingEngine: true,
         locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL: "https://secure.east.prophetservices.com/PublicCourse",
+        newBookingEngine: false,
+        locations: [{ name: "Course", courseId: "1" }]
       },
       {
         baseURL: "https://secure.east.prophetservices.com/PublicCourse",

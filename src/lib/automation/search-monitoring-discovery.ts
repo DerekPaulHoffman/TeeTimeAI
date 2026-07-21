@@ -1670,7 +1670,16 @@ export async function collectOfficialSiteEvidence(
   let wordpressContentAttempted = false;
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
-    const linkCandidates = pages.flatMap((page) => page.evidence.linkCandidates);
+    const observedLinkCandidates = pages.flatMap(
+      (page) => page.evidence.linkCandidates
+    );
+    const linkCandidates = uniqueLinkCandidates<CollectedLinkCandidate>([
+      ...deriveSameOriginBookingRouteCandidates(
+        observedLinkCandidates,
+        firstPage.finalUrl
+      ),
+      ...observedLinkCandidates
+    ]);
     const unvisitedCandidates = linkCandidates.filter(
       (candidate) => !visited.has(normalizeSourceKey(candidate.url))
     );
@@ -2157,6 +2166,54 @@ function isBookingLikeOfficialFollowup(candidate: {
   return /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
     `${candidate.label} ${parsed.hostname.replace(/[._-]+/gu, " ")} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
   );
+}
+
+function deriveSameOriginBookingRouteCandidates(
+  candidates: CollectedLinkCandidate[],
+  officialUrl: string
+): CollectedLinkCandidate[] {
+  const official = parseSafePublicUrl(officialUrl);
+  return candidates.flatMap((candidate) => {
+    const label = candidate.label
+      .replace(/[\u200B-\u200D\uFEFF]/gu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (
+      !/^(?:book|reserve)(?:\s+(?:a|your))?\s+tee\s*times?$/iu.test(
+        label
+      )
+    ) {
+      return [];
+    }
+
+    const observedTarget = parseSafePublicUrl(candidate.url);
+    if (observedTarget.origin !== official.origin) {
+      return [];
+    }
+    const observedRoute = decodeURIComponent(observedTarget.pathname)
+      .replace(/[-_]+/gu, " ");
+    if (
+      /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
+        observedRoute
+      )
+    ) {
+      return [];
+    }
+
+    const slug = label
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/gu, "")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]+/gu, "-")
+      .replace(/^-+|-+$/gu, "");
+    const inferred = parseSafePublicUrl(
+      new URL(`/${slug}`, official.origin).toString()
+    ).toString();
+    if (normalizeSourceKey(inferred) === normalizeSourceKey(candidate.url)) {
+      return [];
+    }
+    return [{ url: inferred, label }];
+  });
 }
 
 function mergeHtmlEvidence(
@@ -3186,7 +3243,7 @@ function extractLegacyProphetWidgetBookingCandidates(
     if (url) {
       candidates.push({
         url,
-        label: `Book tee times at ${matchingLocations[0]!.name}`,
+        label: `Book tee times at ${courseName}`,
         targetScopedRedirect: true
       });
     }
