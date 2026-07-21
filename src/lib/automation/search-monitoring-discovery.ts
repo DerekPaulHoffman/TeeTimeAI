@@ -21,6 +21,7 @@ import {
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
   findCorroboratingAccessBarrier,
+  getBestProbeUrl,
   keepPolicyOnlyDiscoveryActionable,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
@@ -893,13 +894,8 @@ export async function prepareSearchMonitoring(
 function getSafeMonitoringProbeUrl(
   course: MonitoringDiscoveryCandidate["course"]
 ) {
-  for (const candidate of [course.detectedBookingUrl, course.website]) {
-    const safeUrl = readSafePublicUrl(candidate);
-    if (safeUrl) {
-      return parseSafePublicUrl(safeUrl).toString();
-    }
-  }
-  return null;
+  const safeUrl = readSafePublicUrl(getBestProbeUrl(course));
+  return safeUrl ? parseSafePublicUrl(safeUrl).toString() : null;
 }
 
 function getMonitoringCourseExpectation(
@@ -1548,9 +1544,9 @@ export async function collectOfficialSiteEvidence(
     ...firstPage,
     evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl)
   }];
-  let matchedCoursePage = courseName && doesPageUrlIdentifyCourse(
-    firstPage.finalUrl,
-    courseName
+  let matchedCoursePage = courseName && (
+    doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
+    doesPageMarkupIdentifyCourse(firstPage.html, courseName)
   )
     ? pages[0]
     : undefined;
@@ -1672,7 +1668,8 @@ export async function collectOfficialSiteEvidence(
       if (
         identifiesTargetCourse &&
         courseName &&
-        doesPageUrlIdentifyCourse(page.finalUrl, courseName) &&
+        (doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
+          doesPageMarkupIdentifyCourse(fetched.html, courseName)) &&
         haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
       ) {
         matchedCoursePage = page;
@@ -1894,6 +1891,18 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
   }
 
   throw new Error("Official site exceeded the redirect limit");
+}
+
+function doesPageMarkupIdentifyCourse(html: string, courseName: string) {
+  const identities = [
+    ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
+    ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
+  ]
+    .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
+    .filter(Boolean);
+  return identities.some((identity) =>
+    haveCompatibleCourseNames(courseName, identity)
+  );
 }
 
 async function fetchWordPressRenderedPageContent(

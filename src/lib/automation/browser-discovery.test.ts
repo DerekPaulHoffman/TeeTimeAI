@@ -3854,6 +3854,43 @@ describe("browser probe target selection", () => {
     ).toBe("https://booking.example.com/tee-times");
   });
 
+  it("prefers the official course source when a known provider needs discovery", () => {
+    expect(
+      getBestProbeUrl({
+        website: "https://www.whitneyfarmsgc.com/",
+        detectedBookingUrl:
+          "https://whitneyfarmsgolfcourse.book.teeitup.golf/"
+      })
+    ).toBe("https://www.whitneyfarmsgc.com/");
+  });
+
+  it("keeps an already runnable TeeItUp booking root as the probe target", () => {
+    const bookingUrl =
+      "https://whitneyfarmsgolfcourse.book.teeitup.golf/";
+    expect(
+      getBestProbeUrl({
+        website: "https://www.whitneyfarmsgc.com/",
+        detectedBookingUrl: bookingUrl,
+        detectedPlatform: "TEEITUP",
+        bookingMetadata: {
+          aliases: ["whitneyfarmsgolfcourse"],
+          bookingBaseUrl: bookingUrl
+        }
+      })
+    ).toBe(bookingUrl);
+  });
+
+  it("keeps an unsupported provider URL available for access classification", () => {
+    const bookingUrl = "https://www.golfnow.com/tee-times/facility/example";
+    expect(
+      getBestProbeUrl({
+        website: "https://course.example/",
+        detectedBookingUrl: bookingUrl,
+        detectedPlatform: "GOLFNOW"
+      })
+    ).toBe(bookingUrl);
+  });
+
   it("prefers the official course page over a same-host generic permits page", () => {
     expect(
       getBestProbeUrl({

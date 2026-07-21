@@ -4055,14 +4055,31 @@ export function getBestProbeUrl(
   course: Pick<
     BrowserProbeCourseInput,
     "website" | "detectedBookingUrl" | "monitoringFailureEvidence"
-  >
+  > &
+    Partial<
+      Pick<
+        BrowserProbeCourseInput,
+        "detectedPlatform" | "providerFamilyKey" | "bookingMetadata"
+      >
+    >
 ) {
   const website = getSafeBrowserProbeUrl(course.website);
   const bookingUrl = getSafeBrowserProbeUrl(course.detectedBookingUrl);
+  const provider = resolveProviderCapability(course);
   if (
     hasCurrentRepeatedMonitoringFailure(course.monitoringFailureEvidence) &&
     website &&
     isNonProviderWebsite(website)
+  ) {
+    return website;
+  }
+  if (
+    website &&
+    bookingUrl &&
+    isNonProviderWebsite(website) &&
+    provider.providerFamilyKey === "TEEITUP" &&
+    provider.capability?.supportsAutomation &&
+    !provider.metadataReady
   ) {
     return website;
   }

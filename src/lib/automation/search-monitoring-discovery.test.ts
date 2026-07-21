@@ -265,6 +265,78 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("repairs missing TeeItUp metadata from the course-owned official page", async () => {
+    const officialUrl = "https://www.whitneyfarmsgc.com/";
+    const observedBookingUrl =
+      "https://whitneyfarmsgolfcourse.book.teeitup.golf/?course=24680&date=2026-07-24&max=10";
+    const canonicalBookingUrl =
+      "https://whitneyfarmsgolfcourse.book.teeitup.golf/?course=24680";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === officialUrl) {
+        return new Response(
+          `<html><head><title>Chris Bargas Golf Club &amp; Event Venue at Whitney Farms</title></head><body><a href="${observedBookingUrl}">Tee Times</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === observedBookingUrl) {
+        return new Response("<html><title>Tee Times</title></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "whitney-farms",
+          name: "Chris Bargas Golf Club at Whitney Farms",
+          website: officialUrl,
+          detectedBookingUrl:
+            "https://whitneyfarmsgolfcourse.book.teeitup.golf/",
+          detectedPlatform: "TEEITUP",
+          automationEligibility: "ALLOWED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      officialUrl,
+      observedBookingUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "whitney-farms",
+        status: "LEARNED",
+        detectedPlatform: "TEEITUP",
+        bookingUrl: canonicalBookingUrl,
+        apiMetadata: {
+          aliases: ["whitneyfarmsgolfcourse"],
+          bookingBaseUrl: canonicalBookingUrl,
+          facilityIds: [24680]
+        }
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      attemptedCourseIds: ["whitney-farms"],
+      appliedCourseIds: ["whitney-farms"],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: ["whitney-farms"]
+    });
+  });
+
   it("learns ForeUp metadata from Apptegy embedded content links", async () => {
     const bookingUrl =
       "https://foreupsoftware.com/index.php/booking/19333/145#teetimes";
