@@ -11,6 +11,7 @@ export const COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW = 3;
 
 export type ResponderOutcome =
   | "ready"
+  | "resume_owned_work"
   | "recovery_required"
   | "no_due_work"
   | "deferred_busy"
@@ -51,6 +52,7 @@ export type ResponderThreadPolicy = {
 
 const ALWAYS_VISIBLE_OUTCOMES = new Set<ResponderOutcome>([
   "ready",
+  "resume_owned_work",
   "recovery_required",
   "needs_human",
   "blocked_auth",

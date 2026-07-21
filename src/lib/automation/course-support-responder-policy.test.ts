@@ -66,6 +66,18 @@ describe("course-support responder thread policy", () => {
     ).toBe("KEEP_VISIBLE");
   });
 
+  it("keeps same-task owned work visible for direct continuation", () => {
+    expect(
+      getResponderThreadPolicy({
+        outcome: "resume_owned_work",
+        durableCloseoutRecorded: true
+      })
+    ).toEqual({
+      threadDisposition: "KEEP_VISIBLE",
+      archiveReason: "The responder result requires owner visibility."
+    });
+  });
+
   it("never archives before durable closeout", () => {
     expect(
       getResponderThreadPolicy({

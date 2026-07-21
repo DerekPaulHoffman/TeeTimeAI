@@ -70,7 +70,11 @@ async function main() {
   const [command = "inspect", ...args] = process.argv.slice(2);
   switch (command) {
     case "inspect":
-      writeResult(await inspectCourseSupportQueue());
+      writeResult(
+        await inspectCourseSupportQueue({
+          requestingThreadId: optionalOwnerThread(args)
+        })
+      );
       return;
     case "claim":
       writeResult(await claim(args));
@@ -406,6 +410,18 @@ function requireOwnerThread(args: string[]) {
   return resolveCodexOwnerThreadId({
     environmentOwnerThreadId: process.env.CODEX_THREAD_ID,
     requestedOwnerThreadId: readOption(args, "--owner-thread")
+  });
+}
+
+function optionalOwnerThread(args: string[]) {
+  const environmentOwnerThreadId = process.env.CODEX_THREAD_ID?.trim();
+  const requestedOwnerThreadId = readOption(args, "--owner-thread");
+  if (!environmentOwnerThreadId && !requestedOwnerThreadId) {
+    return undefined;
+  }
+  return resolveCodexOwnerThreadId({
+    environmentOwnerThreadId,
+    requestedOwnerThreadId
   });
 }
 

@@ -3,8 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const prismaMocks = vi.hoisted(() => ({
   batchFindFirst: vi.fn(),
   batchUpdateMany: vi.fn(),
+  supportIncidentFindMany: vi.fn(),
   incidentUpdateMany: vi.fn(),
   supportIncidentUpdateMany: vi.fn(),
+  automationRunFindFirst: vi.fn(),
+  automationRunCreate: vi.fn(),
   verificationRequestFindUnique: vi.fn(),
   verificationRequestFindMany: vi.fn(),
   verificationRequestUpdateMany: vi.fn(),
@@ -21,8 +24,13 @@ const verificationMocks = vi.hoisted(() => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     courseSupportBatch: { findFirst: prismaMocks.batchFindFirst },
+    courseSupportIncident: { findMany: prismaMocks.supportIncidentFindMany },
     courseSupportVerificationRequest: {
       findMany: prismaMocks.verificationRequestFindMany
+    },
+    automationRun: {
+      findFirst: prismaMocks.automationRunFindFirst,
+      create: prismaMocks.automationRunCreate
     },
     $transaction: prismaMocks.transaction
   }
@@ -37,6 +45,7 @@ import {
   buildCourseSupportReleaseHistory,
   canCloseCourseSupportRetry,
   chooseNewestProviderVerificationEvidence,
+  classifyCourseSupportQueueInspection,
   classifyDetachedVerificationFailure,
   classifyDetachedVerificationEvidence,
   classifyFreshBatchEvidence,
@@ -44,6 +53,7 @@ import {
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
   heartbeatCourseSupportBatch,
+  inspectCourseSupportQueue,
   isDurableTerminalProof,
   isRemediatedSearchSchedulerHealthy,
   normalizeCourseSupportObservedGitPaths,
@@ -99,6 +109,9 @@ beforeEach(() => {
   prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
   prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
   prismaMocks.teeSearchCount.mockResolvedValue(0);
+  prismaMocks.supportIncidentFindMany.mockResolvedValue([]);
+  prismaMocks.automationRunFindFirst.mockResolvedValue(null);
+  prismaMocks.automationRunCreate.mockResolvedValue({ id: "routine-run" });
 });
 
 function candidate(
@@ -1893,6 +1906,165 @@ describe("course-support recovery", () => {
         now
       }).action
     ).toBe("BLOCK");
+  });
+});
+
+describe("course-support inspection ownership", () => {
+  const inspection = {
+    hasActiveBatch: true,
+    activeBatchOwnerThreadId: "owner-thread",
+    requestingThreadId: "owner-thread",
+    hasActiveHourlyWriter: false,
+    hasExpiredBatch: false,
+    dueIncidentCount: 4
+  };
+
+  it("resumes a healthy batch owned by the requesting task", () => {
+    expect(classifyCourseSupportQueueInspection(inspection)).toBe(
+      "resume_owned_work"
+    );
+  });
+
+  it.each([undefined, null, "different-thread"])(
+    "defers when the active batch is not proven to belong to the requester (%s)",
+    (requestingThreadId) => {
+      expect(
+        classifyCourseSupportQueueInspection({
+          ...inspection,
+          requestingThreadId
+        })
+      ).toBe("deferred_busy");
+    }
+  );
+
+  it("defers to an hourly writer even when the responder batch belongs to the requester", () => {
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveHourlyWriter: true
+      })
+    ).toBe("deferred_busy");
+  });
+
+  it("preserves expired, empty, and ready queue outcomes without an active writer", () => {
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveBatch: false,
+        hasExpiredBatch: true
+      })
+    ).toBe("recovery_required");
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveBatch: false,
+        hasExpiredBatch: false,
+        dueIncidentCount: 0
+      })
+    ).toBe("no_due_work");
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveBatch: false,
+        hasExpiredBatch: false
+      })
+    ).toBe("ready");
+  });
+
+  it("selects the owner internally and resumes only the same task", async () => {
+    prismaMocks.batchFindFirst
+      .mockResolvedValueOnce({
+        id: "batch-1",
+        reference: "batch-reference",
+        status: "VERIFYING",
+        leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
+        providerFamilyKey: "CHRONOGOLF",
+        ownerThreadId: "owner-thread"
+      })
+      .mockResolvedValueOnce(null);
+
+    const result = await inspectCourseSupportQueue({
+      requestingThreadId: "owner-thread",
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "resume_owned_work",
+      ownedByCurrentTask: true,
+      durableCloseoutRecorded: false,
+      threadDisposition: "KEEP_VISIBLE"
+    });
+    expect(prismaMocks.batchFindFirst.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        select: expect.objectContaining({ ownerThreadId: true })
+      })
+    );
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+  });
+
+  it("defers to hourly work without archiving the task that owns the responder batch", async () => {
+    prismaMocks.batchFindFirst
+      .mockResolvedValueOnce({
+        id: "batch-1",
+        reference: "batch-reference",
+        status: "VERIFYING",
+        leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
+        providerFamilyKey: "CHRONOGOLF",
+        ownerThreadId: "owner-thread"
+      })
+      .mockResolvedValueOnce(null);
+    prismaMocks.automationRunFindFirst.mockResolvedValueOnce({
+      startedAt: new Date("2026-07-15T20:01:00.000Z")
+    });
+
+    const result = await inspectCourseSupportQueue({
+      requestingThreadId: "owner-thread",
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "deferred_busy",
+      ownedByCurrentTask: true,
+      durableCloseoutRecorded: false,
+      threadDisposition: "KEEP_VISIBLE"
+    });
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "different-thread"])(
+    "keeps inspect fail-closed for an unproven requester (%s)",
+    async (requestingThreadId) => {
+      prismaMocks.batchFindFirst
+        .mockResolvedValueOnce({
+          id: "batch-1",
+          reference: "batch-reference",
+          status: "VERIFYING",
+          leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
+          providerFamilyKey: "CHRONOGOLF",
+          ownerThreadId: "owner-thread"
+        })
+        .mockResolvedValueOnce(null);
+
+      const result = await inspectCourseSupportQueue({
+        requestingThreadId,
+        now
+      });
+
+      expect(result).toMatchObject({
+        outcome: "deferred_busy",
+        ownedByCurrentTask: false,
+        durableCloseoutRecorded: true,
+        threadDisposition: "ARCHIVE"
+      });
+      expect(prismaMocks.automationRunCreate).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("rejects a blank requester identity before reading queue state", async () => {
+    await expect(
+      inspectCourseSupportQueue({ requestingThreadId: " ", now })
+    ).rejects.toThrow("current task id");
+    expect(prismaMocks.batchFindFirst).not.toHaveBeenCalled();
   });
 });
 

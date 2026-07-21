@@ -830,6 +830,29 @@ export function preserveExplicitHumanVerification(input: {
   };
 }
 
+export function classifyCourseSupportQueueInspection(input: {
+  hasActiveBatch: boolean;
+  activeBatchOwnerThreadId?: string | null;
+  requestingThreadId?: string | null;
+  hasActiveHourlyWriter: boolean;
+  hasExpiredBatch: boolean;
+  dueIncidentCount: number;
+}): ResponderOutcome {
+  if (input.hasActiveHourlyWriter) {
+    return "deferred_busy";
+  }
+  if (input.hasActiveBatch) {
+    return input.requestingThreadId &&
+      input.activeBatchOwnerThreadId === input.requestingThreadId
+      ? "resume_owned_work"
+      : "deferred_busy";
+  }
+  if (input.hasExpiredBatch) {
+    return "recovery_required";
+  }
+  return input.dueIncidentCount === 0 ? "no_due_work" : "ready";
+}
+
 export function assessCourseSupportRecovery(input: {
   leaseExpiresAt: Date;
   ownerThreadId: string | null;
@@ -1034,8 +1057,15 @@ export function shouldDispatchRemediatedCourseRechecks(input: {
   );
 }
 
-export async function inspectCourseSupportQueue(input?: { now?: Date }) {
+export async function inspectCourseSupportQueue(input?: {
+  now?: Date;
+  requestingThreadId?: string;
+}) {
   const now = input?.now ?? new Date();
+  const requestingThreadId = input?.requestingThreadId?.trim() || null;
+  if (input?.requestingThreadId !== undefined) {
+    validateOwnerThread(input.requestingThreadId);
+  }
   const dueWhere = {
     status: "AUTO_INVESTIGATING" as const,
     activeBatchId: null,
@@ -1063,7 +1093,8 @@ export async function inspectCourseSupportQueue(input?: { now?: Date }) {
           reference: true,
           status: true,
           leaseExpiresAt: true,
-          providerFamilyKey: true
+          providerFamilyKey: true,
+          ownerThreadId: true
         }
       }),
       prisma.courseSupportBatch.findFirst({
@@ -1094,16 +1125,22 @@ export async function inspectCourseSupportQueue(input?: { now?: Date }) {
   const dueEngineeringCount = dueIncidents.filter(
     (incident) => incident.engineeringOnly
   ).length;
-  const outcome: ResponderOutcome =
-    activeBatch || activeHourlyRun
-      ? "deferred_busy"
-      : expiredBatch
-        ? "recovery_required"
-        : dueIncidents.length === 0
-          ? "no_due_work"
-          : "ready";
+  const outcome = classifyCourseSupportQueueInspection({
+    hasActiveBatch: Boolean(activeBatch),
+    activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
+    requestingThreadId,
+    hasActiveHourlyWriter: Boolean(activeHourlyRun),
+    hasExpiredBatch: Boolean(expiredBatch),
+    dueIncidentCount: dueIncidents.length
+  });
+  const ownedByCurrentTask = Boolean(
+    activeBatch &&
+      requestingThreadId &&
+      activeBatch.ownerThreadId === requestingThreadId
+  );
   const durableCloseoutRecorded =
-    outcome === "no_due_work" || outcome === "deferred_busy"
+    !ownedByCurrentTask &&
+    (outcome === "no_due_work" || outcome === "deferred_busy")
       ? await recordRoutineResponderObservation({
           outcome,
           now,
@@ -1120,9 +1157,13 @@ export async function inspectCourseSupportQueue(input?: { now?: Date }) {
   const policy = getResponderThreadPolicy({
     outcome,
     durableCloseoutRecorded:
-      outcome === "no_due_work" || outcome === "deferred_busy"
+      ownedByCurrentTask
+        ? false
+        : outcome === "no_due_work" || outcome === "deferred_busy"
         ? durableCloseoutRecorded
-        : true
+        : outcome === "resume_owned_work"
+          ? false
+          : true
   });
 
   return {
@@ -1132,6 +1173,7 @@ export async function inspectCourseSupportQueue(input?: { now?: Date }) {
     dueRealCount,
     dueEngineeringCount,
     providerGroupCount: providerGroups.size,
+    ownedByCurrentTask,
     activeWriter: activeBatch
       ? {
           kind: "COURSE_SUPPORT_BATCH" as const,

@@ -44,6 +44,8 @@ The responder and hourly loop share the transaction-scoped Postgres advisory lea
 
 An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder/hourly writer, an active lease, or mismatched provenance require owner attention.
 
+Recovery atomically transfers the batch and lease token to the recovering task. After `recover` reports success, continue that same batch directly through heartbeat, verification, and closeout; never claim a fresh batch. A later `inspect` supplies the current task identity and returns `resume_owned_work` only for that task's own healthy batch. Missing or mismatched task identity, another responder batch, and an hourly writer still fail closed as `deferred_busy`.
+
 ## Search Execution And Fresh Proof
 
 Each search check uses a separate 15-minute row-token lease on `TeeSearch`. Network calls happen outside a database transaction. Every provider request, including official-site discovery follow-ups, claims the destination family's distributed slot; multi-request adapter steps run sequentially. Provider work is capped globally at two requests and at one request per provider family. Completion is a compare-and-set on search id, `scheduleVersion`, and lease token, so a stale Workflow cannot overwrite a newer edit, pause, resume, or explicit check.
@@ -145,7 +147,8 @@ npm run automation:course-support -- mark-needs-human --batch-ref <batch-ref> --
 # Close from independently derived persisted evidence.
 npm run automation:course-support -- closeout --batch-ref <batch-ref> --outcome success
 
-# Recovery is explicit and provenance checked.
+# Recovery is explicit and provenance checked. Continue the recovered batch
+# directly; an owner-aware inspect may report resume_owned_work for this task.
 npm run automation:course-support -- recover --batch-ref <batch-ref>
 
 # Responder-state backfill is dry-run by default. Existing synthetic cohorts first
