@@ -14,6 +14,7 @@ import {
   evaluateBrowserDiscoveryMonitoringGate,
   getBestProbeUrl,
   keepPolicyOnlyDiscoveryActionable,
+  OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES,
   shouldQueueBrowserProbe,
   type BrowserDiscovery,
   type BrowserProbeCourseInput
@@ -27,8 +28,10 @@ import {
 } from "./improvement";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
 import {
+  normalizeProviderFamilyKey,
   resolveProviderCapability,
-  resolveProviderDiscoveryIdentity
+  resolveProviderDiscoveryIdentity,
+  SOURCE_MISSING_PROVIDER_FAMILY
 } from "./provider-capabilities";
 import { evaluateMonitoringGate } from "./policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
@@ -585,8 +588,14 @@ export async function applyBrowserDiscoveryToCourse(
     input.automationEligibility !== "UNKNOWN" &&
     input.confidence >= 0.8
   );
+  const sourceUnavailableClassification =
+    isSourceUnavailableClassification(input);
 
-  if (!learnedOnlineAdapter && !verifiedClassification) {
+  if (
+    !learnedOnlineAdapter &&
+    !verifiedClassification &&
+    !sourceUnavailableClassification
+  ) {
     if (!inspectedProviderIdentity) {
       return null;
     }
@@ -693,9 +702,20 @@ export async function applyBrowserDiscoveryToCourse(
   );
   const trustedPersistedReplacement =
     replacingLegacyPolicyOnlyBlock || corroboratedLearnedReplacement;
+  const sourceUnavailableWouldReplaceProviderState = Boolean(
+    sourceUnavailableClassification &&
+      !canApplySourceUnavailableClassification({
+        current,
+        discovery: input,
+        persistedProviderFamilyKey: persistedProvider.providerFamilyKey,
+        persistedProviderKnown: Boolean(persistedProvider.capability),
+        persistedProviderConflict: persistedProvider.evidenceConflict
+      })
+  );
   if (
     provider.evidenceConflict ||
     (persistedProvider.evidenceConflict && !trustedPersistedReplacement) ||
+    sourceUnavailableWouldReplaceProviderState ||
     (learnedOnlineAdapter && !persistedGate.adapterAllowed) ||
     (!learnedOnlineAdapter &&
       !incomingTerminal &&
@@ -708,30 +728,149 @@ export async function applyBrowserDiscoveryToCourse(
 
   const updated = await prisma.course.updateMany({
     where: { id: input.courseId, updatedAt: current.updatedAt },
-    data: {
-      detectedPlatform: input.detectedPlatform,
-      providerFamilyKey: provider.providerFamilyKey,
-      automationEligibility,
-      detectedBookingUrl: manualOnly ? null : input.bookingUrl,
-      bookingMetadata: manualOnly
-        ? Prisma.DbNull
-        : (input.apiMetadata as Prisma.InputJsonValue),
-      bookingMethod,
-      bookingPhone: input.bookingPhone,
-      automationReason: input.automationReason ?? "NONE",
-      policyNotes: input.policyNotes,
-      intelligenceVerifiedAt: new Date(),
-      intelligenceReviewAt: input.intelligenceReviewAt
-        ? new Date(input.intelligenceReviewAt)
-        : null,
-      intelligenceConfidence: input.confidence
-    }
+    data: sourceUnavailableClassification
+      ? {
+          automationEligibility,
+          bookingMethod,
+          automationReason: input.automationReason ?? "NONE",
+          policyNotes: input.policyNotes,
+          intelligenceVerifiedAt: new Date(),
+          intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
+          intelligenceConfidence: input.confidence
+        }
+      : {
+          detectedPlatform: input.detectedPlatform,
+          providerFamilyKey: provider.providerFamilyKey,
+          automationEligibility,
+          detectedBookingUrl: manualOnly ? null : input.bookingUrl,
+          bookingMetadata: manualOnly
+            ? Prisma.DbNull
+            : (input.apiMetadata as Prisma.InputJsonValue),
+          bookingMethod,
+          bookingPhone: input.bookingPhone,
+          automationReason: input.automationReason ?? "NONE",
+          policyNotes: input.policyNotes,
+          intelligenceVerifiedAt: new Date(),
+          intelligenceReviewAt: input.intelligenceReviewAt
+            ? new Date(input.intelligenceReviewAt)
+            : null,
+          intelligenceConfidence: input.confidence
+        }
   });
   if (updated.count !== 1) {
     return null;
   }
 
   return prisma.course.findUnique({ where: { id: input.courseId } });
+}
+
+function isSourceUnavailableClassification(input: BrowserDiscovery) {
+  const source = parseSafePublicUrl(input.sourceUrl);
+  const finalUrl = parseSafePublicUrl(input.evidence.finalUrl ?? "");
+  const reviewAt = input.intelligenceReviewAt
+    ? new Date(input.intelligenceReviewAt)
+    : null;
+  const now = Date.now();
+  if (
+    input.status !== "INSPECTED" ||
+    input.detectedPlatform !== "UNKNOWN" ||
+    input.bookingMethod !== "UNKNOWN" ||
+    input.automationEligibility !== "NEEDS_REVIEW" ||
+    input.automationReason !== "TEMPORARILY_UNAVAILABLE" ||
+    input.evidence.learnedFrom !== "official-site-soft-not-found" ||
+    input.policyNotes !== OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES ||
+    input.bookingUrl !== undefined ||
+    input.apiEndpoint !== undefined ||
+    input.apiMetadata !== undefined ||
+    input.bookingPhone !== undefined ||
+    !Number.isFinite(input.confidence) ||
+    input.confidence < 0.9 ||
+    input.confidence > 1 ||
+    !source ||
+    source.search ||
+    source.hash ||
+    !finalUrl ||
+    finalUrl.search ||
+    finalUrl.hash ||
+    !haveSameCourseWebsiteOrigin(source, finalUrl) ||
+    !reviewAt ||
+    Number.isNaN(reviewAt.getTime()) ||
+    reviewAt.getTime() < now + 6 * 24 * 60 * 60 * 1000 ||
+    reviewAt.getTime() > now + 8 * 24 * 60 * 60 * 1000
+  ) {
+    return false;
+  }
+  if (
+    Object.keys(input.evidence).some(
+      (key) => !["finalUrl", "learnedFrom", "observedUrls"].includes(key)
+    )
+  ) {
+    return false;
+  }
+  const expectedUrls = new Set([source.toString(), finalUrl.toString()]);
+  return Boolean(
+    input.evidence.observedUrls.length === expectedUrls.size &&
+      input.evidence.observedUrls.every((value) => expectedUrls.has(value))
+  );
+}
+
+function canApplySourceUnavailableClassification(input: {
+  current: {
+    providerFamilyKey: string | null;
+    detectedPlatform: string | null;
+    detectedBookingUrl: string | null;
+    website: string | null;
+    bookingMetadata: unknown;
+    isPublic: boolean | null;
+    bookingMethod: string | null;
+    automationEligibility: string | null;
+    automationReason: string | null;
+  };
+  discovery: BrowserDiscovery;
+  persistedProviderFamilyKey: string;
+  persistedProviderKnown: boolean;
+  persistedProviderConflict: boolean;
+}) {
+  const { current, discovery } = input;
+  const website = current.website ? parseSafePublicUrl(current.website) : null;
+  const source = parseSafePublicUrl(discovery.sourceUrl);
+  if (!website || !source) {
+    return false;
+  }
+  const normalizePath = (url: URL) => {
+    try {
+      return decodeURIComponent(url.pathname).replace(/\/+$/u, "") || "/";
+    } catch {
+      return null;
+    }
+  };
+  const officialFamily = normalizeProviderFamilyKey(website.hostname);
+  const currentFamily = normalizeProviderFamilyKey(current.providerFamilyKey);
+  const currentFamilyIsOfficialPlaceholder =
+    currentFamily === SOURCE_MISSING_PROVIDER_FAMILY ||
+    currentFamily === officialFamily;
+
+  return Boolean(
+    currentFamilyIsOfficialPlaceholder &&
+      input.persistedProviderFamilyKey === officialFamily &&
+      !input.persistedProviderKnown &&
+      !input.persistedProviderConflict &&
+      !resolveProviderCapability({ website: current.website }).capability &&
+      haveSameCourseWebsiteOrigin(website, source) &&
+      normalizePath(website) === normalizePath(source) &&
+      normalizePath(website) !== null &&
+      current.isPublic !== false &&
+      (!current.detectedPlatform || current.detectedPlatform === "UNKNOWN") &&
+      !current.detectedBookingUrl &&
+      (current.bookingMetadata === null || current.bookingMetadata === undefined) &&
+      (!current.bookingMethod || current.bookingMethod === "UNKNOWN") &&
+      (!current.automationEligibility ||
+        ["UNKNOWN", "NEEDS_REVIEW"].includes(current.automationEligibility)) &&
+      (!current.automationReason ||
+        ["NONE", "TEMPORARILY_UNAVAILABLE"].includes(
+          current.automationReason
+        ))
+  );
 }
 
 function matchesBrowserDiscoveryCourseExpectation(

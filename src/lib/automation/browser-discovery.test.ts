@@ -79,6 +79,75 @@ describe("browser discovery monitoring gate", () => {
 });
 
 describe("buildBrowserDiscovery", () => {
+  it("classifies a confirmed initial-page soft 404 without retaining polluted links", () => {
+    const before = Date.now();
+    const discovery = buildBrowserDiscovery({
+      courseId: "eastwood",
+      courseName: "Eastwood Country Club",
+      sourceUrl: "https://eastwood.example/?campaign=stale#top",
+      finalUrl: "https://www.eastwood.example/",
+      sourcePageAvailability: "SOFT_NOT_FOUND",
+      observedUrls: [
+        "https://www.eastwood.example/",
+        "https://unrelated.example/book-tee-times"
+      ],
+      linkCandidates: [
+        {
+          url: "https://unrelated.example/book-tee-times",
+          label: "Book tee times"
+        }
+      ],
+      visibleText: "Page Not Found unrelated promotional copy"
+    });
+    const after = Date.now();
+
+    expect(discovery).toMatchObject({
+      courseId: "eastwood",
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://eastwood.example/",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "TEMPORARILY_UNAVAILABLE",
+      confidence: 0.98,
+      evidence: {
+        finalUrl: "https://www.eastwood.example/",
+        observedUrls: [
+          "https://eastwood.example/",
+          "https://www.eastwood.example/"
+        ],
+        learnedFrom: "official-site-soft-not-found"
+      }
+    });
+    expect(discovery).not.toHaveProperty("bookingUrl");
+    expect(JSON.stringify(discovery)).not.toContain("unrelated.example");
+    const reviewAt = new Date(discovery.intelligenceReviewAt!).getTime();
+    expect(reviewAt).toBeGreaterThanOrEqual(
+      before + 7 * 24 * 60 * 60 * 1000
+    );
+    expect(reviewAt).toBeLessThanOrEqual(
+      after + 7 * 24 * 60 * 60 * 1000
+    );
+    expect(evaluateBrowserDiscoveryMonitoringGate(discovery)).toMatchObject({
+      disposition: "ACTIONABLE",
+      adapterAllowed: true
+    });
+    expect(shouldQueueBrowserProbe({
+      isPublic: true,
+      detectedPlatform: discovery.detectedPlatform,
+      providerFamilyKey: "eastwood.example",
+      automationEligibility: discovery.automationEligibility!,
+      automationReason: discovery.automationReason,
+      bookingMethod: discovery.bookingMethod,
+      intelligenceVerifiedAt: new Date(),
+      intelligenceReviewAt: discovery.intelligenceReviewAt,
+      intelligenceConfidence: discovery.confidence,
+      website: discovery.sourceUrl,
+      detectedBookingUrl: null,
+      bookingMetadata: null
+    })).toBe(true);
+  });
+
   it("learns reusable ForeUP metadata from browser-observed API requests", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",

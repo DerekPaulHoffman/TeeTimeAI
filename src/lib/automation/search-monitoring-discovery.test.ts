@@ -197,6 +197,268 @@ describe("search monitoring discovery", () => {
     expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
   });
 
+  it("short-circuits an initial-page soft 404 before polluted links are followed or persisted", async () => {
+    const sourceUrl = "https://eastwood.example/";
+    const pollutedUrl = "https://unrelated.example/book-tee-times";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      expect(value).toBe(sourceUrl);
+      return new Response(
+        `<html><title>404 - Page Not Found</title><h1>Page Not Found</h1><a href="${pollutedUrl}">Book tee times</a><p>Unrelated promotional copy.</p></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "eastwood",
+          name: "Eastwood Country Club",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "eastwood.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    expect(discovery).toMatchObject({
+      courseId: "eastwood",
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "TEMPORARILY_UNAVAILABLE",
+      evidence: {
+        finalUrl: sourceUrl,
+        observedUrls: [sourceUrl],
+        learnedFrom: "official-site-soft-not-found"
+      }
+    });
+    expect(discovery).not.toHaveProperty("bookingUrl");
+    expect(JSON.stringify(discovery)).not.toContain("unrelated.example");
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(discovery);
+  });
+
+  it("does not treat a footer help mention as an initial-page soft 404", async () => {
+    const sourceUrl = "https://course.example/";
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      vi.fn().mockResolvedValue(
+        new Response(
+          "<html><title>Example Golf Course</title><title>Page Not Found</title><h1>Example Golf Course</h1><script><h1>404 Page Not Found</h1></script><template><h1>Page Not Found</h1></template><!-- <h1>404</h1> --><textarea><h1>Not Found</h1></textarea><main>Public golf course information.</main><footer>Page not found? Visit our help center.</footer></html>",
+          { status: 200, headers: { "content-type": "text/html" } }
+        )
+      ) as typeof fetch,
+      "Example Golf Course",
+      new Map(),
+      new Map(),
+      sourceUrl
+    );
+
+    expect(evidence.sourcePageAvailability).toBeUndefined();
+    expect(buildBrowserDiscovery({
+      ...evidence,
+      courseId: "example-course",
+      courseName: "Example Golf Course"
+    }).evidence.learnedFrom).toBe("browser-visible-links");
+  });
+
+  it("does not let a missing booking followup poison a valid initial course page", async () => {
+    const sourceUrl = "https://course.example/";
+    const bookingUrl = "https://course.example/book-tee-times";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === sourceUrl) {
+        return new Response(
+          `<html><title>Example Golf Course</title><h1>Example Golf Course</h1><a href="${bookingUrl}">Book tee times</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      expect(value).toBe(bookingUrl);
+      return new Response(
+        "<html><title>Page Not Found</title><h1>404 Page Not Found</h1></html>",
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Example Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "example-course",
+      courseName: "Example Golf Course"
+    });
+
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      sourceUrl,
+      bookingUrl
+    ]);
+    expect(evidence.sourcePageAvailability).toBeUndefined();
+    expect(discovery.automationReason).not.toBe("TEMPORARILY_UNAVAILABLE");
+    expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
+  });
+
+  it("does not classify a cross-host redirect soft 404 as the official site being unavailable", async () => {
+    const sourceUrl = "https://course.example/";
+    const redirectedUrl = "https://unrelated.example/missing";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const value = input.toString();
+      if (value === sourceUrl) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: redirectedUrl }
+        });
+      }
+      expect(value).toBe(redirectedUrl);
+      return new Response(
+        '<html><title>Page Not Found</title><h1>404 Page Not Found</h1><a href="https://casino.example/book-tee-times">Book tee times</a><a href="https://signed.example/book?session=private">Reserve now</a></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "redirected-course",
+          name: "Redirected Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(discovery.automationReason).not.toBe("TEMPORARILY_UNAVAILABLE");
+    expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
+    expect(JSON.stringify(discovery)).not.toMatch(
+      /unrelated\.example|casino\.example|signed\.example/iu
+    );
+  });
+
+  it("does not let a stale detected booking URL soft 404 override a distinct healthy official website", async () => {
+    const website = "https://healthy-course.example/";
+    const staleBookingUrl = "https://stale-booking.example/book-tee-times";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      expect(input.toString()).toBe(staleBookingUrl);
+      return new Response(
+        '<html><title>Page Not Found</title><h1>404 Page Not Found</h1><a href="https://casino.example/book-tee-times">Book tee times</a><a href="https://signed.example/book?session=private">Reserve now</a></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "healthy-official-course",
+          name: "Healthy Official Golf Course",
+          website,
+          detectedBookingUrl: staleBookingUrl,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "stale-booking.example",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(discovery.automationReason).not.toBe("TEMPORARILY_UNAVAILABLE");
+    expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
+    expect(JSON.stringify(discovery)).not.toMatch(
+      /casino\.example|signed\.example/iu
+    );
+  });
+
+  it("does not share trusted soft-404 provenance across same-name courses with different official websites", async () => {
+    const sharedSource = "https://shared-course.example/";
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        '<html><title>Page Not Found</title><h1>404 Page Not Found</h1><a href="https://casino.example/book-tee-times">Book tee times</a></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+    const baseCourse = {
+      name: "Shared Name Golf Course",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      bookingMetadata: null
+    };
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...baseCourse,
+            id: "trusted-shared-source",
+            website: sharedSource,
+            detectedBookingUrl: null,
+            providerFamilyKey: "shared-course.example"
+          }
+        },
+        {
+          rank: 2,
+          course: {
+            ...baseCourse,
+            id: "untrusted-shared-source",
+            website: "https://healthy-course.example/",
+            detectedBookingUrl: sharedSource,
+            providerFamilyKey: "shared-course.example"
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const discoveries = dbMocks.recordBrowserDiscovery.mock.calls.map(
+      ([discovery]) => discovery
+    );
+    expect(discoveries).toHaveLength(2);
+    expect(discoveries[0]).toMatchObject({
+      courseId: "trusted-shared-source",
+      automationReason: "TEMPORARILY_UNAVAILABLE",
+      evidence: { learnedFrom: "official-site-soft-not-found" }
+    });
+    expect(discoveries[1]).toMatchObject({
+      courseId: "untrusted-shared-source",
+      evidence: { learnedFrom: "browser-visible-links" }
+    });
+    expect(discoveries[1].automationReason).not.toBe(
+      "TEMPORARILY_UNAVAILABLE"
+    );
+    expect(JSON.stringify(discoveries)).not.toContain("casino.example");
+  });
+
   it("does not apply one generic shared-site TeeItUp alias to Dennis Highlands and Dennis Pines", async () => {
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {

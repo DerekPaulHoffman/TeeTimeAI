@@ -426,6 +426,7 @@ type CollectedPageEvidence = Pick<
   BrowserDiscoveryEvidence,
   | "sourceUrl"
   | "finalUrl"
+  | "sourcePageAvailability"
   | "observedUrls"
   | "linkCandidates"
   | "officialPage"
@@ -833,7 +834,10 @@ export async function prepareSearchMonitoring(
         }
       };
       try {
-        const sourceKey = `${normalizeSourceKey(sourceUrl)}|${normalizeCourseLinkName(course.name)}`;
+        const officialWebsite = readSafePublicUrl(course.website);
+        const sourceKey = `${normalizeSourceKey(sourceUrl)}|${normalizeCourseLinkName(course.name)}|${
+          officialWebsite ? normalizeSourceKey(officialWebsite) : "SOURCE_MISSING"
+        }`;
         let evidencePromise = evidenceBySource.get(sourceKey);
         if (!evidencePromise) {
           evidencePromise = collectOfficialSiteEvidence(
@@ -841,7 +845,8 @@ export async function prepareSearchMonitoring(
             leasedFetch,
             course.name,
             pageFetches,
-            wordpressContentFetches
+            wordpressContentFetches,
+            course.website
           );
           evidenceBySource.set(sourceKey, evidencePromise);
         }
@@ -1854,7 +1859,8 @@ export async function collectOfficialSiteEvidence(
   fetchImpl: typeof fetch | undefined = undefined,
   courseName?: string,
   pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>(),
-  wordpressContentFetches = new Map<string, Promise<string | null>>()
+  wordpressContentFetches = new Map<string, Promise<string | null>>(),
+  expectedOfficialWebsite: string | null | undefined = null
 ): Promise<CollectedPageEvidence> {
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   const fetchPage = (url: string) => {
@@ -1867,9 +1873,38 @@ export async function collectOfficialSiteEvidence(
     return page;
   };
   const firstPage = await fetchPage(sourceUrl);
+  if (isInitialOfficialSiteSoftNotFoundPage(firstPage.html)) {
+    const canonicalSource = canonicalizeCollectedOfficialUrl(sourceUrl);
+    const canonicalFinal = canonicalizeCollectedOfficialUrl(firstPage.finalUrl);
+    const trustedOfficialSource = Boolean(
+      isSelectedPersistedOfficialSource(sourceUrl, expectedOfficialWebsite) &&
+        haveSameReplayHostname(sourceUrl, firstPage.finalUrl)
+    );
+    return {
+      sourceUrl: canonicalSource,
+      finalUrl: trustedOfficialSource ? canonicalFinal : canonicalSource,
+      ...(trustedOfficialSource
+        ? { sourcePageAvailability: "SOFT_NOT_FOUND" as const }
+        : {}),
+      observedUrls: trustedOfficialSource
+        ? uniqueStrings([canonicalSource, canonicalFinal])
+        : [canonicalSource],
+      linkCandidates: [],
+      bookingSurfaceText: "",
+      teeItUpLegacyConfigurations: [],
+      legacyProphetConfigurations: [],
+      legacyProphetFollowupOutcomes: [],
+      accessBarriers: []
+    };
+  }
+  const firstPageEvidence = extractHtmlEvidence(
+    firstPage.html,
+    firstPage.finalUrl,
+    courseName
+  );
   const pages = [{
     ...firstPage,
-    evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl, courseName)
+    evidence: firstPageEvidence
   }];
   let matchedCoursePage = courseName && (
     doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
@@ -2328,6 +2363,101 @@ async function fetchPublicHtmlFromUrl(sourceUrl: string, fetchImpl: typeof fetch
   }
 
   throw new Error("Official site exceeded the redirect limit");
+}
+
+const SOFT_NOT_FOUND_PAGE_IDENTITIES = new Set([
+  "404",
+  "404 error",
+  "404 not found",
+  "404 page not found",
+  "error 404",
+  "error 404 not found",
+  "error 404 page not found",
+  "not found",
+  "page not found",
+  "page not found 404"
+]);
+const GENERIC_PAGE_TITLE_IDENTITIES = new Set([
+  "",
+  "home",
+  "home page",
+  "official site",
+  "official website",
+  "site",
+  "untitled",
+  "website",
+  "welcome"
+]);
+
+function isInitialOfficialSiteSoftNotFoundPage(html: string) {
+  const structuralHtml = html
+    .replace(/<!--[\s\S]*?-->/gu, "")
+    .replace(
+      /<(script|style|template|textarea)\b[^>]*>[\s\S]*?<\/\1>/giu,
+      ""
+    );
+  const normalizeIdentity = (value: string) =>
+    stripHtml(decodeHtmlEntities(value))
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/gu, "")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]+/gu, " ")
+      .trim();
+  const headHtml =
+    structuralHtml.match(/<head\b[^>]*>([\s\S]*?)<\/head>/iu)?.[1] ?? "";
+  const titleIdentity = normalizeIdentity(
+    headHtml.match(/<title\b[^>]*>([\s\S]*?)<\/title>/iu)?.[1] ?? ""
+  );
+  if (SOFT_NOT_FOUND_PAGE_IDENTITIES.has(titleIdentity)) {
+    return true;
+  }
+  if (!GENERIC_PAGE_TITLE_IDENTITIES.has(titleIdentity)) {
+    return false;
+  }
+  const firstHeading = structuralHtml.match(
+    /<h1\b([^>]*)>([\s\S]*?)<\/h1>/iu
+  );
+  if (
+    !firstHeading ||
+    /(?:^|\s)hidden(?:\s|=|$)|\baria-hidden\s*=\s*["']?true\b|\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)/iu.test(
+      firstHeading[1] ?? ""
+    )
+  ) {
+    return false;
+  }
+  return SOFT_NOT_FOUND_PAGE_IDENTITIES.has(
+    normalizeIdentity(firstHeading[2] ?? "")
+  );
+}
+
+function isSelectedPersistedOfficialSource(
+  sourceUrl: string,
+  expectedOfficialWebsite: string | null | undefined
+) {
+  if (!expectedOfficialWebsite) {
+    return false;
+  }
+  try {
+    const source = parseSafePublicUrl(sourceUrl);
+    const expected = parseSafePublicUrl(expectedOfficialWebsite);
+    const normalizePath = (url: URL) =>
+      decodePublicUrlPath(url.pathname)?.replace(/\/+$/u, "") || "/";
+    return Boolean(
+      !resolveProviderCapability({ detectedBookingUrl: source.toString() })
+        .capability &&
+        haveSameReplayHostname(source.toString(), expected.toString()) &&
+        normalizePath(source) === normalizePath(expected)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function canonicalizeCollectedOfficialUrl(value: string) {
+  const url = parseSafePublicUrl(value);
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function doesPageMarkupIdentifyCourse(html: string, courseName: string) {

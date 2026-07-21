@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
+import { buildBrowserDiscovery } from "./browser-discovery";
 import {
   applyBrowserDiscoveryToCourse,
   listBrowserProbeTargets,
@@ -301,6 +302,114 @@ describe("browser discovery persistence", () => {
 
     expect(result).toBeNull();
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+
+  it("persists the exact built soft-404 classification without rewriting provider fields", async () => {
+    const updatedAt = new Date("2026-07-21T12:00:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "eastwood.example",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "http://eastwood.example/",
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "eastwood" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    const discovery = buildBrowserDiscovery({
+      courseId: "eastwood",
+      courseName: "Eastwood Country Club",
+      sourceUrl: "http://eastwood.example/?campaign=stale#top",
+      finalUrl: "https://www.eastwood.example/",
+      sourcePageAvailability: "SOFT_NOT_FOUND",
+      observedUrls: ["https://unrelated.example/book-tee-times"]
+    });
+
+    const result = await applyBrowserDiscoveryToCourse(discovery);
+
+    expect(result).toEqual({ id: "eastwood" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledOnce();
+    const update = mockedPrisma.course.updateMany.mock.calls[0]?.[0];
+    expect(update).toEqual({
+      where: { id: "eastwood", updatedAt },
+      data: {
+        automationEligibility: "NEEDS_REVIEW",
+        bookingMethod: "UNKNOWN",
+        automationReason: "TEMPORARILY_UNAVAILABLE",
+        policyNotes:
+          "The saved official course site currently serves a not-found page and exposes no trustworthy public booking surface. Tee Time Spot will retry discovery without following unrelated page links.",
+        intelligenceVerifiedAt: expect.any(Date),
+        intelligenceReviewAt: expect.any(Date),
+        intelligenceConfidence: 0.98
+      }
+    });
+    expect(update?.data).not.toHaveProperty("providerFamilyKey");
+    expect(update?.data).not.toHaveProperty("detectedPlatform");
+    expect(update?.data).not.toHaveProperty("detectedBookingUrl");
+    expect(update?.data).not.toHaveProperty("bookingMetadata");
+    expect(update?.data).not.toHaveProperty("bookingPhone");
+  });
+
+  it.each([
+    {
+      label: "runnable provider state",
+      current: {
+        providerFamilyKey: "FOREUP",
+        detectedPlatform: "FOREUP",
+        detectedBookingUrl:
+          "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+        bookingMetadata: {
+          scheduleId: 11739,
+          bookingBaseUrl:
+            "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+        },
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED"
+      }
+    },
+    {
+      label: "different unsupported provider family",
+      current: {
+        providerFamilyKey: "unrelated-provider.example",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        bookingMetadata: null,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN"
+      }
+    }
+  ])("does not let a soft-404 classification replace $label", async ({ current }) => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      ...current,
+      website: "https://eastwood.example/",
+      isPublic: true,
+      automationReason: "NONE",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      updatedAt: new Date("2026-07-21T12:00:00.000Z")
+    } as never);
+    const discovery = buildBrowserDiscovery({
+      courseId: "eastwood",
+      courseName: "Eastwood Country Club",
+      sourceUrl: "https://eastwood.example/",
+      finalUrl: "https://eastwood.example/",
+      sourcePageAvailability: "SOFT_NOT_FOUND",
+      observedUrls: []
+    });
+
+    const result = await applyBrowserDiscoveryToCourse(discovery);
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
   it("applies a high-confidence phone-only finding without adapter metadata", async () => {

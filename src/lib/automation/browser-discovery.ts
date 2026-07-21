@@ -13,11 +13,15 @@ import {
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
 
+export const OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES =
+  "The saved official course site currently serves a not-found page and exposes no trustworthy public booking surface. Tee Time Spot will retry discovery without following unrelated page links.";
+
 export type BrowserDiscoveryEvidence = {
   courseId: string;
   courseName: string;
   sourceUrl: string;
   finalUrl?: string;
+  sourcePageAvailability?: "SOFT_NOT_FOUND";
   observedUrls: string[];
   linkCandidates?: Array<{ url: string; label: string }>;
   officialCourseWebsite?: string | null;
@@ -312,6 +316,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     providerEvidence.sourceUrl,
     ...providerEvidence.observedUrls
   ]);
+  const unavailableOfficialSiteClassification =
+    learnUnavailableOfficialSiteClassification(evidence);
+
+  if (unavailableOfficialSiteClassification) {
+    return unavailableOfficialSiteClassification;
+  }
   const privateClubClassification = learnPrivateClubClassification(evidence, observedUrls);
 
   if (privateClubClassification) {
@@ -478,6 +488,45 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       learnedFrom: "browser-visible-links"
     }
   }, evidence);
+}
+
+function learnUnavailableOfficialSiteClassification(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscovery | null {
+  if (evidence.sourcePageAvailability !== "SOFT_NOT_FOUND") {
+    return null;
+  }
+
+  const canonicalSource = canonicalizeUnavailableOfficialUrl(evidence.sourceUrl);
+  const canonicalFinal = canonicalizeUnavailableOfficialUrl(
+    evidence.finalUrl ?? evidence.sourceUrl
+  );
+  if (!canonicalSource) {
+    return null;
+  }
+  const firstPartyFinal =
+    canonicalFinal &&
+    haveSameWebsiteOrigin(new URL(canonicalSource), new URL(canonicalFinal))
+      ? canonicalFinal
+      : canonicalSource;
+
+  return {
+    courseId: evidence.courseId,
+    status: "INSPECTED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: canonicalSource,
+    bookingMethod: "UNKNOWN",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "TEMPORARILY_UNAVAILABLE",
+    policyNotes: OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES,
+    intelligenceReviewAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: firstPartyFinal,
+      observedUrls: uniqueUrls([canonicalSource, firstPartyFinal]),
+      learnedFrom: "official-site-soft-not-found"
+    }
+  };
 }
 
 function learnClubCaddieDiscovery(
@@ -2698,6 +2747,14 @@ function isForbiddenManualSurfaceHostname(hostname: string) {
 function canonicalizeManualUrl(value: string) {
   const parsed = parseUrl(value);
   if (!parsed || parsed.protocol !== "https:" || !isSafeManualEvidenceUrl(parsed)) {
+    return null;
+  }
+  return `${parsed.origin}${parsed.pathname || "/"}`;
+}
+
+function canonicalizeUnavailableOfficialUrl(value: string) {
+  const parsed = parseUrl(value);
+  if (!parsed || !isSafeManualEvidenceUrl(parsed)) {
     return null;
   }
   return `${parsed.origin}${parsed.pathname || "/"}`;
