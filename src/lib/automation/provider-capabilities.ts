@@ -524,6 +524,9 @@ export function deriveConsumerDisposition(
   input: ConsumerDispositionInput
 ): ConsumerDisposition {
   const monitoringGate = evaluateMonitoringGate(input);
+  if (monitoringGate.disposition === "IDENTITY_RECHECK") {
+    return "SOURCE_UNVERIFIED";
+  }
   if (monitoringGate.disposition === "IDENTITY_FINAL") {
     return "PRIVATE_OR_INVALID";
   }

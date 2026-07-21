@@ -20,6 +20,9 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn(),
       update: vi.fn()
     },
+    googlePlaceReview: {
+      findMany: vi.fn()
+    },
     coursePreference: {
       updateMany: vi.fn()
     },
@@ -52,6 +55,7 @@ describe("createTeeSearchForUser", () => {
     vi.clearAllMocks();
     mockedPrisma.course.findMany.mockResolvedValue([]);
     mockedPrisma.course.update.mockResolvedValue({ id: "course-1" } as never);
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
   });
 
@@ -514,6 +518,370 @@ describe("createTeeSearchForUser", () => {
               expect.objectContaining({ course: { connect: { id: "fairview-farm" } } }),
               expect.objectContaining({ course: { connect: { id: "timberlin" } } })
             ]
+          }
+        })
+      })
+    );
+  });
+
+  it("rejects a mixed search containing a known private course", async () => {
+    mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
+      if ("googlePlaceId" in where && where.googlePlaceId === "private-course") {
+        return {
+          id: "private-course",
+          name: "Private Course",
+          isPublic: false,
+          automationEligibility: "BLOCKED",
+          layoutHoleCounts: [],
+          layoutHolesVerifiedAt: null
+        } as never;
+      }
+      if ("googlePlaceId" in where && where.googlePlaceId === "public-course") {
+        return {
+          id: "public-course",
+          name: "Public Course",
+          isPublic: true,
+          automationEligibility: "ALLOWED",
+          layoutHoleCounts: [],
+          layoutHolesVerifiedAt: null
+        } as never;
+      }
+      return null;
+    });
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 4,
+        cadenceMinutes: 15,
+        courses: [
+          {
+            googlePlaceId: "private-course",
+            name: "Private Course",
+            latitude: 41.8,
+            longitude: -73.1,
+            rank: 1
+          },
+          {
+            googlePlaceId: "public-course",
+            name: "Public Course",
+            latitude: 41.7,
+            longitude: -73,
+            rank: 2
+          }
+        ]
+      })
+    ).rejects.toThrow("only create alerts for public golf courses");
+
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass an exact private place with a nearby supported alias", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "exact-private",
+      name: "Example Golf Course",
+      isPublic: false,
+      automationEligibility: "BLOCKED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null
+    } as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "nearby-public-alias",
+        name: "Example Golf Course",
+        isPublic: true,
+        latitude: 41.8,
+        longitude: -73.1,
+        automationEligibility: "ALLOWED",
+        layoutHoleCounts: [],
+        layoutHolesVerifiedAt: null
+      }
+    ] as never);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 2,
+        cadenceMinutes: 15,
+        courses: [{
+          googlePlaceId: "exact-private-place",
+          name: "Example Golf Course",
+          latitude: 41.8,
+          longitude: -73.1,
+          rank: 1
+        }]
+      })
+    ).rejects.toThrow("only create alerts for public golf courses");
+
+    expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched persisted and Google course identifiers", async () => {
+    mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
+      if ("id" in where && where.id === "public-course-row") {
+        return {
+          id: "public-course-row",
+          name: "Public Course",
+          googlePlaceId: "public-course-place",
+          isPublic: true,
+          automationEligibility: "ALLOWED",
+          layoutHoleCounts: [],
+          layoutHolesVerifiedAt: null
+        } as never;
+      }
+      if ("googlePlaceId" in where && where.googlePlaceId === "private-course-place") {
+        return {
+          id: "private-course-row",
+          name: "Private Course",
+          googlePlaceId: "private-course-place",
+          isPublic: false,
+          automationEligibility: "BLOCKED",
+          layoutHoleCounts: [],
+          layoutHolesVerifiedAt: null
+        } as never;
+      }
+      return null;
+    });
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 2,
+        cadenceMinutes: 15,
+        courses: [{
+          courseId: "public-course-row",
+          googlePlaceId: "private-course-place",
+          name: "Private Course",
+          latitude: 41.8,
+          longitude: -73.1,
+          rank: 1
+        }]
+      })
+    ).rejects.toThrow("only create alerts for public golf courses");
+
+    expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts a strongly linked supported canonical course for a Google alias", async () => {
+    mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
+      if ("id" in where && where.id === "course-tashua-confirmed") {
+        return {
+          id: "course-tashua-confirmed",
+          googlePlaceId: "demo-tashua-knolls",
+          name: "Tashua Knolls Golf Course",
+          address: "40 Tashua Knolls Ln, Trumbull, CT",
+          latitude: 41.242,
+          longitude: -73.209,
+          website: "https://www.tashuaknolls.com/",
+          phone: null,
+          isPublic: true,
+          automationEligibility: "ALLOWED",
+          layoutHoleCounts: [],
+          layoutHolesVerifiedAt: null
+        } as never;
+      }
+      if ("googlePlaceId" in where && where.googlePlaceId === "google-tashua-facility") {
+        return {
+          id: "course-tashua-unreviewed",
+          googlePlaceId: "google-tashua-facility",
+          name: "Tashua Knolls & Tashua Glen Golf Course",
+          address: "40 Tashua Knolls Ln, Trumbull, CT 06611, USA",
+          latitude: 41.2888889,
+          longitude: -73.2494444,
+          website: "http://www.tashuaknolls.com/",
+          phone: null,
+          isPublic: true,
+          automationEligibility: "UNKNOWN",
+          layoutHoleCounts: [],
+          layoutHolesVerifiedAt: null
+        } as never;
+      }
+      return null;
+    });
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 2,
+      cadenceMinutes: 15,
+      courses: [{
+        courseId: "course-tashua-confirmed",
+        googlePlaceId: "google-tashua-facility",
+        name: "Tashua Knolls & Tashua Glen Golf Course",
+        address: "40 Tashua Knolls Ln, Trumbull, CT 06611, USA",
+        latitude: 41.2888889,
+        longitude: -73.2494444,
+        website: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+        rank: 1
+      }]
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [{
+              rank: 1,
+              course: { connect: { id: "course-tashua-confirmed" } }
+            }]
+          }
+        })
+      })
+    );
+  });
+
+  it.each(["VERIFIED_PRIVATE", "VERIFIED_NON_COURSE"] as const)(
+    "rejects an active %s place review even when no Course row exists",
+    async (accessOverride) => {
+      mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([{
+        googlePlaceId: "review-blocked-place",
+        accessOverride,
+        name: "Reviewed Place",
+        classification: "Reviewed exclusion",
+        evidenceUrl: "https://evidence.example/review",
+        reviewedAt: new Date("2026-07-20T00:00:00.000Z"),
+        active: true,
+        canonicalPlaceId: null,
+        canonicalName: null,
+        canonicalAddress: null,
+        canonicalWebsiteUrl: null,
+        canonicalPhone: null,
+        latitude: null,
+        longitude: null,
+        retainWhenCanonicalAbsent: false
+      }] as never);
+      mockedPrisma.course.findUnique.mockResolvedValue(null);
+
+      await expect(
+        createTeeSearchForUser("user-1", {
+          date: "2026-08-15",
+          startTime: "06:00",
+          endTime: "16:00",
+          players: 2,
+          cadenceMinutes: 15,
+          courses: [{
+            googlePlaceId: "review-blocked-place",
+            name: "Reviewed Place",
+            latitude: 41.8,
+            longitude: -73.1,
+            rank: 1
+          }]
+        })
+      ).rejects.toThrow("only create alerts for public golf courses");
+
+      expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+      expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+    }
+  );
+
+  it("rejects an alias whose canonical place has an active private review", async () => {
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([
+      {
+        googlePlaceId: "alias-place",
+        accessOverride: null,
+        name: "Alias Course",
+        classification: "Canonical alias",
+        evidenceUrl: "https://evidence.example/alias",
+        reviewedAt: new Date("2026-07-20T00:00:00.000Z"),
+        active: true,
+        canonicalPlaceId: "canonical-private-place",
+        canonicalName: "Canonical Private Course",
+        canonicalAddress: null,
+        canonicalWebsiteUrl: null,
+        canonicalPhone: null,
+        latitude: null,
+        longitude: null,
+        retainWhenCanonicalAbsent: true
+      },
+      {
+        googlePlaceId: "canonical-private-place",
+        accessOverride: "VERIFIED_PRIVATE",
+        name: "Canonical Private Course",
+        classification: "Verified private",
+        evidenceUrl: "https://evidence.example/private",
+        reviewedAt: new Date("2026-07-20T00:00:00.000Z"),
+        active: true,
+        canonicalPlaceId: null,
+        canonicalName: null,
+        canonicalAddress: null,
+        canonicalWebsiteUrl: null,
+        canonicalPhone: null,
+        latitude: null,
+        longitude: null,
+        retainWhenCanonicalAbsent: false
+      }
+    ] as never);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 2,
+        cadenceMinutes: 15,
+        courses: [{
+          googlePlaceId: "alias-place",
+          name: "Alias Course",
+          latitude: 41.8,
+          longitude: -73.1,
+          rank: 1
+        }]
+      })
+    ).rejects.toThrow("only create alerts for public golf courses");
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite reusable course identity fields from alert input", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "public-course-row",
+      name: "Canonical Public Course",
+      googlePlaceId: "public-course-place",
+      isPublic: true,
+      automationEligibility: "ALLOWED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null
+    } as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "06:00",
+      endTime: "16:00",
+      players: 2,
+      cadenceMinutes: 15,
+      courses: [{
+        courseId: "public-course-row",
+        name: "Tampered Course Name",
+        city: "Wrong City",
+        stateCode: "ZZ",
+        latitude: -20,
+        longitude: 120,
+        rank: 1
+      }]
+    });
+
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [{
+              rank: 1,
+              course: { connect: { id: "public-course-row" } }
+            }]
           }
         })
       })

@@ -142,9 +142,49 @@ describe("evaluateAutomationPolicy", () => {
   });
 
   it("keeps private identities out of adapter execution", () => {
+    expect(evaluateMonitoringGate({
+      isPublic: false,
+      intelligenceVerifiedAt: new Date("2026-07-16T11:00:00.000Z"),
+      intelligenceReviewAt: new Date("2027-01-12T00:00:00.000Z"),
+      intelligenceConfidence: 0.98,
+      now: new Date("2026-07-16T12:00:00.000Z")
+    })).toMatchObject({
+      disposition: "IDENTITY_FINAL",
+      adapterAllowed: false,
+      requiresRevalidation: false,
+      currentEvidence: true
+    });
+  });
+
+  it("revalidates a private identity after its explicit review date", () => {
+    expect(evaluateMonitoringGate({
+      isPublic: false,
+      intelligenceVerifiedAt: new Date("2026-01-01T00:00:00.000Z"),
+      intelligenceReviewAt: new Date("2026-07-15T00:00:00.000Z"),
+      intelligenceConfidence: 0.98,
+      now: new Date("2026-07-16T12:00:00.000Z")
+    })).toMatchObject({
+      disposition: "IDENTITY_RECHECK",
+      adapterAllowed: false,
+      requiresRevalidation: true,
+      currentEvidence: false
+    });
+  });
+
+  it("keeps legacy private identities without a review schedule safely final", () => {
     expect(evaluateMonitoringGate({ isPublic: false })).toMatchObject({
       disposition: "IDENTITY_FINAL",
-      adapterAllowed: false
+      adapterAllowed: false,
+      requiresRevalidation: false,
+      currentEvidence: false
+    });
+  });
+
+  it("keeps invalid non-course identities permanently final", () => {
+    expect(evaluateMonitoringGate({ invalidCourse: true })).toMatchObject({
+      disposition: "IDENTITY_FINAL",
+      adapterAllowed: false,
+      requiresRevalidation: false
     });
   });
 });

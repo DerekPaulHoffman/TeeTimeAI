@@ -177,10 +177,16 @@ export function getChangedCourseNames(
 export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const currentSnapshot = buildSearchStatusSnapshot(input.courses);
   const changedCourses = getChangedCourseNames(currentSnapshot, input.previousSnapshot);
-  const hasAvailability = input.courses.some(
-    (course) =>
+  const hasAvailability = input.courses.some((course) => {
+    const category = getBlockedMonitoringCategory(course);
+    return (
       (course.matchingTimes?.length ?? 0) > 0 &&
-      getBlockedMonitoringCategory(course) !== "IDENTITY_FINAL"
+      category !== "IDENTITY_FINAL" &&
+      category !== "IDENTITY_RECHECK"
+    );
+  });
+  const hasIdentityRecheckCourse = input.courses.some(
+    (course) => getBlockedMonitoringCategory(course) === "IDENTITY_RECHECK"
   );
   const hasDirectOnlyCourse = input.courses.some(
     (course) => {
@@ -195,7 +201,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const hasWorkInProgressCourse = input.courses.some(
     (course) =>
       course.outcome === "NEEDS_ADAPTER" ||
-      getBlockedMonitoringCategory(course) === "POLICY_REMEDIATION"
+      getBlockedMonitoringCategory(course) === "POLICY_REMEDIATION" ||
+      getBlockedMonitoringCategory(course) === "IDENTITY_RECHECK"
   );
   const heading = input.kind === "setup"
     ? "Your tee-time alert is active"
@@ -203,23 +210,30 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   const intro = hasAvailability
     ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
     : input.kind === "setup"
-      ? hasDirectOnlyCourse
-        ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
-        : hasWorkInProgressCourse
-          ? "Your alert is set. We checked every selected course. Use the official link where monitoring is still being added."
-          : "Your alert is set. We checked every selected course and will keep watching automatically."
+      ? hasIdentityRecheckCourse
+        ? "Your alert is set. Automatic monitoring is paused for any course whose public-course identity is being rechecked; we'll keep checking supported courses."
+        : hasDirectOnlyCourse
+          ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
+          : hasWorkInProgressCourse
+            ? "Your alert is set. We checked every selected course. Use the official link where monitoring is still being added."
+            : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
-        : hasDirectOnlyCourse
-          ? "No course status changed since your last email. We're still checking supported courses."
-          : "No course status changed since your last email. We're still checking.";
+        : hasIdentityRecheckCourse
+          ? "No course status changed since your last email. Identity verification is still in progress, and automatic monitoring remains paused for that course."
+          : hasDirectOnlyCourse
+            ? "No course status changed since your last email. We're still checking supported courses."
+            : "No course status changed since your last email. We're still checking.";
   const availabilityCourses = input.courses
     .map((course, index) => ({ course, fallbackRank: index + 1 }))
-    .filter(
-      ({ course }) =>
+    .filter(({ course }) => {
+      const category = getBlockedMonitoringCategory(course);
+      return (
         (course.matchingTimes?.length ?? 0) > 0 &&
-        getBlockedMonitoringCategory(course) !== "IDENTITY_FINAL"
-    )
+        category !== "IDENTITY_FINAL" &&
+        category !== "IDENTITY_RECHECK"
+      );
+    })
     .map(({ course, fallbackRank }) => ({
       courseId: course.courseId,
       courseName: course.courseName,
@@ -268,14 +282,22 @@ function toMonitoringCourse(
   rank: number
 ): CustomerEmailMonitoringCourse {
   const description = describeCourse(course, players);
-  const bookingAccess = getBookingAccess(course);
   const blockedCategory = getBlockedMonitoringCategory(course);
-  const identityFinal = blockedCategory === "IDENTITY_FINAL";
+  const identityBlocked =
+    blockedCategory === "IDENTITY_FINAL" ||
+    blockedCategory === "IDENTITY_RECHECK";
+  const bookingAccess = identityBlocked ? undefined : getBookingAccess(course);
   const isAddingMonitoring =
     course.outcome === "NEEDS_ADAPTER" ||
     blockedCategory === "POLICY_REMEDIATION";
-  const presentation = course.outcome === "MATCH_FOUND"
+  const presentation = identityBlocked
     ? {
+        badgeLabel: description.monitoringLabel.toUpperCase(),
+        tone: "direct" as const,
+        detail: `${description.stateLabel}. ${description.detail}`
+      }
+    : course.outcome === "MATCH_FOUND"
+      ? {
         badgeLabel: "FULLY MONITORED",
         tone: "monitored" as const,
         detail: `We're checking this course automatically. ${description.detail}`
@@ -320,9 +342,9 @@ function toMonitoringCourse(
     badgeLabel: presentation.badgeLabel,
     detail: presentation.detail,
     tone: presentation.tone,
-    bookingUrl: identityFinal ? undefined : course.bookingUrl,
+    bookingUrl: identityBlocked ? undefined : course.bookingUrl,
     bookingLinkLabel,
-    phone: identityFinal ? undefined : course.phone
+    phone: identityBlocked ? undefined : course.phone
   };
 }
 
@@ -348,6 +370,37 @@ function getLocalDateAndHour(date: Date, timeZone: string) {
 }
 
 function describeCourse(course: SearchStatusCourseReport, players: number) {
+  const blockedCategory = getBlockedMonitoringCategory(course);
+  if (blockedCategory === "IDENTITY_RECHECK") {
+    return {
+      monitoringLabel: "Course identity recheck",
+      stateLabel: "Monitoring paused while we verify public access",
+      icon: "!",
+      color: "#7f302a",
+      badgeBackground: "#fbeae7",
+      borderColor: "#ecc4bf",
+      calloutBackground: "#fff5f3",
+      calloutBorder: "#efc9c4",
+      calloutText: "#7f302a",
+      detail:
+        "The prior course-identity review is due. Automatic availability checks remain paused until current official evidence confirms this is a public course."
+    };
+  }
+  if (blockedCategory === "IDENTITY_FINAL") {
+    return {
+      monitoringLabel: "Not a public course",
+      stateLabel: "Not eligible for tee-time monitoring",
+      icon: "!",
+      color: "#7f302a",
+      badgeBackground: "#fbeae7",
+      borderColor: "#ecc4bf",
+      calloutBackground: "#fff5f3",
+      calloutBorder: "#efc9c4",
+      calloutText: "#7f302a",
+      detail:
+        "Current verified identity evidence shows this listing is private, is not a playable golf course, or is otherwise not a public course Tee Time Spot can monitor."
+    };
+  }
   if (course.outcome === "MATCH_FOUND") {
     return {
       monitoringLabel: "Fully monitored ✓",
@@ -417,22 +470,6 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
     };
   }
 
-  const blockedCategory = getBlockedMonitoringCategory(course);
-  if (blockedCategory === "IDENTITY_FINAL") {
-    return {
-      monitoringLabel: "Not a public course",
-      stateLabel: "Not eligible for tee-time monitoring",
-      icon: "!",
-      color: "#7f302a",
-      badgeBackground: "#fbeae7",
-      borderColor: "#ecc4bf",
-      calloutBackground: "#fff5f3",
-      calloutBorder: "#efc9c4",
-      calloutText: "#7f302a",
-      detail:
-        "Current verified identity evidence shows this listing is private, is not a playable golf course, or is otherwise not a public course Tee Time Spot can monitor."
-    };
-  }
   if (blockedCategory === "POLICY_REMEDIATION") {
     return {
       monitoringLabel: "Official booking page",
@@ -574,6 +611,9 @@ function getBookingAccess(course: SearchStatusCourseReport) {
 }
 
 function getBlockedMonitoringCategory(course: SearchStatusCourseReport) {
+  if (course.monitoringDisposition === "IDENTITY_RECHECK") {
+    return "IDENTITY_RECHECK" as const;
+  }
   if (course.monitoringDisposition === "IDENTITY_FINAL") {
     return "IDENTITY_FINAL" as const;
   }

@@ -454,6 +454,82 @@ describe("fresh runtime verification", () => {
     automationEligibility: "ALLOWED" as const,
     automationReason: "NONE" as const
   };
+  const browserPrivateSourceUrl =
+    "https://course.example/golf/deer-creek";
+  const browserPrivatePolicyNotes =
+    "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory.";
+  const browserPrivateProof = {
+    kind: "BROWSER_PRIVATE_IDENTITY",
+    disposition: "VERIFIED_PRIVATE",
+    discoveryCreatedAt: "2026-07-15T19:30:00.000Z",
+    intelligenceVerifiedAt: "2026-07-15T19:31:00.000Z",
+    intelligenceReviewAt: "2027-01-11T19:31:00.000Z",
+    evidenceOrigin: "https://course.example",
+    provenance: "official-private-course-profile",
+    confidence: 0.98,
+    intelligenceConfidence: 0.98,
+    policyNotes: browserPrivatePolicyNotes,
+    courseBookingMethod: "UNKNOWN",
+    courseAutomationEligibility: "BLOCKED",
+    courseAutomationReason: "OTHER",
+    discoveryStatus: "VERIFIED",
+    discoveryDetectedPlatform: "UNKNOWN",
+    discoveryBookingMethod: "UNKNOWN",
+    discoveryBookingPhone: null,
+    discoveryAutomationEligibility: "BLOCKED",
+    discoveryAutomationReason: "OTHER",
+    discoveryApiEndpoint: null,
+    discoveryApiMetadata: null
+  } as const;
+
+  function browserPrivateCourse(input?: {
+    discoveryCreatedAt?: Date;
+    intelligenceVerifiedAt?: Date;
+    intelligenceReviewAt?: Date;
+    provenance?: string;
+    bookingPhone?: string | null;
+    apiEndpoint?: string | null;
+    apiMetadata?: Record<string, string> | null;
+  }) {
+    return {
+      ...runnableCourse,
+      isPublic: false,
+      bookingMethod: "UNKNOWN" as const,
+      automationEligibility: "BLOCKED" as const,
+      automationReason: "OTHER" as const,
+      policyNotes: browserPrivatePolicyNotes,
+      intelligenceVerifiedAt:
+        input?.intelligenceVerifiedAt ??
+        new Date("2026-07-15T19:31:00.000Z"),
+      intelligenceReviewAt:
+        input?.intelligenceReviewAt ??
+        new Date("2027-01-11T19:31:00.000Z"),
+      intelligenceConfidence: 0.98,
+      latestDiscovery: {
+        status: "VERIFIED",
+        detectedPlatform: "UNKNOWN",
+        bookingMethod: "UNKNOWN" as const,
+        bookingPhone: input?.bookingPhone ?? null,
+        automationEligibility: "BLOCKED" as const,
+        automationReason: "OTHER" as const,
+        sourceUrl: browserPrivateSourceUrl,
+        bookingUrl: browserPrivateSourceUrl,
+        apiEndpoint: input?.apiEndpoint ?? null,
+        apiMetadata: input?.apiMetadata ?? null,
+        confidence: 0.98,
+        evidence: {
+          learnedFrom:
+            input?.provenance ?? "official-private-course-profile",
+          finalUrl: browserPrivateSourceUrl,
+          observedUrls: [browserPrivateSourceUrl],
+          visibleText: "Deer Creek Details Status: Private"
+        },
+        createdAt:
+          input?.discoveryCreatedAt ??
+          new Date("2026-07-15T19:30:00.000Z")
+      }
+    };
+  }
 
   it("accepts fresh no-email provider verification from the exact release", () => {
     const releaseSha = "a".repeat(40);
@@ -818,6 +894,99 @@ describe("fresh runtime verification", () => {
     ).toBe("FINAL_DISPOSITION");
   });
 
+  it("accepts current exact browser-verified private identity evidence", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
+        now,
+        course: browserPrivateCourse()
+      })
+    ).toMatchObject({
+      result: "FINAL_DISPOSITION",
+      proofSnapshot: {
+        kind: "BROWSER_PRIVATE_IDENTITY",
+        disposition: "VERIFIED_PRIVATE",
+        provenance: "official-private-course-profile",
+        discoveryApiMetadata: null
+      }
+    });
+  });
+
+  it("accepts replayed private identity evidence when discovery is recorded after the course update", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        now,
+        course: browserPrivateCourse({
+          intelligenceVerifiedAt: new Date("2026-07-15T19:30:00.000Z"),
+          discoveryCreatedAt: new Date("2026-07-15T19:31:00.000Z")
+        })
+      }).result
+    ).toBe("FINAL_DISPOSITION");
+  });
+
+  it("rejects forged browser-private provenance as a batch final", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        now,
+        course: browserPrivateCourse({
+          provenance: "official-private-course-profile:untrusted-marker"
+        })
+      }).result
+    ).toBe("STALE_EVIDENCE");
+  });
+
+  it("requires an explicit persisted private identity for a batch final", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        now,
+        course: { ...browserPrivateCourse(), isPublic: undefined }
+      }).result
+    ).toBe("STALE_EVIDENCE");
+  });
+
+  it.each([
+    { field: "booking phone", value: { bookingPhone: "555-0100" } },
+    {
+      field: "API endpoint",
+      value: { apiEndpoint: "https://course.example/api/tee-times" }
+    },
+    {
+      field: "API metadata",
+      value: { apiMetadata: { provider: "unexpected" } }
+    }
+  ])("rejects browser-private evidence with forged $field metadata", ({ value }) => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        now,
+        course: browserPrivateCourse(value)
+      }).result
+    ).toBe("STALE_EVIDENCE");
+  });
+
+  it("rejects browser-private evidence timestamped beyond the clock-skew allowance", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        now,
+        course: browserPrivateCourse({
+          intelligenceVerifiedAt: new Date("2026-07-15T20:01:01.000Z"),
+          discoveryCreatedAt: new Date("2026-07-15T20:01:01.000Z")
+        })
+      }).result
+    ).toBe("STALE_EVIDENCE");
+  });
+
   it.each([
     {
       label: "the current course method is unknown",
@@ -1057,6 +1226,123 @@ describe("fresh runtime verification", () => {
           verifiedIncidentUpdatedAt: new Date("2026-07-15T19:00:00.000Z"),
           incident: {
             firstSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(false);
+  });
+
+  it("accepts strict browser-private identity evidence as durable terminal proof", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: browserPrivateProof,
+          verifiedAt: now,
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(true);
+  });
+
+  it("keeps replay-ordered browser-private identity evidence durable", () => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: {
+            ...browserPrivateProof,
+            discoveryCreatedAt: "2026-07-15T19:31:00.000Z",
+            intelligenceVerifiedAt: "2026-07-15T19:30:00.000Z"
+          },
+          verifiedAt: now,
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+            lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
+          }
+        },
+        {
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchStartedAt: null
+        }
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "provider metadata",
+      proof: {
+        ...browserPrivateProof,
+        discoveryApiMetadata: { provider: "unexpected" }
+      }
+    },
+    {
+      label: "a future evidence timestamp",
+      proof: {
+        ...browserPrivateProof,
+        discoveryCreatedAt: "2026-07-15T20:01:01.000Z",
+        intelligenceVerifiedAt: "2026-07-15T20:01:01.000Z"
+      }
+    },
+    {
+      label: "evidence timestamps more than five minutes apart",
+      proof: {
+        ...browserPrivateProof,
+        intelligenceVerifiedAt: "2026-07-15T19:36:01.000Z"
+      }
+    },
+    {
+      label: "forged provenance",
+      proof: {
+        ...browserPrivateProof,
+        provenance: "official-private-course-profile:forged"
+      }
+    },
+    {
+      label: "tampered course eligibility",
+      proof: {
+        ...browserPrivateProof,
+        courseAutomationEligibility: "ALLOWED"
+      }
+    },
+    {
+      label: "tampered policy notes",
+      proof: {
+        ...browserPrivateProof,
+        policyNotes: "Private according to an unverified source."
+      }
+    }
+  ])("rejects durable browser-private proof with $label", ({ proof }) => {
+    expect(
+      isDurableTerminalProof(
+        {
+          normalizedResult: "FINAL_DISPOSITION",
+          proofSnapshot: proof,
+          verifiedAt: now,
+          verifiedIncidentUpdatedAt: new Date("2026-07-15T19:45:00.000Z"),
+          incident: {
+            firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
             lastSeenAt: new Date("2026-07-15T19:45:00.000Z")
           }
         },

@@ -1667,7 +1667,56 @@ describe("runSearchCheck email cadence", () => {
     expect(result.courseResults[0]).toMatchObject({
       monitoringDisposition: "IDENTITY_FINAL",
       availableMatches: 0,
-      bookingUrl: undefined
+      bookingUrl: undefined,
+      phone: undefined,
+      bookingAccess: undefined
+    });
+  });
+
+  it("keeps an expired private identity paused without closing its support incident", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: false,
+            automationEligibility: "BLOCKED",
+            automationReason: "OTHER",
+            bookingMethod: "CONTACT_COURSE",
+            bookingPhone: "+1 (203) 555-0100",
+            detectedBookingUrl: "https://private.example/book",
+            intelligenceVerifiedAt: new Date("2026-01-01T00:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-07-10T00:00:00.000Z"),
+            intelligenceConfidence: 0.98
+          }
+        }
+      ]
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "BLOCKED_POLICY",
+        message: expect.stringContaining("identity review is due"),
+        rawSummary: expect.objectContaining({
+          monitoringDisposition: "IDENTITY_RECHECK"
+        })
+      })
+    );
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "BLOCKED_POLICY",
+      monitoringDisposition: "IDENTITY_RECHECK",
+      availableMatches: 0,
+      bookingUrl: undefined,
+      phone: undefined,
+      bookingAccess: undefined,
+      message: expect.stringContaining("monitoring remains paused")
     });
   });
 

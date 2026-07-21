@@ -45,7 +45,8 @@ export type MonitoringDisposition =
   | "ACTIONABLE"
   | "MANUAL_FINAL"
   | "TECHNICAL_FINAL"
-  | "IDENTITY_FINAL";
+  | "IDENTITY_FINAL"
+  | "IDENTITY_RECHECK";
 
 export type MonitoringGateResult = {
   disposition: MonitoringDisposition;
@@ -72,13 +73,43 @@ export function evaluateMonitoringGate(
   const bookingMethod = input.bookingMethod ?? "UNKNOWN";
   const automationReason = input.automationReason ?? "NONE";
 
-  if (input.invalidCourse || input.isPublic === false) {
+  if (input.invalidCourse) {
     return {
       disposition: "IDENTITY_FINAL",
       adapterAllowed: false,
       requiresRevalidation: false,
       currentEvidence,
-      reason: "The persisted course identity is private or not a playable public course."
+      reason: "The persisted identity is not a playable golf course."
+    };
+  }
+
+  if (input.isPublic === false) {
+    const hasReviewSchedule =
+      input.intelligenceVerifiedAt !== undefined &&
+      input.intelligenceVerifiedAt !== null &&
+      input.intelligenceReviewAt !== undefined &&
+      input.intelligenceReviewAt !== null &&
+      input.intelligenceConfidence !== undefined &&
+      input.intelligenceConfidence !== null;
+    if (!hasReviewSchedule) {
+      return {
+        disposition: "IDENTITY_FINAL",
+        adapterAllowed: false,
+        requiresRevalidation: false,
+        currentEvidence: false,
+        reason:
+          "The persisted private identity predates scheduled revalidation and remains final until operator review."
+      };
+    }
+    const currentIdentityEvidence = hasCurrentCourseIdentityIntelligence(input);
+    return {
+      disposition: currentIdentityEvidence ? "IDENTITY_FINAL" : "IDENTITY_RECHECK",
+      adapterAllowed: false,
+      requiresRevalidation: !currentIdentityEvidence,
+      currentEvidence: currentIdentityEvidence,
+      reason: currentIdentityEvidence
+        ? "Current verified evidence identifies this as a private course."
+        : "The private-course identity review is due and requires fresh official evidence."
     };
   }
 
@@ -168,6 +199,27 @@ export function hasCurrentMonitoringIntelligence(
     return false;
   }
   return Boolean(reviewAt && reviewAt.getTime() > now.getTime());
+}
+
+function hasCurrentCourseIdentityIntelligence(
+  input: Pick<
+    MonitoringGateInput,
+    | "intelligenceVerifiedAt"
+    | "intelligenceReviewAt"
+    | "intelligenceConfidence"
+    | "now"
+  >
+) {
+  const now = input.now ?? new Date();
+  const verifiedAt = parseDate(input.intelligenceVerifiedAt);
+  const reviewAt = parseDate(input.intelligenceReviewAt);
+  return Boolean(
+    verifiedAt &&
+      verifiedAt.getTime() <= now.getTime() + 60_000 &&
+      reviewAt &&
+      reviewAt.getTime() > now.getTime() &&
+      (input.intelligenceConfidence ?? 0) >= 0.8
+  );
 }
 
 function parseDate(value: Date | string | null | undefined) {

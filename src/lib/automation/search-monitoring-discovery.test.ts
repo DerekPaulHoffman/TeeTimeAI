@@ -1844,8 +1844,9 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
+        isPublic: false,
         status: "VERIFIED",
-        bookingMethod: "CONTACT_COURSE",
+        bookingMethod: "UNKNOWN",
         automationEligibility: "BLOCKED",
         automationReason: "OTHER",
         evidence: expect.objectContaining({ learnedFrom: "official-private-club-access" })
@@ -3566,9 +3567,10 @@ describe("search monitoring discovery", () => {
     );
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
+        isPublic: false,
         status: "VERIFIED",
         sourceUrl: courseUrl,
-        bookingMethod: "CONTACT_COURSE",
+        bookingMethod: "UNKNOWN",
         automationEligibility: "BLOCKED",
         automationReason: "OTHER",
         evidence: expect.objectContaining({
@@ -3576,6 +3578,136 @@ describe("search monitoring discovery", () => {
         })
       })
     );
+  });
+
+  it("rechecks an expired private identity from the first-party course page", async () => {
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() !== sourceUrl) {
+        throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+      return new Response(
+        '<html><head><title>Deer Creek</title></head><body><h1>Deer Creek Details</h1><p>Architect: Tom Fazio</p><p>Stats: 7,094 Yards / Par 72</p><p>Established: 1991</p><p>Status: Private</p><p>Location: Savannah, GA</p></body></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "expired-private-profile",
+          name: "Deer Creek Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl:
+            "https://app.whoosh.io/patron/club/deer-creek",
+          detectedPlatform: "CUSTOM",
+          providerFamilyKey: "WHOOSH",
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          isPublic: false,
+          intelligenceVerifiedAt: new Date("2025-12-01T00:00:00.000Z"),
+          intelligenceReviewAt: new Date("2026-07-01T00:00:00.000Z"),
+          intelligenceConfidence: 0.98,
+          updatedAt: new Date("2026-07-01T00:00:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      sourceUrl,
+      expect.any(Object)
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isPublic: false,
+        status: "VERIFIED",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        evidence: expect.objectContaining({
+          learnedFrom: "official-private-course-profile"
+        })
+      }),
+      expect.objectContaining({
+        updatedAt: new Date("2026-07-01T00:00:00.000Z"),
+        automationEligibility: "BLOCKED"
+      })
+    );
+    expect(result.attemptedCourseIds).toEqual(["expired-private-profile"]);
+    expect(result.appliedCourseIds).toEqual(["expired-private-profile"]);
+  });
+
+  it("preserves exact private provenance during one-time legacy-policy reconciliation", async () => {
+    dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
+      {
+        courseId: "legacy-private-profile",
+        status: "FAILED",
+        sourceUrl: "https://community.example/golf/deer-creek",
+        createdAt: new Date("2026-07-13T19:00:00.000Z"),
+        evidence: null
+      },
+      {
+        courseId: "legacy-private-profile",
+        status: "FAILED",
+        sourceUrl: "https://community.example/golf/deer-creek",
+        createdAt: new Date("2026-07-13T18:00:00.000Z"),
+        evidence: null
+      }
+    ]);
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        '<html><head><title>Deer Creek</title></head><body><h1>Deer Creek Details</h1><p>Architect: Tom Fazio</p><p>Stats: 7,094 Yards / Par 72</p><p>Established: 1991</p><p>Status: Private</p><p>Location: Savannah, GA</p></body></html>',
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "legacy-private-profile",
+          name: "Deer Creek Golf Course",
+          website: sourceUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "community.example",
+          automationEligibility: "BLOCKED",
+          automationReason: "AUTOMATION_PROHIBITED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null,
+          isPublic: true,
+          updatedAt: new Date("2026-07-01T00:00:00.000Z")
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isPublic: false,
+        automationEligibility: "BLOCKED",
+        evidence: expect.objectContaining({
+          learnedFrom:
+            "official-private-course-profile:legacy-policy-reconciliation"
+        })
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isPublic: false,
+        evidence: expect.objectContaining({
+          learnedFrom:
+            "official-private-course-profile:legacy-policy-reconciliation"
+        })
+      }),
+      expect.objectContaining({ automationEligibility: "BLOCKED" })
+    );
+    expect(result.appliedCourseIds).toEqual(["legacy-private-profile"]);
   });
 
   it("classifies a course-scoped direct legacy Prophet link without following its cookieless session redirect", async () => {

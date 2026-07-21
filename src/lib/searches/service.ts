@@ -9,8 +9,13 @@ import { lockSearchForAlertMutation } from "@/lib/email/search-delivery-outbox";
 import {
   findUniqueGenericCourseMatch,
   haveCompatibleCourseNames,
+  haveStrongCourseIdentityLink,
   isGenericCourseName
 } from "@/lib/places/course-identity";
+import {
+  loadActiveGooglePlaceReviewIndex,
+  type GooglePlaceReviewIndex
+} from "@/lib/places/google-place-reviews";
 import { prisma } from "@/lib/prisma";
 import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
 import {
@@ -44,8 +49,16 @@ export async function createTeeSearchForUser(
 ) {
   await assertQueueCapacity(userId);
 
-  const sortedCourses = [...input.courses].sort((a, b) => a.rank - b.rank);
+  const placeReviews = await loadActiveGooglePlaceReviewIndex();
+  const sortedCourses = input.courses
+    .map((course) => applyActivePlaceReview(course, placeReviews))
+    .sort((a, b) => a.rank - b.rank);
   const resolvedPreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
+  if (resolvedPreferences.some((preference) => preference.course.isPublic === false)) {
+    throw new Error(
+      "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again."
+    );
+  }
   assertCourseLayoutsCompatible(resolvedPreferences, input.requestedLayoutHoles);
   if (resolvedPreferences.every((preference) => preference.automationEligibility === "BLOCKED")) {
     throw new Error(
@@ -78,21 +91,9 @@ export async function createTeeSearchForUser(
 }
 
 async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
-  const timeZone = getTimeZoneForCoordinates(course.latitude, course.longitude);
   const reusableCourse = await findReusableCourse(course);
 
   if (reusableCourse) {
-    await prisma.course.update({
-      where: { id: reusableCourse.id },
-      data: {
-        timeZone,
-        ...(course.city ? { city: course.city } : {}),
-        ...(course.stateCode ? { stateCode: course.stateCode.toUpperCase() } : {}),
-        ...(course.stateName ? { stateName: course.stateName } : {}),
-        ...(course.county ? { county: course.county.replace(/\s+County$/i, "") } : {}),
-        ...(course.countryCode ? { countryCode: course.countryCode.toUpperCase() } : {})
-      }
-    });
     return {
       automationEligibility: reusableCourse.automationEligibility,
       course: reusableCourse,
@@ -106,11 +107,13 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
   }
 
   const placeId = getStablePlaceId(course);
+  const timeZone = getTimeZoneForCoordinates(course.latitude, course.longitude);
 
   return {
     automationEligibility: "UNKNOWN",
     course: {
       name: course.name,
+      isPublic: true,
       layoutHoleCounts: [] as number[],
       layoutHolesVerifiedAt: null
     },
@@ -145,21 +148,75 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
 }
 
 async function findReusableCourse(course: SelectedCourseInput) {
-  if (course.courseId) {
-    const existingById = await prisma.course.findUnique({
+  const existingById = course.courseId
+    ? await prisma.course.findUnique({
       where: { id: course.courseId },
       select: {
         id: true,
         name: true,
+        googlePlaceId: true,
+        address: true,
+        latitude: true,
+        longitude: true,
+        website: true,
+        phone: true,
+        isPublic: true,
         automationEligibility: true,
         layoutHoleCounts: true,
         layoutHolesVerifiedAt: true
       }
-    });
+    })
+    : null;
+  if (course.courseId && !existingById) {
+    throw new Error(
+      "The selected course is no longer available. Refresh the course list and try again."
+    );
+  }
 
-    if (existingById) {
-      return existingById;
+  const exactCourse = course.googlePlaceId
+    ? await prisma.course.findUnique({
+        where: { googlePlaceId: course.googlePlaceId },
+        select: {
+          id: true,
+          name: true,
+          googlePlaceId: true,
+          address: true,
+          latitude: true,
+          longitude: true,
+          website: true,
+          phone: true,
+          isPublic: true,
+          automationEligibility: true,
+          layoutHoleCounts: true,
+          layoutHolesVerifiedAt: true
+        }
+      })
+    : null;
+  if (exactCourse?.isPublic === false) {
+    return exactCourse;
+  }
+  if (
+    existingById &&
+    exactCourse &&
+    exactCourse.id !== existingById.id &&
+    exactCourse.automationEligibility === "BLOCKED"
+  ) {
+    return exactCourse;
+  }
+  if (existingById) {
+    if (
+      course.googlePlaceId &&
+      existingById.googlePlaceId !== course.googlePlaceId &&
+      (!isConfirmedCourseAlias(course, existingById) ||
+        (exactCourse !== null &&
+          exactCourse.id !== existingById.id &&
+          !isConfirmedPersistedCourseAlias(existingById, exactCourse)))
+    ) {
+      throw new Error(
+        "The selected course details do not match. Refresh the course list and try again."
+      );
     }
+    return existingById;
   }
 
   const reusableNearbyCourses = await prisma.course.findMany({
@@ -178,6 +235,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
           detectedPlatform: { not: "UNKNOWN" }
         },
         { automationEligibility: "BLOCKED" },
+        { isPublic: false },
         { layoutHolesVerifiedAt: { not: null } }
       ]
     },
@@ -190,6 +248,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
       longitude: true,
       website: true,
       phone: true,
+      isPublic: true,
       automationEligibility: true,
       layoutHoleCounts: true,
       layoutHolesVerifiedAt: true
@@ -205,20 +264,8 @@ async function findReusableCourse(course: SelectedCourseInput) {
     return supportedNearbyCourse;
   }
 
-  if (course.googlePlaceId) {
-    const exactCourse = await prisma.course.findUnique({
-      where: { googlePlaceId: course.googlePlaceId },
-      select: {
-        id: true,
-        name: true,
-        automationEligibility: true,
-        layoutHoleCounts: true,
-        layoutHolesVerifiedAt: true
-      }
-    });
-    if (exactCourse) {
-      return exactCourse;
-    }
+  if (exactCourse) {
+    return exactCourse;
   }
 
   const verifiedNearbyCourse = reusableNearbyCourses.find(
@@ -241,6 +288,89 @@ async function findReusableCourse(course: SelectedCourseInput) {
     blockedNearbyCourses.find((candidate) =>
       haveCompatibleCourseNames(course.name, candidate.name)
     ) ?? null
+  );
+}
+
+function applyActivePlaceReview(
+  course: SelectedCourseInput,
+  reviews: GooglePlaceReviewIndex
+): SelectedCourseInput {
+  if (!course.googlePlaceId) {
+    return course;
+  }
+  const review = reviews.byPlaceId.get(course.googlePlaceId);
+  const canonicalReview = review?.canonicalPlaceId
+    ? reviews.byPlaceId.get(review.canonicalPlaceId)
+    : undefined;
+  if (
+    isRejectedPlaceReview(review?.accessOverride) ||
+    isRejectedPlaceReview(canonicalReview?.accessOverride)
+  ) {
+    throw new Error(
+      "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again."
+    );
+  }
+  if (!review) {
+    return course;
+  }
+  return {
+    ...course,
+    googlePlaceId: review.canonicalPlaceId ?? course.googlePlaceId,
+    name: review.canonicalName ?? course.name,
+    address: review.canonicalAddress ?? course.address,
+    website: review.canonicalWebsiteUrl ?? course.website,
+    phone: review.canonicalPhone ?? course.phone,
+    latitude: review.latitude ?? course.latitude,
+    longitude: review.longitude ?? course.longitude
+  };
+}
+
+function isRejectedPlaceReview(value: string | null | undefined) {
+  return value === "VERIFIED_PRIVATE" || value === "VERIFIED_NON_COURSE";
+}
+
+function isConfirmedCourseAlias(
+  input: SelectedCourseInput,
+  canonical: {
+    name: string;
+    latitude: number;
+    longitude: number;
+  }
+) {
+  return (
+    haveCompatibleCourseNames(input.name, canonical.name) &&
+    Math.abs(input.latitude - canonical.latitude) <=
+      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+    Math.abs(input.longitude - canonical.longitude) <=
+      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
+  );
+}
+
+function isConfirmedPersistedCourseAlias(
+  canonical: {
+    name: string;
+    address: string | null;
+    latitude: number;
+    longitude: number;
+    website: string | null;
+    phone: string | null;
+  },
+  exact: {
+    name: string;
+    address: string | null;
+    latitude: number;
+    longitude: number;
+    website: string | null;
+    phone: string | null;
+  }
+) {
+  return Boolean(
+    haveCompatibleCourseNames(canonical.name, exact.name) &&
+      Math.abs(canonical.latitude - exact.latitude) <=
+        SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+      Math.abs(canonical.longitude - exact.longitude) <=
+        SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+      haveStrongCourseIdentityLink(canonical, exact)
   );
 }
 

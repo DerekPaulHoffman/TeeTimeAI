@@ -30,6 +30,7 @@ import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intel
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 
@@ -84,12 +85,16 @@ function DashboardView({
   showRecipientEmail: boolean;
   notice?: string;
 }) {
+  const now = new Date();
   const activeSearches = searches.filter((search) => search.status === "ACTIVE");
   const inactiveSearches = searches.filter((search) => search.status !== "ACTIVE");
   const activeCount = activeSearches.length;
   const availableMatches = searches.flatMap((search) =>
     search.matches.filter(
-      (match) => match.availabilityStatus === "AVAILABLE" && match.startsAt > new Date()
+      (match) =>
+        match.availabilityStatus === "AVAILABLE" &&
+        match.startsAt > now &&
+        evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE"
     )
   );
   const selectedCourseCount = new Set(
@@ -242,6 +247,7 @@ function DashboardSearchCard({
   canManage: boolean;
   showRecipientEmail: boolean;
 }) {
+  const now = new Date();
   return (
     <article className="dashboard-row">
       <div className="dashboard-card-main">
@@ -330,19 +336,33 @@ function DashboardSearchCard({
         </div>
         <div className="watch-course-list">
           {search.preferences.map((preference) => {
-            const alertSupport = getCourseAlertSupport(preference.course);
-            const bookingWindow = getBookingWindowForTargetDate(
-              search.date,
-              preference.course
-            );
+            const isPublicCourse = preference.course.isPublic !== false;
+            const monitoringGate = evaluateMonitoringGate({
+              ...preference.course,
+              now
+            });
+            const identityRecheckDue =
+              preference.course.isPublic === false &&
+              monitoringGate.requiresRevalidation;
+            const alertSupport = isPublicCourse
+              ? getCourseAlertSupport(preference.course)
+              : null;
+            const bookingWindow = isPublicCourse
+              ? getBookingWindowForTargetDate(search.date, preference.course)
+              : null;
             const upcomingBookingWindow =
-              bookingWindow && bookingWindow.opensAt > new Date() ? bookingWindow : null;
-            const usesPhoneBooking = ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(
-              preference.course.bookingMethod
-            );
+              bookingWindow && bookingWindow.opensAt > now ? bookingWindow : null;
+            const usesPhoneBooking =
+              isPublicCourse &&
+              ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(
+                preference.course.bookingMethod
+              );
             const bookingPhone = usesPhoneBooking
               ? preference.course.bookingPhone ?? preference.course.phone
               : null;
+            const officialCourseUrl = isPublicCourse
+              ? preference.course.detectedBookingUrl ?? preference.course.website
+              : preference.course.website;
 
             return (
               <div className="watch-course-row" key={preference.id}>
@@ -353,9 +373,18 @@ function DashboardSearchCard({
                 />
                 <div className="watch-course-copy">
                   <div className="figma-course-badges watch-course-badges">
-                    <span className="figma-course-pill is-public">
-                      <Trees size={11} /> Public
-                    </span>
+                    {isPublicCourse ? (
+                      <span className="figma-course-pill is-public">
+                        <Trees size={11} /> Public
+                      </span>
+                    ) : (
+                      <span className="figma-course-pill is-official-site-only">
+                        <CircleOff size={11} />
+                        {identityRecheckDue
+                          ? "Course identity recheck due"
+                          : "Not a public course"}
+                      </span>
+                    )}
                     {alertSupport ? (
                       <span className="figma-course-pill is-official-site-only">
                         <CircleOff size={11} /> {getAlertSupportLabel(alertSupport)}
@@ -384,13 +413,14 @@ function DashboardSearchCard({
                   >
                     Google Maps <ExternalLink size={11} />
                   </a>
-                  {preference.course.detectedBookingUrl ?? preference.course.website ? (
+                  {officialCourseUrl ? (
                     <a
-                      href={preference.course.detectedBookingUrl ?? preference.course.website ?? "#"}
+                      href={officialCourseUrl}
                       rel="noreferrer"
                       target="_blank"
                     >
-                      Official site <ExternalLink size={11} />
+                      {isPublicCourse ? "Official site" : "Course information"}{" "}
+                      <ExternalLink size={11} />
                     </a>
                   ) : null}
                   {bookingPhone ? (

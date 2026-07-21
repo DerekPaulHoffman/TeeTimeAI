@@ -936,6 +936,379 @@ describe("browser discovery persistence", () => {
   });
 
   it.each([
+    ["direct evidence", ""],
+    ["legacy policy reconciliation", ":legacy-policy-reconciliation"]
+  ])("persists exact verified private identity from %s without fabricating public manual-booking facts", async (_label, provenanceSuffix) => {
+    const updatedAt = new Date("2026-07-21T14:10:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        name: "Deer Creek Golf Course",
+        providerFamilyKey: "thelandings.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://thelandings.com/",
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "deer-creek", isPublic: false } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    const sourceUrl =
+      "https://thelandings.com/golf-and-athletic-club/golf/deer-creek";
+    const discovery = buildBrowserDiscovery({
+      courseId: "deer-creek",
+      courseName:
+        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName:
+          "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+        linkCandidates: [],
+        visibleText:
+          "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+      },
+      visibleText:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    });
+
+    const result = await applyBrowserDiscoveryToCourse({
+      ...discovery,
+      evidence: {
+        ...discovery.evidence,
+        learnedFrom: `${discovery.evidence.learnedFrom}${provenanceSuffix}`
+      }
+    });
+
+    expect(result).toEqual({ id: "deer-creek", isPublic: false });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "deer-creek", updatedAt },
+      data: expect.objectContaining({
+        isPublic: false,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER"
+      })
+    });
+    const update = mockedPrisma.course.updateMany.mock.calls[0]?.[0];
+    expect(update?.data).not.toHaveProperty("providerFamilyKey");
+    expect(update?.data).not.toHaveProperty("detectedPlatform");
+    expect(update?.data).not.toHaveProperty("detectedBookingUrl");
+    expect(update?.data).not.toHaveProperty("bookingMetadata");
+    expect(update?.data).not.toHaveProperty("bookingPhone");
+  });
+
+  it("rejects a forged generic private identity discovery", async () => {
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "course-forged-private",
+      isPublic: false,
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://course.example/",
+      bookingUrl: "https://course.example/",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      policyNotes: "A generic page looked private.",
+      intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
+      confidence: 0.98,
+      evidence: {
+        learnedFrom: "browser-visible-links",
+        observedUrls: ["https://course.example/"],
+        visibleText: "Members"
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unrecognized suffix on otherwise exact private provenance", async () => {
+    const sourceUrl = "https://thelandings.com/golf/deer-creek";
+    const discovery = buildBrowserDiscovery({
+      courseId: "course-forged-private-suffix",
+      courseName: "Deer Creek Golf Course",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl],
+      visibleText:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    });
+
+    const result = await applyBrowserDiscoveryToCourse({
+      ...discovery,
+      evidence: {
+        ...discovery.evidence,
+        learnedFrom: `${discovery.evidence.learnedFrom}:untrusted-marker`
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("lets fresh exact verified private identity override stale runnable provider metadata", async () => {
+    const updatedAt = new Date("2026-07-21T14:10:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "FOREUP",
+        detectedPlatform: "FOREUP",
+        detectedBookingUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+        website: "https://thelandings.com/",
+        bookingMetadata: {
+          scheduleId: 6123,
+          bookingBaseUrl:
+            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        },
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: new Date("2026-07-21T14:00:00.000Z"),
+        intelligenceReviewAt: null,
+        intelligenceConfidence: 0.99,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "deer-creek", isPublic: false } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    const sourceUrl =
+      "https://thelandings.com/golf-and-athletic-club/golf/deer-creek";
+    const discovery = buildBrowserDiscovery({
+      courseId: "deer-creek",
+      courseName:
+        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName:
+          "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+        linkCandidates: [],
+        visibleText:
+          "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+      },
+      visibleText:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    });
+
+    const result = await applyBrowserDiscoveryToCourse(discovery);
+
+    expect(result).toEqual({ id: "deer-creek", isPublic: false });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "deer-creek", updatedAt },
+      data: expect.objectContaining({
+        isPublic: false,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER"
+      })
+    });
+    const update = mockedPrisma.course.updateMany.mock.calls[0]?.[0];
+    expect(update?.data).not.toHaveProperty("providerFamilyKey");
+    expect(update?.data).not.toHaveProperty("detectedPlatform");
+    expect(update?.data).not.toHaveProperty("detectedBookingUrl");
+    expect(update?.data).not.toHaveProperty("bookingMetadata");
+  });
+
+  it("reopens a private identity only from an exact official runnable-provider link", async () => {
+    const updatedAt = new Date("2026-07-21T14:10:00.000Z");
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        name: "Deer Creek Golf Course",
+        providerFamilyKey: "thelandings.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://thelandings.com/",
+        bookingMetadata: null,
+        isPublic: false,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        policyNotes: "Previously verified private.",
+        intelligenceVerifiedAt: new Date(),
+        intelligenceReviewAt: new Date(
+          Date.now() + 180 * 24 * 60 * 60 * 1000
+        ),
+        intelligenceConfidence: 0.98,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "deer-creek", isPublic: true } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "deer-creek",
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://thelandings.com/golf/deer-creek",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        scheduleId: 11739,
+        bookingClassId: 22739,
+        bookingBaseUrl: bookingUrl
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "foreup-api-request",
+        observedUrls: [bookingUrl],
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          courseName: "Deer Creek Golf Course",
+          officialWebsiteUrl: "https://thelandings.com/",
+          officialPageUrl: "https://thelandings.com/golf/deer-creek",
+          providerUrl: bookingUrl
+        }
+      }
+    });
+
+    expect(result).toEqual({ id: "deer-creek", isPublic: true });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "deer-creek", updatedAt },
+      data: expect.objectContaining({
+        isPublic: true,
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        detectedBookingUrl: bookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        bookingPhone: null,
+        policyNotes: null
+      })
+    });
+  });
+
+  it("does not reopen a private identity from an uncorroborated provider observation", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      name: "Deer Creek Golf Course",
+      providerFamilyKey: "thelandings.com",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: null,
+      website: "https://thelandings.com/",
+      bookingMetadata: null,
+      isPublic: false,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      intelligenceVerifiedAt: new Date(),
+      intelligenceReviewAt: new Date(
+        Date.now() + 180 * 24 * 60 * 60 * 1000
+      ),
+      intelligenceConfidence: 0.98,
+      updatedAt: new Date("2026-07-21T14:10:00.000Z")
+    } as never);
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "deer-creek",
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://unrelated.example/golf",
+      bookingUrl,
+      apiMetadata: {
+        scheduleId: 11739,
+        bookingClassId: 22739,
+        bookingBaseUrl: bookingUrl
+      },
+      confidence: 0.95,
+      evidence: { learnedFrom: "foreup-api-request", observedUrls: [bookingUrl] }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "account-required provider evidence",
+      discovery: {
+        status: "VERIFIED" as const,
+        detectedPlatform: "CUSTOM" as const,
+        bookingUrl: "https://app.whoosh.io/patron/club/deer-creek",
+        bookingMethod: "PUBLIC_ONLINE" as const,
+        automationEligibility: "BLOCKED" as const,
+        automationReason: "ACCOUNT_REQUIRED" as const,
+        policyNotes: "Availability currently requires an account.",
+        learnedFrom: "official-account-required-booking"
+      }
+    },
+    {
+      label: "phone-only evidence",
+      discovery: {
+        status: "VERIFIED" as const,
+        detectedPlatform: "UNKNOWN" as const,
+        bookingUrl: "https://thelandings.com/golf/deer-creek",
+        bookingMethod: "PHONE_ONLY" as const,
+        bookingPhone: "912-555-0100",
+        automationEligibility: "BLOCKED" as const,
+        automationReason: "NO_ONLINE_BOOKING" as const,
+        policyNotes: "The official course page directs golfers to call.",
+        learnedFrom: "official-phone-reservation"
+      }
+    }
+  ])("does not refresh an expired private identity from $label", async ({ discovery }) => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      name: "Deer Creek Golf Course",
+      providerFamilyKey: "thelandings.com",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: "https://app.whoosh.io/patron/club/deer-creek",
+      website: "https://thelandings.com/golf/deer-creek",
+      bookingMetadata: null,
+      isPublic: false,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      intelligenceVerifiedAt: new Date("2026-01-01T00:00:00.000Z"),
+      intelligenceReviewAt: new Date("2026-07-01T00:00:00.000Z"),
+      intelligenceConfidence: 0.98,
+      updatedAt: new Date("2026-07-01T00:00:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "deer-creek",
+      status: discovery.status,
+      detectedPlatform: discovery.detectedPlatform,
+      sourceUrl: "https://thelandings.com/golf/deer-creek",
+      bookingUrl: discovery.bookingUrl,
+      bookingMethod: discovery.bookingMethod,
+      bookingPhone: "bookingPhone" in discovery
+        ? discovery.bookingPhone
+        : undefined,
+      automationEligibility: discovery.automationEligibility,
+      automationReason: discovery.automationReason,
+      policyNotes: discovery.policyNotes,
+      intelligenceReviewAt: new Date(
+        Date.now() + 30 * 24 * 60 * 60 * 1000
+      ),
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: discovery.learnedFrom,
+        observedUrls: [discovery.bookingUrl]
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
     {
       label: "the booking method is unknown",
       bookingMethod: "UNKNOWN" as const,

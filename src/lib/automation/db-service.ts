@@ -8,6 +8,7 @@ import {
   suppressSearchEmailDeliveriesForMatches
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
+import { haveCompatibleCourseNames } from "@/lib/places/course-identity";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
 import {
@@ -581,13 +582,16 @@ export async function applyBrowserDiscoveryToCourse(
     provider.isRunnable;
   const incomingGate = evaluateBrowserDiscoveryMonitoringGate(input);
   const incomingTerminal = incomingGate.disposition !== "ACTIONABLE";
-  const verifiedClassification = Boolean(
-    input.bookingMethod &&
-    input.bookingMethod !== "UNKNOWN" &&
-    input.automationEligibility &&
-    input.automationEligibility !== "UNKNOWN" &&
-    input.confidence >= 0.8
-  );
+  const verifiedPrivateIdentity = isVerifiedPrivateIdentityDiscovery(input);
+  const verifiedClassification =
+    verifiedPrivateIdentity ||
+    Boolean(
+      input.bookingMethod &&
+        input.bookingMethod !== "UNKNOWN" &&
+        input.automationEligibility &&
+        input.automationEligibility !== "UNKNOWN" &&
+        input.confidence >= 0.8
+    );
   const sourceUnavailableClassification =
     isSourceUnavailableClassification(input);
 
@@ -659,6 +663,7 @@ export async function applyBrowserDiscoveryToCourse(
   const current = await prisma.course.findUnique({
     where: { id: input.courseId },
     select: {
+      name: true,
       providerFamilyKey: true,
       detectedPlatform: true,
       detectedBookingUrl: true,
@@ -698,10 +703,25 @@ export async function applyBrowserDiscoveryToCourse(
     learnedOnlineAdapter &&
       persistedGate.adapterAllowed &&
       persistedMetadataStale &&
-      hasPersistedOfficialCourseProviderCorroboration(input, current.website)
+      hasPersistedOfficialCourseProviderCorroboration(
+        input,
+        current.website,
+        current.name
+      )
+  );
+  const corroboratedPrivateReopening = Boolean(
+    learnedOnlineAdapter &&
+      current.isPublic === false &&
+      hasPersistedOfficialCourseProviderCorroboration(
+        input,
+        current.website,
+        current.name
+      )
   );
   const trustedPersistedReplacement =
-    replacingLegacyPolicyOnlyBlock || corroboratedLearnedReplacement;
+    replacingLegacyPolicyOnlyBlock ||
+    corroboratedLearnedReplacement ||
+    corroboratedPrivateReopening;
   const sourceUnavailableWouldReplaceProviderState = Boolean(
     sourceUnavailableClassification &&
       !canApplySourceUnavailableClassification({
@@ -715,8 +735,13 @@ export async function applyBrowserDiscoveryToCourse(
   if (
     provider.evidenceConflict ||
     (persistedProvider.evidenceConflict && !trustedPersistedReplacement) ||
+    (current.isPublic === false &&
+      !verifiedPrivateIdentity &&
+      !corroboratedPrivateReopening) ||
     sourceUnavailableWouldReplaceProviderState ||
-    (learnedOnlineAdapter && !persistedGate.adapterAllowed) ||
+    (learnedOnlineAdapter &&
+      !persistedGate.adapterAllowed &&
+      !corroboratedPrivateReopening) ||
     (!learnedOnlineAdapter &&
       !incomingTerminal &&
       persistedProvider.isRunnable &&
@@ -738,7 +763,21 @@ export async function applyBrowserDiscoveryToCourse(
           intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
           intelligenceConfidence: input.confidence
         }
+      : verifiedPrivateIdentity
+        ? {
+            isPublic: false,
+            bookingMethod: "UNKNOWN",
+            automationEligibility: "BLOCKED",
+            automationReason: "OTHER",
+            policyNotes: input.policyNotes,
+            intelligenceVerifiedAt: new Date(),
+            intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
+            intelligenceConfidence: input.confidence
+          }
       : {
+          ...(corroboratedPrivateReopening
+            ? { isPublic: true, policyNotes: null }
+            : { policyNotes: input.policyNotes }),
           detectedPlatform: input.detectedPlatform,
           providerFamilyKey: provider.providerFamilyKey,
           automationEligibility,
@@ -747,9 +786,10 @@ export async function applyBrowserDiscoveryToCourse(
             ? Prisma.DbNull
             : (input.apiMetadata as Prisma.InputJsonValue),
           bookingMethod,
-          bookingPhone: input.bookingPhone,
+          bookingPhone: corroboratedPrivateReopening
+            ? (input.bookingPhone ?? null)
+            : input.bookingPhone,
           automationReason: input.automationReason ?? "NONE",
-          policyNotes: input.policyNotes,
           intelligenceVerifiedAt: new Date(),
           intelligenceReviewAt: input.intelligenceReviewAt
             ? new Date(input.intelligenceReviewAt)
@@ -886,6 +926,71 @@ function matchesBrowserDiscoveryCourseExpectation(
   );
 }
 
+const VERIFIED_PRIVATE_IDENTITY_POLICY_NOTES = new Map([
+  [
+    "official-private-course-profile",
+    "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory."
+  ],
+  [
+    "official-private-club-access",
+    "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course."
+  ],
+  [
+    "official-resident-member-access",
+    "The official site identifies this as a neighborhood social club for residents and says the golf course is a member amenity. Tee Time Spot must not present automated public tee-time monitoring for this course."
+  ]
+]);
+
+function isVerifiedPrivateIdentityDiscovery(
+  discovery: BrowserDiscovery,
+  now = new Date()
+) {
+  const learnedFrom = discovery.evidence.learnedFrom;
+  const [baseLearnedFrom, ...provenanceMarkers] = learnedFrom.split(":");
+  const validProvenance =
+    provenanceMarkers.length === 0 ||
+    (provenanceMarkers.length === 1 &&
+      provenanceMarkers[0] === "legacy-policy-reconciliation");
+  const expectedPolicyNotes =
+    validProvenance
+      ? VERIFIED_PRIVATE_IDENTITY_POLICY_NOTES.get(baseLearnedFrom)
+      : undefined;
+  const source = parseSafePublicUrl(discovery.sourceUrl);
+  const booking = parseSafePublicUrl(discovery.bookingUrl ?? "");
+  const finalUrl = parseSafePublicUrl(discovery.evidence.finalUrl ?? "");
+  const reviewAt = discovery.intelligenceReviewAt
+    ? new Date(discovery.intelligenceReviewAt)
+    : null;
+  const maximumReviewAt = new Date(
+    now.getTime() + 181 * 24 * 60 * 60 * 1000
+  );
+  return Boolean(
+    discovery.isPublic === false &&
+      discovery.status === "VERIFIED" &&
+      discovery.detectedPlatform === "UNKNOWN" &&
+      (discovery.bookingMethod ?? "UNKNOWN") === "UNKNOWN" &&
+      discovery.bookingPhone === undefined &&
+      discovery.automationEligibility === "BLOCKED" &&
+      discovery.automationReason === "OTHER" &&
+      discovery.apiEndpoint === undefined &&
+      discovery.apiMetadata === undefined &&
+      discovery.confidence === 0.98 &&
+      expectedPolicyNotes &&
+      discovery.policyNotes === expectedPolicyNotes &&
+      source &&
+      booking &&
+      finalUrl &&
+      source.toString() === booking.toString() &&
+      source.toString() === finalUrl.toString() &&
+      discovery.evidence.observedUrls.includes(source.toString()) &&
+      Boolean(discovery.evidence.visibleText?.trim()) &&
+      reviewAt &&
+      !Number.isNaN(reviewAt.getTime()) &&
+      reviewAt.getTime() > now.getTime() &&
+      reviewAt.getTime() <= maximumReviewAt.getTime()
+  );
+}
+
 function normalizeBrowserDiscoveryForMonitoring(
   discovery: BrowserDiscovery
 ): BrowserDiscovery {
@@ -895,17 +1000,29 @@ function normalizeBrowserDiscoveryForMonitoring(
     ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
       normalized.bookingMethod ?? ""
     ) || normalized.automationReason === "NO_ONLINE_BOOKING";
+  const verifiedPrivateIdentity =
+    isVerifiedPrivateIdentityDiscovery(normalized) &&
+    gate.disposition === "IDENTITY_FINAL";
+  const incoherentPrivateIdentity =
+    normalized.isPublic === false && !verifiedPrivateIdentity;
   const incoherentManualDisposition =
-    manualFieldsPresent && gate.disposition !== "MANUAL_FINAL";
+    manualFieldsPresent &&
+    gate.disposition !== "MANUAL_FINAL" &&
+    !verifiedPrivateIdentity;
   const nonTerminalBlock =
     normalized.automationEligibility === "BLOCKED" &&
     gate.disposition === "ACTIONABLE";
-  if (!incoherentManualDisposition && !nonTerminalBlock) {
+  if (
+    !incoherentPrivateIdentity &&
+    !incoherentManualDisposition &&
+    !nonTerminalBlock
+  ) {
     return normalized;
   }
 
   return {
     ...normalized,
+    isPublic: incoherentPrivateIdentity ? undefined : normalized.isPublic,
     status: ["LEARNED", "VERIFIED", "BLOCKED"].includes(normalized.status)
       ? "INSPECTED"
       : normalized.status,
@@ -915,9 +1032,11 @@ function normalizeBrowserDiscoveryForMonitoring(
     evidence: {
       ...normalized.evidence,
       learnedFrom: `${normalized.evidence.learnedFrom}:${
-        incoherentManualDisposition
-          ? "incoherent-manual-disposition"
-          : "non-terminal-block"
+        incoherentPrivateIdentity
+          ? "incoherent-private-identity"
+          : incoherentManualDisposition
+            ? "incoherent-manual-disposition"
+            : "non-terminal-block"
       }`
     }
   };
@@ -925,13 +1044,17 @@ function normalizeBrowserDiscoveryForMonitoring(
 
 function hasPersistedOfficialCourseProviderCorroboration(
   discovery: BrowserDiscovery,
-  persistedWebsite: string | null
+  persistedWebsite: string | null,
+  persistedCourseName?: string
 ) {
   const proof = discovery.evidence.courseIdentityCorroboration;
   if (
     proof?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK" ||
     !persistedWebsite ||
-    !discovery.bookingUrl
+    !discovery.bookingUrl ||
+    (persistedCourseName !== undefined &&
+      (!proof.courseName ||
+        !haveCompatibleCourseNames(persistedCourseName, proof.courseName)))
   ) {
     return false;
   }

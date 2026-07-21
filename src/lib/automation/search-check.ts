@@ -277,6 +277,9 @@ async function checkSearch(
     const monitoringGate = evaluateMonitoringGate(course);
     if (monitoringGate.disposition !== "ACTIONABLE") {
       const technicalFinal = monitoringGate.disposition === "TECHNICAL_FINAL";
+      const identityBlocked =
+        monitoringGate.disposition === "IDENTITY_FINAL" ||
+        monitoringGate.disposition === "IDENTITY_RECHECK";
       const outcome = technicalFinal ? "BLOCKED_AUTH" : "BLOCKED_POLICY";
       const message = getFinalMonitoringMessage(course, monitoringGate.disposition);
       await markMissingMatchesUnavailable({
@@ -299,11 +302,13 @@ async function checkSearch(
           automationReason: course.automationReason
         }
       });
-      await resolveCourseSupportIncident({
-        courseId: course.id,
-        resolution: "DIRECT_BOOKING_CLASSIFIED",
-        message
-      });
+      if (monitoringGate.disposition !== "IDENTITY_RECHECK") {
+        await resolveCourseSupportIncident({
+          courseId: course.id,
+          resolution: "DIRECT_BOOKING_CLASSIFIED",
+          message
+        });
+      }
       courseResults.push({
         courseId: course.id,
         courseName: course.name,
@@ -311,16 +316,12 @@ async function checkSearch(
         outcome,
         availableMatches: 0,
         message,
-        bookingUrl:
-          monitoringGate.disposition === "IDENTITY_FINAL"
-            ? undefined
-            : getCustomerBookingUrl(course),
-        phone:
-          monitoringGate.disposition === "IDENTITY_FINAL"
-            ? undefined
-            : course.bookingPhone ?? course.phone ?? undefined,
+        bookingUrl: identityBlocked ? undefined : getCustomerBookingUrl(course),
+        phone: identityBlocked
+          ? undefined
+          : course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
-        bookingAccess: getCourseBookingAccess(course),
+        bookingAccess: identityBlocked ? undefined : getCourseBookingAccess(course),
         automationReason: course.automationReason,
         monitoringDisposition: monitoringGate.disposition
       });
@@ -1518,6 +1519,9 @@ function getFinalMonitoringMessage(
   course: AutomationCourse,
   disposition: ReturnType<typeof evaluateMonitoringGate>["disposition"]
 ) {
+  if (disposition === "IDENTITY_RECHECK") {
+    return `${course.name}'s public-course identity review is due. Automatic availability monitoring remains paused while we verify public access.`;
+  }
   if (disposition === "IDENTITY_FINAL") {
     return `${course.name} is not a playable public course eligible for monitoring.`;
   }

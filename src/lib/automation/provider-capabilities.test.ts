@@ -325,6 +325,18 @@ describe("consumer disposition", () => {
 
   it.each<[Partial<Parameters<typeof deriveConsumerDisposition>[0]>, ConsumerDisposition]>([
     [{ ...source, invalidCourse: true }, "PRIVATE_OR_INVALID"],
+    [{ ...source, ...currentClassification, isPublic: false }, "PRIVATE_OR_INVALID"],
+    [
+      {
+        ...source,
+        isPublic: false,
+        intelligenceVerifiedAt: new Date("2026-01-01T00:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-07-15T00:00:00.000Z"),
+        intelligenceConfidence: 0.98,
+        now: new Date("2026-07-16T12:00:00.000Z")
+      },
+      "SOURCE_UNVERIFIED"
+    ],
     [
       { ...source, ...currentClassification, automationReason: "ACCOUNT_REQUIRED" },
       "ACCOUNT_REQUIRED"

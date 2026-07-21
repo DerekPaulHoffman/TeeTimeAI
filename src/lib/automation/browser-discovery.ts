@@ -57,6 +57,7 @@ export type BrowserAccessBarrier = {
 
 export type BrowserDiscovery = {
   courseId: string;
+  isPublic?: boolean;
   status: "LEARNED" | "VERIFIED" | "INSPECTED" | "BLOCKED" | "FAILED";
   detectedPlatform: "UNKNOWN" | "FOREUP" | "GOLFNOW" | "TEEITUP" | "CHRONOGOLF" | "CLUB_CADDIE" | "CUSTOM";
   sourceUrl: string;
@@ -133,6 +134,7 @@ export type BrowserDiscovery = {
     bookingCallToAction?: boolean;
     courseIdentityCorroboration?: {
       kind: "OFFICIAL_COURSE_PROVIDER_LINK";
+      courseName?: string;
       officialWebsiteUrl: string;
       officialPageUrl: string;
       providerUrl: string;
@@ -145,6 +147,7 @@ export function evaluateBrowserDiscoveryMonitoringGate(
   discovery: Pick<
     BrowserDiscovery,
     | "status"
+    | "isPublic"
     | "bookingMethod"
     | "automationEligibility"
     | "automationReason"
@@ -156,6 +159,7 @@ export function evaluateBrowserDiscoveryMonitoringGate(
   const finalClassification =
     discovery.status === "VERIFIED" || discovery.status === "BLOCKED";
   return evaluateMonitoringGate({
+    isPublic: discovery.isPublic,
     bookingMethod: discovery.bookingMethod,
     automationEligibility: finalClassification
       ? discovery.automationEligibility
@@ -323,6 +327,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   if (unavailableOfficialSiteClassification) {
     return unavailableOfficialSiteClassification;
   }
+
   const privateClubClassification = learnPrivateClubClassification(evidence, observedUrls);
 
   if (privateClubClassification) {
@@ -362,103 +367,25 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return withCourseIdentityCorroboration(accountRequiredClassification, evidence);
   }
 
-  const whooshDiscovery = learnWhooshBookingClassification(
-    providerEvidence,
-    providerObservedUrls
+  const providerDiscoveries = [
+    learnWhooshBookingClassification(providerEvidence, providerObservedUrls),
+    learnForeupDiscovery(providerEvidence, providerObservedUrls),
+    learnTeeItUpDiscovery(providerEvidence, providerObservedUrls),
+    learnChelseaDiscovery(providerEvidence, providerObservedUrls),
+    learnGolfBackDiscovery(providerEvidence, providerObservedUrls),
+    learnWebTracDiscovery(providerEvidence, providerObservedUrls),
+    learnClubCaddieDiscovery(providerEvidence, providerObservedUrls),
+    learnProtectedCpsDiscovery(providerEvidence, providerObservedUrls),
+    learnCpsDiscovery(providerEvidence, providerObservedUrls),
+    learnTeesnapDiscovery(providerEvidence, providerObservedUrls),
+    learnTenForeDiscovery(providerEvidence, providerObservedUrls)
+  ];
+  const firstProviderDiscovery = providerDiscoveries.find(
+    (discovery): discovery is BrowserDiscovery => Boolean(discovery)
   );
 
-  if (whooshDiscovery) {
-    return withCourseIdentityCorroboration(whooshDiscovery, evidence);
-  }
-
-  const foreupDiscovery = learnForeupDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (foreupDiscovery) {
-    return withCourseIdentityCorroboration(foreupDiscovery, evidence);
-  }
-
-  const teeItUpDiscovery = learnTeeItUpDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (teeItUpDiscovery) {
-    return withCourseIdentityCorroboration(teeItUpDiscovery, evidence);
-  }
-
-  const chelseaDiscovery = learnChelseaDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (chelseaDiscovery) {
-    return withCourseIdentityCorroboration(chelseaDiscovery, evidence);
-  }
-
-  const golfBackDiscovery = learnGolfBackDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (golfBackDiscovery) {
-    return withCourseIdentityCorroboration(golfBackDiscovery, evidence);
-  }
-
-  const webTracDiscovery = learnWebTracDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (webTracDiscovery) {
-    return withCourseIdentityCorroboration(webTracDiscovery, evidence);
-  }
-
-  const clubCaddieDiscovery = learnClubCaddieDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (clubCaddieDiscovery) {
-    return withCourseIdentityCorroboration(clubCaddieDiscovery, evidence);
-  }
-
-  const protectedCpsDiscovery = learnProtectedCpsDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (protectedCpsDiscovery) {
-    return withCourseIdentityCorroboration(protectedCpsDiscovery, evidence);
-  }
-
-  const cpsDiscovery = learnCpsDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (cpsDiscovery) {
-    return withCourseIdentityCorroboration(cpsDiscovery, evidence);
-  }
-
-  const teesnapDiscovery = learnTeesnapDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (teesnapDiscovery) {
-    return withCourseIdentityCorroboration(teesnapDiscovery, evidence);
-  }
-
-  const tenForeDiscovery = learnTenForeDiscovery(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (tenForeDiscovery) {
-    return withCourseIdentityCorroboration(tenForeDiscovery, evidence);
+  if (firstProviderDiscovery) {
+    return withCourseIdentityCorroboration(firstProviderDiscovery, evidence);
   }
 
   const clubCaddieCandidates = getClubCaddieCandidates(
@@ -1014,6 +941,12 @@ function getOfficialCourseProviderLinkCorroboration(
     !officialWebsite ||
     !officialPage ||
     !providerUrl ||
+    !evidence.officialPage?.courseName ||
+    !haveCompatibleCourseNames(
+      evidence.courseName,
+      evidence.officialPage.courseName
+    ) ||
+    !hasCanonicalTargetPageAuthority(evidence) ||
     getKnownProviderFamilyForHostname(officialWebsite.hostname) ||
     !haveSameWebsiteOrigin(officialWebsite, officialPage)
   ) {
@@ -1027,6 +960,7 @@ function getOfficialCourseProviderLinkCorroboration(
   }
   return {
     kind: "OFFICIAL_COURSE_PROVIDER_LINK" as const,
+    courseName: evidence.courseName,
     officialWebsiteUrl: officialWebsite.toString(),
     officialPageUrl: officialPage.toString(),
     providerUrl: new URL(exactProviderLink.url).toString()
@@ -3515,11 +3449,12 @@ function learnPrivateClubClassification(
 
   return {
     courseId: evidence.courseId,
+    isPublic: false,
     status: "VERIFIED",
     detectedPlatform: "UNKNOWN",
     sourceUrl: manualEvidence.evidenceUrl,
     bookingUrl: manualEvidence.evidenceUrl,
-    bookingMethod: "CONTACT_COURSE",
+    bookingMethod: "UNKNOWN",
     automationEligibility: "BLOCKED",
     automationReason: "OTHER",
     policyNotes: residentMemberClub

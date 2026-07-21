@@ -76,6 +76,47 @@ describe("browser discovery monitoring gate", () => {
       )
     ).toMatchObject({ disposition: "ACTIONABLE", adapterAllowed: true });
   });
+
+  it("expires a verified private identity into a fresh-evidence recheck", () => {
+    expect(
+      evaluateBrowserDiscoveryMonitoringGate(
+        {
+          status: "VERIFIED",
+          isPublic: false,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+          confidence: 0.98
+        },
+        now
+      )
+    ).toMatchObject({
+      disposition: "IDENTITY_FINAL",
+      adapterAllowed: false,
+      requiresRevalidation: false,
+      currentEvidence: true
+    });
+    expect(
+      evaluateBrowserDiscoveryMonitoringGate(
+        {
+          status: "VERIFIED",
+          isPublic: false,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          intelligenceReviewAt: new Date("2026-07-15T00:00:00.000Z"),
+          confidence: 0.98
+        },
+        now
+      )
+    ).toMatchObject({
+      disposition: "IDENTITY_RECHECK",
+      adapterAllowed: false,
+      requiresRevalidation: true,
+      currentEvidence: false
+    });
+  });
 });
 
 describe("buildBrowserDiscovery", () => {
@@ -156,11 +197,16 @@ describe("buildBrowserDiscovery", () => {
       officialCourseWebsite: "https://www.oakhillsgc.com/",
       officialPage: {
         url: "https://www.oakhillsgc.com/tee-times",
+        courseName: "Oak Hills Park Golf Course",
         linkCandidates: [
           {
             url: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
             label: "Book tee times"
           }
+        ],
+        observedUrls: [
+          "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+          "https://foreupsoftware.com/index.php/api/booking/times?time=all&date=07-10-2026&holes=all&players=3&schedule_id=11739&booking_class=22739"
         ]
       },
       finalUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
@@ -188,6 +234,7 @@ describe("buildBrowserDiscovery", () => {
     });
     expect(discovery.evidence.courseIdentityCorroboration).toEqual({
       kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+      courseName: "Oak Hills Park Golf Course",
       officialWebsiteUrl: "https://www.oakhillsgc.com/",
       officialPageUrl: "https://www.oakhillsgc.com/tee-times",
       providerUrl:
@@ -1580,9 +1627,10 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
       detectedPlatform: "UNKNOWN",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER",
       confidence: 0.98,
@@ -1605,9 +1653,10 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
       detectedPlatform: "UNKNOWN",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER",
       confidence: 0.98,
@@ -1774,13 +1823,18 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
       sourceUrl,
       bookingUrl: sourceUrl,
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER",
       evidence: { learnedFrom: "official-private-course-profile" }
+    });
+    expect(evaluateBrowserDiscoveryMonitoringGate(discovery)).toMatchObject({
+      disposition: "IDENTITY_FINAL",
+      adapterAllowed: false
     });
 
     const replay = buildBrowserDiscovery({
@@ -1793,10 +1847,127 @@ describe("buildBrowserDiscovery", () => {
       visibleText: discovery.evidence.visibleText
     });
     expect(replay).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER",
+      evidence: { learnedFrom: "official-private-course-profile" }
+    });
+  });
+
+  it("keeps an exact structured private profile final even when the page links to a runnable provider", () => {
+    const officialWebsite = "https://community.example/";
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const apiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?time=all&date=07-21-2026&holes=all&players=2&schedule_id=11739&booking_class=22739";
+    const privateProfile =
+      "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA";
+
+    const discovery = buildBrowserDiscovery({
+      courseId: "deer-creek-provider-contradiction",
+      courseName:
+        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      officialCourseWebsite: officialWebsite,
+      observedUrls: [sourceUrl, bookingUrl, apiUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName:
+          "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+        linkCandidates: [{ url: bookingUrl, label: "Book tee times" }],
+        observedUrls: [bookingUrl, apiUrl],
+        visibleText: privateProfile
+      },
+      visibleText: privateProfile
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: false,
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingUrl: sourceUrl,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      evidence: {
+        learnedFrom: "official-private-course-profile"
+      }
+    });
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+  });
+
+  it("does not let a mismatched sibling page provider link reopen a private course", () => {
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const apiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?schedule_id=11739&booking_class=22739";
+    const discovery = buildBrowserDiscovery({
+      courseId: "deer-creek-sibling-provider",
+      courseName: "Deer Creek Golf Course",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      officialCourseWebsite: "https://community.example/",
+      observedUrls: [sourceUrl, bookingUrl, apiUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName: "Sibling Hills Golf Course",
+        linkCandidates: [{ url: bookingUrl, label: "Book tee times" }],
+        observedUrls: [bookingUrl, apiUrl],
+        visibleText: "Sibling Hills Golf Course tee times"
+      },
+      visibleText:
+        "Deer Creek Golf Course is a private club available only to members and their guests."
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: false,
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "UNKNOWN",
+      evidence: { learnedFrom: "official-private-club-access" }
+    });
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+  });
+
+  it("fails closed when private text is paired with two distinct runnable provider families", () => {
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const foreupUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const foreupApiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?schedule_id=11739&booking_class=22739";
+    const teeItUpUrl = "https://deer-creek.book.teeitup.golf/";
+    const privateProfile =
+      "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA";
+    const discovery = buildBrowserDiscovery({
+      courseId: "deer-creek-ambiguous-providers",
+      courseName: "Deer Creek Golf Course",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      officialCourseWebsite: "https://community.example/",
+      observedUrls: [sourceUrl, foreupUrl, foreupApiUrl, teeItUpUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName: "Deer Creek Golf Course",
+        linkCandidates: [
+          { url: foreupUrl, label: "Book with ForeUP" },
+          { url: teeItUpUrl, label: "Book with TeeItUp" }
+        ],
+        observedUrls: [foreupUrl, foreupApiUrl, teeItUpUrl],
+        visibleText: privateProfile
+      },
+      visibleText: privateProfile
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: false,
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "UNKNOWN",
       evidence: { learnedFrom: "official-private-course-profile" }
     });
   });
@@ -4495,8 +4666,9 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER"
     });
@@ -4515,8 +4687,9 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER"
     });
@@ -4549,8 +4722,9 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER"
     });
@@ -4567,8 +4741,9 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
+      isPublic: false,
       status: "VERIFIED",
-      bookingMethod: "CONTACT_COURSE",
+      bookingMethod: "UNKNOWN",
       automationEligibility: "BLOCKED",
       automationReason: "OTHER",
       confidence: 0.98,

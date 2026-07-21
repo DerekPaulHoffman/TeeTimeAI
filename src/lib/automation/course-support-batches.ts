@@ -219,6 +219,10 @@ export type CourseSupportCourseEvidence = {
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
+  policyNotes?: string | null;
+  intelligenceVerifiedAt?: Date | null;
+  intelligenceReviewAt?: Date | null;
+  intelligenceConfidence?: number | null;
   latestPlaceReview?: {
     active: boolean;
     accessOverride: GooglePlaceAccessOverride | null;
@@ -229,12 +233,17 @@ export type CourseSupportCourseEvidence = {
   } | null;
   latestDiscovery?: {
     status: string;
+    detectedPlatform?: string;
     bookingMethod: BookingMethod;
+    bookingPhone?: string | null;
     automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
     automationReason: AutomationReason;
     sourceUrl: string;
     bookingUrl: string | null;
+    apiEndpoint?: string | null;
+    apiMetadata?: Prisma.JsonValue | null;
     confidence: number;
+    evidence?: Prisma.JsonValue | null;
     createdAt: Date;
   } | null;
 };
@@ -562,12 +571,14 @@ export function classifyFreshBatchEvidence(input: {
   course: CourseSupportCourseEvidence;
   incidentFirstSeenAt?: Date | null;
   incidentLastSeenAt?: Date | null;
+  now?: Date;
 }): BatchIncidentVerification {
   const finalDisposition = getPersistedFinalDisposition(
     input.course,
     input.incidentFirstSeenAt ??
       input.incidentLastSeenAt ??
-      input.batchCreatedAt
+      input.batchCreatedAt,
+    input.now ?? new Date()
   );
   if (finalDisposition) {
     return {
@@ -1969,17 +1980,26 @@ export async function verifyCourseSupportBatch(input: {
               bookingMethod: true,
               automationEligibility: true,
               automationReason: true,
+              policyNotes: true,
+              intelligenceVerifiedAt: true,
+              intelligenceReviewAt: true,
+              intelligenceConfidence: true,
               automationDiscoveries: {
                 orderBy: { createdAt: "desc" },
                 take: 1,
                 select: {
                   status: true,
+                  detectedPlatform: true,
                   bookingMethod: true,
+                  bookingPhone: true,
                   automationEligibility: true,
                   automationReason: true,
                   sourceUrl: true,
                   bookingUrl: true,
+                  apiEndpoint: true,
+                  apiMetadata: true,
                   confidence: true,
+                  evidence: true,
                   createdAt: true
                 }
               }
@@ -2147,7 +2167,8 @@ export async function verifyCourseSupportBatch(input: {
               : null
           },
           incidentFirstSeenAt: entry.incident.firstSeenAt,
-          incidentLastSeenAt: entry.incident.lastSeenAt
+          incidentLastSeenAt: entry.incident.lastSeenAt,
+          now
         })
       : null;
     const newestProviderVerification = incidentCurrent
@@ -3954,7 +3975,8 @@ function deterministicJitter(seed: string) {
 
 function getPersistedFinalDisposition(
   course: CourseSupportCourseEvidence,
-  incidentFirstSeenAt: Date
+  incidentFirstSeenAt: Date,
+  now: Date
 ): { message: string; proofSnapshot: Prisma.InputJsonValue } | null {
   const placeReview = course.latestPlaceReview;
   const placeReviewEvidenceOrigin = placeReview
@@ -3992,6 +4014,18 @@ function getPersistedFinalDisposition(
   const evidenceOrigin = discovery
     ? getSafeEvidenceOrigin(discovery.sourceUrl)
     : null;
+  const privateIdentityDisposition = discovery
+    ? getVerifiedBrowserPrivateIdentityDisposition({
+        course,
+        discovery,
+        incidentFirstSeenAt,
+        now,
+        evidenceOrigin
+      })
+    : null;
+  if (privateIdentityDisposition) {
+    return privateIdentityDisposition;
+  }
   if (
     !discovery ||
     !evidenceOrigin ||
@@ -4343,6 +4377,144 @@ function getAffectedSearchRefs(dispatch: Record<string, unknown> | null) {
   return refs;
 }
 
+const VERIFIED_BROWSER_PRIVATE_POLICY_NOTES = new Map([
+  [
+    "official-private-course-profile",
+    "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory."
+  ],
+  [
+    "official-private-club-access",
+    "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course."
+  ],
+  [
+    "official-resident-member-access",
+    "The official site identifies this as a neighborhood social club for residents and says the golf course is a member amenity. Tee Time Spot must not present automated public tee-time monitoring for this course."
+  ]
+]);
+
+function getVerifiedBrowserPrivateIdentityDisposition(input: {
+  course: CourseSupportCourseEvidence;
+  discovery: NonNullable<CourseSupportCourseEvidence["latestDiscovery"]>;
+  incidentFirstSeenAt: Date;
+  now: Date;
+  evidenceOrigin: string | null;
+}): { message: string; proofSnapshot: Prisma.InputJsonValue } | null {
+  const { course, discovery, incidentFirstSeenAt, now, evidenceOrigin } = input;
+  const evidence = isPlainJsonObject(discovery.evidence)
+    ? discovery.evidence
+    : null;
+  const learnedFrom = evidence?.learnedFrom;
+  const [baseLearnedFrom, ...markers] =
+    typeof learnedFrom === "string" ? learnedFrom.split(":") : [];
+  const validProvenance =
+    markers.length === 0 ||
+    (markers.length === 1 && markers[0] === "legacy-policy-reconciliation");
+  const expectedPolicyNotes = validProvenance
+    ? VERIFIED_BROWSER_PRIVATE_POLICY_NOTES.get(baseLearnedFrom)
+    : undefined;
+  const finalUrl = typeof evidence?.finalUrl === "string"
+    ? evidence.finalUrl
+    : null;
+  const observedUrls = Array.isArray(evidence?.observedUrls)
+    ? evidence.observedUrls
+    : [];
+  const verifiedAt = course.intelligenceVerifiedAt;
+  const reviewAt = course.intelligenceReviewAt;
+  const source = getSafeExactEvidenceUrl(discovery.sourceUrl);
+  const booking = discovery.bookingUrl
+    ? getSafeExactEvidenceUrl(discovery.bookingUrl)
+    : null;
+  const final = finalUrl ? getSafeExactEvidenceUrl(finalUrl) : null;
+  const maximumEvidenceAt = now.getTime() + 60 * 1000;
+  const maximumReviewAt = verifiedAt
+    ? verifiedAt.getTime() + 181 * 24 * 60 * 60 * 1000
+    : 0;
+  if (
+    course.isPublic !== false ||
+    course.bookingMethod !== "UNKNOWN" ||
+    course.automationEligibility !== "BLOCKED" ||
+    course.automationReason !== "OTHER" ||
+    course.policyNotes !== expectedPolicyNotes ||
+    course.intelligenceConfidence !== 0.98 ||
+    !verifiedAt ||
+    !reviewAt ||
+    verifiedAt.getTime() < incidentFirstSeenAt.getTime() ||
+    verifiedAt.getTime() > maximumEvidenceAt ||
+    discovery.createdAt.getTime() < incidentFirstSeenAt.getTime() ||
+    discovery.createdAt.getTime() > maximumEvidenceAt ||
+    Math.abs(verifiedAt.getTime() - discovery.createdAt.getTime()) >
+      5 * 60 * 1000 ||
+    reviewAt.getTime() <= verifiedAt.getTime() ||
+    reviewAt.getTime() <= now.getTime() ||
+    reviewAt.getTime() > maximumReviewAt ||
+    discovery.status !== "VERIFIED" ||
+    discovery.detectedPlatform !== "UNKNOWN" ||
+    discovery.bookingMethod !== "UNKNOWN" ||
+    discovery.bookingPhone != null ||
+    discovery.automationEligibility !== "BLOCKED" ||
+    discovery.automationReason !== "OTHER" ||
+    discovery.apiEndpoint != null ||
+    discovery.apiMetadata != null ||
+    discovery.confidence !== 0.98 ||
+    !expectedPolicyNotes ||
+    !evidenceOrigin ||
+    !source ||
+    !booking ||
+    !final ||
+    source !== booking ||
+    source !== final ||
+    !observedUrls.some((value) => value === source) ||
+    typeof evidence?.visibleText !== "string" ||
+    !evidence.visibleText.trim()
+  ) {
+    return null;
+  }
+  return {
+    message:
+      "Current exact official browser evidence supports a final private-course identity disposition.",
+    proofSnapshot: {
+      kind: "BROWSER_PRIVATE_IDENTITY",
+      disposition: "VERIFIED_PRIVATE",
+      discoveryCreatedAt: discovery.createdAt.toISOString(),
+      intelligenceVerifiedAt: verifiedAt.toISOString(),
+      intelligenceReviewAt: reviewAt.toISOString(),
+      evidenceOrigin,
+      provenance: learnedFrom,
+      confidence: discovery.confidence,
+      intelligenceConfidence: course.intelligenceConfidence,
+      policyNotes: course.policyNotes,
+      courseBookingMethod: course.bookingMethod,
+      courseAutomationEligibility: course.automationEligibility,
+      courseAutomationReason: course.automationReason,
+      discoveryStatus: discovery.status,
+      discoveryDetectedPlatform: discovery.detectedPlatform,
+      discoveryBookingMethod: discovery.bookingMethod,
+      discoveryBookingPhone: discovery.bookingPhone ?? null,
+      discoveryAutomationEligibility: discovery.automationEligibility,
+      discoveryAutomationReason: discovery.automationReason,
+      discoveryApiEndpoint: discovery.apiEndpoint ?? null,
+      discoveryApiMetadata: discovery.apiMetadata ?? null
+    } satisfies Prisma.InputJsonObject
+  };
+}
+
+function isPlainJsonObject(value: Prisma.JsonValue | null | undefined): value is Prisma.JsonObject {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function getSafeExactEvidenceUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function isDetachedRestoredVerification(
   verification: BatchIncidentVerification
 ): verification is BatchIncidentVerification & {
@@ -4601,6 +4773,62 @@ export function isDurableTerminalProof(
           reviewUpdatedAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
           proof.automationEligibility === "BLOCKED" &&
           proof.automationReason === "OTHER"
+      );
+    }
+    if (proof.kind === "BROWSER_PRIVATE_IDENTITY") {
+      const discoveryCreatedAt = parseProofDate(proof.discoveryCreatedAt);
+      const intelligenceVerifiedAt = parseProofDate(
+        proof.intelligenceVerifiedAt
+      );
+      const intelligenceReviewAt = parseProofDate(proof.intelligenceReviewAt);
+      const maximumEvidenceAt = entry.verifiedAt.getTime() + 60 * 1000;
+      const maximumReviewAt = intelligenceVerifiedAt
+        ? intelligenceVerifiedAt.getTime() + 181 * 24 * 60 * 60 * 1000
+        : 0;
+      const provenance =
+        typeof proof.provenance === "string" ? proof.provenance : "";
+      const [baseProvenance, ...provenanceMarkers] = provenance.split(":");
+      const validProvenance =
+        provenanceMarkers.length === 0 ||
+        (provenanceMarkers.length === 1 &&
+          provenanceMarkers[0] === "legacy-policy-reconciliation");
+      const expectedPolicyNotes = validProvenance
+        ? VERIFIED_BROWSER_PRIVATE_POLICY_NOTES.get(baseProvenance)
+        : undefined;
+      return Boolean(
+        proof.disposition === "VERIFIED_PRIVATE" &&
+          typeof proof.evidenceOrigin === "string" &&
+          getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
+          discoveryCreatedAt &&
+          intelligenceVerifiedAt &&
+          intelligenceReviewAt &&
+          discoveryCreatedAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
+          intelligenceVerifiedAt.getTime() >=
+            entry.incident.firstSeenAt.getTime() &&
+          discoveryCreatedAt.getTime() <= maximumEvidenceAt &&
+          intelligenceVerifiedAt.getTime() <= maximumEvidenceAt &&
+          Math.abs(
+            discoveryCreatedAt.getTime() - intelligenceVerifiedAt.getTime()
+          ) <=
+            5 * 60 * 1000 &&
+          intelligenceReviewAt.getTime() > intelligenceVerifiedAt.getTime() &&
+          intelligenceReviewAt.getTime() > entry.verifiedAt.getTime() &&
+          intelligenceReviewAt.getTime() <= maximumReviewAt &&
+          expectedPolicyNotes &&
+          proof.policyNotes === expectedPolicyNotes &&
+          proof.confidence === 0.98 &&
+          proof.intelligenceConfidence === 0.98 &&
+          proof.courseBookingMethod === "UNKNOWN" &&
+          proof.courseAutomationEligibility === "BLOCKED" &&
+          proof.courseAutomationReason === "OTHER" &&
+          proof.discoveryStatus === "VERIFIED" &&
+          proof.discoveryDetectedPlatform === "UNKNOWN" &&
+          proof.discoveryBookingMethod === "UNKNOWN" &&
+          proof.discoveryBookingPhone === null &&
+          proof.discoveryAutomationEligibility === "BLOCKED" &&
+          proof.discoveryAutomationReason === "OTHER" &&
+          proof.discoveryApiEndpoint === null &&
+          proof.discoveryApiMetadata === null
       );
     }
     const discoveredAt = parseProofDate(proof.discoveryCreatedAt);

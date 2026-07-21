@@ -34,6 +34,7 @@ import {
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import {
   haveCompatibleCourseNames,
   normalizeCourseIdentityName
@@ -648,6 +649,7 @@ export async function prepareSearchMonitoring(
         includeCourseIds.has(course.id) ||
         forceFreshCourseIds.has(course.id) ||
         shouldQueueBrowserProbe(course) ||
+        shouldRevalidatePrivateCourseIdentity(course, now) ||
         shouldRediscoverFailedRunnableProvider(
           course,
           repeatedFailureEvidenceByCourse.get(course.id),
@@ -658,7 +660,9 @@ export async function prepareSearchMonitoring(
   const candidateInputs = probeCourses
     .map((course) => ({
       course,
-      sourceUrl: getSafeMonitoringProbeUrl(course)
+      sourceUrl: shouldRevalidatePrivateCourseIdentity(course, now)
+        ? getSafePrivateIdentityRevalidationUrl(course)
+        : getSafeMonitoringProbeUrl(course)
     }));
   const appliedCourseIds: string[] = [];
   for (const { course, sourceUrl } of candidateInputs) {
@@ -853,6 +857,7 @@ export async function prepareSearchMonitoring(
         const collected = await evidencePromise;
         const collectedWithCorroboration = {
           ...collected,
+          ...(officialWebsite ? { officialCourseWebsite: officialWebsite } : {}),
           corroboratedAccessBarrier:
             findCorroboratingAccessBarrier(
               previousEvidenceByCourse.get(course.id),
@@ -2227,6 +2232,30 @@ export async function collectOfficialSiteEvidence(
       ...legacyProphetAccessBarriers
     ]
   };
+}
+
+function shouldRevalidatePrivateCourseIdentity(
+  course: BrowserProbeCourseInput,
+  now: Date
+) {
+  if (course.isPublic !== false) {
+    return false;
+  }
+  const gate = evaluateMonitoringGate({ ...course, now });
+  return gate.requiresRevalidation;
+}
+
+function getSafePrivateIdentityRevalidationUrl(
+  course: BrowserProbeCourseInput
+) {
+  const website = readSafePublicUrl(course.website);
+  if (
+    !website ||
+    resolveProviderCapability({ detectedBookingUrl: website }).capability
+  ) {
+    return null;
+  }
+  return website;
 }
 
 function doesFollowupIdentifyCourse(

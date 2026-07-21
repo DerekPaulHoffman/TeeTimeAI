@@ -3255,12 +3255,18 @@ async function getLatestCourseProbeByCourse(
 
 function isMonitoringDisposition(
   value: unknown
-): value is "ACTIONABLE" | "MANUAL_FINAL" | "TECHNICAL_FINAL" | "IDENTITY_FINAL" {
+): value is
+  | "ACTIONABLE"
+  | "MANUAL_FINAL"
+  | "TECHNICAL_FINAL"
+  | "IDENTITY_FINAL"
+  | "IDENTITY_RECHECK" {
   return (
     value === "ACTIONABLE" ||
     value === "MANUAL_FINAL" ||
     value === "TECHNICAL_FINAL" ||
-    value === "IDENTITY_FINAL"
+    value === "IDENTITY_FINAL" ||
+    value === "IDENTITY_RECHECK"
   );
 }
 
