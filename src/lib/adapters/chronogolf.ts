@@ -1,6 +1,7 @@
-import { connect } from "node:http2";
-
-import { ProviderHttpError } from "@/lib/adapters/fetch-with-timeout";
+import {
+  fetchWithProviderTimeout,
+  ProviderHttpError
+} from "@/lib/adapters/fetch-with-timeout";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 const CHRONOGOLF_MARKETPLACE_BASE_URL = "https://www.chronogolf.com";
@@ -36,6 +37,14 @@ type ChronogolfApiSlot = {
 
 type ChronogolfResponse = {
   teetimes?: ChronogolfApiSlot[];
+  data?: {
+    teetimes?: ChronogolfApiSlot[];
+  };
+  pagination?: {
+    total?: number;
+    per_page?: number;
+    perPage?: number;
+  };
 };
 
 type ChronogolfPage = {
@@ -89,12 +98,16 @@ export async function fetchChronogolfSlots(input: {
   date: Date;
   players: number;
   metadata: ChronogolfMetadata;
-}, request: ChronogolfRequester = requestChronogolfJson): Promise<TeeTimeSlot[]> {
+}, request?: ChronogolfRequester, fetchImpl: typeof fetch = fetch): Promise<TeeTimeSlot[]> {
   const slots: TeeTimeSlot[] = [];
+  const activeRequest = request ?? await createChronogolfPublicRequester(
+    input.metadata.bookingBaseUrl,
+    fetchImpl
+  );
 
   for (let page = 1; page <= CHRONOGOLF_MAX_PAGES; page += 1) {
     const url = buildTeeTimesUrl(input.date, input.players, input.metadata.courseIds, page);
-    const response = await request(url, input.metadata.bookingBaseUrl);
+    const response = await activeRequest(url, input.metadata.bookingBaseUrl);
     const teeTimes = Array.isArray(response.payload.teetimes)
       ? response.payload.teetimes
       : [];
@@ -148,91 +161,133 @@ function normalizeSlot(
     }];
 }
 
+async function createChronogolfPublicRequester(
+  bookingBaseUrl: string,
+  fetchImpl: typeof fetch
+): Promise<ChronogolfRequester> {
+  const publicProfileUrl = normalizeChronogolfPublicProfileUrl(bookingBaseUrl);
+  if (!publicProfileUrl) {
+    throw new Error(
+      "Chronogolf metadata did not include a canonical public club profile"
+    );
+  }
+
+  const profileResponse = await fetchWithProviderTimeout(
+    publicProfileUrl,
+    {
+      headers: buildChronogolfPublicRequestHeaders(publicProfileUrl),
+      redirect: "error"
+    },
+    fetchImpl,
+    CHRONOGOLF_REQUEST_TIMEOUT_MS
+  );
+  if (!profileResponse.ok) {
+    throw new ProviderHttpError("Chronogolf public profile", profileResponse);
+  }
+
+  const anonymousCookie = getChronogolfAnonymousCookie(profileResponse.headers);
+  await profileResponse.body?.cancel();
+
+  return (urlValue, profileUrl) =>
+    requestChronogolfJson(urlValue, profileUrl, anonymousCookie, fetchImpl);
+}
+
 async function requestChronogolfJson(
   urlValue: string,
-  bookingBaseUrl: string
+  bookingBaseUrl: string,
+  anonymousCookie: string | null,
+  fetchImpl: typeof fetch
 ): Promise<ChronogolfPage> {
-  const url = new URL(urlValue);
-  const headers = buildChronogolfPublicRequestHeaders(bookingBaseUrl);
+  const headers: Record<string, string> = buildChronogolfPublicRequestHeaders(
+    bookingBaseUrl
+  );
+  if (anonymousCookie) {
+    headers.cookie = anonymousCookie;
+  }
 
-  return new Promise((resolve, reject) => {
-    const client = connect(url.origin);
-    let body = "";
-    let status = 0;
-    let retryAfter: string | null = null;
-    let settled = false;
+  const response = await fetchWithProviderTimeout(
+    urlValue,
+    { headers, redirect: "error" },
+    fetchImpl,
+    CHRONOGOLF_REQUEST_TIMEOUT_MS
+  );
+  if (!response.ok) {
+    throw new ProviderHttpError("Chronogolf tee times", response);
+  }
 
-    let total = 0;
-    let perPage = 0;
+  const body = await readChronogolfResponse(response);
+  let decoded: ChronogolfResponse;
+  try {
+    decoded = JSON.parse(body) as ChronogolfResponse;
+  } catch {
+    throw new Error("Chronogolf tee times returned invalid JSON");
+  }
 
-    const finish = (error?: Error, page?: ChronogolfPage) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      client.close();
-      if (error) {
-        reject(error);
-      } else {
-        resolve(page ?? { payload: {}, total: 0, perPage: 0 });
-      }
-    };
+  const payload = decoded.data ?? decoded;
+  const teeTimeCount = Array.isArray(payload.teetimes)
+    ? payload.teetimes.length
+    : 0;
+  const total = firstValidNumber(
+    response.headers.get("total"),
+    decoded.pagination?.total,
+    teeTimeCount
+  );
+  const perPage = firstPositiveNumber(
+    response.headers.get("per-page"),
+    decoded.pagination?.per_page,
+    decoded.pagination?.perPage,
+    teeTimeCount
+  );
 
-    const timeout = setTimeout(() => {
-      request.close();
-      finish(new Error("Chronogolf tee times request timed out"));
-    }, CHRONOGOLF_REQUEST_TIMEOUT_MS);
+  return { payload, total, perPage };
+}
 
-    client.once("error", (error) => finish(error));
-    const request = client.request({
-      ":method": "GET",
-      ":path": `${url.pathname}${url.search}`,
-      ...headers
-    });
+function getChronogolfAnonymousCookie(headers: Headers) {
+  const combined = headers.get("set-cookie");
+  if (!combined) {
+    return null;
+  }
+  const match = combined.match(/(?:^|,\s*)__cf_bm=([^;,\s]+)/i);
+  return match?.[1] ? `__cf_bm=${match[1]}` : null;
+}
 
-    request.setEncoding("utf8");
-    request.on("response", (headers) => {
-      status = Number(headers[":status"] ?? 0);
-      const retryAfterHeader = headers["retry-after"];
-      retryAfter = Array.isArray(retryAfterHeader)
-        ? retryAfterHeader[0] ?? null
-        : retryAfterHeader ?? null;
-      total = Number(headers.total ?? 0);
-      perPage = Number(headers["per-page"] ?? 0);
-    });
-    request.on("data", (chunk: string) => {
-      body += chunk;
-      if (Buffer.byteLength(body, "utf8") > CHRONOGOLF_RESPONSE_LIMIT_BYTES) {
-        request.close();
-        finish(new Error("Chronogolf tee times response exceeded the size limit"));
-      }
-    });
-    request.once("error", (error) => finish(error));
-    request.once("end", () => {
-      if (status < 200 || status >= 300) {
-        const headers = new Headers();
-        if (retryAfter) {
-          headers.set("retry-after", retryAfter);
-        }
-        finish(new ProviderHttpError("Chronogolf tee times", { status, headers }));
-        return;
-      }
+async function readChronogolfResponse(response: Response) {
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (
+    Number.isFinite(contentLength) &&
+    contentLength > CHRONOGOLF_RESPONSE_LIMIT_BYTES
+  ) {
+    await response.body?.cancel();
+    throw new Error("Chronogolf tee times response exceeded the size limit");
+  }
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > CHRONOGOLF_RESPONSE_LIMIT_BYTES) {
+    throw new Error("Chronogolf tee times response exceeded the size limit");
+  }
+  return new TextDecoder().decode(buffer);
+}
 
-      try {
-        const payload = JSON.parse(body) as ChronogolfResponse;
-        const teeTimeCount = Array.isArray(payload.teetimes) ? payload.teetimes.length : 0;
-        finish(undefined, {
-          payload,
-          total: Number.isFinite(total) && total >= 0 ? total : teeTimeCount,
-          perPage: Number.isFinite(perPage) && perPage > 0 ? perPage : teeTimeCount
-        });
-      } catch {
-        finish(new Error("Chronogolf tee times returned invalid JSON"));
-      }
-    });
-    request.end();
-  });
+function firstValidNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) {
+      return number;
+    }
+  }
+  return 0;
+}
+
+function firstPositiveNumber(...values: unknown[]) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) {
+      return number;
+    }
+  }
+  return 0;
 }
 
 function buildTeeTimesUrl(date: Date, players: number, courseIds: string[], page: number) {

@@ -120,4 +120,84 @@ describe("Chronogolf adapter", () => {
       }
     ]);
   });
+
+  it("bootstraps a bounded signed-out session and reads the current response shape", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("profile", {
+        status: 200,
+        headers: {
+          "set-cookie": "__cf_bm=anonymous-public-value; HttpOnly; Secure; Path=/, account_session=do-not-forward; HttpOnly"
+        }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        pagination: { total: 1, per_page: 12 },
+        data: {
+          status: "open",
+          teetimes: [{
+            uuid: "slot-current-shape",
+            date: "2026-07-14",
+            start_time: "9:10",
+            max_player_size: 2,
+            frozen: false,
+            course: { holes: 18 }
+          }]
+        }
+      }), { status: 200 }));
+
+    const slots = await fetchChronogolfSlots({
+      courseId: "blue-rock",
+      date: new Date("2026-07-14T00:00:00.000Z"),
+      players: 2,
+      metadata: {
+        clubId: 7221,
+        courseIds: ["7657db51-4e0c-4bc7-8e98-bd0a705370af"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+      }
+    }, undefined, fetchMock as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://www.chronogolf.com/club/blue-rock-golf-course"
+    );
+    const profileHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(profileHeaders.get("cookie")).toBeNull();
+    const teeTimeHeaders = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(teeTimeHeaders.get("cookie")).toBe("__cf_bm=anonymous-public-value");
+    expect(teeTimeHeaders.get("cookie")).not.toContain("account_session");
+    expect(slots).toEqual([
+      expect.objectContaining({
+        sourceId: "chronogolf-slot-current-shape",
+        startsAt: "2026-07-14T09:10",
+        availableSpots: 2
+      })
+    ]);
+  });
+
+  it("does not forward challenge-clearance or account cookies", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("profile", {
+        status: 200,
+        headers: {
+          "set-cookie": "cf_clearance=not-allowed; Secure; Path=/, session=not-allowed; HttpOnly"
+        }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        pagination: { total: 0, per_page: 12 },
+        data: { teetimes: [] }
+      }), { status: 200 }));
+
+    await fetchChronogolfSlots({
+      courseId: "blue-rock",
+      date: new Date("2026-07-14T00:00:00.000Z"),
+      players: 2,
+      metadata: {
+        clubId: 7221,
+        courseIds: ["7657db51-4e0c-4bc7-8e98-bd0a705370af"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+      }
+    }, undefined, fetchMock as typeof fetch);
+
+    const teeTimeHeaders = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(teeTimeHeaders.get("cookie")).toBeNull();
+  });
 });
