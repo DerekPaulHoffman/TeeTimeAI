@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { Prisma } from "@prisma/client";
 import type {
@@ -172,6 +172,7 @@ export type CourseSupportCandidate = {
   firstSeenAt: Date;
   lastSeenAt: Date;
   lastAttemptAt: Date | null;
+  nextAttemptAt: Date | null;
   attemptCount: number;
   updatedAt: Date;
 };
@@ -185,8 +186,32 @@ export type SelectedCourseSupportBatch = {
   providerFamilyKey: string;
   failureFingerprint: string;
   incidents: CourseSupportCandidate[];
-  fairnessReason: "PRIORITY" | "AGED_SYNTHETIC_RESERVATION";
+  fairnessReason:
+    | "PRIORITY"
+    | "AGED_SYNTHETIC_RESERVATION"
+    | "TARGETED_RETRY";
   containsCriticalRealDemand: boolean;
+};
+
+export type CourseSupportRetryBatchEvidence = {
+  status: CourseSupportBatchStatus;
+  completedAt: Date | null;
+  summary: Prisma.JsonValue | null;
+  providerFamilyKey: string;
+  failureFingerprint: string;
+  incidents: Array<{
+    id: string;
+    incidentId: string;
+    courseId: string;
+    cycle: number;
+    result: CourseSupportBatchIncidentResult;
+    incident: {
+      batchIncidents: Array<{
+        id: string;
+        cycle: number;
+      }>;
+    };
+  }>;
 };
 
 export type CourseSupportCourseEvidence = {
@@ -384,6 +409,117 @@ export function selectCourseSupportBatch(input: {
     incidents: selectedIncidents,
     fairnessReason,
     containsCriticalRealDemand
+  };
+}
+
+export function selectCourseSupportRetryBatch(input: {
+  candidates: CourseSupportCandidate[];
+  retryBatch: CourseSupportRetryBatchEvidence;
+  maxCourses?: number;
+  now?: Date;
+}): SelectedCourseSupportBatch {
+  const now = input.now ?? new Date();
+  const maxCourses = clampCourseSupportBatchSize(input.maxCourses);
+  const retryBatch = input.retryBatch;
+  const closeout = asJsonObject(retryBatch.summary).closeout;
+  if (
+    retryBatch.status !== "RETRYABLE_FAILED" ||
+    !retryBatch.completedAt ||
+    !closeout ||
+    typeof closeout !== "object" ||
+    Array.isArray(closeout)
+  ) {
+    throw new Error(
+      "A targeted responder retry must reference a durably closed retryable batch."
+    );
+  }
+  if (retryBatch.incidents.length === 0) {
+    throw new Error("A targeted responder retry has no incident evidence.");
+  }
+  if (retryBatch.incidents.length > maxCourses) {
+    throw new Error(
+      "The targeted responder retry exceeds the requested batch size."
+    );
+  }
+
+  const seenIncidentKeys = new Set<string>();
+  const seenCourseCycles = new Set<string>();
+  const selectedIncidents = retryBatch.incidents.map((entry) => {
+    if (entry.result !== "RETRY_SCHEDULED") {
+      throw new Error(
+        "A targeted responder retry contains non-retryable incident evidence."
+      );
+    }
+    const latestBatchIncident = entry.incident.batchIncidents[0];
+    if (
+      !latestBatchIncident ||
+      latestBatchIncident.id !== entry.id ||
+      latestBatchIncident.cycle !== entry.cycle
+    ) {
+      throw new Error(
+        "The targeted responder retry was superseded by a later batch."
+      );
+    }
+    const incidentKey = `${entry.incidentId}\u0000${entry.cycle}`;
+    const courseCycle = `${entry.courseId}\u0000${entry.cycle}`;
+    if (
+      seenIncidentKeys.has(incidentKey) ||
+      seenCourseCycles.has(courseCycle)
+    ) {
+      throw new Error(
+        "A targeted responder retry contains duplicate incident evidence."
+      );
+    }
+    seenIncidentKeys.add(incidentKey);
+    seenCourseCycles.add(courseCycle);
+
+    const candidate = input.candidates.find(
+      (current) =>
+        current.id === entry.incidentId &&
+        current.courseId === entry.courseId &&
+        current.cycle === entry.cycle &&
+        current.providerFamilyKey === retryBatch.providerFamilyKey &&
+        current.failureFingerprint === retryBatch.failureFingerprint
+    );
+    if (!candidate) {
+      throw new Error(
+        "The targeted responder retry is not currently due or its provenance changed."
+      );
+    }
+    if (
+      !candidate.nextAttemptAt ||
+      candidate.nextAttemptAt.getTime() <= retryBatch.completedAt!.getTime() ||
+      candidate.nextAttemptAt.getTime() > now.getTime()
+    ) {
+      throw new Error(
+        "The targeted responder retry does not have a current due retry schedule."
+      );
+    }
+    return candidate;
+  });
+  const selectedIncidentIds = new Set(
+    selectedIncidents.map((incident) => incident.id)
+  );
+  if (
+    input.candidates.some(
+      (candidate) =>
+        !selectedIncidentIds.has(candidate.id) &&
+        isCriticalRealDemand(candidate, now)
+    )
+  ) {
+    throw new Error(
+      "A targeted responder retry cannot bypass due critical real-demand work."
+    );
+  }
+
+  return {
+    providerFamilyKey: retryBatch.providerFamilyKey,
+    failureFingerprint: retryBatch.failureFingerprint,
+    incidents: selectedIncidents,
+    fairnessReason: "TARGETED_RETRY",
+    containsCriticalRealDemand: selectedIncidents.some((candidate) =>
+      isCriticalRealDemand(candidate, now)
+    )
   };
 }
 
@@ -1018,13 +1154,20 @@ export async function claimCourseSupportBatch(input: {
   baseSha: string;
   plannedPaths?: string[];
   maxCourses?: number;
+  retryBatchId?: string;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
   validateOwnerThread(input.ownerThreadId);
   validateTaskBranch(input.branch);
   validateGitSha(input.baseSha, "base SHA");
+  if (input.retryBatchId !== undefined && !input.retryBatchId.trim()) {
+    throw new Error("The targeted responder retry reference is invalid.");
+  }
   const maxCourses = clampCourseSupportBatchSize(input.maxCourses);
+  const retrySourceBatchDigest = input.retryBatchId
+    ? createHash("sha256").update(input.retryBatchId).digest("hex")
+    : null;
 
   const lease = await runWithRepositoryWriterTransitionLease(async () => {
     const [activeBatch, activeHourlyRun] = await Promise.all([
@@ -1067,7 +1210,7 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    const [candidates, recentBatches] = await Promise.all([
+    const [candidates, recentBatches, retryBatch] = await Promise.all([
       listDueCourseSupportCandidates(now),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },
@@ -1088,21 +1231,62 @@ export async function claimCourseSupportBatch(input: {
             }
           }
         }
-      })
+      }),
+      input.retryBatchId
+        ? prisma.courseSupportBatch.findUnique({
+            where: { id: input.retryBatchId },
+            select: {
+              status: true,
+              completedAt: true,
+              summary: true,
+              providerFamilyKey: true,
+              failureFingerprint: true,
+              incidents: {
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                select: {
+                  id: true,
+                  incidentId: true,
+                  courseId: true,
+                  cycle: true,
+                  result: true,
+                  incident: {
+                    select: {
+                      batchIncidents: {
+                        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                        take: 1,
+                        select: { id: true, cycle: true }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          })
+        : Promise.resolve(null)
     ]);
-    const selected = selectCourseSupportBatch({
-      candidates,
-      recentBatches: recentBatches.map((batch) => ({
-        includedEngineeringOnly: batch.incidents.some(
-          (entry) => entry.incident.engineeringOnly
-        ),
-        includedCriticalRealDemand: batch.incidents.some((entry) =>
-          isHistoricalCriticalRealDemand(entry.incident, now)
-        )
-      })),
-      maxCourses,
-      now
-    });
+    if (input.retryBatchId && !retryBatch) {
+      throw new Error("The targeted responder retry batch was not found.");
+    }
+    const selected = retryBatch
+      ? selectCourseSupportRetryBatch({
+          candidates,
+          retryBatch,
+          maxCourses,
+          now
+        })
+      : selectCourseSupportBatch({
+          candidates,
+          recentBatches: recentBatches.map((batch) => ({
+            includedEngineeringOnly: batch.incidents.some(
+              (entry) => entry.incident.engineeringOnly
+            ),
+            includedCriticalRealDemand: batch.incidents.some((entry) =>
+              isHistoricalCriticalRealDemand(entry.incident, now)
+            )
+          })),
+          maxCourses,
+          now
+        });
     if (!selected) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "no_due_work",
@@ -1148,7 +1332,11 @@ export async function claimCourseSupportBatch(input: {
             baseSha: input.baseSha,
             plannedPaths,
             incidentCount: selected.incidents.length,
-            fairnessReason: selected.fairnessReason
+            fairnessReason: selected.fairnessReason,
+            targetedRetry: Boolean(input.retryBatchId),
+            ...(retrySourceBatchDigest
+              ? { retrySourceBatchDigest }
+              : {})
           })
         },
         select: { id: true }
@@ -1171,6 +1359,10 @@ export async function claimCourseSupportBatch(input: {
             branch: input.branch,
             plannedPaths,
             fairnessReason: selected.fairnessReason,
+            targetedRetry: Boolean(input.retryBatchId),
+            ...(retrySourceBatchDigest
+              ? { retrySourceBatchDigest }
+              : {}),
             containsCriticalRealDemand: selected.containsCriticalRealDemand,
             selectedIncidentCount: selected.incidents.length
           }
@@ -1196,7 +1388,19 @@ export async function claimCourseSupportBatch(input: {
             updatedAt: incident.updatedAt,
             status: "AUTO_INVESTIGATING",
             activeBatchId: null,
-            OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+            ...(retryBatch?.completedAt
+              ? {
+                  nextAttemptAt: {
+                    gt: retryBatch.completedAt,
+                    lte: now
+                  }
+                }
+              : {
+                  OR: [
+                    { nextAttemptAt: null },
+                    { nextAttemptAt: { lte: now } }
+                  ]
+                })
           },
           data: {
             activeBatchId: batch.id,
@@ -3889,6 +4093,7 @@ async function listDueCourseSupportCandidates(now: Date) {
       firstSeenAt: true,
       lastSeenAt: true,
       lastAttemptAt: true,
+      nextAttemptAt: true,
       attemptCount: true
       ,updatedAt: true
     }

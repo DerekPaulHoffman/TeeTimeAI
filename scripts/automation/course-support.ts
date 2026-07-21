@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import {
   normalizeGitCommandOutput,
   parseGitNulPaths,
-  parseGitPorcelainV1ZPaths
+  parseGitPorcelainV1ZPaths,
+  resolveCodexOwnerThreadId
 } from "./git-output";
 
 import {
@@ -120,12 +121,16 @@ async function claim(args: string[]) {
     );
   }
   const plannedPaths = readRepeatedOption(args, "--path");
+  const retryBatchRef = readOption(args, "--retry-batch-ref");
   return claimCourseSupportBatch({
     ownerThreadId: requireOwnerThread(args),
     branch: git.branch,
     baseSha: git.headSha,
     plannedPaths,
-    maxCourses: readIntegerOption(args, "--max-courses")
+    maxCourses: readIntegerOption(args, "--max-courses"),
+    retryBatchId: retryBatchRef
+      ? await resolveCourseSupportBatchReference(retryBatchRef)
+      : undefined
   });
 }
 
@@ -398,14 +403,10 @@ function readJsonPayload() {
 }
 
 function requireOwnerThread(args: string[]) {
-  const ownerThreadId =
-    readOption(args, "--owner-thread") ?? process.env.CODEX_THREAD_ID?.trim();
-  if (!ownerThreadId) {
-    throw new Error(
-      "Course-support command requires CODEX_THREAD_ID or --owner-thread."
-    );
-  }
-  return ownerThreadId;
+  return resolveCodexOwnerThreadId({
+    environmentOwnerThreadId: process.env.CODEX_THREAD_ID,
+    requestedOwnerThreadId: readOption(args, "--owner-thread")
+  });
 }
 
 function requireOption(args: string[], name: string) {

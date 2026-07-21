@@ -38,6 +38,8 @@ Claiming requires all of the following:
 
 Claim returns a redacted `batchRef`, then `packet` exposes only bounded course ordinals and safe official roots. Every path must be recorded with `claim-path` before that file is edited. The database lease token and row ids never leave the command implementation.
 
+When a durably closed `RETRYABLE_FAILED` batch is due and coordination requires that exact retry, pass its private reference with `claim --retry-batch-ref`. The claim fails closed unless every prior entry is still `RETRY_SCHEDULED`, currently due, unowned, and unchanged in incident, course, cycle, provider family, and failure fingerprint, and no outside critical real-demand candidate is due. It never falls back to unrelated queue work, and the private reference must not be copied into reports or logs.
+
 The responder and hourly loop share the transaction-scoped Postgres advisory lease `tee-time-spot:repository-writer` for inspect/claim/recovery state transitions. The durable batch and unfinished `AutomationRun` own the longer implementation interval. A responder lease lasts 15 minutes and must be heartbeated while work continues.
 
 An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder/hourly writer, an active lease, or mismatched provenance require owner attention.

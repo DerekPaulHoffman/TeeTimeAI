@@ -2,6 +2,30 @@ export function normalizeGitCommandOutput(output: string) {
   return output.trimEnd();
 }
 
+export function resolveCodexOwnerThreadId(input: {
+  environmentOwnerThreadId?: string;
+  requestedOwnerThreadId?: string;
+}) {
+  const environmentOwnerThreadId = input.environmentOwnerThreadId?.trim();
+  const requestedOwnerThreadId = input.requestedOwnerThreadId?.trim();
+  if (
+    environmentOwnerThreadId &&
+    requestedOwnerThreadId &&
+    environmentOwnerThreadId !== requestedOwnerThreadId
+  ) {
+    throw new Error(
+      "--owner-thread does not match the current Codex task identity."
+    );
+  }
+  const ownerThreadId = environmentOwnerThreadId ?? requestedOwnerThreadId;
+  if (!ownerThreadId) {
+    throw new Error(
+      "Course-support command requires CODEX_THREAD_ID or --owner-thread."
+    );
+  }
+  return ownerThreadId;
+}
+
 export function parseGitNulPaths(output: string) {
   return [
     ...new Set(

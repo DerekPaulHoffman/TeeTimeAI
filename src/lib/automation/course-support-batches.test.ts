@@ -51,9 +51,11 @@ import {
   preserveExplicitHumanVerification,
   resolveCourseSupportProviderCapability,
   selectCourseSupportBatch,
+  selectCourseSupportRetryBatch,
   shouldDispatchRemediatedCourseRechecks,
   verifyCourseSupportBatch,
-  type CourseSupportCandidate
+  type CourseSupportCandidate,
+  type CourseSupportRetryBatchEvidence
 } from "./course-support-batches";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
@@ -116,8 +118,36 @@ function candidate(
     firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
     lastSeenAt: new Date("2026-07-15T18:00:00.000Z"),
     lastAttemptAt: null,
+    nextAttemptAt: new Date("2026-07-15T19:30:00.000Z"),
     attemptCount: 0,
     updatedAt: new Date("2026-07-15T18:00:00.000Z"),
+    ...overrides
+  };
+}
+
+function retryBatchEvidence(
+  intended: CourseSupportCandidate,
+  overrides: Partial<CourseSupportRetryBatchEvidence> = {}
+): CourseSupportRetryBatchEvidence {
+  const batchIncidentId = `batch-entry-${intended.id}`;
+  return {
+    status: "RETRYABLE_FAILED",
+    completedAt: new Date("2026-07-15T19:00:00.000Z"),
+    summary: { closeout: { outcome: "retryable_failed" } },
+    providerFamilyKey: intended.providerFamilyKey,
+    failureFingerprint: intended.failureFingerprint,
+    incidents: [
+      {
+        id: batchIncidentId,
+        incidentId: intended.id,
+        courseId: intended.courseId,
+        cycle: intended.cycle,
+        result: "RETRY_SCHEDULED",
+        incident: {
+          batchIncidents: [{ id: batchIncidentId, cycle: intended.cycle }]
+        }
+      }
+    ],
     ...overrides
   };
 }
@@ -221,6 +251,160 @@ describe("course-support batch selection", () => {
     expect(selected?.incidents.some((incident) => incident.id === "aged-synthetic")).toBe(
       true
     );
+  });
+
+  it("claims only the exact due incidents from a completed retryable batch", () => {
+    const intended = candidate({
+      id: "retry-incident",
+      courseId: "retry-course",
+      cycle: 3,
+      providerFamilyKey: "BROWSER_DISCOVERY",
+      failureFingerprint: "v1:MISSING_SOURCE:NEEDS_ADAPTER"
+    });
+    const selected = selectCourseSupportRetryBatch({
+      candidates: [candidate(), intended],
+      retryBatch: retryBatchEvidence(intended),
+      maxCourses: 1,
+      now
+    });
+
+    expect(selected).toMatchObject({
+      fairnessReason: "TARGETED_RETRY",
+      incidents: [{ id: "retry-incident", courseId: "retry-course" }]
+    });
+  });
+
+  it("fails closed when a targeted retry is not due or its provenance changed", () => {
+    const intended = candidate({
+      id: "retry-incident",
+      courseId: "retry-course",
+      cycle: 3
+    });
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [
+          {
+            ...intended,
+            failureFingerprint: "v2:changed"
+          }
+        ],
+        retryBatch: retryBatchEvidence(intended),
+        now
+      })
+    ).toThrow("not currently due or its provenance changed");
+  });
+
+  it("rejects incomplete, terminal, duplicate, or oversized retry evidence", () => {
+    const intended = candidate();
+    const retryBatch = retryBatchEvidence(intended);
+    retryBatch.incidents[0].result = "FINAL_DISPOSITION";
+
+    expect(() =>
+      selectCourseSupportRetryBatch({ candidates: [intended], retryBatch, now })
+    ).toThrow("non-retryable incident evidence");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch: { ...retryBatch, status: "PARTIAL" },
+        now
+      })
+    ).toThrow("durably closed retryable batch");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch: {
+          ...retryBatch,
+          incidents: [
+            { ...retryBatch.incidents[0], result: "RETRY_SCHEDULED" },
+            { ...retryBatch.incidents[0], result: "RETRY_SCHEDULED" }
+          ]
+        },
+        maxCourses: 2,
+        now
+      })
+    ).toThrow("duplicate incident evidence");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch: {
+          ...retryBatch,
+          incidents: [
+            { ...retryBatch.incidents[0], result: "RETRY_SCHEDULED" },
+            {
+              ...retryBatch.incidents[0],
+              incidentId: "incident-2",
+              courseId: "course-2",
+              result: "RETRY_SCHEDULED"
+            }
+          ]
+        },
+        maxCourses: 1,
+        now
+      })
+    ).toThrow("exceeds the requested batch size");
+  });
+
+  it("does not let a targeted retry bypass due critical real demand", () => {
+    const intended = candidate({
+      id: "retry-incident",
+      courseId: "retry-course"
+    });
+    const critical = candidate({
+      id: "critical-incident",
+      courseId: "critical-course",
+      kind: "FETCH_FAILED",
+      engineeringOnly: false,
+      activeRealSearchCount: 1,
+      earliestTargetDate: new Date("2026-07-18T00:00:00.000Z")
+    });
+
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended, critical],
+        retryBatch: retryBatchEvidence(intended),
+        maxCourses: 1,
+        now
+      })
+    ).toThrow("cannot bypass due critical real-demand work");
+  });
+
+  it.each([
+    ["missing", null],
+    ["not newer than closeout", new Date("2026-07-15T19:00:00.000Z")],
+    ["not due yet", new Date("2026-07-15T20:01:00.000Z")]
+  ])("rejects a %s targeted retry schedule", (_label, nextAttemptAt) => {
+    const intended = candidate({
+      id: "retry-incident",
+      courseId: "retry-course",
+      nextAttemptAt
+    });
+
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch: retryBatchEvidence(intended),
+        now
+      })
+    ).toThrow("does not have a current due retry schedule");
+  });
+
+  it("rejects an old retry source after a later batch attempt", () => {
+    const intended = candidate({
+      id: "retry-incident",
+      courseId: "retry-course"
+    });
+    const retryBatch = retryBatchEvidence(intended);
+    retryBatch.incidents[0].incident.batchIncidents = [
+      { id: "newer-batch-entry", cycle: intended.cycle }
+    ];
+
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        now
+      })
+    ).toThrow("superseded by a later batch");
   });
 });
 

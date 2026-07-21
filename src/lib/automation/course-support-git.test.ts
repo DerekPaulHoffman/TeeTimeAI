@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeGitCommandOutput,
   parseGitNulPaths,
-  parseGitPorcelainV1ZPaths
+  parseGitPorcelainV1ZPaths,
+  resolveCodexOwnerThreadId
 } from "../../../scripts/automation/git-output";
 
 describe("course-support git output", () => {
@@ -54,5 +55,29 @@ describe("course-support git output", () => {
       "src/old name.ts",
       "src/new name.ts"
     ]);
+  });
+
+  it("binds responder ownership to the current Codex task identity", () => {
+    expect(
+      resolveCodexOwnerThreadId({
+        environmentOwnerThreadId: "task-current",
+        requestedOwnerThreadId: "task-current"
+      })
+    ).toBe("task-current");
+  });
+
+  it("rejects a mismatched owner override and permits a flag only without task context", () => {
+    expect(() =>
+      resolveCodexOwnerThreadId({
+        environmentOwnerThreadId: "task-current",
+        requestedOwnerThreadId: "task-other"
+      })
+    ).toThrow("does not match the current Codex task identity");
+    expect(
+      resolveCodexOwnerThreadId({ requestedOwnerThreadId: "task-explicit" })
+    ).toBe("task-explicit");
+    expect(() => resolveCodexOwnerThreadId({})).toThrow(
+      "requires CODEX_THREAD_ID or --owner-thread"
+    );
   });
 });
