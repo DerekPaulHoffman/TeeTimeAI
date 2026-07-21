@@ -1752,6 +1752,348 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies and replays an exact official private course profile", () => {
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const discovery = buildBrowserDiscovery({
+      courseId: "deer-creek-private-profile",
+      courseName:
+        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      sourceUrl: "https://community.example/",
+      finalUrl: sourceUrl,
+      observedUrls: ["https://community.example/", sourceUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName:
+          "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+        linkCandidates: [],
+        visibleText:
+          "Deer Creek\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+      },
+      visibleText:
+        "Deer Creek\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      sourceUrl,
+      bookingUrl: sourceUrl,
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      evidence: { learnedFrom: "official-private-course-profile" }
+    });
+
+    const replay = buildBrowserDiscovery({
+      courseId: "deer-creek-private-profile-replay",
+      courseName:
+        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      sourceUrl: discovery.sourceUrl,
+      finalUrl: discovery.evidence.finalUrl,
+      observedUrls: discovery.evidence.observedUrls,
+      visibleText: discovery.evidence.visibleText
+    });
+    expect(replay).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "OTHER",
+      evidence: { learnedFrom: "official-private-course-profile" }
+    });
+  });
+
+  it.each([
+    {
+      label: "the structured status is public",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Public\nLocation: Savannah, GA"
+    },
+    {
+      label: "the profile belongs to a sibling course",
+      profile:
+        "Sibling Hills Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "public play contradicts the private status",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA\nPublic tee times are available online."
+    },
+    {
+      label: "public golfers are explicitly welcome",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA\nPublic golfers are welcome."
+    },
+    {
+      label: "the course is semi-private",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA\nThis is a semi-private club."
+    },
+    {
+      label: "the golf course is open to everyone",
+      profile:
+        "The golf course is open to everyone.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the golf course is open to resort guests and the public",
+      profile:
+        "The golf course is open to resort guests and the public.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the public is welcome to play the golf course",
+      profile:
+        "The public is welcome to play the golf course.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "an account status appears outside a course profile",
+      profile:
+        "Deer Creek member portal. Architect: Tom Fazio. Account Status: Private. Location: Savannah, GA."
+    },
+    {
+      label: "a nearer sibling profile owns the private status",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nSibling Hills Details\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a nearer membership-account section owns the private status",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nMembership Account Details\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the page identifies a public golf course",
+      profile:
+        "Deer Creek is a public golf course.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the page identifies a public course",
+      profile:
+        "Deer Creek is a public course.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a municipal course is open to all golfers",
+      profile:
+        "This municipal golf course is open to all golfers.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the page publishes Unicode-hyphen daily-fee play",
+      profile:
+        "Deer Creek offers daily‑fee play.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the page publishes soft-hyphen daily-fee play",
+      profile:
+        "Deer Creek offers daily­fee play.\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a sibling golf-course heading intervenes",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nSibling Hills Golf Course\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a short sibling heading intervenes",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nThe Lakes\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a member portal heading intervenes",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nMember Portal\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a membership account heading intervenes",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nMembership Account\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "an empty architect field consumes a sibling heading",
+      profile:
+        "Deer Creek Details\nArchitect:\nSibling Hills Golf Course\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "an empty architect field consumes a member portal heading",
+      profile:
+        "Deer Creek Details\nArchitect:\nMember Portal\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a longer sibling name contains the target alias",
+      profile:
+        "Deer Creek Championship Course Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "the parent club suffix is not a leading course alias",
+      profile:
+        "The Landings Golf & Athletic Club Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops the target course layout",
+      courseName: "Deer Creek North Golf Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops an executive layout name",
+      courseName: "Deer Creek Executive Golf Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops a championship layout name",
+      courseName: "Deer Creek Championship Golf Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops a lakes layout name",
+      courseName: "Deer Creek Lakes Golf Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops a spelled numbered layout name",
+      courseName: "Deer Creek Nine Golf Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops a north course after at",
+      courseName: "Deer Creek Golf Course at North Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops an executive course after at",
+      courseName: "Deer Creek at Executive Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops a lakes course after at",
+      courseName: "Deer Creek at Lakes Course",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a shorter alias drops a numeric course after at",
+      courseName: "Deer Creek at Course 2",
+      profile:
+        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a country club profile conflicts with a golf course target",
+      courseName: "Deer Creek Golf Course",
+      profile:
+        "Deer Creek Country Club Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a golf club profile conflicts with a golf course target",
+      courseName: "Deer Creek Golf Course",
+      profile:
+        "Deer Creek Golf Club Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a golf course profile conflicts with a country club target",
+      courseName: "Deer Creek Country Club",
+      profile:
+        "Deer Creek Golf Course Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a standalone club profile conflicts with a golf course target",
+      courseName: "Deer Creek Golf Course",
+      profile:
+        "Deer Creek Club Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a golf course profile conflicts with a standalone club target",
+      courseName: "Deer Creek Club",
+      profile:
+        "Deer Creek Golf Course Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    },
+    {
+      label: "a standalone links profile conflicts with a club target",
+      courseName: "Deer Creek Club",
+      profile:
+        "Deer Creek Links Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+    }
+  ])("does not infer a private course profile when $label", ({ profile, courseName: suppliedCourseName }) => {
+    const courseName = suppliedCourseName ??
+      "Deer Creek Golf Course at The Landings Golf & Athletic Club";
+    const sourceUrl = "https://community.example/golf/deer-creek";
+    const discovery = buildBrowserDiscovery({
+      courseId: "private-profile-negative",
+      courseName,
+      sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl],
+      officialPage: {
+        url: sourceUrl,
+        courseName,
+        linkCandidates: [],
+        visibleText: profile
+      },
+      visibleText: profile
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not combine a target profile with a later aggregate status block", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "private-profile-aggregate-boundary",
+      courseName:
+        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      sourceUrl: "https://community.example/",
+      observedUrls: ["https://community.example/"],
+      visibleText:
+        "Deer Creek Details. Architect: Tom Fazio. Stats: 7,094 Yards / Par 72. Established: 1991.\nStatus: Private. Location: Savannah, GA"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it.each([
+    {
+      label: "the official page follows a cross-host redirect",
+      sourceUrl: "https://official.example/",
+      finalUrl: "https://untrusted.example/golf/deer-creek",
+      officialPageUrl: "https://untrusted.example/golf/deer-creek"
+    },
+    {
+      label: "the original source contains session state",
+      sourceUrl: "https://official.example/?session_id=example-value",
+      finalUrl: "https://official.example/golf/deer-creek",
+      officialPageUrl: "https://official.example/golf/deer-creek"
+    }
+  ])("does not trust a private course profile when $label", ({
+    sourceUrl,
+    finalUrl,
+    officialPageUrl
+  }) => {
+    const courseName =
+      "Deer Creek Golf Course at The Landings Golf & Athletic Club";
+    const profile =
+      "Deer Creek\nDeer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA";
+    const discovery = buildBrowserDiscovery({
+      courseId: "private-profile-untrusted-source",
+      courseName,
+      sourceUrl,
+      finalUrl,
+      observedUrls: [sourceUrl, finalUrl],
+      officialPage: {
+        url: officialPageUrl,
+        courseName,
+        linkCandidates: [],
+        visibleText: profile
+      },
+      visibleText: profile
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it("classifies repeated weekday and weekend no-tee-time access as walk-in", () => {
     const sourceUrl = "http://www.quarry-view.example/";
     const discovery = buildBrowserDiscovery({

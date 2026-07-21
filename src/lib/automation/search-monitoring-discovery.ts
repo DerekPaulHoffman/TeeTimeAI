@@ -3995,6 +3995,7 @@ function stripHtml(value: string) {
 
 function stripHtmlPreservingBlockBoundaries(value: string) {
   return value
+    .replace(/<\/(?:td|th)>\s*<(?:td|th)\b[^>]*>/gi, " ")
     .replace(
       /<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|hr|li|main|ol|p|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>/gi,
       "\n"

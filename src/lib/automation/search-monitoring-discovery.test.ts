@@ -3519,6 +3519,65 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("classifies a linked official course profile with structured private status", async () => {
+    const officialUrl = "https://community.example/";
+    const courseUrl = "https://community.example/golf/deer-creek";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === officialUrl) {
+        return new Response(
+          '<html><body><a href="/golf/deer-creek">Deer Creek</a></body></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === courseUrl) {
+        return new Response(
+          '<html><head><title>Deer Creek | Private Golf Club Memberships</title></head><body><h1>Deer Creek</h1><h2>Deer Creek Details</h2><table><tr><td>Architect:</td><td>Tom Fazio</td></tr><tr><td>Stats:</td><td>7,094 Yards / Par 72</td></tr><tr><td>Established:</td><td>1991</td></tr><tr><td>Status:</td><td>Private</td></tr><tr><td>Location:</td><td>Savannah, GA</td></tr></table></body></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "deer-creek-private-profile",
+          name:
+            "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+          website: officialUrl,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evidence: expect.objectContaining({
+          visibleText: expect.stringContaining("Status: Private")
+        })
+      })
+    );
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "VERIFIED",
+        sourceUrl: courseUrl,
+        bookingMethod: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        evidence: expect.objectContaining({
+          learnedFrom: "official-private-course-profile"
+        })
+      })
+    );
+  });
+
   it("classifies a course-scoped direct legacy Prophet link without following its cookieless session redirect", async () => {
     const sourceUrl = "https://www.troyny.example/frear-park-golf-course";
     const legacyRoot =

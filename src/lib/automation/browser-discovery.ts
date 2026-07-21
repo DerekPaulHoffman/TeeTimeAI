@@ -3466,16 +3466,49 @@ function learnPrivateClubClassification(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const visibleText = evidence.visibleText?.replace(/\s+/g, " ").trim() ?? "";
-  const scopedAccess = findTargetScopedPrivateClubAccess(
-    evidence.courseName,
-    visibleText
-  );
+  const rawVisibleText = evidence.visibleText ?? "";
+  const visibleText = rawVisibleText.replace(/\s+/g, " ").trim();
+  const officialCourseProfileText =
+    evidence.officialPage?.courseName &&
+    haveCompatibleCourseNames(
+      evidence.courseName,
+      evidence.officialPage.courseName
+    )
+      ? evidence.officialPage.visibleText ?? ""
+      : "";
+  const privateCourseProfile =
+    findTargetScopedPrivateCourseProfile(
+      evidence.courseName,
+      officialCourseProfileText
+    ) ??
+    (!/\r?\n/u.test(rawVisibleText)
+      ? findTargetScopedPrivateCourseProfile(evidence.courseName, rawVisibleText)
+      : null);
+  const scopedAccess = privateCourseProfile
+    ? {
+        privateMemberGuestClub: true,
+        residentMemberClub: false,
+        scopedText: privateCourseProfile.scopedText
+      }
+    : findTargetScopedPrivateClubAccess(evidence.courseName, visibleText);
   if (!scopedAccess) {
     return null;
   }
+  if (
+    privateCourseProfile &&
+    (hasUnsafePrimaryManualEvidenceUrl(evidence) ||
+      hasUntrustedPrimaryManualEvidenceTransition(evidence))
+  ) {
+    return null;
+  }
   const { residentMemberClub, scopedText } = scopedAccess;
-  const manualEvidence = getSafeManualEvidence(evidence, observedUrls);
+  const scopedEvidence = privateCourseProfile
+    ? getOfficialSourceScopedEvidence(evidence, scopedText)
+    : evidence;
+  const manualEvidence = getSafeManualEvidence(
+    scopedEvidence,
+    privateCourseProfile ? scopedEvidence.observedUrls : observedUrls
+  );
   if (!manualEvidence) {
     return null;
   }
@@ -3491,6 +3524,8 @@ function learnPrivateClubClassification(
     automationReason: "OTHER",
     policyNotes: residentMemberClub
       ? "The official site identifies this as a neighborhood social club for residents and says the golf course is a member amenity. Tee Time Spot must not present automated public tee-time monitoring for this course."
+      : privateCourseProfile
+        ? "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory."
       : "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course.",
     intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
     confidence: 0.98,
@@ -3500,9 +3535,223 @@ function learnPrivateClubClassification(
       visibleText: summarizeVisibleText(scopedText),
       learnedFrom: residentMemberClub
         ? "official-resident-member-access"
+        : privateCourseProfile
+          ? "official-private-course-profile"
         : "official-private-club-access"
     }
   };
+}
+
+function findTargetScopedPrivateCourseProfile(
+  courseName: string,
+  visibleText: string
+) {
+  const normalizedLines = visibleText
+    .replace(/\r\n?/gu, "\n")
+    .split(/\n+/u)
+    .map((line) => line.replace(/\s+/gu, " ").trim())
+    .filter(Boolean);
+  const normalizedText = normalizedLines.join(" ");
+  if (
+    !normalizedText ||
+    /\b(?:open|available)\s+to\s+(?:the\s+)?public\b|\bopen\s+to\s+(?:all\s+golfers?|anyone|everyone)\b|\bopen\s+to\s+[^.!?]{1,80}\b(?:the\s+)?public\b|\bpublic\s+(?:(?:golf\s+)?course|tee\s*times?|play|access|welcome|golfers?\s+are\s+welcome|daily(?:[\s\-\u00ad\u2010-\u2015\u2212]+)fee)\b|\b(?:the\s+)?public\s+(?:is|are)\s+welcome(?:\s+to\s+play)?\b|\bwelcomes?\s+(?:the\s+)?public\b|\bsemi(?:[\s\-\u00ad\u2010-\u2015\u2212]+)private\b|\bdaily(?:[\s\-\u00ad\u2010-\u2015\u2212]+)fee\b|\bnon(?:[\s\-\u00ad\u2010-\u2015\u2212]+)members?\b/i.test(
+      normalizedText
+    )
+  ) {
+    return null;
+  }
+
+  const profileLines = /\r?\n/u.test(visibleText)
+    ? normalizedLines
+    : visibleText
+        .split(/[.!?]\s+/u)
+        .map((line) => line.replace(/\s+/gu, " ").trim())
+        .filter(Boolean);
+  for (let index = 0; index < profileLines.length; index += 1) {
+    const detailsLine = profileLines[index] ?? "";
+    if (!/\sdetails\s*$/i.test(detailsLine)) {
+      continue;
+    }
+    const identity = detailsLine
+      .replace(/\s+details\s*$/i, "")
+      .trim();
+    if (!isTargetOrShorterCourseProfileIdentity(identity, courseName)) {
+      continue;
+    }
+    const architect = readPrivateCourseProfileField(
+      profileLines,
+      index + 1,
+      "architect"
+    );
+    const stats = architect && readPrivateCourseProfileField(
+      profileLines,
+      architect.nextIndex,
+      "stats"
+    );
+    const established = stats && readPrivateCourseProfileField(
+      profileLines,
+      stats.nextIndex,
+      "established"
+    );
+    const status = established && readPrivateCourseProfileField(
+      profileLines,
+      established.nextIndex,
+      "status"
+    );
+    const location = status && readPrivateCourseProfileField(
+      profileLines,
+      status.nextIndex,
+      "location"
+    );
+    if (
+      !architect ||
+      !stats ||
+      !established ||
+      !status ||
+      !location ||
+      !architect.value ||
+      !/\byards?\b.*\bpar\b/i.test(stats.value) ||
+      !/^\d{4}$/u.test(established.value) ||
+      !/^private$/i.test(status.value) ||
+      !location.value
+    ) {
+      continue;
+    }
+    return {
+      scopedText: normalizePrivateCourseProfileProof(
+        profileLines.slice(index, location.nextIndex)
+      )
+    };
+  }
+  return null;
+}
+
+function readPrivateCourseProfileField(
+  lines: string[],
+  index: number,
+  field: "architect" | "stats" | "established" | "status" | "location"
+) {
+  const line = lines[index] ?? "";
+  const match = new RegExp(`^${field}\\s*:\\s*(.*)$`, "i").exec(line);
+  if (!match) {
+    return null;
+  }
+  const inlineValue = match[1]?.trim() ?? "";
+  if (!inlineValue) {
+    return null;
+  }
+  return { value: inlineValue, nextIndex: index + 1 };
+}
+
+function isTargetOrShorterCourseProfileIdentity(
+  candidate: string,
+  courseName: string
+) {
+  const candidateFacilityKind = getPrivateCourseProfileFacilityKind(candidate);
+  const targetFacilityKind = getPrivateCourseProfileFacilityKind(courseName);
+  if (
+    candidateFacilityKind &&
+    targetFacilityKind &&
+    candidateFacilityKind !== targetFacilityKind
+  ) {
+    return false;
+  }
+  const candidateTokens = normalizeCourseIdentityName(candidate)
+    .split(" ")
+    .filter(Boolean);
+  const targetTokens = normalizeCourseIdentityName(courseName)
+    .split(" ")
+    .filter(Boolean);
+  if (candidateTokens.length === 0 || targetTokens.length === 0) {
+    return false;
+  }
+  if (candidateTokens.join(" ") === targetTokens.join(" ")) {
+    return true;
+  }
+  const omittedTargetTokens = targetTokens.slice(candidateTokens.length);
+  return candidateTokens.length >= 2 &&
+    candidateTokens.length < targetTokens.length &&
+    candidateTokens.every((token, index) => targetTokens[index] === token) &&
+    omittedTargetTokens[0] === "at" &&
+    hasPrivateCourseProfileParentSuffix(courseName);
+}
+
+function getPrivateCourseProfileFacilityKind(value: string) {
+  const primaryIdentity = value.split(/\s+at\s+/iu)[0]?.trim() ?? "";
+  const normalized = primaryIdentity
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim();
+  return [
+    "country club",
+    "golf club",
+    "golf course",
+    "golf center",
+    "golf centre",
+    "golf links",
+    "club",
+    "course",
+    "center",
+    "centre",
+    "links"
+  ].find((kind) => normalized.endsWith(kind));
+}
+
+function hasPrivateCourseProfileParentSuffix(courseName: string) {
+  const suffix = /\bat\b(?<suffix>.+)$/iu.exec(courseName)?.groups?.suffix;
+  if (!suffix) {
+    return false;
+  }
+  const tokens = suffix
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
+  const parentFacilityTokens = new Set([
+    "association",
+    "athletic",
+    "club",
+    "college",
+    "community",
+    "municipal",
+    "resort",
+    "university"
+  ]);
+  const layoutTokens = new Set([
+    "back",
+    "black",
+    "blue",
+    "championship",
+    "course",
+    "east",
+    "eighteen",
+    "executive",
+    "front",
+    "green",
+    "lake",
+    "lakes",
+    "nine",
+    "north",
+    "par",
+    "red",
+    "short",
+    "south",
+    "west",
+    "yellow"
+  ]);
+  return (
+    tokens.some((token) => parentFacilityTokens.has(token)) &&
+    !tokens.some((token) => layoutTokens.has(token) || /^\d+$/u.test(token))
+  );
+}
+
+function normalizePrivateCourseProfileProof(lines: string[]) {
+  return lines.join(". ").replace(/:\.\s*/gu, ": ");
 }
 
 function findTargetScopedPrivateClubAccess(courseName: string, visibleText: string) {
