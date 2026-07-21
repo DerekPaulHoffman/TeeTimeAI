@@ -17,6 +17,7 @@ import {
   buildHourlyImprovementRunProvenance,
   buildPortfolioCategoryHistory,
   buildRepeatedCoveragePortfolioCandidates,
+  hasCourseSupportWriterConflict,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
   IMPROVEMENT_CATEGORIES,
   isHourlyImprovementClaimWindowOpen,
@@ -35,7 +36,7 @@ import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v12";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v13";
 const PROMPT_VERSION_PREFIX = "tee-time-spot-improvement-loop-v";
 const ACTIVE_RUN_STALE_AFTER_MS = 55 * 60 * 1000;
 const PORTFOLIO_HISTORY_HOURS = 24;
@@ -45,7 +46,7 @@ const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
-1. Before branch setup, installation, research, or edits, run \`npm run automation:course-support -- inspect\`. If a responder batch is active, expired and awaiting recovery, or has due incidents, stop this broad loop with blocked_concurrent. Otherwise fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work. A dirty checkout may be resumed only when the immediately preceding unfinished run for this exact automation recorded the same branch, expected HEAD, owner run, owner thread, and every dirty path in its pre-edit plan; otherwise block it.
+1. Before branch setup, installation, research, or edits, run \`npm run automation:course-support -- inspect\`. Stop this broad loop with blocked_concurrent only when a responder batch is active or expired and awaiting recovery. A due incident backlog without an owning batch is informational and must not stop unrelated product work; those incidents still belong exclusively to the responder and may never become hourly candidates. Otherwise fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work. A dirty checkout may be resumed only when the immediately preceding unfinished run for this exact automation recorded the same branch, expected HEAD, owner run, owner thread, and every dirty path in its pre-edit plan; otherwise block it.
 2. The prepare command checks responder ownership again under the shared database transition lease before candidate selection. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
 3. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
 4. Before browser exploration, set sessionStorage key \`tee-time-spot:traffic-class\` to \`AUTOMATION\` (or \`TEST\` only for an explicit manual test). Confirm analytics requests carry that aggregate marker. Never create a persistent visitor/session identifier, and never let unmarked automation traffic persist as public funnel activity.
@@ -494,7 +495,7 @@ async function prepareImprovementRun() {
     "--recover-run"
   );
 
-  if (courseSupportState.activeBatchCount > 0) {
+  if (hasCourseSupportWriterConflict(courseSupportState)) {
     writeHandoff({
       state: "blocked_concurrent",
       reason:
@@ -678,44 +679,6 @@ async function prepareImprovementRun() {
         code: "INTERRUPTED_WITHOUT_CLOSEOUT"
       }
     });
-  }
-
-  if (courseSupportState.dueIncidentCount > 0) {
-    const blockedRun = await startAutomationRun(PROMPT_VERSION);
-    const reasons = [
-      "Due provider-remediation incidents belong to the dedicated course-support responder."
-    ];
-    const blockedRecord = buildRunRecord({
-      runId: blockedRun.id,
-      ownerThreadId,
-      git,
-      lifecycle: "blocked",
-      checkpoints: buildImprovementCheckpoints({
-        queueConfirmed: true,
-        candidateSelected: false
-      }),
-      blocker: {
-        outcome: "blocked_concurrent",
-        reasons
-      }
-    });
-    await closeHourlyImprovementRun(blockedRun.id, {
-      outcome: "blocked_concurrent",
-      record: blockedRecord,
-      errors: {
-        code: "COURSE_SUPPORT_RESPONDER_PRIORITY",
-        dueIncidentCount: courseSupportState.dueIncidentCount
-      }
-    });
-    writeHandoff({
-      automationRunId: blockedRun.id,
-      state: "blocked_concurrent",
-      outcomeRecorded: true,
-      reason: reasons[0],
-      courseSupport: courseSupportState
-    });
-    process.exitCode = 2;
-    return;
   }
 
   if (

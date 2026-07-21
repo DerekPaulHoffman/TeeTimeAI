@@ -8,6 +8,7 @@ import {
   buildImprovementCheckpoints,
   buildRepeatedCoveragePortfolioCandidates,
   hasCompletePreEditProvenance,
+  hasCourseSupportWriterConflict,
   isHourlyImprovementClaimWindowOpen,
   markImprovementOutcomeRecorded,
   rankPortfolioCandidates,
@@ -18,6 +19,17 @@ import {
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology
 } from "./improvement";
+
+describe("course-support coordination", () => {
+  it("blocks only while a responder batch owns the writer lane", () => {
+    expect(
+      hasCourseSupportWriterConflict({ activeBatchCount: 1, dueIncidentCount: 0 })
+    ).toBe(true);
+    expect(
+      hasCourseSupportWriterConflict({ activeBatchCount: 0, dueIncidentCount: 52 })
+    ).toBe(false);
+  });
+});
 
 function portfolioRunNotes(blockers: string[]) {
   return JSON.stringify({

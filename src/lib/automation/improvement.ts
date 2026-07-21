@@ -67,6 +67,13 @@ export const IMPROVEMENT_EVIDENCE_TRACKS = [
 
 export type ImprovementEvidenceTrack = (typeof IMPROVEMENT_EVIDENCE_TRACKS)[number];
 
+export function hasCourseSupportWriterConflict(input: {
+  activeBatchCount: number;
+  dueIncidentCount: number;
+}) {
+  return input.activeBatchCount > 0;
+}
+
 export type PortfolioCandidateInput = {
   id: string;
   category: ImprovementCategory;

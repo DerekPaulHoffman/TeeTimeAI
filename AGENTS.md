@@ -398,7 +398,7 @@ Important behavior:
 
 ### Hourly Improvement Loop
 
-The hourly improvement loop is allowed to improve the product when evidence supports a change, but only when no responder batch is active and no course-support work is due. Course-support incidents are excluded from its candidate portfolio.
+The hourly improvement loop is allowed to improve the product when evidence supports a change whenever no responder batch currently owns or must recover the repository writer lane. A due course-support backlog by itself is informational and does not block unrelated product work. Course-support incidents remain excluded from the hourly candidate portfolio.
 
 For this hourly workflow, `no_op` is not a valid terminal outcome. An empty first queue or a healthy baseline is the nonterminal state `exploration_required`: rotate to least-recently covered locations, devices, routes, feedback, course gaps, accessibility, performance, security, metadata, and current-practice evidence until the run finds a safe valuable improvement or a concrete blocker. This rule does not change legitimate `no_op` behavior for event-driven search checks or browser probes.
 
@@ -428,7 +428,7 @@ Before the first file edit, persist durable `AutomationRun` provenance containin
 
 Use `npm run automation:improve` to prepare the unfinished owner row, `npm run automation:improve -- claim --run-id <id> --path <path>` before edits, and pipe the structured terminal JSON to `npm run automation:improve -- closeout --run-id <id>`. Use `--owner-thread` only when `CODEX_THREAD_ID` is unavailable and the actual current Codex thread id is known. Dirty recovery requires a separate same-thread `--recover-run <id>` invocation; never infer the claim from the latest row.
 
-Acquire the shared transaction-scoped `tee-time-spot:repository-writer` lease before candidate selection, path claims, or closeout. It serializes those transitions with the responder; due responder work, an active responder batch, or an active hourly run is `blocked_concurrent`. The single unfinished owner `AutomationRun` is the durable guard for the rest of the run. Keep `outcome_recorded=false` during preparation, editing, and verification; set it true only in the same closeout write that records `completedAt` and the terminal outcome. Terminal exceptions must close the owned run with a redacted error and concrete blocker.
+Acquire the shared transaction-scoped `tee-time-spot:repository-writer` lease before candidate selection, path claims, or closeout. It serializes those transitions with the responder; an active or expired responder batch, or an active hourly run, is `blocked_concurrent`. Unowned due responder work is not concurrency. The single unfinished owner `AutomationRun` is the durable guard for the rest of the run. Keep `outcome_recorded=false` during preparation, editing, and verification; set it true only in the same closeout write that records `completedAt` and the terminal outcome. Terminal exceptions must close the owned run with a redacted error and concrete blocker.
 
 Enter closeout no later than 40 minutes after the run starts or when only 20 minutes remain before the next scheduled launch. Start no new exploration or edits after that point; reserve the closeout budget for tests, diff review, commit, rebase, push, deployment, production verification, and the durable final record.
 
