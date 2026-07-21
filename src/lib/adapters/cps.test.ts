@@ -113,6 +113,16 @@ describe("resolveCpsRuntimeCourseIds", () => {
       expected: [0]
     },
     {
+      name: "rejects sibling facility names sharing one published id",
+      configured: [0],
+      options: [
+        { courseId: 41, courseName: "Lakeside Golf Club" },
+        { courseId: 41, courseName: "Woodland Golf Club" }
+      ],
+      allow: true,
+      expected: [0]
+    },
+    {
       name: "rejects a missing label in a multi-id tenant",
       configured: [0],
       options: [
@@ -378,7 +388,7 @@ describe("fetchCpsSlots", () => {
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
-  it("fails closed when public options describe sibling named courses", async () => {
+  it("fails closed when one published id describes sibling named courses", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input) => {
         const url = input.toString();
@@ -397,7 +407,7 @@ describe("fetchCpsSlots", () => {
             webSiteId: "public-website",
             courseOptions: [
               { courseId: 41, courseName: "Lakeside Golf Club" },
-              { courseId: 42, courseName: "Woodland Golf Club" }
+              { courseId: 41, courseName: "Woodland Golf Club" }
             ]
           });
         }

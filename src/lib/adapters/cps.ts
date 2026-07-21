@@ -969,6 +969,10 @@ export function resolveCpsRuntimeCourseIds(
     (left, right) => left - right
   );
   if (publishedCourseIds.length === 1) {
+    const courseNames = publishedCourseNames.get(publishedCourseIds[0]);
+    if (courseNames && courseNames.size > 1) {
+      return configuredCourseIds;
+    }
     return publishedCourseIds;
   }
   if (
