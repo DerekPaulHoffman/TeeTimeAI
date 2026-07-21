@@ -1552,6 +1552,10 @@ export async function collectOfficialSiteEvidence(
     ? pages[0]
     : undefined;
   const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
+  const targetScopedOfficialRedirects: Array<{
+    url: string;
+    label: string;
+  }> = [];
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
     const linkCandidates = pages.flatMap((page) => page.evidence.linkCandidates);
@@ -1578,6 +1582,18 @@ export async function collectOfficialSiteEvidence(
     if (!followupCandidate) {
       break;
     }
+    const exactTargetOfficialRedirect = courseName
+      ? linkCandidates.find(
+          (candidate) =>
+            normalizeSourceKey(candidate.url) ===
+              normalizeSourceKey(followupCandidate) &&
+            haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
+            doesProviderLinkLabelExactlyIdentifyCourse(
+              candidate.label,
+              courseName
+            )
+        )
+      : undefined;
     const identifiesTargetCourse = Boolean(
       courseName &&
         doesFollowupIdentifyCourse(
@@ -1595,6 +1611,15 @@ export async function collectOfficialSiteEvidence(
         evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
       };
       pages.push(page);
+      if (
+        exactTargetOfficialRedirect &&
+        !haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
+      ) {
+        targetScopedOfficialRedirects.push({
+          url: page.finalUrl,
+          label: exactTargetOfficialRedirect.label
+        });
+      }
       if (
         identifiesTargetCourse &&
         courseName &&
@@ -1616,18 +1641,21 @@ export async function collectOfficialSiteEvidence(
   const finalPage = pages.at(-1)!;
   const targetScopedOfficialLinks = matchedCoursePage && courseName
     ? uniqueLinkCandidates(
-        pages
-          .filter((page) =>
-            haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
-          )
-          .flatMap((page) => page.evidence.linkCandidates)
-          .filter((candidate) =>
-            !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
-            doesProviderLinkLabelExactlyIdentifyCourse(
-              candidate.label,
-              courseName
+        [
+          ...pages
+            .filter((page) =>
+              haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
             )
-          )
+            .flatMap((page) => page.evidence.linkCandidates)
+            .filter((candidate) =>
+              !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
+              doesProviderLinkLabelExactlyIdentifyCourse(
+                candidate.label,
+                courseName
+              )
+            ),
+          ...targetScopedOfficialRedirects
+        ]
       )
     : [];
   return {
