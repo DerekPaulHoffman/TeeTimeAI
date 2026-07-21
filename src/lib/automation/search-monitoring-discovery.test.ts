@@ -3019,7 +3019,7 @@ describe("search monitoring discovery", () => {
       const value = input.toString();
       if (value === sourceUrl) {
         return new Response(
-          `<html><title>Frear Park Golf Course</title><h1>Frear Park Golf Course</h1><h2>Reserve Tee Times</h2><p>Tee Times can be booked online or by calling the Pro Shop.</p><a href="${legacyRoot}">Book Online</a></html>`,
+          `<html><title>Frear Park Golf Course</title><h1>Frear Park Golf Course</h1><h2>Reserve Tee Times</h2><p>Tee Times can be booked online or by calling the Pro Shop.</p><a href="${legacyRoot}"><span aria-hidden="true"></span></a><a href="${legacyRoot}">Book Online</a></html>`,
           { status: 200, headers: { "content-type": "text/html" } }
         );
       }

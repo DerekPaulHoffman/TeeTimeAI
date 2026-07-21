@@ -1943,11 +1943,15 @@ export async function collectOfficialSiteEvidence(
     if (!followupCandidate) {
       break;
     }
-    const followedLinkCandidate = linkCandidates.find(
+    const matchingFollowedLinkCandidates = linkCandidates.filter(
       (candidate) =>
         normalizeSourceKey(candidate.url) ===
         normalizeSourceKey(followupCandidate)
     );
+    const followedLinkCandidate =
+      matchingFollowedLinkCandidates.find(
+        (candidate) => candidate.legacyProphetConfiguration
+      ) ?? matchingFollowedLinkCandidates[0];
     const exactTargetOfficialRedirect =
       courseName &&
       followedLinkCandidate &&
