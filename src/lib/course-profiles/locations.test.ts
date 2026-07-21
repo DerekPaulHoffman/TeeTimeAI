@@ -30,7 +30,7 @@ describe("location hub registry", () => {
     expect(hub && await loadQualifiedLocationHub(hub)).toBeNull();
   });
 
-  it("publishes a registered hub at five supported profiles and uses the oldest included verification date", async () => {
+  it("publishes a registered hub at five supported current or stale profiles and uses the oldest included verification date", async () => {
     mockedPrisma.course.findMany.mockResolvedValue(makeCourses(LOCATION_HUB_MINIMUM_COURSES) as never);
     const hub = getLocationHub(["connecticut", "fairfield-county"]);
     const result = hub && await loadQualifiedLocationHub(hub);
@@ -40,9 +40,12 @@ describe("location hub registry", () => {
     expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         stateCode: "CT",
-        county: "Fairfield",
+        OR: [
+          { county: "Fairfield" },
+          { city: { in: expect.arrayContaining(["Fairfield", "Trumbull"]) } }
+        ],
         automationEligibility: "ALLOWED",
-        profile: { status: "PUBLISHED" }
+        profile: { status: { in: ["PUBLISHED", "STALE"] } }
       })
     }));
   });

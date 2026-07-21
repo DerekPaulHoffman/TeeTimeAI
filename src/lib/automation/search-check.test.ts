@@ -1947,19 +1947,23 @@ describe("runSearchCheck email cadence", () => {
             ...search.preferences[0].course,
             name: "Weekend Golf Course",
             detectedPlatform: "FOREUP",
-            detectedBookingUrl: "https://foreupsoftware.com/booking/weekend",
+            providerFamilyKey: "FOREUP",
+            detectedBookingUrl:
+              "https://foreupsoftware.com/index.php/booking/123#/teetimes",
             automationEligibility: "ALLOWED",
             automationReason: "NONE",
             policyNotes: null,
             bookingMetadata: {
               scheduleId: 123,
-              bookingBaseUrl: "https://foreupsoftware.com/booking/weekend"
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/123#/teetimes"
             },
             bookingWindowDaysAhead: 14,
             bookingReleaseTimeLocal: "05:00",
             bookingWindowSource: "PROVIDER_CONFIG",
             bookingWindowConfidence: 1,
-            bookingWindowEvidenceUrl: "https://foreupsoftware.com/booking/weekend",
+            bookingWindowEvidenceUrl:
+              "https://foreupsoftware.com/index.php/booking/123#/teetimes",
             bookingWindowCheckedAt: new Date("2026-07-10T12:00:00.000Z"),
             bookingWindowObservedAt: new Date("2026-07-10T12:00:00.000Z")
           }

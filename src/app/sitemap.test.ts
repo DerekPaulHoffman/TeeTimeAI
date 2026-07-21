@@ -14,7 +14,7 @@ import sitemap from "./sitemap";
 describe("sitemap", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("lists static routes, published profiles, and only qualified locations", async () => {
+  it("lists static routes, public current or stale profiles, and only qualified locations", async () => {
     vi.mocked(prisma.courseProfile.findMany).mockResolvedValue([
       { canonicalSlug: "tashua-knolls-golf-course-trumbull-ct", updatedAt: new Date("2026-07-15T12:00:00Z") }
     ] as never);
@@ -23,7 +23,16 @@ describe("sitemap", () => {
       .mockResolvedValueOnce(qualifiedCourses() as never)
       .mockResolvedValueOnce([] as never);
 
-    expect(await sitemap()).toEqual([
+    const result = await sitemap();
+
+    expect(prisma.courseProfile.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        status: { in: ["PUBLISHED", "STALE"] },
+        course: { isPublic: true }
+      }
+    }));
+
+    expect(result).toEqual([
       { url: "https://teetimespot.com/" },
       { url: "https://teetimespot.com/search" },
       { url: "https://teetimespot.com/how-it-works" },

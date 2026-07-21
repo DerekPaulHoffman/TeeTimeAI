@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import type { CourseProfileStatus, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { buildCourseProfileSlug, withStableSlugSuffix } from "@/lib/course-profiles/slug";
@@ -10,6 +10,10 @@ import {
 
 export const COURSE_PROFILE_REVIEW_DAYS = 180;
 export const COURSE_PROFILE_QUEUE_BATCH_SIZE = 3;
+export const PUBLIC_COURSE_PROFILE_STATUSES: readonly CourseProfileStatus[] = [
+  "PUBLISHED",
+  "STALE"
+];
 
 export async function ensurePendingCourseProfile(courseId: string) {
   const course = await prisma.course.findUnique({
@@ -149,7 +153,11 @@ export async function applyCourseProfileDraft(value: unknown, apply = false) {
 
 export async function getPublishedCourseProfile(slug: string) {
   const direct = await prisma.courseProfile.findFirst({
-    where: { canonicalSlug: slug, status: "PUBLISHED" },
+    where: {
+      canonicalSlug: slug,
+      status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] },
+      course: { isPublic: true }
+    },
     include: { course: true, sources: { orderBy: [{ sourceType: "asc" }, { publisher: "asc" }] } }
   });
   if (direct) return { profile: direct, redirectSlug: null };
@@ -157,7 +165,11 @@ export async function getPublishedCourseProfile(slug: string) {
     where: { slug },
     include: { courseProfile: { include: { course: true, sources: true } } }
   });
-  if (!alias || alias.courseProfile.status !== "PUBLISHED") return null;
+  if (
+    !alias ||
+    !alias.courseProfile.course.isPublic ||
+    !PUBLIC_COURSE_PROFILE_STATUSES.includes(alias.courseProfile.status)
+  ) return null;
   return { profile: alias.courseProfile, redirectSlug: alias.courseProfile.canonicalSlug };
 }
 

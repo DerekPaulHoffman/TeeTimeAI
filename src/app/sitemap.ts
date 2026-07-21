@@ -2,6 +2,7 @@ import type { MetadataRoute } from "next";
 
 import { absoluteUrl } from "@/lib/seo";
 import { LOCATION_HUBS, loadQualifiedLocationHub } from "@/lib/course-profiles/locations";
+import { PUBLIC_COURSE_PROFILE_STATUSES } from "@/lib/course-profiles/service";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +25,10 @@ const STATIC_ROUTES = [
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const [profiles, locationResults] = await Promise.all([
     prisma.courseProfile.findMany({
-      where: { status: "PUBLISHED" },
+      where: {
+        status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] },
+        course: { isPublic: true }
+      },
       orderBy: { canonicalSlug: "asc" },
       select: { canonicalSlug: true, updatedAt: true }
     }),

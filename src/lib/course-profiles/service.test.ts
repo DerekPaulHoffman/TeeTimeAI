@@ -44,18 +44,48 @@ describe("course profile service", () => {
     });
   });
 
-  it("resolves a stored alias only when its destination remains published", async () => {
+  it("keeps a public stale profile and its aliases visible while refresh is queued", async () => {
+    mockedPrisma.courseProfile.findFirst.mockResolvedValue({
+      status: "STALE",
+      canonicalSlug: "current-course-fairfield-ct",
+      course: { isPublic: true }
+    } as never);
+
+    expect(await getPublishedCourseProfile("current-course-fairfield-ct")).toMatchObject({
+      redirectSlug: null,
+      profile: { status: "STALE" }
+    });
+    expect(mockedPrisma.courseProfile.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        canonicalSlug: "current-course-fairfield-ct",
+        status: { in: ["PUBLISHED", "STALE"] },
+        course: { isPublic: true }
+      }
+    }));
+
     mockedPrisma.courseProfile.findFirst.mockResolvedValue(null);
     mockedPrisma.courseProfileSlugAlias.findUnique.mockResolvedValue({
-      courseProfile: { status: "PUBLISHED", canonicalSlug: "current-course-fairfield-ct" }
+      courseProfile: {
+        status: "STALE",
+        canonicalSlug: "current-course-fairfield-ct",
+        course: { isPublic: true }
+      }
     } as never);
 
     expect(await getPublishedCourseProfile("old-course-fairfield-ct")).toMatchObject({
       redirectSlug: "current-course-fairfield-ct"
     });
+  });
+
+  it("hides a stale profile after the course is no longer public", async () => {
+    mockedPrisma.courseProfile.findFirst.mockResolvedValue(null);
 
     mockedPrisma.courseProfileSlugAlias.findUnique.mockResolvedValue({
-      courseProfile: { status: "STALE", canonicalSlug: "current-course-fairfield-ct" }
+      courseProfile: {
+        status: "STALE",
+        canonicalSlug: "current-course-fairfield-ct",
+        course: { isPublic: false }
+      }
     } as never);
     expect(await getPublishedCourseProfile("old-course-fairfield-ct")).toBeNull();
   });

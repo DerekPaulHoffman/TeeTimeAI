@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { PUBLIC_COURSE_PROFILE_STATUSES } from "@/lib/course-profiles/service";
 
 export const LOCATION_HUB_MINIMUM_COURSES = 5;
 
@@ -10,6 +11,7 @@ export const LOCATION_HUBS = {
     shortName: "Connecticut",
     stateCode: "CT",
     county: null,
+    municipalities: null,
     description: "Public golf courses in Connecticut where Tee Time Spot can currently watch public, signed-out online tee-time availability.",
     considerations: [
       "Booking windows vary by operator, and resident or pass-holder access may open before general public inventory.",
@@ -23,6 +25,12 @@ export const LOCATION_HUBS = {
     shortName: "Fairfield County",
     stateCode: "CT",
     county: "Fairfield",
+    municipalities: [
+      "Bethel", "Bridgeport", "Brookfield", "Danbury", "Darien", "Easton",
+      "Fairfield", "Greenwich", "Monroe", "New Canaan", "New Fairfield",
+      "Newtown", "Norwalk", "Redding", "Ridgefield", "Shelton", "Sherman",
+      "Stamford", "Stratford", "Trumbull", "Weston", "Westport", "Wilton"
+    ],
     description: "Supported public golf alert coverage across Fairfield County, from municipal courses near the coast to inland daily-fee options.",
     considerations: [
       "Municipal courses may publish separate resident and non-resident access rules, so confirm the official policy before release day.",
@@ -36,6 +44,13 @@ export const LOCATION_HUBS = {
     shortName: "New Haven County",
     stateCode: "CT",
     county: "New Haven",
+    municipalities: [
+      "Ansonia", "Beacon Falls", "Bethany", "Branford", "Cheshire", "Derby",
+      "East Haven", "Guilford", "Hamden", "Madison", "Meriden", "Middlebury",
+      "Milford", "Naugatuck", "New Haven", "North Branford", "North Haven",
+      "Orange", "Oxford", "Prospect", "Seymour", "Southbury", "Wallingford",
+      "Waterbury", "West Haven", "Wolcott", "Woodbridge"
+    ],
     description: "Supported public golf alert coverage across New Haven County, including municipal and independently operated courses.",
     considerations: [
       "Some operators release inventory on a fixed morning schedule while others use rolling booking windows.",
@@ -54,10 +69,17 @@ export async function loadQualifiedLocationHub(hub: LocationHub) {
   const courses = await prisma.course.findMany({
     where: {
       stateCode: hub.stateCode,
-      ...(hub.county ? { county: hub.county } : {}),
+      ...(hub.county
+        ? {
+            OR: [
+              { county: hub.county },
+              { city: { in: [...hub.municipalities] } }
+            ]
+          }
+        : {}),
       isPublic: true,
       automationEligibility: "ALLOWED",
-      profile: { status: "PUBLISHED" }
+      profile: { status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] } }
     },
     orderBy: [{ city: "asc" }, { name: "asc" }],
     select: {
