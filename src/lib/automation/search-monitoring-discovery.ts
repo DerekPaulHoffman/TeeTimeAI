@@ -1930,6 +1930,7 @@ export async function collectOfficialSiteEvidence(
     url: string;
     label: string;
   }> = [];
+  const targetScopedBookingProviderLinks: CollectedLinkCandidate[] = [];
   const legacyProphetFollowupOutcomes: LegacyProphetFollowupOutcome[] = [];
   const legacyProphetAccessBarriers: Array<{ url: string; status: 403 }> = [];
   const failedFollowupObservedUrls: string[] = [];
@@ -1992,6 +1993,20 @@ export async function collectOfficialSiteEvidence(
       matchingFollowedLinkCandidates.find(
         (candidate) => candidate.legacyProphetConfiguration
       ) ?? matchingFollowedLinkCandidates[0];
+    const followsBookingPageFromMatchedCourse = Boolean(
+      matchedCoursePage &&
+        followedLinkCandidate &&
+        haveSameReplayHostname(
+          firstPage.finalUrl,
+          followedLinkCandidate.url
+        ) &&
+        isBookingLikeOfficialFollowup(followedLinkCandidate) &&
+        matchedCoursePage.evidence.linkCandidates.some(
+          (candidate) =>
+            normalizeSourceKey(candidate.url) ===
+            normalizeSourceKey(followedLinkCandidate.url)
+        )
+    );
     const exactTargetOfficialRedirect =
       courseName &&
       followedLinkCandidate &&
@@ -2054,6 +2069,29 @@ export async function collectOfficialSiteEvidence(
         ...fetched,
         evidence: extractedEvidence
       };
+      if (
+        followsBookingPageFromMatchedCourse &&
+        courseName &&
+        (doesPageMarkupIdentifyCourse(fetched.html, courseName) ||
+          doesOfficialHostnameIdentifyCourse(firstPage.finalUrl, courseName))
+      ) {
+        const providerLink = getUniqueTargetScopedBookingProviderLink(
+          page.evidence.linkCandidates,
+          firstPage.finalUrl,
+          page.finalUrl,
+          courseName
+        );
+        if (providerLink) {
+          targetScopedBookingProviderLinks.push(providerLink);
+          if (
+            resolveProviderCapability({
+              detectedBookingUrl: providerLink.url
+            }).providerFamilyKey === "EZLINKS"
+          ) {
+            visited.add(normalizeSourceKey(providerLink.url));
+          }
+        }
+      }
       if (followedLinkCandidate?.legacyProphetConfiguration) {
         const modernCpsUrl = findStrictModernCpsUrl([page.finalUrl]);
         legacyProphetFollowupOutcomes.push({
@@ -2149,7 +2187,8 @@ export async function collectOfficialSiteEvidence(
                     isLegacyTeeItUpPlayUrl(candidate.url)))
             );
           }),
-          ...targetScopedOfficialRedirects
+          ...targetScopedOfficialRedirects,
+          ...targetScopedBookingProviderLinks
         ]
       )
     : [];
@@ -2502,6 +2541,33 @@ function doesPageMarkupIdentifyCourse(html: string, courseName: string) {
   );
 }
 
+function doesOfficialHostnameIdentifyCourse(
+  pageUrl: string,
+  courseName: string
+) {
+  const targetIdentity = normalizeCourseIdentityName(courseName).replace(
+    /\s+/gu,
+    ""
+  );
+  if (targetIdentity.length < 4) {
+    return false;
+  }
+  try {
+    return parseSafePublicUrl(pageUrl).hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./u, "")
+      .split(".")
+      .some((label) => {
+        const labelIdentity = normalizeCourseIdentityName(
+          label.replace(/([a-z0-9])([A-Z])/gu, "$1 $2").replace(/[-_]+/gu, " ")
+        ).replace(/\s+/gu, "");
+        return labelIdentity.length >= 4 && labelIdentity === targetIdentity;
+      });
+  } catch {
+    return false;
+  }
+}
+
 function doesSecondaryHeadingIdentifyCourse(
   html: string,
   courseName: string
@@ -2638,6 +2704,90 @@ function isBookingLikeOfficialFollowup(candidate: {
   const parsed = parseSafePublicUrl(candidate.url);
   return /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
     `${candidate.label} ${parsed.hostname.replace(/[._-]+/gu, " ")} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
+  );
+}
+
+function getUniqueTargetScopedBookingProviderLink(
+  candidates: CollectedLinkCandidate[],
+  officialUrl: string,
+  bookingPageUrl: string,
+  courseName: string | undefined
+) {
+  const hasAnotherOfficialBookingChoice = candidates.some(
+    (candidate) =>
+      haveSameReplayHostname(officialUrl, candidate.url) &&
+      normalizeSourceKey(candidate.url) !==
+        normalizeSourceKey(bookingPageUrl) &&
+      isBookingLikeOfficialFollowup(candidate)
+  );
+  if (hasAnotherOfficialBookingChoice) {
+    return undefined;
+  }
+
+  const externalBookingLinks = new Map<string, CollectedLinkCandidate[]>();
+  for (const candidate of candidates) {
+    if (
+      haveSameReplayHostname(officialUrl, candidate.url) ||
+      !isBookingLikeOfficialFollowup(candidate)
+    ) {
+      continue;
+    }
+    try {
+      const parsed = parseSafePublicUrl(candidate.url);
+      const key = normalizeSourceKey(parsed.toString());
+      const links = externalBookingLinks.get(key) ?? [];
+      links.push({
+        ...candidate,
+        url: parsed.toString()
+      });
+      externalBookingLinks.set(key, links);
+    } catch {
+      // Unsafe, signed, or non-public destinations never become course evidence.
+    }
+  }
+  if (externalBookingLinks.size !== 1) {
+    return undefined;
+  }
+  const providerLinks = externalBookingLinks.values().next().value;
+  if (
+    !providerLinks?.length ||
+    (courseName &&
+      providerLinks.some((providerLink) =>
+        doesBookingLabelIdentifyAnotherCourse(providerLink.label, courseName)
+      )) ||
+    !resolveProviderCapability({
+      detectedBookingUrl: providerLinks[0]?.url
+    }).capability
+  ) {
+    return undefined;
+  }
+  return (
+    (courseName
+      ? providerLinks.find((providerLink) =>
+          doesProviderLinkLabelExactlyIdentifyCourse(
+            providerLink.label,
+            courseName
+          )
+        )
+      : undefined) ?? providerLinks[0]
+  );
+}
+
+function doesBookingLabelIdentifyAnotherCourse(
+  label: string,
+  courseName: string
+) {
+  const normalized = label.replace(/\s+/gu, " ").trim();
+  if (
+    /^(?:book(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|book\s+online|general\s+public|public|reserve(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|tee\s*times?)$/iu.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
+  return (
+    /\b(?:club|course|golf|tee\s*times?)\b/iu.test(normalized) &&
+    !doesProviderLinkLabelExactlyIdentifyCourse(normalized, courseName)
   );
 }
 

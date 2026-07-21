@@ -4563,6 +4563,291 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("keeps one recognized provider handoff scoped to the official course booking page", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const policyUrl = "https://public-course.example/faq/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a><a href="${policyUrl}">FAQs</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Book now</title><h1>Reserve a tee time</h1><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case policyUrl:
+          return new Response(
+            "<html><title>FAQs</title><h1>Frequently asked questions</h1></html>",
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      policyUrl
+    ]);
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: providerUrl,
+      label: "Book now"
+    });
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "public-course",
+      courseName: "Public Course Golf Club"
+    });
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: providerUrl,
+      evidence: { learnedFrom: "browser-visible-links" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("records a scoped provider handoff without fetching the provider", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected provider fetch ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl
+    ]);
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: providerUrl,
+      label: "Book now"
+    });
+  });
+
+  it("does not trust one generic provider link from a shared booking index", async () => {
+    const sourceUrl =
+      "https://play-city-golf.example/target-course-golf-club/";
+    const bookingPageUrl =
+      "https://play-city-golf.example/book-online/";
+    const providerUrl = "https://sibling-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Target Course Golf Club</title><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>City golf booking</title><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response("<html>Public tee times</html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Course Golf Club"
+    );
+
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: providerUrl })
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "target-course",
+      courseName: "Target Course Golf Club"
+    });
+    expect(discovery.bookingUrl).not.toBe(providerUrl);
+  });
+
+  it("does not treat a recognized provider as unique beside an unknown booking destination", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const recognizedProviderUrl =
+      "https://public-course.ezlinksgolf.com/";
+    const unknownProviderUrl = "https://booking-vendor.example/book-now/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club tee times</title><a href="${recognizedProviderUrl}">Book now</a><a href="${unknownProviderUrl}">Reserve now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case recognizedProviderUrl:
+        case unknownProviderUrl:
+          return new Response("<html>Public tee times</html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: recognizedProviderUrl })
+    );
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: unknownProviderUrl })
+    );
+  });
+
+  it.each([
+    {
+      label: "sibling label before generic label",
+      labels: ["Sibling Course Golf Club Tee Times", "Book now"]
+    },
+    {
+      label: "generic label before sibling label",
+      labels: ["Book now", "Sibling Course Golf Club Tee Times"]
+    }
+  ])("rejects duplicate provider links with $label", async ({ labels }) => {
+    const sourceUrl = "https://target-course.example/";
+    const bookingPageUrl = "https://target-course.example/book-now/";
+    const providerUrl = "https://sibling-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Target Course Golf Club</title><a href="${bookingPageUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Target Course Golf Club tee times</title>${labels
+              .map((label) => `<a href="${providerUrl}">${label}</a>`)
+              .join("")}</html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response("<html>Public tee times</html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Target Course Golf Club"
+    );
+
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: providerUrl })
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "target-course",
+      courseName: "Target Course Golf Club"
+    });
+    expect(discovery.bookingUrl).not.toBe(providerUrl);
+  });
+
+  it("does not scope ambiguous provider handoffs from a shared booking page", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/book-now/";
+    const policyUrl = "https://public-course.example/faq/";
+    const firstProviderUrl = "https://first-course.ezlinksgolf.com/";
+    const secondProviderUrl = "https://second-course.ezlinksgolf.com/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Book now</a><a href="${policyUrl}">FAQs</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Book now</title><a href="${firstProviderUrl}">Book now</a><a href="${secondProviderUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case policyUrl:
+          return new Response("<html><title>FAQs</title></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: firstProviderUrl })
+    );
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: secondProviderUrl })
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "public-course",
+      courseName: "Public Course Golf Club"
+    });
+    expect(discovery.bookingUrl).toBe(bookingPageUrl);
+  });
+
   it("prioritizes the target course booking path over unrelated policy and academy pages", async () => {
     const sourceUrl =
       "https://www.playdcgolf.example/rock-creek-park-golf-course/";

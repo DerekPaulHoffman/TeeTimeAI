@@ -18,7 +18,7 @@ The course-support responder is the dedicated engineering path for persistent `N
 Provider identity and runnable support come from `src/lib/automation/provider-capabilities.ts`, not scattered platform switches or optimistic URL guesses.
 
 - Runnable families are `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `WEBTRAC`, and `CLUB_CADDIE` when their required metadata validates.
-- Recognized but non-runnable families are `GOLFNOW`, `WHOOSH`, and `TENFORE`. Recognition is not proof of monitoring support.
+- Recognized but non-runnable families are `EZLINKS`, `GOLFNOW`, `WHOOSH`, and `TENFORE`. Recognition is not proof of monitoring support.
 - Missing official source, missing metadata, unsupported family, authentication, rate limit, challenge, not-found, provider 5xx, timeout, network, schema, and unknown failures are classified separately.
 - Contradictory persisted provider signals resolve to `SOURCE_CONFLICT`, which is deliberately non-runnable. No provider request may run until current official-source evidence reconciles the platform, booking URL, and metadata to one family.
 - A failure fingerprint is a hash of the normalized provider family, failure class, operation, and HTTP status bucket. It contains no course name, recipient, URL, token, or raw error text.

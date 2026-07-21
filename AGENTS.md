@@ -470,7 +470,7 @@ Adapter behavior:
 Do not assume every `DetectedPlatform` enum has a runnable adapter.
 
 - Runnable families: `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `WEBTRAC`, and `CLUB_CADDIE`, each only when the registry validates its required metadata.
-- Recognized but non-runnable today: `GOLFNOW`, `WHOOSH`, and `TENFORE`; finding one is not evidence that monitoring is implemented.
+- Recognized but non-runnable today: `EZLINKS`, `GOLFNOW`, `WHOOSH`, and `TENFORE`; finding one is not evidence that monitoring is implemented.
 - `UNKNOWN` means provider discovery is still needed, not that the course is unsupported forever.
 
 Use the registry's consumer dispositions rather than optimistic support labels. Only a current trusted `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, or `BOOKING_NOT_OPEN` result counts as effective monitored coverage. Direct-site, phone/walk-in, account-required, CAPTCHA/queue, private/invalid, source-unverified, retrying, and engineering states must remain distinct. Treat `policy-blocked` as a legacy state that requires live revalidation, not a terminal result for public read-only monitoring.

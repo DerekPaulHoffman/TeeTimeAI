@@ -3141,6 +3141,12 @@ describe("course-support provider discovery reconciliation", () => {
       detectedPlatform: "CUSTOM",
       bookingUrl: "https://example-course.teesnap.net/",
       confidence: 0.55
+    },
+    {
+      expectedFamily: "EZLINKS",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://example-course.ezlinksgolf.com/",
+      confidence: 0.45
     }
   ])(
     "uses an inspected $expectedFamily booking surface instead of the official-site host",

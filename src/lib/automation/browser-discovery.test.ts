@@ -1435,6 +1435,81 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.bookingUrl).toBe("https://www.fairchildwheelergolf.com/tee-times");
   });
 
+  it("prefers a safe recognized provider handoff over its official booking wrapper", () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingWrapperUrl = "https://public-course.example/book-now/";
+    const providerConfigUrl = "https://api.ezlinksgolf.com/v1/config";
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-course",
+      courseName: "Public Course Golf Club",
+      sourceUrl,
+      finalUrl: "https://public-course.example/faq/",
+      observedUrls: [bookingWrapperUrl, providerConfigUrl, providerUrl],
+      officialPage: {
+        url: sourceUrl,
+        linkCandidates: [
+          { url: bookingWrapperUrl, label: "Book now" },
+          { url: providerUrl, label: "Book now" }
+        ],
+        courseName: "Public Course Golf Club",
+        visibleText: "Public Course Golf Club tee times"
+      },
+      visibleText: "Frequently asked questions"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: providerUrl,
+      evidence: { learnedFrom: "browser-visible-links" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
+  it("does not select a sensitive recognized-provider destination", () => {
+    const bookingWrapperUrl = "https://public-course.example/book-now/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-course",
+      courseName: "Public Course Golf Club",
+      sourceUrl: "https://public-course.example/",
+      observedUrls: [
+        bookingWrapperUrl,
+        "https://public-course.ezlinksgolf.com/checkout"
+      ],
+      visibleText: "Book tee times online"
+    });
+
+    expect(discovery.bookingUrl).toBe(bookingWrapperUrl);
+    expect(discovery.bookingUrl).not.toContain("checkout");
+  });
+
+  it("does not select a labeled provider API or configuration endpoint", () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingWrapperUrl = "https://public-course.example/book-now/";
+    const providerConfigUrl = "https://config-qa.ezlinksgolf.com/v1/config";
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-course",
+      courseName: "Public Course Golf Club",
+      sourceUrl,
+      observedUrls: [bookingWrapperUrl, providerConfigUrl],
+      officialPage: {
+        url: sourceUrl,
+        linkCandidates: [
+          { url: bookingWrapperUrl, label: "Book now" },
+          { url: providerConfigUrl, label: "Book now" }
+        ],
+        courseName: "Public Course Golf Club",
+        visibleText: "Public Course Golf Club tee times"
+      },
+      visibleText: "Book tee times online"
+    });
+
+    expect(discovery.bookingUrl).toBe(bookingWrapperUrl);
+    expect(discovery.bookingUrl).not.toBe(providerConfigUrl);
+  });
+
   it("prefers a Chelsea reservation surface over tee-time wording in event URLs", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "dennis-highlands",

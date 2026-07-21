@@ -242,6 +242,44 @@ describe("browser discovery persistence", () => {
     });
   });
 
+  it("persists EZLinks identity without marking the course runnable", async () => {
+    const updatedAt = new Date("2026-07-16T12:00:00.000Z");
+    const providerUrl = "https://public-course.ezlinksgolf.com/";
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "public-course.example",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: "https://public-course.example/book-now/",
+        website: "https://public-course.example/",
+        bookingMetadata: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "public-course" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await applyBrowserDiscoveryToCourse({
+      courseId: "public-course",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: "https://public-course.example/",
+      bookingUrl: providerUrl,
+      confidence: 0.45,
+      evidence: {
+        learnedFrom: "browser-visible-links",
+        observedUrls: [providerUrl]
+      }
+    });
+
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "public-course", updatedAt },
+      data: {
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "EZLINKS",
+        detectedBookingUrl: providerUrl
+      }
+    });
+  });
+
   it("does not apply a stale inspected identity after the course changed", async () => {
     const updatedAt = new Date("2026-07-16T12:00:00.000Z");
     mockedPrisma.course.findUnique.mockResolvedValueOnce({

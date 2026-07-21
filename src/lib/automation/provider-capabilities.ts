@@ -23,6 +23,7 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "TEESNAP",
   "GOLFBACK",
   "WEBTRAC",
+  "EZLINKS",
   "GOLFNOW",
   "CLUB_CADDIE",
   "WHOOSH",
@@ -154,6 +155,12 @@ export const PROVIDER_CAPABILITIES = {
     supportsAutomation: true,
     matchesHostname: (hostname) => matchesDomain(hostname, "navyaims.com"),
     validatesMetadata: isWebTracMetadata
+  },
+  EZLINKS: {
+    family: "EZLINKS",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: false,
+    matchesHostname: (hostname) => matchesDomain(hostname, "ezlinksgolf.com")
   },
   GOLFNOW: {
     family: "GOLFNOW",

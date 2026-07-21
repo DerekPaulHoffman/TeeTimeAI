@@ -394,7 +394,10 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   );
   const bookingUrl = clubCaddieCandidates.length > 0
     ? providerEvidence.sourceUrl
-    : pickBookingLikeUrl(providerObservedUrls) ??
+    : pickBookingLikeUrl(
+        providerObservedUrls,
+        providerEvidence.linkCandidates ?? []
+      ) ??
       providerEvidence.finalUrl ??
       providerEvidence.sourceUrl;
 
@@ -5356,19 +5359,41 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
   return "UNKNOWN";
 }
 
-function pickBookingLikeUrl(urls: string[]) {
-  return urls.find((url) => {
+function pickBookingLikeUrl(
+  urls: string[],
+  linkCandidates: Array<{ url: string; label: string }>
+) {
+  const candidates = urls.flatMap((url) => {
     const parsed = parseUrl(url);
     if (
       !parsed ||
+      !isSafeManualEvidenceUrl(parsed) ||
       isNonBookingHost(parsed.hostname) ||
       isStaticAssetPath(parsed.pathname) ||
       isEditorialContentPath(parsed.pathname) ||
       isClearlyUnrelatedBookingUrl(parsed)
     ) {
-      return false;
+      return [];
     }
 
+    return [{ url, parsed }];
+  });
+
+  const recognizedProvider = candidates.find(({ url, parsed }) =>
+    Boolean(
+      getKnownProviderFamilyForHostname(parsed.hostname) &&
+        linkCandidates.some(
+          (candidate) =>
+            haveSameExactUrl(candidate.url, url) &&
+            isRecognizedProviderBookingLink(candidate)
+        )
+    )
+  );
+  if (recognizedProvider) {
+    return recognizedProvider.url;
+  }
+
+  return candidates.find(({ parsed }) => {
     if (parsed.hostname.endsWith("chelseareservations.com")) {
       return true;
     }
@@ -5377,7 +5402,46 @@ function pickBookingLikeUrl(urls: string[]) {
     return /(^|[^a-z])(book|booking|tee.?times?|reservations?|reserve|foreup|golfnow|teeitup|chronogolf|clubcaddie)([^a-z]|$)/i.test(
       searchable
     );
-  });
+  })?.url;
+}
+
+function isRecognizedProviderBookingLink(candidate: {
+  url: string;
+  label: string;
+}) {
+  const parsed = parseUrl(candidate.url);
+  if (
+    !parsed ||
+    !isSafeManualEvidenceUrl(parsed) ||
+    !getKnownProviderFamilyForHostname(parsed.hostname) ||
+    isProviderInfrastructureUrl(parsed) ||
+    isClearlyUnrelatedBookingLabel(candidate.label) ||
+    isClearlyUnrelatedBookingUrl(parsed)
+  ) {
+    return false;
+  }
+  const label = normalizeTeeTimeTypography(candidate.label)
+    .replace(/\s+/gu, " ")
+    .trim();
+  return Boolean(
+    isBookingCallToActionCandidate(candidate) ||
+      isGenericOnlineBookingCallToAction(candidate) ||
+      /^(?:book|reserve)(?:\s+(?:now|online))?$/iu.test(label)
+  );
+}
+
+function isProviderInfrastructureUrl(url: URL) {
+  const firstHostnameLabel = url.hostname
+    .toLocaleLowerCase("en-US")
+    .split(".")[0] ?? "";
+  return Boolean(
+    /^(?:admin|api|assets?|auth|cdn|config|developer|docs?|static|status)(?:[-\d]|$)/iu.test(
+      firstHostnameLabel
+    ) ||
+      /(?:^|\/)(?:admin|api|auth|config(?:uration)?|developer|docs?|status)(?:\/|$)/iu.test(
+        url.pathname
+      )
+  );
 }
 
 function uniqueUrls(urls: Array<string | undefined>) {

@@ -86,6 +86,7 @@ describe("provider capability registry", () => {
       TEESNAP: [true, "CUSTOM"],
       GOLFBACK: [true, "CUSTOM"],
       WEBTRAC: [true, "CUSTOM"],
+      EZLINKS: [false, "CUSTOM"],
       GOLFNOW: [false, "GOLFNOW"],
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [false, "CUSTOM"],
@@ -159,12 +160,40 @@ describe("provider capability registry", () => {
     ["course.teesnap.net", "TEESNAP"],
     ["api.golfback.com", "GOLFBACK"],
     ["course.navyaims.com", "WEBTRAC"],
+    ["public-course.ezlinksgolf.com", "EZLINKS"],
     ["www.golfnow.com", "GOLFNOW"],
     ["app.clubcaddie.com", "CLUB_CADDIE"],
     ["app.whoosh.io", "WHOOSH"],
     ["fox.tenfore.golf", "TENFORE"]
   ])("maps %s to the canonical %s family", (hostname, family) => {
     expect(getKnownProviderFamilyForHostname(hostname)).toBe(family);
+  });
+
+  it("recognizes EZLinks without treating provider identity as runnable coverage", () => {
+    const resolution = resolveProviderCapability({
+      detectedPlatform: "CUSTOM",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/"
+    });
+
+    expect(resolution).toMatchObject({
+      providerFamilyKey: "EZLINKS",
+      detectedPlatform: "CUSTOM",
+      metadataReady: false,
+      isRunnable: false,
+      evidenceConflict: false
+    });
+    expect(getProviderReadinessFailure(resolution)).toBe(
+      "UNSUPPORTED_FAMILY"
+    );
+    expect(getKnownProviderFamilyForHostname("ezlinksgolf.com")).toBe(
+      "EZLINKS"
+    );
+    expect(
+      getKnownProviderFamilyForHostname("ezlinksgolf.com.attacker.example")
+    ).toBeNull();
+    expect(
+      getKnownProviderFamilyForHostname("not-ezlinksgolf.com")
+    ).toBeNull();
   });
 
   it("uses only a normalized hostname for unknown sources", () => {
