@@ -24,6 +24,7 @@ export type BrowserDiscoveryEvidence = {
   officialPage?: {
     url: string;
     linkCandidates: Array<{ url: string; label: string }>;
+    courseName?: string;
   };
   visibleText?: string;
   bookingSurfaceText?: string;
@@ -60,6 +61,7 @@ export type BrowserDiscovery = {
   } | {
     aliases: string[];
     bookingBaseUrl: string;
+    facilityIds?: number[];
   } | {
     provider: "CPS";
     siteName: string;
@@ -3681,22 +3683,101 @@ function learnTeeItUpDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
+  const officialPageMatchesTarget = Boolean(
+    evidence.officialPage &&
+      evidence.officialPage.courseName &&
+      haveCompatibleCourseNames(
+        evidence.courseName,
+        evidence.officialPage.courseName
+      )
+  );
+  const candidateLinks = officialPageMatchesTarget
+    ? evidence.officialPage?.linkCandidates ?? []
+    : [];
+  const labeledBookingCandidates =
+    uniqueTeeItUpLinkCandidates(candidateLinks);
+  const hasTeeItUpEvidence =
+    labeledBookingCandidates.length > 0 ||
+    observedUrls.some(isTeeItUpBookingUrl);
+  if (!officialPageMatchesTarget) {
+    return hasTeeItUpEvidence
+      ? buildRejectedTeeItUpDiscovery(
+          evidence,
+          observedUrls,
+          false,
+          "teeitup-target-scope-unconfirmed"
+        )
+      : null;
+  }
+
+  const generalPublicCandidates = labeledBookingCandidates.filter(
+    ({ label }) => isGeneralPublicTeeItUpLabel(label)
+  );
+  const unrestrictedCandidates = labeledBookingCandidates.filter(
+    ({ label }) => !isRestrictedTeeItUpLabel(label)
+  );
+  const selectedBookingUrls = uniqueUrls(
+    generalPublicCandidates.length > 0
+      ? generalPublicCandidates.map(({ url }) => url)
+      : unrestrictedCandidates.length > 0
+        ? unrestrictedCandidates.map(({ url }) => url)
+        : labeledBookingCandidates.length > 0
+          ? []
+          : []
+  );
+
+  if (selectedBookingUrls.length === 0) {
+    return hasTeeItUpEvidence
+      ? buildRejectedTeeItUpDiscovery(
+          evidence,
+          observedUrls,
+          officialPageMatchesTarget,
+          "teeitup-target-scope-unconfirmed"
+        )
+      : null;
+  }
+
+  const selectorResolution = resolveTeeItUpFacilitySelector(
+    selectedBookingUrls
+  );
+  if (selectorResolution.status === "INVALID") {
+    return buildRejectedTeeItUpDiscovery(
+      evidence,
+      observedUrls,
+      officialPageMatchesTarget,
+      "teeitup-target-scope-ambiguous"
+    );
+  }
+
   const aliases = [
     ...new Set(
-      observedUrls
+      selectedBookingUrls
         .map(getTeeItUpAlias)
         .filter((alias): alias is string => Boolean(alias))
     )
   ];
 
   if (aliases.length === 0) {
-    return null;
+    return buildRejectedTeeItUpDiscovery(
+      evidence,
+      observedUrls,
+      officialPageMatchesTarget,
+      "teeitup-alias-invalid"
+    );
   }
 
-  const observedBookingUrl = observedUrls.find(isTeeItUpBookingUrl);
-  const bookingUrl = observedBookingUrl
-    ? `${new URL(observedBookingUrl).origin}/`
-    : `https://${aliases[0]}.book.teeitup.golf/`;
+  const bookingUrl = buildTeeItUpBookingUrl(
+    selectedBookingUrls[0],
+    selectorResolution.facilityId
+  );
+  if (!bookingUrl) {
+    return buildRejectedTeeItUpDiscovery(
+      evidence,
+      observedUrls,
+      officialPageMatchesTarget,
+      "teeitup-booking-root-invalid"
+    );
+  }
 
   return {
     courseId: evidence.courseId,
@@ -3707,7 +3788,10 @@ function learnTeeItUpDiscovery(
     apiEndpoint: "https://phx-api-be-east-1b.kenna.io/v2/tee-times",
     apiMetadata: {
       aliases,
-      bookingBaseUrl: bookingUrl
+      bookingBaseUrl: bookingUrl,
+      ...(selectorResolution.facilityId
+        ? { facilityIds: [selectorResolution.facilityId] }
+        : {})
     },
     confidence: 0.9,
     evidence: {
@@ -3717,6 +3801,133 @@ function learnTeeItUpDiscovery(
       learnedFrom: "teeitup-booking-url"
     }
   };
+}
+
+function buildRejectedTeeItUpDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[],
+  officialPageMatchesTarget: boolean,
+  learnedFrom: string
+): BrowserDiscovery {
+  const officialCoursePage = [
+    officialPageMatchesTarget ? evidence.officialPage?.url : undefined,
+    evidence.officialCourseWebsite ?? undefined,
+    evidence.sourceUrl
+  ]
+    .map((value) => parseUrl(value))
+    .find((url) => url && !isTeeItUpBookingUrl(url.toString()));
+
+  return {
+    courseId: evidence.courseId,
+    status: "INSPECTED",
+    detectedPlatform: "TEEITUP",
+    sourceUrl: evidence.sourceUrl,
+    ...(officialCoursePage
+      ? { bookingUrl: officialCoursePage.toString() }
+      : {}),
+    confidence: 0.45,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom
+    }
+  };
+}
+
+function uniqueTeeItUpLinkCandidates(
+  candidates: Array<{ url: string; label: string }>
+) {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    if (!isTeeItUpBookingUrl(candidate.url)) {
+      return false;
+    }
+    const key = `${candidate.url}\u0000${candidate.label}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function isGeneralPublicTeeItUpLabel(label: string) {
+  return /\bgeneral\s+public\b|\bpublic\s+tee\s*times?\b/i.test(label);
+}
+
+function isRestrictedTeeItUpLabel(label: string) {
+  return /\b(?:capital\s+club|juniors?|members?|military|seniors?)\b/i.test(
+    label
+  );
+}
+
+function resolveTeeItUpFacilitySelector(urls: string[]):
+  | { status: "VALID"; facilityId?: number }
+  | { status: "INVALID" } {
+  const facilityIds = new Set<number>();
+  const scopedAliases = new Set<string>();
+  let scopedUrlCount = 0;
+
+  for (const value of urls) {
+    const url = parseUrl(value);
+    if (!url) {
+      return { status: "INVALID" };
+    }
+    const selectors = url.searchParams.getAll("course");
+    if (selectors.length === 0) {
+      continue;
+    }
+    scopedUrlCount += 1;
+    if (selectors.length !== 1 || !/^[1-9]\d*$/.test(selectors[0])) {
+      return { status: "INVALID" };
+    }
+    const facilityId = Number(selectors[0]);
+    if (!Number.isSafeInteger(facilityId) || facilityId <= 0) {
+      return { status: "INVALID" };
+    }
+    const alias = getTeeItUpAlias(value);
+    if (!alias) {
+      return { status: "INVALID" };
+    }
+    facilityIds.add(facilityId);
+    scopedAliases.add(alias.toLocaleLowerCase("en-US"));
+  }
+
+  if (
+    facilityIds.size > 1 ||
+    (scopedUrlCount === 0 && urls.length !== 1) ||
+    (scopedUrlCount > 0 &&
+      (scopedUrlCount !== urls.length || scopedAliases.size !== 1))
+  ) {
+    return { status: "INVALID" };
+  }
+
+  return {
+    status: "VALID",
+    ...(facilityIds.size === 1
+      ? { facilityId: [...facilityIds][0] }
+      : {})
+  };
+}
+
+function buildTeeItUpBookingUrl(
+  value: string | undefined,
+  facilityId: number | undefined
+) {
+  const observedUrl = parseUrl(value);
+  if (
+    !observedUrl ||
+    !["http:", "https:"].includes(observedUrl.protocol) ||
+    !isTeeItUpBookingUrl(observedUrl.toString())
+  ) {
+    return null;
+  }
+  const bookingUrl = new URL(`https://${observedUrl.hostname}/`);
+  if (facilityId) {
+    bookingUrl.searchParams.set("course", String(facilityId));
+  }
+  return bookingUrl.toString();
 }
 
 export function getBestProbeUrl(

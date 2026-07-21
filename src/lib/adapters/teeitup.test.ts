@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchTeeItUpSlots, fetchTeeItUpTeeSheet } from "./teeitup";
+import {
+  fetchTeeItUpSlots,
+  fetchTeeItUpTeeSheet,
+  isTeeItUpMetadata
+} from "./teeitup";
 
 describe("TeeItUp adapter", () => {
   afterEach(() => {
@@ -97,6 +101,366 @@ describe("TeeItUp adapter", () => {
       }
     ]);
   });
+
+  it("fails before reading inventory when one unscoped alias exposes multiple facilities", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: 24680,
+          courseId: "first-course",
+          name: "First Golf Course",
+          timeZone: "America/New_York"
+        },
+        {
+          id: 13579,
+          courseId: "second-course",
+          name: "Second Golf Course",
+          timeZone: "America/New_York"
+        }
+      ]
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchTeeItUpSlots({
+        courseId: "target-course",
+        date: new Date("2026-07-28T00:00:00-04:00"),
+        metadata: {
+          aliases: ["shared-public"],
+          bookingBaseUrl: "https://shared-public.book.teeitup.com/"
+        }
+      })
+    ).rejects.toThrow("ambiguous facility set");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { label: "missing", facility: { courseId: "target-course" } },
+    { label: "string", facility: { id: "24680", courseId: "target-course" } },
+    { label: "zero", facility: { id: 0, courseId: "target-course" } },
+    { label: "negative", facility: { id: -1, courseId: "target-course" } },
+    { label: "decimal", facility: { id: 24.68, courseId: "target-course" } }
+  ])(
+    "fails before reading inventory for a $label unscoped facility id",
+    async ({ facility }) => {
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        ok: true,
+        json: async () => [facility]
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(
+        fetchTeeItUpSlots({
+          courseId: "target-course",
+          date: new Date("2026-07-28T00:00:00-04:00"),
+          metadata: {
+            aliases: ["single-public"],
+            bookingBaseUrl: "https://single-public.book.teeitup.com/"
+          }
+        })
+      ).rejects.toThrow("invalid facility identifier");
+      expect(fetchMock).toHaveBeenCalledOnce();
+    }
+  );
+
+  it("limits a shared alias request and booking link to the selected facility", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 24680,
+            courseId: "rock-creek-course",
+            name: "Rock Creek Park Golf",
+            timeZone: "America/New_York"
+          },
+          {
+            id: 13579,
+            courseId: "sibling-course",
+            name: "Sibling Golf Course",
+            timeZone: "America/New_York"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            teetimes: [
+              {
+                courseId: "rock-creek-course",
+                teetime: "2026-07-28T12:00:00.000Z",
+                rates: [
+                  {
+                    allowedPlayers: [1, 2, 3, 4],
+                    holes: 9,
+                    greenFeeCart: 2400
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const slots = await fetchTeeItUpSlots({
+      courseId: "rock-creek",
+      date: new Date("2026-07-28T00:00:00-04:00"),
+      metadata: {
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl:
+          "https://play-dc-golf-public.book.teeitup.com/?course=24680",
+        facilityIds: [24680]
+      }
+    });
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://phx-api-be-east-1b.kenna.io/v2/tee-times?date=2026-07-28&facilityIds=24680&returnPromotedRates=true"
+    );
+    expect(slots).toHaveLength(1);
+    expect(slots[0]).toMatchObject({
+      courseId: "rock-creek",
+      sourceId:
+        "teeitup-24680-rock-creek-course-2026-07-28T12:00:00.000Z",
+      bookingUrl:
+        "https://play-dc-golf-public.book.teeitup.com/?course=24680&date=2026-07-28",
+      holes: 9,
+      priceCents: 2400
+    });
+  });
+
+  it("fails when the selected facility is absent instead of reporting an empty tee sheet", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        {
+          id: 13579,
+          courseId: "sibling-course",
+          name: "Sibling Golf Course",
+          timeZone: "America/New_York"
+        }
+      ]
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchTeeItUpTeeSheet({
+        courseId: "rock-creek",
+        date: new Date("2026-07-28T00:00:00-04:00"),
+        metadata: {
+          aliases: ["play-dc-golf-public"],
+          bookingBaseUrl:
+            "https://play-dc-golf-public.book.teeitup.com/?course=24680",
+          facilityIds: [24680]
+        }
+      })
+    ).rejects.toThrow("did not return the selected facility");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("fails when a scoped provider response references a sibling course", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 24680,
+            courseId: "rock-creek-course",
+            name: "Rock Creek Park Golf",
+            timeZone: "America/New_York"
+          },
+          {
+            id: 13579,
+            courseId: "sibling-course",
+            name: "Sibling Golf Course",
+            timeZone: "America/New_York"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            teetimes: [
+              {
+                courseId: "sibling-course",
+                teetime: "2026-07-28T12:10:00.000Z",
+                rates: [
+                  {
+                    allowedPlayers: [1, 2, 3, 4],
+                    holes: 18,
+                    greenFeeCart: 9000
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchTeeItUpSlots({
+        courseId: "rock-creek",
+        date: new Date("2026-07-28T00:00:00-04:00"),
+        metadata: {
+          aliases: ["play-dc-golf-public"],
+          bookingBaseUrl:
+            "https://play-dc-golf-public.book.teeitup.com/?course=24680",
+          facilityIds: [24680]
+        }
+      })
+    ).rejects.toThrow("outside the selected facility set");
+  });
+
+  it("rejects duplicate selectors and scoped metadata that is not bound to one alias", () => {
+    expect(
+      isTeeItUpMetadata({
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl:
+          "https://play-dc-golf-public.book.teeitup.com/?course=24680&course=24680",
+        facilityIds: [24680]
+      })
+    ).toBe(false);
+    expect(
+      isTeeItUpMetadata({
+        aliases: ["play-dc-golf-public", "play-dc-golf-senior"],
+        bookingBaseUrl:
+          "https://play-dc-golf-public.book.teeitup.com/?course=24680",
+        facilityIds: [24680]
+      })
+    ).toBe(false);
+    expect(
+      isTeeItUpMetadata({
+        aliases: ["different-alias"],
+        bookingBaseUrl:
+          "https://play-dc-golf-public.book.teeitup.com/?course=24680",
+        facilityIds: [24680]
+      })
+    ).toBe(false);
+  });
+
+  it.each([
+    "not-a-url",
+    "http://play-dc-golf-public.book.teeitup.com/",
+    "https://example.com/",
+    "https://user@play-dc-golf-public.book.teeitup.com/",
+    "https://play-dc-golf-public.book.teeitup.com:8443/",
+    "https://play-dc-golf-public.book.teeitup.com/store/",
+    "https://play-dc-golf-public.book.teeitup.com/#tee-times",
+    "https://play-dc-golf-public.book.teeitup.com/?course=24680&session=unsafe"
+  ])("rejects a non-canonical TeeItUp booking base URL %s", (bookingBaseUrl) => {
+    expect(
+      isTeeItUpMetadata({
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl,
+        ...(bookingBaseUrl.includes("course=24680")
+          ? { facilityIds: [24680] }
+          : {})
+      })
+    ).toBe(false);
+  });
+
+  it("keeps canonical unscoped legacy TeeItUp metadata valid", () => {
+    expect(
+      isTeeItUpMetadata({
+        aliases: ["red-course", "black-course"],
+        bookingBaseUrl: "https://red-course.book.teeitup.golf/"
+      })
+    ).toBe(true);
+  });
+
+  it("uses each legacy alias as the booking URL for its own slots", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 111,
+            courseId: "red-course-id",
+            timeZone: "America/New_York"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            teetimes: [
+              {
+                courseId: "red-course-id",
+                teetime: "2026-07-12T12:00:00.000Z",
+                rates: [{ allowedPlayers: [1, 2, 3, 4], holes: 18 }]
+              }
+            ]
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: 222,
+            courseId: "black-course-id",
+            timeZone: "America/New_York"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            teetimes: [
+              {
+                courseId: "black-course-id",
+                teetime: "2026-07-12T13:00:00.000Z",
+                rates: [{ allowedPlayers: [1, 2], holes: 9 }]
+              }
+            ]
+          }
+        ]
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const slots = await fetchTeeItUpSlots({
+      courseId: "legacy-shared-course",
+      date: new Date("2026-07-12T00:00:00-04:00"),
+      metadata: {
+        aliases: ["red-course", "black-course"],
+        bookingBaseUrl: "https://red-course.book.teeitup.com/"
+      }
+    });
+
+    expect(slots.map((slot) => slot.bookingUrl)).toEqual([
+      "https://red-course.book.teeitup.com/?date=2026-07-12",
+      "https://black-course.book.teeitup.com/?date=2026-07-12"
+    ]);
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+      headers: {
+        origin: "https://black-course.book.teeitup.com",
+        referer: "https://black-course.book.teeitup.com/"
+      }
+    });
+  });
+
+  it.each(["0", "-1", "1.5", "1e3", "%2024680", "9007199254740992"])(
+    "rejects an unsafe TeeItUp facility selector %s",
+    (selector) => {
+      expect(
+        isTeeItUpMetadata({
+          aliases: ["play-dc-golf-public"],
+          bookingBaseUrl:
+            `https://play-dc-golf-public.book.teeitup.com/?course=${selector}`,
+          facilityIds: [24680]
+        })
+      ).toBe(false);
+    }
+  );
 
   it("uses the legacy .com booking origin when the course metadata requires it", async () => {
     const fetchMock = vi

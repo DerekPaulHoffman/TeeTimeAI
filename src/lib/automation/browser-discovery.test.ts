@@ -183,7 +183,7 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).toBeUndefined();
   });
 
-  it("learns reusable TeeItUp metadata from booking links", () => {
+  it("fails closed for multiple newly discovered unscoped TeeItUp booking links", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
       courseName: "Fairchild Wheeler Golf Course",
@@ -193,22 +193,45 @@ describe("buildBrowserDiscovery", () => {
         "https://fairchild-wheeler-red-course.book.teeitup.golf/",
         "https://fairchild-wheeler-golf-course-black-course.book.teeitup.golf/"
       ],
+      linkCandidates: [
+        {
+          url: "https://fairchild-wheeler-red-course.book.teeitup.golf/",
+          label: "Red Course Tee Times"
+        },
+        {
+          url: "https://fairchild-wheeler-golf-course-black-course.book.teeitup.golf/",
+          label: "Black Course Tee Times"
+        }
+      ],
+      officialPage: {
+        url: "https://www.fairchildwheelergolf.com/teetimes/",
+        courseName: "Fairchild Wheeler Golf Course",
+        linkCandidates: [
+          {
+            url: "https://fairchild-wheeler-red-course.book.teeitup.golf/",
+            label: "Red Course Tee Times"
+          },
+          {
+            url: "https://fairchild-wheeler-golf-course-black-course.book.teeitup.golf/",
+            label: "Black Course Tee Times"
+          }
+        ]
+      },
       visibleText: "Red Course Black Course"
     };
 
     const discovery = buildBrowserDiscovery(evidence);
 
-    expect(discovery.status).toBe("LEARNED");
+    expect(discovery.status).toBe("INSPECTED");
     expect(discovery.detectedPlatform).toBe("TEEITUP");
-    expect(discovery.bookingUrl).toBe("https://fairchild-wheeler-red-course.book.teeitup.golf/");
-    expect(discovery.apiEndpoint).toBe("https://phx-api-be-east-1b.kenna.io/v2/tee-times");
-    expect(discovery.apiMetadata).toEqual({
-      aliases: [
-        "fairchild-wheeler-red-course",
-        "fairchild-wheeler-golf-course-black-course"
-      ],
-      bookingBaseUrl: "https://fairchild-wheeler-red-course.book.teeitup.golf/"
-    });
+    expect(discovery.bookingUrl).toBe(
+      "https://www.fairchildwheelergolf.com/teetimes/"
+    );
+    expect(discovery.apiEndpoint).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe(
+      "teeitup-target-scope-ambiguous"
+    );
   });
 
   it("learns TeeItUp metadata from legacy .com booking links", () => {
@@ -218,6 +241,16 @@ describe("buildBrowserDiscovery", () => {
       sourceUrl: "https://www.richterpark.com/request_tt/",
       finalUrl: "https://www.richterpark.com/request_tt/",
       observedUrls: ["https://richter-park-golf-course.book.teeitup.com/"],
+      officialPage: {
+        url: "https://www.richterpark.com/request_tt/",
+        courseName: "Richter Park Golf Course",
+        linkCandidates: [
+          {
+            url: "https://richter-park-golf-course.book.teeitup.com/",
+            label: "Book a tee time online"
+          }
+        ]
+      },
       visibleText: "Book a tee time online"
     };
 
@@ -234,6 +267,227 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("does not trust TeeItUp links from an official page without an explicit course identity", () => {
+    const siblingBookingUrl =
+      "https://sibling-public.book.teeitup.com/?course=13579";
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-course",
+      courseName: "Target Golf Course",
+      sourceUrl: "https://target.example/tee-times",
+      observedUrls: [siblingBookingUrl],
+      linkCandidates: [
+        { url: siblingBookingUrl, label: "Sibling Course Tee Times" }
+      ],
+      officialPage: {
+        url: "https://target.example/book-online",
+        linkCandidates: [
+          { url: siblingBookingUrl, label: "Sibling Course Tee Times" }
+        ]
+      },
+      visibleText: "Target Golf Course tee times"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.bookingUrl).toBe("https://target.example/tee-times");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe(
+      "teeitup-target-scope-unconfirmed"
+    );
+  });
+
+  it("upgrades an official HTTP TeeItUp booking root to canonical HTTPS", () => {
+    const httpBookingUrl = "http://legacy-public.book.teeitup.com/";
+    const httpsBookingUrl = "https://legacy-public.book.teeitup.com/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "legacy-course",
+      courseName: "Legacy Golf Course",
+      sourceUrl: "https://legacy.example/tee-times",
+      observedUrls: [httpBookingUrl],
+      officialPage: {
+        url: "https://legacy.example/tee-times",
+        courseName: "Legacy Golf Course",
+        linkCandidates: [
+          { url: httpBookingUrl, label: "General Public Tee Times" }
+        ]
+      },
+      visibleText: "Legacy Golf Course public tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: httpsBookingUrl,
+      apiMetadata: {
+        aliases: ["legacy-public"],
+        bookingBaseUrl: httpsBookingUrl
+      }
+    });
+  });
+
+  it("prefers a target-scoped General Public TeeItUp link and preserves its facility selector", () => {
+    const publicBookingUrl =
+      "https://play-dc-golf-public.book.teeitup.com/?course=24680";
+    const discovery = buildBrowserDiscovery({
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf",
+      sourceUrl: "https://www.playdcgolf.com/rock-creek-park-golf-course/",
+      finalUrl: "https://www.playdcgolf.com/rock-creek-tee-times/",
+      observedUrls: [
+        publicBookingUrl,
+        "https://play-dc-golf-senior.book.teeitup.com/?course=24680",
+        "https://play-dc-golf-junior.book.teeitup.com/?course=24680",
+        "https://play-dc-golf-military.book.teeitup.com/?course=24680"
+      ],
+      linkCandidates: [
+        { url: publicBookingUrl, label: "General Public" },
+        {
+          url: "https://play-dc-golf-senior.book.teeitup.com/?course=24680",
+          label: "Seniors"
+        },
+        {
+          url: "https://play-dc-golf-junior.book.teeitup.com/?course=24680",
+          label: "Juniors"
+        },
+        {
+          url: "https://play-dc-golf-military.book.teeitup.com/?course=24680",
+          label: "Military"
+        }
+      ],
+      officialPage: {
+        url: "https://www.playdcgolf.com/rock-creek-tee-times/",
+        courseName: "Rock Creek Park Golf",
+        linkCandidates: [
+          { url: publicBookingUrl, label: "General Public" },
+          {
+            url: "https://play-dc-golf-senior.book.teeitup.com/?course=24680",
+            label: "Seniors"
+          },
+          {
+            url: "https://play-dc-golf-junior.book.teeitup.com/?course=24680",
+            label: "Juniors"
+          },
+          {
+            url: "https://play-dc-golf-military.book.teeitup.com/?course=24680",
+            label: "Military"
+          }
+        ]
+      },
+      visibleText: "Reserve your tee time for the 9-Hole Course or the 5-Hole Loop."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: publicBookingUrl,
+      apiMetadata: {
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl: publicBookingUrl,
+        facilityIds: [24680]
+      }
+    });
+  });
+
+  it("fails closed when target TeeItUp links disagree on the facility selector", () => {
+    const linkCandidates = [
+      {
+        url: "https://shared-public.book.teeitup.com/?course=24680",
+        label: "General Public"
+      },
+      {
+        url: "https://shared-public.book.teeitup.com/?course=13579",
+        label: "General Public Tee Times"
+      }
+    ];
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-teeitup-course",
+      courseName: "Shared TeeItUp Course",
+      sourceUrl: "https://shared.example/tee-times",
+      observedUrls: [
+        "https://shared-public.book.teeitup.com/?course=24680",
+        "https://shared-public.book.teeitup.com/?course=13579"
+      ],
+      linkCandidates,
+      officialPage: {
+        url: "https://shared.example/tee-times",
+        courseName: "Shared TeeItUp Course",
+        linkCandidates
+      },
+      visibleText: "Public tee times"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.bookingUrl).toBe("https://shared.example/tee-times");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe(
+      "teeitup-target-scope-ambiguous"
+    );
+  });
+
+  it("fails closed when a TeeItUp booking URL repeats its facility selector", () => {
+    const duplicateSelectorUrl =
+      "https://shared-public.book.teeitup.com/?course=24680&course=24680";
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-teeitup-course",
+      courseName: "Shared TeeItUp Course",
+      sourceUrl: "https://shared.example/tee-times",
+      observedUrls: [duplicateSelectorUrl],
+      linkCandidates: [
+        { url: duplicateSelectorUrl, label: "General Public" }
+      ],
+      visibleText: "Public tee times"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("suppresses an ambiguous provider booking URL when no official course page is known", () => {
+    const ambiguousProviderUrl =
+      "https://shared-public.book.teeitup.com/?course=24680&course=13579";
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-teeitup-course",
+      courseName: "Shared TeeItUp Course",
+      sourceUrl: ambiguousProviderUrl,
+      observedUrls: [ambiguousProviderUrl],
+      visibleText: "Public tee times"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.bookingUrl).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("fails closed instead of applying one facility selector across TeeItUp aliases", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-teeitup-course",
+      courseName: "Shared TeeItUp Course",
+      sourceUrl: "https://shared.example/tee-times",
+      observedUrls: [
+        "https://shared-public.book.teeitup.com/?course=24680",
+        "https://alternate-public.book.teeitup.com/?course=24680"
+      ],
+      linkCandidates: [
+        {
+          url: "https://shared-public.book.teeitup.com/?course=24680",
+          label: "General Public"
+        },
+        {
+          url: "https://alternate-public.book.teeitup.com/?course=24680",
+          label: "General Public"
+        }
+      ],
+      visibleText: "Public tee times"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("canonicalizes TeeItUp store links to the provider booking root", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "little-harbor",
@@ -244,6 +498,16 @@ describe("buildBrowserDiscovery", () => {
       observedUrls: [
         "https://little-harbor-country-club.book.teeitup.com/store/gift-certificates"
       ],
+      officialPage: {
+        url: "https://littleharborgolf.com/",
+        courseName: "Little Harbor Golf Course",
+        linkCandidates: [
+          {
+            url: "https://little-harbor-country-club.book.teeitup.com/store/gift-certificates",
+            label: "Book tee times"
+          }
+        ]
+      },
       visibleText: "Book tee times"
     });
 
@@ -2783,6 +3047,11 @@ describe("buildBrowserDiscovery", () => {
       finalUrl: "https://www.knightsplay.com/rates/",
       observedUrls: ["https://www.knightsplay.com/rates/", bookingUrl],
       linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Online" }],
+      officialPage: {
+        url: "https://www.knightsplay.com/rates/",
+        courseName: "Knights Play Golf Center",
+        linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Online" }]
+      },
       visibleText:
         "Knights Play Golf Center. Call the Pro Shop at (919) 555-0142 to reserve a tee time."
     });
@@ -2804,6 +3073,11 @@ describe("buildBrowserDiscovery", () => {
       finalUrl: "https://www.knightsplay.com/rates/",
       observedUrls: ["https://www.knightsplay.com/rates/", bookingUrl],
       linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Online" }],
+      officialPage: {
+        url: "https://www.knightsplay.com/rates/",
+        courseName: "Knights Play Golf Center",
+        linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Online" }]
+      },
       visibleText:
         "Knights Play Golf Center. Call 919-555-0142 to reserve a tee time. Call 919-555-0199 to reserve a tee time."
     });

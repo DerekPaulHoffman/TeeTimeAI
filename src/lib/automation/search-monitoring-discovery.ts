@@ -384,6 +384,7 @@ type CollectedPageEvidence = Pick<
   | "finalUrl"
   | "observedUrls"
   | "linkCandidates"
+  | "officialPage"
   | "visibleText"
   | "bookingSurfaceText"
   | "accessBarriers"
@@ -1355,6 +1356,12 @@ export async function collectOfficialSiteEvidence(
     ...firstPage,
     evidence: extractHtmlEvidence(firstPage.html, firstPage.finalUrl)
   }];
+  let matchedCoursePage = courseName && doesPageUrlIdentifyCourse(
+    firstPage.finalUrl,
+    courseName
+  )
+    ? pages[0]
+    : undefined;
   const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
@@ -1382,6 +1389,14 @@ export async function collectOfficialSiteEvidence(
     if (!followupCandidate) {
       break;
     }
+    const identifiesTargetCourse = Boolean(
+      courseName &&
+        doesFollowupIdentifyCourse(
+          followupCandidate,
+          linkCandidates,
+          courseName
+        )
+    );
     visited.add(normalizeSourceKey(followupCandidate));
 
     try {
@@ -1391,6 +1406,14 @@ export async function collectOfficialSiteEvidence(
         evidence: extractHtmlEvidence(fetched.html, fetched.finalUrl)
       };
       pages.push(page);
+      if (
+        identifiesTargetCourse &&
+        courseName &&
+        doesPageUrlIdentifyCourse(page.finalUrl, courseName) &&
+        haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)
+      ) {
+        matchedCoursePage = page;
+      }
       visited.add(normalizeSourceKey(page.finalUrl));
     } catch (error) {
       if (error instanceof ProviderDiscoveryLeaseDeferredError) {
@@ -1411,6 +1434,17 @@ export async function collectOfficialSiteEvidence(
     linkCandidates: uniqueLinkCandidates(
       pages.flatMap((page) => page.evidence.linkCandidates)
     ).slice(0, 200),
+    ...(matchedCoursePage && courseName
+      ? {
+          officialPage: {
+            url: matchedCoursePage.finalUrl,
+            linkCandidates: uniqueLinkCandidates(
+              matchedCoursePage.evidence.linkCandidates
+            ).slice(0, 200),
+            courseName
+          }
+        }
+      : {}),
     visibleText: pages.slice().reverse().map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
@@ -1425,6 +1459,42 @@ export async function collectOfficialSiteEvidence(
       .filter((page) => page.accessBarrier === "MANAGED_CHALLENGE")
       .map((page) => ({ url: page.finalUrl, status: 403 as const }))
   };
+}
+
+function doesFollowupIdentifyCourse(
+  url: string,
+  candidates: Array<{ url: string; label: string }>,
+  courseName: string
+) {
+  if (doesPageUrlIdentifyCourse(url, courseName)) {
+    return true;
+  }
+  const key = normalizeSourceKey(url);
+  return candidates.some(
+    (candidate) =>
+      normalizeSourceKey(candidate.url) === key &&
+      haveCompatibleCourseNames(courseName, candidate.label)
+  );
+}
+
+function doesPageUrlIdentifyCourse(value: string, courseName: string) {
+  try {
+    const url = new URL(value);
+    const decodedPath = decodeURIComponent(url.pathname);
+    const pathIdentities = [
+      ...(decodedPath.split("/").filter(Boolean).slice(-1)),
+      decodedPath
+    ].map((identity) =>
+      identity
+        .replace(/[-_]+/g, " ")
+        .replace(/\btee\s*times?\b/gi, " ")
+    );
+    return pathIdentities.some((identity) =>
+      haveCompatibleCourseNames(courseName, identity)
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function fetchPublicHtml(sourceUrl: string, fetchImpl: typeof fetch) {
@@ -1639,7 +1709,9 @@ function pickOfficialCourseDetailCandidate(
     const pathSegment = parsed.pathname.split("/").filter(Boolean).at(-1) ?? "";
     return (
       normalizedLabel === normalizedTarget ||
-      normalizeCourseLinkName(pathSegment) === normalizedTarget
+      normalizeCourseLinkName(pathSegment) === normalizedTarget ||
+      haveCompatibleCourseNames(courseName, candidate.label) ||
+      haveCompatibleCourseNames(courseName, pathSegment.replace(/[-_]+/g, " "))
     );
   })?.url;
 }
@@ -2330,7 +2402,19 @@ function stripHtml(value: string) {
 function normalizeSourceKey(value: string) {
   const url = new URL(value);
   url.hash = "";
+  for (const key of [...url.searchParams.keys()]) {
+    if (isTrackingQueryParameter(key)) {
+      url.searchParams.delete(key);
+    }
+  }
+  url.searchParams.sort();
   return url.toString();
+}
+
+function isTrackingQueryParameter(key: string) {
+  return /^(?:utm_(?:campaign|content|id|medium|source|term)|_gl|dclid|fbclid|gclid|mc_cid|mc_eid|msclkid)$/i.test(
+    key
+  );
 }
 
 function uniqueStrings(values: Array<string | undefined>) {

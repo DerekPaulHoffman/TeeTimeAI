@@ -15,6 +15,7 @@ const providerLeaseMocks = vi.hoisted(() => ({
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 
+import { buildBrowserDiscovery } from "./browser-discovery";
 import {
   collectOfficialSiteEvidence,
   createAddressPinnedPublicFetch,
@@ -119,7 +120,8 @@ describe("search monitoring discovery", () => {
     expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
   });
 
-  it("tries the official site before classification and reuses exact shared-site evidence", async () => {
+  it("does not apply one generic shared-site TeeItUp alias to Dennis Highlands and Dennis Pines", async () => {
+    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();
       if (value === "https://dennis.example/golf") {
@@ -157,16 +159,34 @@ describe("search monitoring discovery", () => {
       )
     ).toEqual(["dennis.example", "TEEITUP"]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledTimes(2);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: "LEARNED",
-        detectedPlatform: "TEEITUP",
-        apiMetadata: expect.objectContaining({ aliases: ["dennis-golf"] })
-      })
+    const discoveries = dbMocks.recordBrowserDiscovery.mock.calls.map(
+      ([discovery]) => discovery
     );
+    expect(discoveries).toEqual([
+      expect.objectContaining({
+        courseId: "dennis-highlands",
+        status: "INSPECTED",
+        detectedPlatform: "TEEITUP",
+        bookingUrl: "https://dennis.example/golf",
+        evidence: expect.objectContaining({
+          learnedFrom: "teeitup-target-scope-unconfirmed"
+        })
+      }),
+      expect.objectContaining({
+        courseId: "dennis-pines",
+        status: "INSPECTED",
+        detectedPlatform: "TEEITUP",
+        bookingUrl: "https://dennis.example/golf",
+        evidence: expect.objectContaining({
+          learnedFrom: "teeitup-target-scope-unconfirmed"
+        })
+      })
+    ]);
+    expect(discoveries.every((discovery) => discovery.apiMetadata === undefined))
+      .toBe(true);
     expect(result).toEqual({
       attemptedCourseIds: ["dennis-highlands", "dennis-pines"],
-      appliedCourseIds: ["dennis-highlands", "dennis-pines"],
+      appliedCourseIds: [],
       failedCourseIds: [],
       deferredCourseIds: [],
       retryCourseIds: ["dennis-highlands", "dennis-pines"]
@@ -2198,6 +2218,149 @@ describe("search monitoring discovery", () => {
       { url: amherstUrl, label: "Book @ ACC" },
       { url: ponemahUrl, label: "Book @ PG" }
     ]));
+  });
+
+  it("deduplicates a UTM-tagged self link and follows the matching course tee-time page", async () => {
+    const sourceUrl =
+      "https://www.playdcgolf.example/rock-creek-park-golf-course/?utm_source=extnet&utm_medium=yext";
+    const canonicalUrl =
+      "https://www.playdcgolf.example/rock-creek-park-golf-course/";
+    const bookingIndexUrl = "https://www.playdcgolf.example/book-online/";
+    const targetTeeTimesUrl =
+      "https://www.playdcgolf.example/rock-creek-tee-times/";
+    const publicBookingUrl =
+      "https://play-dc-golf-public.book.teeitup.com/?course=24680";
+    const siblingPublicBookingUrl =
+      "https://sibling-public.book.teeitup.com/?course=13579";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><a href="${canonicalUrl}">Rock Creek Park Golf</a><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingIndexUrl:
+          return new Response(
+            `<html><a href="/east-potomac-tee-times/">East Potomac Golf Links Tee Times</a><a href="${siblingPublicBookingUrl}">General Public</a><a href="/rock-creek-tee-times/">Rock Creek Park Golf Tee Times</a><a href="/langston-tee-times/">Langston Golf Course Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case targetTeeTimesUrl:
+          return new Response(
+            `<html><a href="${publicBookingUrl}">General Public</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Rock Creek Park Golf"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingIndexUrl,
+      targetTeeTimesUrl
+    ]);
+    expect(evidence.linkCandidates).toContainEqual({
+      url: publicBookingUrl,
+      label: "General Public"
+    });
+    expect(evidence.linkCandidates).toContainEqual({
+      url: siblingPublicBookingUrl,
+      label: "General Public"
+    });
+    expect(evidence.officialPage).toEqual({
+      url: targetTeeTimesUrl,
+      linkCandidates: [{ url: publicBookingUrl, label: "General Public" }],
+      courseName: "Rock Creek Park Golf"
+    });
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf"
+    });
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: publicBookingUrl,
+      apiMetadata: {
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl: publicBookingUrl,
+        facilityIds: [24680]
+      }
+    });
+  });
+
+  it("does not bless sibling inventory when a target detail URL redirects to a generic index", async () => {
+    const sourceUrl =
+      "https://redirect.playdcgolf.example/rock-creek-park-golf-course/";
+    const bookingIndexUrl =
+      "https://redirect.playdcgolf.example/book-online/";
+    const targetTeeTimesUrl =
+      "https://redirect.playdcgolf.example/rock-creek-tee-times/";
+    const redirectedIndexUrl =
+      "https://redirect.playdcgolf.example/book-online/?view=shared";
+    const siblingPublicBookingUrl =
+      "https://sibling-public.book.teeitup.com/?course=13579";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><a href="${bookingIndexUrl}">Book Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingIndexUrl:
+          return new Response(
+            `<html><a href="${targetTeeTimesUrl}">Rock Creek Park Golf Tee Times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case targetTeeTimesUrl:
+          return new Response(null, {
+            status: 302,
+            headers: { location: redirectedIndexUrl }
+          });
+        case redirectedIndexUrl:
+          return new Response(
+            `<html><a href="${siblingPublicBookingUrl}">General Public</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Rock Creek Park Golf"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingIndexUrl,
+      targetTeeTimesUrl,
+      redirectedIndexUrl
+    ]);
+    expect(evidence.officialPage).toEqual({
+      url: sourceUrl,
+      linkCandidates: [{ url: bookingIndexUrl, label: "Book Tee Times" }],
+      courseName: "Rock Creek Park Golf"
+    });
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "rock-creek",
+      courseName: "Rock Creek Park Golf"
+    });
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.detectedPlatform).toBe("TEEITUP");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.bookingUrl).not.toBe(siblingPublicBookingUrl);
   });
 
   it("follows the course-matching CPS tenant before a sibling facility", async () => {

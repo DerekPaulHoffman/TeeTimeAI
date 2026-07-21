@@ -12,6 +12,7 @@ const TEEITUP_API_BASE_URL = "https://phx-api-be-east-1b.kenna.io";
 export type TeeItUpMetadata = {
   aliases: string[];
   bookingBaseUrl: string;
+  facilityIds?: number[];
 };
 
 type TeeItUpFacility = {
@@ -52,11 +53,52 @@ export function isTeeItUpMetadata(value: unknown): value is TeeItUpMetadata {
   }
 
   const metadata = value as Partial<TeeItUpMetadata>;
-  return (
-    Array.isArray(metadata.aliases) &&
-    metadata.aliases.length > 0 &&
-    metadata.aliases.every((alias) => typeof alias === "string" && alias.length > 0) &&
-    typeof metadata.bookingBaseUrl === "string"
+  const aliases = metadata.aliases;
+  const hasValidAliases =
+    Array.isArray(aliases) &&
+    aliases.length > 0 &&
+    aliases.every(
+      (alias) =>
+        typeof alias === "string" &&
+        /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(alias)
+    ) &&
+    new Set(aliases.map((alias) => alias.toLocaleLowerCase("en-US"))).size ===
+      aliases.length;
+  if (!hasValidAliases || typeof metadata.bookingBaseUrl !== "string") {
+    return false;
+  }
+
+  const bookingUrl = parseCanonicalTeeItUpBookingUrl(
+    metadata.bookingBaseUrl
+  );
+  if (
+    !bookingUrl ||
+    !aliases.some(
+      (alias) =>
+        alias.toLocaleLowerCase("en-US") ===
+        bookingUrl.alias.toLocaleLowerCase("en-US")
+    )
+  ) {
+    return false;
+  }
+
+  if (metadata.facilityIds === undefined) {
+    return bookingUrl.facilityId === undefined;
+  }
+
+  if (
+    !Array.isArray(metadata.facilityIds) ||
+    metadata.facilityIds.length !== 1 ||
+    !isPositiveSafeInteger(metadata.facilityIds[0]) ||
+    aliases.length !== 1
+  ) {
+    return false;
+  }
+
+  return Boolean(
+    bookingUrl.facilityId === metadata.facilityIds[0] &&
+      bookingUrl.alias.toLocaleLowerCase("en-US") ===
+        aliases[0].toLocaleLowerCase("en-US")
   );
 }
 
@@ -73,48 +115,77 @@ export async function fetchTeeItUpTeeSheet(input: {
   date: Date;
   metadata: TeeItUpMetadata;
 }): Promise<TeeItUpTeeSheetResult> {
+  if (!isTeeItUpMetadata(input.metadata)) {
+    throw new Error("TeeItUp metadata is invalid or ambiguously scoped");
+  }
+
   const slots: TeeTimeSlot[] = [];
   let bookingWindowEvidence: BookingWindowEvidence | null = null;
 
   for (const alias of input.metadata.aliases) {
-    const facilities = await fetchFacilities(alias, input.metadata.bookingBaseUrl);
-    if (facilities.length === 0) {
-      continue;
+    const aliasBookingBaseUrl = getAliasBookingBaseUrl(alias, input.metadata);
+    const discoveredFacilities = await fetchFacilities(
+      alias,
+      aliasBookingBaseUrl
+    );
+    const facilities = input.metadata.facilityIds
+      ? discoveredFacilities.filter(
+          (facility) =>
+            typeof facility.id === "number" &&
+            input.metadata.facilityIds?.includes(facility.id)
+        )
+      : discoveredFacilities;
+    if (!input.metadata.facilityIds && facilities.length !== 1) {
+      throw new Error(
+        "TeeItUp returned an ambiguous facility set for an unscoped booking alias"
+      );
+    }
+    if (input.metadata.facilityIds && facilities.length !== 1) {
+      throw new Error(
+        "TeeItUp did not return the selected facility for the scoped booking link"
+      );
+    }
+    if (!facilities.every((facility) => isPositiveSafeInteger(facility.id))) {
+      throw new Error("TeeItUp returned an invalid facility identifier");
     }
 
     const facilityIds = facilities
       .map((facility) => facility.id)
-      .filter((id): id is number => typeof id === "number");
-    if (facilityIds.length === 0) {
-      continue;
-    }
+      .filter((id): id is number => isPositiveSafeInteger(id));
 
     const daySlots = await fetchFacilitySlots(
       alias,
       input.date,
       facilityIds,
-      input.metadata.bookingBaseUrl
+      aliasBookingBaseUrl
     );
     const facilityByCourseId = new Map(
       facilities
         .filter((facility) => facility.courseId)
         .map((facility) => [facility.courseId as string, facility])
     );
-    const defaultFacility = facilities[0];
 
     for (const day of daySlots) {
       if (day.message) {
-        const facility =
-          (day.courseId && facilityByCourseId.get(day.courseId)) || defaultFacility;
+        const facility = resolveResponseFacility(
+          day.courseId,
+          facilities,
+          facilityByCourseId
+        );
+        if (!facility) {
+          throw new Error(
+            "TeeItUp returned booking-window evidence without an unambiguous facility"
+          );
+        }
         const evidence = parseBookingReleaseMessage({
           message: day.message,
           targetDate: input.date,
-          timeZone: facility?.timeZone ?? "America/New_York",
+          timeZone: facility.timeZone ?? "America/New_York",
           evidenceUrl: buildTeeTimesUrl(input.date, facilityIds).toString()
         });
         bookingWindowEvidence = pickEarlierBookingWindow(
           input.date,
-          facility?.timeZone ?? "America/New_York",
+          facility.timeZone ?? "America/New_York",
           bookingWindowEvidence,
           evidence
         );
@@ -131,9 +202,15 @@ export async function fetchTeeItUpTeeSheet(input: {
           continue;
         }
 
-        const facility = (slot.courseId && facilityByCourseId.get(slot.courseId)) || defaultFacility;
+        const facility = resolveResponseFacility(
+          slot.courseId,
+          facilities,
+          facilityByCourseId
+        );
         if (!facility?.id) {
-          continue;
+          throw new Error(
+            "TeeItUp returned a tee time without an unambiguous selected facility"
+          );
         }
 
         slots.push({
@@ -141,7 +218,7 @@ export async function fetchTeeItUpTeeSheet(input: {
           sourceId: `teeitup-${facility.id}-${slot.courseId ?? "course"}-${slot.teetime}`,
           startsAt: toLocalDateTime(slot.teetime, facility.timeZone ?? "America/New_York"),
           availableSpots,
-          bookingUrl: withDateParam(input.metadata.bookingBaseUrl, input.date),
+          bookingUrl: withDateParam(aliasBookingBaseUrl, input.date),
           priceCents: rate?.greenFeeCart,
           holes: rate?.holes,
           priceOptions: getPriceOptions(slot.rates),
@@ -157,6 +234,41 @@ export async function fetchTeeItUpTeeSheet(input: {
       bookingWindowEvidence ? "NOT_OPEN" : slots.length > 0 ? "OPEN" : "UNKNOWN",
     bookingWindowEvidence
   };
+}
+
+function getAliasBookingBaseUrl(
+  alias: string,
+  metadata: TeeItUpMetadata
+) {
+  if (metadata.aliases.length === 1) {
+    return metadata.bookingBaseUrl;
+  }
+
+  const bookingUrl = new URL(metadata.bookingBaseUrl);
+  const domainMatch = bookingUrl.hostname.match(/\.book\.teeitup\.(golf|com)$/i);
+  if (!domainMatch?.[1]) {
+    throw new Error("TeeItUp booking domain is invalid");
+  }
+
+  return `https://${alias}.book.teeitup.${domainMatch[1].toLowerCase()}/`;
+}
+
+function resolveResponseFacility(
+  courseId: string | undefined,
+  facilities: TeeItUpFacility[],
+  facilityByCourseId: Map<string, TeeItUpFacility>
+) {
+  if (courseId) {
+    const facility = facilityByCourseId.get(courseId);
+    if (!facility) {
+      throw new Error(
+        "TeeItUp returned a course outside the selected facility set"
+      );
+    }
+    return facility;
+  }
+
+  return facilities.length === 1 ? facilities[0] : undefined;
 }
 
 function pickEarlierBookingWindow(
@@ -285,4 +397,54 @@ function withDateParam(bookingBaseUrl: string, date: Date) {
   const url = new URL(bookingBaseUrl);
   url.searchParams.set("date", formatDate(date));
   return url.toString();
+}
+
+function parseCanonicalTeeItUpBookingUrl(value: string) {
+  try {
+    const url = new URL(value);
+    const hostMatch = url.hostname.match(
+      /^(.+)\.book\.teeitup\.(?:golf|com)$/i
+    );
+    const selectors = url.searchParams.getAll("course");
+    const queryKeys = [...url.searchParams.keys()];
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.hash ||
+      url.pathname !== "/" ||
+      !hostMatch?.[1] ||
+      (queryKeys.length > 0 &&
+        (selectors.length !== 1 ||
+          queryKeys.length !== 1 ||
+          queryKeys[0] !== "course"))
+    ) {
+      return null;
+    }
+    if (selectors.length === 0) {
+      const canonicalUrl = `https://${url.hostname}/`;
+      return value === canonicalUrl
+        ? { alias: hostMatch[1], facilityId: undefined }
+        : null;
+    }
+    if (!/^[1-9]\d*$/.test(selectors[0])) {
+      return null;
+    }
+    const facilityId = Number(selectors[0]);
+    if (!isPositiveSafeInteger(facilityId)) {
+      return null;
+    }
+    const canonicalUrl = new URL(`https://${url.hostname}/`);
+    canonicalUrl.searchParams.set("course", String(facilityId));
+    return value === canonicalUrl.toString()
+      ? { alias: hostMatch[1], facilityId }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
