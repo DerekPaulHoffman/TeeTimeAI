@@ -1209,7 +1209,6 @@ function learnWalkInClassification(
     /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\b(?:do|does)\s+not\s+(?:take|accept)\s+tee times?\b)/i.exec(
       visibleText
     );
-
   if (!noReservationMatch && !noTeeTimeEvidence && !dayScopedNoTeeTimeEvidence) {
     return null;
   }
@@ -1567,7 +1566,7 @@ function hasInterveningNamedSection(value: string, courseName: string) {
 function hasDifferentNoTeeTimeCourseIdentity(value: string, courseName: string) {
   return [
     ...value.matchAll(
-      /\b((?:[A-Z][\p{L}\p{N}'â€™&-]*\s+){0,6}(?:Golf\s+(?:Course|Club|Center|Centre|Links)|Country\s+Club))\b/gu
+      /\b((?:[A-Z][\p{L}\p{N}'â€™&-]*[^\S\r\n]+){0,6}(?:Golf[^\S\r\n]+(?:Course|Club|Center|Centre|Links)|Country[^\S\r\n]+Club))\b/gu
     )
   ].some((match) => {
     const candidate = match[1] ?? "";
@@ -1575,6 +1574,23 @@ function hasDifferentNoTeeTimeCourseIdentity(value: string, courseName: string) 
       /^(?:(?:nine|9|eighteen|18)[- ]?)?holes?\s+public\s+golf\s+(?:course|club|center|centre|links)$/i.test(
         candidate
       )
+    ) {
+      return false;
+    }
+    const matchStart = match.index ?? -1;
+    const lineStart = matchStart >= 0
+      ? value.lastIndexOf("\n", Math.max(0, matchStart - 1)) + 1
+      : -1;
+    const followingLineBreak = matchStart >= 0
+      ? value.indexOf("\n", matchStart + candidate.length)
+      : -1;
+    const lineEnd = followingLineBreak >= 0 ? followingLineBreak : value.length;
+    const containingLine = lineStart >= 0
+      ? value.slice(lineStart, lineEnd).trim()
+      : "";
+    if (
+      containingLine.localeCompare(candidate, "en-US", { sensitivity: "accent" }) === 0 &&
+      isGenericGolfFacilityLabel(candidate)
     ) {
       return false;
     }
@@ -2841,6 +2857,12 @@ function canonicalizeManualUrl(value: string) {
   return `${parsed.origin}${parsed.pathname || "/"}`;
 }
 
+function isGenericGolfFacilityLabel(value: string) {
+  return /^(?:Golf\s+(?:Course|Club|Center|Centre|Links)|Country\s+Club)$/i.test(
+    value.trim()
+  );
+}
+
 function findRepeatedDayScopedNoTeeTimeEvidence(
   courseName: string,
   visibleText: string
@@ -2942,29 +2964,44 @@ function findRepeatedDayScopedNoTeeTimeEvidence(
     /\b9\s*holes?\b/i.test(feeEvidence) &&
     /\b18\s*holes?\b/i.test(feeEvidence) &&
     /\b\d{1,3}\.\d{2}\b/.test(feeEvidence);
+  const hasDifferentIdentity = hasDifferentNoTeeTimeCourseIdentity(
+    identityContext,
+    targetName
+  );
+  const hasAmbiguousOwner = hasAmbiguousStartingTimesSectionOwner(
+    sectionOwnerContext,
+    targetName
+  );
+  const hasNonCourseOwner = hasNonCourseFacilityStartingTimesOwner(
+    sectionOwnerContext,
+    targetName
+  );
+  const hasSearchResultLanguage =
+    /\b(?:availability|inventory|results?|search|selected\s+date|sold\s+out|try\s+again)\b/i.test(
+      policyContext
+    );
   if (
     !identifiesPublicPhysicalCourse ||
     !publishesDailyFees ||
-    hasDifferentNoTeeTimeCourseIdentity(identityContext, targetName) ||
-    hasAmbiguousStartingTimesSectionOwner(
-      sectionOwnerContext,
-      targetName
-    ) ||
-    hasNonCourseFacilityStartingTimesOwner(
-      sectionOwnerContext,
-      targetName
-    ) ||
-    /\b(?:availability|inventory|results?|search|selected\s+date|sold\s+out|try\s+again)\b/i.test(
-      policyContext
-    )
+    hasDifferentIdentity ||
+    hasAmbiguousOwner ||
+    hasNonCourseOwner ||
+    hasSearchResultLanguage
   ) {
     return null;
   }
 
-  const identityExcerpt = normalizedText.slice(
-    corroborationTargetStart,
-    Math.min(firstStart, corroborationTargetStart + 360)
-  );
+  const identityExcerpt = normalizedText
+    .slice(
+      corroborationTargetStart,
+      Math.min(firstStart, corroborationTargetStart + 360)
+    )
+    .split("\n")
+    .filter((line) =>
+      !isGenericGolfFacilityLabel(line) ||
+      isLikelyTargetCourseAlias(line, targetName)
+    )
+    .join("\n");
   const targetIdentityProof = normalizedText.slice(
     targetStart,
     targetStart + targetName.length
@@ -3178,7 +3215,7 @@ function canonicalizeRejectedManualSource(value: string) {
 }
 
 function hasPositiveOnlineBookingText(value: string) {
-  return normalizeTeeTimeTypography(value).split(/[.!?\n]+/).some((statement) => {
+  return normalizeTeeTimeTypography(value).split(/[.!?]+/).some((statement) => {
     const normalized = statement.replace(/\s+/g, " ").trim();
     const hasExplicitTeeTimeBookingText =
       /\btee\s*times?\b/i.test(normalized) &&

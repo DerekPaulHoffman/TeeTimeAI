@@ -2497,6 +2497,92 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("preserves official block boundaries for a day-scoped walk-in section", async () => {
+    const sourceUrl = "https://quarry-view.example/";
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        `<html><body>
+          <h1>Quarry View Golf Course</h1>
+          <p>Welcome to Quarry View Public Golf Course.</p>
+          <p>This nine-hole course is open for daily-fee public play.</p>
+          <div>Directions to Quarry View Golf Course</div>
+          <div>For Directions: Go</div>
+          <h2>Starting Times</h2>
+          <div>Phone: (860) 555-0100</div>
+          <div>Weekdays: Tee times not needed.</div>
+          <div>Weekends: Tee times not needed.</div>
+          <h2>Fees</h2>
+          <table>
+            <tr><td>9 Holes</td><td>15.00</td></tr>
+            <tr><td>18 Holes</td><td>20.00</td></tr>
+          </table>
+        </body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Quarry View Golf Course"
+    );
+    expect(evidence.officialPage?.visibleText).toContain(
+      "Starting Times\nPhone: (860) 555-0100\nWeekdays: Tee times not needed.\nWeekends: Tee times not needed."
+    );
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "quarry-view",
+      courseName: "Quarry View Golf Course"
+    });
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: {
+        learnedFrom: "official-day-scoped-walk-in-access"
+      }
+    });
+  });
+
+  it("keeps a line-broken online-booking button stronger than walk-in wording", async () => {
+    const sourceUrl = "https://quarry-view.example/";
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        `<html><body>
+          <h1>Quarry View Golf Course</h1>
+          <p>Welcome to Quarry View Public Golf Course.</p>
+          <p>This nine-hole course is open for daily-fee public play.</p>
+          <div>Directions to Quarry View Golf Course</div>
+          <h2>Starting Times</h2>
+          <div>Weekdays: Tee times not needed.</div>
+          <div>Weekends: Tee times not needed.</div>
+          <button>Book<br>Tee Times</button>
+          <h2>Fees</h2>
+          <div>9 Holes 15.00</div>
+          <div>18 Holes 20.00</div>
+        </body></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Quarry View Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "quarry-view-split-booking-button",
+      courseName: "Quarry View Golf Course"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it.each([
     {
       label: "an observed tee-time route is present without a link label",
@@ -2515,6 +2601,14 @@ describe("search monitoring discovery", () => {
       ],
       suffix:
         `${" Course conditions and public-play details.".repeat(40)} Book tee times online now.`
+    },
+    {
+      label: "the evidence contains a line-broken online-booking CTA",
+      observedUrls: [
+        "http://www.quarry-view.example/",
+        "https://www.quarry-view.example/"
+      ],
+      suffix: "\nBook\nTee Times"
     }
   ])("does not replay walk-in evidence when $label", async ({
     observedUrls,

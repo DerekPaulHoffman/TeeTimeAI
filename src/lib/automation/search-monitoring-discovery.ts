@@ -1732,7 +1732,7 @@ function hasExplicitReplayTeeTimeDestination(url: URL) {
 }
 
 function hasReplayPositiveOnlineBookingText(value: string) {
-  return normalizeReplayTeeTimeTypography(value).split(/[.!?\n]+/).some((statement) => {
+  return normalizeReplayTeeTimeTypography(value).split(/[.!?]+/).some((statement) => {
     const normalized = statement.replace(/\s+/g, " ").trim();
     const hasExplicitTeeTimeText = /\btee\s*times?\b/i.test(normalized);
     if (
@@ -2793,7 +2793,7 @@ function extractHtmlEvidence(
   const visibleText = [
     relevantScripts,
     widgetConfigs,
-    stripHtml(
+    stripHtmlPreservingBlockBoundaries(
       decodedHtml
         .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
         .replace(/<(?:style|nav|header)\b[^>]*>[\s\S]*?<\/(?:style|nav|header)>/gi, " ")
@@ -2801,8 +2801,10 @@ function extractHtmlEvidence(
   ]
     .filter(Boolean)
     .join("\n")
-    .replace(/\s+/g, " ")
-    .trim()
+    .split(/\n+/u)
+    .map((line) => line.replace(/\s+/gu, " ").trim())
+    .filter(Boolean)
+    .join("\n")
     .slice(0, 12_000);
   const courseScopedLinkCandidates = annotateDirectLegacyProphetBookingLinks({
     candidates: linkCandidates,
@@ -3989,6 +3991,19 @@ function decodeEmbeddedContent(value: string) {
 
 function stripHtml(value: string) {
   return value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function stripHtmlPreservingBlockBoundaries(value: string) {
+  return value
+    .replace(
+      /<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|hr|li|main|ol|p|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>/gi,
+      "\n"
+    )
+    .replace(/<[^>]*>/g, " ")
+    .split(/\n+/u)
+    .map((line) => line.replace(/\s+/gu, " ").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 function normalizeSourceKey(value: string) {

@@ -1785,6 +1785,62 @@ describe("buildBrowserDiscovery", () => {
     );
   });
 
+  it("ignores a standalone generic golf-center navigation label in walk-in evidence", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "quarry-view-generic-navigation",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: "https://www.quarry-view.example/",
+      finalUrl: "https://www.quarry-view.example/",
+      observedUrls: ["https://www.quarry-view.example/"],
+      visibleText:
+        "Quarry View Golf Course\nWelcome to Quarry View Public Golf Course\nThis nine-hole course is open for daily-fee public play\nGolf Center\nDirections to Quarry View Golf Course\nFor Directions: Go\nStarting Times\nWeekdays: Tee times not needed.\nWeekends: Tee times not needed.\nFees\n9 Holes 15.00\n18 Holes 20.00"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: {
+        learnedFrom: "official-day-scoped-walk-in-access"
+      }
+    });
+
+    const replay = buildBrowserDiscovery({
+      courseId: "quarry-view-generic-navigation-replay",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: discovery.sourceUrl,
+      finalUrl: discovery.evidence.finalUrl,
+      observedUrls: discovery.evidence.observedUrls,
+      visibleText: discovery.evidence.visibleText
+    });
+    expect(replay).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: {
+        learnedFrom: "official-day-scoped-walk-in-access"
+      }
+    });
+  });
+
+  it("does not ignore a generic golf-center phrase embedded in another line", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "quarry-view-inline-generic-identity",
+      courseName: "Quarry View Golf Course",
+      sourceUrl: "https://www.quarry-view.example/",
+      finalUrl: "https://www.quarry-view.example/",
+      observedUrls: ["https://www.quarry-view.example/"],
+      visibleText:
+        "Quarry View Golf Course\nWelcome to Quarry View Public Golf Course\nThis nine-hole course is open for daily-fee public play\nWelcome to Golf Center\nDirections to Quarry View Golf Course\nStarting Times\nWeekdays: Tee times not needed.\nWeekends: Tee times not needed.\nFees\n9 Holes 15.00\n18 Holes 20.00"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it.each([
     {
       label: "only one day is corroborated",
