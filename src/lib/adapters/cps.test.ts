@@ -1645,6 +1645,130 @@ describe("fetchCpsSlots", () => {
     }
   );
 
+  it.each([400, 401, 403])(
+    "recovers a token-authenticated CPS tee-time HTTP %i through the matching published API key",
+    async (status) => {
+      let teeTimeAttempts = 0;
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+        async (input, init) => {
+          const url = input.toString();
+          if (url.endsWith("/identityapi/myconnect/token/short")) {
+            return jsonResponse({ access_token: "short-lived-token" });
+          }
+          if (url.endsWith("/RegisterTransactionId")) {
+            return jsonResponse(true);
+          }
+          if (url.endsWith("/onlineresweb/Home/Configuration")) {
+            expect(init?.redirect).toBe("manual");
+            return jsonResponse({
+              ...cpsConfiguration(),
+              apiKey: "provider-published-key"
+            });
+          }
+          if (url.includes("/GetAllOptions/traditionoaklane?")) {
+            const headers = init?.headers as Record<string, string>;
+            expect(headers.authorization).toBeUndefined();
+            expect(headers["x-apikey"]).toBe("provider-published-key");
+            return jsonResponse({
+              webSiteId: "published-website-id",
+              reservationOptions: { terminalId: 3 }
+            });
+          }
+          if (url.includes("/TeeTimes?")) {
+            teeTimeAttempts += 1;
+            const headers = init?.headers as Record<string, string>;
+            const teeTimesUrl = new URL(url);
+            if (teeTimeAttempts === 1) {
+              expect(headers.authorization).toBe("Bearer short-lived-token");
+              expect(headers["x-apikey"]).toBeUndefined();
+              expect(teeTimesUrl.searchParams.has("transactionId")).toBe(true);
+              return new Response("Rejected", { status });
+            }
+            expect(headers.authorization).toBeUndefined();
+            expect(headers["x-apikey"]).toBe("provider-published-key");
+            expect(headers["x-websiteid"]).toBe("published-website-id");
+            expect(headers["x-terminalid"]).toBe("3");
+            expect(teeTimesUrl.searchParams.has("transactionId")).toBe(false);
+            expect(teeTimesUrl.searchParams.get("holes")).toBe("0");
+            expect(teeTimesUrl.searchParams.get("numberOfPlayer")).toBe("0");
+            return jsonResponse([]);
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
+        }
+      );
+
+      await expect(fetchCpsSlots(persistedCpsInput())).resolves.toEqual([]);
+      expect(teeTimeAttempts).toBe(2);
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          input.toString().endsWith("/RegisterTransactionId")
+        )
+      ).toHaveLength(1);
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          input.toString().endsWith("/onlineresweb/Home/Configuration")
+        )
+      ).toHaveLength(1);
+    }
+  );
+
+  it("preserves a CPS tee-time 400 when no matching published key exists", async () => {
+    let teeTimeAttempts = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return jsonResponse({ access_token: "short-lived-token" });
+        }
+        if (url.endsWith("/RegisterTransactionId")) {
+          return jsonResponse(true);
+        }
+        if (url.includes("/TeeTimes?")) {
+          teeTimeAttempts += 1;
+          return new Response("Rejected", { status: 400 });
+        }
+        if (url.endsWith("/onlineresweb/Home/Configuration")) {
+          return jsonResponse(cpsConfiguration());
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      "CPS tee times returned 400"
+    );
+    expect(teeTimeAttempts).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not use published-key fallback for a rate-limited CPS tee-time read", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input) => {
+        const url = input.toString();
+        if (url.endsWith("/identityapi/myconnect/token/short")) {
+          return jsonResponse({ access_token: "short-lived-token" });
+        }
+        if (url.endsWith("/RegisterTransactionId")) {
+          return jsonResponse(true);
+        }
+        if (url.includes("/TeeTimes?")) {
+          return new Response("Rate limited", { status: 429 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }
+    );
+
+    await expect(fetchCpsSlots(persistedCpsInput())).rejects.toThrow(
+      "CPS tee times returned 429"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        input.toString().endsWith("/onlineresweb/Home/Configuration")
+      )
+    ).toBe(false);
+  });
+
   it("preserves a CPS transaction rejection when no matching published key exists", async () => {
     let registrationAttempts = 0;
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(

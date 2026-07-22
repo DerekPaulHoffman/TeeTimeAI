@@ -247,7 +247,7 @@ export async function fetchCpsTeeSheet(
   } catch (availabilityError) {
     if (
       !credential.token ||
-      !isCpsTransactionCredentialRejection(availabilityError)
+      !canRecoverCpsAvailabilityWithPublishedKey(availabilityError)
     ) {
       throw availabilityError;
     }
@@ -1054,7 +1054,7 @@ async function registerTransactionId(onlineApi: string, headers: Record<string, 
   }
 }
 
-function isCpsTransactionCredentialRejection(error: unknown) {
+function canRecoverCpsAvailabilityWithPublishedKey(error: unknown) {
   if (!error || typeof error !== "object") {
     return false;
   }
@@ -1064,11 +1064,19 @@ function isCpsTransactionCredentialRejection(error: unknown) {
       message?: unknown;
       status?: unknown;
     };
+    if (record.name !== "ProviderHttpError") {
+      return false;
+    }
+    if (
+      (record.status === 401 || record.status === 403) &&
+      record.message ===
+        `CPS transaction registration returned ${record.status}`
+    ) {
+      return true;
+    }
     return Boolean(
-      record.name === "ProviderHttpError" &&
-        (record.status === 401 || record.status === 403) &&
-        record.message ===
-          `CPS transaction registration returned ${record.status}`
+      (record.status === 400 || record.status === 401 || record.status === 403) &&
+        record.message === `CPS tee times returned ${record.status}`
     );
   } catch {
     return false;
