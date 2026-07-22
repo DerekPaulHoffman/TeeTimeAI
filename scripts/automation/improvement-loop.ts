@@ -17,7 +17,6 @@ import {
   buildHourlyImprovementRunProvenance,
   buildPortfolioCategoryHistory,
   buildRepeatedCoveragePortfolioCandidates,
-  hasCourseSupportWriterConflict,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
   IMPROVEMENT_CATEGORIES,
   isHourlyImprovementClaimWindowOpen,
@@ -36,7 +35,7 @@ import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v14";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v15";
 const PROMPT_VERSION_PREFIX = "tee-time-spot-improvement-loop-v";
 const ACTIVE_RUN_STALE_AFTER_MS = 55 * 60 * 1000;
 const PORTFOLIO_HISTORY_HOURS = 24;
@@ -46,8 +45,8 @@ const loopPrompt = `
 You are improving Tee Time Spot, a Next.js + Postgres tee-time alert POC.
 
 Every run:
-1. Before branch setup, installation, research, or edits, run \`npm run automation:course-support -- inspect\`. Stop this broad loop with blocked_concurrent only when a responder batch is active or expired and awaiting recovery. A due incident backlog without an owning batch is informational and must not stop unrelated product work; those incidents still belong exclusively to the responder and may never become hourly candidates. Otherwise fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work. A dirty checkout may be resumed only when the immediately preceding unfinished run for this exact automation recorded the same branch, expected HEAD, owner run, owner thread, and every dirty path in its pre-edit plan; otherwise block it.
-2. The prepare command checks responder ownership again under the shared database transition lease before candidate selection. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
+1. Before branch setup, installation, research, or edits, run \`npm run automation:course-support -- inspect\` for aggregate coverage context only. A responder batch, expired responder recovery, or due incident backlog never blocks this loop because the hourly automation owns a separate checkout and database writer lane. Course-support incidents still belong exclusively to the responder and may never become hourly candidates. Fetch \`origin/main\` and create a unique named branch such as \`automation/hourly-YYYYMMDD-HHmmss\` from \`origin/main\`. Never work or commit on \`main\`, and never remain detached. Then run \`npm run automation:preflight\`, require the clean task branch to be synchronized with \`origin/main\`, and record the starting SHA and reported \`git push origin HEAD:main\` command. Stop with blocked_dirty_worktree or blocked_git instead of touching unrelated work. A dirty checkout may be resumed only when the immediately preceding unfinished run for this exact automation recorded the same branch, expected HEAD, owner run, owner thread, and every dirty path in its pre-edit plan; otherwise block it.
+2. The prepare, claim, and closeout commands acquire the hourly automation's own database transition lease. After preflight passes, run \`npm install\` only when lockfile-declared dependencies are unavailable, then run \`npm run automation:inspect\` and read recent AutomationRun, TeeTimeMatch, active TeeSearch, pending alert, WebsiteEvent, WebsiteFeedback, deployment, and recent Vercel log state.
 3. Read recent AutomationRun notes and CourseAutomationDiscovery records as loop memory. Do not repeat a stale candidate unless new evidence changed.
 4. Before browser exploration, set sessionStorage key \`tee-time-spot:traffic-class\` to \`AUTOMATION\` (or \`TEST\` only for an explicit manual test). Confirm analytics requests carry that aggregate marker. Never create a persistent visitor/session identifier, and never let unmarked automation traffic persist as public funnel activity.
 5. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
@@ -89,7 +88,7 @@ Tool research requirements:
 
 Loop engineering requirements:
 - Use stable idempotency keys for notifications and external side effects.
-- Acquire the short transaction-scoped initialization/state-update lease before selecting candidates, claiming paths, or closeout. It serializes those database transitions; the single unfinished owner AutomationRun is the durable rest-of-run guard. Treat an unfinished, non-stale run as blocked_concurrent.
+- Acquire the hourly-specific short transaction-scoped initialization/state-update lease before selecting candidates, claiming paths, or closeout. It serializes hourly database transitions without blocking the course-support responder; the single unfinished hourly owner AutomationRun is the durable rest-of-run guard. Treat an unfinished, non-stale hourly run as blocked_concurrent.
 - Never start implementation in a dirty or diverged checkout, never stage another task's files, and never force-push.
 - Resume owned dirty work only under the exact immediately-preceding same-automation branch, owner-run, owner-thread, expected-HEAD, and planned-path provenance contract. Any mismatch is blocked_dirty_worktree.
 - Maintain a living learning ledger in AutomationRun notes: open signals, stale repeated work, successful patterns, failed assumptions, research links, and next action.
@@ -493,7 +492,6 @@ async function closeoutImprovementRun() {
 async function prepareImprovementRun() {
   const git = readGitRunState();
   const ownerThreadId = resolveOwnerThreadId(process.argv.slice(2));
-  const courseSupportState = await loadCourseSupportGuardState();
   const previous = await prisma.automationRun.findFirst({
     where: {
       promptVersion: {
@@ -511,17 +509,6 @@ async function prepareImprovementRun() {
     process.argv.slice(2),
     "--recover-run"
   );
-
-  if (hasCourseSupportWriterConflict(courseSupportState)) {
-    writeHandoff({
-      state: "blocked_concurrent",
-      reason:
-        "The dedicated course-support responder owns or must recover the repository writer lane.",
-      courseSupport: courseSupportState
-    });
-    process.exitCode = 2;
-    return;
-  }
 
   if (git.dirtyPaths.length > 0) {
     const exactSameThreadRecoveryClaim = Boolean(
@@ -837,30 +824,6 @@ async function prepareImprovementRun() {
     });
     throw error;
   }
-}
-
-async function loadCourseSupportGuardState() {
-  const now = new Date();
-  const [activeBatchCount, dueIncidentCount] = await Promise.all([
-    prisma.courseSupportBatch.count({
-      where: {
-        status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] }
-      }
-    }),
-    prisma.courseSupportIncident.count({
-      where: {
-        status: "AUTO_INVESTIGATING",
-        activeBatchId: null,
-        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
-      }
-    })
-  ]);
-
-  return {
-    observedAt: now.toISOString(),
-    activeBatchCount,
-    dueIncidentCount
-  };
 }
 
 function buildRunRecord(input: {

@@ -56,9 +56,8 @@ import {
   resolveCourseSupportIncident
 } from "./support-incidents";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 
-const REPOSITORY_WRITER_LEASE_KEY = "tee-time-spot:repository-writer";
-const HOURLY_PROMPT_PREFIX = "tee-time-spot-improvement-loop-v";
 const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const SEARCH_TIMELINESS_GRACE_MS = 15 * 60 * 1000;
 const RECHECK_HEALTH_FRESHNESS_MS = 2 * 60 * 1000;
@@ -325,12 +324,12 @@ const CURRENT_PROVIDER_EVIDENCE_TIE_PRIORITY = {
   DETACHED_FAILURE: 3
 } as const satisfies Record<CurrentProviderEvidenceSource, number>;
 
-export function runWithRepositoryWriterTransitionLease<T>(
+export function runWithCourseSupportWriterTransitionLease<T>(
   worker: () => Promise<T>
 ) {
   return withPostgresAdvisoryTextLease(
     prisma,
-    REPOSITORY_WRITER_LEASE_KEY,
+    COURSE_SUPPORT_WRITER_LANE,
     worker
   );
 }
@@ -910,15 +909,11 @@ export function classifyCourseSupportQueueInspection(input: {
   hasActiveBatch: boolean;
   activeBatchOwnerThreadId?: string | null;
   requestingThreadId?: string | null;
-  hasActiveHourlyWriter: boolean;
   hasExpiredBatch: boolean;
   dueIncidentCount: number;
   dueRealCount?: number;
   engineeringSweepDue?: boolean;
 }): ResponderOutcome {
-  if (input.hasActiveHourlyWriter) {
-    return "deferred_busy";
-  }
   if (input.hasActiveBatch) {
     return input.requestingThreadId &&
       input.activeBatchOwnerThreadId === input.requestingThreadId
@@ -1191,8 +1186,7 @@ export async function inspectCourseSupportQueue(input?: {
     activeBatchId: null,
     OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
   };
-  const [dueIncidents, activeBatch, expiredBatch, activeHourlyRun] =
-    await Promise.all([
+  const [dueIncidents, activeBatch, expiredBatch] = await Promise.all([
       prisma.courseSupportIncident.findMany({
         where: dueWhere,
         select: {
@@ -1246,8 +1240,7 @@ export async function inspectCourseSupportQueue(input?: {
           status: true,
           leaseExpiresAt: true
         }
-      }),
-      findActiveHourlyWriter()
+      })
     ]);
 
   const providerGroups = new Set(
@@ -1288,7 +1281,6 @@ export async function inspectCourseSupportQueue(input?: {
     hasActiveBatch: Boolean(activeBatch),
     activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
     requestingThreadId,
-    hasActiveHourlyWriter: Boolean(activeHourlyRun),
     hasExpiredBatch: Boolean(expiredBatch),
     dueIncidentCount: dueIncidents.length,
     dueRealCount,
@@ -1314,8 +1306,7 @@ export async function inspectCourseSupportQueue(input?: {
             dueHistoricalRealCount,
             providerGroupCount: providerGroups.size,
             engineeringSweepDue,
-            activeBatch: Boolean(activeBatch),
-            activeHourlyWriter: Boolean(activeHourlyRun)
+            activeBatch: Boolean(activeBatch)
           }
         })
       : false;
@@ -1355,13 +1346,7 @@ export async function inspectCourseSupportQueue(input?: {
           providerFamilyKey: activeBatch.providerFamilyKey,
           leaseExpiresAt: activeBatch.leaseExpiresAt.toISOString()
         }
-      : activeHourlyRun
-        ? {
-            kind: "HOURLY_IMPROVEMENT" as const,
-            startedAt: activeHourlyRun.startedAt.toISOString(),
-            requiresExplicitRecovery: true
-          }
-        : null,
+      : null,
     expiredBatch: expiredBatch
       ? {
           batchRef: expiredBatch.reference,
@@ -1406,17 +1391,14 @@ export async function claimCourseSupportBatch(input: {
     ? createHash("sha256").update(input.retryBatchId).digest("hex")
     : null;
 
-  const lease = await runWithRepositoryWriterTransitionLease(async () => {
-    const [activeBatch, activeHourlyRun] = await Promise.all([
-      prisma.courseSupportBatch.findFirst({
-        where: {
-          status: { in: ACTIVE_BATCH_STATUSES }
-        },
-        orderBy: { heartbeatAt: "desc" },
-        select: { id: true, leaseExpiresAt: true, status: true }
-      }),
-      findActiveHourlyWriter()
-    ]);
+  const lease = await runWithCourseSupportWriterTransitionLease(async () => {
+    const activeBatch = await prisma.courseSupportBatch.findFirst({
+      where: {
+        status: { in: ACTIVE_BATCH_STATUSES }
+      },
+      orderBy: { heartbeatAt: "desc" },
+      select: { id: true, leaseExpiresAt: true, status: true }
+    });
     if (
       activeBatch &&
       activeBatch.leaseExpiresAt.getTime() <= now.getTime()
@@ -1428,13 +1410,12 @@ export async function claimCourseSupportBatch(input: {
         archiveReason: "An expired responder batch must be recovered before new work is claimed."
       };
     }
-    if (activeBatch || activeHourlyRun) {
+    if (activeBatch) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
         now,
         summary: {
-          activeBatch: Boolean(activeBatch),
-          activeHourlyWriter: Boolean(activeHourlyRun)
+          activeBatch: true
         }
       });
       return {
@@ -3925,7 +3906,7 @@ export async function recoverCourseSupportBatch(input: {
   now?: Date;
 }) {
   const now = input.now ?? new Date();
-  const lease = await runWithRepositoryWriterTransitionLease(async () => {
+  const lease = await runWithCourseSupportWriterTransitionLease(async () => {
     const batch = await prisma.courseSupportBatch.findUnique({
       where: { id: input.batchId },
       select: {
@@ -3948,25 +3929,22 @@ export async function recoverCourseSupportBatch(input: {
         archiveReason: "Responder recovery needs owner attention."
       };
     }
-    const [otherBatch, activeHourlyRun] = await Promise.all([
-      prisma.courseSupportBatch.findFirst({
-        where: {
-          id: { not: batch.id },
-          status: { in: ACTIVE_BATCH_STATUSES }
-        },
-        select: { id: true }
-      }),
-      findActiveHourlyWriter()
-    ]);
-    if (otherBatch || activeHourlyRun) {
+    const otherBatch = await prisma.courseSupportBatch.findFirst({
+      where: {
+        id: { not: batch.id },
+        status: { in: ACTIVE_BATCH_STATUSES }
+      },
+      select: { id: true }
+    });
+    if (otherBatch) {
       return {
         outcome: "deferred_busy" as const,
         recovered: false,
         reasons: [
-          "Another repository writer must finish before this responder batch can be recovered."
+          "Another course-support writer must finish before this responder batch can be recovered."
         ],
         threadDisposition: "KEEP_VISIBLE" as const,
-        archiveReason: "Responder recovery is blocked by another repository writer."
+        archiveReason: "Responder recovery is blocked by another course-support writer."
       };
     }
     const summary = asJsonObject(batch.summary);
@@ -4048,7 +4026,7 @@ export async function recoverCourseSupportBatch(input: {
         outcome: "deferred_busy" as const,
         recovered: false,
         threadDisposition: "ARCHIVE" as const,
-        archiveReason: "Another repository writer owns the transition lease."
+        archiveReason: "Another course-support writer owns the transition lease."
       };
 }
 
@@ -4663,17 +4641,6 @@ async function listDueCourseSupportCandidates(now: Date) {
     };
   });
 }
-async function findActiveHourlyWriter() {
-  return prisma.automationRun.findFirst({
-    where: {
-      promptVersion: { startsWith: HOURLY_PROMPT_PREFIX },
-      completedAt: null
-    },
-    orderBy: { startedAt: "desc" },
-    select: { id: true, startedAt: true }
-  });
-}
-
 async function recordRoutineResponderObservation(input: {
   outcome:
     | "no_due_work"

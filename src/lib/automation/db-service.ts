@@ -28,6 +28,7 @@ import {
   type HourlyImprovementRunRecord
 } from "./improvement";
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
+import { HOURLY_IMPROVEMENT_WRITER_LANE } from "./writer-lanes";
 import {
   normalizeProviderFamilyKey,
   resolveProviderCapability,
@@ -120,7 +121,7 @@ export async function runWithSearchCheckLease<T>(
 export function runWithHourlyImprovementLease<T>(worker: () => Promise<T>) {
   return withPostgresAdvisoryTextLease(
     prisma,
-    "tee-time-spot:repository-writer",
+    HOURLY_IMPROVEMENT_WRITER_LANE,
     worker
   );
 }

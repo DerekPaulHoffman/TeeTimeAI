@@ -8,7 +8,6 @@ import {
   buildImprovementCheckpoints,
   buildRepeatedCoveragePortfolioCandidates,
   hasCompletePreEditProvenance,
-  hasCourseSupportWriterConflict,
   isHourlyImprovementClaimWindowOpen,
   markImprovementOutcomeRecorded,
   rankPortfolioCandidates,
@@ -19,15 +18,16 @@ import {
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology
 } from "./improvement";
+import {
+  COURSE_SUPPORT_WRITER_LANE,
+  HOURLY_IMPROVEMENT_WRITER_LANE
+} from "./writer-lanes";
 
-describe("course-support coordination", () => {
-  it("blocks only while a responder batch owns the writer lane", () => {
-    expect(
-      hasCourseSupportWriterConflict({ activeBatchCount: 1, dueIncidentCount: 0 })
-    ).toBe(true);
-    expect(
-      hasCourseSupportWriterConflict({ activeBatchCount: 0, dueIncidentCount: 52 })
-    ).toBe(false);
+describe("automation writer lanes", () => {
+  it("keeps hourly and course-support state transitions independent", () => {
+    expect(HOURLY_IMPROVEMENT_WRITER_LANE).not.toBe(COURSE_SUPPORT_WRITER_LANE);
+    expect(HOURLY_IMPROVEMENT_WRITER_LANE).toContain("hourly-improvement");
+    expect(COURSE_SUPPORT_WRITER_LANE).toContain("course-support");
   });
 });
 

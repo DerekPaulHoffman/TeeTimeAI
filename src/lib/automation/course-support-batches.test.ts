@@ -2445,7 +2445,6 @@ describe("course-support inspection ownership", () => {
     hasActiveBatch: true,
     activeBatchOwnerThreadId: "owner-thread",
     requestingThreadId: "owner-thread",
-    hasActiveHourlyWriter: false,
     hasExpiredBatch: false,
     dueIncidentCount: 4
   };
@@ -2467,15 +2466,6 @@ describe("course-support inspection ownership", () => {
       ).toBe("deferred_busy");
     }
   );
-
-  it("defers to an hourly writer even when the responder batch belongs to the requester", () => {
-    expect(
-      classifyCourseSupportQueueInspection({
-        ...inspection,
-        hasActiveHourlyWriter: true
-      })
-    ).toBe("deferred_busy");
-  });
 
   it("preserves expired, empty, and ready queue outcomes without an active writer", () => {
     expect(
@@ -2633,7 +2623,7 @@ describe("course-support inspection ownership", () => {
     );
   });
 
-  it("defers to hourly work without archiving the task that owns the responder batch", async () => {
+  it("resumes owned responder work without consulting the hourly lane", async () => {
     prismaMocks.batchFindFirst
       .mockResolvedValueOnce({
         id: "batch-1",
@@ -2644,21 +2634,18 @@ describe("course-support inspection ownership", () => {
         ownerThreadId: "owner-thread"
       })
       .mockResolvedValueOnce(null);
-    prismaMocks.automationRunFindFirst.mockResolvedValueOnce({
-      startedAt: new Date("2026-07-15T20:01:00.000Z")
-    });
-
     const result = await inspectCourseSupportQueue({
       requestingThreadId: "owner-thread",
       now
     });
 
     expect(result).toMatchObject({
-      outcome: "deferred_busy",
+      outcome: "resume_owned_work",
       ownedByCurrentTask: true,
       durableCloseoutRecorded: false,
       threadDisposition: "KEEP_VISIBLE"
     });
+    expect(prismaMocks.automationRunFindFirst).not.toHaveBeenCalled();
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
   });
 

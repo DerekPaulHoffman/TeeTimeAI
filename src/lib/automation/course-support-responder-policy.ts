@@ -127,7 +127,7 @@ export function getResponderThreadPolicy(input: {
       input.outcome === "no_due_work"
         ? "No course-support work is due."
         : input.outcome === "deferred_busy"
-          ? "Another durable repository writer owns the checkout."
+          ? "Another durable course-support writer owns the responder lane."
           : input.outcome === "deferred_engineering_cadence"
             ? "Only non-customer work is due, and the bounded engineering sweep is not due yet."
           : "The responder result is durably closed and needs no owner action."

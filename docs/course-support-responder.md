@@ -10,7 +10,7 @@ The course-support responder is the dedicated engineering path for persistent `N
 - A due batch contains one provider family and one failure fingerprint. The default claim is 5 courses; the command clamps all requests to 1 through 20.
 - Batches prioritize near-date active real-demand fetch failures, then other active real demand, then historical non-engineering incidents whose searches have ended, then engineering-only synthetic coverage. Aged engineering-only evidence receives bounded fairness when no critical real demand is waiting.
 - Any active real demand may claim on every 10-minute run. When no active real demand is due, `inspect` and `claim` enforce the first ten UTC minutes as the single hourly engineering sweep; other runs close as `deferred_engineering_cadence` without provider, Git, or database mutation beyond the routine observation.
-- The broad product-improvement loop must exit `blocked_concurrent` before candidate selection when a responder batch is active or requires recovery. An unowned backlog is informational, and course-support incidents are never portfolio candidates for that loop.
+- The broad product-improvement loop uses an independent writer lane and may proceed while a responder batch is active or requires recovery. Responder state remains informational there, and course-support incidents are never portfolio candidates for that loop.
 
 `CourseSupportIncident` is the durable per-course problem. `CourseSupportBatch` is the short-lived provider-family/fingerprint engineering claim. `CourseSupportBatchIncident` preserves the per-course pre-remediation evidence and final batch result.
 
@@ -35,7 +35,7 @@ Claiming requires all of the following:
 - a clean `automation/course-support-*` task branch;
 - checked-out `HEAD` exactly equal to current `origin/main`;
 - the real Codex task id from `CODEX_THREAD_ID` or `--owner-thread`;
-- no active hourly writer or active responder batch.
+- no active responder batch in the course-support lane.
 
 Claim returns a redacted `batchRef`, then `packet` exposes only bounded course ordinals and safe official roots. Every path must be recorded with `claim-path` before that file is edited. The database lease token and row ids never leave the command implementation.
 
@@ -43,11 +43,11 @@ When a durably closed `RETRYABLE_FAILED` batch is due and coordination requires 
 
 For a multi-course source batch whose entries have different retry times, coordination may select exactly one immutable source-entry ordinal with `claim --retry-batch-ref <private-ref> --retry-ordinal <NN> --max-courses 1`. Source-entry ordinals use the persisted batch-entry order (`createdAt`, then the private row id as a tie-breaker); they are not course-name order and must never be accompanied by a row id or course name in task output. Exact-entry mode still requires the whole source batch to be a durably closed retryable batch with unique, latest `RETRY_SCHEDULED` entries, then revalidates the selected entry's current cycle, provider provenance, due time, demand, ownership, and source-entry relation inside the ordinary serializable claim fence. Unselected siblings need not be due. Any invalid ordinal or mismatch aborts without falling back to the normal queue.
 
-The responder and hourly loop share the transaction-scoped Postgres advisory lease `tee-time-spot:repository-writer` for inspect/claim/recovery state transitions. The durable batch and unfinished `AutomationRun` own the longer implementation interval. A responder lease lasts 15 minutes and must be heartbeated while work continues.
+The responder uses the transaction-scoped Postgres advisory lease `tee-time-spot:course-support-writer` for inspect/claim/recovery state transitions. The hourly loop uses its own `tee-time-spot:hourly-improvement-writer` lease. The durable responder batch and unfinished responder `AutomationRun` own the longer responder implementation interval. A responder lease lasts 15 minutes and must be heartbeated while work continues.
 
-An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder/hourly writer, an active lease, or mismatched provenance require owner attention.
+An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder writer, an active responder lease, or mismatched provenance require owner attention.
 
-Recovery atomically transfers the batch and lease token to the recovering task. After `recover` reports success, continue that same batch directly through heartbeat, verification, and closeout; never claim a fresh batch. A later `inspect` supplies the current task identity and returns `resume_owned_work` only for that task's own healthy batch. Missing or mismatched task identity, another responder batch, and an hourly writer still fail closed as `deferred_busy`.
+Recovery atomically transfers the batch and lease token to the recovering task. After `recover` reports success, continue that same batch directly through heartbeat, verification, and closeout; never claim a fresh batch. A later `inspect` supplies the current task identity and returns `resume_owned_work` only for that task's own healthy batch. Missing or mismatched task identity and another responder batch still fail closed as `deferred_busy`; hourly activity is outside the responder lane.
 
 ## Search Execution And Fresh Proof
 
