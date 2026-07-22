@@ -64,6 +64,15 @@ const runnableMetadata = {
     bookingBaseUrl:
       "https://www.golfnow.com/tee-times/facility/10296-hunter-golf-course/search"
   },
+  AGILYSYS: {
+    provider: "AGILYSYS",
+    tenantId: 553,
+    propertyId: "biltmorehotel",
+    courseId: 560,
+    playerTypeId: 2281,
+    bookingBaseUrl:
+      "https://book.onagilysys.com/onecart/golf/courses/553/biltmorehotel"
+  },
   GOLF_WITH_ACCESS: {
     provider: "GOLF_WITH_ACCESS",
     courseIds: ["123e4567-e89b-42d3-a456-426614174000"],
@@ -358,6 +367,29 @@ describe("provider capability registry", () => {
     ).toBe(false);
   });
 
+  it("accepts only the exact public Agilysys course landing", () => {
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://book.onagilysys.com/onecart/golf/courses/553/biltmorehotel?date=2026-07-23&id=560"
+      )
+    ).toBe(true);
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://book.onagilysys.com/onecart/golf/courses/553/biltmorehotel"
+      )
+    ).toBe("AGILYSYS:book.onagilysys.com:/onecart/golf/courses/553/biltmorehotel:");
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://book.onagilysys.com/onecart/golf/courses/553/biltmorehotel?checkout=1"
+      )
+    ).toBe(false);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://book.onagilysys.com/onecart/checkout/553/biltmorehotel"
+      )
+    ).toBe(false);
+  });
+
   it("keeps every current adapter distinct while preserving the external platform enum", () => {
     expect(
       Object.fromEntries(
@@ -378,6 +410,7 @@ describe("provider capability registry", () => {
       WEBTRAC: [true, "CUSTOM"],
       EZLINKS: [false, "CUSTOM"],
       GOLFNOW: [true, "GOLFNOW"],
+      AGILYSYS: [true, "CUSTOM"],
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [true, "CUSTOM"],
       TENFORE: [false, "CUSTOM"]
@@ -464,6 +497,7 @@ describe("provider capability registry", () => {
     ["course.navyaims.com", "WEBTRAC"],
     ["public-course.ezlinksgolf.com", "EZLINKS"],
     ["www.golfnow.com", "GOLFNOW"],
+    ["book.onagilysys.com", "AGILYSYS"],
     ["app.clubcaddie.com", "CLUB_CADDIE"],
     ["app.whoosh.io", "WHOOSH"],
     ["fox.tenfore.golf", "TENFORE"]

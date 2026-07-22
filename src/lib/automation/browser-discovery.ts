@@ -2,6 +2,10 @@ import type {
   AutomationReason,
   BookingMethod
 } from "@/lib/courses/intelligence";
+import {
+  getAgilysysBookingIdentity,
+  normalizeAgilysysBookingUrl
+} from "@/lib/adapters/agilysys";
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import {
@@ -119,6 +123,13 @@ export type BrowserDiscovery = {
   } | {
     provider: "GOLFNOW";
     facilityId: number;
+    bookingBaseUrl: string;
+  } | {
+    provider: "AGILYSYS";
+    tenantId: number;
+    propertyId: string;
+    courseId: number;
+    playerTypeId: number;
     bookingBaseUrl: string;
   } | {
     provider: "GOLF_WITH_ACCESS";
@@ -545,6 +556,11 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   );
   if (golfWithAccessDiscovery) {
     return golfWithAccessDiscovery;
+  }
+
+  const agilysysDiscovery = learnAgilysysDiscovery(evidence, observedUrls);
+  if (agilysysDiscovery) {
+    return withCourseIdentityCorroboration(agilysysDiscovery, evidence);
   }
 
   const phoneReservationClassification = learnOfficialPhoneReservationClassification(
@@ -1499,6 +1515,7 @@ function hasUnresolvedProviderEvidenceConflict(
     "FOREUP",
     "GOLFBACK",
     "GOLFNOW",
+    "AGILYSYS",
     "TEESNAP",
     "TENFORE",
     "WEBTRAC",
@@ -1531,6 +1548,18 @@ function isProviderTechnicalEvidenceCompatibleWithLanding(
       ? technicalScheduleId === landingScheduleId
       : Boolean(technicalScheduleId);
   }
+  if (providerFamily === "AGILYSYS") {
+    const landing = getAgilysysBookingIdentity(landingUrl.toString());
+    const technical = technicalUrl.pathname.match(
+      /^\/wbe-golf-service\/golf\/tenants\/([1-9]\d{0,9})\/propertyId\/([a-z0-9][a-z0-9_-]{0,63})\/getAvailableTeeSlots$/iu
+    );
+    return Boolean(
+      landing &&
+        technical &&
+        landing.tenantId === Number(technical[1]) &&
+        landing.propertyId === technical[2]
+    );
+  }
   return true;
 }
 
@@ -1549,9 +1578,55 @@ function isExactProviderTechnicalEvidenceUrl(
       return isTeesnapTechnicalEvidenceUrl(url.toString());
     case "CHRONOGOLF":
       return isExactChronogolfProfilePingUrl(url);
+    case "AGILYSYS":
+      return isExactAgilysysTeeSheetUrl(url);
     default:
       return false;
   }
+}
+
+function isExactAgilysysTeeSheetUrl(url: URL) {
+  if (
+    url.protocol !== "https:" ||
+    url.hostname.toLowerCase() !== "book.onagilysys.com" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    url.hash ||
+    !/^\/wbe-golf-service\/golf\/tenants\/[1-9]\d{0,9}\/propertyId\/[a-z0-9][a-z0-9_-]{0,63}\/getAvailableTeeSlots$/iu.test(
+      url.pathname
+    )
+  ) {
+    return false;
+  }
+  const query = new Map<string, string>();
+  for (const [rawKey, value] of url.searchParams) {
+    const key = rawKey.toLowerCase();
+    if (query.has(key)) {
+      return false;
+    }
+    query.set(key, value);
+  }
+  const allowed = new Set([
+    "fromdate",
+    "todate",
+    "courseid",
+    "playertypeid",
+    "holes",
+    "appname"
+  ]);
+  return Boolean(
+    query.size === allowed.size &&
+      [...query.keys()].every((key) => allowed.has(key)) &&
+      /^\d{4}-\d{2}-\d{2}$/u.test(query.get("fromdate") ?? "") &&
+      query.get("fromdate") === query.get("todate") &&
+      Number(query.get("courseid")) > 0 &&
+      Number.isSafeInteger(Number(query.get("courseid"))) &&
+      Number(query.get("playertypeid")) > 0 &&
+      Number.isSafeInteger(Number(query.get("playertypeid"))) &&
+      query.get("holes") === "0" &&
+      query.get("appname")?.toLowerCase() === "golf"
+  );
 }
 
 const CLUB_CADDIE_GENERIC_COURSE_WORDS = new Set([
@@ -1696,6 +1771,106 @@ function learnGolfNowDiscovery(
       learnedFrom: "golfnow-public-facility-search"
     }
   };
+}
+
+function learnAgilysysDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const allUrls = [
+    ...observedUrls,
+    ...(evidence.linkCandidates ?? []).map(({ url }) => url),
+    ...(evidence.officialPage?.linkCandidates ?? []).map(({ url }) => url)
+  ];
+  const bookingCandidates = uniqueUrls(
+    allUrls
+      .map(normalizeAgilysysBookingUrl)
+      .filter((value): value is string => Boolean(value))
+  );
+  if (bookingCandidates.length !== 1) {
+    return null;
+  }
+  const bookingBaseUrl = bookingCandidates[0];
+  const identity = getAgilysysBookingIdentity(bookingBaseUrl);
+  const officialLinks = [
+    ...(evidence.linkCandidates ?? []),
+    ...(evidence.officialPage?.linkCandidates ?? [])
+  ];
+  const officialLinkCount = officialLinks.filter(
+    ({ url }) => normalizeAgilysysBookingUrl(url) === bookingBaseUrl
+  ).length;
+  if (!identity || officialLinkCount === 0) {
+    return null;
+  }
+
+  const courseIds = new Set<number>();
+  const playerTypeIds = new Set<number>();
+  for (const value of allUrls) {
+    const url = parseUrl(value);
+    if (!url || url.hostname.toLowerCase() !== "book.onagilysys.com") {
+      continue;
+    }
+    const landing = normalizeAgilysysBookingUrl(url.toString());
+    if (landing === bookingBaseUrl) {
+      addPositiveBoundedProviderId(courseIds, url.searchParams.get("id"));
+    }
+    const technical = url.pathname.match(
+      /^\/wbe-golf-service\/golf\/tenants\/([1-9]\d{0,9})\/propertyId\/([a-z0-9][a-z0-9_-]{0,63})\/getAvailableTeeSlots$/iu
+    );
+    if (
+      technical &&
+      Number(technical[1]) === identity.tenantId &&
+      technical[2] === identity.propertyId
+    ) {
+      addPositiveBoundedProviderId(courseIds, url.searchParams.get("courseId"));
+      addPositiveBoundedProviderId(
+        playerTypeIds,
+        url.searchParams.get("playerTypeId")
+      );
+    }
+  }
+  if (courseIds.size !== 1 || playerTypeIds.size !== 1) {
+    return null;
+  }
+  const courseId = [...courseIds][0];
+  const playerTypeId = [...playerTypeIds][0];
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The course's official site links to a public Agilysys OneCart tee sheet. Tee Time Spot reads signed-out availability only and leaves account, cart, payment, and booking actions to the golfer on the provider site.",
+    apiEndpoint:
+      `https://book.onagilysys.com/wbe-golf-service/golf/tenants/${identity.tenantId}/propertyId/${identity.propertyId}/getAvailableTeeSlots?fromDate={date}&toDate={date}&courseId=${courseId}&playerTypeId=${playerTypeId}&holes=0&appName=golf`,
+    apiMetadata: {
+      provider: "AGILYSYS",
+      tenantId: identity.tenantId,
+      propertyId: identity.propertyId,
+      courseId,
+      playerTypeId,
+      bookingBaseUrl
+    },
+    confidence: 0.97,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "agilysys-public-course-tee-sheet"
+    }
+  };
+}
+
+function addPositiveBoundedProviderId(target: Set<number>, value: string | null) {
+  const parsed = Number(value);
+  if (Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647) {
+    target.add(parsed);
+  }
 }
 
 function learnGolfBackDiscovery(

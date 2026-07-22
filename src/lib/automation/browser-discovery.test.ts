@@ -6671,6 +6671,69 @@ describe("GolfNow public booking discovery", () => {
   });
 });
 
+describe("Agilysys public booking discovery", () => {
+  const bookingUrl =
+    "https://book.onagilysys.com/onecart/golf/courses/553/biltmorehotel";
+  const teeSheetUrl =
+    "https://book.onagilysys.com/wbe-golf-service/golf/tenants/553/propertyId/biltmorehotel/getAvailableTeeSlots?fromDate=2026-07-23&toDate=2026-07-23&courseId=560&playerTypeId=2281&holes=0&appName=golf";
+
+  it("learns reusable tenant and course metadata from the official public tee sheet", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "biltmore",
+      courseName: "Biltmore Golf Course Miami",
+      sourceUrl: "https://biltmorehotel.com/miami-golf-resort/",
+      finalUrl: `${bookingUrl}?date=2026-07-23&id=560`,
+      observedUrls: [
+        `${bookingUrl}?date=2026-07-23&id=560`,
+        teeSheetUrl
+      ],
+      linkCandidates: [{ url: bookingUrl, label: "Book Tee Time" }],
+      officialPage: {
+        url: "https://biltmorehotel.com/miami-golf-resort/",
+        courseName: "Biltmore Golf Course Miami",
+        linkCandidates: [{ url: bookingUrl, label: "Book Tee Time" }]
+      },
+      visibleText: "Championship Golf Course. Book Tee Time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiMetadata: {
+        provider: "AGILYSYS",
+        tenantId: 553,
+        propertyId: "biltmorehotel",
+        courseId: 560,
+        playerTypeId: 2281,
+        bookingBaseUrl: bookingUrl
+      },
+      evidence: expect.objectContaining({
+        learnedFrom: "agilysys-public-course-tee-sheet"
+      })
+    });
+  });
+
+  it("refuses ambiguous course or player identities", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "biltmore",
+      courseName: "Biltmore Golf Course Miami",
+      sourceUrl: "https://biltmorehotel.com/miami-golf-resort/",
+      observedUrls: [
+        bookingUrl,
+        teeSheetUrl,
+        teeSheetUrl.replace("courseId=560", "courseId=561")
+      ],
+      linkCandidates: [{ url: bookingUrl, label: "Book Tee Time" }]
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+});
+
 describe("TenFore public booking enrichment", () => {
   it("keeps public browser-visible TenFore availability in adapter review", () => {
     const discovery = buildBrowserDiscovery({

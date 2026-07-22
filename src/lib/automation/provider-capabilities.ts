@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { isAgilysysMetadata } from "@/lib/adapters/agilysys";
 import { isCpsMetadata } from "@/lib/adapters/cps";
 import { isChelseaMetadata } from "@/lib/adapters/chelsea";
 import { isChronogolfMetadata } from "@/lib/adapters/chronogolf";
@@ -29,6 +30,7 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "WEBTRAC",
   "EZLINKS",
   "GOLFNOW",
+  "AGILYSYS",
   "CLUB_CADDIE",
   "WHOOSH",
   "TENFORE"
@@ -180,6 +182,13 @@ export const PROVIDER_CAPABILITIES = {
     matchesHostname: (hostname) => matchesDomain(hostname, "golfnow.com"),
     validatesMetadata: isGolfNowMetadata
   },
+  AGILYSYS: {
+    family: "AGILYSYS",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: true,
+    matchesHostname: (hostname) => hostname === "book.onagilysys.com",
+    validatesMetadata: isAgilysysMetadata
+  },
   CLUB_CADDIE: {
     family: "CLUB_CADDIE",
     detectedPlatform: "CLUB_CADDIE",
@@ -252,6 +261,7 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["TEESNAP", "TEESNAP"],
   ["GOLFBACK", "GOLFBACK"],
   ["GOLFNOW", "GOLFNOW"],
+  ["AGILYSYS", "AGILYSYS"],
   ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
   ["WEBTRAC", "WEBTRAC"],
   ["CLUB_CADDIE", "CLUB_CADDIE"],
@@ -754,6 +764,15 @@ function isProviderFamilyPublicBookingLandingUrl(
             )) &&
           !url.hash
       );
+    case "AGILYSYS":
+      return Boolean(
+        hostname === "book.onagilysys.com" &&
+          /^\/onecart\/golf\/courses\/[1-9]\d{0,9}\/[a-z0-9][a-z0-9_-]{0,63}\/?$/iu.test(
+            pathname
+          ) &&
+          hasOnlyAgilysysLandingQuery(url) &&
+          !url.hash
+      );
     case "WHOOSH":
       return Boolean(
         hostname === "app.whoosh.io" &&
@@ -770,6 +789,22 @@ function isProviderFamilyPublicBookingLandingUrl(
     case "CLUB_CADDIE":
       return false;
   }
+}
+
+function hasOnlyAgilysysLandingQuery(url: URL) {
+  const query = readUniqueProviderLandingQuery(url);
+  if (!query) {
+    return false;
+  }
+  const allowedKeys = new Set(["date", "id"]);
+  return [...query.entries()].every(([key, value]) => {
+    if (!allowedKeys.has(key)) {
+      return false;
+    }
+    return key === "date"
+      ? isValidProviderLandingDate(value)
+      : Boolean(readBoundedProviderLandingInteger(value, 2_147_483_647));
+  });
 }
 
 function isSingleProviderTenantHostname(hostname: string, domain: string) {
@@ -1045,6 +1080,17 @@ function hasAllowedProviderBookingLandingQuery(
           return readBoundedProviderLandingInteger(entry, maximum);
         })
     );
+  }
+  if (providerFamily === "AGILYSYS") {
+    const allowedKeys = new Set(["date", "id"]);
+    return [...query.entries()].every(([key, entry]) => {
+      if (!allowedKeys.has(key)) {
+        return false;
+      }
+      return key === "date"
+        ? isValidProviderLandingDate(entry)
+        : Boolean(readBoundedProviderLandingInteger(entry, 2_147_483_647));
+    });
   }
   return false;
 }

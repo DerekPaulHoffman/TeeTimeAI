@@ -1,3 +1,7 @@
+import {
+  fetchAgilysysTeeSheet,
+  isAgilysysMetadata
+} from "@/lib/adapters/agilysys";
 import { fetchCpsTeeSheet, isCpsMetadata } from "@/lib/adapters/cps";
 import { fetchChelseaTeeSheet, isChelseaMetadata } from "@/lib/adapters/chelsea";
 import {
@@ -118,6 +122,17 @@ export function fetchCourseTeeSheet(
   }
   if (providerFamily === "GOLFNOW" && isGolfNowMetadata(course.bookingMetadata)) {
     return fetchGolfNowTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
+    });
+  }
+  if (
+    providerFamily === "AGILYSYS" &&
+    isAgilysysMetadata(course.bookingMetadata)
+  ) {
+    return fetchAgilysysTeeSheet({
       courseId: course.id,
       date,
       players,

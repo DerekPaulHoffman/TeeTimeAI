@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const adapterMocks = vi.hoisted(() => ({
+  fetchAgilysysTeeSheet: vi.fn(),
   fetchCpsTeeSheet: vi.fn(),
   fetchChelseaTeeSheet: vi.fn(),
   fetchChronogolfSlots: vi.fn(),
@@ -13,6 +14,7 @@ const adapterMocks = vi.hoisted(() => ({
   fetchTeesnapTeeSheet: vi.fn(),
   fetchWebTracTeeSheet: vi.fn(),
   fetchWhooshTeeSheet: vi.fn(),
+  isAgilysysMetadata: vi.fn(),
   isCpsMetadata: vi.fn(),
   isChelseaMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
@@ -31,6 +33,10 @@ const capabilityMocks = vi.hoisted(() => ({
   resolveProviderCapability: vi.fn()
 }));
 
+vi.mock("@/lib/adapters/agilysys", () => ({
+  fetchAgilysysTeeSheet: adapterMocks.fetchAgilysysTeeSheet,
+  isAgilysysMetadata: adapterMocks.isAgilysysMetadata
+}));
 vi.mock("@/lib/adapters/cps", () => ({
   fetchCpsTeeSheet: adapterMocks.fetchCpsTeeSheet,
   isCpsMetadata: adapterMocks.isCpsMetadata
@@ -117,6 +123,7 @@ describe("fetchCourseTeeSheet", () => {
     capabilityMocks.resolveProviderCapability.mockImplementation((course) => ({
       providerFamilyKey: course.providerFamilyKey
     }));
+    adapterMocks.isAgilysysMetadata.mockReturnValue(true);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
     adapterMocks.isChelseaMetadata.mockReturnValue(true);
     adapterMocks.isChronogolfMetadata.mockReturnValue(true);
@@ -129,6 +136,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.isTeesnapMetadata.mockReturnValue(true);
     adapterMocks.isWebTracMetadata.mockReturnValue(true);
     adapterMocks.isWhooshMetadata.mockReturnValue(true);
+    adapterMocks.fetchAgilysysTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchCpsTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchChelseaTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
@@ -221,6 +229,16 @@ describe("fetchCourseTeeSheet", () => {
       fetchCourseTeeSheet(buildCourse("GOLFNOW"), date, 3, true)
     ).resolves.toBe(providerResult);
     expect(adapterMocks.fetchGolfNowTeeSheet).toHaveBeenCalledWith({
+      courseId: "course-1",
+      date,
+      players: 3,
+      metadata
+    });
+
+    await expect(
+      fetchCourseTeeSheet(buildCourse("AGILYSYS"), date, 3, true)
+    ).resolves.toBe(providerResult);
+    expect(adapterMocks.fetchAgilysysTeeSheet).toHaveBeenCalledWith({
       courseId: "course-1",
       date,
       players: 3,
