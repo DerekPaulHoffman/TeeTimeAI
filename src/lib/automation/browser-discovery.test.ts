@@ -6611,6 +6611,66 @@ describe("CPS public configuration enrichment", () => {
   });
 });
 
+describe("GolfNow public booking discovery", () => {
+  it("learns reusable facility metadata from one exact public search page", () => {
+    const bookingUrl =
+      "https://www.golfnow.com/tee-times/facility/10296-hunter-golf-course/search";
+    const discovery = buildBrowserDiscovery({
+      courseId: "hunter",
+      courseName: "Hunter Golf Course",
+      sourceUrl: "https://stewarthunter.armymwr.com/programs/hunter-golf-course",
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl],
+      linkCandidates: [{ url: bookingUrl, label: "Book online tee times" }],
+      officialPage: {
+        url: "https://stewarthunter.armymwr.com/programs/hunter-golf-course",
+        courseName: "Hunter Golf Course",
+        linkCandidates: [{ url: bookingUrl, label: "Book online tee times" }]
+      },
+      visibleText: "We book tee times one week in advance. Book online."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "GOLFNOW",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiEndpoint:
+        "https://www.golfnow.com/api/tee-times/tee-time-search-results",
+      apiMetadata: {
+        provider: "GOLFNOW",
+        facilityId: 10296,
+        bookingBaseUrl: bookingUrl
+      },
+      evidence: expect.objectContaining({
+        learnedFrom: "golfnow-public-facility-search"
+      })
+    });
+  });
+
+  it("does not merge multiple GolfNow facility identities", () => {
+    const first =
+      "https://www.golfnow.com/tee-times/facility/10296-hunter-golf-course/search";
+    const second =
+      "https://www.golfnow.com/tee-times/facility/99999-other-course/search";
+    const discovery = buildBrowserDiscovery({
+      courseId: "hunter",
+      courseName: "Hunter Golf Course",
+      sourceUrl: "https://stewarthunter.armymwr.com/programs/hunter-golf-course",
+      observedUrls: [first, second],
+      linkCandidates: [
+        { url: first, label: "Hunter tee times" },
+        { url: second, label: "Other tee times" }
+      ]
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe("provider-evidence-conflict");
+  });
+});
+
 describe("TenFore public booking enrichment", () => {
   it("keeps public browser-visible TenFore availability in adapter review", () => {
     const discovery = buildBrowserDiscovery({

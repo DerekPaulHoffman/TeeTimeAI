@@ -6,6 +6,7 @@ import { isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isForeupMetadata } from "@/lib/adapters/foreup";
 import { isGolfBackMetadata } from "@/lib/adapters/golfback";
+import { isGolfNowMetadata } from "@/lib/adapters/golfnow";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
@@ -175,8 +176,9 @@ export const PROVIDER_CAPABILITIES = {
   GOLFNOW: {
     family: "GOLFNOW",
     detectedPlatform: "GOLFNOW",
-    supportsAutomation: false,
-    matchesHostname: (hostname) => matchesDomain(hostname, "golfnow.com")
+    supportsAutomation: true,
+    matchesHostname: (hostname) => matchesDomain(hostname, "golfnow.com"),
+    validatesMetadata: isGolfNowMetadata
   },
   CLUB_CADDIE: {
     family: "CLUB_CADDIE",
@@ -249,6 +251,7 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["CHELSEA", "CHELSEA"],
   ["TEESNAP", "TEESNAP"],
   ["GOLFBACK", "GOLFBACK"],
+  ["GOLFNOW", "GOLFNOW"],
   ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
   ["WEBTRAC", "WEBTRAC"],
   ["CLUB_CADDIE", "CLUB_CADDIE"],

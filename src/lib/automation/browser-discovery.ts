@@ -5,6 +5,10 @@ import type {
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import {
+  getGolfNowFacilityId,
+  normalizeGolfNowBookingUrl
+} from "@/lib/adapters/golfnow";
+import {
   getKnownProviderFamilyForHostname,
   getProviderPublicBookingLandingIdentity,
   isProviderInfrastructureUrl,
@@ -111,6 +115,10 @@ export type BrowserDiscovery = {
   } | {
     provider: "GOLFBACK";
     courseId: string;
+    bookingBaseUrl: string;
+  } | {
+    provider: "GOLFNOW";
+    facilityId: number;
     bookingBaseUrl: string;
   } | {
     provider: "GOLF_WITH_ACCESS";
@@ -597,6 +605,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     learnTeeItUpDiscovery(providerEvidence, providerObservedUrls),
     learnChelseaDiscovery(providerEvidence, providerObservedUrls),
     learnGolfBackDiscovery(providerEvidence, providerObservedUrls),
+    learnGolfNowDiscovery(providerEvidence, providerObservedUrls),
     learnWebTracDiscovery(providerEvidence, providerObservedUrls),
     learnClubCaddieDiscovery(providerEvidence, providerObservedUrls),
     learnProtectedCpsDiscovery(providerEvidence, providerObservedUrls),
@@ -1635,6 +1644,56 @@ function learnWebTracDiscovery(
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "webtrac-public-golf-search"
+    }
+  };
+}
+
+function learnGolfNowDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const candidates = uniqueUrls(
+    [
+      ...observedUrls,
+      ...(evidence.linkCandidates ?? []).map(({ url }) => url),
+      ...(evidence.officialPage?.linkCandidates ?? []).map(({ url }) => url)
+    ]
+      .map(normalizeGolfNowBookingUrl)
+      .filter((value): value is string => Boolean(value))
+  );
+  if (candidates.length !== 1) {
+    return null;
+  }
+  const bookingBaseUrl = candidates[0];
+  const facilityId = getGolfNowFacilityId(bookingBaseUrl);
+  if (!facilityId) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "GOLFNOW",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The course's official site links to a public GolfNow facility page. Tee Time Spot reads signed-out tee-time search results and leaves account, cart, payment, and booking actions to the golfer on GolfNow.",
+    apiEndpoint:
+      "https://www.golfnow.com/api/tee-times/tee-time-search-results",
+    apiMetadata: {
+      provider: "GOLFNOW",
+      facilityId,
+      bookingBaseUrl
+    },
+    confidence: 0.96,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "golfnow-public-facility-search"
     }
   };
 }

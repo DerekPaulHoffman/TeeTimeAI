@@ -58,6 +58,12 @@ const runnableMetadata = {
     bookingBaseUrl:
       "https://golfback.com/#/course/123e4567-e89b-42d3-a456-426614174000"
   },
+  GOLFNOW: {
+    provider: "GOLFNOW",
+    facilityId: 10296,
+    bookingBaseUrl:
+      "https://www.golfnow.com/tee-times/facility/10296-hunter-golf-course/search"
+  },
   GOLF_WITH_ACCESS: {
     provider: "GOLF_WITH_ACCESS",
     courseIds: ["123e4567-e89b-42d3-a456-426614174000"],
@@ -371,7 +377,7 @@ describe("provider capability registry", () => {
       GOLF_WITH_ACCESS: [true, "CUSTOM"],
       WEBTRAC: [true, "CUSTOM"],
       EZLINKS: [false, "CUSTOM"],
-      GOLFNOW: [false, "GOLFNOW"],
+      GOLFNOW: [true, "GOLFNOW"],
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [true, "CUSTOM"],
       TENFORE: [false, "CUSTOM"]
@@ -388,6 +394,7 @@ describe("provider capability registry", () => {
             "FOREUP",
             "TEEITUP",
             "CHRONOGOLF",
+            "GOLFNOW",
             "CLUB_CADDIE"
           ].includes(family)
             ? family
