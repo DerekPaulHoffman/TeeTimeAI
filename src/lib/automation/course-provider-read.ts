@@ -10,6 +10,10 @@ import {
 } from "@/lib/adapters/clubcaddie";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
+import {
+  fetchGolfWithAccessTeeSheet,
+  isGolfWithAccessMetadata
+} from "@/lib/adapters/golf-with-access";
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { fetchWebTracTeeSheet, isWebTracMetadata } from "@/lib/adapters/webtrac";
@@ -108,6 +112,17 @@ export function fetchCourseTeeSheet(
       timeZone: course.timeZone,
       metadata: course.bookingMetadata,
       discoverBookingWindow
+    });
+  }
+  if (
+    providerFamily === "GOLF_WITH_ACCESS" &&
+    isGolfWithAccessMetadata(course.bookingMetadata)
+  ) {
+    return fetchGolfWithAccessTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
     });
   }
   if (providerFamily === "WEBTRAC" && isWebTracMetadata(course.bookingMetadata)) {

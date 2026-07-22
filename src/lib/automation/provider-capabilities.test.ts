@@ -58,6 +58,12 @@ const runnableMetadata = {
     bookingBaseUrl:
       "https://golfback.com/#/course/123e4567-e89b-42d3-a456-426614174000"
   },
+  GOLF_WITH_ACCESS: {
+    provider: "GOLF_WITH_ACCESS",
+    courseIds: ["123e4567-e89b-42d3-a456-426614174000"],
+    bookingBaseUrl:
+      "https://golfwithaccess.com/course/public-course/reserve-tee-time"
+  },
   WEBTRAC: {
     provider: "WEBTRAC",
     bookingBaseUrl:
@@ -355,6 +361,7 @@ describe("provider capability registry", () => {
       CHELSEA: [true, "CUSTOM"],
       TEESNAP: [true, "CUSTOM"],
       GOLFBACK: [true, "CUSTOM"],
+      GOLF_WITH_ACCESS: [true, "CUSTOM"],
       WEBTRAC: [true, "CUSTOM"],
       EZLINKS: [false, "CUSTOM"],
       GOLFNOW: [false, "GOLFNOW"],
@@ -438,6 +445,8 @@ describe("provider capability registry", () => {
     ["course.chelseareservations.com", "CHELSEA"],
     ["course.teesnap.net", "TEESNAP"],
     ["api.golfback.com", "GOLFBACK"],
+    ["golfwithaccess.com", "GOLF_WITH_ACCESS"],
+    ["cdn.golfwithaccess.com", "GOLF_WITH_ACCESS"],
     ["course.navyaims.com", "WEBTRAC"],
     ["public-course.ezlinksgolf.com", "EZLINKS"],
     ["www.golfnow.com", "GOLFNOW"],
@@ -446,6 +455,29 @@ describe("provider capability registry", () => {
     ["fox.tenfore.golf", "TENFORE"]
   ])("maps %s to the canonical %s family", (hostname, family) => {
     expect(getKnownProviderFamilyForHostname(hostname)).toBe(family);
+  });
+
+  it("keeps only the generic public Golf with Access course landing", () => {
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://golfwithaccess.com/course/public-course/reserve-tee-time"
+      )
+    ).toBe(true);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://golfwithaccess.com/course/public-course/reserve-tee-time/opaque-slot"
+      )
+    ).toBe(false);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://golfwithaccess.com/course/public-course/reserve-tee-time?rateId=private"
+      )
+    ).toBe(false);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://cdn.golfwithaccess.com/course/public-course/reserve-tee-time"
+      )
+    ).toBe(false);
   });
 
   it("recognizes EZLinks without treating provider identity as runnable coverage", () => {

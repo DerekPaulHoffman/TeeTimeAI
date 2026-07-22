@@ -7,6 +7,7 @@ const adapterMocks = vi.hoisted(() => ({
   fetchClubCaddieTeeSheet: vi.fn(),
   fetchForeupTeeSheet: vi.fn(),
   fetchGolfBackTeeSheet: vi.fn(),
+  fetchGolfWithAccessTeeSheet: vi.fn(),
   fetchTeeItUpTeeSheet: vi.fn(),
   fetchTeesnapTeeSheet: vi.fn(),
   fetchWebTracTeeSheet: vi.fn(),
@@ -16,6 +17,7 @@ const adapterMocks = vi.hoisted(() => ({
   isClubCaddieMetadata: vi.fn(),
   isForeupMetadata: vi.fn(),
   isGolfBackMetadata: vi.fn(),
+  isGolfWithAccessMetadata: vi.fn(),
   isTeeItUpMetadata: vi.fn(),
   isTeesnapMetadata: vi.fn(),
   isWebTracMetadata: vi.fn()
@@ -48,6 +50,10 @@ vi.mock("@/lib/adapters/foreup", () => ({
 vi.mock("@/lib/adapters/golfback", () => ({
   fetchGolfBackTeeSheet: adapterMocks.fetchGolfBackTeeSheet,
   isGolfBackMetadata: adapterMocks.isGolfBackMetadata
+}));
+vi.mock("@/lib/adapters/golf-with-access", () => ({
+  fetchGolfWithAccessTeeSheet: adapterMocks.fetchGolfWithAccessTeeSheet,
+  isGolfWithAccessMetadata: adapterMocks.isGolfWithAccessMetadata
 }));
 vi.mock("@/lib/adapters/teeitup", () => ({
   fetchTeeItUpTeeSheet: adapterMocks.fetchTeeItUpTeeSheet,
@@ -105,6 +111,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.isClubCaddieMetadata.mockReturnValue(true);
     adapterMocks.isForeupMetadata.mockReturnValue(true);
     adapterMocks.isGolfBackMetadata.mockReturnValue(true);
+    adapterMocks.isGolfWithAccessMetadata.mockReturnValue(true);
     adapterMocks.isTeeItUpMetadata.mockReturnValue(true);
     adapterMocks.isTeesnapMetadata.mockReturnValue(true);
     adapterMocks.isWebTracMetadata.mockReturnValue(true);
@@ -114,6 +121,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.fetchClubCaddieTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchForeupTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue(providerResult);
+    adapterMocks.fetchGolfWithAccessTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchTeeItUpTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchTeesnapTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchWebTracTeeSheet.mockResolvedValue(providerResult);
@@ -191,6 +199,16 @@ describe("fetchCourseTeeSheet", () => {
       timeZone: "America/New_York",
       metadata,
       discoverBookingWindow: true
+    });
+
+    await expect(
+      fetchCourseTeeSheet(buildCourse("GOLF_WITH_ACCESS"), date, 3, true)
+    ).resolves.toBe(providerResult);
+    expect(adapterMocks.fetchGolfWithAccessTeeSheet).toHaveBeenCalledWith({
+      courseId: "course-1",
+      date,
+      players: 3,
+      metadata
     });
 
     await expect(

@@ -12,10 +12,60 @@ import {
   getBestProbeUrl,
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
+  pickLikelyBookingHref,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
   type BrowserDiscoveryEvidence
 } from "./browser-discovery";
+
+describe("booking-link selection", () => {
+  it("prefers a public external tee sheet over a same-page booking label", () => {
+    expect(
+      pickLikelyBookingHref(
+        [
+          {
+            href: "https://course.example/book-tee-time/",
+            text: "Book Tee Times"
+          },
+          {
+            href: "https://troon.example/course/public/reserve-tee-time",
+            text: "Please click here"
+          },
+          {
+            href:
+              "https://golfwithaccess.com/course/public-course/reserve-tee-time",
+            text: "BOOK TEE TIMES"
+          }
+        ],
+        "https://course.example/book-tee-time/"
+      )
+    ).toBe(
+      "https://golfwithaccess.com/course/public-course/reserve-tee-time"
+    );
+  });
+
+  it("does not select account, checkout, or unrelated booking links", () => {
+    expect(
+      pickLikelyBookingHref(
+        [
+          {
+            href: "https://course.example/account/login",
+            text: "Book Tee Times"
+          },
+          {
+            href: "https://course.example/checkout/start",
+            text: "Reserve Tee Time"
+          },
+          {
+            href: "https://course.example/lessons/book",
+            text: "Book Lessons Online"
+          }
+        ],
+        "https://course.example/"
+      )
+    ).toBeNull();
+  });
+});
 
 describe("browser discovery monitoring gate", () => {
   const now = new Date("2026-07-16T12:00:00.000Z");
@@ -121,6 +171,120 @@ describe("browser discovery monitoring gate", () => {
 });
 
 describe("buildBrowserDiscovery", () => {
+  it("learns reusable Golf with Access metadata from an official provider link and public API request", () => {
+    const bookingUrl =
+      "https://golfwithaccess.com/course/example-public-course/reserve-tee-time";
+    const apiUrl = new URL("https://golfwithaccess.com/api/v1/tee-times");
+    apiUrl.searchParams.append(
+      "courseIds",
+      "11111111-1111-4111-8111-111111111111"
+    );
+    apiUrl.searchParams.append(
+      "courseIds",
+      "22222222-2222-4222-8222-222222222222"
+    );
+    apiUrl.searchParams.set("players", "2");
+    apiUrl.searchParams.set("startAt", "00:00:00");
+    apiUrl.searchParams.set("endAt", "23:59:59");
+    apiUrl.searchParams.set("day", "2026-07-24");
+
+    const discovery = buildBrowserDiscovery({
+      courseId: "golf-with-access-course",
+      courseName: "Example Public Golf Club",
+      sourceUrl: "https://course.example/book-tee-time/",
+      finalUrl: bookingUrl,
+      officialCourseWebsite: "https://course.example/",
+      observedUrls: [bookingUrl, apiUrl.toString()],
+      linkCandidates: [{ url: bookingUrl, label: "Book Tee Times" }],
+      officialPage: {
+        url: "https://course.example/book-tee-time/",
+        courseName: "Example Public Golf Club",
+        linkCandidates: [{ url: bookingUrl, label: "Book Tee Times" }],
+        visibleText: "Example Public Golf Club. Book tee times online."
+      },
+      visibleText:
+        "Example Public Golf Club. Public signed-out tee times are available."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiEndpoint: "https://golfwithaccess.com/api/v1/tee-times",
+      apiMetadata: {
+        provider: "GOLF_WITH_ACCESS",
+        courseIds: [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222"
+        ],
+        bookingBaseUrl: bookingUrl
+      },
+      evidence: {
+        learnedFrom: "golf-with-access-public-availability",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK"
+        }
+      }
+    });
+  });
+
+  it.each([
+    {
+      label: "missing official provider link",
+      mutate: (evidence: BrowserDiscoveryEvidence) => ({
+        ...evidence,
+        officialPage: { ...evidence.officialPage!, linkCandidates: [] }
+      })
+    },
+    {
+      label: "mismatched official course identity",
+      mutate: (evidence: BrowserDiscoveryEvidence) => ({
+        ...evidence,
+        officialPage: {
+          ...evidence.officialPage!,
+          courseName: "Different Golf Club"
+        }
+      })
+    },
+    {
+      label: "unsafe API query state",
+      mutate: (evidence: BrowserDiscoveryEvidence) => ({
+        ...evidence,
+        observedUrls: evidence.observedUrls.map((url) =>
+          url.includes("/api/v1/tee-times") ? `${url}&token=private` : url
+        )
+      })
+    }
+  ])("fails closed for $label", ({ mutate }) => {
+    const bookingUrl =
+      "https://golfwithaccess.com/course/example-public-course/reserve-tee-time";
+    const apiUrl =
+      "https://golfwithaccess.com/api/v1/tee-times?courseIds=11111111-1111-4111-8111-111111111111&players=2&startAt=00%3A00%3A00&endAt=23%3A59%3A59&day=2026-07-24";
+    const evidence: BrowserDiscoveryEvidence = {
+      courseId: "golf-with-access-negative",
+      courseName: "Example Public Golf Club",
+      sourceUrl: "https://course.example/book-tee-time/",
+      finalUrl: bookingUrl,
+      officialCourseWebsite: "https://course.example/",
+      observedUrls: [bookingUrl, apiUrl],
+      linkCandidates: [{ url: bookingUrl, label: "Book Tee Times" }],
+      officialPage: {
+        url: "https://course.example/book-tee-time/",
+        courseName: "Example Public Golf Club",
+        linkCandidates: [{ url: bookingUrl, label: "Book Tee Times" }],
+        visibleText: "Example Public Golf Club. Book tee times online."
+      },
+      visibleText: "Example Public Golf Club."
+    };
+
+    const discovery = buildBrowserDiscovery(mutate(evidence));
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("classifies a confirmed initial-page soft 404 without retaining polluted links", () => {
     const before = Date.now();
     const discovery = buildBrowserDiscovery({

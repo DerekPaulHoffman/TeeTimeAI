@@ -8,6 +8,7 @@ import {
   evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
   keepPolicyOnlyDiscoveryActionable,
+  pickLikelyBookingHref,
   sanitizeBrowserDiscoveryAccessEvidence,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
@@ -363,34 +364,19 @@ function haveSameOrigin(left: string, right: string) {
 }
 
 async function clickLikelyBookingLink(page: Page) {
-  const href = await page.evaluate(() => {
-    const candidates = Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
+  const candidates = await page.evaluate(() =>
+    Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
       .map((anchor) => ({
         href: anchor.href,
         text: anchor.textContent?.replace(/\s+/g, " ").trim() ?? ""
       }))
-      .filter((anchor) => /tee.?time|book|reserve|reservation|foreup|teeitup|golfnow|cps\.golf/i.test(`${anchor.text} ${anchor.href}`))
-      .map((anchor) => {
-        const searchable = `${anchor.text} ${anchor.href}`;
-        let score = 0;
-        if (/foreupsoftware\.com|\.book\.teeitup\.golf|golfnow\.com|cps\.golf/i.test(anchor.href)) {
-          score += 100;
-        }
-        if (/tee.?time/i.test(searchable)) {
-          score += 20;
-        }
-        if (/book|reserve|reservation/i.test(searchable)) {
-          score += 10;
-        }
-        if (/#$/.test(anchor.href)) {
-          score -= 50;
-        }
-        return { ...anchor, score };
-      })
-      .sort((a, b) => b.score - a.score);
-
-    return candidates[0]?.href ?? null;
-  });
+      .filter((anchor) =>
+        /tee.?time|book|reserve|reservation|foreup|teeitup|golfnow|cps\.golf/i.test(
+          `${anchor.text} ${anchor.href}`
+        )
+      )
+  );
+  const href = pickLikelyBookingHref(candidates, page.url());
 
   if (!href) {
     return;

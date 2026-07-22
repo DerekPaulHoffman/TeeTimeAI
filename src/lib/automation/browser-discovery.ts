@@ -3,6 +3,7 @@ import type {
   BookingMethod
 } from "@/lib/courses/intelligence";
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
+import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import {
   getKnownProviderFamilyForHostname,
   getProviderPublicBookingLandingIdentity,
@@ -110,6 +111,10 @@ export type BrowserDiscovery = {
   } | {
     provider: "GOLFBACK";
     courseId: string;
+    bookingBaseUrl: string;
+  } | {
+    provider: "GOLF_WITH_ACCESS";
+    courseIds: string[];
     bookingBaseUrl: string;
   } | {
     provider: "WEBTRAC";
@@ -522,6 +527,14 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return withCourseIdentityCorroboration(privateClubClassification, evidence);
   }
 
+  const golfWithAccessDiscovery = learnGolfWithAccessDiscovery(
+    evidence,
+    observedUrls
+  );
+  if (golfWithAccessDiscovery) {
+    return golfWithAccessDiscovery;
+  }
+
   const phoneReservationClassification = learnOfficialPhoneReservationClassification(
     providerEvidence,
     providerObservedUrls
@@ -633,6 +646,178 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       learnedFrom: "browser-visible-links"
     }
   }, evidence);
+}
+
+export function pickLikelyBookingHref(
+  candidates: Array<{ href: string; text: string }>,
+  currentPageUrl: string
+) {
+  const scored = candidates.flatMap((candidate, index) => {
+    const parsed = parseUrl(candidate.href);
+    if (
+      !parsed ||
+      !["http:", "https:"].includes(parsed.protocol) ||
+      !isSafeManualEvidenceUrl(parsed) ||
+      isClearlyUnrelatedBookingLabel(candidate.text)
+    ) {
+      return [];
+    }
+    const searchable = normalizeTeeTimeTypography(
+      `${candidate.text} ${candidate.href}`
+    );
+    let score = 0;
+    if (isProviderPublicBookingLandingUrl(parsed)) {
+      score += 100;
+    }
+    if (
+      /\b(?:book|reserve|schedule|view|search|find|check)\b.{0,60}\btee\s*times?\b/i.test(
+        normalizeTeeTimeTypography(candidate.text)
+      )
+    ) {
+      score += 40;
+    }
+    if (/\btee\s*times?\b/i.test(searchable)) {
+      score += 20;
+    }
+    if (/\b(?:book|reserve|reservation)\b/i.test(searchable)) {
+      score += 10;
+    }
+    if (haveSameExactUrl(candidate.href, currentPageUrl)) {
+      score -= 200;
+    }
+    if (/#$/u.test(candidate.href)) {
+      score -= 50;
+    }
+    return score > 0 ? [{ href: parsed.toString(), score, index }] : [];
+  });
+  return scored.sort((left, right) =>
+    right.score - left.score || left.index - right.index
+  )[0]?.href ?? null;
+}
+
+function learnGolfWithAccessDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const bookingUrls = uniqueUrls(
+    (evidence.officialPage?.linkCandidates ?? [])
+      .map(({ url }) => url)
+      .filter((value) => {
+        const parsed = parseUrl(value);
+        return Boolean(
+          parsed &&
+            parsed.hostname === "golfwithaccess.com" &&
+            isProviderPublicBookingLandingUrl(parsed)
+        );
+      })
+  );
+  if (bookingUrls.length !== 1) {
+    return null;
+  }
+  const bookingBaseUrl = bookingUrls[0];
+  const apiRequests = observedUrls.flatMap((value) => {
+    const parsed = parseUrl(value);
+    if (!parsed || !isExactGolfWithAccessTechnicalEvidenceUrl(parsed)) {
+      return [];
+    }
+    const courseIds = parsed.searchParams.getAll("courseIds");
+    const metadata = {
+      provider: "GOLF_WITH_ACCESS" as const,
+      courseIds,
+      bookingBaseUrl
+    };
+    return isGolfWithAccessMetadata(metadata)
+      ? [{ metadata, requestUrl: parsed.toString() }]
+      : [];
+  });
+  const metadataByCourseIds = new Map(
+    apiRequests.map((request) => [
+      [...request.metadata.courseIds]
+        .map((courseId) => courseId.toLowerCase())
+        .sort()
+        .join(","),
+      request
+    ])
+  );
+  if (metadataByCourseIds.size !== 1) {
+    return null;
+  }
+  const request = [...metadataByCourseIds.values()][0];
+  const discovery: BrowserDiscovery = {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.officialPage?.url ?? evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The official course page links to a public Golf with Access tee sheet. Tee Time Spot reads only signed-out availability and sends golfers to the generic official course page to book.",
+    apiEndpoint: "https://golfwithaccess.com/api/v1/tee-times",
+    apiMetadata: request.metadata,
+    confidence: 0.95,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls: uniqueUrls([
+        evidence.officialPage?.url,
+        bookingBaseUrl,
+        request.requestUrl
+      ]),
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "golf-with-access-public-availability"
+    }
+  };
+  const corroboration = getOfficialCourseProviderLinkCorroboration(
+    discovery,
+    evidence
+  );
+  if (!corroboration) {
+    return null;
+  }
+  return {
+    ...discovery,
+    evidence: { ...discovery.evidence, courseIdentityCorroboration: corroboration }
+  };
+}
+
+function isValidGolfWithAccessDate(value: string | null) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return (
+    !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+  );
+}
+
+function isExactGolfWithAccessTechnicalEvidenceUrl(url: URL) {
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "golfwithaccess.com" ||
+    url.pathname !== "/api/v1/tee-times" ||
+    url.hash ||
+    url.username ||
+    url.password ||
+    url.port
+  ) {
+    return false;
+  }
+  const allowedKeys = new Set([
+    "courseIds",
+    "players",
+    "startAt",
+    "endAt",
+    "day"
+  ]);
+  return (
+    ![...url.searchParams.keys()].some((key) => !allowedKeys.has(key)) &&
+    url.searchParams.getAll("courseIds").length > 0 &&
+    /^[1-4]$/u.test(url.searchParams.get("players") ?? "") &&
+    url.searchParams.get("startAt") === "00:00:00" &&
+    url.searchParams.get("endAt") === "23:59:59" &&
+    isValidGolfWithAccessDate(url.searchParams.get("day"))
+  );
 }
 
 function learnKnownProviderAccessBarrierClassification(
@@ -1277,6 +1462,8 @@ function isExactProviderTechnicalEvidenceUrl(
   url: URL
 ) {
   switch (providerFamily) {
+    case "GOLF_WITH_ACCESS":
+      return isExactGolfWithAccessTechnicalEvidenceUrl(url);
     case "FOREUP":
       return isForeupApiUrl(url.toString());
     case "CPS":

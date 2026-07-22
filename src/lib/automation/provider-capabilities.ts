@@ -6,6 +6,7 @@ import { isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isForeupMetadata } from "@/lib/adapters/foreup";
 import { isGolfBackMetadata } from "@/lib/adapters/golfback";
+import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { isWebTracMetadata } from "@/lib/adapters/webtrac";
@@ -22,6 +23,7 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "CHELSEA",
   "TEESNAP",
   "GOLFBACK",
+  "GOLF_WITH_ACCESS",
   "WEBTRAC",
   "EZLINKS",
   "GOLFNOW",
@@ -149,6 +151,13 @@ export const PROVIDER_CAPABILITIES = {
     matchesHostname: (hostname) => matchesDomain(hostname, "golfback.com"),
     validatesMetadata: isGolfBackMetadata
   },
+  GOLF_WITH_ACCESS: {
+    family: "GOLF_WITH_ACCESS",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: true,
+    matchesHostname: (hostname) => matchesDomain(hostname, "golfwithaccess.com"),
+    validatesMetadata: isGolfWithAccessMetadata
+  },
   WEBTRAC: {
     family: "WEBTRAC",
     detectedPlatform: "CUSTOM",
@@ -238,6 +247,7 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["CHELSEA", "CHELSEA"],
   ["TEESNAP", "TEESNAP"],
   ["GOLFBACK", "GOLFBACK"],
+  ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
   ["WEBTRAC", "WEBTRAC"],
   ["CLUB_CADDIE", "CLUB_CADDIE"]
 ]);
@@ -700,6 +710,14 @@ function isProviderFamilyPublicBookingLandingUrl(
           /^#\/course\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/?$/iu.test(
             url.hash
           )
+      );
+    case "GOLF_WITH_ACCESS":
+      return Boolean(
+        hostname === "golfwithaccess.com" &&
+          /^\/course\/[a-z0-9][a-z0-9-]{0,127}\/reserve-tee-time\/?$/iu.test(
+            pathname
+          ) &&
+          !url.hash
       );
     case "WEBTRAC":
       return Boolean(
