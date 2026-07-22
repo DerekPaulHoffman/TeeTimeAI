@@ -4631,11 +4631,12 @@ describe("search monitoring discovery", () => {
     expect(discovery.automationEligibility).toBeUndefined();
   });
 
-  it("follows an exact legacy provider search landing and records its managed challenge", async () => {
+  it.each([
+    "https://public-course.ezlinksgolf.com/target-course/search",
+    "https://public-course.ezlinksgolf.com/index.html#/search"
+  ])("follows an exact legacy provider search landing and records its managed challenge: %s", async (providerUrl) => {
     const sourceUrl = "https://public-course.example/";
     const bookingPageUrl = "https://public-course.example/tee-times/";
-    const providerUrl =
-      "https://public-course.ezlinksgolf.com/target-course/search";
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       switch (url.toString()) {
         case sourceUrl:

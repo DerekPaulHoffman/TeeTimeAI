@@ -709,7 +709,8 @@ function isProviderFamilyPublicBookingLandingUrl(
           url.searchParams.get("secondarycode") &&
           !url.hash
       );
-    case "EZLINKS":
+    case "EZLINKS": {
+      const legacySearchHash = /^#\/search\/?$/iu.test(url.hash);
       return Boolean(
         isSingleProviderTenantHostname(hostname, "ezlinksgolf.com") &&
           !hasUnrelatedProviderHostLabel(hostname, "ezlinksgolf.com") &&
@@ -718,8 +719,9 @@ function isProviderFamilyPublicBookingLandingUrl(
             /^\/[a-z0-9][a-z0-9-]{0,127}\/(?:(?:public-)?(?:book(?:ing)?|tee-?times?)|search)\/?$/iu.test(
               pathname
             )) &&
-          !url.hash
+          (!url.hash || (isRoot && legacySearchHash))
       );
+    }
     case "GOLFNOW":
       return Boolean(
         /^(?:www\.)?golfnow\.com$/u.test(hostname) &&

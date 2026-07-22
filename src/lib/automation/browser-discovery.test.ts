@@ -1524,7 +1524,7 @@ describe("buildBrowserDiscovery", () => {
   it("classifies a corroborated managed challenge on an exact known-provider search landing", () => {
     const sourceUrl = "https://public-course.example/tee-times";
     const providerUrl =
-      "https://public-course.ezlinksgolf.com/target-course/search";
+      "https://public-course.ezlinksgolf.com/index.html#/search";
     const accessBarrier = { url: providerUrl, status: 403 as const };
     const discovery = buildBrowserDiscovery({
       courseId: "target-course",
@@ -1545,7 +1545,10 @@ describe("buildBrowserDiscovery", () => {
       automationReason: "CAPTCHA_OR_QUEUE",
       confidence: 0.95,
       evidence: {
-        accessBarriers: [accessBarrier],
+        accessBarriers: [{
+          url: "https://public-course.ezlinksgolf.com/index.html",
+          status: 403
+        }],
         learnedFrom: "known-provider-public-landing-access-barrier"
       }
     });

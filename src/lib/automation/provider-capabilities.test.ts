@@ -152,6 +152,7 @@ describe("provider capability registry", () => {
     "https://forest.ezlinksgolf.com/tee-times",
     "https://public-course.ezlinksgolf.com/oak-forest/tee-times",
     "https://public-course.ezlinksgolf.com/oak-forest/search",
+    "https://public-course.ezlinksgolf.com/index.html#/search",
     "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
     "https://fox.tenfore.golf/gainfieldfarms",
     "https://dennis.chelseareservations.com/GPInprocess"
@@ -238,6 +239,15 @@ describe("provider capability registry", () => {
     );
     expect(
       getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/index.html#/search"
+      )
+    ).toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/"
+      )
+    );
+    expect(
+      getProviderPublicBookingLandingIdentity(
         "https://target.book.teeitup.golf/?course=111"
       )
     ).not.toBe(
@@ -265,6 +275,9 @@ describe("provider capability registry", () => {
     "https://capitalhillsny.cps.golf/onlineresweb/search-teetime/checkout?CourseId=7",
     "https://foreupsoftware.com/index.php/booking/21017/checkout#/teetimes",
     "https://public-course.ezlinksgolf.com/tee-times#checkout",
+    "https://public-course.ezlinksgolf.com/index.html#/checkout",
+    "https://public-course.ezlinksgolf.com/index.html#/account",
+    "https://public-course.ezlinksgolf.com/index.html#/offers",
     "https://public-course.ezlinksgolf.com/booking/transaction",
     "https://public-course.ezlinksgolf.com/tee-times/confirm",
     "https://public-course.ezlinksgolf.com/tee-times/confirmation",
