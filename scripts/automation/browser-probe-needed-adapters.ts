@@ -10,6 +10,7 @@ import {
   haveSamePublicWebsiteOrigin,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
+  prioritizeBrowserDiscoveryLinks,
   sanitizeBrowserDiscoveryAccessEvidence,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
@@ -316,7 +317,7 @@ async function collectBrowserEvidence(
 }
 
 async function collectPageEvidence(page: Page) {
-  return page.evaluate(() => {
+  const evidence = await page.evaluate(() => {
     const anchorCandidates = Array.from(
       document.querySelectorAll<HTMLAnchorElement>("a[href]")
     )
@@ -325,7 +326,7 @@ async function collectPageEvidence(page: Page) {
         label: anchor.textContent?.replace(/\s+/g, " ").trim() ?? ""
       }))
       .filter((candidate) => Boolean(candidate.url))
-      .slice(0, 80);
+      .slice(0, 200);
     const pageText = document.body?.innerText?.replace(/\s+/g, " ").trim() ?? "";
     const frameCandidates = /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
       ? Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe[src]"))
@@ -339,7 +340,7 @@ async function collectPageEvidence(page: Page) {
           .filter((candidate) => Boolean(candidate.url))
           .slice(0, 20)
       : [];
-    const linkCandidates = [...anchorCandidates, ...frameCandidates].slice(0, 100);
+    const linkCandidates = [...anchorCandidates, ...frameCandidates];
     const anchors = linkCandidates.map((candidate) => candidate.url);
     const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>("script[src]"))
       .map((script) => script.src)
@@ -377,6 +378,15 @@ async function collectPageEvidence(page: Page) {
         .join("\n")
     };
   });
+  const linkCandidates = prioritizeBrowserDiscoveryLinks(
+    evidence.linkCandidates,
+    100
+  );
+  return {
+    ...evidence,
+    anchors: linkCandidates.map(({ url }) => url),
+    linkCandidates
+  };
 }
 
 async function clickLikelyBookingLink(page: Page) {

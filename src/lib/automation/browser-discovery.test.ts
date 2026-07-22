@@ -14,12 +14,27 @@ import {
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
+  prioritizeBrowserDiscoveryLinks,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
   type BrowserDiscoveryEvidence
 } from "./browser-discovery";
 
 describe("booking-link selection", () => {
+  it("retains late official booking links inside the bounded evidence set", () => {
+    const genericLinks = Array.from({ length: 120 }, (_, index) => ({
+      url: `https://course.example/page-${index}`,
+      label: `Page ${index}`
+    }));
+    const bookingLink = {
+      url: "https://provider.example/public-course/tee-times",
+      label: "Book Tee Times"
+    };
+    expect(
+      prioritizeBrowserDiscoveryLinks([...genericLinks, bookingLink], 80)
+    ).toContainEqual(bookingLink);
+  });
+
   it("keeps apex and www redirects inside the same official website", () => {
     expect(
       haveSamePublicWebsiteOrigin(

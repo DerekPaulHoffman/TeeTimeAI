@@ -717,6 +717,27 @@ export function haveSamePublicWebsiteOrigin(left: string, right: string) {
   );
 }
 
+export function prioritizeBrowserDiscoveryLinks(
+  candidates: Array<{ url: string; label: string }>,
+  limit = 100
+) {
+  return candidates
+    .map((candidate, index) => ({
+      ...candidate,
+      index,
+      bookingPriority: /tee.?time|book|reserve|reservation/i.test(
+        `${candidate.label} ${candidate.url}`
+      )
+    }))
+    .sort(
+      (left, right) =>
+        Number(right.bookingPriority) - Number(left.bookingPriority) ||
+        left.index - right.index
+    )
+    .slice(0, Math.max(1, Math.min(limit, 200)))
+    .map(({ url, label }) => ({ url, label }));
+}
+
 function learnGolfWithAccessDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
