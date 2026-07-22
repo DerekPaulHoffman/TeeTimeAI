@@ -232,6 +232,67 @@ describe("TeeItUp adapter", () => {
     });
   });
 
+  it("limits a shared alias to an explicitly selected multi-course facility", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          { id: 17639, courseId: "rock-creek", name: "Rock Creek" },
+          { id: 17638, courseId: "langston", name: "Langston" },
+          { id: 17644, courseId: "east-red", name: "East Potomac Red" },
+          { id: 17645, courseId: "east-white", name: "East Potomac White" },
+          { id: 17637, courseId: "east-blue", name: "East Potomac Blue" }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            teetimes: [
+              {
+                courseId: "east-red",
+                teetime: "2026-07-28T12:00:00.000Z",
+                rates: [
+                  { allowedPlayers: [1, 2, 3, 4], holes: 9, greenFeeCart: 2400 }
+                ]
+              },
+              {
+                courseId: "east-blue",
+                teetime: "2026-07-28T12:10:00.000Z",
+                rates: [
+                  { allowedPlayers: [1, 2], holes: 18, greenFeeCart: 4800 }
+                ]
+              }
+            ]
+          }
+        ]
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const slots = await fetchTeeItUpSlots({
+      courseId: "east-potomac",
+      date: new Date("2026-07-28T00:00:00-04:00"),
+      metadata: {
+        aliases: ["play-dc-golf-public"],
+        bookingBaseUrl: "https://play-dc-golf-public.book.teeitup.com/",
+        facilityIds: [17644, 17645, 17637]
+      }
+    });
+
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://phx-api-be-east-1b.kenna.io/v2/tee-times?date=2026-07-28&facilityIds=17644%2C17645%2C17637&returnPromotedRates=true"
+    );
+    expect(slots).toHaveLength(2);
+    expect(slots.map((slot) => slot.sourceId)).toEqual([
+      "teeitup-17644-east-red-2026-07-28T12:00:00.000Z",
+      "teeitup-17637-east-blue-2026-07-28T12:10:00.000Z"
+    ]);
+    expect(slots[0]?.bookingUrl).toBe(
+      "https://play-dc-golf-public.book.teeitup.com/?date=2026-07-28"
+    );
+  });
+
   it("fails when the selected facility is absent instead of reporting an empty tee sheet", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce({
       ok: true,

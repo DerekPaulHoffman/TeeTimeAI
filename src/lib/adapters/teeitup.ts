@@ -88,18 +88,26 @@ export function isTeeItUpMetadata(value: unknown): value is TeeItUpMetadata {
 
   if (
     !Array.isArray(metadata.facilityIds) ||
-    metadata.facilityIds.length !== 1 ||
-    !isPositiveSafeInteger(metadata.facilityIds[0]) ||
+    metadata.facilityIds.length < 1 ||
+    metadata.facilityIds.length > 20 ||
+    metadata.facilityIds.some((facilityId) => !isPositiveSafeInteger(facilityId)) ||
+    new Set(metadata.facilityIds).size !== metadata.facilityIds.length ||
     aliases.length !== 1
   ) {
     return false;
   }
 
-  return Boolean(
-    bookingUrl.facilityId === metadata.facilityIds[0] &&
-      bookingUrl.alias.toLocaleLowerCase("en-US") ===
-        aliases[0].toLocaleLowerCase("en-US")
-  );
+  if (
+    bookingUrl.alias.toLocaleLowerCase("en-US") !==
+    aliases[0].toLocaleLowerCase("en-US")
+  ) {
+    return false;
+  }
+
+  return bookingUrl.facilityId === undefined
+    ? metadata.facilityIds.length > 1
+    : metadata.facilityIds.length === 1 &&
+        bookingUrl.facilityId === metadata.facilityIds[0];
 }
 
 export async function fetchTeeItUpSlots(input: {
@@ -140,9 +148,12 @@ export async function fetchTeeItUpTeeSheet(input: {
         "TeeItUp returned an ambiguous facility set for an unscoped booking alias"
       );
     }
-    if (input.metadata.facilityIds && facilities.length !== 1) {
+    if (
+      input.metadata.facilityIds &&
+      facilities.length !== input.metadata.facilityIds.length
+    ) {
       throw new Error(
-        "TeeItUp did not return the selected facility for the scoped booking link"
+        "TeeItUp did not return the selected facility set for the scoped booking link"
       );
     }
     if (!facilities.every((facility) => isPositiveSafeInteger(facility.id))) {

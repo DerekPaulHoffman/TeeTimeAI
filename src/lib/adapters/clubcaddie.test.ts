@@ -132,6 +132,24 @@ describe("parseClubCaddieSlots", () => {
     ).toEqual({ slots: [], responseRecognized: true });
   });
 
+  it("recognizes the provider's public filter-empty result", () => {
+    expect(
+      parseClubCaddieSlots(
+        `<div class="card">
+          Use Time & Day Filters To Find Desired Tee-Times.
+          To see more times adjust your filters for date, holes, players, or time of day.
+        </div>`,
+        {
+          courseId: "course-1",
+          providerCourseId: "103436",
+          targetDate: "2026-07-19",
+          players: 2,
+          bookingBaseUrl: metadata.bookingBaseUrl
+        }
+      )
+    ).toEqual({ slots: [], responseRecognized: true });
+  });
+
   it("does not convert a changed slot-card schema into a false no-match", () => {
     expect(
       parseClubCaddieSlots(
@@ -192,6 +210,36 @@ describe("parseClubCaddieSlots", () => {
       slots: [expect.objectContaining({ startsAt: "2026-07-19T08:08" })],
       responseRecognized: true
     });
+  });
+
+  it("preserves public slots that offer either 9 or 18 holes", () => {
+    const result = parseClubCaddieSlots(
+      `<div class="teetime bigscreen">
+        Golfers: 1 - 4 Starting 9: Front Tee Time: 05:20 PM
+        Price: $20.00 - $34.00 Holes: 9 or 18 Holes
+        <button>Book Now</button>
+      </div>`,
+      {
+        courseId: "course-1",
+        providerCourseId: "103436",
+        targetDate: "2026-07-19",
+        players: 2,
+        bookingBaseUrl: metadata.bookingBaseUrl
+      }
+    );
+
+    expect(result).toEqual({
+      slots: [
+        expect.objectContaining({
+          sourceId: "clubcaddie-103436-20260719-1720-front-9-18",
+          startsAt: "2026-07-19T17:20",
+          bookableHoleCounts: [9, 18]
+        })
+      ],
+      responseRecognized: true
+    });
+    expect(result.slots[0]).not.toHaveProperty("holes");
+    expect(result.slots[0]).not.toHaveProperty("priceCents");
   });
 
   it("rejects invalid provider clocks and malformed cards even beside empty-result copy", () => {
@@ -357,6 +405,55 @@ describe("fetchClubCaddieTeeSheet", () => {
     expect(new URL(fetchImpl.mock.calls[1][0].toString()).pathname).toBe(
       "/webapi/view/public-resource/slots"
     );
+  });
+
+  it("follows the provider's bounded same-course public search defaults redirect", async () => {
+    const suffixlessMetadata: ClubCaddieMetadata = {
+      ...metadata,
+      bookingBaseUrl:
+        "https://apimanager-cc28.clubcaddie.com/webapi/view/public-resource"
+    };
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(
+        new Response("bootstrap", {
+          status: 200,
+          headers: { "Session-Id": "request-local-session" }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 307,
+          headers: {
+            Location:
+              "/webapi/view/public-resource/slots?date=07/19/2026&player=0&ratetype=any"
+          }
+        })
+      )
+      .mockResolvedValueOnce(new Response(publicSearchPage, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response("<div>No tee times available for this date.</div>", { status: 200 })
+      );
+
+    await expect(
+      fetchClubCaddieTeeSheet(
+        {
+          courseId: "course-1",
+          date: new Date("2026-07-19T00:00:00.000Z"),
+          players: 2,
+          metadata: suffixlessMetadata
+        },
+        fetchImpl
+      )
+    ).resolves.toMatchObject({ slots: [], targetDateStatus: "OPEN" });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(new URL(fetchImpl.mock.calls[2][0].toString()).pathname).toBe(
+      "/webapi/view/public-resource/slots"
+    );
+    expect(
+      new URL(fetchImpl.mock.calls[2][0].toString()).searchParams.get(
+        "Interaction"
+      )
+    ).toBe("request-local-session");
   });
 
   it.each([

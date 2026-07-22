@@ -9,6 +9,7 @@ import {
 
 export type ProviderCoverageCategory =
   | "MONITORED"
+  | "SUPPORTED_READY"
   | "SUPPORTED_DEGRADED"
   | "TECHNICAL_CONSTRAINT"
   | "PHONE_OR_WALK_IN"
@@ -32,6 +33,8 @@ type CoverageCourse = {
   probes: Array<{ outcome: string; observedAt: Date }>;
   supportIncident: {
     status: string;
+    resolvedAt: Date | null;
+    resolution: string | null;
     activeRealSearchCount: number;
     engineeringOnly: boolean;
     failureClass: string;
@@ -70,13 +73,24 @@ export function classifyProviderCoverage(
   }
 
   const latestOutcome = course.probes[0]?.outcome;
+  const latestObservedAt = course.probes[0]?.observedAt;
   const hasCurrentOpenIncident = Boolean(
     course.supportIncident && course.supportIncident.status !== "RESOLVED"
   );
-  return !hasCurrentOpenIncident &&
-    (latestOutcome === "MATCH_FOUND" || latestOutcome === "NO_MATCH")
-    ? "MONITORED"
-    : "SUPPORTED_DEGRADED";
+  if (hasCurrentOpenIncident) {
+    return "SUPPORTED_DEGRADED";
+  }
+  if (latestOutcome === "MATCH_FOUND" || latestOutcome === "NO_MATCH") {
+    return "MONITORED";
+  }
+  if (
+    course.supportIncident?.resolution === "MONITORING_RESTORED" &&
+    course.supportIncident.resolvedAt &&
+    (!latestObservedAt || course.supportIncident.resolvedAt >= latestObservedAt)
+  ) {
+    return "MONITORED";
+  }
+  return latestOutcome ? "SUPPORTED_DEGRADED" : "SUPPORTED_READY";
 }
 
 export async function getProviderCoverageDashboard(input?: { now?: Date }) {
@@ -103,6 +117,8 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
       supportIncident: {
         select: {
           status: true,
+          resolvedAt: true,
+          resolution: true,
           activeRealSearchCount: true,
           engineeringOnly: true,
           failureClass: true,
@@ -119,6 +135,7 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
     {
       courseCount: number;
       monitoredCount: number;
+      readyCount: number;
       degradedCount: number;
       openIncidentCount: number;
       activeRealDemandIncidentCount: number;
@@ -134,6 +151,7 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
     const current = familyCounts.get(family) ?? {
       courseCount: 0,
       monitoredCount: 0,
+      readyCount: 0,
       degradedCount: 0,
       openIncidentCount: 0,
       activeRealDemandIncidentCount: 0,
@@ -141,6 +159,7 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
     };
     current.courseCount += 1;
     current.monitoredCount += Number(category === "MONITORED");
+    current.readyCount += Number(category === "SUPPORTED_READY");
     current.degradedCount += Number(category === "SUPPORTED_DEGRADED");
     if (
       course.supportIncident?.status !== undefined &&
@@ -170,6 +189,7 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
 
   const categoryOrder: ProviderCoverageCategory[] = [
     "MONITORED",
+    "SUPPORTED_READY",
     "SUPPORTED_DEGRADED",
     "TECHNICAL_CONSTRAINT",
     "PHONE_OR_WALK_IN",

@@ -334,9 +334,31 @@ async function fetchCpsAvailability(
       transactionId
     });
     const payload = await retryCpsReadOnTimeout(async () => {
-      const response = await fetchWithProviderTimeout(url, {
+      let response = await fetchWithProviderTimeout(url, {
         headers
       });
+
+      if (
+        credential.apiKey &&
+        await isCpsInvalidTransactionResponse(response)
+      ) {
+        const fallbackTransactionId = crypto.randomUUID();
+        await registerTransactionId(
+          configuration.onlineApi,
+          headers,
+          fallbackTransactionId
+        );
+        response = await fetchWithProviderTimeout(
+          buildTeeTimesUrl(configuration.onlineApi, {
+            date: input.date,
+            players: 0,
+            cpsCourseIds: courseIds,
+            holes,
+            transactionId: fallbackTransactionId
+          }),
+          { headers }
+        );
+      }
 
       if (!response.ok) {
         throw providerHttpError("CPS tee times", response);
@@ -377,6 +399,27 @@ async function fetchCpsAvailability(
   }
 
   return slots;
+}
+
+async function isCpsInvalidTransactionResponse(response: Response) {
+  if (
+    response.status !== 400 ||
+    !response.headers.get("content-type")?.toLowerCase().includes("application/json")
+  ) {
+    return false;
+  }
+  try {
+    const value = await response.clone().json() as unknown;
+    return Boolean(
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      (value as { error?: unknown }).error === "Invalid Transaction Id"
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function fetchCpsBookingWindow(
@@ -1122,8 +1165,23 @@ function canRecoverCpsTokenErrorWithPublishedKey(error: unknown) {
   return (
     isCpsTimeoutError(error) ||
     isTransientCpsTokenHttpError(error) ||
-    isCpsTokenCredentialRejection(error)
+    isCpsTokenCredentialRejection(error) ||
+    isCpsTokenEndpointUnavailable(error)
   );
+}
+
+function isCpsTokenEndpointUnavailable(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  try {
+    const record = error as { name?: unknown; status?: unknown };
+    return Boolean(
+      record.name === "ProviderHttpError" && record.status === 404
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isCpsTokenCredentialRejection(error: unknown) {

@@ -160,6 +160,13 @@ npm run automation:course-support -- backfill
 npm run automation:course-support -- backfill --apply
 ```
 
+Coverage status is evidence-based: `MONITORED` requires a current successful probe
+or a newer `MONITORING_RESTORED` incident resolution. `SUPPORTED_READY` means the
+provider configuration is runnable but no course check has run yet.
+`SUPPORTED_DEGRADED` is reserved for an open support incident or an unresolved
+latest failed probe. Current authentication, challenge, or queue barriers are
+reported separately as `TECHNICAL_CONSTRAINT` once verified and classified.
+
 Do not paste task ids, batch references, database ids, or workflow ids into customer-visible reports. The CLI accepts `--owner-thread` only when `CODEX_THREAD_ID` is unavailable and the real current task id is known.
 
 ## Migration And Rollout

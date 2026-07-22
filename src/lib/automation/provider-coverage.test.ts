@@ -34,6 +34,8 @@ describe("provider coverage classification", () => {
         ...baseCourse,
         supportIncident: {
           status: "AUTO_INVESTIGATING",
+          resolvedAt: null,
+          resolution: null,
           activeRealSearchCount: 0,
           engineeringOnly: true,
           failureClass: "HTTP_5XX",
@@ -54,6 +56,36 @@ describe("provider coverage classification", () => {
         probes: []
       })
     ).toBe("SOURCE_UNVERIFIED");
+  });
+
+  it("keeps supported courses awaiting their first demand check out of degraded", () => {
+    expect(
+      classifyProviderCoverage({
+        ...baseCourse,
+        probes: [],
+        supportIncident: null
+      })
+    ).toBe("SUPPORTED_READY");
+  });
+
+  it("accepts a newer monitoring-restored resolution over stale failure history", () => {
+    const observedAt = new Date("2026-07-22T08:00:00.000Z");
+    expect(
+      classifyProviderCoverage({
+        ...baseCourse,
+        probes: [{ outcome: "FETCH_FAILED", observedAt }],
+        supportIncident: {
+          status: "RESOLVED",
+          resolvedAt: new Date("2026-07-22T09:00:00.000Z"),
+          resolution: "MONITORING_RESTORED",
+          activeRealSearchCount: 0,
+          engineeringOnly: true,
+          failureClass: "AUTH",
+          attemptCount: 1,
+          firstSeenAt: observedAt
+        }
+      })
+    ).toBe("MONITORED");
   });
 
   it("keeps manual and technical final states distinct", () => {

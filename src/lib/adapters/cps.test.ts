@@ -1477,8 +1477,8 @@ describe("fetchCpsSlots", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it.each([401, 403])(
-    "recovers a CPS token credential HTTP %s through a matching published API key",
+  it.each([401, 403, 404])(
+    "recovers a CPS token HTTP %s through a matching published API key",
     async (status) => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
         async (input, init) => {
@@ -1526,8 +1526,8 @@ describe("fetchCpsSlots", () => {
     }
   );
 
-  it.each([401, 403])(
-    "preserves CPS token credential HTTP %s when no matching published key exists",
+  it.each([401, 403, 404])(
+    "preserves CPS token HTTP %s when no matching published key exists",
     async (status) => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
         async (input) =>
@@ -1982,6 +1982,77 @@ describe("fetchCpsSlots", () => {
         holes: 18
       })
     ]);
+  });
+
+  it("uses a request-local transaction when a published-key tenant requires one", async () => {
+    let registeredTransactionId: string | null = null;
+    let teeTimeAttempts = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = input.toString();
+
+      if (url.endsWith("/identityapi/myconnect/token/short")) {
+        return new Response(null, { status: 404 });
+      }
+      if (url.endsWith("/onlineresweb/Home/Configuration")) {
+        return jsonResponse({
+          ...cpsConfiguration(),
+          apiKey: "provider-published-key"
+        });
+      }
+      if (url.includes("/GetAllOptions/traditionoaklane?")) {
+        return jsonResponse({
+          webSiteId: "published-website-id",
+          reservationOptions: { terminalId: 3 }
+        });
+      }
+      if (url.endsWith("/RegisterTransactionId")) {
+        const body = JSON.parse(String(init?.body)) as {
+          transactionId?: string;
+          action?: string;
+        };
+        expect(body.action).toBe("homepage");
+        expect(body.transactionId).toMatch(/^[a-f0-9-]{36}$/i);
+        registeredTransactionId = body.transactionId ?? null;
+        return jsonResponse(true);
+      }
+      if (url.includes("/TeeTimes?")) {
+        teeTimeAttempts += 1;
+        const teeTimesUrl = new URL(url);
+        if (teeTimeAttempts === 1) {
+          expect(teeTimesUrl.searchParams.has("transactionId")).toBe(false);
+          return new Response(
+            JSON.stringify({ error: "Invalid Transaction Id" }),
+            {
+              status: 400,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+        expect(teeTimesUrl.searchParams.get("transactionId")).toBe(
+          registeredTransactionId
+        );
+        return jsonResponse([
+          {
+            teeSheetId: 789,
+            startTime: "2026-07-18T08:00:00",
+            availableParticipantNo: [1, 2, 3, 4],
+            holes: 18
+          }
+        ]);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const slots = await fetchCpsSlots(persistedCpsInput());
+
+    expect(teeTimeAttempts).toBe(2);
+    expect(slots).toEqual([
+      expect.objectContaining({
+        sourceId: "cps-traditionoaklane-789",
+        availableSpots: 4
+      })
+    ]);
+    expect(JSON.stringify(slots)).not.toContain(registeredTransactionId);
   });
 
   it("learns the public booking window from CPS booking-rule configuration", async () => {

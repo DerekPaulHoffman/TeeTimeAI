@@ -9,6 +9,8 @@ const MAX_PUBLIC_PAGE_BYTES = 2_000_000;
 const MAX_PUBLIC_GET_REDIRECTS = 2;
 const UNSAFE_PUBLIC_REDIRECT_PATH =
   /\/(?:account|auth|authorization|book|booking|cart|checkout|login|pay|payment|purchase|queue|reserve|reservation|sign-?in|sign-?up|verify)(?:\/|$)/i;
+const CLUB_CADDIE_FILTER_EMPTY_RESULT =
+  /Use Time & Day Filters To Find Desired Tee-Times\. To see more times adjust your filters for date, holes, players, or time of day\./i;
 
 const SAFE_TRANSPORT_CODES = new Set<string>([
   "CERT_HAS_EXPIRED",
@@ -269,7 +271,7 @@ export function parseClubCaddieSlots(
     }
     const golferMatch = /Golfers:\s*(\d+)(?:\s*-\s*(\d+))?/i.exec(text);
     const timeMatch = /Tee Time:\s*(\d{1,2}:\d{2}\s*(?:AM|PM))/i.exec(text);
-    const holesMatch = /Holes:\s*(9|18)\s*Holes?/i.exec(text);
+    const holesMatch = /Holes:\s*(9|18)(?:\s+or\s+(9|18))?\s*Holes?/i.exec(text);
     const priceSection = /Price:\s*(.*?)\s*Holes:/i.exec(text)?.[1] ?? "";
     const priceValues = [...priceSection.matchAll(/\$\s*(\d+(?:\.\d{1,2})?)/g)]
       .map((match) => match[1]);
@@ -295,7 +297,14 @@ export function parseClubCaddieSlots(
     if (input.players < minimumPlayers || input.players > availableSpots) {
       return [];
     }
-    const holes = Number(holesMatch[1]) as 9 | 18;
+    const bookableHoleCounts = [...new Set(
+      [holesMatch[1], holesMatch[2]]
+        .filter((value): value is string => Boolean(value))
+        .map((value) => Number(value) as 9 | 18)
+    )];
+    const holes = bookableHoleCounts.length === 1
+      ? bookableHoleCounts[0]
+      : undefined;
     const startingNine = normalizeSourcePart(startingNineMatch?.[1] ?? "course");
     const priceCents = priceValues.length === 1
       ? parsePriceCents(priceValues[0])
@@ -308,15 +317,15 @@ export function parseClubCaddieSlots(
         input.targetDate.replaceAll("-", ""),
         localTime.replace(":", ""),
         startingNine,
-        String(holes)
+        bookableHoleCounts.join("-")
       ].join("-"),
       courseId: input.courseId,
       startsAt: `${input.targetDate}T${localTime}`,
       availableSpots,
       bookingUrl: input.bookingBaseUrl,
       ...(priceCents !== undefined ? { priceCents } : {}),
-      holes,
-      bookableHoleCounts: [holes],
+      ...(holes ? { holes } : {}),
+      bookableHoleCounts,
       evidenceUrl: input.bookingBaseUrl
     }];
   });
@@ -327,7 +336,7 @@ export function parseClubCaddieSlots(
       ? recognizedSlotCards === slotElements.length
       : /\b(?:no|zero)\s+(?:available\s+)?(?:tee\s*times?|slots?|availability)\b|\btee\s*times?\s+(?:are\s+)?not\s+available\b/i.test(
           htmlText(html)
-        )
+        ) || CLUB_CADDIE_FILTER_EMPTY_RESULT.test(htmlText(html))
   };
 }
 
@@ -569,6 +578,12 @@ function parseSafeClubCaddieRedirect(input: {
   if (redirectUrl.hash || !isSafeRedirectQueryTransition(input.currentUrl, redirectUrl)) {
     throw unsafeRedirectError(input.label, "redirect state changed");
   }
+  if (isSafePublicSearchDefaultsRedirect(input.currentUrl, redirectUrl)) {
+    redirectUrl.searchParams.set(
+      "Interaction",
+      input.currentUrl.searchParams.get("Interaction") as string
+    );
+  }
   return redirectUrl;
 }
 
@@ -587,15 +602,46 @@ function isSafeRedirectQueryTransition(currentUrl: URL, redirectUrl: URL) {
     const entry = `${key}\u0000${value}`;
     availableEntries.set(entry, (availableEntries.get(entry) ?? 0) + 1);
   }
+  let isSubset = true;
   for (const [key, value] of redirectUrl.searchParams) {
     const entry = `${key}\u0000${value}`;
     const remaining = availableEntries.get(entry) ?? 0;
     if (remaining === 0) {
-      return false;
+      isSubset = false;
+      break;
     }
     availableEntries.set(entry, remaining - 1);
   }
-  return true;
+  if (isSubset) {
+    return true;
+  }
+
+  return isSafePublicSearchDefaultsRedirect(currentUrl, redirectUrl);
+}
+
+function isSafePublicSearchDefaultsRedirect(currentUrl: URL, redirectUrl: URL) {
+  const currentEntries = [...currentUrl.searchParams.entries()];
+  const redirectEntries = [...redirectUrl.searchParams.entries()];
+  if (
+    currentEntries.length !== 1 ||
+    currentEntries[0][0] !== "Interaction" ||
+    !isSafeInteractionValue(currentEntries[0][1]) ||
+    !/\/slots\/?$/i.test(redirectUrl.pathname) ||
+    redirectEntries.length !== 3
+  ) {
+    return false;
+  }
+
+  const defaults = Object.fromEntries(redirectEntries);
+  return Boolean(
+    /^(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})$/.test(defaults.date ?? "") &&
+    /^[0-4]$/.test(defaults.player ?? "") &&
+    /^[a-z0-9_-]{1,40}$/i.test(defaults.ratetype ?? "") &&
+    new Set(redirectEntries.map(([key]) => key)).size === 3 &&
+    Object.keys(defaults).every((key) =>
+      ["date", "player", "ratetype"].includes(key)
+    )
+  );
 }
 
 function getRedirectVisitKey(url: URL) {
