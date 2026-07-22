@@ -209,6 +209,10 @@ function retryBatchEvidence(
   };
 }
 
+function retryBatchEntry(intended: CourseSupportCandidate) {
+  return retryBatchEvidence(intended).incidents[0];
+}
+
 describe("course-support batch selection", () => {
   it("deduplicates live demand and keeps its earliest target date", () => {
     expect(
@@ -391,6 +395,107 @@ describe("course-support batch selection", () => {
     });
   });
 
+  it("claims one exact source ordinal without requiring sibling retries to be due", () => {
+    const first = candidate({ id: "retry-first", courseId: "retry-course-1" });
+    const intended = candidate({
+      id: "retry-intended",
+      courseId: "retry-course-2",
+      cycle: 3
+    });
+    const last = candidate({ id: "retry-last", courseId: "retry-course-3" });
+    const retryBatch = retryBatchEvidence(intended, {
+      incidents: [
+        retryBatchEntry(first),
+        retryBatchEntry(intended),
+        retryBatchEntry(last)
+      ]
+    });
+
+    expect(
+      selectCourseSupportRetryBatch({
+        candidates: [candidate(), intended],
+        retryBatch,
+        retryOrdinal: 2,
+        maxCourses: 1,
+        now
+      })
+    ).toMatchObject({
+      fairnessReason: "TARGETED_RETRY",
+      incidents: [{ id: "retry-intended", courseId: "retry-course-2" }]
+    });
+  });
+
+  it("fails closed for invalid exact-entry retry ordinals and batch sizes", () => {
+    const intended = candidate();
+    const retryBatch = retryBatchEvidence(intended);
+
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        retryOrdinal: 0,
+        maxCourses: 1,
+        now
+      })
+    ).toThrow("positive integer");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        retryOrdinal: 2,
+        maxCourses: 1,
+        now
+      })
+    ).toThrow("out of range");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        retryOrdinal: 1,
+        now
+      })
+    ).toThrow("requires maxCourses to be 1");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        retryOrdinal: 1,
+        maxCourses: 0,
+        now
+      })
+    ).toThrow("requires maxCourses to be 1");
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        retryOrdinal: 1,
+        maxCourses: 2,
+        now
+      })
+    ).toThrow("requires maxCourses to be 1");
+  });
+
+  it("never falls back when the selected retry ordinal is not currently eligible", () => {
+    const selected = candidate({
+      id: "selected-retry",
+      courseId: "selected-course"
+    });
+    const unrelated = candidate({
+      id: "unrelated-due",
+      courseId: "unrelated-course"
+    });
+
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [unrelated],
+        retryBatch: retryBatchEvidence(selected),
+        retryOrdinal: 1,
+        maxCourses: 1,
+        now
+      })
+    ).toThrow("not currently due or its provenance changed");
+  });
+
   it("fails closed when a targeted retry is not due or its provenance changed", () => {
     const intended = candidate({
       id: "retry-incident",
@@ -543,6 +648,22 @@ describe("course-support claim demand fencing", () => {
     };
   }
 
+  it("rejects an exact retry ordinal without a source batch", async () => {
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryOrdinal: 1,
+        maxCourses: 1,
+        now
+      })
+    ).rejects.toThrow("requires a retry batch reference");
+
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
   it("atomically promotes synthetic provenance when current real demand exists", async () => {
     const preferences = [
       {
@@ -642,6 +763,186 @@ describe("course-support claim demand fencing", () => {
         now: new Date("2026-07-21T01:00:00.000Z")
       })
     ).rejects.toThrow("demand changed during claim");
+
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("claims only one exact retry ordinal and records redacted source provenance", async () => {
+    const first = candidate({ id: "retry-first", courseId: "retry-course-1" });
+    const intended = candidate({
+      id: "retry-intended",
+      courseId: "retry-course-2",
+      engineeringOnly: false
+    });
+    const last = candidate({ id: "retry-last", courseId: "retry-course-3" });
+    const retryBatch = retryBatchEvidence(intended, {
+      incidents: [
+        retryBatchEntry(first),
+        retryBatchEntry(intended),
+        retryBatchEntry(last)
+      ]
+    });
+    const incident = {
+      ...intended,
+      course: { timeZone: "America/Los_Angeles", preferences: [] }
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryBatchId: "private-source-batch-id",
+        retryOrdinal: 2,
+        maxCourses: 1,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      fairnessReason: "TARGETED_RETRY"
+    });
+
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          incidentId: "retry-intended",
+          courseId: "retry-course-2"
+        })
+      ]
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "retry-intended",
+          batchIncidents: {
+            some: expect.objectContaining({
+              id: "batch-entry-retry-intended",
+              batchId: "private-source-batch-id",
+              incidentId: "retry-intended",
+              courseId: "retry-course-2",
+              result: "RETRY_SCHEDULED"
+            })
+          }
+        })
+      })
+    );
+    const notes = JSON.parse(
+      prismaMocks.automationRunCreate.mock.calls[0][0].data.notes
+    );
+    expect(notes).toMatchObject({
+      targetedRetry: true,
+      retryScope: "ENTRY",
+      retrySourceOrdinal: "02"
+    });
+    expect(notes.retrySourceBatchDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(notes)).not.toContain("private-source-batch-id");
+    const summary = prismaMocks.batchCreate.mock.calls[0][0].data.summary;
+    expect(summary).toMatchObject({
+      targetedRetry: true,
+      retryScope: "ENTRY",
+      retrySourceOrdinal: "02"
+    });
+    expect(summary.retrySourceBatchDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(summary)).not.toContain("private-source-batch-id");
+  });
+
+  it("rolls back an exact-entry retry when live demand changes during claim", async () => {
+    const intended = candidate({
+      id: "retry-intended",
+      courseId: "retry-course",
+      engineeringOnly: false
+    });
+    const retryBatch = retryBatchEvidence(intended);
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([
+        {
+          ...intended,
+          course: { timeZone: "America/Los_Angeles", preferences: [] }
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          ...intended,
+          course: {
+            timeZone: "America/Los_Angeles",
+            preferences: [
+              {
+                teeSearch: {
+                  id: "new-real-demand",
+                  date: new Date("2026-07-20T00:00:00.000Z")
+                }
+              }
+            ]
+          }
+        }
+      ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryBatchId: "private-source-batch-id",
+        retryOrdinal: 1,
+        maxCourses: 1,
+        now: new Date("2026-07-21T01:00:00.000Z")
+      })
+    ).rejects.toThrow("demand changed during claim");
+
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rolls back an exact-entry retry when critical real demand appears", async () => {
+    const intended = candidate({
+      id: "retry-intended",
+      courseId: "retry-course",
+      engineeringOnly: false
+    });
+    const incident = {
+      ...intended,
+      course: { timeZone: "America/Los_Angeles", preferences: [] }
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatchEvidence(intended));
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([
+        {
+          course: {
+            timeZone: "America/New_York",
+            preferences: [
+              {
+                teeSearch: {
+                  id: "new-critical-demand",
+                  date: new Date("2026-07-22T00:00:00.000Z")
+                }
+              }
+            ]
+          }
+        }
+      ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryBatchId: "private-source-batch-id",
+        retryOrdinal: 1,
+        maxCourses: 1,
+        now: new Date("2026-07-21T01:00:00.000Z")
+      })
+    ).rejects.toThrow("cannot bypass due critical real-demand work");
 
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();

@@ -125,16 +125,22 @@ async function claim(args: string[]) {
     );
   }
   const plannedPaths = readRepeatedOption(args, "--path");
-  const retryBatchRef = readOption(args, "--retry-batch-ref");
+  const retryBatchRef = readSingleOption(args, "--retry-batch-ref");
+  const retryOrdinal = readSingleIntegerOption(args, "--retry-ordinal");
+  const maxCourses = readSingleIntegerOption(args, "--max-courses");
+  if (retryOrdinal !== undefined && !retryBatchRef) {
+    throw new Error("--retry-ordinal requires --retry-batch-ref.");
+  }
   return claimCourseSupportBatch({
     ownerThreadId: requireOwnerThread(args),
     branch: git.branch,
     baseSha: git.headSha,
     plannedPaths,
-    maxCourses: readIntegerOption(args, "--max-courses"),
+    maxCourses,
     retryBatchId: retryBatchRef
       ? await resolveCourseSupportBatchReference(retryBatchRef)
-      : undefined
+      : undefined,
+    retryOrdinal
   });
 }
 
@@ -462,6 +468,25 @@ function readRepeatedOption(args: string[], name: string) {
 
 function readIntegerOption(args: string[], name: string) {
   const raw = readOption(args, name);
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${name} must be an integer.`);
+  }
+  return parsed;
+}
+
+function readSingleOption(args: string[], name: string) {
+  if (args.filter((argument) => argument === name).length > 1) {
+    throw new Error(`${name} may be provided only once.`);
+  }
+  return readOption(args, name);
+}
+
+function readSingleIntegerOption(args: string[], name: string) {
+  const raw = readSingleOption(args, name);
   if (raw === undefined) {
     return undefined;
   }

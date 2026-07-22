@@ -461,6 +461,7 @@ export function selectCourseSupportBatch(input: {
 export function selectCourseSupportRetryBatch(input: {
   candidates: CourseSupportCandidate[];
   retryBatch: CourseSupportRetryBatchEvidence;
+  retryOrdinal?: number;
   maxCourses?: number;
   now?: Date;
 }): SelectedCourseSupportBatch {
@@ -482,7 +483,15 @@ export function selectCourseSupportRetryBatch(input: {
   if (retryBatch.incidents.length === 0) {
     throw new Error("A targeted responder retry has no incident evidence.");
   }
-  if (retryBatch.incidents.length > maxCourses) {
+  const scopedEntries = selectCourseSupportRetrySourceEntries({
+    retryBatch,
+    retryOrdinal: input.retryOrdinal,
+    requestedMaxCourses: input.maxCourses
+  });
+  if (
+    input.retryOrdinal === undefined &&
+    retryBatch.incidents.length > maxCourses
+  ) {
     throw new Error(
       "The targeted responder retry exceeds the requested batch size."
     );
@@ -490,7 +499,7 @@ export function selectCourseSupportRetryBatch(input: {
 
   const seenIncidentKeys = new Set<string>();
   const seenCourseCycles = new Set<string>();
-  const selectedIncidents = retryBatch.incidents.map((entry) => {
+  for (const entry of retryBatch.incidents) {
     if (entry.result !== "RETRY_SCHEDULED") {
       throw new Error(
         "A targeted responder retry contains non-retryable incident evidence."
@@ -518,7 +527,9 @@ export function selectCourseSupportRetryBatch(input: {
     }
     seenIncidentKeys.add(incidentKey);
     seenCourseCycles.add(courseCycle);
+  }
 
+  const selectedIncidents = scopedEntries.map((entry) => {
     const candidate = input.candidates.find(
       (current) =>
         current.id === entry.incidentId &&
@@ -567,6 +578,29 @@ export function selectCourseSupportRetryBatch(input: {
       isCriticalRealDemand(candidate, now)
     )
   };
+}
+
+function selectCourseSupportRetrySourceEntries(input: {
+  retryBatch: CourseSupportRetryBatchEvidence;
+  retryOrdinal?: number;
+  requestedMaxCourses?: number;
+}) {
+  if (input.retryOrdinal === undefined) {
+    return input.retryBatch.incidents;
+  }
+  if (!Number.isInteger(input.retryOrdinal) || input.retryOrdinal < 1) {
+    throw new Error("A targeted responder retry ordinal must be a positive integer.");
+  }
+  if (input.requestedMaxCourses !== 1) {
+    throw new Error(
+      "An exact-entry targeted responder retry requires maxCourses to be 1."
+    );
+  }
+  const entry = input.retryBatch.incidents[input.retryOrdinal - 1];
+  if (!entry) {
+    throw new Error("The targeted responder retry ordinal is out of range.");
+  }
+  return [entry];
 }
 
 export function computeCourseSupportNextAttemptAt(input: {
@@ -1285,6 +1319,7 @@ export async function claimCourseSupportBatch(input: {
   plannedPaths?: string[];
   maxCourses?: number;
   retryBatchId?: string;
+  retryOrdinal?: number;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -1293,6 +1328,16 @@ export async function claimCourseSupportBatch(input: {
   validateGitSha(input.baseSha, "base SHA");
   if (input.retryBatchId !== undefined && !input.retryBatchId.trim()) {
     throw new Error("The targeted responder retry reference is invalid.");
+  }
+  if (input.retryOrdinal !== undefined && !input.retryBatchId) {
+    throw new Error(
+      "A targeted responder retry ordinal requires a retry batch reference."
+    );
+  }
+  if (input.retryOrdinal !== undefined && input.maxCourses !== 1) {
+    throw new Error(
+      "An exact-entry targeted responder retry requires maxCourses to be 1."
+    );
   }
   const maxCourses = clampCourseSupportBatchSize(input.maxCourses);
   const retrySourceBatchDigest = input.retryBatchId
@@ -1401,6 +1446,7 @@ export async function claimCourseSupportBatch(input: {
       ? selectCourseSupportRetryBatch({
           candidates,
           retryBatch,
+          retryOrdinal: input.retryOrdinal,
           maxCourses,
           now
         })
@@ -1507,6 +1553,59 @@ export async function claimCourseSupportBatch(input: {
           );
         }
       }
+      if (input.retryOrdinal !== undefined) {
+        const outsideDueFetchFailures =
+          await tx.courseSupportIncident.findMany({
+            where: {
+              id: {
+                notIn: selected.incidents.map((incident) => incident.id)
+              },
+              status: "AUTO_INVESTIGATING",
+              activeBatchId: null,
+              kind: "FETCH_FAILED",
+              OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+            },
+            select: {
+              course: {
+                select: {
+                  timeZone: true,
+                  preferences: {
+                    where: {
+                      teeSearch: {
+                        status: "ACTIVE",
+                        trafficClass: {
+                          notIn: [...syntheticWebsiteTrafficClasses]
+                        }
+                      }
+                    },
+                    select: {
+                      teeSearch: { select: { id: true, date: true } }
+                    }
+                  }
+                }
+              }
+            }
+          });
+        const outsideCriticalDemandAppeared = outsideDueFetchFailures.some(
+          ({ course }) => {
+            const currentDemand = deriveCourseSupportCurrentDemand(
+              course.preferences,
+              { timeZone: course.timeZone, now }
+            );
+            return Boolean(
+              currentDemand.activeRealSearchCount > 0 &&
+                currentDemand.earliestTargetDate &&
+                currentDemand.earliestTargetDate.getTime() <=
+                  now.getTime() + NEAR_DATE_WINDOW_MS
+            );
+          }
+        );
+        if (outsideCriticalDemandAppeared) {
+          throw new Error(
+            "A targeted responder retry cannot bypass due critical real-demand work."
+          );
+        }
+      }
       const automationRun = await tx.automationRun.create({
         data: {
           promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
@@ -1519,6 +1618,12 @@ export async function claimCourseSupportBatch(input: {
             incidentCount: selected.incidents.length,
             fairnessReason: selected.fairnessReason,
             targetedRetry: Boolean(input.retryBatchId),
+            ...(input.retryOrdinal !== undefined
+              ? {
+                  retryScope: "ENTRY",
+                  retrySourceOrdinal: String(input.retryOrdinal).padStart(2, "0")
+                }
+              : {}),
             ...(retrySourceBatchDigest
               ? { retrySourceBatchDigest }
               : {})
@@ -1545,6 +1650,12 @@ export async function claimCourseSupportBatch(input: {
             plannedPaths,
             fairnessReason: selected.fairnessReason,
             targetedRetry: Boolean(input.retryBatchId),
+            ...(input.retryOrdinal !== undefined
+              ? {
+                  retryScope: "ENTRY",
+                  retrySourceOrdinal: String(input.retryOrdinal).padStart(2, "0")
+                }
+              : {}),
             ...(retrySourceBatchDigest
               ? { retrySourceBatchDigest }
               : {}),
@@ -1564,6 +1675,10 @@ export async function claimCourseSupportBatch(input: {
         }))
       });
       for (const incident of selected.incidents) {
+        const retrySourceEntry =
+          retryBatch && input.retryOrdinal !== undefined
+            ? retryBatch.incidents[input.retryOrdinal - 1]
+            : null;
         const claimed = await tx.courseSupportIncident.updateMany({
           where: {
             id: incident.id,
@@ -1573,6 +1688,20 @@ export async function claimCourseSupportBatch(input: {
             updatedAt: incident.updatedAt,
             status: "AUTO_INVESTIGATING",
             activeBatchId: null,
+            ...(retrySourceEntry
+              ? {
+                  batchIncidents: {
+                    some: {
+                      id: retrySourceEntry.id,
+                      batchId: input.retryBatchId!,
+                      incidentId: incident.id,
+                      courseId: incident.courseId,
+                      cycle: incident.cycle,
+                      result: "RETRY_SCHEDULED"
+                    }
+                  }
+                }
+              : {}),
             ...(retryBatch?.completedAt
               ? {
                   nextAttemptAt: {
