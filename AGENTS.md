@@ -718,7 +718,7 @@ Update docs when decisions change. Do not let old TeeTimeAI branding creep back 
 - Do not stage unrelated user work without understanding it.
 - Run `git status --short` before and after commits.
 - Commit on the thread-owned task branch, never on `main`.
-- Before publishing, fetch `origin/main`, rebase the clean task branch when needed, and rerun affected verification.
+- Before publishing, fetch `origin/main`, rebase the clean task branch when needed, and rerun affected verification. For a responder batch claimed before a concurrent main advance, the release fence may trust only commits already present on fetched `origin/main`; the candidate delta after that exact remote SHA must be nonempty and contain only responder-claimed paths.
 - When the user authorizes a direct push or production release, fast-forward `main` from the verified task branch with `git push origin HEAD:main`. Do not check out or commit on local `main`, and never force-push `main`.
 - Push the task branch itself only when a PR, review branch, or remote backup is useful or requested.
 - After pushing to `main`, require `git rev-list --left-right --count HEAD...origin/main` to report `0 0` before deployment or completion.

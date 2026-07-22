@@ -402,7 +402,11 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     learnProtectedCpsDiscovery(providerEvidence, providerObservedUrls),
     learnCpsDiscovery(providerEvidence, providerObservedUrls),
     learnTeesnapDiscovery(providerEvidence, providerObservedUrls),
-    learnTenForeDiscovery(providerEvidence, providerObservedUrls)
+    learnTenForeDiscovery(providerEvidence, providerObservedUrls),
+    learnKnownProviderAccessBarrierClassification(
+      providerEvidence,
+      providerObservedUrls
+    )
   ];
   const firstProviderDiscovery = providerDiscoveries.find(
     (discovery): discovery is BrowserDiscovery => Boolean(discovery)
@@ -446,6 +450,67 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       learnedFrom: "browser-visible-links"
     }
   }, evidence);
+}
+
+function learnKnownProviderAccessBarrierClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const accessBarrier = evidence.corroboratedAccessBarrier;
+  const barrierUrl = parseUrl(accessBarrier?.url);
+  if (
+    !accessBarrier ||
+    !barrierUrl ||
+    !isProviderPublicBookingLandingUrl(barrierUrl)
+  ) {
+    return null;
+  }
+
+  const provider = resolveProviderCapability({
+    detectedBookingUrl: barrierUrl.toString()
+  });
+  if (!provider.capability) {
+    return null;
+  }
+
+  const exactBarrierObserved = observedUrls.some(
+    (url) => haveSameExactUrl(url, barrierUrl.toString())
+  );
+  const exactBookingLinkObserved = (evidence.linkCandidates ?? []).some(
+    (candidate) =>
+      haveSameExactUrl(candidate.url, barrierUrl.toString()) &&
+      isRecognizedProviderBookingLink(candidate)
+  );
+  if (!exactBarrierObserved || !exactBookingLinkObserved) {
+    return null;
+  }
+
+  const safeAccessBarriers = sanitizeAccessBarriers([accessBarrier]);
+  const accountRequired = accessBarrier.status === 401;
+  return {
+    courseId: evidence.courseId,
+    status: "BLOCKED",
+    detectedPlatform: provider.detectedPlatform,
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: barrierUrl.toString(),
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "BLOCKED",
+    automationReason: accountRequired
+      ? "ACCOUNT_REQUIRED"
+      : "CAPTCHA_OR_QUEUE",
+    policyNotes: accountRequired
+      ? "The official public booking landing requires an account before availability can be viewed. Tee Time Spot does not use golfer accounts or account-specific sessions, so golfers must check the official booking page directly."
+      : "The official public booking landing repeatedly returns a managed browser challenge. Tee Time Spot does not bypass technical access controls, so golfers must check the official booking page directly.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: 0.95,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls: uniqueUrls([...observedUrls, barrierUrl.toString()]),
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      accessBarriers: safeAccessBarriers,
+      learnedFrom: "known-provider-public-landing-access-barrier"
+    }
+  };
 }
 
 function getSafeNonProviderBarrierFallback(

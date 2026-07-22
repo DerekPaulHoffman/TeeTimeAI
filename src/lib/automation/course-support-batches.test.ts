@@ -58,6 +58,7 @@ import {
   buildFailureFingerprint,
   buildCourseSupportReleaseHistory,
   canCloseCourseSupportRetry,
+  chooseCourseSupportReleaseDiffBase,
   chooseNewestProviderVerificationEvidence,
   classifyCourseSupportQueueInspection,
   classifyDetachedVerificationFailure,
@@ -2860,6 +2861,52 @@ describe("course-support follow-up releases", () => {
         ]
       })
     ]);
+  });
+});
+
+describe("course-support release Git reconciliation", () => {
+  const baseSha = "a".repeat(40);
+  const persistedReleaseSha = "b".repeat(40);
+  const originMainSha = "c".repeat(40);
+  const requestedReleaseSha = "d".repeat(40);
+
+  it("checks only the responder delta after a trusted concurrent main advance", () => {
+    expect(
+      chooseCourseSupportReleaseDiffBase({
+        baseSha,
+        persistedReleaseSha: null,
+        requestedReleaseSha,
+        originMainSha,
+        trustedBaseIsAncestorOfOriginMain: true,
+        originMainIsAncestorOfRequestedRelease: true
+      })
+    ).toBe(originMainSha);
+  });
+
+  it("falls back to the durable responder base when main is unrelated", () => {
+    expect(
+      chooseCourseSupportReleaseDiffBase({
+        baseSha,
+        persistedReleaseSha,
+        requestedReleaseSha,
+        originMainSha,
+        trustedBaseIsAncestorOfOriginMain: false,
+        originMainIsAncestorOfRequestedRelease: true
+      })
+    ).toBe(persistedReleaseSha);
+  });
+
+  it("does not re-derive paths after the exact release was durably fenced", () => {
+    expect(
+      chooseCourseSupportReleaseDiffBase({
+        baseSha,
+        persistedReleaseSha: requestedReleaseSha,
+        requestedReleaseSha,
+        originMainSha: requestedReleaseSha,
+        trustedBaseIsAncestorOfOriginMain: true,
+        originMainIsAncestorOfRequestedRelease: true
+      })
+    ).toBeNull();
   });
 });
 

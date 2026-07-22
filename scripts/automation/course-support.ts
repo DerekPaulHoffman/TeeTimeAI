@@ -14,6 +14,7 @@ import {
   appendCourseSupportBatchPath,
   backfillCourseSupportResponderState,
   claimCourseSupportBatch,
+  chooseCourseSupportReleaseDiffBase,
   closeoutCourseSupportBatch,
   getCourseSupportBatchPacket,
   getCourseSupportBatchRecoveryProvenance,
@@ -315,35 +316,41 @@ async function assertReleaseGitProvenance(batchId: string, releaseSha: string) {
   if (!isGitAncestor(provenance.baseSha, git.headSha)) {
     throw new Error("The claimed base SHA is not an ancestor of the responder release.");
   }
+  const trustedBaseSha = provenance.releaseSha ?? provenance.baseSha;
+  const releaseDiffBase = chooseCourseSupportReleaseDiffBase({
+    baseSha: provenance.baseSha,
+    persistedReleaseSha: provenance.releaseSha,
+    requestedReleaseSha: releaseSha,
+    originMainSha: git.originMainSha,
+    trustedBaseIsAncestorOfOriginMain: isGitAncestor(
+      trustedBaseSha,
+      git.originMainSha
+    ),
+    originMainIsAncestorOfRequestedRelease: isGitAncestor(
+      git.originMainSha,
+      releaseSha
+    )
+  });
+  if (!releaseDiffBase) {
+    return { releaseAdvanceProof: undefined };
+  }
   const plannedPaths = new Set(provenance.plannedPaths);
-  const committedPaths = readCommittedPaths(provenance.baseSha, git.headSha);
+  const committedPaths = readCommittedPaths(releaseDiffBase, git.headSha);
+  if (committedPaths.length === 0) {
+    throw new Error("Responder release must contain a committed planned change.");
+  }
   const unplannedPaths = committedPaths.filter((path) => !plannedPaths.has(path));
   if (unplannedPaths.length > 0) {
     throw new Error(
       `Release contains paths not claimed by the responder: ${unplannedPaths.join(", ")}`
     );
   }
-  if (!provenance.releaseSha || provenance.releaseSha === releaseSha) {
+  if (!provenance.releaseSha) {
     return { releaseAdvanceProof: undefined };
   }
   if (!isGitAncestor(provenance.releaseSha, releaseSha)) {
     throw new Error(
       "A follow-up responder release must descend from the persisted release."
-    );
-  }
-  const releaseCommittedPaths = readCommittedPaths(
-    provenance.releaseSha,
-    releaseSha
-  );
-  if (releaseCommittedPaths.length === 0) {
-    throw new Error("A follow-up responder release must contain a committed change.");
-  }
-  const unplannedReleasePaths = releaseCommittedPaths.filter(
-    (path) => !plannedPaths.has(path)
-  );
-  if (unplannedReleasePaths.length > 0) {
-    throw new Error(
-      `Follow-up release contains paths not claimed by the responder: ${unplannedReleasePaths.join(", ")}`
     );
   }
   if (!provenance.branch) {
@@ -354,7 +361,7 @@ async function assertReleaseGitProvenance(batchId: string, releaseSha: string) {
       fromSha: provenance.releaseSha,
       toSha: releaseSha,
       branch: provenance.branch,
-      committedPaths: releaseCommittedPaths,
+      committedPaths,
       descendantVerified: true as const
     }
   };

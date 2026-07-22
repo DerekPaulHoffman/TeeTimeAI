@@ -1521,6 +1521,55 @@ describe("buildBrowserDiscovery", () => {
     expect(JSON.stringify(discovery)).not.toContain("sibling-course.cps.golf");
   });
 
+  it("classifies a corroborated managed challenge on an exact known-provider search landing", () => {
+    const sourceUrl = "https://public-course.example/tee-times";
+    const providerUrl =
+      "https://public-course.ezlinksgolf.com/target-course/search";
+    const accessBarrier = { url: providerUrl, status: 403 as const };
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-course",
+      courseName: "Target Course Golf Club",
+      sourceUrl,
+      observedUrls: [sourceUrl, providerUrl],
+      linkCandidates: [{ url: providerUrl, label: "Book now" }],
+      accessBarriers: [accessBarrier],
+      corroboratedAccessBarrier: accessBarrier
+    });
+
+    expect(discovery).toMatchObject({
+      status: "BLOCKED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: providerUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      confidence: 0.95,
+      evidence: {
+        accessBarriers: [accessBarrier],
+        learnedFrom: "known-provider-public-landing-access-barrier"
+      }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("keeps a first managed challenge retryable until it is corroborated", () => {
+    const sourceUrl = "https://public-course.example/tee-times";
+    const providerUrl =
+      "https://public-course.ezlinksgolf.com/target-course/search";
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-course",
+      courseName: "Target Course Golf Club",
+      sourceUrl,
+      observedUrls: [sourceUrl, providerUrl],
+      linkCandidates: [{ url: providerUrl, label: "Book now" }],
+      accessBarriers: [{ url: providerUrl, status: 403 }]
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingUrl).toBe(providerUrl);
+    expect(discovery.automationReason).not.toBe("CAPTCHA_OR_QUEUE");
+  });
+
   it("fails closed when an official packet contains multiple unresolved provider families", () => {
     const foreupUrl =
       "https://foreupsoftware.com/index.php/booking/21017/6654#/teetimes";

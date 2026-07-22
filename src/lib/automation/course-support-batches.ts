@@ -1045,6 +1045,25 @@ export type CourseSupportReleaseAdvanceProof = {
   descendantVerified: boolean;
 };
 
+export function chooseCourseSupportReleaseDiffBase(input: {
+  baseSha: string;
+  persistedReleaseSha: string | null;
+  requestedReleaseSha: string;
+  originMainSha: string;
+  trustedBaseIsAncestorOfOriginMain: boolean;
+  originMainIsAncestorOfRequestedRelease: boolean;
+}) {
+  if (input.persistedReleaseSha === input.requestedReleaseSha) {
+    return null;
+  }
+
+  const trustedBaseSha = input.persistedReleaseSha ?? input.baseSha;
+  return input.trustedBaseIsAncestorOfOriginMain &&
+    input.originMainIsAncestorOfRequestedRelease
+    ? input.originMainSha
+    : trustedBaseSha;
+}
+
 export function orderCourseSupportBatchIncidents<
   T extends { id: string; createdAt: Date; course: { name: string } }
 >(entries: readonly T[]) {

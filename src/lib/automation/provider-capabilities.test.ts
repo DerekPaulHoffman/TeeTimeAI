@@ -151,6 +151,7 @@ describe("provider capability registry", () => {
     "https://public-course.ezlinksgolf.com/public-booking",
     "https://forest.ezlinksgolf.com/tee-times",
     "https://public-course.ezlinksgolf.com/oak-forest/tee-times",
+    "https://public-course.ezlinksgolf.com/oak-forest/search",
     "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
     "https://fox.tenfore.golf/gainfieldfarms",
     "https://dennis.chelseareservations.com/GPInprocess"
@@ -228,6 +229,15 @@ describe("provider capability registry", () => {
     );
     expect(
       getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/sibling/search"
+      )
+    ).not.toBe(
+      getProviderPublicBookingLandingIdentity(
+        "https://public-course.ezlinksgolf.com/target/search"
+      )
+    );
+    expect(
+      getProviderPublicBookingLandingIdentity(
         "https://target.book.teeitup.golf/?course=111"
       )
     ).not.toBe(
@@ -247,6 +257,7 @@ describe("provider capability registry", () => {
 
   it.each([
     "https://public-course.ezlinksgolf.com/tee-times/checkout",
+    "https://public-course.ezlinksgolf.com/oak-forest/search/checkout",
     "https://public-course.ezlinksgolf.com/tee-times/account",
     "https://public-course.ezlinksgolf.com/tee-times/cart",
     "https://public-course.ezlinksgolf.com/tee-times/payment",

@@ -594,7 +594,7 @@ export function getProviderPublicBookingLandingIdentity(
       return `${providerFamily}:${hostname}`;
     case "EZLINKS": {
       const scopedCourse = pathname.match(
-        /^\/([a-z0-9][a-z0-9-]{0,127})\/(?:public-)?(?:book(?:ing)?|tee-?times?)$/iu
+        /^\/([a-z0-9][a-z0-9-]{0,127})\/(?:(?:public-)?(?:book(?:ing)?|tee-?times?)|search)$/iu
       )?.[1];
       return `${providerFamily}:${hostname}:${scopedCourse?.toLocaleLowerCase("en-US") ?? "root"}`;
     }
@@ -715,7 +715,7 @@ function isProviderFamilyPublicBookingLandingUrl(
           !hasUnrelatedProviderHostLabel(hostname, "ezlinksgolf.com") &&
           (isRoot ||
             /^\/(?:public-)?(?:book(?:ing)?|tee-?times?)\/?$/iu.test(pathname) ||
-            /^\/[a-z0-9][a-z0-9-]{0,127}\/(?:public-)?(?:book(?:ing)?|tee-?times?)\/?$/iu.test(
+            /^\/[a-z0-9][a-z0-9-]{0,127}\/(?:(?:public-)?(?:book(?:ing)?|tee-?times?)|search)\/?$/iu.test(
               pathname
             )) &&
           !url.hash

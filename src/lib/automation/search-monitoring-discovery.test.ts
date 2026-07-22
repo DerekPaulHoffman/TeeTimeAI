@@ -4631,6 +4631,56 @@ describe("search monitoring discovery", () => {
     expect(discovery.automationEligibility).toBeUndefined();
   });
 
+  it("follows an exact legacy provider search landing and records its managed challenge", async () => {
+    const sourceUrl = "https://public-course.example/";
+    const bookingPageUrl = "https://public-course.example/tee-times/";
+    const providerUrl =
+      "https://public-course.ezlinksgolf.com/target-course/search";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case sourceUrl:
+          return new Response(
+            `<html><title>Public Course Golf Club</title><h1>Public Course Golf Club</h1><a href="${bookingPageUrl}">Tee times</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case bookingPageUrl:
+          return new Response(
+            `<html><title>Tee times</title><h1>Public Course Golf Club</h1><a href="${providerUrl}">Book now</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case providerUrl:
+          return new Response("Enable JavaScript and cookies to continue", {
+            status: 403,
+            headers: {
+              "content-type": "text/html",
+              "cf-mitigated": "challenge"
+            }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Public Course Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingPageUrl,
+      providerUrl
+    ]);
+    expect(evidence.accessBarriers).toEqual([
+      { url: providerUrl, status: 403 }
+    ]);
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: providerUrl,
+      label: "Book now"
+    });
+  });
+
   it("does not leave the provider family after a direct provider source", async () => {
     const sourceUrl = "https://public-course.ezlinksgolf.com/";
     const foreignUrl =
