@@ -508,8 +508,7 @@ export function isProviderInfrastructureUrl(value: URL | string) {
 
   const hostnameTokens = url.hostname
     .toLocaleLowerCase("en-US")
-    .split(".")
-    .flatMap(tokenizeProviderSurfacePart);
+    .split(".");
   const pathname = safeDecodeProviderSurfacePart(url.pathname);
   const pathTokens = pathname
     .split("/")

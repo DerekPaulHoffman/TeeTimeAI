@@ -95,6 +95,7 @@ describe("provider capability registry", () => {
     "https://public-course.ezlinksgolf.com/tee-times.json",
     "https://public-course.ezlinksgolf.com/tee-times?format=json",
     "https://apiqa.ezlinksgolf.com/tee-times",
+    "https://api-v2.book.teeitup.golf/",
     "https://adminportal.ezlinksgolf.com/tee-times",
     "https://devportal.ezlinksgolf.com/tee-times",
     "https://public-course.ezlinksgolf.com/configprod/tee-times",
@@ -164,6 +165,7 @@ describe("provider capability registry", () => {
     "https://public-course.ezlinksgolf.com/oak-forest/tee-times",
     "https://public-course.ezlinksgolf.com/oak-forest/search",
     "https://public-course.ezlinksgolf.com/index.html#/search",
+    "https://cedar-ridge-golf-course-v2.book.teeitup.com/",
     "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
     "https://fox.tenfore.golf/gainfieldfarms",
     "https://dennis.chelseareservations.com/GPInprocess"
