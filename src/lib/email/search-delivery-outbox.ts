@@ -1062,10 +1062,17 @@ async function applyOwnerDeliveryOutcome(
           id: match.matchId,
           availabilityCycle: match.availabilityCycle
         })),
-        alertStatus: "PENDING",
-        ...(input.kind === "MATCH" ? { availabilityStatus: "AVAILABLE" } : {})
+        alertStatus: ownerSent ? { in: ["PENDING", "SUPPRESSED"] } : "PENDING",
+        ...(input.kind === "MATCH" && !ownerSent
+          ? { availabilityStatus: "AVAILABLE" }
+          : {})
       },
-      data: { alertStatus: terminalStatus, sentAt }
+      data: {
+        alertStatus: terminalStatus,
+        // TeeTimeMatch.sentAt records an accepted owner delivery, not the time
+        // at which an opening was intentionally suppressed or dry-run.
+        sentAt: ownerSent ? sentAt : null
+      }
     });
   }
 
@@ -1202,7 +1209,7 @@ export async function suppressSearchEmailDeliveriesForMatches(input: {
       },
       data: {
         alertStatus: "SUPPRESSED",
-        sentAt: input.now ?? new Date()
+        sentAt: null
       }
     });
     return { count: rows.length, matchCount: matches.count, current: true as const };
@@ -3313,7 +3320,7 @@ async function terminalizeMatchEvidence(
     data: {
       alertStatus: "SUPPRESSED",
       availabilityStatus: "GONE",
-      sentAt: now,
+      sentAt: null,
       unavailableAt: now
     }
   });
@@ -3337,8 +3344,9 @@ async function suppressPendingMatchRefs(
   transaction: DeliveryTransaction,
   searchId: string,
   matchRefs: MatchRef[],
-  now: Date
+  _now: Date
 ) {
+  void _now;
   const refs = uniqueMatchRefs(matchRefs);
   if (refs.length === 0) {
     return;
@@ -3354,7 +3362,7 @@ async function suppressPendingMatchRefs(
     },
     data: {
       alertStatus: "SUPPRESSED",
-      sentAt: now
+      sentAt: null
     }
   });
 }
@@ -3363,8 +3371,9 @@ async function suppressPendingMatchIds(
   transaction: DeliveryTransaction,
   searchId: string,
   matchIds: string[],
-  now: Date
+  _now: Date
 ) {
+  void _now;
   const ids = [...new Set(matchIds)];
   if (ids.length === 0) {
     return;
@@ -3377,7 +3386,7 @@ async function suppressPendingMatchIds(
     },
     data: {
       alertStatus: "SUPPRESSED",
-      sentAt: now
+      sentAt: null
     }
   });
 }

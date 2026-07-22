@@ -75,7 +75,7 @@ describe("stopTeeSearchFromEmail", () => {
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { teeSearchId: "search-1", alertStatus: "PENDING" },
-        data: expect.objectContaining({ alertStatus: "SUPPRESSED" })
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
       })
     );
     expect(mockedPrisma.websiteEvent.create).toHaveBeenCalledWith(

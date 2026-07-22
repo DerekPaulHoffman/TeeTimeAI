@@ -1453,7 +1453,7 @@ describe("search email delivery outbox", () => {
           OR: [{ id: "match-1", availabilityCycle: 7 }],
           alertStatus: "PENDING"
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: now }
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
       })
     );
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledWith(
@@ -1715,7 +1715,7 @@ describe("search email delivery outbox", () => {
           OR: [{ id: "match-1", availabilityCycle: 7 }],
           alertStatus: "PENDING"
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: now }
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
       })
     );
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
@@ -1769,7 +1769,7 @@ describe("search email delivery outbox", () => {
           OR: [{ id: "match-1", availabilityCycle: 7 }],
           alertStatus: "PENDING"
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: now }
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
       })
     );
   });
@@ -1828,7 +1828,7 @@ describe("search email delivery outbox", () => {
           OR: [{ id: "match-2", availabilityCycle: 4 }],
           alertStatus: "PENDING"
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: now }
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
       })
     );
   });
@@ -1890,7 +1890,7 @@ describe("search email delivery outbox", () => {
         OR: [{ id: "match-1", availabilityCycle: 7 }],
         alertStatus: "PENDING"
       },
-      data: { alertStatus: "SUPPRESSED", sentAt: now }
+      data: { alertStatus: "SUPPRESSED", sentAt: null }
     });
   });
 
@@ -2192,7 +2192,7 @@ describe("search email delivery outbox", () => {
         ],
         alertStatus: "PENDING"
       },
-      data: { alertStatus: "SUPPRESSED", sentAt: now }
+      data: { alertStatus: "SUPPRESSED", sentAt: null }
     });
   });
 
@@ -2311,7 +2311,7 @@ describe("search email delivery outbox", () => {
             { id: "match-2", availabilityCycle: 4 }
           ])
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: now }
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
       })
     );
   });
@@ -2402,7 +2402,7 @@ describe("search email delivery outbox", () => {
         OR: [{ id: "match-1", availabilityCycle: 7 }],
         alertStatus: "PENDING"
       },
-      data: { alertStatus: "SUPPRESSED", sentAt: now }
+      data: { alertStatus: "SUPPRESSED", sentAt: null }
     });
   });
 
@@ -3413,7 +3413,39 @@ describe("search email delivery outbox", () => {
       ownerFinalized: true
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } })
+      expect.objectContaining({
+        where: expect.objectContaining({
+          alertStatus: { in: ["PENDING", "SUPPRESSED"] }
+        }),
+        data: { alertStatus: "SENT", sentAt: now }
+      })
+    );
+    expect(mockedPrisma.teeTimeMatch.updateMany.mock.calls[0]?.[0].where).not.toHaveProperty(
+      "availabilityStatus"
+    );
+  });
+
+  it("does not record a match send timestamp for a dry-run owner outcome", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      delivery("delivery-1", "owner@example.com", {
+        status: "SUPPRESSED",
+        sentAt: now,
+        lastError: "DELIVERY_DRY_RUN"
+      })
+    ] as never);
+
+    await finalizeSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      kind: "MATCH",
+      groupKey: "match-group"
+    });
+
+    expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ alertStatus: "PENDING" }),
+        data: { alertStatus: "SUPPRESSED", sentAt: null }
+      })
     );
   });
 

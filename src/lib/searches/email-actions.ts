@@ -45,7 +45,6 @@ export async function stopTeeSearchFromEmail(searchId: string, reason: EmailStop
       return { id: lockedSearch.id, status: lockedSearch.status, changed: false };
     }
     const status = reason === "booked" ? "COMPLETED" : "CANCELLED";
-    const stoppedAt = new Date();
     const updated = await transaction.teeSearch.update({
       where: { id: searchId },
       data: {
@@ -73,7 +72,7 @@ export async function stopTeeSearchFromEmail(searchId: string, reason: EmailStop
       },
       data: {
         alertStatus: "SUPPRESSED",
-        sentAt: stoppedAt
+        sentAt: null
       }
     });
 
