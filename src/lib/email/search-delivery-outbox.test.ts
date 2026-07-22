@@ -2721,6 +2721,123 @@ describe("search email delivery outbox", () => {
     );
   });
 
+  it.each([
+    {
+      description: "sends a current status when optional provider details are omitted",
+      optionalDetails: {},
+      terminalStatus: "SENT" as const,
+      shouldSend: true
+    },
+    {
+      description: "retires a status when a supplied provider price changed",
+      optionalDetails: { priceCents: 4000 },
+      terminalStatus: "SUPPRESSED" as const,
+      shouldSend: false
+    }
+  ])("$description", async ({ optionalDetails, terminalStatus, shouldSend }) => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      matchIds: [],
+      displayMatchIds: ["match-1"],
+      statusSnapshot: [{ courseId: "course-1", state: "MATCH_FOUND" }],
+      statusReport: {
+        kind: "daily",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Course",
+            timeZone: "America/New_York",
+            outcome: "MATCH_FOUND",
+            availableMatches: 1,
+            matchingTimes: [
+              {
+                matchId: "match-1",
+                startsAt: "2026-07-16T08:30",
+                availableSpots: 4,
+                ...optionalDetails
+              }
+            ]
+          }
+        ]
+      }
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      kind: "DAILY",
+      groupKey: "status-group",
+      payload: statusPayload
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([
+        {
+          ...owner,
+          status: terminalStatus,
+          sentAt: shouldSend ? now : null
+        }
+      ] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-1",
+        name: "Course",
+        address: null,
+        timeZone: "America/New_York",
+        updatedAt: new Date("2026-07-15T14:00:00.000Z"),
+        website: "https://course.example/",
+        detectedBookingUrl: "https://course.example/tee-times",
+        isPublic: true,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null
+      }
+    ] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now }
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      {
+        id: "match-1",
+        courseId: "course-1",
+        startsAt: new Date("2026-07-16T12:30:00.000Z"),
+        availableSpots: 4,
+        priceCents: 5000,
+        holes: 18,
+        alertStatus: "SENT",
+        availabilityCycle: 1
+      }
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "DAILY",
+        groupKey: "status-group",
+        send,
+        now: () => now
+      })
+    ).resolves.toContainEqual({ id: "delivery-1", status: terminalStatus });
+
+    if (shouldSend) {
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ payload: statusPayload })
+      );
+    } else {
+      expect(send).not.toHaveBeenCalled();
+    }
+  });
+
   it("retires an unattempted daily report when the exact rendered opening changed", async () => {
     const statusPayload = {
       schemaVersion: 2 as const,

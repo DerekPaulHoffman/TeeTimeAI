@@ -3170,13 +3170,15 @@ async function validateCurrentStatusDeliveryPayload(
         return "stale";
       }
       const persistedStart = zonedDateTimeToDate(startsAt, course.timeZone as string);
+      const persistedPriceCents = optionalNullableNumber(matchingTime.priceCents);
+      const persistedHoles = optionalNullableNumber(matchingTime.holes);
       if (
         Number.isNaN(persistedStart.getTime()) ||
         persistedStart.getTime() !== currentMatch.startsAt.getTime() ||
         optionalNumber(matchingTime.availableSpots) !== currentMatch.availableSpots ||
-        (optionalNullableNumber(matchingTime.priceCents) ?? null) !==
-          currentMatch.priceCents ||
-        (optionalNullableNumber(matchingTime.holes) ?? null) !== currentMatch.holes
+        (persistedPriceCents !== undefined &&
+          persistedPriceCents !== currentMatch.priceCents) ||
+        (persistedHoles !== undefined && persistedHoles !== currentMatch.holes)
       ) {
         return "stale";
       }
