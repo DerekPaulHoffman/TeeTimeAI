@@ -221,6 +221,20 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
   );
   const activeRealSearchCount = realDemand._count.id;
   const earliestTargetDate = realDemand._min.date;
+  const bookingUrl = input.course.detectedBookingUrl ?? input.course.website;
+  const provider = resolveProviderCapability(input.course);
+  const readinessFailure =
+    input.kind === "NEEDS_ADAPTER" ? getProviderReadinessFailure(provider) : null;
+  const failure = classifyProviderFailure({
+    error: input.error ?? input.message,
+    readinessFailure
+  });
+  const failureFingerprint = buildProviderFailureFingerprint({
+    providerFamilyKey: provider.providerFamilyKey,
+    failureClass: failure.failureClass,
+    operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
+    httpStatus: failure.httpStatus
+  });
 
   if (disposableSyntheticSearch) {
     if (
@@ -246,6 +260,21 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       });
     }
 
+    return {
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    } satisfies CourseSupportIssueState;
+  }
+
+  if (
+    existing?.status === "RESOLVED" &&
+    existing.resolution === "SOURCE_UNVERIFIED" &&
+    engineeringOnlySource &&
+    activeRealSearchCount === 0 &&
+    existing.providerFamilyKey === provider.providerFamilyKey &&
+    existing.failureFingerprint === failureFingerprint
+  ) {
     return {
       incidentId: null,
       status: "UNRECORDED",
@@ -311,20 +340,6 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     } satisfies CourseSupportIssueState;
   }
 
-  const bookingUrl = input.course.detectedBookingUrl ?? input.course.website;
-  const provider = resolveProviderCapability(input.course);
-  const readinessFailure =
-    input.kind === "NEEDS_ADAPTER" ? getProviderReadinessFailure(provider) : null;
-  const failure = classifyProviderFailure({
-    error: input.error ?? input.message,
-    readinessFailure
-  });
-  const failureFingerprint = buildProviderFailureFingerprint({
-    providerFamilyKey: provider.providerFamilyKey,
-    failureClass: failure.failureClass,
-    operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
-    httpStatus: failure.httpStatus
-  });
   const initialNextAttemptAt = getInitialCourseSupportAttemptAt(failure, now);
   let incident: CourseSupportIncident;
 

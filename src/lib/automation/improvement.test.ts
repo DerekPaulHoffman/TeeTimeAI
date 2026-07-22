@@ -850,6 +850,50 @@ describe("hourly closeout audit", () => {
     ).not.toThrow();
   });
 
+  it("accepts a fully evidenced no-action audit without commit or deployment", () => {
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: {
+          ...completeAudit,
+          commitSha: null,
+          deploymentId: null,
+          pushResult: null,
+          productionVerification: "Current production remained healthy.",
+          selectedCategory: null,
+          changedBehavior: "No production behavior changed.",
+          measuredResult:
+            "Every required evidence track was checked and no candidate cleared the shipping threshold."
+        },
+        outcome: "no_action_healthy",
+        deploymentRequired: false,
+        currentHeadSha: headSha
+      })
+    ).not.toThrow();
+  });
+
+  it("rejects no-action audits that omit evidence or claim a release", () => {
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: {
+          ...completeAudit,
+          deploymentId: null,
+          evidenceTrackResults: {}
+        },
+        outcome: "no_action_healthy",
+        deploymentRequired: false,
+        currentHeadSha: headSha
+      })
+    ).toThrow("evidence-track results");
+    expect(() =>
+      validateHourlyCloseoutAudit({
+        audit: completeAudit,
+        outcome: "no_action_healthy",
+        deploymentRequired: false,
+        currentHeadSha: headSha
+      })
+    ).toThrow("cannot record a commit or deployment");
+  });
+
   it("requires every owner-report audit field", () => {
     const incompleteAudit: Record<string, unknown> = { ...completeAudit };
     delete incompleteAudit.researchSources;

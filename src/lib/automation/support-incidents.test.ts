@@ -84,6 +84,12 @@ const rateLimitFailureFingerprint = buildProviderFailureFingerprint({
   operation: "AVAILABILITY",
   httpStatus: 429
 });
+const missingSourceFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "SOURCE_MISSING",
+  failureClass: "MISSING_SOURCE",
+  operation: "METADATA",
+  httpStatus: null
+});
 
 function mockRealDemand(count: number) {
   prismaMocks.teeSearch.findUnique.mockResolvedValue({
@@ -505,6 +511,48 @@ describe("course support incidents", () => {
     expect(updateData).not.toHaveProperty("attemptCount");
     expect(updateData).not.toHaveProperty("lastAttemptAt");
     expect(result.incidentId).toBe("incident-1");
+  });
+
+  it("does not immediately reopen unchanged synthetic source-unverified evidence", async () => {
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        status: "RESOLVED",
+        resolution: "SOURCE_UNVERIFIED",
+        providerFamilyKey: "SOURCE_MISSING",
+        failureFingerprint: missingSourceFingerprint,
+        engineeringOnly: true
+      })
+    );
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Synthetic Coverage Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: null
+        },
+        searchId: "search-multi-cycle",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
   });
 
   it("promotes same-local-day western demand after UTC midnight", async () => {

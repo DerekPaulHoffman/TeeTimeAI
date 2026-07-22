@@ -1,13 +1,14 @@
 export const COURSE_SUPPORT_RESPONDER_AUTOMATION_ID =
   "tee-time-spot-course-support-responder";
 export const COURSE_SUPPORT_RESPONDER_PROMPT_VERSION =
-  "tee-time-spot-course-support-responder-v1";
+  "tee-time-spot-course-support-responder-v2";
 
 export const COURSE_SUPPORT_BATCH_DEFAULT_SIZE = 5;
 export const COURSE_SUPPORT_BATCH_MAX_SIZE = 20;
 export const COURSE_SUPPORT_BATCH_LEASE_MS = 15 * 60 * 1000;
 export const COURSE_SUPPORT_SYNTHETIC_AGING_MS = 24 * 60 * 60 * 1000;
 export const COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW = 3;
+export const COURSE_SUPPORT_ENGINEERING_SWEEP_MINUTE_WINDOW = 10;
 
 export type ResponderOutcome =
   | "ready"
@@ -15,6 +16,7 @@ export type ResponderOutcome =
   | "recovery_required"
   | "no_due_work"
   | "deferred_busy"
+  | "deferred_engineering_cadence"
   | "success"
   | "classification_only"
   | "partial"
@@ -126,8 +128,14 @@ export function getResponderThreadPolicy(input: {
         ? "No course-support work is due."
         : input.outcome === "deferred_busy"
           ? "Another durable repository writer owns the checkout."
+          : input.outcome === "deferred_engineering_cadence"
+            ? "Only non-customer work is due, and the bounded engineering sweep is not due yet."
           : "The responder result is durably closed and needs no owner action."
   };
+}
+
+export function isCourseSupportEngineeringSweepDue(now = new Date()) {
+  return now.getUTCMinutes() < COURSE_SUPPORT_ENGINEERING_SWEEP_MINUTE_WINDOW;
 }
 
 export function clampCourseSupportBatchSize(value: number | undefined) {

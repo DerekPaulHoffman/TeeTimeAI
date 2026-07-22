@@ -1,15 +1,16 @@
 # Course-Support Responder
 
-The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It runs every 10 minutes, groups reusable work, and either restores public read-only monitoring or records a final evidence-backed technical-access/contact/identity disposition. It is separate from per-search scheduling and from the broad hourly product-improvement loop.
+The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It checks for real demand every 10 minutes, limits non-customer engineering work to one hourly sweep, groups reusable work, and either restores public read-only monitoring or records a final evidence-backed technical-access/contact/identity/source disposition. It is separate from per-search scheduling and from the broad product-improvement loop.
 
 ## Ownership And Cadence
 
 - Vercel Workflows remain the scheduler for golfer searches. The responder does not poll tee sheets on a timer and does not replace a search workflow.
 - The Codex automation `tee-time-spot-course-support-responder` begins every 10-minute task with `npm run automation:course-support -- inspect`.
-- The responder runs from the already-approved dedicated checkout `C:\dev\TeeTimeAI-cohort-remediation`; the hourly loop remains in `C:\dev\TeeTimeAI-automation`. They must never share one mutable checkout. The database writer lease still serializes release ownership across both checkouts.
+- The responder runs from the already-approved dedicated checkout `C:\dev\TeeTimeAi-CourseSupportResponder`; the bounded product-improvement loop remains in `C:\dev\TeeTimeAI-automation`. They must never share one mutable checkout. The database writer lease still serializes release ownership across both checkouts.
 - A due batch contains one provider family and one failure fingerprint. The default claim is 5 courses; the command clamps all requests to 1 through 20.
 - Batches prioritize near-date active real-demand fetch failures, then other active real demand, then historical non-engineering incidents whose searches have ended, then engineering-only synthetic coverage. Aged engineering-only evidence receives bounded fairness when no critical real demand is waiting.
-- The broad hourly product-improvement loop must exit `blocked_concurrent` before candidate selection when a responder batch is active or responder work is due. Course-support incidents are not portfolio candidates for that loop.
+- Any active real demand may claim on every 10-minute run. When no active real demand is due, `inspect` and `claim` enforce the first ten UTC minutes as the single hourly engineering sweep; other runs close as `deferred_engineering_cadence` without provider, Git, or database mutation beyond the routine observation.
+- The broad product-improvement loop must exit `blocked_concurrent` before candidate selection when a responder batch is active or requires recovery. An unowned backlog is informational, and course-support incidents are never portfolio candidates for that loop.
 
 `CourseSupportIncident` is the durable per-course problem. `CourseSupportBatch` is the short-lived provider-family/fingerprint engineering claim. `CourseSupportBatchIncident` preserves the per-course pre-remediation evidence and final batch result.
 
@@ -94,7 +95,7 @@ Keep the queue payload minimal. Do not log raw message bodies, database ids, wor
 
 ## Retry And Closeout
 
-The normal retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`; a task must not archive a retryable failure without a future durable retry time. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day at inspection and claim time instead of trusting a stale incident snapshot. A historical real-demand incident keeps `engineeringOnly=false` after those searches end, but no longer outranks active demand and becomes eligible for no-email detached verification. When an unclaimed engineering-only incident gains real demand, it becomes immediately due unless the unchanged failure is rate-limited; that promotion keeps the later of its persisted cooldown and the fresh bounded `Retry-After`. Claimed work keeps its current ownership and proof fences.
+The normal retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`. Repeated `SOURCE_MISSING` or `SOURCE_CONFLICT` evidence does not retry forever: after at least four verified attempts spanning at least 24 hours, and only when no active real demand exists, the incident closes as `SOURCE_UNVERIFIED`. Matching synthetic evidence does not immediately reopen it; new real demand or changed provider evidence does. This is an honest lack-of-source result, not proof that monitoring is impossible. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day at inspection and claim time instead of trusting a stale incident snapshot. A historical real-demand incident keeps `engineeringOnly=false` after those searches end, but no longer outranks active demand and becomes eligible for no-email detached verification. When an unclaimed engineering-only incident gains real demand, it becomes immediately due unless the unchanged failure is rate-limited. Claimed work keeps its current ownership and proof fences.
 
 Closeout independently derives per-course and batch outcomes from persisted evidence:
 
@@ -108,13 +109,9 @@ Terminal closeout additionally requires immutable proof snapshots, an unchanged 
 
 Privacy, delivery, unsafe-provider, migration, deployment, production-verification, authentication, environment, Git, command, recovery, and repeated-SLA failures are never routine closeouts.
 
-## Task Auto-Archive Policy
+## Task Retention Policy
 
-The automation may archive its own Codex task only after the command reports a durable closeout and `threadDisposition: ARCHIVE`.
-
-Routine archived outcomes are `no_due_work`, a durably recorded `deferred_busy`, `success`, `classification_only`, `partial`, and `retryable_failed` with a future `nextAttemptAt`. Archive only after the durable database transition succeeds; an archive API failure does not change batch state.
-
-Keep the task visible for work in progress (`ready`), recovery required, missing durable closeout, `needs_human`, privacy or wrong-recipient evidence, delivery failures, unsafe-provider behavior, migration/deploy/production-verification failure, authentication/environment/Git blockers, command failures, or repeated SLA failure. Other automations and interactive tasks are not auto-archived by this policy.
+The responder never performs sidebar cleanup. A separate low-priority maintenance automation archives old completed responder tasks only after activity and durable-closeout guards pass. Cleanup failure affects sidebar hygiene only and must never extend a batch lease, block provider work, or change production state.
 
 ## Operator Commands
 
@@ -123,6 +120,10 @@ Run commands through the environment that owns the target database. Structured o
 ```powershell
 # Inspect first. No branch or provider research is needed for no_due_work.
 npm run automation:course-support -- inspect
+
+# Aggregate provider coverage and leverage dashboard. No course names, ids,
+# recipients, URLs, or workflow identifiers are returned.
+npm run automation:course-support -- coverage
 
 # Claim a clean, current task branch, inspect ordinal evidence, then claim paths before edits.
 npm run automation:course-support -- claim --max-courses 5

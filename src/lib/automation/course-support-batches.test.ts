@@ -74,12 +74,14 @@ import {
   isRemediatedSearchSchedulerHealthy,
   markCourseSupportBatchNeedsHuman,
   normalizeCourseSupportObservedGitPaths,
+  nextCourseSupportEngineeringSweepAt,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
   resolveCourseSupportProviderCapability,
   selectCourseSupportBatch,
   selectCourseSupportRetryBatch,
   shouldDispatchRemediatedCourseRechecks,
+  shouldFinalizeSourceUnverified,
   verifyCourseSupportBatch,
   type CourseSupportCandidate,
   type CourseSupportRetryBatchEvidence
@@ -2498,6 +2500,56 @@ describe("course-support inspection ownership", () => {
         hasExpiredBatch: false
       })
     ).toBe("ready");
+  });
+
+  it("defers non-customer work outside the bounded engineering sweep", () => {
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveBatch: false,
+        dueRealCount: 0,
+        engineeringSweepDue: false
+      })
+    ).toBe("deferred_engineering_cadence");
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveBatch: false,
+        dueRealCount: 1,
+        engineeringSweepDue: false
+      })
+    ).toBe("ready");
+    expect(
+      nextCourseSupportEngineeringSweepAt(
+        new Date("2026-07-22T05:23:45.000Z")
+      ).toISOString()
+    ).toBe("2026-07-22T06:00:00.000Z");
+  });
+
+  it("finalizes only old repeated source gaps without active real demand", () => {
+    const evidence = {
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE" as const,
+      attemptCount: 4,
+      activeRealSearchCount: 0,
+      firstSeenAt: new Date("2026-07-20T20:00:00.000Z"),
+      verifiedAt: new Date("2026-07-22T20:00:00.000Z"),
+      result: "RETRY_SCHEDULED" as const,
+      now: new Date("2026-07-22T20:00:00.000Z")
+    };
+    expect(shouldFinalizeSourceUnverified(evidence)).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        activeRealSearchCount: 1
+      })
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        attemptCount: 3
+      })
+    ).toBe(false);
   });
 
   it("selects the owner internally and resumes only the same task", async () => {

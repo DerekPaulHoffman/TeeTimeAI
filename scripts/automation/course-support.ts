@@ -26,6 +26,7 @@ import {
   verifyCourseSupportBatch,
   type CourseSupportReleaseAdvanceProof
 } from "@/lib/automation/course-support-batches";
+import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import {
   getResponderThreadPolicy,
   sanitizeResponderText,
@@ -76,6 +77,9 @@ async function main() {
         })
       );
       return;
+    case "coverage":
+      writeResult(await getProviderCoverageDashboard());
+      return;
     case "claim":
       writeResult(await claim(args));
       return;
@@ -107,7 +111,7 @@ async function main() {
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, claim, packet, claim-path, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, claim, packet, claim-path, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
       );
   }
 }

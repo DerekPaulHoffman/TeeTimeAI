@@ -1058,18 +1058,20 @@ export function validateHourlyCloseoutAudit(input: {
     }
   }
 
-  if (input.outcome !== "success") {
+  if (input.outcome !== "success" && input.outcome !== "no_action_healthy") {
     return;
   }
 
-  const selectedCategory = readImprovementCategory(input.audit.selectedCategory);
-  if (!selectedCategory) {
-    throw new Error("successful closeout requires a valid selectedCategory");
-  }
-  if (input.candidateCategory && selectedCategory !== input.candidateCategory) {
-    throw new Error(
-      `successful closeout selectedCategory must match the claimed candidate category ${input.candidateCategory}`
-    );
+  if (input.outcome === "success") {
+    const selectedCategory = readImprovementCategory(input.audit.selectedCategory);
+    if (!selectedCategory) {
+      throw new Error("successful closeout requires a valid selectedCategory");
+    }
+    if (input.candidateCategory && selectedCategory !== input.candidateCategory) {
+      throw new Error(
+        `successful closeout selectedCategory must match the claimed candidate category ${input.candidateCategory}`
+      );
+    }
   }
   if (readStringArray(input.audit.candidateRanking).length === 0) {
     throw new Error("successful closeout requires a non-empty candidateRanking");
@@ -1090,7 +1092,16 @@ export function validateHourlyCloseoutAudit(input: {
     throw new Error("successful closeout requires non-empty changedBehavior evidence");
   }
   if (!isNonEmptyString(input.audit.measuredResult)) {
-    throw new Error("successful closeout requires non-empty measuredResult evidence");
+    throw new Error("healthy closeout requires non-empty measuredResult evidence");
+  }
+
+  if (input.outcome === "no_action_healthy") {
+    if (input.audit.commitSha !== null || input.audit.deploymentId !== null) {
+      throw new Error(
+        "no_action_healthy closeout cannot record a commit or deployment"
+      );
+    }
+    return;
   }
 
   const commitSha =

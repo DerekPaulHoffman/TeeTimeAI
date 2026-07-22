@@ -34,7 +34,9 @@ import {
   classifyProviderFailure,
   getProviderReadinessFailure,
   resolveProviderCapability,
-  resolveProviderDiscoveryIdentity
+  resolveProviderDiscoveryIdentity,
+  SOURCE_CONFLICT_PROVIDER_FAMILY,
+  SOURCE_MISSING_PROVIDER_FAMILY
 } from "./provider-capabilities";
 import {
   COURSE_SUPPORT_BATCH_LEASE_MS,
@@ -43,6 +45,7 @@ import {
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   clampCourseSupportBatchSize,
   getResponderThreadPolicy,
+  isCourseSupportEngineeringSweepDue,
   sanitizeResponderText,
   sanitizeResponderValue,
   type ResponderFailureDomain,
@@ -60,6 +63,8 @@ const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const SEARCH_TIMELINESS_GRACE_MS = 15 * 60 * 1000;
 const RECHECK_HEALTH_FRESHNESS_MS = 2 * 60 * 1000;
 const DETACHED_FAILURE_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT = 4;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = [
   "CLAIMED",
   "IMPLEMENTING",
@@ -908,6 +913,8 @@ export function classifyCourseSupportQueueInspection(input: {
   hasActiveHourlyWriter: boolean;
   hasExpiredBatch: boolean;
   dueIncidentCount: number;
+  dueRealCount?: number;
+  engineeringSweepDue?: boolean;
 }): ResponderOutcome {
   if (input.hasActiveHourlyWriter) {
     return "deferred_busy";
@@ -921,7 +928,49 @@ export function classifyCourseSupportQueueInspection(input: {
   if (input.hasExpiredBatch) {
     return "recovery_required";
   }
-  return input.dueIncidentCount === 0 ? "no_due_work" : "ready";
+  if (input.dueIncidentCount === 0) {
+    return "no_due_work";
+  }
+  if ((input.dueRealCount ?? 0) === 0 && input.engineeringSweepDue === false) {
+    return "deferred_engineering_cadence";
+  }
+  return "ready";
+}
+
+export function shouldFinalizeSourceUnverified(input: {
+  providerFamilyKey: string;
+  failureClass: CourseSupportFailureClass;
+  attemptCount: number;
+  activeRealSearchCount: number;
+  firstSeenAt: Date;
+  verifiedAt: Date | null;
+  result: CourseSupportBatchIncidentResult;
+  now?: Date;
+}) {
+  const now = input.now ?? new Date();
+  return Boolean(
+    input.result === "RETRY_SCHEDULED" &&
+      input.activeRealSearchCount === 0 &&
+      input.attemptCount >= SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT &&
+      now.getTime() - input.firstSeenAt.getTime() >=
+        SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS &&
+      input.verifiedAt &&
+      input.verifiedAt.getTime() - input.firstSeenAt.getTime() >=
+        SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS &&
+      ((input.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+        input.failureClass === "MISSING_SOURCE") ||
+        (input.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
+          input.failureClass === "MISSING_METADATA"))
+  );
+}
+
+export function nextCourseSupportEngineeringSweepAt(now = new Date()) {
+  const next = new Date(now);
+  next.setUTCMinutes(0, 0, 0);
+  if (next.getTime() <= now.getTime()) {
+    next.setUTCHours(next.getUTCHours() + 1);
+  }
+  return next;
 }
 
 export function assessCourseSupportRecovery(input: {
@@ -1234,13 +1283,16 @@ export async function inspectCourseSupportQueue(input?: {
     ({ incident, activeRealSearchCount }) =>
       !incident.engineeringOnly && activeRealSearchCount === 0
   ).length;
+  const engineeringSweepDue = isCourseSupportEngineeringSweepDue(now);
   const outcome = classifyCourseSupportQueueInspection({
     hasActiveBatch: Boolean(activeBatch),
     activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
     requestingThreadId,
     hasActiveHourlyWriter: Boolean(activeHourlyRun),
     hasExpiredBatch: Boolean(expiredBatch),
-    dueIncidentCount: dueIncidents.length
+    dueIncidentCount: dueIncidents.length,
+    dueRealCount,
+    engineeringSweepDue
   });
   const ownedByCurrentTask = Boolean(
     activeBatch &&
@@ -1249,7 +1301,9 @@ export async function inspectCourseSupportQueue(input?: {
   );
   const durableCloseoutRecorded =
     !ownedByCurrentTask &&
-    (outcome === "no_due_work" || outcome === "deferred_busy")
+    (outcome === "no_due_work" ||
+      outcome === "deferred_busy" ||
+      outcome === "deferred_engineering_cadence")
       ? await recordRoutineResponderObservation({
           outcome,
           now,
@@ -1259,6 +1313,7 @@ export async function inspectCourseSupportQueue(input?: {
             dueEngineeringCount,
             dueHistoricalRealCount,
             providerGroupCount: providerGroups.size,
+            engineeringSweepDue,
             activeBatch: Boolean(activeBatch),
             activeHourlyWriter: Boolean(activeHourlyRun)
           }
@@ -1269,7 +1324,9 @@ export async function inspectCourseSupportQueue(input?: {
     durableCloseoutRecorded:
       ownedByCurrentTask
         ? false
-        : outcome === "no_due_work" || outcome === "deferred_busy"
+        : outcome === "no_due_work" ||
+            outcome === "deferred_busy" ||
+            outcome === "deferred_engineering_cadence"
         ? durableCloseoutRecorded
         : outcome === "resume_owned_work"
           ? false
@@ -1284,6 +1341,11 @@ export async function inspectCourseSupportQueue(input?: {
     dueEngineeringCount,
     dueHistoricalRealCount,
     providerGroupCount: providerGroups.size,
+    engineeringSweepDue,
+    nextEngineeringSweepAt:
+      dueRealCount === 0 && !engineeringSweepDue
+        ? nextCourseSupportEngineeringSweepAt(now).toISOString()
+        : null,
     ownedByCurrentTask,
     activeWriter: activeBatch
       ? {
@@ -1441,6 +1503,34 @@ export async function claimCourseSupportBatch(input: {
     ]);
     if (input.retryBatchId && !retryBatch) {
       throw new Error("The targeted responder retry batch was not found.");
+    }
+    const dueRealCount = candidates.filter(
+      (candidate) => candidate.activeRealSearchCount > 0
+    ).length;
+    if (dueRealCount === 0 && !isCourseSupportEngineeringSweepDue(now)) {
+      const nextEngineeringSweepAt = nextCourseSupportEngineeringSweepAt(now);
+      const recorded = await recordRoutineResponderObservation({
+        outcome: "deferred_engineering_cadence",
+        now,
+        summary: {
+          dueIncidentCount: candidates.length,
+          dueRealCount,
+          engineeringSweepDue: false,
+          nextEngineeringSweepAt: nextEngineeringSweepAt.toISOString()
+        }
+      });
+      return {
+        outcome: "deferred_engineering_cadence" as const,
+        dueIncidentCount: candidates.length,
+        dueRealCount,
+        engineeringSweepDue: false,
+        nextEngineeringSweepAt: nextEngineeringSweepAt.toISOString(),
+        durableCloseoutRecorded: recorded,
+        ...getResponderThreadPolicy({
+          outcome: "deferred_engineering_cadence",
+          durableCloseoutRecorded: recorded
+        })
+      };
     }
     const selected = retryBatch
       ? selectCourseSupportRetryBatch({
@@ -1743,6 +1833,18 @@ export async function claimCourseSupportBatch(input: {
       providerFamilyKey: selected.providerFamilyKey,
       failureFingerprint: selected.failureFingerprint,
       incidentCount: selected.incidents.length,
+      leverage: {
+        providerGroupCount: 1,
+        currentAffectedCourseCount: selected.incidents.length,
+        activeRealDemandCount: selected.incidents.reduce(
+          (total, incident) => total + incident.activeRealSearchCount,
+          0
+        ),
+        futureSiblingApplicability: ![
+          SOURCE_MISSING_PROVIDER_FAMILY,
+          SOURCE_CONFLICT_PROVIDER_FAMILY
+        ].includes(selected.providerFamilyKey as never)
+      },
       fairnessReason: selected.fairnessReason,
       containsCriticalRealDemand: selected.containsCriticalRealDemand,
       threadDisposition: "KEEP_VISIBLE" as const,
@@ -3310,6 +3412,39 @@ export async function closeoutCourseSupportBatch(input: {
   const normalizedEntries = batch.incidents.map((entry) => {
     const currentProviderSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(entry.course);
+    if (
+      shouldFinalizeSourceUnverified({
+        providerFamilyKey: entry.incident.providerFamilyKey,
+        failureClass: entry.incident.failureClass,
+        attemptCount: entry.incident.attemptCount,
+        activeRealSearchCount: entry.incident.activeRealSearchCount,
+        firstSeenAt: entry.incident.firstSeenAt,
+        verifiedAt: entry.verifiedAt,
+        result: entry.result,
+        now
+      })
+    ) {
+      const priorProof = asJsonObject(entry.proofSnapshot);
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        normalizedResult: "FINAL_DISPOSITION" as const,
+        proofSnapshot: {
+          kind: "SOURCE_UNVERIFIED_FINAL",
+          disposition: "SOURCE_UNVERIFIED",
+          providerFamilyKey: entry.incident.providerFamilyKey,
+          failureClass: entry.incident.failureClass,
+          attemptCount: entry.incident.attemptCount,
+          activeRealSearchCount: entry.incident.activeRealSearchCount,
+          firstSeenAt: entry.incident.firstSeenAt.toISOString(),
+          verifiedAt: entry.verifiedAt!.toISOString(),
+          priorProofKind:
+            typeof priorProof.kind === "string" ? priorProof.kind : "UNKNOWN"
+        } satisfies Prisma.InputJsonObject,
+        message:
+          "Repeated current checks could not establish one trustworthy public provider source; the course remains visible with monitoring marked source-unverified until new demand or source evidence appears."
+      };
+    }
     if (entry.result === "PENDING" || entry.result === "STALE_EVIDENCE") {
       return {
         ...entry,
@@ -3521,6 +3656,7 @@ export async function closeoutCourseSupportBatch(input: {
           }
         });
       } else if (entry.normalizedResult === "FINAL_DISPOSITION") {
+        const resolution = getFinalDispositionResolution(entry.proofSnapshot);
         incidentUpdated = await tx.courseSupportIncident.updateMany({
           where: {
             id: entry.incidentId,
@@ -3534,7 +3670,7 @@ export async function closeoutCourseSupportBatch(input: {
             activeBatchId: null,
             nextAttemptAt: null,
             resolvedAt: now,
-            resolution: "DIRECT_BOOKING_CLASSIFIED",
+            resolution,
             resolutionMessage: message,
             lastSeenAt: now
           }
@@ -3660,7 +3796,7 @@ export async function closeoutCourseSupportBatch(input: {
       resolution:
         entry.normalizedResult === "RESTORED"
           ? "MONITORING_RESTORED"
-          : "DIRECT_BOOKING_CLASSIFIED",
+          : getFinalDispositionResolution(entry.proofSnapshot),
       message: sanitizeResponderText(
         entry.message ?? "Course-support responder closeout recorded."
       ),
@@ -3740,9 +3876,40 @@ export async function closeoutCourseSupportBatch(input: {
     terminalCount,
     retryCount,
     notificationPendingCount,
+    leverage: {
+      providerGroupResolvedCount:
+        retryCount === 0 && needsHumanCount === 0 ? 1 : 0,
+      claimedCourseCount: normalizedEntries.length,
+      monitoringRestoredCourseCount: restoredCount,
+      courseSpecificFinalCount: normalizedEntries.filter(
+        (entry) =>
+          entry.normalizedResult === "FINAL_DISPOSITION" &&
+          getFinalDispositionResolution(entry.proofSnapshot) !==
+            "SOURCE_UNVERIFIED"
+      ).length,
+      sourceUnverifiedFinalCount: normalizedEntries.filter(
+        (entry) =>
+          entry.normalizedResult === "FINAL_DISPOSITION" &&
+          getFinalDispositionResolution(entry.proofSnapshot) ===
+            "SOURCE_UNVERIFIED"
+      ).length,
+      futureSiblingApplicability:
+        restoredCount > 0 &&
+        ![
+          SOURCE_MISSING_PROVIDER_FAMILY,
+          SOURCE_CONFLICT_PROVIDER_FAMILY
+        ].includes(batch.providerFamilyKey as never)
+    },
     nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
     ...policy
   };
+}
+
+function getFinalDispositionResolution(proofSnapshot: unknown) {
+  const proof = asJsonObject(proofSnapshot as Prisma.JsonValue | null);
+  return proof.kind === "SOURCE_UNVERIFIED_FINAL"
+    ? ("SOURCE_UNVERIFIED" as const)
+    : ("DIRECT_BOOKING_CLASSIFIED" as const);
 }
 
 export async function recoverCourseSupportBatch(input: {
@@ -4508,7 +4675,10 @@ async function findActiveHourlyWriter() {
 }
 
 async function recordRoutineResponderObservation(input: {
-  outcome: "no_due_work" | "deferred_busy";
+  outcome:
+    | "no_due_work"
+    | "deferred_busy"
+    | "deferred_engineering_cadence";
   now: Date;
   summary: unknown;
 }) {
@@ -5051,7 +5221,14 @@ export function isDurableTerminalProof(
     verifiedAt: Date | null;
     verifiedIncidentUpdatedAt: Date | null;
     currentProviderSnapshotFingerprint?: string | null;
-    incident: { firstSeenAt: Date; lastSeenAt: Date };
+    incident: {
+      firstSeenAt: Date;
+      lastSeenAt: Date;
+      providerFamilyKey: string;
+      failureClass: CourseSupportFailureClass;
+      attemptCount: number;
+      activeRealSearchCount: number;
+    };
   },
   batch: {
     createdAt: Date;
@@ -5106,6 +5283,30 @@ export function isDurableTerminalProof(
     );
   }
   if (entry.normalizedResult === "FINAL_DISPOSITION") {
+    if (proof.kind === "SOURCE_UNVERIFIED_FINAL") {
+      const firstSeenAt = parseProofDate(proof.firstSeenAt);
+      const verifiedAt = parseProofDate(proof.verifiedAt);
+      return Boolean(
+        proof.disposition === "SOURCE_UNVERIFIED" &&
+          proof.providerFamilyKey === entry.incident.providerFamilyKey &&
+          proof.failureClass === entry.incident.failureClass &&
+          proof.attemptCount === entry.incident.attemptCount &&
+          proof.activeRealSearchCount === 0 &&
+          entry.incident.activeRealSearchCount === 0 &&
+          entry.incident.attemptCount >= SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT &&
+          ((entry.incident.providerFamilyKey ===
+              SOURCE_MISSING_PROVIDER_FAMILY &&
+            entry.incident.failureClass === "MISSING_SOURCE") ||
+            (entry.incident.providerFamilyKey ===
+              SOURCE_CONFLICT_PROVIDER_FAMILY &&
+              entry.incident.failureClass === "MISSING_METADATA")) &&
+          firstSeenAt?.getTime() === entry.incident.firstSeenAt.getTime() &&
+          verifiedAt?.getTime() === entry.verifiedAt.getTime() &&
+          verifiedAt &&
+          verifiedAt.getTime() - firstSeenAt.getTime() >=
+            SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS
+      );
+    }
     if (proof.kind === "EXACT_PLACE_REVIEW") {
       const reviewUpdatedAt = parseProofDate(proof.reviewUpdatedAt);
       const reviewedAt = parseProofDate(proof.reviewedAt);
@@ -5247,7 +5448,14 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
     "typecheckPassed",
     "buildPassed",
     "migrationApplied",
-    "productionSmokePassed"
+    "productionSmokePassed",
+    "providerGroupCount",
+    "currentAffectedCourseCount",
+    "futureSiblingCourseCount",
+    "courseSpecificRecordCount",
+    "recurringProviderFailureCount",
+    "realDemandAgeMinutes",
+    "exactRuntimeVerifiedCourseCount"
   ] as const;
   const result: Record<string, number | boolean> = {};
   for (const key of allowedKeys) {

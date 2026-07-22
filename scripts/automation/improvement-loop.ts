@@ -36,7 +36,7 @@ import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
-const PROMPT_VERSION = "tee-time-spot-improvement-loop-v13";
+const PROMPT_VERSION = "tee-time-spot-improvement-loop-v14";
 const PROMPT_VERSION_PREFIX = "tee-time-spot-improvement-loop-v";
 const ACTIVE_RUN_STALE_AFTER_MS = 55 * 60 * 1000;
 const PORTFOLIO_HISTORY_HOURS = 24;
@@ -52,7 +52,7 @@ Every run:
 4. Before browser exploration, set sessionStorage key \`tee-time-spot:traffic-class\` to \`AUTOMATION\` (or \`TEST\` only for an explicit manual test). Confirm analytics requests carry that aggregate marker. Never create a persistent visitor/session identifier, and never let unmarked automation traffic persist as public funnel activity.
 5. Run \`npm run ui:smoke\` as a baseline desktop/mobile UI and access check. Treat legitimate failures as first-class candidates.
 6. Confirm checkpoints: queue_confirmed, candidate_selected, provenance_recorded, tool_research_done, ui_smoke_done, verification_done, git_committed, git_pushed, production_verified, outcome_recorded. Keep outcome_recorded false until the same database write that sets completedAt and the terminal outcome.
-7. Rank the highest-leverage evidence-backed improvements. Drain already-found pending alerts first, then rank structured feedback, funnel, browser, email, performance, metadata, security, coverage, and learning signals together. The dedicated course-support responder exclusively owns CourseSupportIncident and provider-remediation work, including deferred retries; never select those incidents or their provider probes here. Record the selected category and ranked alternatives. Apply the diversity bonus to the least-recently shipped eligible category; discretionary search_discovery may not win after two consecutive successful selections unless current real-user BROKEN feedback overrides the cap. An empty initial queue is the nonterminal state exploration_required: broaden least-recently tested ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice evidence until at least one safe valuable improvement or a concrete blocker is found. no_op is not an hourly outcome.
+7. Rank the highest-leverage evidence-backed improvements. Drain already-found pending alerts first, then rank structured feedback, funnel, browser, email, performance, metadata, security, coverage, and learning signals together. The dedicated course-support responder exclusively owns CourseSupportIncident and provider-remediation work, including deferred retries; never select those incidents or their provider probes here. Record the selected category and ranked alternatives. Apply the diversity bonus to the least-recently shipped eligible category; discretionary search_discovery may not win after two consecutive successful selections unless current real-user BROKEN feedback overrides the cap. If the initial queue is empty, broaden the least-recently tested evidence surfaces once. After every required evidence track is checked, close with no_action_healthy when no candidate clears the evidence, customer-value, safety, and end-to-end verification threshold. Never manufacture code churn to satisfy the schedule.
 8. Before the first file edit, update this exact AutomationRun with the owner run/thread, branch, starting and expected HEAD SHA, exact planned paths, and provenance_recorded=true. If the plan expands, persist the added paths before editing them.
 9. Implement every compatible selected improvement in the chosen category that can be completed safely as one coherent batch. Do not piggyback a discretionary course/search correction onto a non-search release; record it as a ranked follow-up unless it is current real BROKEN feedback. Add or update focused tests and behavior documentation. Preserve alert-only boundaries and never enter checkout, payment, login, captcha, or verification-code flows.
 10. Use current official research or stronger design tools only when they materially change the selected implementation; do not perform generic hourly research.
@@ -97,7 +97,7 @@ Loop engineering requirements:
 - When inspection returns courseProfileQueue items and no higher-priority incident is active, process up to three as one metadata_seo batch. Use automation:course-profile research packets, authoritative sources, and dry-run validation, and apply only profiles that pass; never delay or disable alert creation when evidence is insufficient. Write public profile prose as a confident facility guide focused on layouts, setting, amenities, ownership, access, and playing experience. Keep claim keys, evidence summaries, research-process language, and broad uncertainty internal; when one fact is unavailable, qualify only that field and point golfers to the official course or booking page.
 - A required evidence track may report healthy, empty with sample counts, unavailable with the exact blocker, or actionable; it may not be omitted. After the same access gap appears in three successful runs, surface it as a durable coverage blocker instead of repeating a harmless note forever.
 - If the same non-incident course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement. Leave all provider-remediation incidents and retries to the dedicated course-support responder.
-- Stop with a normalized terminal outcome: success, incident, needs_adapter, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. exploration_required is nonterminal, and no_op is prohibited for this hourly workflow. Treat legacy blocked_policy evidence as needs_adapter until current technical access is re-verified.
+- Stop with a normalized terminal outcome: success, no_action_healthy, incident, needs_adapter, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. Treat legacy blocked_policy evidence as needs_adapter until current technical access is re-verified.
 
 Hard boundaries:
 - Alert only; never book, hold, pay, bypass controls, or solve account-specific course flows.
@@ -273,6 +273,7 @@ async function closeoutImprovementRun() {
   const payload = readCloseoutPayload();
   const terminalOutcomes = new Set([
     "success",
+    "no_action_healthy",
     "incident",
     "needs_adapter",
     "blocked_policy",
@@ -286,7 +287,7 @@ async function closeoutImprovementRun() {
   ]);
   if (!terminalOutcomes.has(payload.outcome)) {
     throw new Error(
-      "closeout outcome must be terminal; no_op and exploration_required are not allowed"
+      "closeout outcome must be a supported terminal result"
     );
   }
 
@@ -406,6 +407,19 @@ async function closeoutImprovementRun() {
         "successful closeout requires a clean tree with HEAD matching origin/main"
       );
     }
+  } else if (payload.outcome === "no_action_healthy") {
+    if (actualStatePaths.length > 0) {
+      throw new Error("no_action_healthy closeout requires a clean unchanged checkout");
+    }
+    if (
+      git.branch !== record.provenance.branch ||
+      git.aheadOfOriginMain !== 0 ||
+      git.behindOriginMain !== 0
+    ) {
+      throw new Error(
+        "no_action_healthy closeout requires a clean branch at origin/main parity"
+      );
+    }
   } else if (sanitizedBlockerReasons.length === 0) {
     throw new Error("a blocked or incident closeout requires blockerReasons");
   }
@@ -428,7 +442,7 @@ async function closeoutImprovementRun() {
     dirtyPathsAtCloseout: git.dirtyPaths,
     unplannedResidue: unplannedChanges,
     blockers:
-      payload.outcome === "success"
+      payload.outcome === "success" || payload.outcome === "no_action_healthy"
         ? (sanitizedAudit.blockers ?? [])
         : sanitizedBlockerReasons,
     deploymentRequired: payload.deploymentRequired ?? true
@@ -443,10 +457,13 @@ async function closeoutImprovementRun() {
 
   const closeoutRecord: HourlyImprovementRunRecord = {
     ...record,
-    lifecycle: payload.outcome === "success" ? "closeout" : "blocked",
+    lifecycle:
+      payload.outcome === "success" || payload.outcome === "no_action_healthy"
+        ? "closeout"
+        : "blocked",
     checkpoints,
     blocker:
-      payload.outcome === "success"
+      payload.outcome === "success" || payload.outcome === "no_action_healthy"
         ? undefined
         : {
             outcome: payload.outcome,

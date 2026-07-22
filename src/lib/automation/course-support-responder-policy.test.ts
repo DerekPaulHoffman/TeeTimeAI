@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampCourseSupportBatchSize,
   getResponderThreadPolicy,
+  isCourseSupportEngineeringSweepDue,
   sanitizeResponderValue
 } from "./course-support-responder-policy";
 
@@ -10,6 +11,7 @@ describe("course-support responder thread policy", () => {
   it.each([
     "no_due_work",
     "deferred_busy",
+    "deferred_engineering_cadence",
     "success",
     "classification_only",
     "partial"
@@ -94,6 +96,19 @@ describe("course-support responder safeguards", () => {
     expect(clampCourseSupportBatchSize(0)).toBe(1);
     expect(clampCourseSupportBatchSize(12.9)).toBe(12);
     expect(clampCourseSupportBatchSize(100)).toBe(20);
+  });
+
+  it("opens one deterministic engineering sweep window per UTC hour", () => {
+    expect(
+      isCourseSupportEngineeringSweepDue(
+        new Date("2026-07-22T05:09:59.000Z")
+      )
+    ).toBe(true);
+    expect(
+      isCourseSupportEngineeringSweepDue(
+        new Date("2026-07-22T05:10:00.000Z")
+      )
+    ).toBe(false);
   });
 
   it("redacts structured secrets and sensitive URL parameters", () => {
