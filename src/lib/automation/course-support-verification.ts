@@ -13,6 +13,7 @@ import type {
 import { prisma } from "@/lib/prisma";
 import { normalizeTimeZone } from "@/lib/timezones";
 
+import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import { evaluateMonitoringGate } from "./policy";
 import { normalizeProviderFamilyKey } from "./provider-capabilities";
 import { sanitizeResponderText } from "./course-support-responder-policy";
@@ -80,6 +81,7 @@ const requestExecutionSelect = {
     select: {
       id: true,
       batchId: true,
+      incidentId: true,
       courseId: true,
       cycle: true,
       batch: {
@@ -96,9 +98,13 @@ const requestExecutionSelect = {
           cycle: true,
           activeBatchId: true,
           engineeringOnly: true,
+          activeRealSearchCount: true,
+          earliestTargetDate: true,
+          updatedAt: true,
           status: true
         }
-      }
+      },
+      verifiedIncidentUpdatedAt: true
     }
   },
   course: { select: providerCourseSelect }
@@ -141,6 +147,7 @@ export type CourseSupportVerificationRejectionReason =
   | "batch_not_verifying"
   | "batch_ownership_changed"
   | "incident_not_engineering_only"
+  | "incident_demand_changed"
   | "incident_resolved"
   | "active_demand"
   | "lease_lost"
@@ -178,14 +185,19 @@ export async function scheduleCourseSupportVerificationRequests(input: {
               : {}),
             select: {
               id: true,
+              incidentId: true,
               courseId: true,
               cycle: true,
+              verifiedIncidentUpdatedAt: true,
               incident: {
                 select: {
                   id: true,
                   cycle: true,
                   activeBatchId: true,
                   engineeringOnly: true,
+                  activeRealSearchCount: true,
+                  earliestTargetDate: true,
+                  updatedAt: true,
                   status: true
                 }
               },
@@ -1277,7 +1289,10 @@ type DetachedEligibilityInput = {
   batchReleaseSha: string | null;
   batchCompletedAt: Date | null;
   batchIncidentCourseId: string;
+  batchIncidentId: string;
+  batchIncidentIncidentId: string;
   batchIncidentCycle: number;
+  batchIncidentVerifiedIncidentUpdatedAt: Date | null;
   courseId: string;
   course: Pick<
     ProviderCourseSnapshot,
@@ -1292,9 +1307,13 @@ type DetachedEligibilityInput = {
   >;
   releaseSha: string;
   incident: {
+    id: string;
     cycle: number;
     activeBatchId: string | null;
     engineeringOnly: boolean;
+    activeRealSearchCount: number;
+    earliestTargetDate: Date | null;
+    updatedAt: Date;
     status: string;
   };
 };
@@ -1307,8 +1326,11 @@ function buildDetachedEligibilityInput(input: {
     completedAt: Date | null;
   };
   batchIncident: {
+    id: string;
+    incidentId: string;
     courseId: string;
     cycle: number;
+    verifiedIncidentUpdatedAt: Date | null;
     incident: DetachedEligibilityInput["incident"];
   };
   courseId: string;
@@ -1320,8 +1342,12 @@ function buildDetachedEligibilityInput(input: {
     batchStatus: input.batch.status,
     batchReleaseSha: input.batch.releaseSha,
     batchCompletedAt: input.batch.completedAt,
+    batchIncidentId: input.batchIncident.id,
+    batchIncidentIncidentId: input.batchIncident.incidentId,
     batchIncidentCourseId: input.batchIncident.courseId,
     batchIncidentCycle: input.batchIncident.cycle,
+    batchIncidentVerifiedIncidentUpdatedAt:
+      input.batchIncident.verifiedIncidentUpdatedAt,
     courseId: input.courseId,
     course: input.course,
     releaseSha: input.releaseSha,
@@ -1365,9 +1391,6 @@ async function evaluateDetachedEligibility(
   ) {
     return { eligible: false, reason: "batch_ownership_changed" };
   }
-  if (!input.incident.engineeringOnly) {
-    return { eligible: false, reason: "incident_not_engineering_only" };
-  }
   if (input.incident.status !== "AUTO_INVESTIGATING") {
     return { eligible: false, reason: "incident_resolved" };
   }
@@ -1379,13 +1402,60 @@ async function evaluateDetachedEligibility(
   const activeFuturePairs = await transaction.teeSearch.count({
     where: {
       status: "ACTIVE",
-      date: { gte: localDateStorageBoundary(input.course.timeZone, now) },
+      date: {
+        gte: getCourseLocalDateStorageBoundary(input.course.timeZone, now)
+      },
       preferences: { some: { courseId: input.courseId } }
     }
   });
-  return activeFuturePairs === 0
-    ? { eligible: true }
-    : { eligible: false, reason: "active_demand" };
+  if (activeFuturePairs > 0) {
+    return { eligible: false, reason: "active_demand" };
+  }
+  if (
+    input.incident.activeRealSearchCount === 0 &&
+    input.incident.earliestTargetDate === null
+  ) {
+    return { eligible: true };
+  }
+
+  const reconciledAt = now;
+  const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+    where: {
+      id: input.incident.id,
+      cycle: input.incident.cycle,
+      activeBatchId: input.batchId,
+      status: "AUTO_INVESTIGATING",
+      updatedAt: input.incident.updatedAt,
+      activeRealSearchCount: input.incident.activeRealSearchCount,
+      earliestTargetDate: input.incident.earliestTargetDate
+    },
+    data: {
+      activeRealSearchCount: 0,
+      earliestTargetDate: null,
+      updatedAt: reconciledAt
+    }
+  });
+  if (incidentUpdated.count !== 1) {
+    return { eligible: false, reason: "incident_demand_changed" };
+  }
+  const batchIncidentUpdated =
+    await transaction.courseSupportBatchIncident.updateMany({
+      where: {
+        id: input.batchIncidentId,
+        batchId: input.batchId,
+        incidentId: input.batchIncidentIncidentId,
+        cycle: input.batchIncidentCycle,
+        verifiedIncidentUpdatedAt:
+          input.batchIncidentVerifiedIncidentUpdatedAt
+      },
+      data: { verifiedIncidentUpdatedAt: reconciledAt }
+    });
+  if (batchIncidentUpdated.count !== 1) {
+    throw new Error(
+      "Course-support demand changed while detached verification was scheduled."
+    );
+  }
+  return { eligible: true };
 }
 
 function validateExecutionOwnership(
@@ -1759,14 +1829,6 @@ function validDate(value: Date, label: string) {
     throw new Error(`Course-support verification ${label} is invalid.`);
   }
   return value;
-}
-
-function localDateStorageBoundary(timeZone: string, value: Date) {
-  const localDate = buildCourseSupportVerificationIntent(
-    timeZone,
-    value
-  ).targetDateLocal;
-  return new Date(`${localDate}T00:00:00.000Z`);
 }
 
 function stableJson(value: unknown): string {

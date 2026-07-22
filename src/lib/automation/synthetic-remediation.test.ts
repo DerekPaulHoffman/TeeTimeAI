@@ -9,6 +9,7 @@ import {
 const course = {
   id: "course-1",
   name: "Example Course",
+  timeZone: "America/Los_Angeles",
   detectedPlatform: "UNKNOWN" as const,
   detectedBookingUrl: null,
   website: "https://example.com"
@@ -95,6 +96,9 @@ describe("selectSyntheticRemediationCandidates", () => {
     ];
 
     expect(selectSyntheticRemediationCandidates(searches)).toHaveLength(1);
+    expect(selectSyntheticRemediationCandidates(searches)[0]?.course.timeZone).toBe(
+      "America/Los_Angeles"
+    );
   });
 
   it("accounts for every selected preference with its newest outcome", () => {

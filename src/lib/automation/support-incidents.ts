@@ -15,7 +15,7 @@ import {
 } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
-import { startOfUtcCalendarDay } from "./date-boundary";
+import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
   buildProviderFailureFingerprint,
@@ -28,6 +28,7 @@ export type CourseSupportIssueInput = {
   course: {
     id: string;
     name: string;
+    timeZone: string;
     detectedPlatform: DetectedPlatform;
     detectedBookingUrl: string | null;
     website: string | null;
@@ -169,6 +170,10 @@ export async function escalateCourseSupportIncident(input: {
 
 async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
   const now = input.now ?? new Date();
+  const dateBoundary = getCourseLocalDateStorageBoundary(
+    input.course.timeZone,
+    now
+  );
   const [sourceSearch, affectedSearchCount, realDemand, existing] = await Promise.all([
     prisma.teeSearch.findUnique({
       where: { id: input.searchId },
@@ -177,7 +182,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     prisma.teeSearch.count({
       where: {
         status: "ACTIVE",
-        date: { gte: startOfUtcCalendarDay(now) },
+        date: { gte: dateBoundary },
         OR: [
           { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
           { syntheticMultiCycle: true }
@@ -190,7 +195,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     prisma.teeSearch.aggregate({
       where: {
         status: "ACTIVE",
-        date: { gte: startOfUtcCalendarDay(now) },
+        date: { gte: dateBoundary },
         trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
         preferences: {
           some: { courseId: input.course.id }

@@ -28,7 +28,8 @@ import {
   enqueueRemediatedCourseRechecks,
   enqueueSearchScheduleMessage,
   getSearchScheduleQueueRetryDirective,
-  recoverSearchScheduleStartFailure
+  recoverSearchScheduleStartFailure,
+  selectCurrentRemediatedSearchIds
 } from "./search-recheck-queue";
 
 const message = {
@@ -239,6 +240,52 @@ describe("search schedule recovery queue", () => {
       scheduleVersion: 8,
       trigger: "COURSE_REMEDIATED"
     });
+  });
+
+  it("does not create customer workflow activity when no active search remains", async () => {
+    const dependencies = {
+      listSearchIds: vi.fn().mockResolvedValue([]),
+      queueSearch: vi.fn(),
+      enqueue: vi.fn()
+    };
+
+    await expect(
+      enqueueRemediatedCourseRechecks(["course-1"], dependencies)
+    ).resolves.toEqual({
+      affectedSearchCount: 0,
+      queuedCount: 0,
+      queueFailureCount: 0,
+      directStartCount: 0,
+      scheduledSearches: [],
+      affectedSearchRefs: []
+    });
+    expect(dependencies.queueSearch).not.toHaveBeenCalled();
+    expect(dependencies.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("keeps same-local-day western searches in remediation rechecks after UTC midnight", () => {
+    expect(
+      selectCurrentRemediatedSearchIds(
+        [
+          {
+            teeSearchId: "current-search",
+            teeSearch: { date: new Date("2026-07-20T00:00:00.000Z") },
+            course: { timeZone: "America/Los_Angeles" }
+          },
+          {
+            teeSearchId: "expired-search",
+            teeSearch: { date: new Date("2026-07-19T00:00:00.000Z") },
+            course: { timeZone: "America/Los_Angeles" }
+          },
+          {
+            teeSearchId: "current-search",
+            teeSearch: { date: new Date("2026-07-20T00:00:00.000Z") },
+            course: { timeZone: "America/Los_Angeles" }
+          }
+        ],
+        new Date("2026-07-21T01:00:00.000Z")
+      )
+    ).toEqual(["current-search"]);
   });
 
   it("forwards one durable remediation key to schedule and queue idempotency", async () => {

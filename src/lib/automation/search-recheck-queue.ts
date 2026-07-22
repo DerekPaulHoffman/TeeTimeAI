@@ -9,7 +9,9 @@ import {
   getSearchScheduleState,
   queueSearchCheck
 } from "@/lib/automation/db-service";
-import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
+import {
+  getCourseLocalDateStorageBoundary
+} from "@/lib/automation/date-boundary";
 import { prisma } from "@/lib/prisma";
 
 export const SEARCH_SCHEDULE_QUEUE_TOPIC = "tee-time-spot-search-schedule";
@@ -72,6 +74,31 @@ type RemediatedCourseRecheckDependencies = {
   ) => Promise<void>;
 };
 
+type RemediatedCoursePreference = {
+  teeSearchId: string;
+  teeSearch: { date: Date };
+  course: { timeZone: string };
+};
+
+export function selectCurrentRemediatedSearchIds(
+  preferences: readonly RemediatedCoursePreference[],
+  now = new Date()
+) {
+  const searchIds = new Set<string>();
+  for (const preference of preferences) {
+    if (
+      preference.teeSearch.date.getTime() >=
+      getCourseLocalDateStorageBoundary(
+        preference.course.timeZone,
+        now
+      ).getTime()
+    ) {
+      searchIds.add(preference.teeSearchId);
+    }
+  }
+  return [...searchIds];
+}
+
 const defaultConsumerDependencies: SearchScheduleQueueDependencies = {
   getScheduleState: async (searchId, scheduleVersion) =>
     getSearchScheduleState(searchId, scheduleVersion),
@@ -108,14 +135,16 @@ const defaultRemediatedCourseRecheckDependencies: RemediatedCourseRecheckDepende
       where: {
         courseId: { in: courseIds },
         teeSearch: {
-          status: "ACTIVE",
-          date: { gte: startOfUtcCalendarDay() }
+          status: "ACTIVE"
         }
       },
-      distinct: ["teeSearchId"],
-      select: { teeSearchId: true }
+      select: {
+        teeSearchId: true,
+        teeSearch: { select: { date: true } },
+        course: { select: { timeZone: true } }
+      }
     });
-    return preferences.map((preference) => preference.teeSearchId);
+    return selectCurrentRemediatedSearchIds(preferences);
   },
   queueSearch: async (searchId, remediationDispatchKey) => {
     const queued = await queueSearchCheck(searchId, remediationDispatchKey);

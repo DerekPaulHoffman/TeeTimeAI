@@ -2,12 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
   batchFindFirst: vi.fn(),
+  batchFindMany: vi.fn(),
+  batchFindUnique: vi.fn(),
+  batchCreate: vi.fn(),
   batchUpdateMany: vi.fn(),
+  batchIncidentCreateMany: vi.fn(),
   supportIncidentFindMany: vi.fn(),
   incidentUpdateMany: vi.fn(),
   supportIncidentUpdateMany: vi.fn(),
   automationRunFindFirst: vi.fn(),
   automationRunCreate: vi.fn(),
+  courseProbeFindMany: vi.fn(),
   verificationRequestFindUnique: vi.fn(),
   verificationRequestFindMany: vi.fn(),
   verificationRequestUpdateMany: vi.fn(),
@@ -20,11 +25,19 @@ const verificationMocks = vi.hoisted(() => ({
   getEligibleCourseSupportVerificationProof: vi.fn(),
   scheduleCourseSupportVerificationRequests: vi.fn()
 }));
+const leaseMocks = vi.hoisted(() => ({
+  withPostgresAdvisoryTextLease: vi.fn()
+}));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    courseSupportBatch: { findFirst: prismaMocks.batchFindFirst },
+    courseSupportBatch: {
+      findFirst: prismaMocks.batchFindFirst,
+      findMany: prismaMocks.batchFindMany,
+      findUnique: prismaMocks.batchFindUnique
+    },
     courseSupportIncident: { findMany: prismaMocks.supportIncidentFindMany },
+    courseProbe: { findMany: prismaMocks.courseProbeFindMany },
     courseSupportVerificationRequest: {
       findMany: prismaMocks.verificationRequestFindMany
     },
@@ -37,6 +50,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 vi.mock("./course-support-verification", () => verificationMocks);
+vi.mock("./lease", () => leaseMocks);
 
 import {
   assessCourseSupportRecovery,
@@ -49,13 +63,16 @@ import {
   classifyDetachedVerificationFailure,
   classifyDetachedVerificationEvidence,
   classifyFreshBatchEvidence,
+  claimCourseSupportBatch,
   closeoutCourseSupportBatch,
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
+  deriveCourseSupportCurrentDemand,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
   isDurableTerminalProof,
   isRemediatedSearchSchedulerHealthy,
+  markCourseSupportBatchNeedsHuman,
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
@@ -71,9 +88,19 @@ import {
 const now = new Date("2026-07-15T20:00:00.000Z");
 
 const transactionClient = {
-  courseSupportBatch: { updateMany: prismaMocks.batchUpdateMany },
-  courseSupportBatchIncident: { updateMany: prismaMocks.incidentUpdateMany },
-  courseSupportIncident: { updateMany: prismaMocks.supportIncidentUpdateMany },
+  automationRun: { create: prismaMocks.automationRunCreate },
+  courseSupportBatch: {
+    create: prismaMocks.batchCreate,
+    updateMany: prismaMocks.batchUpdateMany
+  },
+  courseSupportBatchIncident: {
+    createMany: prismaMocks.batchIncidentCreateMany,
+    updateMany: prismaMocks.incidentUpdateMany
+  },
+  courseSupportIncident: {
+    findMany: prismaMocks.supportIncidentFindMany,
+    updateMany: prismaMocks.supportIncidentUpdateMany
+  },
   courseSupportVerificationRequest: {
     findUnique: prismaMocks.verificationRequestFindUnique,
     findMany: prismaMocks.verificationRequestFindMany,
@@ -110,8 +137,25 @@ beforeEach(() => {
   prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
   prismaMocks.teeSearchCount.mockResolvedValue(0);
   prismaMocks.supportIncidentFindMany.mockResolvedValue([]);
+  prismaMocks.batchFindFirst.mockResolvedValue(null);
+  prismaMocks.batchFindMany.mockResolvedValue([]);
+  prismaMocks.batchFindUnique.mockResolvedValue(null);
+  prismaMocks.batchCreate.mockResolvedValue({
+    id: "batch-1",
+    reference: "batch-reference"
+  });
+  prismaMocks.batchIncidentCreateMany.mockResolvedValue({ count: 1 });
+  prismaMocks.courseProbeFindMany.mockResolvedValue([]);
+  prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
   prismaMocks.automationRunFindFirst.mockResolvedValue(null);
   prismaMocks.automationRunCreate.mockResolvedValue({ id: "routine-run" });
+  leaseMocks.withPostgresAdvisoryTextLease.mockImplementation(
+    async (
+      _client: unknown,
+      _key: string,
+      worker: () => Promise<unknown>
+    ) => ({ acquired: true, value: await worker() })
+  );
 });
 
 function candidate(
@@ -166,6 +210,66 @@ function retryBatchEvidence(
 }
 
 describe("course-support batch selection", () => {
+  it("deduplicates live demand and keeps its earliest target date", () => {
+    expect(
+      deriveCourseSupportCurrentDemand([
+        {
+          teeSearch: {
+            id: "search-2",
+            date: new Date("2026-07-20T00:00:00.000Z")
+          }
+        },
+        {
+          teeSearch: {
+            id: "search-1",
+            date: new Date("2026-07-18T00:00:00.000Z")
+          }
+        },
+        {
+          teeSearch: {
+            id: "search-1",
+            date: new Date("2026-07-18T00:00:00.000Z")
+          }
+        }
+      ])
+    ).toEqual({
+      activeRealSearchCount: 2,
+      earliestTargetDate: new Date("2026-07-18T00:00:00.000Z")
+    });
+    expect(deriveCourseSupportCurrentDemand([])).toEqual({
+      activeRealSearchCount: 0,
+      earliestTargetDate: null
+    });
+  });
+
+  it("keeps a same-day western search current across the UTC date rollover", () => {
+    const currentDemand = deriveCourseSupportCurrentDemand(
+      [
+        {
+          teeSearch: {
+            id: "same-local-day",
+            date: new Date("2026-07-20T00:00:00.000Z")
+          }
+        },
+        {
+          teeSearch: {
+            id: "previous-local-day",
+            date: new Date("2026-07-19T00:00:00.000Z")
+          }
+        }
+      ],
+      {
+        timeZone: "America/Los_Angeles",
+        now: new Date("2026-07-21T01:00:00.000Z")
+      }
+    );
+
+    expect(currentDemand).toEqual({
+      activeRealSearchCount: 1,
+      earliestTargetDate: new Date("2026-07-20T00:00:00.000Z")
+    });
+  });
+
   it("prioritizes a near-date real fetch failure", () => {
     const selected = selectCourseSupportBatch({
       candidates: [
@@ -418,6 +522,130 @@ describe("course-support batch selection", () => {
         now
       })
     ).toThrow("superseded by a later batch");
+  });
+});
+
+describe("course-support claim demand fencing", () => {
+  const baseSha = "a".repeat(40);
+
+  function incidentRecord(input: {
+    engineeringOnly: boolean;
+    preferences: Array<{
+      teeSearch: { id: string; date: Date };
+    }>;
+  }) {
+    return {
+      ...candidate({ engineeringOnly: input.engineeringOnly }),
+      course: {
+        timeZone: "America/Los_Angeles",
+        preferences: input.preferences
+      }
+    };
+  }
+
+  it("atomically promotes synthetic provenance when current real demand exists", async () => {
+    const preferences = [
+      {
+        teeSearch: {
+          id: "real-search",
+          date: new Date("2026-07-20T00:00:00.000Z")
+        }
+      }
+    ];
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([
+        incidentRecord({ engineeringOnly: true, preferences })
+      ])
+      .mockResolvedValueOnce([
+        incidentRecord({ engineeringOnly: true, preferences })
+      ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:00:00.000Z")
+      })
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          activeRealSearchCount: 1,
+          earliestTargetDate: new Date("2026-07-20T00:00:00.000Z"),
+          engineeringOnly: false
+        })
+      })
+    );
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: "Serializable" }
+    );
+  });
+
+  it("rolls back claim creation when live demand changes after selection", async () => {
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([
+        incidentRecord({ engineeringOnly: true, preferences: [] })
+      ])
+      .mockResolvedValueOnce([
+        incidentRecord({
+          engineeringOnly: true,
+          preferences: [
+            {
+              teeSearch: {
+                id: "late-real-search",
+                date: new Date("2026-07-20T00:00:00.000Z")
+              }
+            }
+          ]
+        })
+      ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:00:00.000Z")
+      })
+    ).rejects.toThrow("demand changed during claim");
+
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rolls back claim creation when live demand ends after selection", async () => {
+    const preferences = [
+      {
+        teeSearch: {
+          id: "ending-real-search",
+          date: new Date("2026-07-20T00:00:00.000Z")
+        }
+      }
+    ];
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([
+        incidentRecord({ engineeringOnly: false, preferences })
+      ])
+      .mockResolvedValueOnce([
+        incidentRecord({ engineeringOnly: false, preferences: [] })
+      ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:00:00.000Z")
+      })
+    ).rejects.toThrow("demand changed during claim");
+
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -2002,6 +2230,56 @@ describe("course-support inspection ownership", () => {
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
   });
 
+  it("reports live demand separately from historical real provenance", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        providerFamilyKey: "FOREUP",
+        failureFingerprint: "historical",
+        engineeringOnly: false,
+        course: { timeZone: "America/New_York", preferences: [] }
+      },
+      {
+        providerFamilyKey: "FOREUP",
+        failureFingerprint: "live",
+        engineeringOnly: true,
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "search-live",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      },
+      {
+        providerFamilyKey: "CPS",
+        failureFingerprint: "synthetic",
+        engineeringOnly: true,
+        course: { timeZone: "America/New_York", preferences: [] }
+      }
+    ]);
+    prismaMocks.batchFindFirst.mockResolvedValue(null);
+
+    await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
+      outcome: "ready",
+      dueIncidentCount: 3,
+      dueRealCount: 1,
+      dueHistoricalRealCount: 1,
+      dueEngineeringCount: 1,
+      providerGroupCount: 3
+    });
+    expect(prismaMocks.supportIncidentFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          course: expect.objectContaining({ select: expect.any(Object) })
+        })
+      })
+    );
+  });
+
   it("defers to hourly work without archiving the task that owns the responder batch", async () => {
     prismaMocks.batchFindFirst
       .mockResolvedValueOnce({
@@ -2489,7 +2767,7 @@ describe("detached verification atomic batch fences", () => {
     };
   }
 
-  function atomicRequest(course = providerCourse()) {
+  function atomicRequest(course = providerCourse(), engineeringOnly = true) {
     return {
       courseId: "course-1",
       releaseSha,
@@ -2521,14 +2799,14 @@ describe("detached verification atomic batch fences", () => {
           cycle: 1,
           status: "AUTO_INVESTIGATING",
           activeBatchId: "batch-1",
-          engineeringOnly: true
+          engineeringOnly
         },
         course
       }
     };
   }
 
-  function verificationBatch() {
+  function verificationBatch(engineeringOnly = true) {
     return {
       id: "batch-1",
       status: "VERIFYING",
@@ -2555,7 +2833,7 @@ describe("detached verification atomic batch fences", () => {
           incident: {
             cycle: 1,
             status: "AUTO_INVESTIGATING",
-            engineeringOnly: true,
+            engineeringOnly,
             activeBatchId: "batch-1",
             firstSeenAt: new Date("2026-07-15T18:30:00.000Z"),
             lastSeenAt: incidentUpdatedAt,
@@ -2684,7 +2962,7 @@ describe("detached verification atomic batch fences", () => {
   }
 
   function closeoutBatch(
-    result: "RESTORED" | "RETRY_SCHEDULED",
+    result: "RESTORED" | "RETRY_SCHEDULED" | "NEEDS_HUMAN",
     retryProofSnapshot: Record<string, unknown> | null = null
   ) {
     const proofSnapshot =
@@ -2728,7 +3006,7 @@ describe("detached verification atomic batch fences", () => {
           incident: {
             cycle: 1,
             status: "AUTO_INVESTIGATING",
-            engineeringOnly: true,
+            engineeringOnly: result === "NEEDS_HUMAN" ? false : true,
             activeBatchId: "batch-1",
             firstSeenAt: new Date("2026-07-15T18:30:00.000Z"),
             lastSeenAt: incidentUpdatedAt,
@@ -2742,6 +3020,62 @@ describe("detached verification atomic batch fences", () => {
       ]
     };
   }
+
+  it("atomically stales detached work when human evidence supersedes it", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue({
+      status: "VERIFYING",
+      revision: 7,
+      incidents: [
+        {
+          id: "entry-1",
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          incidentId: "incident-1",
+          cycle: 1,
+          updatedAt: incidentUpdatedAt,
+          course: { name: "Course One" },
+          incident: {
+            engineeringOnly: false,
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: "batch-1",
+            updatedAt: incidentUpdatedAt
+          }
+        }
+      ]
+    });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      markCourseSupportBatchNeedsHuman({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        evidence: "Provider approval is required.",
+        nextAction: "Request provider access.",
+        now
+      })
+    ).resolves.toMatchObject({ outcome: "needs_human" });
+
+    expect(prismaMocks.verificationRequestUpdateMany).toHaveBeenCalledWith({
+      where: {
+        batchIncidentId: "entry-1",
+        status: {
+          in: ["QUEUED", "CHECKING", "SUCCEEDED", "RETRYABLE_FAILED"]
+        }
+      },
+      data: expect.objectContaining({
+        status: "STALE",
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        completedAt: now,
+        lastError: "human_verification_superseded"
+      })
+    });
+  });
 
   it("downgrades detached success when live demand appears before atomic persistence", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
@@ -2876,6 +3210,39 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
+  it("persists detached success for historical real demand after its searches end", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch(false));
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(
+      atomicRequest(providerCourse(), false)
+    );
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
+      eligibleProof()
+    );
+
+    await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RESTORED" })
+      })
+    );
+    expect(prismaMocks.teeSearchCount).toHaveBeenCalledWith({
+      where: {
+        status: "ACTIVE",
+        date: { gte: new Date("2026-07-15T00:00:00.000Z") },
+        preferences: { some: { courseId: "course-1" } }
+      }
+    });
+  });
+
   it("reports aggregate pending detached verification and requires a verify rerun", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
@@ -2904,6 +3271,33 @@ describe("detached verification atomic batch fences", () => {
         detachedVerificationPendingCount: 1,
         detachedVerificationRerunNeeded: true
       }
+    });
+  });
+
+  it("does not schedule or await detached work after human evidence wins", async () => {
+    const batch = verificationBatch(false);
+    batch.incidents[0].result = "NEEDS_HUMAN";
+    batch.incidents[0].message = "Provider approval is required.";
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("QUEUED")
+    ]);
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(
+      verificationMocks.scheduleCourseSupportVerificationRequests
+    ).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      detachedVerification: { pendingCount: 0, rerunNeeded: false }
     });
   });
 
@@ -3020,6 +3414,28 @@ describe("detached verification atomic batch fences", () => {
       expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
     }
   );
+
+  it("allows human closeout when an older detached request is still pending", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("NEEDS_HUMAN"));
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("QUEUED")
+    ]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "needs_human",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "needs_human",
+      durableCloseoutRecorded: true
+    });
+  });
 
   it("refuses closeout when detached success finished after the last verify read", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(

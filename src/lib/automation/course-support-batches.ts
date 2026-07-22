@@ -16,8 +16,8 @@ import {
   evaluateMonitoringGate,
   isCoherentManualDisposition
 } from "@/lib/automation/policy";
+import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
-import { normalizeTimeZone } from "@/lib/timezones";
 
 import {
   buildCourseSupportProviderSnapshotFingerprint,
@@ -52,6 +52,7 @@ import {
   notifyCourseSupportIssueBatch,
   resolveCourseSupportIncident
 } from "./support-incidents";
+import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 
 const REPOSITORY_WRITER_LEASE_KEY = "tee-time-spot:repository-writer";
 const HOURLY_PROMPT_PREFIX = "tee-time-spot-improvement-loop-v";
@@ -176,6 +177,42 @@ export type CourseSupportCandidate = {
   attemptCount: number;
   updatedAt: Date;
 };
+
+type CourseSupportDemandPreference = {
+  teeSearch: {
+    id: string;
+    date: Date;
+  };
+};
+
+export function deriveCourseSupportCurrentDemand(
+  preferences: readonly CourseSupportDemandPreference[],
+  context?: { timeZone: string; now: Date }
+) {
+  const dateBoundary = context
+    ? getCourseLocalDateStorageBoundary(context.timeZone, context.now)
+    : null;
+  const searchDates = new Map<string, Date>();
+  for (const preference of preferences) {
+    if (
+      dateBoundary &&
+      preference.teeSearch.date.getTime() < dateBoundary.getTime()
+    ) {
+      continue;
+    }
+    const current = searchDates.get(preference.teeSearch.id);
+    if (!current || preference.teeSearch.date.getTime() < current.getTime()) {
+      searchDates.set(preference.teeSearch.id, preference.teeSearch.date);
+    }
+  }
+  const dates = [...searchDates.values()].sort(
+    (left, right) => left.getTime() - right.getTime()
+  );
+  return {
+    activeRealSearchCount: dates.length,
+    earliestTargetDate: dates[0] ?? null
+  };
+}
 
 export type RecentBatchFairnessEvidence = {
   includedEngineeringOnly: boolean;
@@ -1079,7 +1116,24 @@ export async function inspectCourseSupportQueue(input?: {
           providerFamilyKey: true,
           failureFingerprint: true,
           engineeringOnly: true,
-          activeRealSearchCount: true
+          course: {
+            select: {
+              timeZone: true,
+              preferences: {
+                where: {
+                  teeSearch: {
+                    status: "ACTIVE",
+                    trafficClass: {
+                      notIn: [...syntheticWebsiteTrafficClasses]
+                    }
+                  }
+                },
+                select: {
+                  teeSearch: { select: { id: true, date: true } }
+                }
+              }
+            }
+          }
         }
       }),
       prisma.courseSupportBatch.findFirst({
@@ -1119,11 +1173,32 @@ export async function inspectCourseSupportQueue(input?: {
         `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
     )
   );
-  const dueRealCount = dueIncidents.filter(
-    (incident) => incident.activeRealSearchCount > 0 && !incident.engineeringOnly
+  const dueDemand = dueIncidents.map((incident) => {
+    const currentDemand = deriveCourseSupportCurrentDemand(
+      incident.course.preferences,
+      { timeZone: incident.course.timeZone, now }
+    );
+    return {
+      incident: {
+        ...incident,
+        engineeringOnly:
+          currentDemand.activeRealSearchCount > 0
+            ? false
+            : incident.engineeringOnly
+      },
+      ...currentDemand
+    };
+  });
+  const dueRealCount = dueDemand.filter(
+    ({ activeRealSearchCount }) => activeRealSearchCount > 0
   ).length;
-  const dueEngineeringCount = dueIncidents.filter(
-    (incident) => incident.engineeringOnly
+  const dueEngineeringCount = dueDemand.filter(
+    ({ incident, activeRealSearchCount }) =>
+      incident.engineeringOnly && activeRealSearchCount === 0
+  ).length;
+  const dueHistoricalRealCount = dueDemand.filter(
+    ({ incident, activeRealSearchCount }) =>
+      !incident.engineeringOnly && activeRealSearchCount === 0
   ).length;
   const outcome = classifyCourseSupportQueueInspection({
     hasActiveBatch: Boolean(activeBatch),
@@ -1148,6 +1223,7 @@ export async function inspectCourseSupportQueue(input?: {
             dueIncidentCount: dueIncidents.length,
             dueRealCount,
             dueEngineeringCount,
+            dueHistoricalRealCount,
             providerGroupCount: providerGroups.size,
             activeBatch: Boolean(activeBatch),
             activeHourlyWriter: Boolean(activeHourlyRun)
@@ -1172,6 +1248,7 @@ export async function inspectCourseSupportQueue(input?: {
     dueIncidentCount: dueIncidents.length,
     dueRealCount,
     dueEngineeringCount,
+    dueHistoricalRealCount,
     providerGroupCount: providerGroups.size,
     ownedByCurrentTask,
     activeWriter: activeBatch
@@ -1375,6 +1452,61 @@ export async function claimCourseSupportBatch(input: {
     const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
     const plannedPaths = normalizePaths(input.plannedPaths ?? []);
     const created = await prisma.$transaction(async (tx) => {
+      const currentIncidents = await tx.courseSupportIncident.findMany({
+        where: { id: { in: selected.incidents.map((incident) => incident.id) } },
+        select: {
+          id: true,
+          engineeringOnly: true,
+          course: {
+            select: {
+              timeZone: true,
+              preferences: {
+                where: {
+                  teeSearch: {
+                    status: "ACTIVE",
+                    trafficClass: {
+                      notIn: [...syntheticWebsiteTrafficClasses]
+                    }
+                  }
+                },
+                select: {
+                  teeSearch: { select: { id: true, date: true } }
+                }
+              }
+            }
+          }
+        }
+      });
+      const currentIncidentById = new Map(
+        currentIncidents.map((incident) => [incident.id, incident])
+      );
+      for (const incident of selected.incidents) {
+        const current = currentIncidentById.get(incident.id);
+        if (!current) {
+          throw new Error(
+            "Course-support demand changed during claim; rerun selection."
+          );
+        }
+        const currentDemand = deriveCourseSupportCurrentDemand(
+          current.course.preferences,
+          { timeZone: current.course.timeZone, now }
+        );
+        const currentEngineeringOnly =
+          currentDemand.activeRealSearchCount > 0
+            ? false
+            : current.engineeringOnly;
+        if (
+          currentDemand.activeRealSearchCount !==
+            incident.activeRealSearchCount ||
+          (currentDemand.earliestTargetDate?.getTime() ?? null) !==
+            (incident.earliestTargetDate?.getTime() ?? null) ||
+          currentEngineeringOnly !== incident.engineeringOnly
+        ) {
+          throw new Error(
+            "Course-support demand changed during claim; rerun selection."
+          );
+        }
+      }
       const automationRun = await tx.automationRun.create({
         data: {
           promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
@@ -1457,6 +1589,9 @@ export async function claimCourseSupportBatch(input: {
           },
           data: {
             activeBatchId: batch.id,
+            activeRealSearchCount: incident.activeRealSearchCount,
+            earliestTargetDate: incident.earliestTargetDate,
+            engineeringOnly: incident.engineeringOnly,
             lastAttemptAt: now,
             attemptCount: { increment: 1 }
           }
@@ -1470,7 +1605,7 @@ export async function claimCourseSupportBatch(input: {
         batchId: batch.id,
         batchRef: batch.reference
       };
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     return {
       outcome: "ready" as const,
@@ -1797,6 +1932,24 @@ export async function markCourseSupportBatchNeedsHuman(input: {
         proofSnapshot: Prisma.DbNull,
         verifiedIncidentUpdatedAt: now,
         verifiedAt: now
+      }
+    });
+    await transaction.courseSupportVerificationRequest.updateMany({
+      where: {
+        batchIncidentId: entry.id,
+        status: {
+          in: ["QUEUED", "CHECKING", "SUCCEEDED", "RETRYABLE_FAILED"]
+        }
+      },
+      data: {
+        status: "STALE",
+        revision: { increment: 1 },
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        completedAt: now,
+        lastError: "human_verification_superseded",
+        updatedAt: now
       }
     });
     if (ownership.count !== 1 || incident.count !== 1 || batchEntry.count !== 1) {
@@ -2246,7 +2399,9 @@ export async function verifyCourseSupportBatch(input: {
       entry.incident.cycle === entry.cycle &&
       entry.incident.activeBatchId === batch.id &&
       entry.incident.status === "AUTO_INVESTIGATING" &&
-      !["FINAL_DISPOSITION", "RESTORED"].includes(verification.result)
+      !["FINAL_DISPOSITION", "RESTORED", "NEEDS_HUMAN"].includes(
+        verification.result
+      )
   );
   const preliminaryRecheckCourseIds = preliminaryRecheckVerifications.map(
     ({ entry }) => entry.courseId
@@ -2349,7 +2504,9 @@ export async function verifyCourseSupportBatch(input: {
       entry.incident.cycle === entry.cycle &&
       entry.incident.activeBatchId === batch.id &&
       entry.incident.status === "AUTO_INVESTIGATING" &&
-      !["FINAL_DISPOSITION", "RESTORED"].includes(verification.result)
+      !["FINAL_DISPOSITION", "RESTORED", "NEEDS_HUMAN"].includes(
+        verification.result
+      )
   );
   const recheckCourseIds = recheckVerifications.map(
     ({ entry }) => entry.courseId
@@ -3604,8 +3761,6 @@ export async function backfillCourseSupportResponderState(input?: {
   now?: Date;
 }) {
   const now = input?.now ?? new Date();
-  const today = new Date(now);
-  today.setUTCHours(0, 0, 0, 0);
   const [courses, incidents] = await Promise.all([
     prisma.course.findMany({
       select: {
@@ -3638,6 +3793,7 @@ export async function backfillCourseSupportResponderState(input?: {
     include: {
       course: {
         select: {
+          timeZone: true,
           providerFamilyKey: true,
           detectedPlatform: true,
           detectedBookingUrl: true,
@@ -3660,7 +3816,7 @@ export async function backfillCourseSupportResponderState(input?: {
           },
           preferences: {
             where: {
-              teeSearch: { status: "ACTIVE", date: { gte: today } }
+              teeSearch: { status: "ACTIVE" }
             },
             select: {
               teeSearch: {
@@ -3687,9 +3843,15 @@ export async function backfillCourseSupportResponderState(input?: {
         ];
   });
   const updates = incidents.map((incident) => {
+    const localDateBoundary = getCourseLocalDateStorageBoundary(
+      incident.course.timeZone,
+      now
+    );
     const realSearchDates = incident.course.preferences
       .filter(
         (preference) =>
+          preference.teeSearch.date.getTime() >=
+            localDateBoundary.getTime() &&
           preference.teeSearch.trafficClass !== "AUTOMATION" &&
           preference.teeSearch.trafficClass !== "TEST"
       )
@@ -4148,7 +4310,7 @@ function getSafeEvidenceOrigin(value: string) {
 }
 
 async function listDueCourseSupportCandidates(now: Date) {
-  return prisma.courseSupportIncident.findMany({
+  const incidents = await prisma.courseSupportIncident.findMany({
     where: {
       status: "AUTO_INVESTIGATING",
       activeBatchId: null,
@@ -4170,12 +4332,41 @@ async function listDueCourseSupportCandidates(now: Date) {
       lastSeenAt: true,
       lastAttemptAt: true,
       nextAttemptAt: true,
-      attemptCount: true
-      ,updatedAt: true
+      attemptCount: true,
+      updatedAt: true,
+      course: {
+        select: {
+          timeZone: true,
+          preferences: {
+            where: {
+              teeSearch: {
+                status: "ACTIVE",
+                trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
+              }
+            },
+            select: {
+              teeSearch: { select: { id: true, date: true } }
+            }
+          }
+        }
+      }
     }
   });
+  return incidents.map(({ course, ...incident }) => {
+    const currentDemand = deriveCourseSupportCurrentDemand(
+      course.preferences,
+      { timeZone: course.timeZone, now }
+    );
+    return {
+      ...incident,
+      ...currentDemand,
+      engineeringOnly:
+        currentDemand.activeRealSearchCount > 0
+          ? false
+          : incident.engineeringOnly
+    };
+  });
 }
-
 async function findActiveHourlyWriter() {
   return prisma.automationRun.findFirst({
     where: {
@@ -4686,7 +4877,6 @@ async function revalidateDetachedVerificationProof(
       incident.cycle === input.cycle &&
       incident.status === "AUTO_INVESTIGATING" &&
       incident.activeBatchId === input.batchId &&
-      incident.engineeringOnly === true &&
       currentMonitoringGate.disposition === "ACTIONABLE" &&
       currentMonitoringGate.adapterAllowed === true &&
       evidence.kind === "PROVIDER_VERIFICATION" &&
@@ -4723,19 +4913,6 @@ async function revalidateDetachedVerificationProof(
     }
   });
   return liveFutureDemand === 0;
-}
-
-function getCourseLocalDateStorageBoundary(timeZone: string, value: Date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: normalizeTimeZone(timeZone),
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(value);
-  const byType = new Map(parts.map((part) => [part.type, part.value]));
-  return new Date(
-    `${byType.get("year")}-${byType.get("month")}-${byType.get("day")}T00:00:00.000Z`
-  );
 }
 
 export function isDurableTerminalProof(
@@ -5089,10 +5266,15 @@ function summarizeDetachedVerificationRerun(input: {
   verificationByBatchIncidentId: Map<string, BatchIncidentVerification>;
   currentFailureBatchIncidentIds: Set<string>;
 }) {
-  const pendingCount = input.requests.filter(
+  const relevantRequests = input.requests.filter(
+    (request) =>
+      input.verificationByBatchIncidentId.get(request.batchIncidentId)
+        ?.result !== "NEEDS_HUMAN"
+  );
+  const pendingCount = relevantRequests.filter(
     (request) => request.status === "QUEUED" || request.status === "CHECKING"
   ).length;
-  const rerunNeeded = input.requests.some((request) => {
+  const rerunNeeded = relevantRequests.some((request) => {
     const verification = input.verificationByBatchIncidentId.get(
       request.batchIncidentId
     );
@@ -5130,6 +5312,9 @@ function assertDetachedVerificationReadyForCloseout(input: {
     const verification = input.verificationByBatchIncidentId.get(
       request.batchIncidentId
     );
+    if (verification?.result === "NEEDS_HUMAN") {
+      continue;
+    }
     if (request.status === "QUEUED" || request.status === "CHECKING") {
       throw new Error(
         "Detached provider verification is still pending; rerun verification before closeout."

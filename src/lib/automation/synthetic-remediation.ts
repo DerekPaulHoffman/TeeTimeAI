@@ -7,6 +7,7 @@ import type {
 export type SyntheticRemediationCourse = {
   id: string;
   name: string;
+  timeZone: string;
   detectedPlatform: DetectedPlatform;
   detectedBookingUrl: string | null;
   website: string | null;

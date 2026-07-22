@@ -31,6 +31,7 @@ export async function backfillSyntheticRemediation(options: BackfillOptions) {
             select: {
               id: true,
               name: true,
+              timeZone: true,
               detectedPlatform: true,
               detectedBookingUrl: true,
               website: true
