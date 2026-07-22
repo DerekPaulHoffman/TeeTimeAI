@@ -4220,9 +4220,10 @@ describe("search monitoring discovery", () => {
       const bookingPageUrl = "https://simsbury.example/book-a-tee-time";
       const legacyRoot =
         "https://secure.east.prophetservices.com/SimsburyFarmsV3";
+      const legacySearchLanding = `${legacyRoot}/Home/nIndex`;
       const widgetConfig = Buffer.from(
         JSON.stringify({
-          baseURL: legacyRoot,
+          baseURL: legacySearchLanding,
           newBookingEngine: false,
           locations: [{ name: "simsbury farms", courseId: "1" }]
         })
@@ -4432,6 +4433,30 @@ describe("search monitoring discovery", () => {
       },
       {
         baseURL: "https://secure.east.prophetservices.com/PublicCourse?session=1",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL:
+          "https://secure.east.prophetservices.com/PublicCourse/Home/nIndex?session=1",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL:
+          "https://secure.east.prophetservices.com/PublicCourse/Home/nIndex#top",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL:
+          "https://secure.east.prophetservices.com/PublicCourse/Home/nIndex/extra",
+        newBookingEngine: false,
+        locations: [{ name: "Target Golf Course", courseId: "1" }]
+      },
+      {
+        baseURL:
+          "https://secure.east.prophetservices.com/PublicCourse/Home/checkout",
         newBookingEngine: false,
         locations: [{ name: "Target Golf Course", courseId: "1" }]
       },

@@ -4428,6 +4428,12 @@ function getSafeLegacyProphetWidgetRoot(value: string) {
   try {
     const url = new URL(value);
     const segments = url.pathname.split("/").filter(Boolean);
+    const isTenantRoot = segments.length === 1;
+    const isExactLegacySearchLanding = Boolean(
+      segments.length === 3 &&
+        segments[1]?.toLocaleLowerCase("en-US") === "home" &&
+        segments[2]?.toLocaleLowerCase("en-US") === "nindex"
+    );
     if (
       url.protocol !== "https:" ||
       url.hostname.toLowerCase() !== "secure.east.prophetservices.com" ||
@@ -4436,7 +4442,7 @@ function getSafeLegacyProphetWidgetRoot(value: string) {
       url.port ||
       url.search ||
       url.hash ||
-      segments.length !== 1 ||
+      (!isTenantRoot && !isExactLegacySearchLanding) ||
       !/^[a-z0-9][a-z0-9_-]{0,79}$/iu.test(segments[0]) ||
       /(?:account|auth|captcha|checkout|login|queue|session|webstore)/iu.test(
         segments[0]
