@@ -537,6 +537,27 @@ describe("provider capability registry", () => {
     ).toBeNull();
   });
 
+  it("keeps a versioned TeeItUp course tenant runnable with canonical metadata", () => {
+    expect(
+      resolveProviderCapability({
+        detectedPlatform: "TEEITUP",
+        providerFamilyKey: "TEEITUP",
+        detectedBookingUrl:
+          "https://cedar-ridge-golf-course-v2.book.teeitup.com/",
+        bookingMetadata: {
+          aliases: ["cedar-ridge-golf-course-v2"],
+          bookingBaseUrl:
+            "https://cedar-ridge-golf-course-v2.book.teeitup.com/"
+        }
+      })
+    ).toMatchObject({
+      providerFamilyKey: "TEEITUP",
+      metadataReady: true,
+      isRunnable: true,
+      evidenceConflict: false
+    });
+  });
+
   it("uses only a normalized hostname for unknown sources", () => {
     const resolution = resolveProviderCapability({
       detectedPlatform: "UNKNOWN",
