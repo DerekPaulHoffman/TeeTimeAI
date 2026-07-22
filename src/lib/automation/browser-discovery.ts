@@ -2571,13 +2571,16 @@ function hasStrongCourseIdentityEvidence(
   const targetStart = precedingContext
     .toLocaleLowerCase("en-US")
     .lastIndexOf(courseName.toLocaleLowerCase("en-US"));
-  if (targetStart < 0) {
+  const targetEnd = targetStart >= 0
+    ? targetStart + courseName.length
+    : findNormalizedCourseMentionEnd(
+        precedingContext,
+        normalizedCourseName
+      );
+  if (targetEnd < 0) {
     return false;
   }
-
-  const betweenTargetAndInstruction = precedingContext.slice(
-    targetStart + courseName.length
-  );
+  const betweenTargetAndInstruction = precedingContext.slice(targetEnd);
   const afterInstruction = visibleText.slice(
     directPhone.matchEnd,
     directPhone.matchEnd + 200
@@ -2595,6 +2598,23 @@ function hasStrongCourseIdentityEvidence(
     return false;
   }
   return true;
+}
+
+function findNormalizedCourseMentionEnd(value: string, normalizedName: string) {
+  const tokens = normalizedName.split(" ").filter(Boolean);
+  if (tokens.length < 2) {
+    return -1;
+  }
+  const connector = String.raw`(?:[\s\p{P}]+(?:(?:golf|course|club|center|centre|municipal|public|the|at|of)[\s\p{P}]+)*)`;
+  const pattern = new RegExp(
+    String.raw`\b${tokens.join(connector)}\b`,
+    "giu"
+  );
+  let matchEnd = -1;
+  for (const match of value.matchAll(pattern)) {
+    matchEnd = (match.index ?? 0) + match[0].length;
+  }
+  return matchEnd;
 }
 
 function hasDifferentExplicitCourseIdentity(value: string, courseName: string) {

@@ -4956,6 +4956,31 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("accepts an official phone instruction when the page omits a generic word from the saved course name", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "official-phone-name-alias",
+      courseName: "Portland Golf Course West",
+      sourceUrl: "https://course.example/",
+      finalUrl: "https://course.example/",
+      observedUrls: ["https://course.example/"],
+      linkCandidates: [
+        {
+          url: "https://course.example/foreupgolf.com",
+          label: "TEE TIMES"
+        }
+      ],
+      visibleText:
+        "PORTLAND GOLF WEST. Please Call The Pro Shop At (860) 342-6111 For Tee Times."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-phone-reservation-contact" }
+    });
+  });
+
   it.each([
     "https://academy-course.example/tee-times",
     "https://night-golf.example/academy-course/tee-times",
