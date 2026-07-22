@@ -92,7 +92,7 @@ Keep the queue payload minimal. Do not log raw message bodies, database ids, wor
 
 ## Retry And Closeout
 
-The normal retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`; a task must not archive a retryable failure without a future durable retry time.
+The normal retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`; a task must not archive a retryable failure without a future durable retry time. When an unclaimed engineering-only incident gains real demand, it becomes immediately due unless the unchanged failure is rate-limited; that promotion keeps the later of its persisted cooldown and the fresh bounded `Retry-After`. Claimed work keeps its current ownership and proof fences.
 
 Closeout independently derives per-course and batch outcomes from persisted evidence:
 

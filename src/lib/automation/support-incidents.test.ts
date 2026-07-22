@@ -26,6 +26,7 @@ import {
   reportCourseSupportIssue,
   resolveCourseSupportIncident
 } from "./support-incidents";
+import { buildProviderFailureFingerprint } from "./provider-capabilities";
 
 const now = new Date("2026-07-12T14:00:00.000Z");
 
@@ -59,6 +60,40 @@ function incident(overrides: Record<string, unknown> = {}) {
     updatedAt: now,
     ...overrides
   };
+}
+
+const foreupCourse = {
+  id: "course-1",
+  name: "Shared Coverage Course",
+  detectedPlatform: "FOREUP" as const,
+  detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/1/1",
+  website: "https://example.com/"
+};
+
+const authFailureFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "FOREUP",
+  failureClass: "AUTH",
+  operation: "AVAILABILITY",
+  httpStatus: 401
+});
+
+const rateLimitFailureFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "FOREUP",
+  failureClass: "RATE_LIMIT",
+  operation: "AVAILABILITY",
+  httpStatus: 429
+});
+
+function mockRealDemand(count: number) {
+  prismaMocks.teeSearch.findUnique.mockResolvedValue({
+    trafficClass: "PUBLIC",
+    syntheticMultiCycle: false
+  });
+  prismaMocks.teeSearch.count.mockResolvedValue(count);
+  prismaMocks.teeSearch.aggregate.mockResolvedValue({
+    _count: { id: count },
+    _min: { date: now }
+  });
 }
 
 describe("course support incidents", () => {
@@ -418,31 +453,39 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
   });
 
-  it("promotes an engineering-only incident when real demand arrives", async () => {
-    const engineeringOnly = incident({ engineeringOnly: true });
-    const promoted = incident({ engineeringOnly: false, affectedSearchCount: 2 });
-    prismaMocks.teeSearch.findUnique.mockResolvedValue({
-      trafficClass: "PUBLIC",
-      syntheticMultiCycle: false
+  it("makes an unclaimed non-rate-limited incident due when real demand arrives", async () => {
+    const nextAttemptAt = new Date(now.getTime() + 6 * 60 * 60 * 1000);
+    const lastAttemptAt = new Date(now.getTime() - 60 * 60 * 1000);
+    const engineeringOnly = incident({
+      providerFamilyKey: "FOREUP",
+      failureClass: "AUTH",
+      failureFingerprint: authFailureFingerprint,
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      nextAttemptAt,
+      attemptCount: 3,
+      lastAttemptAt
     });
-    prismaMocks.teeSearch.count.mockResolvedValue(2);
-    prismaMocks.teeSearch.aggregate.mockResolvedValue({
-      _count: { id: 2 },
-      _min: { date: now }
+    const promoted = incident({
+      providerFamilyKey: "FOREUP",
+      failureClass: "AUTH",
+      failureFingerprint: authFailureFingerprint,
+      engineeringOnly: false,
+      affectedSearchCount: 2,
+      activeRealSearchCount: 2,
+      nextAttemptAt: now,
+      attemptCount: 3,
+      lastAttemptAt
     });
+    mockRealDemand(2);
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(engineeringOnly);
     prismaMocks.courseSupportIncident.update.mockResolvedValue(promoted);
 
     const result = await reportCourseSupportIssue({
-      course: {
-        id: "course-1",
-        name: "Shared Coverage Course",
-        detectedPlatform: "UNKNOWN",
-        detectedBookingUrl: null,
-        website: "https://example.com/"
-      },
+      course: foreupCourse,
       searchId: "search-public",
-      kind: "NEEDS_ADAPTER",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
       now
     });
 
@@ -450,10 +493,162 @@ describe("course support incidents", () => {
       where: { id: "incident-1" },
       data: expect.objectContaining({
         affectedSearchCount: 2,
-        engineeringOnly: false
+        engineeringOnly: false,
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        nextAttemptAt: now
       })
     });
+    const updateData = prismaMocks.courseSupportIncident.update.mock.calls[0][0].data;
+    expect(updateData).not.toHaveProperty("cycle");
+    expect(updateData).not.toHaveProperty("attemptCount");
+    expect(updateData).not.toHaveProperty("lastAttemptAt");
     expect(result.incidentId).toBe("incident-1");
+  });
+
+  it("preserves the retry ladder for an incident that already has real demand", async () => {
+    const nextAttemptAt = new Date(now.getTime() + 6 * 60 * 60 * 1000);
+    mockRealDemand(2);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        providerFamilyKey: "FOREUP",
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        engineeringOnly: false,
+        activeRealSearchCount: 1,
+        nextAttemptAt
+      })
+    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({ engineeringOnly: false, nextAttemptAt })
+    );
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({ nextAttemptAt })
+    });
+  });
+
+  it("preserves an unchanged rate-limit cooldown when real demand arrives", async () => {
+    const nextAttemptAt = new Date(now.getTime() + 4 * 60 * 60 * 1000);
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        providerFamilyKey: "FOREUP",
+        failureClass: "RATE_LIMIT",
+        failureFingerprint: rateLimitFailureFingerprint,
+        engineeringOnly: true,
+        activeRealSearchCount: 0,
+        nextAttemptAt
+      })
+    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({ engineeringOnly: false, nextAttemptAt })
+    );
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 429, retryAfter: "7200" },
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({
+        engineeringOnly: false,
+        failureClass: "RATE_LIMIT",
+        failureFingerprint: rateLimitFailureFingerprint,
+        nextAttemptAt
+      })
+    });
+  });
+
+  it("refreshes an expired rate-limit cooldown when real demand arrives", async () => {
+    const expiredNextAttemptAt = new Date(now.getTime() - 60 * 1000);
+    const expectedNextAttemptAt = new Date(now.getTime() + 30 * 60 * 1000);
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        providerFamilyKey: "FOREUP",
+        failureClass: "RATE_LIMIT",
+        failureFingerprint: rateLimitFailureFingerprint,
+        engineeringOnly: true,
+        activeRealSearchCount: 0,
+        nextAttemptAt: expiredNextAttemptAt
+      })
+    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({ engineeringOnly: false, nextAttemptAt: expectedNextAttemptAt })
+    );
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 429, retryAfter: "1800" },
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({
+        engineeringOnly: false,
+        failureClass: "RATE_LIMIT",
+        failureFingerprint: rateLimitFailureFingerprint,
+        nextAttemptAt: expectedNextAttemptAt
+      })
+    });
+  });
+
+  it("honors Retry-After when a real-demand promotion changes to rate limiting", async () => {
+    const expectedNextAttemptAt = new Date(now.getTime() + 30 * 60 * 1000);
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        providerFamilyKey: "FOREUP",
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        engineeringOnly: true,
+        activeRealSearchCount: 0,
+        nextAttemptAt: new Date(now.getTime() + 6 * 60 * 60 * 1000),
+        attemptCount: 3,
+        lastAttemptAt: new Date(now.getTime() - 60 * 60 * 1000)
+      })
+    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({ engineeringOnly: false, nextAttemptAt: expectedNextAttemptAt })
+    );
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 429, retryAfter: "1800" },
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        attemptCount: 0,
+        lastAttemptAt: null,
+        engineeringOnly: false,
+        failureClass: "RATE_LIMIT",
+        failureFingerprint: rateLimitFailureFingerprint,
+        nextAttemptAt: expectedNextAttemptAt
+      })
+    });
   });
 
   it("escalates only after an automated remediation records a concrete blocker", async () => {
@@ -666,6 +861,12 @@ describe("course support incidents", () => {
         lastSeenAt: now
       })
     });
+    const promotionData =
+      prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;
+    expect(promotionData).not.toHaveProperty("nextAttemptAt");
+    expect(promotionData).not.toHaveProperty("cycle");
+    expect(promotionData).not.toHaveProperty("failureFingerprint");
+    expect(promotionData).not.toHaveProperty("activeBatchId");
   });
 
   it("does not let a disposable synthetic check resolve an incident owned by a batch", async () => {

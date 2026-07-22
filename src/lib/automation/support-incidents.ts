@@ -388,6 +388,17 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     const fingerprintChanged =
       existing.providerFamilyKey !== provider.providerFamilyKey ||
       existing.failureFingerprint !== failureFingerprint;
+    const promotedToRealDemand =
+      existing.engineeringOnly && activeRealSearchCount > 0;
+    const promotedNextAttemptAt =
+      failure.failureClass === "RATE_LIMIT"
+        ? new Date(
+            Math.max(
+              existing.nextAttemptAt?.getTime() ?? 0,
+              initialNextAttemptAt.getTime()
+            )
+          )
+        : now;
     incident = await prisma.courseSupportIncident.update({
       where: { id: existing.id },
       data: {
@@ -419,7 +430,9 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           activeRealSearchCount === 0,
         nextAttemptAt: fingerprintChanged
           ? initialNextAttemptAt
-          : (existing.nextAttemptAt ?? initialNextAttemptAt),
+          : promotedToRealDemand
+            ? promotedNextAttemptAt
+            : (existing.nextAttemptAt ?? initialNextAttemptAt),
         activeRealSearchCount,
         earliestTargetDate,
         lastSeenAt: now
