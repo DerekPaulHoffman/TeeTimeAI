@@ -1628,4 +1628,37 @@ describe("browser discovery persistence", () => {
       listBrowserProbeTargets(1, "Westwoods Golf Course")
     ).resolves.toEqual([]);
   });
+
+  it("allows an exact targeted browser probe for a runnable course with a current auth failure", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-current-auth",
+        name: "Current Auth Course",
+        website: "https://sample-course.example/",
+        detectedBookingUrl: "https://sample-course.cps.golf/",
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "CPS",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingMetadata: {
+          bookingBaseUrl: "https://sample-course.cps.golf/",
+          courseId: 1
+        },
+        supportIncident: {
+          kind: "FETCH_FAILED",
+          failureClass: "AUTH",
+          occurrenceCount: 1,
+          lastSeenAt: new Date()
+        },
+        probes: [{ outcome: "FETCH_FAILED", observedAt: new Date() }],
+        preferences: []
+      }
+    ] as never);
+
+    const targets = await listBrowserProbeTargets(1, "Current Auth Course");
+
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.course.providerFamilyKey).toBe("CPS");
+  });
 });

@@ -332,6 +332,7 @@ async function listExactIncidentBrowserProbeTarget(
       supportIncident: {
         select: {
           kind: true,
+          failureClass: true,
           occurrenceCount: true,
           lastSeenAt: true
         }
@@ -368,7 +369,19 @@ async function listExactIncidentBrowserProbeTarget(
     : undefined;
   const probeCourse = course ? { ...course, monitoringFailureEvidence } : null;
   const probeUrl = probeCourse ? getBestProbeUrl(probeCourse) : null;
-  if (!course || !probeUrl || !probeCourse || !shouldQueueBrowserProbe(probeCourse)) {
+  const hasCurrentTechnicalAccessFailure = Boolean(
+    course?.supportIncident?.kind === "FETCH_FAILED" &&
+      ["AUTH", "CHALLENGE"].includes(
+        course.supportIncident.failureClass ?? ""
+      )
+  );
+  if (
+    !course ||
+    !probeUrl ||
+    !probeCourse ||
+    (!shouldQueueBrowserProbe(probeCourse) &&
+      !hasCurrentTechnicalAccessFailure)
+  ) {
     return [];
   }
   const preference = course.preferences[0];
