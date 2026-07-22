@@ -32,9 +32,9 @@
     "@clerk/nextjs": "^7.5.14",
     "@neondatabase/serverless": "^1.1.0",
     "@photostructure/tz-lookup": "^11.5.0",
-    "@prisma/adapter-neon": "^7.8.0",
-    "@prisma/adapter-pg": "^7.8.0",
-    "@prisma/client": "^7.8.0",
+    "@prisma/adapter-neon": "^7.9.0",
+    "@prisma/adapter-pg": "^7.9.0",
+    "@prisma/client": "^7.9.0",
     "@types/leaflet": "^1.9.21",
     "@vercel/analytics": "^2.0.1",
     "@vercel/queue": "^0.4.0",
@@ -42,7 +42,7 @@
     "framer-motion": "^12.42.2",
     "leaflet": "^1.9.4",
     "lucide-react": "^1.23.0",
-    "next": "^16.2.10",
+    "next": "^16.2.11",
     "pg": "^8.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
@@ -58,11 +58,18 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.2",
-    "eslint-config-next": "^16.2.10",
+    "eslint-config-next": "^16.2.11",
     "jsdom": "^27.2.0",
-    "prisma": "^7.8.0",
+    "prisma": "^7.9.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "fast-uri": "3.1.4",
+    "next": {
+      "postcss": "8.5.21",
+      "sharp": "0.35.3"
+    }
   }
 }
