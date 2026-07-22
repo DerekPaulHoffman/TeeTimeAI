@@ -210,6 +210,8 @@ describe("buildBrowserDiscovery", () => {
     apiUrl.searchParams.set("startAt", "00:00:00");
     apiUrl.searchParams.set("endAt", "23:59:59");
     apiUrl.searchParams.set("day", "2026-07-24");
+    apiUrl.searchParams.set("utmCampaign", "official-booking-link");
+    apiUrl.searchParams.set("utmSource", "official-course");
 
     const discovery = buildBrowserDiscovery({
       courseId: "golf-with-access-course",

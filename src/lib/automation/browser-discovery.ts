@@ -842,12 +842,24 @@ function isExactGolfWithAccessTechnicalEvidenceUrl(url: URL) {
     "day"
   ]);
   return (
-    ![...url.searchParams.keys()].some((key) => !allowedKeys.has(key)) &&
+    ![...url.searchParams.entries()].some(
+      ([key, value]) =>
+        !allowedKeys.has(key) &&
+        !isSafeGolfWithAccessTrackingEntry(key, value)
+    ) &&
     url.searchParams.getAll("courseIds").length > 0 &&
     /^[1-4]$/u.test(url.searchParams.get("players") ?? "") &&
     url.searchParams.get("startAt") === "00:00:00" &&
     url.searchParams.get("endAt") === "23:59:59" &&
     isValidGolfWithAccessDate(url.searchParams.get("day"))
+  );
+}
+
+function isSafeGolfWithAccessTrackingEntry(key: string, value: string) {
+  return Boolean(
+    (isProviderTrackingQueryParameter(key) ||
+      /^utm(?:Campaign|Content|Id|Medium|Source|Term)$/u.test(key)) &&
+      /^[a-z0-9._-]{0,128}$/iu.test(value)
   );
 }
 
