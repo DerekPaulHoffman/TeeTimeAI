@@ -375,12 +375,19 @@ async function listExactIncidentBrowserProbeTarget(
         course.supportIncident.failureClass ?? ""
       )
   );
+  const hasCurrentUnsupportedCoverageFailure = Boolean(
+    course?.supportIncident?.kind === "NEEDS_ADAPTER" &&
+      ["MISSING_SOURCE", "MISSING_METADATA", "UNSUPPORTED_FAMILY"].includes(
+        course.supportIncident.failureClass ?? ""
+      )
+  );
   if (
     !course ||
     !probeUrl ||
     !probeCourse ||
     (!shouldQueueBrowserProbe(probeCourse) &&
-      !hasCurrentTechnicalAccessFailure)
+      !hasCurrentTechnicalAccessFailure &&
+      !hasCurrentUnsupportedCoverageFailure)
   ) {
     return [];
   }

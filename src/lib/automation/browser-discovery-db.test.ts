@@ -1661,4 +1661,38 @@ describe("browser discovery persistence", () => {
     expect(targets).toHaveLength(1);
     expect(targets[0]?.course.providerFamilyKey).toBe("CPS");
   });
+
+  it("allows an exact targeted browser probe for a blocked course with a current unsupported-family incident", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-current-unsupported",
+        name: "Current Unsupported Course",
+        website: "https://current-unsupported.example/",
+        detectedBookingUrl: null,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "current-unsupported.example",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        bookingMethod: "CONTACT_COURSE",
+        isPublic: true,
+        bookingMetadata: null,
+        supportIncident: {
+          kind: "NEEDS_ADAPTER",
+          failureClass: "UNSUPPORTED_FAMILY",
+          occurrenceCount: 1,
+          lastSeenAt: new Date()
+        },
+        probes: [{ outcome: "NEEDS_ADAPTER", observedAt: new Date() }],
+        preferences: []
+      }
+    ] as never);
+
+    const targets = await listBrowserProbeTargets(
+      1,
+      "Current Unsupported Course"
+    );
+
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.course.automationEligibility).toBe("BLOCKED");
+  });
 });
