@@ -4970,7 +4970,7 @@ describe("buildBrowserDiscovery", () => {
         }
       ],
       visibleText:
-        "PORTLAND GOLF WEST. Please Call The Pro Shop At (860) 342-6111 For Tee Times."
+        "PORTLAND GOLF WEST. Come join us for your next round of golf. See you soon! Please Call The Pro Shop At (860) 342-6111 For Tee Times."
     });
 
     expect(discovery).toMatchObject({
@@ -4979,6 +4979,20 @@ describe("buildBrowserDiscovery", () => {
       automationReason: "NO_ONLINE_BOOKING",
       evidence: { learnedFrom: "official-phone-reservation-contact" }
     });
+  });
+
+  it("rejects a normalized name alias that is too remote from the phone instruction", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "remote-phone-name-alias",
+      courseName: "Portland Golf Course West",
+      sourceUrl: "https://course.example/",
+      finalUrl: "https://course.example/",
+      observedUrls: ["https://course.example/"],
+      visibleText: `PORTLAND GOLF WEST. ${"Unscoped facility information. ".repeat(12)} Please Call The Pro Shop At (860) 342-6111 For Tee Times.`
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
   });
 
   it.each([

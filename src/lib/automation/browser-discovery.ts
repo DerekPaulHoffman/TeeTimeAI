@@ -2585,15 +2585,18 @@ function hasStrongCourseIdentityEvidence(
     directPhone.matchEnd,
     directPhone.matchEnd + 200
   );
+  const hasNearbyNormalizedAlias =
+    targetStart < 0 && betweenTargetAndInstruction.length <= 240;
   if (
     hasDifferentExplicitCourseIdentity(
       `${betweenTargetAndInstruction} ${afterInstruction}`,
       courseName
     ) ||
-    hasUnscopedPhoneAssociationContext(
-      betweenTargetAndInstruction,
-      afterInstruction
-    )
+    (!hasNearbyNormalizedAlias &&
+      hasUnscopedPhoneAssociationContext(
+        betweenTargetAndInstruction,
+        afterInstruction
+      ))
   ) {
     return false;
   }
