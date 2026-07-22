@@ -2552,8 +2552,15 @@ function hasUnscopedPhoneAssociationContext(
 }
 
 function isSafePhoneAssociationPart(value: string) {
-  const normalized = value.replace(/\s+/gu, " ").trim();
-  if (/\b(?:at|for)\b/i.test(normalized)) {
+  const normalized = value
+    .replace(/[*_]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const isLastTeeTimeNotice =
+    /^(?:as\s+of\s+[a-z]+\s+\d{1,2}\s*,?\s*\d{4}\s*:?\s*)?(?:weather\s+permitting\s*)?(?:our\s+)?last\s+tee[- ]?time\b.{0,160}\b(?:holes?|am|pm)\b/i.test(
+      normalized
+    );
+  if (!isLastTeeTimeNotice && /\b(?:at|for)\b/i.test(normalized)) {
     return false;
   }
   const hasRecognizedStructure = (
@@ -2564,6 +2571,7 @@ function isSafePhoneAssociationPart(value: string) {
     /^(?:tee[- ]?times?|tee[- ]?time\s+reservations?|reservations?|bookings?)\b.{0,240}\b(?:may|can|are|is|must|accepted|taken|booked|reserved|scheduled|phone|online|advance)\b/i.test(
       normalized
     ) ||
+    isLastTeeTimeNotice ||
     /^(?:events?|outings?)(?:\s+and\s+(?:events?|outings?))?\b.{0,160}\bcall\b/i.test(
       normalized
     )
@@ -2578,15 +2586,18 @@ function isSafePhoneAssociationPart(value: string) {
     "course", "courses", "current", "daily", "day", "days", "daytime", "during",
     "each", "events", "fee", "fees", "first", "for", "friday", "from", "golf",
     "green", "greens", "holiday", "holidays", "hole", "holes", "hour", "hours",
-    "in", "included", "includes", "is", "junior", "juniors", "may", "military",
+    "highly", "in", "included", "includes", "is", "junior", "juniors", "last",
+    "may", "military",
     "monday", "must", "night", "no", "not", "offered", "on", "one", "online",
-    "only", "open", "our", "outings", "per", "phone", "please", "pm", "pricing",
+    "of", "only", "open", "our", "outings", "per", "permitting", "phone", "please",
+    "pm", "pricing",
     "private", "pro", "public", "rate", "rates", "regular", "reservation",
-    "reservations", "reserve", "reserved", "reserving", "resident", "riding",
+    "recommended", "reservations", "reserve", "reserved", "reserving", "resident", "riding",
     "saturday", "schedule", "scheduled", "senior", "seniors", "shop", "sunday",
     "taken", "tax", "tee", "the", "thursday", "time", "times", "to", "tuesday",
-    "twilight", "up", "walking", "wednesday", "week", "weekday", "weekdays",
-    "weekend", "weekends", "weeks", "your"
+    "twilight", "up", "walking", "weather", "wednesday", "week", "weekday", "weekdays",
+    "weekend", "weekends", "weeks", "your", "january", "february", "march", "april",
+    "june", "july", "august", "september", "october", "november", "december"
   ]);
   const tokens = normalized
     .normalize("NFKD")
@@ -3752,11 +3763,30 @@ function canonicalizeRejectedManualSource(value: string) {
 function hasPositiveOnlineBookingText(value: string) {
   return normalizeTeeTimeTypography(value).split(/[.!?]+/).some((statement) => {
     const normalized = statement.replace(/\s+/g, " ").trim();
-    const hasExplicitTeeTimeBookingText =
-      /\btee\s*times?\b/i.test(normalized) &&
-      /\b(?:book|booking|reserve|reservation|schedule|online|availability)\b/i.test(
-        normalized
+    const teeTimePositions = [...normalized.matchAll(/\btee\s*times?\b/gi)].map(
+      (match) => match.index ?? 0
+    );
+    const hasRelevantOnlineTeeTimeText = [
+      ...normalized.matchAll(/\bonline\b/gi)
+    ].some((onlineMatch) => {
+      const onlineIndex = onlineMatch.index ?? 0;
+      if (
+        /^online\s+(?:store|shop|merchandise|gift\s+cards?|lessons?|instruction|academ(?:y|ies)|clinics?|simulators?|restaurants?|dining|lodging|spa|appointments?)\b/i.test(
+          normalized.slice(onlineIndex)
+        )
+      ) {
+        return false;
+      }
+      return teeTimePositions.some(
+        (teeTimeIndex) => Math.abs(teeTimeIndex - onlineIndex) <= 80
       );
+    });
+    const hasExplicitTeeTimeBookingText =
+      teeTimePositions.length > 0 &&
+      (hasRelevantOnlineTeeTimeText ||
+        /\b(?:book|booking|reserve|reservation|schedule|availability)\b/i.test(
+          normalized
+        ));
     if (
       /\b(?:no|not|never|without|do\s+not|does\s+not|cannot|can['’]t)\b.{0,60}\bonline\b/i.test(
         normalized
@@ -3783,7 +3813,7 @@ function hasPositiveOnlineBookingText(value: string) {
       return false;
     }
     return (
-      /\bonline\b/i.test(normalized) ||
+      hasRelevantOnlineTeeTimeText ||
       /\b(?:book|reserve|schedule)\b.{0,80}\bnow\b/i.test(normalized) ||
       /^(?:book|reserve|schedule|view|see|search|find|check)\b.{0,80}\btee\s*times?\b/i.test(
         normalized

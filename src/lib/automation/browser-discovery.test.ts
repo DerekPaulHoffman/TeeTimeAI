@@ -4782,6 +4782,26 @@ describe("buildBrowserDiscovery", () => {
     expect(JSON.stringify(discovery)).not.toContain("mailto:");
   });
 
+  it("accepts an official phone-reservation notice followed by current last-tee-time hours", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "phone-contact-with-hours",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      visibleText:
+        "Lessons/Clinics Grill Shop/Online Store Contact Rates at Example Night Golf Center. Tee Times are HIGHLY recommended. Tee Times are taken ONE WEEK in advance. Please call 919-555-0142 to reserve your tee time. As of June 21, 2026: **weather permitting** Our last tee time for 18 holes is 7:30 PM. **Our last tee time for 9 holes is 9:00 PM.**"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "919-555-0142",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-phone-reservation-contact" }
+    });
+  });
+
   it("treats visible Book your tee time now copy as online-booking evidence", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "visible-book-now",
