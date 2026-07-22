@@ -465,12 +465,22 @@ describe("provider capability registry", () => {
     ).toBe(true);
     expect(
       isProviderPublicBookingLandingUrl(
+        "https://golfwithaccess.com/course/public-course/reserve-tee-time?filterFacilities=north-course&filterFacilities=south-course&utm_source=official-course"
+      )
+    ).toBe(true);
+    expect(
+      isProviderPublicBookingLandingUrl(
         "https://golfwithaccess.com/course/public-course/reserve-tee-time/opaque-slot"
       )
     ).toBe(false);
     expect(
       isProviderPublicBookingLandingUrl(
         "https://golfwithaccess.com/course/public-course/reserve-tee-time?rateId=private"
+      )
+    ).toBe(false);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://golfwithaccess.com/course/public-course/reserve-tee-time?filterFacilities=north-course&filterFacilities=north-course"
       )
     ).toBe(false);
     expect(

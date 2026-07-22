@@ -699,7 +699,7 @@ function learnGolfWithAccessDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const bookingUrls = uniqueUrls(
+  const officialBookingUrls = uniqueUrls(
     (evidence.officialPage?.linkCandidates ?? [])
       .map(({ url }) => url)
       .filter((value) => {
@@ -711,10 +711,19 @@ function learnGolfWithAccessDiscovery(
         );
       })
   );
-  if (bookingUrls.length !== 1) {
+  const bookingBaseUrls = uniqueUrls(
+    officialBookingUrls.map((value) => {
+      const canonical = new URL(value);
+      canonical.search = "";
+      canonical.hash = "";
+      return canonical.toString();
+    })
+  );
+  if (officialBookingUrls.length < 1 || bookingBaseUrls.length !== 1) {
     return null;
   }
-  const bookingBaseUrl = bookingUrls[0];
+  const officialBookingUrl = officialBookingUrls[0];
+  const bookingBaseUrl = bookingBaseUrls[0];
   const apiRequests = observedUrls.flatMap((value) => {
     const parsed = parseUrl(value);
     if (!parsed || !isExactGolfWithAccessTechnicalEvidenceUrl(parsed)) {
@@ -748,7 +757,7 @@ function learnGolfWithAccessDiscovery(
     status: "LEARNED",
     detectedPlatform: "CUSTOM",
     sourceUrl: evidence.officialPage?.url ?? evidence.sourceUrl,
-    bookingUrl: bookingBaseUrl,
+    bookingUrl: officialBookingUrl,
     bookingMethod: "PUBLIC_ONLINE",
     automationEligibility: "ALLOWED",
     automationReason: "NONE",

@@ -968,6 +968,26 @@ function hasAllowedProviderBookingLandingQuery(
   if (!url.search) {
     return true;
   }
+  if (providerFamily === "GOLF_WITH_ACCESS") {
+    const facilityFilters = [...url.searchParams.entries()].filter(
+      ([key]) => key.toLocaleLowerCase("en-US") === "filterfacilities"
+    );
+    const unsafeEntry = [...url.searchParams.entries()].some(
+      ([key, value]) =>
+        !isProviderTrackingQueryParameter(key) &&
+        (key.toLocaleLowerCase("en-US") !== "filterfacilities" ||
+          !/^[a-z0-9][a-z0-9-]{0,127}$/iu.test(value))
+    );
+    return Boolean(
+      !unsafeEntry &&
+        facilityFilters.length <= 12 &&
+        new Set(
+          facilityFilters.map(([, value]) =>
+            value.toLocaleLowerCase("en-US")
+          )
+        ).size === facilityFilters.length
+    );
+  }
   const query = readUniqueProviderLandingQuery(url);
   if (!query) {
     return false;

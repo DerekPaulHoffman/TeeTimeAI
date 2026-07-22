@@ -245,6 +245,14 @@ async function collectBrowserEvidence(
   const landingPageEvidence = await collectPageEvidence(page);
 
   await clickLikelyBookingLink(page);
+  await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+  const firstDestinationPageUrl = page.url();
+  const firstDestinationPageEvidence = await collectPageEvidence(page);
+
+  if (haveSameOrigin(landingPageUrl, firstDestinationPageUrl)) {
+    await clickLikelyBookingLink(page);
+    await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+  }
   await trySelectSearchDate(page);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const destinationPageUrl = page.url();
@@ -254,6 +262,11 @@ async function collectBrowserEvidence(
         url: destinationPageUrl,
         evidence: destinationPageEvidence
       }
+    : haveSameOrigin(landingPageUrl, firstDestinationPageUrl)
+      ? {
+          url: firstDestinationPageUrl,
+          evidence: firstDestinationPageEvidence
+        }
     : {
         url: landingPageUrl,
         evidence: landingPageEvidence
@@ -262,6 +275,8 @@ async function collectBrowserEvidence(
   for (const url of [
     ...landingPageEvidence.anchors,
     ...landingPageEvidence.scripts,
+    ...firstDestinationPageEvidence.anchors,
+    ...firstDestinationPageEvidence.scripts,
     ...destinationPageEvidence.anchors,
     ...destinationPageEvidence.scripts
   ]) {
@@ -275,6 +290,7 @@ async function collectBrowserEvidence(
     observedUrls: [...observedUrls],
     linkCandidates: [
       ...landingPageEvidence.linkCandidates,
+      ...firstDestinationPageEvidence.linkCandidates,
       ...destinationPageEvidence.linkCandidates
     ],
     officialPage: {
@@ -285,7 +301,11 @@ async function collectBrowserEvidence(
     },
     accessBarrierUrls: [...accessBarrierUrls],
     accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),
-    visibleText: [landingPageEvidence.visibleText, destinationPageEvidence.visibleText]
+    visibleText: [
+      landingPageEvidence.visibleText,
+      firstDestinationPageEvidence.visibleText,
+      destinationPageEvidence.visibleText
+    ]
       .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
       .join("\n")
   };

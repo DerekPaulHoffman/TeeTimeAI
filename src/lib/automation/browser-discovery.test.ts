@@ -33,14 +33,14 @@ describe("booking-link selection", () => {
           },
           {
             href:
-              "https://golfwithaccess.com/course/public-course/reserve-tee-time",
+              "https://golfwithaccess.com/course/public-course/reserve-tee-time?filterFacilities=north-course&utm_source=official-course",
             text: "BOOK TEE TIMES"
           }
         ],
         "https://course.example/book-tee-time/"
       )
     ).toBe(
-      "https://golfwithaccess.com/course/public-course/reserve-tee-time"
+      "https://golfwithaccess.com/course/public-course/reserve-tee-time?filterFacilities=north-course&utm_source=official-course"
     );
   });
 
@@ -174,6 +174,7 @@ describe("buildBrowserDiscovery", () => {
   it("learns reusable Golf with Access metadata from an official provider link and public API request", () => {
     const bookingUrl =
       "https://golfwithaccess.com/course/example-public-course/reserve-tee-time";
+    const officialBookingLink = `${bookingUrl}?filterFacilities=north-course&filterFacilities=south-course&utm_source=official-course`;
     const apiUrl = new URL("https://golfwithaccess.com/api/v1/tee-times");
     apiUrl.searchParams.append(
       "courseIds",
@@ -194,12 +195,14 @@ describe("buildBrowserDiscovery", () => {
       sourceUrl: "https://course.example/book-tee-time/",
       finalUrl: bookingUrl,
       officialCourseWebsite: "https://course.example/",
-      observedUrls: [bookingUrl, apiUrl.toString()],
-      linkCandidates: [{ url: bookingUrl, label: "Book Tee Times" }],
+      observedUrls: [officialBookingLink, apiUrl.toString()],
+      linkCandidates: [{ url: officialBookingLink, label: "Book Tee Times" }],
       officialPage: {
         url: "https://course.example/book-tee-time/",
         courseName: "Example Public Golf Club",
-        linkCandidates: [{ url: bookingUrl, label: "Book Tee Times" }],
+        linkCandidates: [
+          { url: officialBookingLink, label: "Book Tee Times" }
+        ],
         visibleText: "Example Public Golf Club. Book tee times online."
       },
       visibleText:
@@ -209,7 +212,7 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery).toMatchObject({
       status: "LEARNED",
       detectedPlatform: "CUSTOM",
-      bookingUrl,
+      bookingUrl: officialBookingLink,
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "ALLOWED",
       automationReason: "NONE",
