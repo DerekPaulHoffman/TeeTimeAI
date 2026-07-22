@@ -172,10 +172,48 @@ async function createChronogolfPublicRequester(
     );
   }
 
+  let anonymousCookie = await bootstrapChronogolfAnonymousCookie(
+    publicProfileUrl,
+    fetchImpl
+  );
+
+  return async (urlValue, profileUrl) => {
+    try {
+      return await requestChronogolfJson(
+        urlValue,
+        profileUrl,
+        anonymousCookie,
+        fetchImpl
+      );
+    } catch (error) {
+      if (!isChronogolfAnonymousSessionRejection(error)) {
+        throw error;
+      }
+      anonymousCookie = await bootstrapChronogolfAnonymousCookie(
+        publicProfileUrl,
+        fetchImpl
+      );
+      return requestChronogolfJson(
+        urlValue,
+        profileUrl,
+        anonymousCookie,
+        fetchImpl
+      );
+    }
+  };
+}
+
+async function bootstrapChronogolfAnonymousCookie(
+  publicProfileUrl: string,
+  fetchImpl: typeof fetch
+) {
   const profileResponse = await fetchWithProviderTimeout(
     publicProfileUrl,
     {
-      headers: buildChronogolfPublicRequestHeaders(publicProfileUrl),
+      headers: {
+        ...buildChronogolfPublicRequestHeaders(publicProfileUrl),
+        accept: "text/html,application/xhtml+xml"
+      },
       redirect: "error"
     },
     fetchImpl,
@@ -187,9 +225,18 @@ async function createChronogolfPublicRequester(
 
   const anonymousCookie = getChronogolfAnonymousCookie(profileResponse.headers);
   await profileResponse.body?.cancel();
+  return anonymousCookie;
+}
 
-  return (urlValue, profileUrl) =>
-    requestChronogolfJson(urlValue, profileUrl, anonymousCookie, fetchImpl);
+function isChronogolfAnonymousSessionRejection(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const value = error as { name?: unknown; status?: unknown };
+  return Boolean(
+    value.name === "ProviderHttpError" &&
+    (value.status === 401 || value.status === 403)
+  );
 }
 
 async function requestChronogolfJson(

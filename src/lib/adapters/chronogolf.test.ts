@@ -160,8 +160,10 @@ describe("Chronogolf adapter", () => {
       "https://www.chronogolf.com/club/blue-rock-golf-course"
     );
     const profileHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(profileHeaders.get("accept")).toBe("text/html,application/xhtml+xml");
     expect(profileHeaders.get("cookie")).toBeNull();
     const teeTimeHeaders = new Headers(fetchMock.mock.calls[1]?.[1]?.headers);
+    expect(teeTimeHeaders.get("accept")).toBe("application/json");
     expect(teeTimeHeaders.get("cookie")).toBe("__cf_bm=anonymous-public-value");
     expect(teeTimeHeaders.get("cookie")).not.toContain("account_session");
     expect(slots).toEqual([
@@ -171,6 +173,42 @@ describe("Chronogolf adapter", () => {
         availableSpots: 2
       })
     ]);
+  });
+
+  it("refreshes the bounded anonymous session once after a public API rejection", async () => {
+    const firstCookie = "first-anonymous-cookie";
+    const refreshedCookie = "refreshed-anonymous-cookie";
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response("profile", {
+        status: 200,
+        headers: { "set-cookie": `__cf_bm=${firstCookie}; HttpOnly; Secure; Path=/` }
+      }))
+      .mockResolvedValueOnce(new Response("rejected", { status: 403 }))
+      .mockResolvedValueOnce(new Response("profile", {
+        status: 200,
+        headers: { "set-cookie": `__cf_bm=${refreshedCookie}; HttpOnly; Secure; Path=/` }
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        pagination: { total: 0, per_page: 12 },
+        data: { teetimes: [] }
+      }), { status: 200 }));
+
+    await fetchChronogolfSlots({
+      courseId: "blue-rock",
+      date: new Date("2026-07-14T00:00:00.000Z"),
+      players: 2,
+      metadata: {
+        clubId: 7221,
+        courseIds: ["7657db51-4e0c-4bc7-8e98-bd0a705370af"],
+        bookingBaseUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+      }
+    }, undefined, fetchMock as typeof fetch);
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("cookie"))
+      .toBe(`__cf_bm=${firstCookie}`);
+    expect(new Headers(fetchMock.mock.calls[3]?.[1]?.headers).get("cookie"))
+      .toBe(`__cf_bm=${refreshedCookie}`);
   });
 
   it("does not forward challenge-clearance or account cookies", async () => {
