@@ -695,6 +695,28 @@ export function pickLikelyBookingHref(
   )[0]?.href ?? null;
 }
 
+export function haveSamePublicWebsiteOrigin(left: string, right: string) {
+  const leftUrl = parseUrl(left);
+  const rightUrl = parseUrl(right);
+  if (
+    !leftUrl ||
+    !rightUrl ||
+    !["http:", "https:"].includes(leftUrl.protocol) ||
+    !["http:", "https:"].includes(rightUrl.protocol)
+  ) {
+    return false;
+  }
+  const normalizeHostname = (hostname: string) =>
+    hostname.toLocaleLowerCase("en-US").replace(/^www\./u, "");
+  return Boolean(
+    normalizeHostname(leftUrl.hostname) ===
+      normalizeHostname(rightUrl.hostname) &&
+      leftUrl.port === rightUrl.port &&
+      (leftUrl.protocol === rightUrl.protocol ||
+        (leftUrl.protocol === "http:" && rightUrl.protocol === "https:"))
+  );
+}
+
 function learnGolfWithAccessDiscovery(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]

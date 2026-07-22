@@ -7,6 +7,7 @@ import {
   enrichBrowserDiscoveryWithProviderLease,
   evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
+  haveSamePublicWebsiteOrigin,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
   sanitizeBrowserDiscoveryAccessEvidence,
@@ -249,7 +250,7 @@ async function collectBrowserEvidence(
   const firstDestinationPageUrl = page.url();
   const firstDestinationPageEvidence = await collectPageEvidence(page);
 
-  if (haveSameOrigin(landingPageUrl, firstDestinationPageUrl)) {
+  if (haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)) {
     await clickLikelyBookingLink(page);
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   }
@@ -257,12 +258,15 @@ async function collectBrowserEvidence(
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const destinationPageUrl = page.url();
   const destinationPageEvidence = await collectPageEvidence(page);
-  const officialPageEvidence = haveSameOrigin(landingPageUrl, destinationPageUrl)
+  const officialPageEvidence = haveSamePublicWebsiteOrigin(
+    landingPageUrl,
+    destinationPageUrl
+  )
     ? {
         url: destinationPageUrl,
         evidence: destinationPageEvidence
       }
-    : haveSameOrigin(landingPageUrl, firstDestinationPageUrl)
+    : haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
       ? {
           url: firstDestinationPageUrl,
           evidence: firstDestinationPageEvidence
@@ -373,14 +377,6 @@ async function collectPageEvidence(page: Page) {
         .join("\n")
     };
   });
-}
-
-function haveSameOrigin(left: string, right: string) {
-  try {
-    return new URL(left).origin === new URL(right).origin;
-  } catch {
-    return false;
-  }
 }
 
 async function clickLikelyBookingLink(page: Page) {

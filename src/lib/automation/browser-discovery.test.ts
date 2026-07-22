@@ -9,6 +9,7 @@ import {
   enrichTeesnapDiscovery,
   evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
+  haveSamePublicWebsiteOrigin,
   getBestProbeUrl,
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
@@ -19,6 +20,27 @@ import {
 } from "./browser-discovery";
 
 describe("booking-link selection", () => {
+  it("keeps apex and www redirects inside the same official website", () => {
+    expect(
+      haveSamePublicWebsiteOrigin(
+        "https://course.example/",
+        "https://www.course.example/book-tee-time/"
+      )
+    ).toBe(true);
+    expect(
+      haveSamePublicWebsiteOrigin(
+        "http://course.example/",
+        "https://www.course.example/book-tee-time/"
+      )
+    ).toBe(true);
+    expect(
+      haveSamePublicWebsiteOrigin(
+        "https://course.example/",
+        "https://booking.example.net/tee-times"
+      )
+    ).toBe(false);
+  });
+
   it("prefers a public external tee sheet over a same-page booking label", () => {
     expect(
       pickLikelyBookingHref(
