@@ -17,6 +17,7 @@ import {
 import { fetchTeeItUpTeeSheet, isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { fetchWebTracTeeSheet, isWebTracMetadata } from "@/lib/adapters/webtrac";
+import { fetchWhooshTeeSheet, isWhooshMetadata } from "@/lib/adapters/whoosh";
 import {
   resolveProviderCapability,
   type ExternalDetectedPlatform
@@ -150,6 +151,16 @@ export function fetchCourseTeeSheet(
       courseId: course.id,
       date,
       players,
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
+    });
+  }
+  if (providerFamily === "WHOOSH" && isWhooshMetadata(course.bookingMetadata)) {
+    return fetchWhooshTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      timeZone: course.timeZone,
       metadata: course.bookingMetadata,
       discoverBookingWindow
     });

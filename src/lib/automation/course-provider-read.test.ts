@@ -11,6 +11,7 @@ const adapterMocks = vi.hoisted(() => ({
   fetchTeeItUpTeeSheet: vi.fn(),
   fetchTeesnapTeeSheet: vi.fn(),
   fetchWebTracTeeSheet: vi.fn(),
+  fetchWhooshTeeSheet: vi.fn(),
   isCpsMetadata: vi.fn(),
   isChelseaMetadata: vi.fn(),
   isChronogolfMetadata: vi.fn(),
@@ -20,7 +21,8 @@ const adapterMocks = vi.hoisted(() => ({
   isGolfWithAccessMetadata: vi.fn(),
   isTeeItUpMetadata: vi.fn(),
   isTeesnapMetadata: vi.fn(),
-  isWebTracMetadata: vi.fn()
+  isWebTracMetadata: vi.fn(),
+  isWhooshMetadata: vi.fn()
 }));
 
 const capabilityMocks = vi.hoisted(() => ({
@@ -66,6 +68,10 @@ vi.mock("@/lib/adapters/teesnap", () => ({
 vi.mock("@/lib/adapters/webtrac", () => ({
   fetchWebTracTeeSheet: adapterMocks.fetchWebTracTeeSheet,
   isWebTracMetadata: adapterMocks.isWebTracMetadata
+}));
+vi.mock("@/lib/adapters/whoosh", () => ({
+  fetchWhooshTeeSheet: adapterMocks.fetchWhooshTeeSheet,
+  isWhooshMetadata: adapterMocks.isWhooshMetadata
 }));
 vi.mock("@/lib/automation/provider-capabilities", () => capabilityMocks);
 
@@ -115,6 +121,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.isTeeItUpMetadata.mockReturnValue(true);
     adapterMocks.isTeesnapMetadata.mockReturnValue(true);
     adapterMocks.isWebTracMetadata.mockReturnValue(true);
+    adapterMocks.isWhooshMetadata.mockReturnValue(true);
     adapterMocks.fetchCpsTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchChelseaTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
@@ -125,6 +132,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.fetchTeeItUpTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchTeesnapTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchWebTracTeeSheet.mockResolvedValue(providerResult);
+    adapterMocks.fetchWhooshTeeSheet.mockResolvedValue(providerResult);
   });
 
   it("delegates to every supported provider with the original input shape", async () => {
@@ -239,6 +247,18 @@ describe("fetchCourseTeeSheet", () => {
       courseId: "course-1",
       date,
       players: 3,
+      metadata,
+      discoverBookingWindow: true
+    });
+
+    await expect(
+      fetchCourseTeeSheet(buildCourse("WHOOSH"), date, 3, true)
+    ).resolves.toBe(providerResult);
+    expect(adapterMocks.fetchWhooshTeeSheet).toHaveBeenCalledWith({
+      courseId: "course-1",
+      date,
+      players: 3,
+      timeZone: "America/New_York",
       metadata,
       discoverBookingWindow: true
     });

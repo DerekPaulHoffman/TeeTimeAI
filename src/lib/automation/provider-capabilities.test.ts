@@ -74,6 +74,11 @@ const runnableMetadata = {
     provider: "CLUB_CADDIE",
     bookingBaseUrl:
       "https://apimanager-cc12.clubcaddie.com/webapi/view/public-course/slots"
+  },
+  WHOOSH: {
+    provider: "WHOOSH",
+    clubSlug: "public-course",
+    bookingBaseUrl: "https://app.whoosh.io/patron/club/public-course"
   }
 } as const;
 
@@ -366,7 +371,7 @@ describe("provider capability registry", () => {
       EZLINKS: [false, "CUSTOM"],
       GOLFNOW: [false, "GOLFNOW"],
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
-      WHOOSH: [false, "CUSTOM"],
+      WHOOSH: [true, "CUSTOM"],
       TENFORE: [false, "CUSTOM"]
     });
   });
@@ -490,6 +495,19 @@ describe("provider capability registry", () => {
     ).toBe(false);
   });
 
+  it("keeps only the generic Whoosh club landing and rejects driving-range inventory", () => {
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://app.whoosh.io/patron/club/yale-golf-course"
+      )
+    ).toBe(true);
+    expect(
+      isProviderPublicBookingLandingUrl(
+        "https://app.whoosh.io/patron/club/windy-hill/agenda/driving-range/today"
+      )
+    ).toBe(false);
+  });
+
   it("recognizes EZLinks without treating provider identity as runnable coverage", () => {
     const resolution = resolveProviderCapability({
       detectedPlatform: "CUSTOM",
@@ -596,7 +614,7 @@ describe("provider capability registry", () => {
           detectedBookingUrl: "https://app.whoosh.io/patron/club/public-course"
         })
       )
-    ).toBe("UNSUPPORTED_FAMILY");
+    ).toBe("MISSING_METADATA");
     expect(
       getProviderReadinessFailure(
         resolveProviderCapability({

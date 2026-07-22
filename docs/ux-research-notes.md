@@ -1,5 +1,11 @@
 # UX Research Notes
 
+## 2026-07-22 - Monitor public Whoosh golf tee sheets without mixing in range inventory
+
+- Current source check: Yale's signed-out Whoosh page and its public JSON response expose the club identity, a `GOLF_COURSE` facility, public visibility/bookability, booking-window days, tee-time capacity, permitted hole layouts, and customer prices. No sign-in, booking mutation, cart, payment, or checkout action is needed to read that availability.
+- Non-course guard: Windy Hill's saved Whoosh URL targets `/agenda/driving-range/today` and presents Toptracer bay durations. The same club also exposes real Lake Course and Par 3 tee sheets. The agenda route may identify the club, but it is converted to the generic club landing and its simulator/range inventory must never be normalized as course availability.
+- Decision: make WHOOSH a reusable runnable provider only with exact `app.whoosh.io/patron/club/<slug>` metadata. At read time, require a matching public club plus a visible, bookable facility whose provider type is exactly `GOLF_COURSE`; reject simulator, driving-range, and other facility types. Keep the official Whoosh club page as the customer booking link and stop before any transaction flow.
+
 ## 2026-07-21 - Keep public course guides available during evidence refresh
 
 - Current evidence: production returned `404` for the Tashua Knolls course guide and Fairfield County hub while the Connecticut, New Haven County, and Cedar Ridge routes remained `200`. The stored Tashua profile still had complete official-source content and a public course identity, but a material course update had correctly moved its profile from `PUBLISHED` to `STALE`; public reads treated that refresh state as deletion. The same refresh stored Google's current `Greater Bridgeport Planning Region` administrative area instead of the legacy `Fairfield` county value, so a strict county-string query left the hub with four courses.
@@ -48,7 +54,7 @@
 ## 2026-07-15 - Distinguish direct online booking from automatic monitoring
 
 - Evidence: public `BROKEN` feedback on Yale University Golf Course said the "Official site only" status was incorrect because the linked course flow supports booking. Production reproduction showed the card linking to Yale's official course site while using the generic manual-only label.
-- Current source check: Yale's official [2026 course page](https://yalebulldogs.com/sports/2026/2/24/yale-golf-course.aspx), published February 24, 2026, links to Whoosh for registration and booking. A signed-out live check of that Whoosh page on July 15 showed the date picker, available tee times, remaining capacity, holes, and price before sign-in. Registration is needed to finish booking, but is not currently required to view availability. Automatic monitoring remains unconfirmed until the Whoosh surface receives a separate policy-safe adapter review.
+- Current source check: Yale's official [2026 course page](https://yalebulldogs.com/sports/2026/2/24/yale-golf-course.aspx), published February 24, 2026, links to Whoosh for registration and booking. A signed-out live check of that Whoosh page on July 15 showed the date picker, available tee times, remaining capacity, holes, and price before sign-in. Registration is needed to finish booking, but is not currently required to view availability. The July 22 reusable adapter review confirmed that the same signed-out response can be monitored while leaving booking on Whoosh.
 - Accessibility guidance: W3C's [WCAG 2.2 Headings and Labels guidance](https://www.w3.org/WAI/WCAG22/Understanding/headings-and-labels), updated March 9, 2026, says labels should describe their purpose; a generic site-only label did not communicate the available booking action.
 - Decision: classify blocked `PUBLIC_ONLINE` and `ONLINE_OR_PHONE` courses as `DIRECT_ONLINE`, present "Book online directly," and keep the explicit no-automatic-monitoring explanation. Preserve `OFFICIAL_SITE_ONLY` for blocked courses whose booking mode is unknown.
 

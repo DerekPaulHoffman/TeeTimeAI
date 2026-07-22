@@ -2447,13 +2447,18 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
-      status: "VERIFIED",
+      status: "LEARNED",
       detectedPlatform: "CUSTOM",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
       bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
-      confidence: 0.9,
+      apiMetadata: {
+        provider: "WHOOSH",
+        clubSlug: "yale-golf-course",
+        bookingBaseUrl: "https://app.whoosh.io/patron/club/yale-golf-course"
+      },
+      confidence: 0.95,
       evidence: { learnedFrom: "official-whoosh-booking-policy-evidence" }
     });
   });
@@ -2492,15 +2497,15 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
-      status: "VERIFIED",
+      status: "LEARNED",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
       evidence: { learnedFrom: "official-whoosh-booking-policy-evidence" }
     });
   });
 
-  it("keeps Whoosh under review until public read-only monitoring is implemented", () => {
+  it("learns reusable Whoosh metadata from the exact public club landing", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "unverified-whoosh",
       courseName: "Example Whoosh Course",
@@ -2510,10 +2515,15 @@ describe("buildBrowserDiscovery", () => {
     });
 
     expect(discovery).toMatchObject({
-      status: "VERIFIED",
+      status: "LEARNED",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "UNSUPPORTED_PLATFORM",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        provider: "WHOOSH",
+        clubSlug: "example-course",
+        bookingBaseUrl: "https://app.whoosh.io/patron/club/example-course"
+      },
       evidence: { learnedFrom: "official-whoosh-booking" }
     });
   });
@@ -4953,6 +4963,30 @@ describe("buildBrowserDiscovery", () => {
       status: "VERIFIED",
       bookingMethod: "CONTACT_COURSE",
       automationReason: "NO_ONLINE_BOOKING"
+    });
+  });
+
+  it("uses a Whoosh agenda route only to identify the club and never as tee-time metadata", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "windy-hill",
+      courseName: "Windy Hill Golf Course and Sports Complex",
+      sourceUrl: "https://windyhillsports.com/golf/",
+      observedUrls: [
+        "https://app.whoosh.io/patron/club/windy-hill/agenda/driving-range/today"
+      ],
+      visibleText: "Book the golf course or reserve a driving-range bay."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      bookingUrl: "https://app.whoosh.io/patron/club/windy-hill",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        provider: "WHOOSH",
+        clubSlug: "windy-hill",
+        bookingBaseUrl: "https://app.whoosh.io/patron/club/windy-hill"
+      }
     });
   });
 

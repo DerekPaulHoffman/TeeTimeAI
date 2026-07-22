@@ -1651,12 +1651,17 @@ describe("search monitoring discovery", () => {
     ]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "VERIFIED",
+        status: "LEARNED",
         detectedPlatform: "CUSTOM",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "NEEDS_REVIEW",
-        automationReason: "UNSUPPORTED_PLATFORM",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
         bookingUrl: "https://app.whoosh.io/patron/club/yale-golf-course",
+        apiMetadata: {
+          provider: "WHOOSH",
+          clubSlug: "yale-golf-course",
+          bookingBaseUrl: "https://app.whoosh.io/patron/club/yale-golf-course"
+        },
         evidence: expect.objectContaining({
           learnedFrom: "official-whoosh-booking:legacy-policy-reconciliation"
         })
@@ -1664,9 +1669,9 @@ describe("search monitoring discovery", () => {
     );
     expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "VERIFIED",
-        automationEligibility: "NEEDS_REVIEW",
-        automationReason: "UNSUPPORTED_PLATFORM"
+        status: "LEARNED",
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE"
       }),
       {
         updatedAt: new Date("2026-07-14T00:00:00.000Z"),

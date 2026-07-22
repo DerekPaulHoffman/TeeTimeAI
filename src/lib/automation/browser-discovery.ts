@@ -126,6 +126,10 @@ export type BrowserDiscovery = {
     provider: "CLUB_CADDIE";
     bookingBaseUrl: string;
   } | {
+    provider: "WHOOSH";
+    clubSlug: string;
+    bookingBaseUrl: string;
+  } | {
     clubId: number;
     courseIds: string[];
     bookingBaseUrl: string;
@@ -1926,21 +1930,32 @@ function learnWhooshBookingClassification(
     ) &&
     /\b(?:spiders?|robots?|crawlers?|data mining tools?)\b/i.test(providerPolicyText);
 
+  const clubSlug = whooshBookingUrl.pathname.split("/").filter(Boolean).at(-1);
+  if (!clubSlug) {
+    return null;
+  }
+  const bookingBaseUrl = whooshBookingUrl.toString();
+
   return {
     courseId: evidence.courseId,
-    status: "VERIFIED",
+    status: "LEARNED",
     detectedPlatform: "CUSTOM",
     sourceUrl: evidence.sourceUrl,
-    bookingUrl: whooshBookingUrl.toString(),
+    bookingUrl: bookingBaseUrl,
     bookingMethod: "PUBLIC_ONLINE",
-    automationEligibility: "NEEDS_REVIEW",
-    automationReason: "UNSUPPORTED_PLATFORM",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
     policyNotes:
       providerTermsProhibitAutomation
-        ? "The course links to an official public Whoosh booking page. Provider terms are retained as evidence but do not determine read-only monitoring eligibility; reusable monitoring support still needs technical verification."
-        : "The course links to an official Whoosh online booking page. Golfers can use that page directly; Tee Time Spot has not yet confirmed reusable monitoring for this Whoosh surface.",
-    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-    confidence: 0.9,
+        ? "The course links to an official public Whoosh booking page. Provider terms are retained as evidence but do not determine read-only monitoring eligibility. Tee Time Spot reads only signed-out golf-course availability and leaves booking on Whoosh."
+        : "The official Whoosh course page exposes signed-out golf-course availability. Tee Time Spot reads only that public tee sheet and leaves booking on Whoosh.",
+    apiEndpoint: "https://api.app.whoosh.io/private/api",
+    apiMetadata: {
+      provider: "WHOOSH",
+      clubSlug,
+      bookingBaseUrl
+    },
+    confidence: 0.95,
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
@@ -1961,7 +1976,8 @@ function getWhooshPublicBookingUrl(values: string[]) {
       Boolean(
         url &&
           url.hostname.toLocaleLowerCase("en-US") === "app.whoosh.io" &&
-          isProviderPublicBookingLandingUrl(url)
+          (isProviderPublicBookingLandingUrl(url) ||
+            isWhooshPublicAgendaUrl(url))
       )
     );
   if (!observed || observed.hostname.toLocaleLowerCase("en-US") !== "app.whoosh.io") {
@@ -1970,8 +1986,26 @@ function getWhooshPublicBookingUrl(values: string[]) {
   const canonical = new URL(observed);
   canonical.search = "";
   canonical.hash = "";
-  canonical.pathname = canonical.pathname.replace(/\/+$/u, "");
+  const clubPath = canonical.pathname.match(
+    /^(\/patron\/club\/[a-z0-9][a-z0-9_-]{0,127})(?:\/|$)/iu
+  )?.[1];
+  if (!clubPath) {
+    return null;
+  }
+  canonical.pathname = clubPath;
   return canonical;
+}
+
+function isWhooshPublicAgendaUrl(url: URL) {
+  return Boolean(
+    url.protocol === "https:" &&
+      url.hostname.toLocaleLowerCase("en-US") === "app.whoosh.io" &&
+      /^\/patron\/club\/[a-z0-9][a-z0-9_-]{0,127}\/agenda\/[a-z0-9][a-z0-9_-]{0,127}\/(?:today|\d{4}-\d{2}-\d{2})\/?$/iu.test(
+        url.pathname
+      ) &&
+      !url.search &&
+      !url.hash
+  );
 }
 
 function learnWalkInClassification(

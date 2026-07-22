@@ -10,6 +10,7 @@ import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { isWebTracMetadata } from "@/lib/adapters/webtrac";
+import { isWhooshMetadata } from "@/lib/adapters/whoosh";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 
 export const SOURCE_MISSING_PROVIDER_FAMILY = "SOURCE_MISSING" as const;
@@ -187,8 +188,9 @@ export const PROVIDER_CAPABILITIES = {
   WHOOSH: {
     family: "WHOOSH",
     detectedPlatform: "CUSTOM",
-    supportsAutomation: false,
-    matchesHostname: (hostname) => matchesDomain(hostname, "whoosh.io")
+    supportsAutomation: true,
+    matchesHostname: (hostname) => matchesDomain(hostname, "whoosh.io"),
+    validatesMetadata: isWhooshMetadata
   },
   TENFORE: {
     family: "TENFORE",
@@ -249,7 +251,8 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["GOLFBACK", "GOLFBACK"],
   ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
   ["WEBTRAC", "WEBTRAC"],
-  ["CLUB_CADDIE", "CLUB_CADDIE"]
+  ["CLUB_CADDIE", "CLUB_CADDIE"],
+  ["WHOOSH", "WHOOSH"]
 ]);
 
 export function resolveProviderCapability(
