@@ -3999,6 +3999,63 @@ describe("buildBrowserDiscovery", () => {
     expect(JSON.stringify(discovery)).not.toContain("view=");
   });
 
+  it("ignores request-local asset state when the official phone evidence URLs are safe", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "phone-contact-with-request-state",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/rates/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: [
+        "https://night-golf.example/rates/",
+        "https://static-assets.example/runtime.js?session_token=request-local-value"
+      ],
+      linkCandidates: [
+        {
+          url: "https://night-golf.example/rates/",
+          label: "Tee Times / Rates"
+        }
+      ],
+      visibleText:
+        "Example Night Golf Center. Tee Times are highly recommended and are taken one week in advance. Please call 919-555-0142 to reserve your tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING"
+    });
+    expect(JSON.stringify(discovery)).not.toContain("session_token");
+    expect(JSON.stringify(discovery)).not.toContain("request-local-value");
+  });
+
+  it("still rejects an unsafe tee-time booking candidate", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "unsafe-phone-contact-booking-link",
+      courseName: "Example Night Golf Center",
+      sourceUrl: "https://night-golf.example/rates/",
+      finalUrl: "https://night-golf.example/rates/",
+      observedUrls: ["https://night-golf.example/rates/"],
+      linkCandidates: [
+        {
+          url: "https://booking.example/tee-times?session_token=private-value",
+          label: "Book Tee Times Online"
+        }
+      ],
+      visibleText:
+        "Example Night Golf Center. Call the Pro Shop at 919-555-0142 to reserve a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      evidence: {
+        learnedFrom: "official-phone-reservation-rejected:unsafe-url-evidence"
+      }
+    });
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(JSON.stringify(discovery)).not.toContain("session_token");
+    expect(JSON.stringify(discovery)).not.toContain("private-value");
+  });
+
   it("rejects credentialed manual evidence without persisting URL userinfo", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "credentialed-phone-contact",

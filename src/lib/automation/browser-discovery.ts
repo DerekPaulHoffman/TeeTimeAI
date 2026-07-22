@@ -2873,9 +2873,32 @@ function hasUnsafeManualEvidenceUrl(
     return true;
   }
 
+  const relevantLinkCandidates = (evidence.linkCandidates ?? []).filter(
+    (candidate) => {
+      const parsed = parseUrl(candidate.url);
+      return Boolean(
+        parsed &&
+          (hasExplicitTeeTimeDestination(parsed) ||
+            isBookingCallToActionCandidate(candidate) ||
+            isGenericOnlineBookingCallToAction(candidate) ||
+            resolveProviderCapability({ detectedBookingUrl: candidate.url })
+              .capability)
+      );
+    }
+  );
+  const relevantObservedUrls = observedUrls.filter((value) => {
+    const parsed = parseUrl(value);
+    return Boolean(
+      parsed &&
+        ["http:", "https:"].includes(parsed.protocol) &&
+        (hasExplicitTeeTimeDestination(parsed) ||
+          resolveProviderCapability({ detectedBookingUrl: value }).capability)
+    );
+  });
+
   return [
-    ...observedUrls,
-    ...(evidence.linkCandidates ?? []).map(({ url }) => url)
+    ...relevantObservedUrls,
+    ...relevantLinkCandidates.map(({ url }) => url)
   ].some((value) => {
     if (!value) {
       return false;
