@@ -246,7 +246,17 @@ async function collectBrowserEvidence(
   await clickLikelyBookingLink(page);
   await trySelectSearchDate(page);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
+  const destinationPageUrl = page.url();
   const destinationPageEvidence = await collectPageEvidence(page);
+  const officialPageEvidence = haveSameOrigin(landingPageUrl, destinationPageUrl)
+    ? {
+        url: destinationPageUrl,
+        evidence: destinationPageEvidence
+      }
+    : {
+        url: landingPageUrl,
+        evidence: landingPageEvidence
+      };
 
   for (const url of [
     ...landingPageEvidence.anchors,
@@ -259,6 +269,7 @@ async function collectBrowserEvidence(
 
   return {
     ...input,
+    sourceUrl: officialPageEvidence.url,
     finalUrl: page.url(),
     observedUrls: [...observedUrls],
     linkCandidates: [
@@ -266,10 +277,10 @@ async function collectBrowserEvidence(
       ...destinationPageEvidence.linkCandidates
     ],
     officialPage: {
-      url: landingPageUrl,
-      linkCandidates: landingPageEvidence.linkCandidates,
+      url: officialPageEvidence.url,
+      linkCandidates: officialPageEvidence.evidence.linkCandidates,
       courseName: input.courseName,
-      visibleText: landingPageEvidence.visibleText.slice(0, 12_000)
+      visibleText: officialPageEvidence.evidence.visibleText.slice(0, 12_000)
     },
     accessBarrierUrls: [...accessBarrierUrls],
     accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),
@@ -281,7 +292,7 @@ async function collectBrowserEvidence(
 
 async function collectPageEvidence(page: Page) {
   return page.evaluate(() => {
-    const linkCandidates = Array.from(
+    const anchorCandidates = Array.from(
       document.querySelectorAll<HTMLAnchorElement>("a[href]")
     )
       .map((anchor) => ({
@@ -290,6 +301,20 @@ async function collectPageEvidence(page: Page) {
       }))
       .filter((candidate) => Boolean(candidate.url))
       .slice(0, 80);
+    const pageText = document.body?.innerText?.replace(/\s+/g, " ").trim() ?? "";
+    const frameCandidates = /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
+      ? Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe[src]"))
+          .map((frame) => ({
+            url: frame.src,
+            label:
+              frame.title?.replace(/\s+/g, " ").trim() ||
+              frame.getAttribute("aria-label")?.replace(/\s+/g, " ").trim() ||
+              "Embedded tee-time booking"
+          }))
+          .filter((candidate) => Boolean(candidate.url))
+          .slice(0, 20)
+      : [];
+    const linkCandidates = [...anchorCandidates, ...frameCandidates].slice(0, 100);
     const anchors = linkCandidates.map((candidate) => candidate.url);
     const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>("script[src]"))
       .map((script) => script.src)
@@ -321,12 +346,20 @@ async function collectPageEvidence(page: Page) {
       visibleText: [
         inlineCourseData,
         widgetConfigs,
-        document.body?.innerText?.replace(/\s+/g, " ").trim().slice(0, 4000)
+        pageText.slice(0, 4000)
       ]
         .filter(Boolean)
         .join("\n")
     };
   });
+}
+
+function haveSameOrigin(left: string, right: string) {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
 }
 
 async function clickLikelyBookingLink(page: Page) {

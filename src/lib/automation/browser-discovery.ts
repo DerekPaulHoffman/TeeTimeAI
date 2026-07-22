@@ -266,8 +266,13 @@ export async function enrichBrowserDiscoveryWithProviderLease(
   }) as typeof fetch;
 
   try {
-    const chronogolfDiscovery = await enrichChronogolfDiscovery(
+    const teeItUpDiscovery = await enrichTeeItUpDiscovery(
       discovery,
+      courseName,
+      leasedFetch
+    );
+    const chronogolfDiscovery = await enrichChronogolfDiscovery(
+      teeItUpDiscovery,
       leasedFetch
     );
     const cpsDiscovery = await enrichCpsDiscovery(
@@ -289,6 +294,184 @@ export async function enrichBrowserDiscoveryWithProviderLease(
     }
     throw error;
   }
+}
+
+export async function enrichTeeItUpDiscovery(
+  discovery: BrowserDiscovery,
+  courseName: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscovery> {
+  if (
+    discovery.detectedPlatform !== "TEEITUP" ||
+    ![
+      "teeitup-target-scope-ambiguous",
+      "teeitup-target-scope-unconfirmed"
+    ].includes(discovery.evidence.learnedFrom)
+  ) {
+    return discovery;
+  }
+
+  const corroboration = discovery.evidence.courseIdentityCorroboration;
+  const legacyUrls = [
+    corroboration?.providerUrl,
+    ...discovery.evidence.observedUrls
+  ]
+    .filter((value): value is string => Boolean(value))
+    .filter(isLegacyTeeItUpPlayUrl);
+  const uniqueLegacyUrls = [
+    ...new Set(
+      legacyUrls
+        .map(normalizeTeeItUpSourceUrl)
+        .filter((value): value is string => Boolean(value))
+    )
+  ];
+  if (
+    corroboration?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK" ||
+    uniqueLegacyUrls.length !== 1 ||
+    normalizeTeeItUpSourceUrl(corroboration.providerUrl) !== uniqueLegacyUrls[0]
+  ) {
+    return discovery;
+  }
+
+  const providerUrl = uniqueLegacyUrls[0];
+  const fetched = await fetchLegacyTeeItUpConfigurationPage(
+    providerUrl,
+    fetchImpl
+  );
+  if (!fetched?.response.ok) {
+    return discovery;
+  }
+
+  const configuration = parseLegacyTeeItUpConfiguration(
+    providerUrl,
+    await fetched.response.text()
+  );
+  if (
+    !configuration ||
+    !haveCompatibleCourseNames(courseName, configuration.courseName)
+  ) {
+    return discovery;
+  }
+
+  const facilityId = configuration.facilityIds[0];
+  const bookingUrl = buildTeeItUpBookingUrl(providerUrl, facilityId);
+  if (!bookingUrl) {
+    return discovery;
+  }
+
+  return {
+    ...discovery,
+    status: "LEARNED",
+    bookingUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The official course page embeds a public TeeItUp tee sheet. Tee Time Spot reads only public availability and leaves booking on the official provider page.",
+    apiEndpoint: "https://phx-api-be-east-1b.kenna.io/v2/tee-times",
+    apiMetadata: {
+      aliases: [configuration.alias],
+      bookingBaseUrl: bookingUrl,
+      facilityIds: [facilityId]
+    },
+    confidence: 0.9,
+    evidence: {
+      ...discovery.evidence,
+      finalUrl: fetched.finalUrl,
+      observedUrls: uniqueUrls([
+        ...discovery.evidence.observedUrls,
+        providerUrl,
+        bookingUrl
+      ]),
+      learnedFrom: "teeitup-legacy-play-configuration"
+    }
+  };
+}
+
+export async function fetchLegacyTeeItUpConfigurationPage(
+  providerUrl: string,
+  fetchImpl: typeof fetch
+) {
+  const sourceAlias = getTeeItUpAlias(providerUrl);
+  if (!sourceAlias || !isLegacyTeeItUpPlayUrl(providerUrl)) {
+    return null;
+  }
+  let currentUrl = providerUrl;
+  for (let redirectCount = 0; redirectCount <= 2; redirectCount += 1) {
+    const response = await fetchImpl(currentUrl, {
+      headers: {
+        Accept: "text/html,application/xhtml+xml;q=0.9",
+        "User-Agent":
+          "Tee Time Spot availability monitor (+https://teetimespot.com/guides/public-golf-booking-windows)"
+      },
+      redirect: "manual"
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location || redirectCount === 2) {
+        return null;
+      }
+      const redirectUrl = new URL(location, currentUrl);
+      if (
+        !isTeeItUpPublicLandingCandidate(redirectUrl.toString()) ||
+        getTeeItUpAlias(redirectUrl.toString())?.toLocaleLowerCase("en-US") !==
+          sourceAlias.toLocaleLowerCase("en-US")
+      ) {
+        return null;
+      }
+      currentUrl = redirectUrl.toString();
+      continue;
+    }
+    const finalUrl = response.url || currentUrl;
+    if (
+      getTeeItUpAlias(finalUrl)?.toLocaleLowerCase("en-US") !==
+        sourceAlias.toLocaleLowerCase("en-US") ||
+      !isTeeItUpPublicLandingCandidate(finalUrl)
+    ) {
+      return null;
+    }
+    return { response, finalUrl };
+  }
+  return null;
+}
+
+export function parseLegacyTeeItUpConfiguration(
+  providerUrl: string,
+  html: string
+): TeeItUpLegacyConfigurationEvidence | null {
+  const alias = getTeeItUpAlias(providerUrl);
+  if (!alias || !html.trim()) {
+    return null;
+  }
+  const normalized = html
+    .replace(/&quot;/giu, '"')
+    .replace(/&#(?:x27|39);/giu, "'")
+    .replace(/\\+"/gu, '"');
+  const facilityMatch = normalized.match(/"gnFacilityIds"\s*:\s*\[([^\]]*)\]/u);
+  if (!facilityMatch) {
+    return null;
+  }
+  const facilityIds = [
+    ...new Set(
+      facilityMatch[1]
+        .split(",")
+        .map((value) => Number(value.trim()))
+        .filter(isPositiveSafeInteger)
+    )
+  ];
+  const courseNameMatch = normalized
+    .slice(facilityMatch.index)
+    .match(/"name"\s*:\s*"([^"\r\n]{1,200})"/u);
+  const configuredCourseName = courseNameMatch?.[1]?.trim();
+  if (facilityIds.length !== 1 || !configuredCourseName) {
+    return null;
+  }
+  return {
+    providerUrl,
+    alias,
+    facilityIds,
+    courseName: configuredCourseName
+  };
 }
 
 export type BrowserProbeCourseInput = {
@@ -1361,6 +1544,7 @@ function getOfficialCourseProviderLinkCorroboration(
     ) ||
     !hasCanonicalTargetPageAuthority(evidence) ||
     getKnownProviderFamilyForHostname(officialWebsite.hostname) ||
+    !getKnownProviderFamilyForHostname(providerUrl.hostname) ||
     !haveSameWebsiteOrigin(officialWebsite, officialPage)
   ) {
     return null;
@@ -5237,6 +5421,25 @@ function buildRejectedTeeItUpDiscovery(
   ]
     .map((value) => parseUrl(value))
     .find((url) => url && !isTeeItUpBookingUrl(url.toString()));
+  const linkedProviderUrls = uniqueUrls(
+    uniqueTeeItUpLinkCandidates(
+      officialPageMatchesTarget ? evidence.officialPage?.linkCandidates ?? [] : []
+    ).map(({ url }) => url)
+  );
+  const courseIdentityCorroboration = linkedProviderUrls.length === 1
+    ? getOfficialCourseProviderLinkCorroboration(
+        {
+          courseId: evidence.courseId,
+          status: "INSPECTED",
+          detectedPlatform: "TEEITUP",
+          sourceUrl: evidence.sourceUrl,
+          bookingUrl: linkedProviderUrls[0],
+          confidence: 0.45,
+          evidence: { observedUrls, learnedFrom }
+        },
+        evidence
+      )
+    : null;
 
   return {
     courseId: evidence.courseId,
@@ -5251,6 +5454,7 @@ function buildRejectedTeeItUpDiscovery(
       finalUrl: evidence.finalUrl,
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
+      ...(courseIdentityCorroboration ? { courseIdentityCorroboration } : {}),
       learnedFrom
     }
   };

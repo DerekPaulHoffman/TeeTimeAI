@@ -5,6 +5,7 @@ import {
   enrichBrowserDiscoveryWithProviderLease,
   enrichCpsDiscovery,
   enrichChronogolfDiscovery,
+  enrichTeeItUpDiscovery,
   enrichTeesnapDiscovery,
   evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
@@ -424,6 +425,96 @@ describe("buildBrowserDiscovery", () => {
         learnedFrom: "teeitup-legacy-play-configuration"
       }
     });
+  });
+
+  it("enriches a corroborated legacy TeeItUp embed from its public configuration", async () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const providerUrl = `https://${alias}.play.teeitup.golf/`;
+    const discovery = buildBrowserDiscovery({
+      courseId: "wampanoag",
+      courseName: "Wampanoag Golf Course",
+      sourceUrl: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      finalUrl: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      observedUrls: [providerUrl],
+      officialCourseWebsite: "https://www.wampanoaggolfcourseswansea.com/",
+      officialPage: {
+        url: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+        courseName: "Wampanoag Golf Course",
+        linkCandidates: [{ url: providerUrl, label: "Book tee times" }]
+      },
+      visibleText: "Wampanoag Golf Course Book Tee Times Online"
+    });
+    expect(discovery.evidence.courseIdentityCorroboration).toMatchObject({
+      kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+      providerUrl
+    });
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 301,
+          headers: {
+            location: `https://${alias}.book.teeitup.com/`
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          '<script>self.__next_f.push([1,"{\\\"gnFacilityIds\\\":[15969],\\\"name\\\":\\\"Wampanoag Golf Course\\\"}"])</script>',
+          { status: 200 }
+        )
+      );
+    const enriched = await enrichTeeItUpDiscovery(
+      discovery,
+      "Wampanoag Golf Course",
+      fetchImpl as typeof fetch
+    );
+
+    expect(enriched).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingUrl: `https://${alias}.book.teeitup.golf/?course=15969`,
+      apiMetadata: {
+        aliases: [alias],
+        facilityIds: [15969]
+      },
+      evidence: { learnedFrom: "teeitup-legacy-play-configuration" }
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not enrich a legacy TeeItUp embed whose configured course identity differs", async () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const providerUrl = `https://${alias}.play.teeitup.golf/`;
+    const discovery = buildBrowserDiscovery({
+      courseId: "wampanoag",
+      courseName: "Wampanoag Golf Course",
+      sourceUrl: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      observedUrls: [providerUrl],
+      officialCourseWebsite: "https://www.wampanoaggolfcourseswansea.com/",
+      officialPage: {
+        url: "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+        courseName: "Wampanoag Golf Course",
+        linkCandidates: [{ url: providerUrl, label: "Book tee times" }]
+      }
+    });
+
+    const enriched = await enrichTeeItUpDiscovery(
+      discovery,
+      "Wampanoag Golf Course",
+      vi.fn(async () =>
+        new Response(
+          '<script>self.__next_f.push([1,"{\\\"gnFacilityIds\\\":[15969],\\\"name\\\":\\\"Different Golf Course\\\"}"])</script>',
+          { status: 200 }
+        )
+      ) as typeof fetch
+    );
+
+    expect(enriched).toEqual(discovery);
   });
 
   it("accepts only a credential-free HTTPS root for legacy TeeItUp play embeds", () => {
