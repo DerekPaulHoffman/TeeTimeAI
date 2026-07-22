@@ -4846,8 +4846,24 @@ describe("buildBrowserDiscovery", () => {
       sourceUrl: "https://night-golf.example/",
       finalUrl: "https://night-golf.example/rates/",
       observedUrls: ["https://night-golf.example/rates/"],
+      officialPage: {
+        url: "https://night-golf.example/rates/",
+        courseName: "Example Night Golf Center",
+        linkCandidates: [
+          {
+            url: "https://night-golf.example/rates/",
+            label: "Tee Times / Rates"
+          },
+          {
+            url: "https://night-golf.example/category/all-products",
+            label: "Shop / Online Store"
+          }
+        ],
+        visibleText:
+          "Example Night Golf Center. Tee Times are HIGHLY recommended. Tee Times are taken ONE WEEK in advance. Please call 919-555-0142 to reserve your tee time. As of June 21, 2026: **weather permitting** Our last tee time for 18 holes is 7:30 PM. **Our last tee time for 9 holes is 9:00 PM.**"
+      },
       visibleText:
-        "Lessons/Clinics Grill Shop/Online Store Contact Rates at Example Night Golf Center. Tee Times are HIGHLY recommended. Tee Times are taken ONE WEEK in advance. Please call 919-555-0142 to reserve your tee time. As of June 21, 2026: **weather permitting** Our last tee time for 18 holes is 7:30 PM. **Our last tee time for 9 holes is 9:00 PM.**"
+        "Golf lessons and clinics book online Shop/Online Store Welcome to Example Night Golf Center\nExample Night Golf Center. Tee Times are HIGHLY recommended. Tee Times are taken ONE WEEK in advance. Please call 919-555-0142 to reserve your tee time. As of June 21, 2026: **weather permitting** Our last tee time for 18 holes is 7:30 PM. **Our last tee time for 9 holes is 9:00 PM.**"
     });
 
     expect(discovery).toMatchObject({

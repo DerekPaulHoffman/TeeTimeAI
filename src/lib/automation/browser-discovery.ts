@@ -523,8 +523,8 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   }
 
   const phoneReservationClassification = learnOfficialPhoneReservationClassification(
-    evidence,
-    observedUrls
+    providerEvidence,
+    providerObservedUrls
   );
 
   if (phoneReservationClassification) {
