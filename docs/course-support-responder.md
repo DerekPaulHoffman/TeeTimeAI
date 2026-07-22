@@ -1,6 +1,6 @@
 # Course-Support Responder
 
-The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It checks for real demand every 10 minutes, limits non-customer engineering work to one hourly sweep, groups reusable work, and either restores public read-only monitoring or records a final evidence-backed technical-access/contact/identity/source disposition. It is separate from per-search scheduling and from the broad product-improvement loop.
+The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It checks for due work every 10 minutes, groups reusable work, and either restores public read-only monitoring or records a final evidence-backed technical-access/contact/identity/source disposition. It is separate from per-search scheduling and from the broad product-improvement loop.
 
 ## Ownership And Cadence
 
@@ -9,7 +9,7 @@ The course-support responder is the dedicated engineering path for persistent `N
 - The responder runs from the already-approved dedicated checkout `C:\dev\TeeTimeAi-CourseSupportResponder`; the bounded product-improvement loop remains in `C:\dev\TeeTimeAI-automation`. They must never share one mutable checkout. The database writer lease still serializes release ownership across both checkouts.
 - A due batch contains one provider family and one failure fingerprint. The default claim is 5 courses; the command clamps all requests to 1 through 20.
 - Batches prioritize near-date active real-demand fetch failures, then other active real demand, then historical non-engineering incidents whose searches have ended, then engineering-only synthetic coverage. Aged engineering-only evidence receives bounded fairness when no critical real demand is waiting.
-- Any active real demand may claim on every 10-minute run. When no active real demand is due, `inspect` and `claim` enforce the first ten UTC minutes as the single hourly engineering sweep; other runs close as `deferred_engineering_cadence` without provider, Git, or database mutation beyond the routine observation.
+- Every 10-minute run may claim one due bounded batch, including engineering-only work. Active real demand remains higher priority, while the durable batch owner and responder lease prevent duplicate claims. This lets the responder continuously drain engineering incidents without allowing parallel responders to mutate the same batch.
 - The broad product-improvement loop uses an independent writer lane and may proceed while a responder batch is active or requires recovery. Responder state remains informational there, and course-support incidents are never portfolio candidates for that loop.
 
 `CourseSupportIncident` is the durable per-course problem. `CourseSupportBatch` is the short-lived provider-family/fingerprint engineering claim. `CourseSupportBatchIncident` preserves the per-course pre-remediation evidence and final batch result.

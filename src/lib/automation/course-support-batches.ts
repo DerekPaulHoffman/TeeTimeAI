@@ -45,7 +45,6 @@ import {
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   clampCourseSupportBatchSize,
   getResponderThreadPolicy,
-  isCourseSupportEngineeringSweepDue,
   sanitizeResponderText,
   sanitizeResponderValue,
   type ResponderFailureDomain,
@@ -911,8 +910,6 @@ export function classifyCourseSupportQueueInspection(input: {
   requestingThreadId?: string | null;
   hasExpiredBatch: boolean;
   dueIncidentCount: number;
-  dueRealCount?: number;
-  engineeringSweepDue?: boolean;
 }): ResponderOutcome {
   if (input.hasActiveBatch) {
     return input.requestingThreadId &&
@@ -925,9 +922,6 @@ export function classifyCourseSupportQueueInspection(input: {
   }
   if (input.dueIncidentCount === 0) {
     return "no_due_work";
-  }
-  if ((input.dueRealCount ?? 0) === 0 && input.engineeringSweepDue === false) {
-    return "deferred_engineering_cadence";
   }
   return "ready";
 }
@@ -957,15 +951,6 @@ export function shouldFinalizeSourceUnverified(input: {
         (input.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
           input.failureClass === "MISSING_METADATA"))
   );
-}
-
-export function nextCourseSupportEngineeringSweepAt(now = new Date()) {
-  const next = new Date(now);
-  next.setUTCMinutes(0, 0, 0);
-  if (next.getTime() <= now.getTime()) {
-    next.setUTCHours(next.getUTCHours() + 1);
-  }
-  return next;
 }
 
 export function assessCourseSupportRecovery(input: {
@@ -1295,15 +1280,12 @@ export async function inspectCourseSupportQueue(input?: {
     ({ incident, activeRealSearchCount }) =>
       !incident.engineeringOnly && activeRealSearchCount === 0
   ).length;
-  const engineeringSweepDue = isCourseSupportEngineeringSweepDue(now);
   const outcome = classifyCourseSupportQueueInspection({
     hasActiveBatch: Boolean(activeBatch),
     activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
     requestingThreadId,
     hasExpiredBatch: Boolean(expiredBatch),
-    dueIncidentCount: dueIncidents.length,
-    dueRealCount,
-    engineeringSweepDue
+    dueIncidentCount: dueIncidents.length
   });
   const ownedByCurrentTask = Boolean(
     activeBatch &&
@@ -1312,9 +1294,7 @@ export async function inspectCourseSupportQueue(input?: {
   );
   const durableCloseoutRecorded =
     !ownedByCurrentTask &&
-    (outcome === "no_due_work" ||
-      outcome === "deferred_busy" ||
-      outcome === "deferred_engineering_cadence")
+    (outcome === "no_due_work" || outcome === "deferred_busy")
       ? await recordRoutineResponderObservation({
           outcome,
           now,
@@ -1324,7 +1304,6 @@ export async function inspectCourseSupportQueue(input?: {
             dueEngineeringCount,
             dueHistoricalRealCount,
             providerGroupCount: providerGroups.size,
-            engineeringSweepDue,
             activeBatch: Boolean(activeBatch)
           }
         })
@@ -1334,9 +1313,7 @@ export async function inspectCourseSupportQueue(input?: {
     durableCloseoutRecorded:
       ownedByCurrentTask
         ? false
-        : outcome === "no_due_work" ||
-            outcome === "deferred_busy" ||
-            outcome === "deferred_engineering_cadence"
+        : outcome === "no_due_work" || outcome === "deferred_busy"
         ? durableCloseoutRecorded
         : outcome === "resume_owned_work"
           ? false
@@ -1351,11 +1328,6 @@ export async function inspectCourseSupportQueue(input?: {
     dueEngineeringCount,
     dueHistoricalRealCount,
     providerGroupCount: providerGroups.size,
-    engineeringSweepDue,
-    nextEngineeringSweepAt:
-      dueRealCount === 0 && !engineeringSweepDue
-        ? nextCourseSupportEngineeringSweepAt(now).toISOString()
-        : null,
     ownedByCurrentTask,
     activeWriter: activeBatch
       ? {
@@ -1503,34 +1475,6 @@ export async function claimCourseSupportBatch(input: {
     ]);
     if (input.retryBatchId && !retryBatch) {
       throw new Error("The targeted responder retry batch was not found.");
-    }
-    const dueRealCount = candidates.filter(
-      (candidate) => candidate.activeRealSearchCount > 0
-    ).length;
-    if (dueRealCount === 0 && !isCourseSupportEngineeringSweepDue(now)) {
-      const nextEngineeringSweepAt = nextCourseSupportEngineeringSweepAt(now);
-      const recorded = await recordRoutineResponderObservation({
-        outcome: "deferred_engineering_cadence",
-        now,
-        summary: {
-          dueIncidentCount: candidates.length,
-          dueRealCount,
-          engineeringSweepDue: false,
-          nextEngineeringSweepAt: nextEngineeringSweepAt.toISOString()
-        }
-      });
-      return {
-        outcome: "deferred_engineering_cadence" as const,
-        dueIncidentCount: candidates.length,
-        dueRealCount,
-        engineeringSweepDue: false,
-        nextEngineeringSweepAt: nextEngineeringSweepAt.toISOString(),
-        durableCloseoutRecorded: recorded,
-        ...getResponderThreadPolicy({
-          outcome: "deferred_engineering_cadence",
-          durableCloseoutRecorded: recorded
-        })
-      };
     }
     const selected = retryBatch
       ? selectCourseSupportRetryBatch({

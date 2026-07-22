@@ -53,6 +53,17 @@ test.describe("physical course layout filtering", () => {
         status: 201
       });
     });
+    await page.route("**/api/location/geocode?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({
+          formattedAddress: "Bethany, CT",
+          latitude: 41.421,
+          longitude: -73.005
+        }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
     await page.route("**/api/courses/discover?**", async (route) => {
       await route.fulfill({
         body: JSON.stringify({ courses: discoveredCourses }),

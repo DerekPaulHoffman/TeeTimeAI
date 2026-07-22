@@ -75,7 +75,6 @@ import {
   isRemediatedSearchSchedulerHealthy,
   markCourseSupportBatchNeedsHuman,
   normalizeCourseSupportObservedGitPaths,
-  nextCourseSupportEngineeringSweepAt,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
   resolveCourseSupportProviderCapability,
@@ -665,6 +664,30 @@ describe("course-support claim demand fencing", () => {
 
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("claims due engineering-only work at any minute of the hour", async () => {
+    const incident = incidentRecord({
+      engineeringOnly: true,
+      preferences: []
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z")
+      })
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1
+    });
+
+    expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
   });
 
   it("atomically promotes synthetic provenance when current real demand exists", async () => {
@@ -2493,28 +2516,21 @@ describe("course-support inspection ownership", () => {
     ).toBe("ready");
   });
 
-  it("defers non-customer work outside the bounded engineering sweep", () => {
+  it("keeps due engineering work ready throughout the hour", () => {
     expect(
       classifyCourseSupportQueueInspection({
         ...inspection,
         hasActiveBatch: false,
-        dueRealCount: 0,
-        engineeringSweepDue: false
-      })
-    ).toBe("deferred_engineering_cadence");
-    expect(
-      classifyCourseSupportQueueInspection({
-        ...inspection,
-        hasActiveBatch: false,
-        dueRealCount: 1,
-        engineeringSweepDue: false
+        dueIncidentCount: 1
       })
     ).toBe("ready");
     expect(
-      nextCourseSupportEngineeringSweepAt(
-        new Date("2026-07-22T05:23:45.000Z")
-      ).toISOString()
-    ).toBe("2026-07-22T06:00:00.000Z");
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        hasActiveBatch: false,
+        dueIncidentCount: 5
+      })
+    ).toBe("ready");
   });
 
   it("finalizes only old repeated source gaps without active real demand", () => {

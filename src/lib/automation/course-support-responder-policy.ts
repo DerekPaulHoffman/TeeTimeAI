@@ -8,7 +8,6 @@ export const COURSE_SUPPORT_BATCH_MAX_SIZE = 20;
 export const COURSE_SUPPORT_BATCH_LEASE_MS = 15 * 60 * 1000;
 export const COURSE_SUPPORT_SYNTHETIC_AGING_MS = 24 * 60 * 60 * 1000;
 export const COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW = 3;
-export const COURSE_SUPPORT_ENGINEERING_SWEEP_MINUTE_WINDOW = 10;
 
 export type ResponderOutcome =
   | "ready"
@@ -132,10 +131,6 @@ export function getResponderThreadPolicy(input: {
             ? "Only non-customer work is due, and the bounded engineering sweep is not due yet."
           : "The responder result is durably closed and needs no owner action."
   };
-}
-
-export function isCourseSupportEngineeringSweepDue(now = new Date()) {
-  return now.getUTCMinutes() < COURSE_SUPPORT_ENGINEERING_SWEEP_MINUTE_WINDOW;
 }
 
 export function clampCourseSupportBatchSize(value: number | undefined) {
