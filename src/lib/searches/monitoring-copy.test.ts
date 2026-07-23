@@ -15,8 +15,9 @@ describe("buildSearchSavedMessage", () => {
     const message = buildSearchSavedMessage([{ name: "Unreviewed Golf Course" }]);
 
     expect(message).toContain(
-      "We'll confirm whether we can check Unreviewed Golf Course automatically when your alert starts."
+      "We'll email a monitoring verdict for Unreviewed Golf Course after the first check"
     );
+    expect(message).toContain("capped at 30 minutes");
     expect(message).not.toContain("the moment a matching tee time opens up");
   });
 

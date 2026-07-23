@@ -100,6 +100,12 @@ export type CourseCandidate = {
   bookableHoleCountsObservedAt?: string;
   alertSupport?: CourseAlertSupport;
   monitoringSupport?: CourseMonitoringSupport;
+  monitoringReadiness?:
+    | "READY"
+    | "VERIFYING"
+    | "UNAVAILABLE"
+    | "TEMPORARILY_UNAVAILABLE";
+  monitoringReadinessObservedAt?: string;
   layoutHoleCounts?: CourseLayoutHoleCount[];
   layoutHolesStatus?: "VERIFIED" | "UNVERIFIED";
   layoutHolesEvidenceUrl?: string;

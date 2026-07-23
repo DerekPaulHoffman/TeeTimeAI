@@ -29,6 +29,17 @@ type KnownCourseRecord = CourseIdentity & {
   automationReason: AutomationReason;
   detectedBookingUrl?: string | null;
   profile?: { canonicalSlug: string; status: string } | null;
+  probes?: Array<{
+    outcome:
+      | "MATCH_FOUND"
+      | "NO_MATCH"
+      | "BLOCKED_POLICY"
+      | "BLOCKED_AUTH"
+      | "BLOCKED_TOOLING"
+      | "FETCH_FAILED"
+      | "NEEDS_ADAPTER";
+    observedAt: Date;
+  }>;
 };
 
 export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[]) {
@@ -66,7 +77,12 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
       automationEligibility: true,
       automationReason: true,
       detectedBookingUrl: true,
-      profile: { select: { canonicalSlug: true, status: true } }
+      profile: { select: { canonicalSlug: true, status: true } },
+      probes: {
+        orderBy: { observedAt: "desc" },
+        take: 1,
+        select: { outcome: true, observedAt: true }
+      }
     }
   });
 
@@ -85,7 +101,11 @@ function mapCourseAlertSupport(
     ? ("AUTOMATIC" as const)
     : getCourseMonitoringSupport(course);
   if (!course) {
-    return { ...candidate, monitoringSupport };
+    return {
+      ...candidate,
+      monitoringSupport,
+      monitoringReadiness: "VERIFYING" as const
+    };
   }
 
   const candidateWithOfficialBooking =
@@ -107,6 +127,7 @@ function mapCourseAlertSupport(
   const candidateWithProfile = {
     ...candidateWithRating,
     courseId: course.id,
+    ...getMonitoringReadiness(course),
     ...(course.profile && ["PUBLISHED", "STALE"].includes(course.profile.status)
       ? { profileUrl: `/courses/${course.profile.canonicalSlug}` }
       : {})
@@ -117,6 +138,46 @@ function mapCourseAlertSupport(
   return alertSupport
     ? { ...candidateWithProfile, alertSupport, monitoringSupport }
     : { ...candidateWithProfile, monitoringSupport };
+}
+
+function getMonitoringReadiness(course: KnownCourseRecord) {
+  const latestProbe = course.probes?.[0];
+  const monitoringReadinessObservedAt = latestProbe?.observedAt.toISOString();
+  if (course.automationEligibility === "BLOCKED") {
+    return {
+      monitoringReadiness: "UNAVAILABLE" as const,
+      ...(monitoringReadinessObservedAt ? { monitoringReadinessObservedAt } : {})
+    };
+  }
+  if (latestProbe?.outcome === "FETCH_FAILED" || latestProbe?.outcome === "BLOCKED_TOOLING") {
+    return {
+      monitoringReadiness: "TEMPORARILY_UNAVAILABLE" as const,
+      monitoringReadinessObservedAt
+    };
+  }
+  if (
+    latestProbe &&
+    ["NEEDS_ADAPTER", "BLOCKED_POLICY", "BLOCKED_AUTH"].includes(latestProbe.outcome)
+  ) {
+    return {
+      monitoringReadiness: "UNAVAILABLE" as const,
+      monitoringReadinessObservedAt
+    };
+  }
+  if (
+    course.automationEligibility === "ALLOWED" ||
+    latestProbe?.outcome === "MATCH_FOUND" ||
+    latestProbe?.outcome === "NO_MATCH"
+  ) {
+    return {
+      monitoringReadiness: "READY" as const,
+      ...(monitoringReadinessObservedAt ? { monitoringReadinessObservedAt } : {})
+    };
+  }
+  return {
+    monitoringReadiness: "VERIFYING" as const,
+    ...(monitoringReadinessObservedAt ? { monitoringReadinessObservedAt } : {})
+  };
 }
 
 export function findKnownCourse(

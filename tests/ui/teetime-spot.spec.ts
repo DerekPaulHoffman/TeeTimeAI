@@ -864,9 +864,9 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(firstCourse.getByText("4.3", { exact: true })).toBeVisible();
       await expect(firstCourse.getByText(/18H/)).toBeVisible();
       await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
-      await expect(firstCourse.getByText("Tee-time checking available", { exact: true })).toBeVisible();
+      await expect(firstCourse.getByText("Automatic monitoring confirmed", { exact: true })).toBeVisible();
       await expect(
-        page.locator(".course-row").nth(1).getByText("Checking availability support", {
+        page.locator(".course-row").nth(1).getByText("Monitoring verdict after first check", {
           exact: true
         })
       ).toBeVisible();

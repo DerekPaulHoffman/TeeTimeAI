@@ -65,11 +65,9 @@ import {
   getCourseLayoutLabel
 } from "@/lib/courses/course-layout";
 import {
-  getRenderedTeeTimeAlertMatchIds,
   sendSearchStatusEmail,
   sendTeeTimeAlert
 } from "@/lib/email/alerts";
-import { getRenderedAvailabilityTimes } from "@/lib/email/customer-email";
 import {
   drainSearchEmailDeliveryGroup,
   finalizeSearchEmailDeliveryGroup,
@@ -979,12 +977,12 @@ async function checkSearch(
         searchId,
         getCurrentMatchIds(courseResults)
       );
-      const renderedPendingMatchIds = getRenderedPendingMatchIds(
+      const coveredPendingMatchIds = getCoveredPendingMatchIds(
         pendingMatches,
         courseResults
       );
-      const coveredMatchIds = renderedPendingMatchIds;
-      const renderedPendingMatchIdSet = new Set(renderedPendingMatchIds);
+      const coveredMatchIds = coveredPendingMatchIds;
+      const coveredPendingMatchIdSet = new Set(coveredPendingMatchIds);
       statusEmailOutcome = await deliverSearchStatusReport({
         search,
         searchWindow,
@@ -993,7 +991,7 @@ async function checkSearch(
         kind: statusEmailKind ?? "daily",
         coveredMatchIds,
         coveredMatchRefs: pendingMatches
-          .filter((match) => renderedPendingMatchIdSet.has(match.id))
+          .filter((match) => coveredPendingMatchIdSet.has(match.id))
           .map((match) => ({
             matchId: match.id,
             availabilityCycle: match.availabilityCycle
@@ -1020,20 +1018,20 @@ async function checkSearch(
         searchId,
         getCurrentMatchIds(courseResults)
       );
-      const renderedPendingMatchIds = getRenderedPendingMatchIds(
+      const coveredPendingMatchIds = getCoveredPendingMatchIds(
         setupPendingMatches,
         courseResults
       );
-      const renderedPendingMatchIdSet = new Set(renderedPendingMatchIds);
+      const coveredPendingMatchIdSet = new Set(coveredPendingMatchIds);
       statusEmailOutcome = await deliverSearchStatusReport({
         search,
         searchWindow,
         courseResults,
         checkedAt,
         kind: statusEmailKind,
-        coveredMatchIds: renderedPendingMatchIds,
+        coveredMatchIds: coveredPendingMatchIds,
         coveredMatchRefs: setupPendingMatches
-          .filter((match) => renderedPendingMatchIdSet.has(match.id))
+          .filter((match) => coveredPendingMatchIdSet.has(match.id))
           .map((match) => ({
             matchId: match.id,
             availabilityCycle: match.availabilityCycle
@@ -1043,7 +1041,7 @@ async function checkSearch(
       });
       newlyAlertedMatches =
         statusEmailOutcome === "sent" || statusEmailOutcome === "dry_run"
-          ? renderedPendingMatchIds.length
+          ? coveredPendingMatchIds.length
           : 0;
     } catch (error) {
       statusEmailOutcome = "failed";
@@ -1101,7 +1099,7 @@ async function checkSearch(
   };
 }
 
-function getRenderedPendingMatchIds(
+function getCoveredPendingMatchIds(
   pendingMatches: Array<{
     id: string;
     course: { id: string };
@@ -1112,7 +1110,7 @@ function getRenderedPendingMatchIds(
   return [
     ...new Set(
       courseResults.flatMap((course) =>
-        getRenderedAvailabilityTimes(course.matchingTimes ?? [], course.timeZone)
+        (course.matchingTimes ?? [])
           .map((match) => match.matchId)
           .filter(
             (matchId): matchId is string =>
@@ -1323,10 +1321,15 @@ async function deliverSearchStatusReport(input: {
     input.search.id,
     getCurrentMatchIds(input.courseResults)
   );
-  const displayMatchIds = getRenderedPendingMatchIds(
-    availableMatches,
-    input.courseResults
-  );
+  // The persisted field keeps its legacy name, but it represents every opening
+  // covered by the email. The renderer still shows a concise top set and an
+  // explicit "more tee times" count for the rest.
+  const displayMatchIds = [
+    ...new Set([
+      ...getCoveredPendingMatchIds(availableMatches, input.courseResults),
+      ...(input.coveredMatchIds ?? [])
+    ])
+  ];
   const basePeriodKey =
     input.kind === "setup"
       ? `setup-${createEmailSnapshotKey(persistedStatusReport)}`
@@ -1520,19 +1523,14 @@ async function sendPendingMatchAlerts(
       isNew: currentPendingIds.has(match.id)
     };
   });
-  const renderedMatchIds = new Set(getRenderedTeeTimeAlertMatchIds(reportMatches));
-  const renderedMatches = reportMatches.filter((match) =>
-    renderedMatchIds.has(match.matchId)
-  );
-  const renderedPendingMatches = currentPendingMatches.filter((match) =>
-    renderedMatchIds.has(match.id)
-  );
-  if (renderedPendingMatches.length === 0) {
+  const coveredMatches = reportMatches;
+  const coveredPendingMatches = currentPendingMatches;
+  if (coveredPendingMatches.length === 0) {
     return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
 
   const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
-  const batchKey = buildMatchDeliveryGroupKey(renderedPendingMatches);
+  const batchKey = buildMatchDeliveryGroupKey(coveredPendingMatches);
   await input.assertCurrent?.();
   const prepared = await prepareRecipientMatchDeliveryGroups({
     searchId,
@@ -1544,12 +1542,12 @@ async function sendPendingMatchAlerts(
     payload: {
       schemaVersion: 2,
       checkedAt: input.checkedAt.toISOString(),
-      matchIds: renderedPendingMatches.map((match) => match.id),
-      matchRefs: renderedPendingMatches.map((match) => ({
+      matchIds: coveredPendingMatches.map((match) => match.id),
+      matchRefs: coveredPendingMatches.map((match) => ({
         matchId: match.id,
         availabilityCycle: match.availabilityCycle
       })),
-      displayMatchIds: renderedMatches.map((match) => match.matchId),
+      displayMatchIds: coveredMatches.map((match) => match.matchId),
       satisfiesStatusReport: input.satisfiesStatusReport,
       statusSnapshot: buildSearchStatusSnapshot(input.courseResults),
       matchReport: toSearchEmailJson({
@@ -1559,7 +1557,7 @@ async function sendPendingMatchAlerts(
         players: input.searchWindow.players,
         requestedLayoutHoles: input.requestedLayoutHoles,
         userTimeZone: search.userTimeZone,
-        matches: renderedMatches.map((match) => ({
+        matches: coveredMatches.map((match) => ({
           ...match,
           startsAt: match.startsAt.toISOString()
         }))
