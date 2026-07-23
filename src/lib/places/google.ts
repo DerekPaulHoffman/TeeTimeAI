@@ -158,6 +158,7 @@ const NON_COURSE_NAME_PATTERNS = [
 const PLAYABLE_COURSE_NAME_PATTERN =
   /\b(?:course|links|park|center|resort|tpc)\b|\b\d+\s*(?:hole|course)\b/i;
 const SEMANTIC_FALLBACK_NAME_PATTERN = /\bgolf\s+(?:course|links)\b/i;
+const GOLF_IDENTITY_NAME_PATTERN = /\bgolf\b/i;
 
 const MEMBERSHIP_PLACE_TYPES = new Set(["association_or_organization", "sports_club"]);
 
@@ -282,17 +283,33 @@ function isLikelyPublicGolfCoursePlace(
 
   const hasTypedGolfCourseEvidence =
     place.primaryType === "golf_course" && placeTypes.includes("golf_course");
+  // A broad sports-club Nearby pass is noisy and competes for the same result cap.
+  // Recover only records independently returned by the public-course text search.
+  const hasCorroboratedSportsClubEvidence =
+    place.primaryType === "sports_club" &&
+    placeTypes.includes("golf_course") &&
+    hasPublicCourseEvidence &&
+    GOLF_IDENTITY_NAME_PATTERN.test(name) &&
+    Boolean(place.websiteUri);
   const hasSemanticFallbackEvidence =
     hasPublicCourseEvidence &&
     !place.primaryType &&
     SEMANTIC_FALLBACK_NAME_PATTERN.test(name) &&
     Boolean(place.websiteUri);
 
-  if (!hasTypedGolfCourseEvidence && !hasSemanticFallbackEvidence) {
+  if (
+    !hasTypedGolfCourseEvidence &&
+    !hasCorroboratedSportsClubEvidence &&
+    !hasSemanticFallbackEvidence
+  ) {
     return false;
   }
 
-  if (place.primaryType && NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType)) {
+  if (
+    place.primaryType &&
+    NON_PUBLIC_PRIMARY_TYPES.has(place.primaryType) &&
+    !hasCorroboratedSportsClubEvidence
+  ) {
     return false;
   }
 
@@ -312,7 +329,7 @@ function isLikelyPublicGolfCoursePlace(
 
   const hasMembershipShape =
     /\bclub\b/i.test(name) && placeTypes.some((type) => MEMBERSHIP_PLACE_TYPES.has(type));
-  const hasGolfIdentity = /\bgolf\b/i.test(name);
+  const hasGolfIdentity = GOLF_IDENTITY_NAME_PATTERN.test(name);
   const hasExplicitCourseSurface = PLAYABLE_COURSE_NAME_PATTERN.test(name);
 
   if (hasMembershipShape && !hasExplicitCourseSurface && !hasGolfIdentity) {

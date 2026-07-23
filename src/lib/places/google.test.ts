@@ -29,6 +29,7 @@ const TEST_REVIEW_INDEX = buildGooglePlaceReviewIndex([
     ["ChIJwYHDYQ5VwokRfkjeAFO-rcY", "Forest Hill Field Club"],
     ["ChIJmYaOBZeqw4kR8uLQ3-n-ies", "Montclair Golf Club"],
     ["ChIJMXRRcFvo5YkRkNXOrqSfVGM", "Shelter Harbor Golf Club"],
+    ["ChIJyaYoSGzg54kRN_2lDR8PO_g", "Highland Golf Club"],
     ["ChIJy0obgpGr2YgR3puygnLMK5M", "Shell Bay Club"],
     ["ChIJ0fUoNOn24YkRd7n-n1PQsls", "Baker Hill Golf Club"],
     ["ChIJ-5eDKiZ64YkROEiuRnTjEKw", "Dublin Lake Club Golf Course"],
@@ -550,6 +551,90 @@ describe("Google Places mapping", () => {
     expect(places.map((place) => place.displayName?.text)).toEqual([
       "H Smith Richardson Golf Course"
     ]);
+  });
+
+  it("recovers only corroborated sports-club records with a playable golf-course shape", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/gillette-ridge",
+          displayName: { text: "Gillette Ridge Golf Club" },
+          primaryType: "sports_club",
+          types: ["golf_course", "sports_club", "point_of_interest"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.gilletteridgegolf.com/",
+          location: { latitude: 41.8117579, longitude: -72.7438363 }
+        },
+        {
+          id: "places/uncorroborated-club",
+          displayName: { text: "Uncorroborated Golf Club" },
+          primaryType: "sports_club",
+          types: ["golf_course", "sports_club", "point_of_interest"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://example.com/uncorroborated",
+          location: { latitude: 41.8, longitude: -72.7 }
+        },
+        {
+          id: "places/no-golf-course-type",
+          displayName: { text: "Public Sports Golf Club" },
+          primaryType: "sports_club",
+          types: ["sports_club", "association_or_organization"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://example.com/no-golf-type",
+          location: { latitude: 41.79, longitude: -72.68 }
+        },
+        {
+          id: "places/no-website",
+          displayName: { text: "Public Golf Club" },
+          primaryType: "sports_club",
+          types: ["golf_course", "sports_club"],
+          businessStatus: "OPERATIONAL",
+          location: { latitude: 41.78, longitude: -72.66 }
+        },
+        {
+          id: "places/no-golf-identity",
+          displayName: { text: "Public Sports Club" },
+          primaryType: "sports_club",
+          types: ["golf_course", "sports_club"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://example.com/no-golf-identity",
+          location: { latitude: 41.77, longitude: -72.64 }
+        }
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "gillette-ridge",
+          "no-golf-course-type",
+          "no-website",
+          "no-golf-identity"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Gillette Ridge Golf Club"
+    ]);
+  });
+
+  it("lets an exact private review override corroborated sports-club evidence", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJyaYoSGzg54kRN_2lDR8PO_g",
+          displayName: { text: "Highland Golf Club" },
+          primaryType: "sports_club",
+          types: ["golf_course", "sports_club", "association_or_organization"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://www.highlandgolfclub.com/",
+          location: { latitude: 41.806563, longitude: -72.694177 }
+        }
+      ],
+      {
+        publicCourseEvidenceIds: new Set(["ChIJyaYoSGzg54kRN_2lDR8PO_g"])
+      }
+    );
+
+    expect(places).toEqual([]);
   });
 
   it("filters ancillary listings, private membership clubs, and closed businesses", () => {
@@ -2084,6 +2169,77 @@ describe("Google Places mapping", () => {
       "https://places.googleapis.com/v1/places:searchText",
       expect.objectContaining({
         body: expect.not.stringContaining('"strictTypeFiltering"')
+      })
+    );
+  });
+
+  it("adds a public-text sports club with golf-course evidence while excluding an exact private club", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ places: [] })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ places: [] })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/ChIJvbgDvA-r54kRnKZmg_Lj1Wc",
+              displayName: { text: "Gillette Ridge Golf Club" },
+              formattedAddress: "1360 Hall Blvd, Bloomfield, CT 06002",
+              primaryType: "sports_club",
+              types: ["golf_course", "sports_club", "point_of_interest"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://www.gilletteridgegolf.com/",
+              location: { latitude: 41.8117579, longitude: -72.7438363 }
+            },
+            {
+              id: "places/ChIJyaYoSGzg54kRN_2lDR8PO_g",
+              displayName: { text: "Highland Golf Club" },
+              formattedAddress: "10 Goodwin St, Hartford, CT 06103",
+              primaryType: "sports_club",
+              types: ["golf_course", "sports_club", "association_or_organization"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://www.highlandgolfclub.com/",
+              location: { latitude: 41.775, longitude: -72.694 }
+            }
+          ]
+        })
+      } as Response);
+
+    const courses = await searchNearbyGolfCourses({
+      latitude: 41.7658,
+      longitude: -72.6734,
+      radiusMeters: 24140
+    });
+
+    expect(courses).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "ChIJvbgDvA-r54kRnKZmg_Lj1Wc",
+        name: "Gillette Ridge Golf Club",
+        website: "https://www.gilletteridgegolf.com/",
+        distanceMeters: expect.any(Number)
+      })
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://places.googleapis.com/v1/places:searchNearby",
+      expect.objectContaining({
+        body: expect.stringContaining('"includedPrimaryTypes":["golf_course"]')
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "https://places.googleapis.com/v1/places:searchText",
+      expect.objectContaining({
+        body: expect.stringContaining('"textQuery":"public golf courses"')
       })
     );
   });
