@@ -29,6 +29,8 @@ export type TeeTimeAlertMatch = {
   priceCents?: number | null;
   holes?: number | null;
   bookableHoleCounts?: Array<9 | 18>;
+  factLine?: string;
+  courseGuideUrl?: string;
   isNew?: boolean;
 };
 
@@ -531,6 +533,8 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
         courseAddress: first?.courseAddress,
         courseTimeZone: first?.courseTimeZone,
         bookingUrl: first?.bookingUrl,
+        factLine: first?.factLine,
+        courseGuideUrl: first?.courseGuideUrl,
         times: courseMatches.map((match) => ({
           startsAt: match.startsAt,
           availableSpots: match.availableSpots,

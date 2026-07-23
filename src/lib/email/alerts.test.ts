@@ -93,6 +93,33 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("9H/18H");
   });
 
+  it("shows the reusable course strip and Course Guide in instant alerts", () => {
+    const html = renderAlertHtml({
+      to: "player@example.com",
+      searchId: "search-1",
+      matches: [
+        {
+          courseName: "Tashua Knolls Golf Course",
+          courseTimeZone: "America/New_York",
+          startsAt: new Date("2026-07-18T20:20:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+          factLine:
+            "Public · 4.1 rating (observed Jul 20, 2026) · 1.3 mi · 18H verified layout · $85–$98 last observed Jul 22, 2026",
+          courseGuideUrl: "/courses/tashua-knolls-golf-course"
+        }
+      ]
+    });
+
+    expect(html).toContain("Public · 4.1 rating");
+    expect(html).toContain("1.3 mi");
+    expect(html).toContain("$85–$98 last observed Jul 22, 2026");
+    expect(html).toContain(
+      'href="https://teetimespot.com/courses/tashua-knolls-golf-course"'
+    );
+    expect(html).toContain("Course Guide");
+  });
+
   it("keeps separate hourly windows and renders both stop-alert controls", () => {
     const html = renderAlertHtml({
       to: "player@example.com",

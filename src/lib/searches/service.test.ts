@@ -113,6 +113,7 @@ describe("createTeeSearchForUser", () => {
           address: "40 Tashua Knolls Ln, Trumbull, CT",
           latitude: 41.242,
           longitude: -73.209,
+          distanceMeters: 2092,
           rank: 1
         }
       ]
@@ -141,6 +142,7 @@ describe("createTeeSearchForUser", () => {
             create: [
               {
                 rank: 1,
+                distanceMetersAtSelection: 2092,
                 course: {
                   connect: { id: "foreup-course-1" }
                 }

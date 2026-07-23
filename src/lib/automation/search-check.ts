@@ -83,6 +83,7 @@ import {
   summarizeSearchStatusAvailability,
   type SearchStatusCourseReport
 } from "@/lib/email/search-status";
+import { buildCourseFactLine } from "@/lib/email/course-facts";
 import {
   buildCoursePriceEstimate,
   buildObservedBookableHoleSummary,
@@ -766,6 +767,8 @@ async function checkSearch(
         preference.course.id,
         {
         rank: preference.rank,
+        distanceMeters:
+          preference.distanceMetersAtSelection ?? undefined,
         courseAddress: preference.course.address ?? undefined,
         isPublic: preference.course.isPublic,
         rating: preference.course.rating ?? undefined,
@@ -794,6 +797,7 @@ async function checkSearch(
   for (const courseResult of courseResults) {
     const context = preferenceContext.get(courseResult.courseId);
     courseResult.rank = context?.rank;
+    courseResult.distanceMeters = context?.distanceMeters;
     courseResult.courseAddress = context?.courseAddress;
     courseResult.isPublic = context?.isPublic;
     courseResult.rating = context?.rating;
@@ -806,6 +810,7 @@ async function checkSearch(
     courseResult.bookableHoleCountsObservedAt =
       context?.bookableHoleSummary.observedAt;
     courseResult.courseGuideUrl = context?.courseGuideUrl;
+    courseResult.factLine = buildCourseFactLine(courseResult);
   }
   courseResults.sort((left, right) => (left.rank ?? 99) - (right.rank ?? 99));
 
@@ -1403,30 +1408,31 @@ async function sendPendingMatchAlerts(
   }
 
   const currentPendingIds = new Set(currentPendingMatches.map((match) => match.id));
-  const reportMatches = availableMatches.map((match) => ({
-    matchId: match.id,
-    courseId: match.course.id,
-    courseName: match.course.name,
-    courseRank: input.courseResults.find(
+  const reportMatches = availableMatches.map((match) => {
+    const courseResult = input.courseResults.find(
       (course) => course.courseId === match.course.id
-    )?.rank,
-    courseAddress:
-      input.courseResults.find((course) => course.courseId === match.course.id)
-        ?.courseAddress ?? match.course.address ?? undefined,
-    courseTimeZone: match.course.timeZone,
-    startsAt: match.startsAt,
-    availableSpots: match.availableSpots,
-    bookingUrl: match.bookingUrl,
-    priceCents: match.priceCents,
-    holes: match.holes,
-    bookableHoleCounts:
-      input.courseResults
-        .find((course) => course.courseId === match.course.id)
-        ?.matchingTimes?.find(
+    );
+    return {
+      matchId: match.id,
+      courseId: match.course.id,
+      courseName: match.course.name,
+      courseRank: courseResult?.rank,
+      courseAddress: courseResult?.courseAddress ?? match.course.address ?? undefined,
+      courseTimeZone: match.course.timeZone,
+      startsAt: match.startsAt,
+      availableSpots: match.availableSpots,
+      bookingUrl: match.bookingUrl,
+      priceCents: match.priceCents,
+      holes: match.holes,
+      bookableHoleCounts:
+        courseResult?.matchingTimes?.find(
           (time) => time.matchId === match.id
         )?.bookableHoleCounts ?? [],
-    isNew: currentPendingIds.has(match.id)
-  }));
+      factLine: courseResult?.factLine ?? buildCourseFactLine(courseResult ?? {}),
+      courseGuideUrl: courseResult?.courseGuideUrl,
+      isNew: currentPendingIds.has(match.id)
+    };
+  });
   const renderedMatchIds = new Set(getRenderedTeeTimeAlertMatchIds(reportMatches));
   const renderedMatches = reportMatches.filter((match) =>
     renderedMatchIds.has(match.matchId)

@@ -135,6 +135,9 @@ async function buildCoursePreferenceCreate(
           : null,
       create: {
         rank: course.rank,
+        ...(course.distanceMeters !== undefined
+          ? { distanceMetersAtSelection: course.distanceMeters }
+          : {}),
         course: {
           connect: { id: reusableCourse.id }
         }
@@ -156,6 +159,9 @@ async function buildCoursePreferenceCreate(
     },
     create: {
       rank: course.rank,
+      ...(course.distanceMeters !== undefined
+        ? { distanceMetersAtSelection: course.distanceMeters }
+        : {}),
       course: {
         connectOrCreate: {
           where: {

@@ -14,6 +14,7 @@ import {
   renderCustomerEmail,
   type CustomerEmailMonitoringCourse
 } from "@/lib/email/customer-email";
+import { buildCourseFactLine } from "@/lib/email/course-facts";
 import type { EmailStopUrls } from "@/lib/email/search-actions";
 import {
   DEFAULT_TIME_ZONE,
@@ -39,11 +40,13 @@ export type SearchStatusCourseReport = {
   isPublic?: boolean;
   rating?: number;
   ratingObservedAt?: string;
+  distanceMeters?: number;
   layoutHoleCounts?: number[];
   layoutHolesVerifiedAt?: string;
   priceEstimate?: CoursePriceEstimate;
   bookableHoleCounts?: Array<9 | 18>;
   bookableHoleCountsObservedAt?: string;
+  factLine?: string;
   courseGuideUrl?: string;
   outcome:
     | "MATCH_FOUND"
@@ -258,6 +261,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
       courseAddress: course.courseAddress,
       courseTimeZone: course.timeZone,
       bookingUrl: course.bookingUrl,
+      factLine: course.factLine ?? buildCourseFactLine(course),
+      courseGuideUrl: course.courseGuideUrl,
       times: course.matchingTimes ?? []
     }));
   const availabilityCourseIds = new Set(
@@ -362,69 +367,9 @@ function toMonitoringCourse(
     bookingUrl: identityBlocked ? undefined : course.bookingUrl,
     bookingLinkLabel,
     phone: identityBlocked ? undefined : course.phone,
-    factLine: buildCourseFactLine(course),
+    factLine: course.factLine ?? buildCourseFactLine(course),
     courseGuideUrl: course.courseGuideUrl
   };
-}
-
-function buildCourseFactLine(course: SearchStatusCourseReport) {
-  const facts: string[] = [];
-  if (course.isPublic === true) facts.push("Public");
-  if (typeof course.rating === "number") {
-    facts.push(
-      `${course.rating.toFixed(1)} rating${formatObservedSuffix(course.ratingObservedAt)}`
-    );
-  }
-  const physicalHoles = course.layoutHoleCounts?.includes(18)
-    ? 18
-    : course.layoutHoleCounts?.includes(9)
-      ? 9
-      : undefined;
-  const observedHoles = course.bookableHoleCounts?.includes(18)
-    ? 18
-    : course.bookableHoleCounts?.includes(9)
-      ? 9
-      : undefined;
-  if (physicalHoles) {
-    facts.push(`${physicalHoles}H verified layout`);
-  } else if (observedHoles) {
-    facts.push(
-      `${observedHoles}H booking option${formatObservedSuffix(course.bookableHoleCountsObservedAt)}`
-    );
-  }
-  const range =
-    (physicalHoles === 9 ? course.priceEstimate?.nineHoles : undefined) ??
-    (physicalHoles === 18 ? course.priceEstimate?.eighteenHoles : undefined) ??
-    course.priceEstimate?.eighteenHoles ??
-    course.priceEstimate?.nineHoles;
-  if (range) {
-    const minimum = formatEmailPrice(range.minPriceCents);
-    const maximum = formatEmailPrice(range.maxPriceCents);
-    facts.push(
-      `${minimum === maximum ? minimum : `${minimum}–${maximum}`} last observed ${formatObservedDate(range.observedAt ?? course.priceEstimate?.observedAt)}`
-    );
-  }
-  return facts.join(" · ");
-}
-
-function formatObservedSuffix(value: string | undefined) {
-  return value ? ` (observed ${formatObservedDate(value)})` : "";
-}
-
-function formatObservedDate(value: string | undefined) {
-  if (!value) return "earlier";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "earlier"
-    : date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
-
-function formatEmailPrice(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: value % 100 === 0 ? 0 : 2
-  }).format(value / 100);
 }
 
 function getLocalDateAndHour(date: Date, timeZone: string) {

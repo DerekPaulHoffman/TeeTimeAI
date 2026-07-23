@@ -35,6 +35,8 @@ export type CustomerEmailAvailabilityCourse = {
   courseAddress?: string;
   courseTimeZone?: string;
   bookingUrl?: string;
+  factLine?: string;
+  courseGuideUrl?: string;
   times: CustomerEmailAvailabilityTime[];
 };
 
@@ -304,6 +306,15 @@ function renderAvailabilityCard(
     ? `<p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:10px 20px 0">${hiddenRowCount} more time window${hiddenRowCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
     : "";
   const safeBookingUrl = getSafeCustomerBookingUrl(course.bookingUrl);
+  const factLine = course.factLine
+    ? `
+      <tr>
+        <td style="background:#ffffff;color:${EMAIL_COLORS.dark};font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:700;line-height:19px;padding:12px 20px">
+          ${escapeHtml(course.factLine)}
+        </td>
+      </tr>
+    `
+    : "";
   const cta = safeBookingUrl
     ? `
       <tr>
@@ -315,6 +326,15 @@ function renderAvailabilityCard(
               </td>
             </tr>
           </table>
+        </td>
+      </tr>
+    `
+    : "";
+  const courseGuideLink = course.courseGuideUrl
+    ? `
+      <tr>
+        <td align="center" style="padding:0 20px 16px">
+          <a href="${escapeHtml(absoluteUrl(course.courseGuideUrl))}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;text-decoration:none">Course Guide &rarr;</a>
         </td>
       </tr>
     `
@@ -331,6 +351,7 @@ function renderAvailabilityCard(
         subline: `${date} &middot; course local time (${escapeHtml(timeZone)})`,
         assetBaseUrl
       })}
+      ${factLine}
       <tr>
         <td style="background:#f7f9f7;padding:8px 20px">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed">
@@ -351,6 +372,7 @@ function renderAvailabilityCard(
         </td>
       </tr>
       ${cta}
+      ${courseGuideLink}
     </table>
   `;
 }

@@ -34,6 +34,7 @@ import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
+import { formatCourseDistance } from "@/lib/email/course-facts";
 import {
   buildCoursePriceEstimate,
   buildObservedBookableHoleSummary,
@@ -425,6 +426,14 @@ function DashboardSearchCard({
                         }
                       >
                         {preference.course.rating.toFixed(1)}
+                      </span>
+                    ) : null}
+                    {typeof preference.distanceMetersAtSelection === "number" ? (
+                      <span
+                        className="figma-course-pill is-detail"
+                        title="Distance when this course was selected"
+                      >
+                        {formatCourseDistance(preference.distanceMetersAtSelection)}
                       </span>
                     ) : null}
                     {bookableHoleCount ? (

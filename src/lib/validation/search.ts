@@ -41,6 +41,7 @@ const selectedCourseSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   timeZone: timeZoneSchema.optional(),
+  distanceMeters: z.number().int().min(0).max(200_000).optional(),
   rating: z.number().min(0).max(5).optional(),
   phone: z.string().optional(),
   website: z.string().url().optional()

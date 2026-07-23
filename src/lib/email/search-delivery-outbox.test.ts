@@ -102,6 +102,8 @@ const payload = {
           priceCents: 6500,
           holes: 18,
           bookableHoleCounts: [9, 18],
+          factLine: "Public · 4.1 rating · 1.3 mi · 18H · $65",
+          courseGuideUrl: "/courses/course",
           isNew: true
         }
       ]
@@ -3615,7 +3617,9 @@ describe("search email delivery outbox", () => {
       expect.objectContaining({
         availableSpots: 4,
         bookingUrl: "https://example.com/tee-times?date=2026-07-16",
-        priceCents: 6500
+        priceCents: 6500,
+        factLine: "Public · 4.1 rating · 1.3 mi · 18H · $65",
+        courseGuideUrl: "/courses/course"
       })
     );
     expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();

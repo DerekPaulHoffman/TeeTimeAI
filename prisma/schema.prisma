@@ -467,13 +467,14 @@ model SearchEmailDelivery {
 }
 
 model CoursePreference {
-  id          String    @id @default(cuid())
-  teeSearchId String
-  courseId    String
-  rank        Int
-  createdAt   DateTime  @default(now())
-  teeSearch   TeeSearch @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course      Course    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                        String    @id @default(cuid())
+  teeSearchId               String
+  courseId                  String
+  rank                      Int
+  distanceMetersAtSelection Int?
+  createdAt                 DateTime  @default(now())
+  teeSearch                 TeeSearch @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course                    Course    @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([teeSearchId, courseId])
   @@unique([teeSearchId, rank])

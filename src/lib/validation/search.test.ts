@@ -31,7 +31,8 @@ describe("teeSearchInputSchema", () => {
           rank: 1,
           latitude: 41.242,
           longitude: -73.209,
-          timeZone: "America/New_York"
+          timeZone: "America/New_York",
+          distanceMeters: 2092
         }
       ],
       cadenceMinutes: 15
@@ -44,6 +45,7 @@ describe("teeSearchInputSchema", () => {
     expect(result.userTimeZone).toBe("America/Los_Angeles");
     expect(result.requestedLayoutHoles).toBeUndefined();
     expect(result.courses[0]?.timeZone).toBe("America/New_York");
+    expect(result.courses[0]?.distanceMeters).toBe(2092);
   });
 
   it.each([9, 18] as const)("accepts a %i-hole physical course-layout preference", (holes) => {

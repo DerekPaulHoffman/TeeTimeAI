@@ -615,6 +615,22 @@ describe("renderSearchStatusHtml", () => {
           rank: 1,
           courseAddress: "1 Pine Road, Glastonbury, CT 06033, USA",
           timeZone: "America/New_York",
+          isPublic: true,
+          rating: 4.1,
+          ratingObservedAt: "2026-07-20T12:00:00.000Z",
+          distanceMeters: 2092,
+          layoutHoleCounts: [18],
+          priceEstimate: {
+            currency: "USD",
+            observedAt: "2026-07-22T12:00:00.000Z",
+            eighteenHoles: {
+              minPriceCents: 5800,
+              maxPriceCents: 6200,
+              sampleSize: 3,
+              observedAt: "2026-07-22T12:00:00.000Z"
+            }
+          },
+          courseGuideUrl: "/courses/pinebrook-golf-club-glastonbury-ct",
           outcome: "MATCH_FOUND",
           availableMatches: 3,
           bookingUrl: "https://example.com/pinebrook",
@@ -685,6 +701,11 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("https://assets.example.com/email/course-card-2.png");
     expect(html).toContain("Glastonbury, CT");
     expect(html).toContain("Orange, CT");
+    expect(html).toContain("Public · 4.1 rating");
+    expect(html).toContain("1.3 mi");
+    expect(html).toContain(
+      'href="https://teetimespot.com/courses/pinebrook-golf-club-glastonbury-ct"'
+    );
     expect(html).toContain("Public · 4.4 rating");
     expect(html).toContain("18H booking option");
     expect(html).toContain("$85–$98 last observed Jul 22, 2026");

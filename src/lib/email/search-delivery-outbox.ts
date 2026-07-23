@@ -1273,6 +1273,8 @@ export async function hydrateMatchAlertPayload(input: {
               (holes: unknown): holes is 9 | 18 => holes === 9 || holes === 18
             )
           : undefined,
+        factLine: optionalString(match.factLine),
+        courseGuideUrl: optionalString(match.courseGuideUrl),
         isNew: match.isNew === true
       };
     }),
@@ -2319,6 +2321,12 @@ async function reconcileCurrentMatchDeliveryPayload(
       ...(Array.isArray(persisted.row.bookableHoleCounts)
         ? { bookableHoleCounts: persisted.row.bookableHoleCounts }
         : {}),
+      ...(optionalString(persisted.row.factLine)
+        ? { factLine: optionalString(persisted.row.factLine) }
+        : {}),
+      ...(optionalString(persisted.row.courseGuideUrl)
+        ? { courseGuideUrl: optionalString(persisted.row.courseGuideUrl) }
+        : {}),
       isNew: requestedMatchIdSet.has(persisted.matchId)
     });
     currentValueByMatchId.set(persisted.matchId, currentValue);
@@ -2658,6 +2666,12 @@ function createMatchContinuationFromStatusPayload(
           holes: optionalNullableNumber(time.holes),
           ...(Array.isArray(time.bookableHoleCounts)
             ? { bookableHoleCounts: time.bookableHoleCounts }
+            : {}),
+          ...(optionalString(course.factLine)
+            ? { factLine: optionalString(course.factLine) }
+            : {}),
+          ...(optionalString(course.courseGuideUrl)
+            ? { courseGuideUrl: optionalString(course.courseGuideUrl) }
             : {}),
           isNew: true
         })

@@ -10,6 +10,7 @@ import {
   renderSearchStatusHtml,
   type SearchStatusEmailInput
 } from "@/lib/email/search-status";
+import { buildCourseFactLine } from "@/lib/email/course-facts";
 
 export const metadata: Metadata = {
   title: "Email Preview",
@@ -42,6 +43,23 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     rank: 1,
     courseAddress: "1 Pinebrook Drive, Glastonbury, CT 06033, United States",
     timeZone: "America/New_York",
+    isPublic: true,
+    rating: 4.1,
+    ratingObservedAt: "2026-07-15T12:00:00.000Z",
+    distanceMeters: 2092,
+    layoutHoleCounts: [18],
+    layoutHolesVerifiedAt: "2026-07-14T12:00:00.000Z",
+    priceEstimate: {
+      currency: "USD",
+      observedAt: "2026-07-15T12:00:00.000Z",
+      eighteenHoles: {
+        minPriceCents: 5800,
+        maxPriceCents: 6200,
+        sampleSize: 3,
+        observedAt: "2026-07-15T12:00:00.000Z"
+      }
+    },
+    courseGuideUrl: "/courses/pinebrook-golf-club",
     outcome: "MATCH_FOUND",
     availableMatches: 3,
     bookingUrl: "https://example.com/pinebrook-booking",
@@ -81,6 +99,23 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     rank: 2,
     courseAddress: "220 Ridge Road, Orange, CT 06477, USA",
     timeZone: "America/New_York",
+    isPublic: true,
+    rating: 4.4,
+    ratingObservedAt: "2026-07-15T12:00:00.000Z",
+    distanceMeters: 8851,
+    bookableHoleCounts: [18],
+    bookableHoleCountsObservedAt: "2026-07-15T12:00:00.000Z",
+    priceEstimate: {
+      currency: "USD",
+      observedAt: "2026-07-15T12:00:00.000Z",
+      eighteenHoles: {
+        minPriceCents: 5400,
+        maxPriceCents: 5400,
+        sampleSize: 2,
+        observedAt: "2026-07-15T12:00:00.000Z"
+      }
+    },
+    courseGuideUrl: "/courses/ridgecrest-golf-course",
     outcome: "MATCH_FOUND",
     availableMatches: 2,
     bookingUrl: "https://example.com/ridgecrest-booking",
@@ -113,6 +148,8 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     rank: 3,
     courseAddress: "95 Cedar Lane, New Haven, CT 06511",
     timeZone: "America/New_York",
+    isPublic: true,
+    distanceMeters: 12875,
     outcome: "NO_MATCH",
     availableMatches: 0,
     bookingUrl: "https://example.com/cedar-valley",
@@ -130,6 +167,8 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     rank: 4,
     courseAddress: "16 Lakeview Road, Hartford, CT 06106",
     timeZone: "America/New_York",
+    isPublic: true,
+    distanceMeters: 17703,
     outcome: "NO_MATCH",
     availableMatches: 0,
     bookingUrl: "https://example.com/lakeview",
@@ -147,6 +186,8 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     rank: 5,
     courseAddress: "400 Meadow Street, Branford, CT 06405",
     timeZone: "America/New_York",
+    isPublic: true,
+    distanceMeters: 22531,
     outcome: "NEEDS_ADAPTER",
     availableMatches: 0,
     bookingUrl: "https://example.com/meadow-hills"
@@ -184,6 +225,8 @@ const previewAlert: TeeTimeAlertInput = {
       priceCents: match.priceCents,
       holes: match.holes,
       bookableHoleCounts: match.bookableHoleCounts,
+      factLine: course.factLine ?? buildCourseFactLine(course),
+      courseGuideUrl: course.courseGuideUrl,
       isNew: match.isNew
     }))
   ),
