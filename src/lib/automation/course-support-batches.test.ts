@@ -57,6 +57,7 @@ import {
   assessCourseSupportReleaseTransition,
   buildFailureFingerprint,
   buildCourseSupportReleaseHistory,
+  canAppendCourseSupportBatchPath,
   canCloseCourseSupportRetry,
   chooseCourseSupportReleaseDiffBase,
   chooseNewestProviderVerificationEvidence,
@@ -88,6 +89,45 @@ import {
 } from "./course-support-batches";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
+
+describe("course-support path planning", () => {
+  it("reopens only an unreleased verifying batch whose original plan was empty", () => {
+    expect(
+      canAppendCourseSupportBatchPath({
+        status: "VERIFYING",
+        releaseSha: null,
+        plannedPaths: []
+      })
+    ).toBe(true);
+    expect(
+      canAppendCourseSupportBatchPath({
+        status: "VERIFYING",
+        releaseSha: "a".repeat(40),
+        plannedPaths: []
+      })
+    ).toBe(false);
+    expect(
+      canAppendCourseSupportBatchPath({
+        status: "VERIFYING",
+        releaseSha: null,
+        plannedPaths: ["src/lib/adapters/teeitup.ts"]
+      })
+    ).toBe(false);
+  });
+
+  it.each(["CLAIMED", "IMPLEMENTING"] as const)(
+    "keeps ordinary %s path planning available",
+    (status) => {
+      expect(
+        canAppendCourseSupportBatchPath({
+          status,
+          releaseSha: null,
+          plannedPaths: []
+        })
+      ).toBe(true);
+    }
+  );
+});
 
 const transactionClient = {
   automationRun: { create: prismaMocks.automationRunCreate },

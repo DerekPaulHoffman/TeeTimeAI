@@ -1823,12 +1823,13 @@ export async function appendCourseSupportBatchPath(input: {
       id: input.batchId,
       leaseToken: input.leaseToken,
       ownerThreadId: input.ownerThreadId,
-      status: { in: ["CLAIMED", "IMPLEMENTING"] },
+      status: { in: ACTIVE_BATCH_STATUSES },
       leaseExpiresAt: { gte: now }
     },
     select: {
       status: true,
       revision: true,
+      releaseSha: true,
       summary: true,
       ownerAutomationRunId: true
     }
@@ -1842,12 +1843,30 @@ export async function appendCourseSupportBatchPath(input: {
     };
   }
   const summary = asJsonObject(batch.summary);
-  const plannedPaths = normalizePaths([
-    ...(Array.isArray(summary.plannedPaths)
+  const currentPlannedPaths = normalizePaths(
+    Array.isArray(summary.plannedPaths)
       ? summary.plannedPaths.filter(
           (candidate): candidate is string => typeof candidate === "string"
         )
-      : []),
+      : []
+  );
+  if (
+    !canAppendCourseSupportBatchPath({
+      status: batch.status,
+      releaseSha: batch.releaseSha,
+      plannedPaths: currentPlannedPaths
+    })
+  ) {
+    return {
+      outcome: "recovery_required" as const,
+      pathRecorded: false,
+      threadDisposition: "KEEP_VISIBLE" as const,
+      archiveReason:
+        "Responder verification provenance is sealed and cannot add paths."
+    };
+  }
+  const plannedPaths = normalizePaths([
+    ...currentPlannedPaths,
     path
   ]);
   const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
@@ -1859,6 +1878,7 @@ export async function appendCourseSupportBatchPath(input: {
         ownerThreadId: input.ownerThreadId,
         status: batch.status,
         revision: batch.revision,
+        releaseSha: batch.releaseSha,
         leaseExpiresAt: { gte: now }
       },
       data: {
@@ -1897,6 +1917,22 @@ export async function appendCourseSupportBatchPath(input: {
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason: "The responder batch is still in progress."
   };
+}
+
+export function canAppendCourseSupportBatchPath(input: {
+  status: CourseSupportBatchStatus;
+  releaseSha: string | null;
+  plannedPaths: string[];
+}) {
+  if (input.status === "CLAIMED" || input.status === "IMPLEMENTING") {
+    return true;
+  }
+
+  return (
+    input.status === "VERIFYING" &&
+    input.releaseSha === null &&
+    input.plannedPaths.length === 0
+  );
 }
 
 export async function getCourseSupportBatchPacket(input: {
