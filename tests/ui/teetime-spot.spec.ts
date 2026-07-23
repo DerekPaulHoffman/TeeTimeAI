@@ -864,9 +864,9 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(firstCourse.getByText("4.3", { exact: true })).toBeVisible();
       await expect(firstCourse.getByText(/18H/)).toBeVisible();
       await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
-      await expect(firstCourse.getByText("Automatic availability alerts", { exact: true })).toBeVisible();
+      await expect(firstCourse.getByText("Tee-time checking available", { exact: true })).toBeVisible();
       await expect(
-        page.locator(".course-row").nth(1).getByText("Automatic alerts not yet confirmed", {
+        page.locator(".course-row").nth(1).getByText("Checking availability support", {
           exact: true
         })
       ).toBeVisible();
@@ -1096,7 +1096,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     const blockedCourseResult = missingCourseResults.filter({
       has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
     });
-    await expect(blockedCourseResult).toContainText("Phone only");
+    await expect(blockedCourseResult).toContainText("Call the course");
     await expect(
       blockedCourseResult.getByRole("link", { name: /Open official site for Fairview Farm/i })
     ).toBeVisible();
@@ -1104,9 +1104,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     const directOnlineCourseResult = missingCourseResults.filter({
       has: page.getByRole("heading", { name: "Yale University Golf Course" })
     });
-    await expect(directOnlineCourseResult).toContainText("Book online directly");
+    await expect(directOnlineCourseResult).toContainText("Check and book directly");
     await expect(directOnlineCourseResult).toContainText(
-      "official booking page to check availability and book"
+      "official booking page to view current tee times and book directly"
     );
     await expect(
       directOnlineCourseResult.getByRole("link", {
@@ -1124,7 +1124,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(mobileSelectionToggle).toBeVisible();
       await mobileSelectionToggle.press("Enter");
     }
-    await expect(page.getByText("Choose at least one course Tee Time Spot can monitor automatically.")).toBeVisible();
+    await expect(page.getByText("Choose at least one course Tee Time Spot can check automatically.")).toBeVisible();
     if (usesSelectionDrawer) {
       await page.locator(".selected-list").getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
     } else {

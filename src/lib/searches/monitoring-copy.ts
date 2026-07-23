@@ -28,7 +28,7 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
   const details: string[] = [];
   if (unconfirmed.length > 0) {
     details.push(
-      `We'll verify automatic monitoring for ${formatCourseNames(unconfirmed)} as your alert starts.`
+      `We'll confirm whether we can check ${formatCourseNames(unconfirmed)} automatically when your alert starts.`
     );
   }
   if (manualOnly.length > 0) {
@@ -37,11 +37,11 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
         getAlertSupportSavedStatus(course.name, course.alertSupport)
       )
       .join("; ");
-    const pronoun = manualOnly.length === 1 ? "It" : "They";
-    details.push(`${statuses}. ${pronoun} won't be checked automatically.`);
+    const reference = manualOnly.length === 1 ? "this course" : "these courses";
+    details.push(`${statuses}. Tee Time Spot won't check ${reference} automatically.`);
   }
 
-  return `Alert saved. We'll monitor supported courses and email you when a match opens. ${details.join(" ")}`;
+  return `Alert saved. We'll check supported courses and email you when a match opens. ${details.join(" ")}`;
 }
 
 function formatCourseNames(courses: MonitoringCourse[]) {

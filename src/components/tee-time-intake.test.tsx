@@ -272,16 +272,16 @@ describe("TeeTimeIntake", () => {
     );
 
     await screen.findByText(
-      "Wheeler Family Traditions Golf Club was added to your list and saved for public-course review. Alerts can start after it is verified."
+      "Wheeler Family Traditions Golf Club was added to your list. We're confirming that it is a public golf course, and alerts can start after we finish."
     );
-    expect(screen.getAllByText("Public access verification needed")).toHaveLength(2);
+    expect(screen.getAllByText("Confirming course details")).toHaveLength(2);
     expect(
       (screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
         .disabled
     ).toBe(true);
     expect(
       screen.getByText(
-        "Wheeler Family Traditions Golf Club still needs public-course verification. It is saved to your list, but alerts cannot start for it yet."
+        "We're still confirming that Wheeler Family Traditions Golf Club is a public golf course. It is saved to your list, but alerts cannot start for it yet."
       )
     ).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(

@@ -231,16 +231,16 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
     : input.kind === "setup"
       ? hasIdentityRecheckCourse
-        ? "Your alert is set. Automatic monitoring is paused for any course whose public-course identity is being rechecked; we'll keep checking supported courses."
+        ? "Your alert is set. We're confirming the details for one or more courses; we'll keep checking the courses that are ready."
         : hasDirectOnlyCourse
-          ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
+          ? "Your alert is set. We'll keep checking supported courses. Please check courses marked for direct booking on their official websites."
           : hasWorkInProgressCourse
-            ? "Your alert is set. We checked every selected course. Use the official link where monitoring is still being added."
+            ? "Your alert is set. We checked every selected course. Please use the official link for any course Tee Time Spot cannot check automatically yet."
             : "Your alert is set. We checked every selected course and will keep watching automatically."
       : changedCourses.length > 0
         ? `Changed since your last email: ${changedCourses.join(", ")}.`
         : hasIdentityRecheckCourse
-          ? "No course status changed since your last email. Identity verification is still in progress, and automatic monitoring remains paused for that course."
+          ? "No course status changed since your last email. We're still confirming the details for one or more courses."
           : hasDirectOnlyCourse
             ? "No course status changed since your last email. We're still checking supported courses."
             : "No course status changed since your last email. We're still checking.";
@@ -320,9 +320,9 @@ function toMonitoringCourse(
       }
     : course.outcome === "MATCH_FOUND"
       ? {
-        badgeLabel: "FULLY MONITORED",
+        badgeLabel: "TEE TIME FOUND",
         tone: "monitored" as const,
-        detail: `We're checking this course automatically. ${description.detail}`
+        detail: description.detail
       }
     : course.outcome === "NO_MATCH" && course.bookingWindow
       ? {
@@ -332,19 +332,19 @@ function toMonitoringCourse(
         }
       : course.outcome === "NO_MATCH"
         ? {
-            badgeLabel: "FULLY MONITORED",
+            badgeLabel: "CHECKING FOR TEE TIMES",
             tone: "monitored" as const,
             detail: `${description.stateLabel}. ${description.detail}`
           }
         : isAddingMonitoring
           ? {
-              badgeLabel: "ADDING MONITORING",
+              badgeLabel: "CHECK OFFICIAL WEBSITE",
               tone: "adding" as const,
               detail: `${description.stateLabel}. ${description.detail}`
             }
           : course.outcome === "FETCH_FAILED"
             ? {
-                badgeLabel: "CHECK RETRYING",
+                badgeLabel: "WE'LL CHECK AGAIN",
                 tone: "retrying" as const,
                 detail: `${description.stateLabel}. ${description.detail}`
               }
@@ -397,8 +397,8 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   const blockedCategory = getBlockedMonitoringCategory(course);
   if (blockedCategory === "IDENTITY_RECHECK") {
     return {
-      monitoringLabel: "Course identity recheck",
-      stateLabel: "Monitoring paused while we verify public access",
+      monitoringLabel: "Confirming course details",
+      stateLabel: "Checking whether this listing is a public golf course",
       icon: "!",
       color: "#7f302a",
       badgeBackground: "#fbeae7",
@@ -407,13 +407,13 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
       detail:
-        "The prior course-identity review is due. Automatic availability checks remain paused until current official evidence confirms this is a public course."
+        "Tee Time Spot will begin checking for tee times after we confirm the course details."
     };
   }
   if (blockedCategory === "IDENTITY_FINAL") {
     return {
-      monitoringLabel: "Not a public course",
-      stateLabel: "Not eligible for tee-time monitoring",
+      monitoringLabel: "Not available for alerts",
+      stateLabel: "This listing is not a public golf course we can check",
       icon: "!",
       color: "#7f302a",
       badgeBackground: "#fbeae7",
@@ -422,13 +422,13 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
       detail:
-        "Current verified identity evidence shows this listing is private, is not a playable golf course, or is otherwise not a public course Tee Time Spot can monitor."
+        "Please choose another public golf course for your alert."
     };
   }
   if (course.outcome === "MATCH_FOUND") {
     return {
-      monitoringLabel: "Fully monitored ✓",
-      stateLabel: "Matching time visible",
+      monitoringLabel: "Tee time found",
+      stateLabel: "A matching tee time is available",
       icon: "✓",
       color: "#147a52",
       badgeBackground: "#e8f4ec",
@@ -462,8 +462,8 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
 
   if (course.outcome === "NEEDS_ADAPTER") {
     return {
-      monitoringLabel: "Official site",
-      stateLabel: "Check this course directly for now",
+      monitoringLabel: "Check the official website",
+      stateLabel: "Tee Time Spot cannot check this course automatically yet",
       icon: "↗",
       color: "#c75c0a",
       badgeBackground: "#fff0e4",
@@ -472,17 +472,17 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#f3cfad",
       calloutText: "#713706",
       detail: course.bookingUrl
-        ? "We checked this course’s official booking surface. Live availability is not currently available inside Tee Time Spot, so use the official link while we keep working to add monitoring."
+        ? "We're working to add support. Please use the official booking page to view current tee times and book directly."
         : course.phone
-          ? "We checked this course’s public booking information. Call the course directly while we keep working to add monitoring."
-          : "We checked the public course information, but no direct availability source was available."
+          ? "We're working to add support. Please call the course directly for current availability."
+          : "We couldn't confirm where this course posts current tee times. Please check the official website or contact the course."
     };
   }
 
   if (course.outcome === "FETCH_FAILED") {
     return {
-      monitoringLabel: "Official site · retry scheduled",
-      stateLabel: "Latest check incomplete",
+      monitoringLabel: "We'll check again",
+      stateLabel: "We couldn't complete the latest check",
       icon: "↻",
       color: "#a23a32",
       badgeBackground: "#fbeae7",
@@ -490,14 +490,14 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff5f3",
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
-      detail: "This course’s latest availability check did not finish. We’ll retry automatically; its official page is available in the meantime."
+      detail: "We'll try again automatically. Please use the official website for current availability."
     };
   }
 
   if (blockedCategory === "POLICY_REMEDIATION") {
     return {
-      monitoringLabel: "Official booking page",
-      stateLabel: "Check this course directly for now",
+      monitoringLabel: "Check the official website",
+      stateLabel: "We're confirming how this course handles online booking",
       icon: "↗",
       color: "#c75c0a",
       badgeBackground: "#fff0e4",
@@ -506,7 +506,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#f3cfad",
       calloutText: "#713706",
       detail:
-        "This legacy policy-only or generic classification is being re-checked against the current public booking surface. Use the official link while we keep working to add monitoring."
+        "Please use the official link for current availability while we finish checking."
     };
   }
 
@@ -523,7 +523,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
         : "CAPTCHA_OR_QUEUE");
     return {
       monitoringLabel: getAlertSupportLabel(alertSupport),
-      stateLabel: "Check this course directly for now",
+      stateLabel: "Please check this course directly",
       icon: "⚠",
       color: "#b66500",
       badgeBackground: "#fff0d6",
@@ -545,7 +545,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       }) ?? "OFFICIAL_SITE_ONLY";
     return {
       monitoringLabel: getAlertSupportLabel(alertSupport),
-      stateLabel: "Direct booking required",
+      stateLabel: "Please check directly with the course",
       icon: "⚠",
       color: "#b66500",
       badgeBackground: "#fff0d6",
@@ -596,7 +596,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
 
 function fullyMonitoredDescription(stateLabel: string) {
   return {
-    monitoringLabel: "Fully monitored ✓",
+    monitoringLabel: "Checking for tee times ✓",
     stateLabel,
     icon: "✓",
     color: "#147a52",

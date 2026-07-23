@@ -54,10 +54,10 @@ describe("course profile presentation", () => {
         "PUBLIC_ONLINE"
       )
     ).toContain(
-      "first-time online booking access must be set up by course staff"
+      "requires staff to set up your online booking access"
     );
     expect(getUnsupportedAlertCopy("UNKNOWN")).toContain(
-      "Check the course's official site for current booking information"
+      "Please use the official website for current booking information"
     );
   });
 });

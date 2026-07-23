@@ -142,14 +142,14 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("ADDING MONITORING");
-    expect(html).toContain("Check this course directly for now");
+    expect(html).toContain("CHECK OFFICIAL WEBSITE");
+    expect(html).toContain("Tee Time Spot cannot check this course automatically yet");
     expect(html).toContain("We checked every selected course");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we're watching for you");
     expect(html).toContain("COURSE LAYOUT");
     expect(html).toContain("18 Holes");
-    expect(html).toContain("FULLY MONITORED");
+    expect(html).toContain("CHECKING FOR TEE TIMES");
     expect(html).toContain("at most one morning status update per day");
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
@@ -235,7 +235,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
-    expect(html).toContain("PRIORITY 2 &middot; ADDING MONITORING");
+    expect(html).toContain("PRIORITY 2 &middot; CHECK OFFICIAL WEBSITE");
   });
 
   it("revalidates a generic legacy block instead of treating it as final", () => {
@@ -267,9 +267,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("monitoring is still being added");
-    expect(html).toContain("ADDING MONITORING");
-    expect(html).toContain("generic classification is being re-checked");
+    expect(html).toContain("cannot check automatically yet");
+    expect(html).toContain("CHECK OFFICIAL WEBSITE");
+    expect(html).toContain("confirming how this course handles online booking");
     expect(html).toContain("Open official site &rarr;");
     expect(html).toContain("Call (860) 555-0102 &rarr;");
     expect(html).not.toContain("keep watching automatically");
@@ -299,10 +299,10 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; ADDING MONITORING");
-    expect(html).toContain("legacy policy-only or generic classification is being re-checked");
+    expect(html).toContain("PRIORITY 1 &middot; CHECK OFFICIAL WEBSITE");
+    expect(html).toContain("confirming how this course handles online booking");
     expect(html).toContain("Open official booking page &rarr;");
-    expect(html).toContain("keep working to add monitoring");
+    expect(html).toContain("while we finish checking");
   });
 
   it("gives phone-only courses a clear direct-booking action", () => {
@@ -330,9 +330,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; PHONE ONLY");
+    expect(html).toContain("PRIORITY 1 &middot; CALL THE COURSE");
     expect(html).toContain(
-      "The course does not publish a public online tee sheet. Call the course directly to check availability and book."
+      "This course does not show tee-time availability online. Please call the course directly to check availability and book."
     );
     expect(html).toContain('href="tel:+12035550199"');
     expect(html).toContain("Call +1 (203) 555-0199 &rarr;");
@@ -341,8 +341,8 @@ describe("renderSearchStatusHtml", () => {
   });
 
   it.each([
-    ["ACCOUNT_REQUIRED", "GOLFER ACCOUNT REQUIRED", "requires a golfer account"],
-    ["CAPTCHA_OR_QUEUE", "CAPTCHA OR QUEUE", "behind a captcha, queue"]
+    ["ACCOUNT_REQUIRED", "SIGN IN ON OFFICIAL WEBSITE", "only shows tee times after golfers sign in"],
+    ["CAPTCHA_OR_QUEUE", "CHECK THE OFFICIAL WEBSITE", "booking website prevents Tee Time Spot"]
   ] as const)(
     "renders %s as a technical final even with the same booking page",
     (automationReason, badge, detail) => {
@@ -372,7 +372,9 @@ describe("renderSearchStatusHtml", () => {
       expect(html).toContain(`PRIORITY 1 &middot; ${badge}`);
       expect(html).toContain(detail);
       expect(html).not.toContain("ADDING MONITORING");
-      expect(html).not.toContain("legacy policy-only");
+      expect(html).not.toContain("CAPTCHA OR QUEUE");
+      expect(html).not.toContain("captcha, queue");
+      expect(html).not.toContain("policy-only");
     }
   );
 
@@ -402,11 +404,11 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; FIRST-TIME ACCESS SETUP");
+    expect(html).toContain("PRIORITY 1 &middot; CONTACT THE COURSE FIRST");
     expect(html).toContain(
-      "first-time online booking access must be set up by course staff"
+      "requires staff to set up your online booking access"
     );
-    expect(html).toContain("Contact the course to get access");
+    expect(html).toContain("contact the course directly to get started");
     expect(html).not.toContain("Not a public course");
     expect(html).not.toContain("private course");
   });
@@ -443,8 +445,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; NOT A PUBLIC COURSE");
-    expect(html).toContain("private, is not a playable golf course");
+    expect(html).toContain("PRIORITY 1 &middot; NOT AVAILABLE FOR ALERTS");
+    expect(html).toContain("This listing is not a public golf course we can check");
     expect(html).not.toContain("AVAILABLE NOW");
     expect(html).not.toContain("https://private.example/book");
     expect(html).not.toContain("tel:+12035550100");
@@ -486,10 +488,10 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; COURSE IDENTITY RECHECK");
-    expect(html).toContain("Monitoring paused while we verify public access");
-    expect(html).toContain("prior course-identity review is due");
-    expect(html).not.toContain("Current verified identity evidence");
+    expect(html).toContain("PRIORITY 1 &middot; CONFIRMING COURSE DETAILS");
+    expect(html).toContain("Checking whether this listing is a public golf course");
+    expect(html).toContain("after we confirm the course details");
+    expect(html).not.toContain("identity evidence");
     expect(html).not.toContain("AVAILABLE NOW");
     expect(html).not.toContain("https://private.example/book");
     expect(html).not.toContain("tel:+12035550100");
@@ -521,9 +523,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; ADDING MONITORING");
-    expect(html).toContain("legacy policy-only or generic classification");
-    expect(html).not.toContain("DIRECT BOOKING REQUIRED");
+    expect(html).toContain("PRIORITY 1 &middot; CHECK OFFICIAL WEBSITE");
+    expect(html).toContain("confirming how this course handles online booking");
+    expect(html).not.toContain("Please check directly with the course");
   });
 
   it("does not infer a manual final from no-online metadata with an unknown method", () => {
@@ -548,8 +550,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; ADDING MONITORING");
-    expect(html).not.toContain("DIRECT BOOKING REQUIRED");
+    expect(html).toContain("PRIORITY 1 &middot; CHECK OFFICIAL WEBSITE");
+    expect(html).not.toContain("Please check directly with the course");
   });
 
   it("keeps internal escalation state out of customer-facing course copy", () => {
@@ -588,10 +590,10 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(pendingHtml).toContain("ADDING MONITORING");
-    expect(alertedHtml).toContain("ADDING MONITORING");
-    expect(pendingHtml).toContain("Check this course directly for now");
-    expect(alertedHtml).toContain("Check this course directly for now");
+    expect(pendingHtml).toContain("CHECK OFFICIAL WEBSITE");
+    expect(alertedHtml).toContain("CHECK OFFICIAL WEBSITE");
+    expect(pendingHtml).toContain("cannot check this course automatically yet");
+    expect(alertedHtml).toContain("cannot check this course automatically yet");
     expect(pendingHtml).not.toContain("team has been alerted");
     expect(alertedHtml).not.toContain("team has been alerted");
     expect(alertedHtml).not.toContain("Automatic monitoring isn’t available yet");

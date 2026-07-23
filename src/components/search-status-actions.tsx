@@ -152,7 +152,7 @@ export function SearchStatusActions({
   }
 
   async function removeSearch() {
-    if (!window.confirm("Remove this search from the queue?")) {
+    if (!window.confirm("Remove this tee-time alert?")) {
       return;
     }
 
@@ -552,7 +552,7 @@ function getCheckStatusDisplay(
   if (status === "QUEUED" || status === "CHECKING") {
     return {
       tone: "checking",
-      title: "We’re working on getting your tee times",
+      title: "We’re checking for tee times",
       detail:
         "We’re checking the official course sites now. This page will update automatically when we finish.",
       timing: lastCheckedAt

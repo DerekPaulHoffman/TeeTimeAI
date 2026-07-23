@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   getAlertSupportDescription,
   getAlertSupportLabel,
+  getAlertSupportSavedStatus,
   getCourseAlertSupport,
   getCourseMonitoringSupport,
   getUnavailableAlertCoverageCopy,
@@ -16,38 +17,38 @@ describe("course intelligence", () => {
   it.each([
     {
       mode: "ACCOUNT_REQUIRED",
-      label: "Golfer account required",
-      copy: "Use the official site and contact the course if you need access"
+      label: "Sign in on official website",
+      copy: "please sign in on the official website"
     },
     {
       mode: "ACCOUNT_SELF_SERVICE",
-      label: "Golfer account required",
-      copy: "Golfers can create or use their own account"
+      label: "Sign in on official website",
+      copy: "create or use your own account"
     },
     {
       mode: "ACCOUNT_STAFF_PROVISIONED",
-      label: "First-time access setup",
-      copy: "first-time online booking access must be set up by course staff"
+      label: "Contact the course first",
+      copy: "requires staff to set up your online booking access"
     },
     {
       mode: "PHONE_ONLY",
-      label: "Phone only",
-      copy: "Call the course directly"
+      label: "Call the course",
+      copy: "call the course directly"
     },
     {
       mode: "CONTACT_COURSE",
-      label: "Contact course",
-      copy: "contact it directly"
+      label: "Contact the course",
+      copy: "contact them directly"
     },
     {
       mode: "WALK_IN",
-      label: "Walk-in only",
-      copy: "handles tee-time access in person"
+      label: "Check with the course in person",
+      copy: "handles tee times in person"
     },
     {
       mode: "CAPTCHA_OR_QUEUE",
-      label: "Captcha or queue",
-      copy: "does not bypass those controls"
+      label: "Check the official website",
+      copy: "booking website prevents Tee Time Spot"
     }
   ] as const)(
     "uses accurate customer wording for $mode",
@@ -132,7 +133,7 @@ describe("course intelligence", () => {
         bookingMethod: "UNKNOWN"
       })
     ).toBe("OFFICIAL_SITE_ONLY");
-    expect(getAlertSupportLabel("DIRECT_ONLINE")).toBe("Book online directly");
+    expect(getAlertSupportLabel("DIRECT_ONLINE")).toBe("Check and book directly");
   });
 
   it("only presents automatic monitoring after support is confirmed", () => {
@@ -148,6 +149,32 @@ describe("course intelligence", () => {
     expect(getCourseMonitoringSupport()).toBe("UNCONFIRMED");
     expect(isManualOnlyAlertSupport(undefined)).toBe(false);
     expect(isManualOnlyAlertSupport("PHONE_ONLY")).toBe(true);
+  });
+
+  it("keeps implementation jargon out of every customer-facing support response", () => {
+    const supports = [
+      "DIRECT_ONLINE",
+      "ACCOUNT_REQUIRED",
+      "ACCOUNT_SELF_SERVICE",
+      "ACCOUNT_STAFF_PROVISIONED",
+      "CAPTCHA_OR_QUEUE",
+      "PHONE_ONLY",
+      "CONTACT_COURSE",
+      "WALK_IN_ONLY",
+      "OFFICIAL_SITE_ONLY"
+    ] as const;
+
+    for (const support of supports) {
+      const copy = [
+        getAlertSupportLabel(support),
+        getAlertSupportDescription(support),
+        getAlertSupportSavedStatus("Example Golf Course", support)
+      ].join(" ");
+
+      expect(copy).not.toMatch(
+        /\b(?:captcha|queue|adapter|booking surface|tee sheet|access control|retry scheduled|policy-only|identity recheck)\b/i
+      );
+    }
   });
 
   it("surfaces stale intelligence for review without returning it to normal probing", () => {

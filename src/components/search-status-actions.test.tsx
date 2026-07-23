@@ -156,7 +156,7 @@ describe("SearchStatusActions", () => {
     );
     expect(screen.getByText("Checking")).toBeTruthy();
     expect(screen.getByRole("status")).toBeTruthy();
-    expect(screen.getByText(/we’re working on getting your tee times/i)).toBeTruthy();
+    expect(screen.getByText(/we’re checking for tee times/i)).toBeTruthy();
     expect(screen.getByText(/update automatically when we finish/i)).toBeTruthy();
   });
 

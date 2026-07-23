@@ -412,8 +412,8 @@ function DashboardSearchCard({
                       <span className="figma-course-pill is-official-site-only">
                         <CircleOff size={11} />
                         {identityRecheckDue
-                          ? "Course identity recheck due"
-                          : "Not a public course"}
+                          ? "Confirming course details"
+                          : "Not available for alerts"}
                       </span>
                     )}
                     {typeof preference.course.rating === "number" ? (

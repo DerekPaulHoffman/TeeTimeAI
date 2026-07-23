@@ -144,45 +144,45 @@ export function isManualOnlyAlertSupport(
 export function getAlertSupportLabel(alertSupport: CourseAlertSupport) {
   switch (alertSupport) {
     case "DIRECT_ONLINE":
-      return "Book online directly";
+      return "Check and book directly";
     case "ACCOUNT_REQUIRED":
     case "ACCOUNT_SELF_SERVICE":
-      return "Golfer account required";
+      return "Sign in on official website";
     case "ACCOUNT_STAFF_PROVISIONED":
-      return "First-time access setup";
+      return "Contact the course first";
     case "CAPTCHA_OR_QUEUE":
-      return "Captcha or queue";
+      return "Check the official website";
     case "PHONE_ONLY":
-      return "Phone only";
+      return "Call the course";
     case "CONTACT_COURSE":
-      return "Contact course";
+      return "Contact the course";
     case "WALK_IN_ONLY":
-      return "Walk-in only";
+      return "Check with the course in person";
     default:
-      return "Official site only";
+      return "Check the official website";
   }
 }
 
 export function getAlertSupportDescription(alertSupport: CourseAlertSupport) {
   switch (alertSupport) {
     case "DIRECT_ONLINE":
-      return "Use the course's official booking page to check availability and book.";
+      return "Tee Time Spot cannot check this course automatically. Please use the official booking page to view current tee times and book directly.";
     case "ACCOUNT_REQUIRED":
-      return "This public course requires a golfer account to view tee times. Tee Time Spot does not sign in to golfer accounts. Use the official site and contact the course if you need access.";
+      return "This course only shows tee times after golfers sign in. Tee Time Spot does not use golfer accounts, so please sign in on the official website to check availability.";
     case "ACCOUNT_SELF_SERVICE":
-      return "This public course requires a golfer account to view tee times. Golfers can create or use their own account on the official booking page, but Tee Time Spot does not sign in to golfer accounts.";
+      return "This course only shows tee times after golfers sign in. Please create or use your own account on the official website to check availability.";
     case "ACCOUNT_STAFF_PROVISIONED":
-      return "This is a public course, but first-time online booking access must be set up by course staff. Contact the course to get access; Tee Time Spot does not sign in to golfer accounts.";
+      return "The course requires staff to set up your online booking access. Please contact the course directly to get started.";
     case "CAPTCHA_OR_QUEUE":
-      return "Availability is behind a captcha, queue, or similar access control. Tee Time Spot does not bypass those controls; check the official booking page directly.";
+      return "This course's booking website prevents Tee Time Spot from checking availability automatically. Please use the official booking page to view current tee times and book directly.";
     case "PHONE_ONLY":
-      return "The course does not publish a public online tee sheet. Call the course directly to check availability and book.";
+      return "This course does not show tee-time availability online. Please call the course directly to check availability and book.";
     case "CONTACT_COURSE":
-      return "The course requires golfers to contact it directly to check availability and arrange a tee time.";
+      return "This course asks golfers to contact them directly for availability and booking.";
     case "WALK_IN_ONLY":
-      return "The course handles tee-time access in person. Visit the course for current availability and booking.";
+      return "This course handles tee times in person. Please visit or contact the course for current availability.";
     default:
-      return "Tee Time Spot has not yet confirmed a safe public way to monitor this course. Check the course's official site for current booking information.";
+      return "Tee Time Spot cannot check this course automatically yet. Please use the official website for current booking information.";
   }
 }
 
@@ -192,22 +192,22 @@ export function getAlertSupportSavedStatus(
 ) {
   switch (alertSupport) {
     case "DIRECT_ONLINE":
-      return `${courseName} can be booked online directly`;
+      return `Check and book ${courseName} on its official website`;
     case "ACCOUNT_REQUIRED":
     case "ACCOUNT_SELF_SERVICE":
-      return `${courseName} requires a golfer account`;
+      return `Sign in on ${courseName}'s official website to check tee times`;
     case "ACCOUNT_STAFF_PROVISIONED":
-      return `${courseName} requires first-time access setup by course staff`;
+      return `Contact ${courseName} before booking online`;
     case "CAPTCHA_OR_QUEUE":
-      return `${courseName} uses a captcha or queue`;
+      return `Check ${courseName} on its official website`;
     case "PHONE_ONLY":
-      return `${courseName} takes tee-time requests by phone only`;
+      return `Call ${courseName} for tee-time availability`;
     case "CONTACT_COURSE":
-      return `${courseName} requires direct contact`;
+      return `Contact ${courseName} directly`;
     case "WALK_IN_ONLY":
       return `${courseName} handles tee times in person`;
     default:
-      return `${courseName} is available through its official site only`;
+      return `Check ${courseName} on its official website`;
   }
 }
 
@@ -226,20 +226,20 @@ export function getUnavailableAlertCoverageCopy(input: {
     support !== "DIRECT_ONLINE" &&
     support !== "OFFICIAL_SITE_ONLY"
   ) {
-    return `Automatic tee time alerts are not available. ${getAlertSupportDescription(support)}`;
+    return getAlertSupportDescription(support);
   }
 
   switch (input.automationReason) {
     case "AUTOMATION_PROHIBITED":
-      return "Automatic tee time monitoring is being re-checked against the current public booking surface.";
+      return "We're confirming how this course handles online booking. Please use the official website for current availability.";
     case "TEMPORARILY_UNAVAILABLE":
-      return "The course's public booking source is temporarily unavailable. Tee Time Spot will retry; check the official site in the meantime.";
+      return "We couldn't complete the latest check. We'll try again automatically. Please use the official website for current availability.";
     case "UNSUPPORTED_PLATFORM":
-      return "The official booking page is available, but Tee Time Spot has not yet added reliable monitoring for its tee sheet. Check the official page directly.";
+      return "Tee Time Spot cannot check this course automatically yet. Please use the official booking page to view current tee times and book directly.";
     case "NO_ONLINE_BOOKING":
-      return "Automatic tee time alerts are not available because the course does not publish a public online tee sheet. Check with the course directly.";
+      return "This course does not show tee-time availability online. Please contact the course directly.";
     default:
-      return "Automatic tee time alerts are not currently available for this course. Check the course's official site for current booking information.";
+      return "Tee Time Spot cannot check this course automatically yet. Please use the official website for current booking information.";
   }
 }
 

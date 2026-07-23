@@ -527,11 +527,11 @@ function TeeTimeIntakeContent({
       : hasInvalidAdditionalEmail
         ? "Enter a valid email for each additional recipient."
       : unverifiedSelectedCourse
-        ? `${unverifiedSelectedCourse.name} still needs public-course verification. It is saved to your list, but alerts cannot start for it yet.`
+        ? `We're still confirming that ${unverifiedSelectedCourse.name} is a public golf course. It is saved to your list, but alerts cannot start for it yet.`
       : incompatibleSelectedCourse && requestedLayoutHoles
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : selected.length > 0 && !hasMonitorableCourse
-        ? "Choose at least one course Tee Time Spot can monitor automatically."
+        ? "Choose at least one course Tee Time Spot can check automatically."
         : null;
 
   function selectCurrentLocation() {
@@ -813,8 +813,8 @@ function TeeTimeIntakeContent({
     const reportSaved = await reportCourseLookupCandidate(course);
     setCourseLookupMessage(
       reportSaved
-        ? `${course.name} was added to your list and saved for public-course review. Alerts can start after it is verified.`
-        : `${course.name} was added to your list in this browser, but we couldn't save the review request. Please try again or send it through Feedback.`
+        ? `${course.name} was added to your list. We're confirming that it is a public golf course, and alerts can start after we finish.`
+        : `${course.name} was added to your list in this browser, but we couldn't save it for review. Please try again or send it through Feedback.`
     );
   }
 
@@ -1509,14 +1509,14 @@ function TeeTimeIntakeContent({
                   ) : null}
                   {course.publicAccessStatus === "UNVERIFIED" ? (
                     <span className="selected-course-support">
-                      Public access verification needed
+                      Confirming course details
                     </span>
                   ) : course.alertSupport ? (
                     <span className="selected-course-support">
                       {getAlertSupportLabel(course.alertSupport)}
                     </span>
                   ) : course.monitoringSupport !== "AUTOMATIC" ? (
-                    <span className="selected-course-support">Alerts not yet confirmed</span>
+                    <span className="selected-course-support">Checking availability support</span>
                   ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
@@ -2067,22 +2067,22 @@ function CourseMonitoringStatus({
       <span>
         <strong>
           {isPublicAccessUnverified
-            ? "Public access verification needed"
+            ? "Confirming course details"
             : isManualOnly && course.alertSupport
             ? getAlertSupportLabel(course.alertSupport)
             : isAutomatic
-              ? "Automatic availability alerts"
-              : "Automatic alerts not yet confirmed"}
+              ? "Tee-time checking available"
+              : "Checking availability support"}
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
             {isPublicAccessUnverified
-              ? "This possible course is saved for review. Alerts can start after it is verified."
+              ? "We're confirming that this listing is a public golf course. Alerts can start after we finish."
               : isManualOnly && course.alertSupport
-              ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
+              ? getAlertSupportDescription(course.alertSupport)
               : isAutomatic
-                ? "Tee Time Spot checks public, signed-out booking availability without entering checkout."
-                : "We'll verify whether this course can be checked automatically when your alert starts."}
+                ? "Tee Time Spot can check this course for matching tee times."
+                : "We'll confirm whether Tee Time Spot can check this course automatically when your alert starts."}
           </small>
         ) : null}
       </span>

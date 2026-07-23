@@ -15,7 +15,7 @@ describe("buildSearchSavedMessage", () => {
     const message = buildSearchSavedMessage([{ name: "Unreviewed Golf Course" }]);
 
     expect(message).toContain(
-      "We'll verify automatic monitoring for Unreviewed Golf Course as your alert starts."
+      "We'll confirm whether we can check Unreviewed Golf Course automatically when your alert starts."
     );
     expect(message).not.toContain("the moment a matching tee time opens up");
   });
@@ -26,11 +26,11 @@ describe("buildSearchSavedMessage", () => {
       { name: "Timberlin Golf Course", monitoringSupport: "AUTOMATIC" }
     ]);
 
-    expect(message).toContain("We'll monitor supported courses");
+    expect(message).toContain("We'll check supported courses");
     expect(message).toContain(
-      "Fairview Farm Golf Course takes tee-time requests by phone only"
+      "Call Fairview Farm Golf Course for tee-time availability"
     );
-    expect(message).toContain("won't be checked automatically");
+    expect(message).toContain("Tee Time Spot won't check this course automatically");
   });
 
   it("can describe multiple durable manual booking modes", () => {
@@ -40,10 +40,10 @@ describe("buildSearchSavedMessage", () => {
     ]);
 
     expect(message).toContain(
-      "Phone Course takes tee-time requests by phone only"
+      "Call Phone Course for tee-time availability"
     );
     expect(message).toContain("Walk-in Course handles tee times in person");
-    expect(message).toContain("They won't be checked automatically");
+    expect(message).toContain("Tee Time Spot won't check these courses automatically");
   });
 
   it("explains staff-provisioned access as setup, not private membership", () => {
@@ -55,10 +55,10 @@ describe("buildSearchSavedMessage", () => {
     ]);
 
     expect(message).toContain(
-      "Public Resort Golf Course requires first-time access setup by course staff"
+      "Contact Public Resort Golf Course before booking online"
     );
     expect(message).not.toContain("private");
-    expect(message).toContain("won't be checked automatically");
+    expect(message).toContain("Tee Time Spot won't check this course automatically");
   });
 
   it("tells golfers when online booking remains available without automatic monitoring", () => {
@@ -67,8 +67,8 @@ describe("buildSearchSavedMessage", () => {
     ]);
 
     expect(message).toContain(
-      "Yale University Golf Course can be booked online directly"
+      "Check and book Yale University Golf Course on its official website"
     );
-    expect(message).toContain("won't be checked automatically");
+    expect(message).toContain("Tee Time Spot won't check this course automatically");
   });
 });
