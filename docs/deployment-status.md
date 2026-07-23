@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-22
+Last updated: 2026-07-23
 
 ## Live Vercel Deployment
 
@@ -15,6 +15,8 @@ Last updated: 2026-07-22
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
+
+- 2026-07-23 hourly product loop applied exact Google Place review `ChIJ99HILg3O54kRiJLIRU3WbfE` as `VERIFIED_PUBLIC` / `PUBLIC_GOLF_COURSE`. A real `[COURSE_LOOKUP_MISS]` for Wheeler Family Traditions reproduced because Google returned the playable course with `primaryType=sports_club` even though `types` also contained `golf_course`. The facility's current official site confirms a public 18-hole course at the same name and address. The exact live lookup changed from zero results to one, and the 15-mile Bethany-area discovery changed from 17 to 18 by adding Wheeler while preserving the existing nearby controls. The correction is database-backed and does not relax the conservative generic sports-club filter.
 
 - 2026-07-22 hourly product loop applied exact Google Place review `ChIJM7da6psNyYcRZxvbI4C3ihM` as `VERIFIED_NON_COURSE` / `INDOOR_SIMULATOR`. The Creeks' current official site identifies The 19th Hole as its indoor Trackman simulator and practice facility, separate from the physical 18-hole course. Live ZIP `72761` discovery changed from four results to three by removing only that listing; Siloam Springs Golf Club, Creeks Golf Course, and Brush Creek Golf Course remained discoverable. The correction is database-backed and required no application deployment or broad filtering heuristic.
 
