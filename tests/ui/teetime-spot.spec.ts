@@ -1350,6 +1350,19 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expectNoPageIssues(issues, testInfo);
   });
 
+  test("private operator overview is concealed while signed out", async ({ page }, testInfo) => {
+    const response = await page.goto("/operator");
+
+    expect(response?.status()).toBe(404);
+    await expect(page.getByRole("link", { name: "Site overview" })).toHaveCount(0);
+    expect(
+      await page.locator("body").innerText(),
+      "the signed-out response must not expose operator identity or registered-user data"
+    ).not.toMatch(/derekpaulhoffman@gmail\.com/i);
+
+    await expectNoHorizontalOverflow(page, testInfo);
+  });
+
   test("alert email preview is accessible and stable", async ({ page }, testInfo) => {
     const issues = collectPageIssues(page);
 

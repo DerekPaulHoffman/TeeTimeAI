@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
-import { Bell, LogIn, Search } from "lucide-react";
+import { Bell, Gauge, LogIn, Search } from "lucide-react";
 
 import { DiscordMark } from "@/components/discord-mark";
 import { discordInviteUrl } from "@/lib/community";
+import { isOperatorEmail } from "@/lib/operator/access";
 
 export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
   if (!clerkEnabled) {
@@ -39,16 +40,31 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
 }
 
 function ConfiguredAuthNav() {
-  const { isLoaded, isSignedIn } = useUser();
+  const { isLoaded, isSignedIn, user } = useUser();
 
   if (!isLoaded) {
     return <nav aria-label="Primary navigation" className="nav-actions" />;
   }
 
+  const operator =
+    isSignedIn &&
+    isOperatorEmail(user?.primaryEmailAddress?.emailAddress);
+
   return (
     <nav aria-label="Primary navigation" className="nav-actions">
       <InfoNavLinks />
       <DiscordNavLink />
+      {operator ? (
+        <Link
+          aria-label="Site overview"
+          className="button button-secondary nav-operator"
+          href="/operator"
+          prefetch={false}
+        >
+          <Gauge size={17} />
+          <span className="nav-button-label">Site overview</span>
+        </Link>
+      ) : null}
       <Link
         aria-label="My alerts"
         className="button button-secondary"
