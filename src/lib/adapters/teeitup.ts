@@ -113,6 +113,7 @@ export function isTeeItUpMetadata(value: unknown): value is TeeItUpMetadata {
 export async function fetchTeeItUpSlots(input: {
   courseId: string;
   date: Date;
+  timeZone?: string;
   metadata: TeeItUpMetadata;
 }): Promise<TeeTimeSlot[]> {
   return (await fetchTeeItUpTeeSheet(input)).slots;
@@ -121,6 +122,7 @@ export async function fetchTeeItUpSlots(input: {
 export async function fetchTeeItUpTeeSheet(input: {
   courseId: string;
   date: Date;
+  timeZone?: string;
   metadata: TeeItUpMetadata;
 }): Promise<TeeItUpTeeSheetResult> {
   if (!isTeeItUpMetadata(input.metadata)) {
@@ -132,10 +134,12 @@ export async function fetchTeeItUpTeeSheet(input: {
 
   for (const alias of input.metadata.aliases) {
     const aliasBookingBaseUrl = getAliasBookingBaseUrl(alias, input.metadata);
-    const discoveredFacilities = await fetchFacilities(
+    const facilityResolution = await fetchFacilities(
       alias,
-      aliasBookingBaseUrl
+      aliasBookingBaseUrl,
+      input.timeZone ?? "America/New_York"
     );
+    const discoveredFacilities = facilityResolution.facilities;
     const facilities = input.metadata.facilityIds
       ? discoveredFacilities.filter(
           (facility) =>
@@ -165,7 +169,7 @@ export async function fetchTeeItUpTeeSheet(input: {
       .filter((id): id is number => isPositiveSafeInteger(id));
 
     const daySlots = await fetchFacilitySlots(
-      alias,
+      facilityResolution.apiAlias,
       input.date,
       facilityIds,
       aliasBookingBaseUrl
@@ -191,12 +195,13 @@ export async function fetchTeeItUpTeeSheet(input: {
         const evidence = parseBookingReleaseMessage({
           message: day.message,
           targetDate: input.date,
-          timeZone: facility.timeZone ?? "America/New_York",
+          timeZone:
+            facility.timeZone ?? input.timeZone ?? "America/New_York",
           evidenceUrl: buildTeeTimesUrl(input.date, facilityIds).toString()
         });
         bookingWindowEvidence = pickEarlierBookingWindow(
           input.date,
-          facility.timeZone ?? "America/New_York",
+          facility.timeZone ?? input.timeZone ?? "America/New_York",
           bookingWindowEvidence,
           evidence
         );
@@ -227,7 +232,10 @@ export async function fetchTeeItUpTeeSheet(input: {
         slots.push({
           courseId: input.courseId,
           sourceId: `teeitup-${facility.id}-${slot.courseId ?? "course"}-${slot.teetime}`,
-          startsAt: toLocalDateTime(slot.teetime, facility.timeZone ?? "America/New_York"),
+          startsAt: toLocalDateTime(
+            slot.teetime,
+            facility.timeZone ?? input.timeZone ?? "America/New_York"
+          ),
           availableSpots,
           bookingUrl: withDateParam(aliasBookingBaseUrl, input.date),
           priceCents: rate?.greenFeeCart,
@@ -271,6 +279,9 @@ function resolveResponseFacility(
 ) {
   if (courseId) {
     const facility = facilityByCourseId.get(courseId);
+    if (!facility && facilities.length === 1 && !facilities[0]?.courseId) {
+      return facilities[0];
+    }
     if (!facility) {
       throw new Error(
         "TeeItUp returned a course outside the selected facility set"
@@ -301,17 +312,39 @@ function pickEarlierBookingWindow(
     : current;
 }
 
-async function fetchFacilities(alias: string, bookingBaseUrl: string) {
+async function fetchFacilities(
+  alias: string,
+  bookingBaseUrl: string,
+  timeZone: string
+): Promise<{ apiAlias: string; facilities: TeeItUpFacility[] }> {
   const url = `${TEEITUP_API_BASE_URL}/alias/${alias}/facilities`;
   const response = await fetchWithProviderTimeout(url, {
     headers: teeItUpHeaders(alias, bookingBaseUrl)
   });
 
-  if (!response.ok) {
+  if (response.ok) {
+    return {
+      apiAlias: alias,
+      facilities: (await response.json()) as TeeItUpFacility[]
+    };
+  }
+
+  if (response.status !== 404) {
     throw providerHttpError("TeeItUp facilities", response);
   }
 
-  return (await response.json()) as TeeItUpFacility[];
+  const configuration = await fetchBookingPageConfiguration(bookingBaseUrl);
+  if (!configuration) {
+    throw providerHttpError("TeeItUp facilities", response);
+  }
+
+  return {
+    apiAlias: configuration.apiAlias,
+    facilities: configuration.facilityIds.map((id) => ({
+      id,
+      timeZone
+    }))
+  };
 }
 
 async function fetchFacilitySlots(
@@ -351,12 +384,61 @@ function teeItUpHeaders(alias: string, bookingBaseUrl: string) {
   };
 }
 
+async function fetchBookingPageConfiguration(bookingBaseUrl: string) {
+  const bookingOrigin = new URL(bookingBaseUrl).origin;
+  const response = await fetchWithProviderTimeout(bookingBaseUrl, {
+    headers: {
+      accept: "text/html,application/xhtml+xml;q=0.9"
+    }
+  });
+  if (!response.ok || new URL(response.url || bookingBaseUrl).origin !== bookingOrigin) {
+    return null;
+  }
+
+  return parseBookingPageConfiguration(await response.text());
+}
+
+function parseBookingPageConfiguration(html: string) {
+  const normalized = html
+    .replace(/&quot;/giu, '"')
+    .replace(/\\+"/gu, '"');
+  const facilityMatch = normalized.match(
+    /"gnFacilityIds"\s*:\s*\[([^\]]*)\]/u
+  );
+  if (!facilityMatch || facilityMatch.index === undefined) {
+    return null;
+  }
+  const facilityIds = [
+    ...new Set(
+      facilityMatch[1]
+        .split(",")
+        .map((value) => Number(value.trim()))
+        .filter(isPositiveSafeInteger)
+    )
+  ];
+  const aliasMatches = [
+    ...normalized
+      .slice(0, facilityMatch.index)
+      .matchAll(/"alias"\s*:\s*"([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)"/giu)
+  ];
+  const apiAlias = aliasMatches.at(-1)?.[1];
+  if (
+    !apiAlias ||
+    facilityIds.length < 1 ||
+    facilityIds.length > 20
+  ) {
+    return null;
+  }
+
+  return { apiAlias, facilityIds };
+}
+
 function getBookingOrigin(alias: string, bookingBaseUrl: string) {
   try {
     const bookingUrl = new URL(bookingBaseUrl);
     const domainMatch = bookingUrl.hostname.match(/\.book\.teeitup\.(golf|com)$/i);
     if (domainMatch?.[1]) {
-      return `https://${alias}.book.teeitup.${domainMatch[1].toLowerCase()}`;
+      return bookingUrl.origin;
     }
   } catch {
     // Metadata validation only guarantees a string; keep the legacy provider origin as fallback.

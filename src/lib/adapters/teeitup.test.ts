@@ -102,6 +102,80 @@ describe("TeeItUp adapter", () => {
     ]);
   });
 
+  it("uses public booking-page configuration when the legacy alias lookup is absent", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        url: "https://windham-golf-course.book.teeitup.com/",
+        text: async () =>
+          '<script>self.__next_f.push([1,"{\\"alias\\":\\"windham-club\\",\\"gnFacilityIds\\":[8541],\\"name\\":\\"Windham Golf Course\\"}"])</script>'
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            teetimes: [
+              {
+                courseId: "windham-course",
+                teetime: "2026-07-23T22:00:00.000Z",
+                rates: [
+                  {
+                    allowedPlayers: [1],
+                    holes: 18,
+                    greenFeeCart: 7351
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchTeeItUpTeeSheet({
+      courseId: "windham",
+      date: new Date("2026-07-23T00:00:00-04:00"),
+      timeZone: "America/New_York",
+      metadata: {
+        aliases: ["windham-golf-course"],
+        bookingBaseUrl:
+          "https://windham-golf-course.book.teeitup.com/"
+      }
+    });
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://phx-api-be-east-1b.kenna.io/alias/windham-golf-course/facilities",
+      "https://windham-golf-course.book.teeitup.com/",
+      "https://phx-api-be-east-1b.kenna.io/v2/tee-times?date=2026-07-23&facilityIds=8541&returnPromotedRates=true"
+    ]);
+    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({
+      headers: {
+        "x-be-alias": "windham-club",
+        origin: "https://windham-golf-course.book.teeitup.com",
+        referer: "https://windham-golf-course.book.teeitup.com/"
+      }
+    });
+    expect(result).toMatchObject({
+      targetDateStatus: "OPEN",
+      slots: [
+        {
+          courseId: "windham",
+          sourceId:
+            "teeitup-8541-windham-course-2026-07-23T22:00:00.000Z",
+          startsAt: "2026-07-23T18:00",
+          availableSpots: 1,
+          holes: 18,
+          priceCents: 7351
+        }
+      ]
+    });
+  });
+
   it("fails before reading inventory when one unscoped alias exposes multiple facilities", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce({
       ok: true,

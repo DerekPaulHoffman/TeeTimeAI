@@ -73,6 +73,7 @@ export function fetchCourseTeeSheet(
     return fetchTeeItUpTeeSheet({
       courseId: course.id,
       date,
+      timeZone: course.timeZone,
       metadata: course.bookingMetadata
     });
   }
