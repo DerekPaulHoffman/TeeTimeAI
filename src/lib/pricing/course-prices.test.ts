@@ -168,7 +168,7 @@ describe("course prices", () => {
     });
   });
 
-  it("does not restore an extreme low-support legacy price beside a durable range", () => {
+  it("does not restore an extreme legacy price beside a durable range", () => {
     const estimate = buildCoursePriceEstimate({
       bookingFacts: [{
         holes: 9,
@@ -186,7 +186,7 @@ describe("course prices", () => {
             eighteenHoles: {
               minPriceCents: 50000,
               maxPriceCents: 50000,
-              sampleSize: 1
+              sampleSize: 23
             }
           }
         }
@@ -199,6 +199,37 @@ describe("course prices", () => {
       maxPriceCents: 4300
     });
     expect(estimate?.eighteenHoles).toBeUndefined();
+  });
+
+  it("retains an extreme price when it is part of the current durable facts", () => {
+    const estimate = buildCoursePriceEstimate({
+      bookingFacts: [
+        {
+          holes: 9,
+          minPriceCents: 3900,
+          maxPriceCents: 4300,
+          priceSampleSize: 53,
+          priceObservedAt: new Date("2026-07-22T08:08:52Z"),
+          bookableObservedAt: new Date("2026-07-22T08:08:52Z")
+        },
+        {
+          holes: 18,
+          minPriceCents: 50000,
+          maxPriceCents: 50000,
+          priceSampleSize: 5,
+          priceObservedAt: new Date("2026-07-22T08:08:52Z"),
+          bookableObservedAt: new Date("2026-07-22T08:08:52Z")
+        }
+      ],
+      probes: [],
+      matches: []
+    });
+
+    expect(estimate?.eighteenHoles).toMatchObject({
+      minPriceCents: 50000,
+      maxPriceCents: 50000,
+      sampleSize: 5
+    });
   });
 
   it("uses confirmed matches to bootstrap existing data", () => {

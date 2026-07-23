@@ -389,14 +389,14 @@ function removeExtremeCrossHoleFallback(
     !durable.nineHoles &&
     legacy.nineHoles &&
     durable.eighteenHoles &&
-    isExtremeLowSupportRange(legacy.nineHoles, durable.eighteenHoles)
+    isExtremeLegacyRange(legacy.nineHoles, durable.eighteenHoles)
       ? undefined
       : legacy.nineHoles;
   const eighteenHoles =
     !durable.eighteenHoles &&
     legacy.eighteenHoles &&
     durable.nineHoles &&
-    isExtremeLowSupportRange(legacy.eighteenHoles, durable.nineHoles)
+    isExtremeLegacyRange(legacy.eighteenHoles, durable.nineHoles)
       ? undefined
       : legacy.eighteenHoles;
   if (!nineHoles && !eighteenHoles) return undefined;
@@ -409,15 +409,12 @@ function removeExtremeCrossHoleFallback(
   };
 }
 
-function isExtremeLowSupportRange(
+function isExtremeLegacyRange(
   candidate: CoursePriceRange,
   reference: CoursePriceRange
 ) {
-  return (
-    candidate.minPriceCents >
-      reference.maxPriceCents * EXTREME_PRICE_MULTIPLIER &&
-    candidate.sampleSize * 10 <= reference.sampleSize
-  );
+  return candidate.minPriceCents >
+    reference.maxPriceCents * EXTREME_PRICE_MULTIPLIER;
 }
 
 function parseRange(value: unknown): CoursePriceRange | undefined {
