@@ -339,6 +339,7 @@ function TeeTimeIntakeContent({
   const hasTrackedCourseSelectionRef = useRef(false);
   const reportedCourseLookupMissesRef = useRef(new Set<string>());
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
+  const shouldRefreshRestoredCoursesRef = useRef(false);
 
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
@@ -356,6 +357,8 @@ function TeeTimeIntakeContent({
         if (transferred.selectedCourse !== undefined) {
           setSelected([transferred.selectedCourse]);
           setCourses([transferred.selectedCourse]);
+          shouldRefreshRestoredCoursesRef.current =
+            transferred.coordinates !== undefined;
           hasTrackedCourseSelectionRef.current = true;
         }
       } else if (draft) {
@@ -369,6 +372,8 @@ function TeeTimeIntakeContent({
         if (draft.coordinates !== undefined) setSearchCoordinates(draft.coordinates);
         setCourses(draft.courses);
         setSelected(draft.selectedCourses);
+        shouldRefreshRestoredCoursesRef.current =
+          draft.coordinates !== undefined && draft.courses.length > 0;
         hasTrackedCourseSelectionRef.current = draft.selectedCourses.length > 0;
       }
 
@@ -641,7 +646,21 @@ function TeeTimeIntakeContent({
         shouldScrollToResultsRef.current = false;
       }
       setSearchCoordinates(coordinates);
-      setCourses(sortCoursesByDistance(data.courses));
+      const freshCourses = sortCoursesByDistance(data.courses);
+      const freshCourseByPlaceId = new Map(
+        freshCourses.map((course) => [course.googlePlaceId, course])
+      );
+      setCourses(freshCourses);
+      setSelected((current) =>
+        current.map(
+          (course) => freshCourseByPlaceId.get(course.googlePlaceId) ?? course
+        )
+      );
+      setCourseLookupResults((current) =>
+        current.map(
+          (course) => freshCourseByPlaceId.get(course.googlePlaceId) ?? course
+        )
+      );
       setVisibleCourseCount(INITIAL_VISIBLE_COURSE_COUNT);
       setNotice({
         type: "success",
@@ -667,6 +686,20 @@ function TeeTimeIntakeContent({
       setLoading(false);
     }
   }, [searchRadiusMiles]);
+
+  useEffect(() => {
+    if (
+      !draftReady ||
+      !shouldRefreshRestoredCoursesRef.current ||
+      !searchCoordinates
+    ) {
+      return;
+    }
+
+    shouldRefreshRestoredCoursesRef.current = false;
+    setLoading(true);
+    void discoverCourses(searchCoordinates);
+  }, [discoverCourses, draftReady, searchCoordinates]);
 
   function expandEmptySearch() {
     if (!searchCoordinates || searchRadiusMiles >= MAX_COURSE_SEARCH_RADIUS_MILES) {

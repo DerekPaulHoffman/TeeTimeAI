@@ -100,6 +100,7 @@ describe("TeeTimeIntake", () => {
   });
 
   it("restores discovered courses and their ranking after the search page remounts", async () => {
+    let maximumPriceCents = 50000;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -117,6 +118,16 @@ describe("TeeTimeIntake", () => {
               longitude: -73.2,
               monitoringSupport: "AUTOMATIC",
               name: "Test Public Golf Course",
+              priceEstimate: {
+                currency: "USD",
+                observedAt: "2026-07-21T18:07:53.000Z",
+                nineHoles: {
+                  minPriceCents: 3900,
+                  maxPriceCents: maximumPriceCents,
+                  sampleSize: 10
+                }
+              },
+              layoutHoleCounts: [9],
               timeZone: "America/New_York",
               website: "https://example.com/course-1"
             },
@@ -170,6 +181,7 @@ describe("TeeTimeIntake", () => {
     });
 
     firstRender.unmount();
+    maximumPriceCents = 4300;
     fetchMock.mockClear();
     render(<TeeTimeIntake accountEnabled />);
 
@@ -184,10 +196,16 @@ describe("TeeTimeIntake", () => {
         screen.getByRole("button", {
           name: "Move Second Public Golf Course up"
         }) as HTMLButtonElement
-      ).disabled
+    ).disabled
     ).toBe(true);
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Trumbull, CT");
-    expect(fetchMock).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/api/courses/discover?")
+      )
+    );
+    expect(await screen.findAllByText(/\$39.*\$43/)).not.toHaveLength(0);
+    expect(screen.queryByText(/\$39.*\$500/)).toBeNull();
   });
 
   it("keeps a possible direct-lookup course in the list while public access is reviewed", async () => {

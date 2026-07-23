@@ -34,6 +34,56 @@ describe("course prices", () => {
     expect(estimate?.eighteenHoles?.sampleSize).toBe(1);
   });
 
+  it("rejects one extreme provider price against a well-supported course range", () => {
+    const ordinarySlots = Array.from({ length: 10 }, (_, index) =>
+      slot({
+        sourceId: `ordinary-${index}`,
+        holes: 9,
+        priceCents: index % 2 === 0 ? 3900 : 4300,
+        priceOptions: [
+          { holes: 9, priceCents: index % 2 === 0 ? 3900 : 4300 }
+        ]
+      })
+    );
+    const estimate = summarizeCourseSlotPrices([
+      ...ordinarySlots,
+      slot({
+        sourceId: "extreme",
+        holes: 9,
+        priceCents: 50000,
+        priceOptions: [
+          { holes: 9, priceCents: 50000 },
+          { holes: 18, priceCents: 50000 }
+        ]
+      })
+    ]);
+
+    expect(estimate?.nineHoles).toMatchObject({
+      minPriceCents: 3900,
+      maxPriceCents: 4300,
+      sampleSize: 10
+    });
+    expect(estimate?.eighteenHoles).toBeUndefined();
+  });
+
+  it("retains consistently observed high prices", () => {
+    const estimate = summarizeCourseSlotPrices(
+      Array.from({ length: 5 }, (_, index) =>
+        slot({
+          sourceId: `premium-${index}`,
+          holes: 18,
+          priceCents: 50000
+        })
+      )
+    );
+
+    expect(estimate?.eighteenHoles).toMatchObject({
+      minPriceCents: 50000,
+      maxPriceCents: 50000,
+      sampleSize: 5
+    });
+  });
+
   it("captures bookable hole options even when the provider omits prices", () => {
     expect(summarizeBookableHoleCounts([
       slot({ bookableHoleCounts: [9, 18] }),
@@ -116,6 +166,39 @@ describe("course prices", () => {
       sampleSize: 1,
       observedAt: "2025-05-10T14:00:00.000Z"
     });
+  });
+
+  it("does not restore an extreme low-support legacy price beside a durable range", () => {
+    const estimate = buildCoursePriceEstimate({
+      bookingFacts: [{
+        holes: 9,
+        minPriceCents: 3900,
+        maxPriceCents: 4300,
+        priceSampleSize: 53,
+        priceObservedAt: new Date("2026-07-22T08:08:52Z"),
+        bookableObservedAt: new Date("2026-07-22T08:08:52Z")
+      }],
+      probes: [{
+        observedAt: new Date("2026-07-21T18:07:53Z"),
+        rawSummary: {
+          pricing: {
+            observedAt: "2026-07-21T18:07:53Z",
+            eighteenHoles: {
+              minPriceCents: 50000,
+              maxPriceCents: 50000,
+              sampleSize: 1
+            }
+          }
+        }
+      }],
+      matches: []
+    });
+
+    expect(estimate?.nineHoles).toMatchObject({
+      minPriceCents: 3900,
+      maxPriceCents: 4300
+    });
+    expect(estimate?.eighteenHoles).toBeUndefined();
   });
 
   it("uses confirmed matches to bootstrap existing data", () => {

@@ -17,6 +17,8 @@ export type CoursePriceEstimate = {
 export type CoursePriceView = "any" | "9" | "18";
 export type BookableHoleCount = 9 | 18;
 
+const EXTREME_PRICE_MULTIPLIER = 8;
+
 export type CourseBookingFactRecord = {
   holes: number;
   minPriceCents: number | null;
@@ -41,6 +43,7 @@ export function summarizeCourseSlotPrices(
   observedAt = new Date()
 ): CoursePriceEstimate | undefined {
   const pricesByHoles = new Map<9 | 18, number[]>([[9, []], [18, []]]);
+  const observations: Array<{ holes: 9 | 18; priceCents: number }> = [];
 
   for (const slot of slots) {
     const seenForSlot = new Set<string>();
@@ -56,8 +59,15 @@ export function summarizeCourseSlotPrices(
       const key = `${option.holes}:${option.priceCents}`;
       if (seenForSlot.has(key)) continue;
       seenForSlot.add(key);
-      pricesByHoles.get(option.holes)?.push(option.priceCents);
+      observations.push({
+        holes: option.holes,
+        priceCents: option.priceCents
+      });
     }
+  }
+
+  for (const observation of removeExtremeIsolatedPrices(observations)) {
+    pricesByHoles.get(observation.holes)?.push(observation.priceCents);
   }
 
   return buildEstimateFromPrices(pricesByHoles, observedAt);
@@ -136,7 +146,10 @@ export function buildCoursePriceEstimate(
   const matchEstimate = matchObservedAt
     ? buildEstimateFromPrices(pricesByHoles, matchObservedAt)
     : undefined;
-  const legacyEstimate = mergePriceEstimateCoverage(probeEstimate, matchEstimate);
+  const legacyEstimate = removeExtremeCrossHoleFallback(
+    durableEstimate,
+    mergePriceEstimateCoverage(probeEstimate, matchEstimate)
+  );
 
   return mergePriceEstimateCoverage(durableEstimate, legacyEstimate);
 }
@@ -339,6 +352,72 @@ function mergeRanges(ranges: CoursePriceRange[]) {
     maxPriceCents: Math.max(...ranges.map((range) => range.maxPriceCents)),
     sampleSize: ranges.reduce((total, range) => total + range.sampleSize, 0)
   };
+}
+
+function removeExtremeIsolatedPrices(
+  observations: Array<{ holes: 9 | 18; priceCents: number }>
+) {
+  const positivePrices = observations
+    .map((observation) => observation.priceCents)
+    .filter((price) => price > 0)
+    .sort((left, right) => left - right);
+  if (positivePrices.length < 5) return observations;
+
+  const middle = Math.floor(positivePrices.length / 2);
+  const median = positivePrices.length % 2 === 0
+    ? ((positivePrices[middle - 1] ?? 0) + (positivePrices[middle] ?? 0)) / 2
+    : positivePrices[middle] ?? 0;
+  if (median <= 0) return observations;
+
+  // Keep ordinary nine-versus-eighteen-hole variation while rejecting isolated
+  // provider sentinels or cart totals far outside a well-supported course range.
+  const extremePriceCeiling = median * EXTREME_PRICE_MULTIPLIER;
+  return observations.filter(
+    (observation) =>
+      observation.priceCents === 0 ||
+      observation.priceCents <= extremePriceCeiling
+  );
+}
+
+function removeExtremeCrossHoleFallback(
+  durable: CoursePriceEstimate | undefined,
+  legacy: CoursePriceEstimate | undefined
+) {
+  if (!durable || !legacy) return legacy;
+
+  const nineHoles =
+    !durable.nineHoles &&
+    legacy.nineHoles &&
+    durable.eighteenHoles &&
+    isExtremeLowSupportRange(legacy.nineHoles, durable.eighteenHoles)
+      ? undefined
+      : legacy.nineHoles;
+  const eighteenHoles =
+    !durable.eighteenHoles &&
+    legacy.eighteenHoles &&
+    durable.nineHoles &&
+    isExtremeLowSupportRange(legacy.eighteenHoles, durable.nineHoles)
+      ? undefined
+      : legacy.eighteenHoles;
+  if (!nineHoles && !eighteenHoles) return undefined;
+
+  return {
+    currency: "USD" as const,
+    observedAt: legacy.observedAt,
+    ...(nineHoles ? { nineHoles } : {}),
+    ...(eighteenHoles ? { eighteenHoles } : {})
+  };
+}
+
+function isExtremeLowSupportRange(
+  candidate: CoursePriceRange,
+  reference: CoursePriceRange
+) {
+  return (
+    candidate.minPriceCents >
+      reference.maxPriceCents * EXTREME_PRICE_MULTIPLIER &&
+    candidate.sampleSize * 10 <= reference.sampleSize
+  );
 }
 
 function parseRange(value: unknown): CoursePriceRange | undefined {
