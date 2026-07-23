@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Public Tee Time Reader</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Local, read-only diagnostic</p>
+          <h1>Public Tee Time Reader</h1>
+          <p class="subtitle">
+            Observes public responses already received by this normal Chrome tab.
+            It does not sign in, solve challenges, reserve, or book.
+          </p>
+        </div>
+        <div class="controls">
+          <button id="start" type="button">Start reading</button>
+          <button id="stop" type="button" class="secondary" disabled>Stop</button>
+          <button id="clear" type="button" class="secondary">Clear</button>
+          <button id="copy" type="button" class="secondary">Copy report</button>
+        </div>
+      </header>
+
+      <section class="status-grid" aria-live="polite">
+        <article>
+          <span>Status</span>
+          <strong id="reader-status">Stopped</strong>
+        </article>
+        <article>
+          <span>Readable tee-time responses</span>
+          <strong id="tee-time-count">0</strong>
+        </article>
+        <article>
+          <span>Parsed slots</span>
+          <strong id="slot-count">0</strong>
+        </article>
+        <article>
+          <span>Challenges</span>
+          <strong id="challenge-count">0</strong>
+        </article>
+      </section>
+
+      <section class="instructions">
+        <strong>How to test:</strong>
+        start reading, reload the public booking page, then use only its signed-out
+        date/player filters. Leave sign-in, reservation, cart, and checkout alone.
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <h2>Observed results</h2>
+          <span id="empty-state">No relevant public responses captured yet.</span>
+        </div>
+        <div id="results" class="results"></div>
+      </section>
+    </main>
+
+    <template id="result-template">
+      <article class="result-card">
+        <div class="result-heading">
+          <span class="badge"></span>
+          <time></time>
+        </div>
+        <strong class="result-title"></strong>
+        <code class="result-url"></code>
+        <p class="result-detail"></p>
+        <div class="slots"></div>
+      </article>
+    </template>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>
