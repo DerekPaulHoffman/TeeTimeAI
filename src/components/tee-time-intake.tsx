@@ -4,7 +4,14 @@ import { SignInButton, useUser } from "@clerk/nextjs";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from "react";
 import type * as Leaflet from "leaflet";
 import {
   Bell,
@@ -25,11 +32,9 @@ import {
   Plus,
   Search,
   Star,
-  Trees,
   X
 } from "lucide-react";
 
-import { openFeedback } from "@/components/open-feedback-button";
 import {
   addLocalDays,
   formatDateInputValue,
@@ -309,6 +314,13 @@ function TeeTimeIntakeContent({
   );
   const [visibleCourseCount, setVisibleCourseCount] = useState(INITIAL_VISIBLE_COURSE_COUNT);
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
+  const [courseLookupQuery, setCourseLookupQuery] = useState("");
+  const [submittedCourseLookupQuery, setSubmittedCourseLookupQuery] = useState("");
+  const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
+  const [courseLookupState, setCourseLookupState] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+  const [courseLookupMessage, setCourseLookupMessage] = useState("");
   const [notice, setNotice] = useState<Notice>({
     type: "info",
     message: "Enter a city and state, ZIP code, or street address, or use your current location."
@@ -325,6 +337,8 @@ function TeeTimeIntakeContent({
   const shouldScrollToResultsRef = useRef(false);
   const nextAdditionalEmailIdRef = useRef(1);
   const hasTrackedCourseSelectionRef = useRef(false);
+  const reportedCourseLookupMissesRef = useRef(new Set<string>());
+  const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
 
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
@@ -447,11 +461,20 @@ function TeeTimeIntakeContent({
       incompatibleCourseCount: withinRadius.length - compatibleOrUnknown.length
     };
   }, [courses, requestedLayoutHoles, searchRadiusMiles]);
-  const visibleCourses = useMemo(
-    () => filteredCourses.slice(0, visibleCourseCount),
-    [filteredCourses, visibleCourseCount]
+  const courseLookupResultIds = useMemo(
+    () => new Set(courseLookupResults.map((course) => course.googlePlaceId)),
+    [courseLookupResults]
   );
-  const hiddenCourseCount = Math.max(filteredCourses.length - visibleCourses.length, 0);
+  const nearbyCourses = useMemo(
+    () => filteredCourses.filter((course) => !courseLookupResultIds.has(course.googlePlaceId)),
+    [courseLookupResultIds, filteredCourses]
+  );
+  const visibleNearbyCourses = useMemo(
+    () => nearbyCourses.slice(0, visibleCourseCount),
+    [nearbyCourses, visibleCourseCount]
+  );
+  const hiddenCourseCount = Math.max(nearbyCourses.length - visibleNearbyCourses.length, 0);
+  const displayedCourseCount = nearbyCourses.length + courseLookupResults.length;
   const searchSignature = useMemo(
     () =>
       JSON.stringify({
@@ -673,6 +696,143 @@ function TeeTimeIntakeContent({
     return () => window.cancelAnimationFrame(animationFrame);
   }, [courses]);
 
+  async function reportMissingCourseLookup(normalizedQuery: string) {
+    const reportKey = `${normalizedQuery.toLowerCase()}|${locationText.trim().toLowerCase()}`;
+    if (reportedCourseLookupMissesRef.current.has(reportKey)) {
+      return true;
+    }
+
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sentiment: "broken",
+          message: `[COURSE_LOOKUP_MISS] ${JSON.stringify({
+            query: normalizedQuery,
+            location: locationText.trim() || undefined,
+            latitude: searchCoordinates?.latitude,
+            longitude: searchCoordinates?.longitude
+          })}`,
+          page: "/search#missing-course",
+          contactEmail: alertEmail || undefined,
+          trafficClass: detectWebsiteTrafficClass()
+        })
+      });
+
+      if (response.ok) {
+        reportedCourseLookupMissesRef.current.add(reportKey);
+        return true;
+      }
+    } catch {
+      // The user still gets a useful recovery path when reporting is unavailable.
+    }
+
+    return false;
+  }
+
+  async function reportCourseLookupCandidate(course: CourseCandidate) {
+    if (reportedCourseLookupCandidatesRef.current.has(course.googlePlaceId)) {
+      return true;
+    }
+
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sentiment: "broken",
+          message: `[COURSE_LOOKUP_CANDIDATE] Missing course requested for public-course review ${JSON.stringify({
+            query: submittedCourseLookupQuery || courseLookupQuery.trim(),
+            googlePlaceId: course.googlePlaceId,
+            name: course.name,
+            address: course.address,
+            website: course.website,
+            location: locationText.trim() || undefined
+          })}`,
+          page: "/search#missing-course",
+          contactEmail: alertEmail || undefined,
+          trafficClass: detectWebsiteTrafficClass()
+        })
+      });
+
+      if (response.ok) {
+        reportedCourseLookupCandidatesRef.current.add(course.googlePlaceId);
+        return true;
+      }
+    } catch {
+      // The shortlist still remains in this browser if the review request is unavailable.
+    }
+
+    return false;
+  }
+
+  async function addCourseLookupResult(course: CourseCandidate) {
+    if (!addCourse(course)) {
+      return;
+    }
+
+    if (course.publicAccessStatus !== "UNVERIFIED") {
+      setCourseLookupMessage(`${course.name} was added to your list.`);
+      return;
+    }
+
+    const reportSaved = await reportCourseLookupCandidate(course);
+    setCourseLookupMessage(
+      reportSaved
+        ? `${course.name} was added to your list and saved for public-course review. Alerts can start after it is verified.`
+        : `${course.name} was added to your list in this browser, but we couldn't save the review request. Please try again or send it through Feedback.`
+    );
+  }
+
+  async function lookupCourse() {
+    const normalizedQuery = courseLookupQuery.trim();
+    if (normalizedQuery.length < 2) {
+      setCourseLookupState("error");
+      setCourseLookupMessage("Enter at least 2 characters from the course name.");
+      return;
+    }
+
+    setSubmittedCourseLookupQuery(normalizedQuery);
+    setCourseLookupResults([]);
+    setCourseLookupState("loading");
+    setCourseLookupMessage("Looking for matching golf coursesâ€¦");
+
+    try {
+      const params = new URLSearchParams({ q: normalizedQuery });
+      if (searchCoordinates) {
+        params.set("latitude", String(searchCoordinates.latitude));
+        params.set("longitude", String(searchCoordinates.longitude));
+      }
+
+      const response = await fetch(`/api/courses/lookup?${params}`);
+      const data = (await response.json()) as { courses?: CourseCandidate[]; error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not look up that course.");
+      }
+
+      const matches = data.courses ?? [];
+      setCourseLookupResults(matches);
+      setCourseLookupState("success");
+      const missWasReported = matches.length === 0
+        ? await reportMissingCourseLookup(normalizedQuery)
+        : false;
+      setCourseLookupMessage(
+        matches.length === 0
+          ? missWasReported
+            ? `We couldn't find â€œ${normalizedQuery}â€ yet. We've logged it for review and will look into it.`
+            : `We couldn't find â€œ${normalizedQuery}â€ yet. Try the full course name plus its city or state, or send it through Feedback so we can investigate.`
+          : `${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`
+      );
+    } catch (error) {
+      setCourseLookupResults([]);
+      setCourseLookupState("error");
+      setCourseLookupMessage(
+        error instanceof Error ? error.message : "Could not look up that course."
+      );
+    }
+  }
+
   function addCourse(course: CourseCandidate) {
     if (
       getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
@@ -763,7 +923,7 @@ function TeeTimeIntakeContent({
 
   function showMoreCourses() {
     setVisibleCourseCount((current) =>
-      Math.min(current + COURSE_REVEAL_INCREMENT, filteredCourses.length)
+      Math.min(current + COURSE_REVEAL_INCREMENT, nearbyCourses.length)
     );
   }
 
@@ -1093,13 +1253,16 @@ function TeeTimeIntakeContent({
       </form>
 
       <MissingCourseLookup
-        contactEmail={alertEmail}
-        locationLabel={locationText}
-        origin={searchCoordinates}
-        requestedLayoutHoles={requestedLayoutHoles}
-        selectedIds={selectedIds}
-        onAddCourse={addCourse}
-        onRemoveCourse={removeCourse}
+        lookupMessage={courseLookupMessage}
+        lookupState={courseLookupState}
+        onQueryChange={setCourseLookupQuery}
+        onSubmit={() => void lookupCourse()}
+        query={courseLookupQuery}
+        showVisibleMessage={
+          courseLookupState === "error" ||
+          courseLookupResults.length === 0 ||
+          !courseLookupMessage.endsWith("found.")
+        }
       />
 
       <div className="figma-results-layout" ref={resultsRef}>
@@ -1111,9 +1274,17 @@ function TeeTimeIntakeContent({
           ) : courses.length > 0 ? (
             <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>
-                {filteredCourses.length} {filteredCourses.length === 1 ? "course" : "courses"}
+                {displayedCourseCount} {displayedCourseCount === 1 ? "course" : "courses"}
               </strong>{" "}
               near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
+            </div>
+          ) : courseLookupResults.length > 0 ? (
+            <div className="figma-results-banner" role="status" aria-atomic="true">
+              <strong>
+                {courseLookupResults.length}{" "}
+                {courseLookupResults.length === 1 ? "course" : "courses"}
+              </strong>{" "}
+              found by name — tap the ones you want and drag to rank them.
             </div>
           ) : notice.type === "success" ? (
             <div className="figma-empty-results" role="status" aria-atomic="true">
@@ -1140,20 +1311,6 @@ function TeeTimeIntakeContent({
               notice={notice}
             />
           )}
-          {courses.length > 0 ? (
-            <p className="course-pricing-note">
-              <CircleDollarSign size={14} aria-hidden="true" />
-              Estimates use recently observed official tee-sheet rates. Final rates can vary.
-            </p>
-          ) : null}
-          {requestedLayoutHoles && incompatibleCourseCount > 0 ? (
-            <p className="course-pricing-note" role="status">
-              <Flag size={14} aria-hidden="true" />
-              Hiding {incompatibleCourseCount} verified{" "}
-              {incompatibleCourseCount === 1 ? "course" : "courses"} without an{" "}
-              {requestedLayoutHoles}-hole layout. Unverified courses follow verified matches.
-            </p>
-          ) : null}
           {courses.length > 0 && notice.type === "error" ? (
             <Notice
               id={locationInputInvalid ? LOCATION_SEARCH_ERROR_ID : undefined}
@@ -1161,7 +1318,9 @@ function TeeTimeIntakeContent({
             />
           ) : null}
           {isCurrentSearchSaved && notice.type === "success" ? <Notice notice={notice} /> : null}
-          {courses.length > 0 && filteredCourses.length === 0 ? (
+          {courses.length > 0 &&
+          filteredCourses.length === 0 &&
+          courseLookupResults.length === 0 ? (
             <div className="figma-empty-results">
               <h3>No courses match these filters.</h3>
               <p>Show all nearby courses or expand the distance to keep looking.</p>
@@ -1177,125 +1336,63 @@ function TeeTimeIntakeContent({
               </button>
             </div>
           ) : null}
-          <div className="course-list figma-course-list" role="list" aria-label="Nearby courses">
-          {visibleCourses.map((course) => {
-            const selectedIndex = selected.findIndex(
-              (selectedCourse) => selectedCourse.googlePlaceId === course.googlePlaceId
-            );
-            const isSelected = selectedIndex >= 0;
-            const layoutCompatibility = getCourseLayoutCompatibility(
-              course.layoutHoleCounts,
-              requestedLayoutHoles
-            );
-            const cardHoleCount = getCourseHeadlineHoleCount(
-              course.layoutHoleCounts,
-              course.bookableHoleCounts
-            );
-
-            return (
+          {courseLookupResults.length > 0 ? (
+            <>
+              <CourseResultsDivider>
+                Direct search · &quot;{submittedCourseLookupQuery}&quot;
+              </CourseResultsDivider>
               <div
-                className={isSelected ? "course-row course-row-selected" : "course-row"}
-                key={course.googlePlaceId}
-                role="listitem"
+                className="course-list figma-course-list"
+                role="list"
+                aria-label="Direct course matches"
               >
-                <CourseThumbnail course={course} />
-                {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
-                <div className="course-copy">
-                  <div className="figma-course-badges">
-                    <span className="figma-course-pill is-public">Public</span>
-                    {course.rating ? (
-                      <span className="figma-course-pill is-rating">
-                        <Star aria-hidden="true" fill="currentColor" size={10} />
-                        {course.rating.toFixed(1)}
-                      </span>
-                    ) : null}
-                    {course.distanceMeters !== undefined ? (
-                      <span className="figma-course-pill is-detail">
-                        <span aria-hidden="true">·</span> {formatDistance(course.distanceMeters)}
-                      </span>
-                    ) : null}
-                    {cardHoleCount ? (
-                      <span
-                        className="figma-course-pill is-detail"
-                        title="Recently observed official booking options"
-                      >
-                        <span aria-hidden="true">·</span>{" "}
-                        {cardHoleCount}H
-                      </span>
-                    ) : null}
-                    {course.par ? (
-                      <span className="figma-course-pill is-detail">
-                        <span aria-hidden="true">·</span> Par {course.par}
-                      </span>
-                    ) : null}
-                    {requestedLayoutHoles && layoutCompatibility === "unknown" ? (
-                      <span className="figma-course-pill is-detail">
-                        <span aria-hidden="true">·</span> Layout unverified
-                      </span>
-                    ) : null}
-                    <CourseHeadlinePrice
-                      estimate={course.priceEstimate}
-                      preferredHoleCounts={cardHoleCount ? [cardHoleCount] : undefined}
-                    />
-                  </div>
-                  <h3>
-                    {course.profileUrl ? (
-                      <Link href={course.profileUrl as `/courses/${string}`}>{course.name}</Link>
-                    ) : (
-                      course.name
+                {courseLookupResults.map((course) => (
+                  <CourseResultCard
+                    course={course}
+                    key={course.googlePlaceId}
+                    onToggle={(lookupCourseResult) => {
+                      if (selectedIds.has(lookupCourseResult.googlePlaceId)) {
+                        removeCourse(lookupCourseResult.googlePlaceId);
+                      } else {
+                        void addCourseLookupResult(lookupCourseResult);
+                      }
+                    }}
+                    requestedLayoutHoles={requestedLayoutHoles}
+                    selectedIndex={selected.findIndex(
+                      (selectedCourse) =>
+                        selectedCourse.googlePlaceId === course.googlePlaceId
                     )}
-                  </h3>
-                  <CourseAddressLink course={course} />
-                  <CourseMonitoringStatus course={course} />
-                </div>
-                <div className="course-actions">
-                  {course.profileUrl ? (
-                    <Link
-                      aria-label={`View course guide for ${course.name}`}
-                      className="button button-ghost course-profile-button"
-                      href={course.profileUrl as `/courses/${string}`}
-                    >
-                      <BookOpenText aria-hidden="true" size={10} />
-                      Course guide
-                    </Link>
-                  ) : null}
-                  {course.website ? (
-                    <a
-                      className="button button-ghost"
-                      href={course.website}
-                      aria-label={`Open official site for ${course.name}`}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <ExternalLink aria-hidden="true" size={10} />
-                      Official site
-                    </a>
-                  ) : null}
-                  <button
-                    className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
-                    type="button"
-                    onClick={() => toggleCourse(course)}
-                    aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
-                    title={isSelected ? `Remove priority ${selectedIndex + 1}` : "Add course"}
-                  >
-                    {isSelected ? (
-                      <>
-                        <Check aria-hidden="true" size={10} />
-                        Added
-                      </>
-                    ) : (
-                      "+ Add to my list"
-                    )}
-                  </button>
-                </div>
+                  />
+                ))}
               </div>
-            );
-          })}
-          </div>
-        {filteredCourses.length > INITIAL_VISIBLE_COURSE_COUNT ? (
+            </>
+          ) : null}
+
+          {courseLookupResults.length > 0 && nearbyCourses.length > 0 ? (
+            <CourseResultsDivider>Courses near you</CourseResultsDivider>
+          ) : null}
+
+          {visibleNearbyCourses.length > 0 ? (
+            <div className="course-list figma-course-list" role="list" aria-label="Nearby courses">
+              {visibleNearbyCourses.map((course) => (
+                <CourseResultCard
+                  course={course}
+                  key={course.googlePlaceId}
+                  onToggle={toggleCourse}
+                  requestedLayoutHoles={requestedLayoutHoles}
+                  selectedIndex={selected.findIndex(
+                    (selectedCourse) =>
+                      selectedCourse.googlePlaceId === course.googlePlaceId
+                  )}
+                />
+              ))}
+            </div>
+          ) : null}
+
+        {nearbyCourses.length > INITIAL_VISIBLE_COURSE_COUNT ? (
           <div className="course-list-footer">
             <span>
-              Showing {visibleCourses.length} of {filteredCourses.length} locations
+              Showing {visibleNearbyCourses.length} of {nearbyCourses.length} locations
             </span>
             {hiddenCourseCount > 0 ? (
               <button className="button button-ghost" type="button" onClick={showMoreCourses}>
@@ -1304,6 +1401,20 @@ function TeeTimeIntakeContent({
               </button>
             ) : null}
           </div>
+        ) : null}
+        {courses.length > 0 ? (
+          <p className="course-pricing-note">
+            <CircleDollarSign size={14} aria-hidden="true" />
+            Estimates use recently observed official tee-sheet rates. Final rates can vary.
+          </p>
+        ) : null}
+        {requestedLayoutHoles && incompatibleCourseCount > 0 ? (
+          <p className="course-pricing-note" role="status">
+            <Flag size={14} aria-hidden="true" />
+            Hiding {incompatibleCourseCount} verified{" "}
+            {incompatibleCourseCount === 1 ? "course" : "courses"} without an{" "}
+            {requestedLayoutHoles}-hole layout. Unverified courses follow verified matches.
+          </p>
         ) : null}
         </div>
 
@@ -1601,165 +1712,174 @@ function TeeTimeIntakeContent({
   );
 }
 
-function MissingCourseLookup({
-  contactEmail,
-  locationLabel,
-  origin,
-  requestedLayoutHoles,
-  selectedIds,
-  onAddCourse,
-  onRemoveCourse
-}: {
-  contactEmail: string;
-  locationLabel: string;
-  origin: SearchCoordinates | null;
-  requestedLayoutHoles: CourseLayoutHoleCount | null;
-  selectedIds: ReadonlySet<string>;
-  onAddCourse: (course: CourseCandidate) => boolean;
-  onRemoveCourse: (placeId: string) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<CourseCandidate[]>([]);
-  const [lookupState, setLookupState] = useState<"idle" | "loading" | "success" | "error">(
-    "idle"
+function CourseResultsDivider({ children }: { children: ReactNode }) {
+  return (
+    <div className="course-results-divider">
+      <span aria-hidden="true" />
+      <p>{children}</p>
+      <span aria-hidden="true" />
+    </div>
   );
-  const [lookupMessage, setLookupMessage] = useState("");
-  const reportedMisses = useRef(new Set<string>());
-  const reportedCandidates = useRef(new Set<string>());
+}
 
-  async function reportMissingCourse(normalizedQuery: string) {
-    const reportKey = `${normalizedQuery.toLowerCase()}|${locationLabel.trim().toLowerCase()}`;
-    if (reportedMisses.current.has(reportKey)) {
-      return true;
-    }
+function CourseResultCard({
+  course,
+  onToggle,
+  requestedLayoutHoles,
+  selectedIndex
+}: {
+  course: CourseCandidate;
+  onToggle: (course: CourseCandidate) => void;
+  requestedLayoutHoles: CourseLayoutHoleCount | null;
+  selectedIndex: number;
+}) {
+  const isSelected = selectedIndex >= 0;
+  const layoutCompatibility = getCourseLayoutCompatibility(
+    course.layoutHoleCounts,
+    requestedLayoutHoles
+  );
+  const isIncompatible = layoutCompatibility === "incompatible";
+  const cardHoleCount = getCourseHeadlineHoleCount(
+    course.layoutHoleCounts,
+    course.bookableHoleCounts
+  );
+  const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
 
-    try {
-      const response = await fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sentiment: "broken",
-          message: `[COURSE_LOOKUP_MISS] ${JSON.stringify({
-            query: normalizedQuery,
-            location: locationLabel.trim() || undefined,
-            latitude: origin?.latitude,
-            longitude: origin?.longitude
-          })}`,
-          page: "/search#missing-course",
-          contactEmail: contactEmail || undefined,
-          trafficClass: detectWebsiteTrafficClass()
-        })
-      });
+  return (
+    <div
+      className={isSelected ? "course-row course-row-selected" : "course-row"}
+      role="listitem"
+    >
+      <CourseThumbnail course={course} />
+      {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
+      <div className="course-copy">
+        <div className="figma-course-badges">
+          <span
+            className={
+              isPublicAccessUnverified
+                ? "figma-course-pill is-unverified"
+                : "figma-course-pill is-public"
+            }
+          >
+            {isPublicAccessUnverified ? "Possible course" : "Public"}
+          </span>
+          {course.rating ? (
+            <span className="figma-course-pill is-rating">
+              <Star aria-hidden="true" fill="currentColor" size={10} />
+              {course.rating.toFixed(1)}
+            </span>
+          ) : null}
+          {course.distanceMeters !== undefined ? (
+            <span className="figma-course-pill is-detail">
+              <span aria-hidden="true">·</span> {formatDistance(course.distanceMeters)}
+            </span>
+          ) : null}
+          {cardHoleCount ? (
+            <span
+              className="figma-course-pill is-detail"
+              title="Recently observed official booking options"
+            >
+              <span aria-hidden="true">·</span> {cardHoleCount}H
+            </span>
+          ) : null}
+          {course.par ? (
+            <span className="figma-course-pill is-detail">
+              <span aria-hidden="true">·</span> Par {course.par}
+            </span>
+          ) : null}
+          {requestedLayoutHoles && layoutCompatibility === "unknown" ? (
+            <span className="figma-course-pill is-detail">
+              <span aria-hidden="true">·</span> Layout unverified
+            </span>
+          ) : null}
+          <CourseHeadlinePrice
+            estimate={course.priceEstimate}
+            preferredHoleCounts={cardHoleCount ? [cardHoleCount] : undefined}
+          />
+        </div>
+        <h3>
+          {course.profileUrl ? (
+            <Link href={course.profileUrl as `/courses/${string}`}>{course.name}</Link>
+          ) : (
+            course.name
+          )}
+        </h3>
+        <CourseAddressLink course={course} />
+        <CourseMonitoringStatus course={course} />
+        {isIncompatible && requestedLayoutHoles ? (
+          <p className="course-alert-support-note">
+            Does not match an {requestedLayoutHoles}-hole course search
+          </p>
+        ) : null}
+      </div>
+      <div className="course-actions">
+        {course.profileUrl ? (
+          <Link
+            aria-label={`View course guide for ${course.name}`}
+            className="button button-ghost course-profile-button"
+            href={course.profileUrl as `/courses/${string}`}
+          >
+            <BookOpenText aria-hidden="true" size={10} />
+            Course guide
+          </Link>
+        ) : null}
+        {course.website ? (
+          <a
+            className="button button-ghost"
+            href={course.website}
+            aria-label={`Open official site for ${course.name}`}
+            rel="noreferrer"
+            target="_blank"
+          >
+            <ExternalLink aria-hidden="true" size={10} />
+            Official site
+          </a>
+        ) : null}
+        <button
+          aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
+          className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
+          disabled={isIncompatible && !isSelected}
+          onClick={() => onToggle(course)}
+          title={
+            isSelected
+              ? `Remove priority ${selectedIndex + 1}`
+              : isIncompatible
+                ? `Does not match this ${requestedLayoutHoles}-hole course search`
+                : "Add course"
+          }
+          type="button"
+        >
+          {isSelected ? (
+            <>
+              <Check aria-hidden="true" size={10} />
+              Added
+            </>
+          ) : isIncompatible ? (
+            "Doesn’t match"
+          ) : (
+            "+ Add to my list"
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
 
-      if (response.ok) {
-        reportedMisses.current.add(reportKey);
-        return true;
-      }
-    } catch {
-      // The user still gets a useful recovery path when reporting is unavailable.
-    }
-
-    return false;
-  }
-
-  async function reportLookupCandidate(course: CourseCandidate) {
-    if (reportedCandidates.current.has(course.googlePlaceId)) {
-      return true;
-    }
-
-    try {
-      const response = await fetch("/api/feedback", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sentiment: "broken",
-          message: `[COURSE_LOOKUP_CANDIDATE] Missing course requested for public-course review ${JSON.stringify({
-            query: query.trim(),
-            googlePlaceId: course.googlePlaceId,
-            name: course.name,
-            address: course.address,
-            website: course.website,
-            location: locationLabel.trim() || undefined
-          })}`,
-          page: "/search#missing-course",
-          contactEmail: contactEmail || undefined,
-          trafficClass: detectWebsiteTrafficClass()
-        })
-      });
-
-      if (response.ok) {
-        reportedCandidates.current.add(course.googlePlaceId);
-        return true;
-      }
-    } catch {
-      // The shortlist still remains in this browser if the review request is unavailable.
-    }
-
-    return false;
-  }
-
-  async function addLookupCourse(course: CourseCandidate) {
-    if (!onAddCourse(course)) {
-      return;
-    }
-
-    if (course.publicAccessStatus !== "UNVERIFIED") {
-      setLookupMessage(`${course.name} was added to your list.`);
-      return;
-    }
-
-    const reportSaved = await reportLookupCandidate(course);
-    setLookupMessage(
-      reportSaved
-        ? `${course.name} was added to your list and saved for public-course review. Alerts can start after it is verified.`
-        : `${course.name} was added to your list in this browser, but we couldn't save the review request. Please try again or send it through Feedback.`
-    );
-  }
-
-  async function lookupCourse() {
-    const normalizedQuery = query.trim();
-    if (normalizedQuery.length < 2) {
-      setLookupState("error");
-      setLookupMessage("Enter at least 2 characters from the course name.");
-      return;
-    }
-
-    setLookupState("loading");
-    setLookupMessage("Looking for matching golf courses…");
-
-    try {
-      const params = new URLSearchParams({ q: normalizedQuery });
-      if (origin) {
-        params.set("latitude", String(origin.latitude));
-        params.set("longitude", String(origin.longitude));
-      }
-
-      const response = await fetch(`/api/courses/lookup?${params}`);
-      const data = (await response.json()) as { courses?: CourseCandidate[]; error?: string };
-      if (!response.ok) {
-        throw new Error(data.error ?? "Could not look up that course.");
-      }
-
-      const matches = data.courses ?? [];
-      setResults(matches);
-      setLookupState("success");
-      const missWasReported = matches.length === 0
-        ? await reportMissingCourse(normalizedQuery)
-        : false;
-      setLookupMessage(
-        matches.length === 0
-          ? missWasReported
-            ? `We couldn't find “${normalizedQuery}” yet. We've logged it for review and will look into it.`
-            : `We couldn't find “${normalizedQuery}” yet. Try the full course name plus its city or state, or send it through Feedback so we can investigate.`
-          : `${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`
-      );
-    } catch (error) {
-      setResults([]);
-      setLookupState("error");
-      setLookupMessage(error instanceof Error ? error.message : "Could not look up that course.");
-    }
-  }
-
+function MissingCourseLookup({
+  lookupMessage,
+  lookupState,
+  onQueryChange,
+  onSubmit,
+  query,
+  showVisibleMessage
+}: {
+  lookupMessage: string;
+  lookupState: "idle" | "loading" | "success" | "error";
+  onQueryChange: (query: string) => void;
+  onSubmit: () => void;
+  query: string;
+  showVisibleMessage: boolean;
+}) {
   return (
     <section className="missing-course-lookup" aria-labelledby="missing-course-heading" id="missing-course">
       <div className="missing-course-heading">
@@ -1770,23 +1890,25 @@ function MissingCourseLookup({
         className="missing-course-form"
         onSubmit={(event) => {
           event.preventDefault();
-          void lookupCourse();
+          onSubmit();
         }}
       >
         <label className="sr-only" htmlFor="missingCourseQuery">
           Course name and town
         </label>
-        <div>
-          <Search aria-hidden="true" size={17} />
-          <input
-            autoComplete="off"
-            id="missingCourseQuery"
-            maxLength={120}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="e.g. Bethpage Black, Farmingdale NY"
-            type="search"
-            value={query}
-          />
+        <div className="missing-course-controls">
+          <div className="missing-course-input">
+            <Search aria-hidden="true" size={15} />
+            <input
+              autoComplete="off"
+              id="missingCourseQuery"
+              maxLength={120}
+              onChange={(event) => onQueryChange(event.target.value)}
+              placeholder="e.g. Bethpage Black, Farmingdale NY"
+              type="search"
+              value={query}
+            />
+          </div>
           <button disabled={lookupState === "loading"} type="submit">
             {lookupState === "loading" ? "Looking…" : "Find course"}
           </button>
@@ -1794,128 +1916,15 @@ function MissingCourseLookup({
       </form>
       {lookupMessage ? (
         <p
-          className={`missing-course-status ${lookupState === "error" ? "is-error" : ""}`}
+          className={
+            showVisibleMessage
+              ? `missing-course-status ${lookupState === "error" ? "is-error" : ""}`
+              : "sr-only"
+          }
           role={lookupState === "error" ? "alert" : "status"}
         >
           {lookupMessage}
         </p>
-      ) : null}
-      {results.length > 0 ? (
-        <div className="missing-course-results" role="list" aria-label="Course name matches">
-          {results.map((course) => {
-            const isSelected = selectedIds.has(course.googlePlaceId);
-            const layoutCompatibility = getCourseLayoutCompatibility(
-              course.layoutHoleCounts,
-              requestedLayoutHoles
-            );
-            const isIncompatible = layoutCompatibility === "incompatible";
-            return (
-              <div className="missing-course-result" key={course.googlePlaceId} role="listitem">
-                <CourseThumbnail
-                  course={course}
-                  emptyLabel="Photo unavailable"
-                  variant="compact"
-                />
-                <div className="missing-course-copy">
-                  <div className="figma-course-badges missing-course-badges">
-                    <span
-                      className={
-                        course.publicAccessStatus === "UNVERIFIED"
-                          ? "figma-course-pill is-unverified"
-                          : "figma-course-pill is-public"
-                      }
-                    >
-                      <Trees size={11} />
-                      {course.publicAccessStatus === "UNVERIFIED"
-                        ? "Possible course"
-                        : "Public"}
-                    </span>
-                    {course.layoutHoleCounts?.length ? (
-                      <span className="figma-course-pill">
-                        <Flag size={11} /> {getCourseLayoutLabel(course.layoutHoleCounts)} course
-                      </span>
-                    ) : requestedLayoutHoles ? (
-                      <span className="figma-course-pill">
-                        <Flag size={11} /> Layout unverified
-                      </span>
-                    ) : null}
-                  </div>
-                  <h3>{course.name}</h3>
-                  <CourseAddressLink course={course} />
-                  {course.distanceMeters !== undefined ? (
-                    <span className="missing-course-distance">
-                      {formatDistance(course.distanceMeters)} away
-                    </span>
-                  ) : null}
-                  {course.publicAccessStatus === "UNVERIFIED" ? (
-                    <span className="missing-course-support">
-                      Public access needs verification before alerts can start
-                    </span>
-                  ) : (
-                    <CourseMonitoringStatus compact course={course} />
-                  )}
-                  {isIncompatible && requestedLayoutHoles ? (
-                    <span className="missing-course-support">
-                      Does not match an {requestedLayoutHoles}-hole course search
-                    </span>
-                  ) : null}
-                  <div className="missing-course-secondary-actions">
-                    {course.profileUrl ? (
-                      <Link
-                        aria-label={`View course guide for ${course.name}`}
-                        className="course-profile-link"
-                        href={course.profileUrl as `/courses/${string}`}
-                      >
-                        <BookOpenText aria-hidden="true" size={13} />
-                        Course guide
-                      </Link>
-                    ) : null}
-                    {course.website ? (
-                      <a
-                        aria-label={`Open official site for ${course.name}`}
-                        href={course.website}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        <ExternalLink size={13} />
-                        Official site
-                      </a>
-                    ) : null}
-                    <button
-                      aria-label={`Report incorrect information for ${course.name}`}
-                      className="course-report-button"
-                      onClick={() => reportCourseIssue(course)}
-                      type="button"
-                    >
-                      <Flag size={13} />
-                      Report incorrect info
-                    </button>
-                  </div>
-                </div>
-                <button
-                  aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
-                  className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
-                  disabled={isIncompatible && !isSelected}
-                  onClick={() => {
-                    if (isSelected) {
-                      onRemoveCourse(course.googlePlaceId);
-                    } else {
-                      void addLookupCourse(course);
-                    }
-                  }}
-                  type="button"
-                >
-                  {isSelected ? <Check size={13} /> : <Plus size={13} />}
-                  {isSelected
-                    ? "Added"
-                    : isIncompatible
-                      ? "Doesn’t match"
-                      : "Add to my list"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
       ) : null}
     </section>
   );
@@ -1994,9 +2003,10 @@ function CourseMonitoringStatus({
   course: CourseCandidate;
   compact?: boolean;
 }) {
+  const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
   const isAutomatic = course.monitoringSupport === "AUTOMATIC";
-  const isUnconfirmed = !isManualOnly && !isAutomatic;
+  const isUnconfirmed = isPublicAccessUnverified || (!isManualOnly && !isAutomatic);
 
   return (
     <p
@@ -2009,7 +2019,9 @@ function CourseMonitoringStatus({
       )}
       <span>
         <strong>
-          {isManualOnly && course.alertSupport
+          {isPublicAccessUnverified
+            ? "Public access verification needed"
+            : isManualOnly && course.alertSupport
             ? getAlertSupportLabel(course.alertSupport)
             : isAutomatic
               ? "Automatic availability alerts"
@@ -2017,7 +2029,9 @@ function CourseMonitoringStatus({
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
-            {isManualOnly && course.alertSupport
+            {isPublicAccessUnverified
+              ? "This possible course is saved for review. Alerts can start after it is verified."
+              : isManualOnly && course.alertSupport
               ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
               : isAutomatic
                 ? "Tee Time Spot checks public, signed-out booking availability without entering checkout."
@@ -2027,14 +2041,6 @@ function CourseMonitoringStatus({
       </span>
     </p>
   );
-}
-
-function reportCourseIssue(course: CourseCandidate) {
-  const location = course.address ? ` at ${course.address}` : "";
-  openFeedback({
-    sentiment: "broken",
-    message: `Please review ${course.name}${location}. What looks incorrect: `
-  });
 }
 
 function CourseResultsMap({

@@ -3156,6 +3156,35 @@ button {
   margin: 0;
 }
 
+.course-results-divider {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  margin: 0 0 12px;
+  min-height: 16px;
+}
+
+.figma-course-list + .course-results-divider {
+  margin-top: 12px;
+}
+
+.course-results-divider > span {
+  background: #d9e3dc;
+  flex: 1 1 auto;
+  height: 1px;
+}
+
+.course-results-divider p {
+  color: #aab9b2;
+  flex: 0 0 auto;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 1.2;
+  margin: 0;
+  text-transform: uppercase;
+}
+
 .search-page .figma-course-list .course-row {
   align-items: stretch;
   background: #ffffff;
@@ -3360,33 +3389,6 @@ button {
   margin-top: 5px;
 }
 
-.course-report-button {
-  align-items: center;
-  appearance: none;
-  background: transparent;
-  border: 0;
-  color: #6d817a;
-  cursor: pointer;
-  display: inline-flex;
-  font: inherit;
-  font-size: 0.68rem;
-  font-weight: 750;
-  gap: 4px;
-  justify-content: flex-start;
-  margin-top: 5px;
-  min-height: 30px;
-  padding: 3px 0;
-  text-decoration: underline;
-  text-decoration-color: transparent;
-  text-underline-offset: 3px;
-}
-
-.course-report-button:hover,
-.course-report-button:focus-visible {
-  color: #183d32;
-  text-decoration-color: currentColor;
-}
-
 .search-page .figma-course-list .course-actions {
   align-items: flex-end;
   align-self: stretch;
@@ -3525,17 +3527,25 @@ button {
   text-transform: uppercase;
 }
 
-.missing-course-form > div {
+.missing-course-controls {
   align-items: center;
-  background: #ffffff;
-  border: 1px solid #cfdcd5;
-  border-radius: 999px;
   display: flex;
   gap: 8px;
-  padding: 5px 5px 5px 15px;
 }
 
-.missing-course-form > div:focus-within {
+.missing-course-input {
+  align-items: center;
+  background: #f7f4eb;
+  border: 1px solid #cfdcd5;
+  border-radius: 12px;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.missing-course-input:focus-within {
   border-color: #18332b;
   box-shadow: 0 0 0 3px rgba(24, 51, 43, 0.1);
 }
@@ -3551,8 +3561,8 @@ button {
   color: #10251f;
   flex: 1;
   font: inherit;
-  font-size: 0.88rem;
-  min-height: 36px;
+  font-size: 0.8125rem;
+  min-height: 38px;
   min-width: 0;
   outline: 0;
   padding: 0;
@@ -3565,11 +3575,12 @@ button {
   border-radius: 999px;
   color: #ffffff;
   display: inline-flex;
-  font-size: 0.78rem;
-  font-weight: 900;
+  flex: 0 0 auto;
+  font-size: 0.8125rem;
+  font-weight: 700;
   justify-content: center;
-  min-height: 38px;
-  padding: 0 18px;
+  min-height: 40px;
+  padding: 0 16px;
   white-space: nowrap;
 }
 
@@ -3588,130 +3599,12 @@ button {
   color: #a33b33;
 }
 
-.missing-course-results {
-  display: grid;
-  gap: 8px;
-  grid-column: 1 / -1;
-  margin-top: 14px;
-}
-
-.missing-course-result {
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid #dce4df;
-  border-radius: 14px;
-  display: grid;
-  gap: 12px;
-  grid-template-areas: "thumbnail copy actions";
-  grid-template-columns: 66px minmax(0, 1fr) auto;
-  min-height: 70px;
-  overflow: hidden;
-  padding: 0 12px 0 0;
-}
-
-.missing-course-result .course-thumbnail {
-  align-self: stretch;
-  border-radius: 13px 0 0 13px;
-  height: 100%;
-  min-height: 68px;
-  width: 66px;
-}
-
-.missing-course-result h3 {
-  color: #10251f;
-  font-size: 0.88rem;
-  line-height: 1.25;
-  margin: 0;
-}
-
-.missing-course-result .meta {
-  margin: 4px 0 0;
-}
-
-.missing-course-result .course-address-link {
-  color: #718982;
-  font-size: 0.72rem;
-}
-
-.missing-course-distance {
-  color: #557168;
-  display: inline-block;
-  font-size: 0.68rem;
-  margin-top: 4px;
-}
-
-.missing-course-copy {
-  grid-area: copy;
-  min-width: 0;
-}
-
-.missing-course-badges {
-  margin-bottom: 5px;
-}
-
-.missing-course-support {
-  color: #8a4f19;
-  display: block;
-  font-size: 0.68rem;
-  font-weight: 750;
-  margin-top: 4px;
-}
-
-.missing-course-secondary-actions {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  margin-top: 3px;
-}
-
-.missing-course-secondary-actions > a {
-  align-items: center;
-  color: #355f52;
-  display: inline-flex;
-  font-size: 0.68rem;
-  font-weight: 800;
-  gap: 4px;
-  min-height: 30px;
-}
-
-.missing-course-secondary-actions > .course-profile-link {
-  color: #1f7a4d;
-}
-
-.missing-course-secondary-actions .course-report-button {
-  margin-top: 0;
-}
-
 .selected-course-support {
   color: #f2bb7f;
   display: block;
   font-size: 0.68rem;
   font-weight: 750;
   margin-top: 3px;
-}
-
-.missing-course-result .figma-add-button {
-  align-items: center;
-  background: #f5f7f5;
-  border: 1px solid #d7e1dc;
-  border-radius: 999px;
-  color: #50645e;
-  display: inline-flex;
-  font-size: 0.73rem;
-  font-weight: 850;
-  gap: 5px;
-  grid-area: actions;
-  justify-content: center;
-  min-height: 34px;
-  padding: 0 13px;
-  white-space: nowrap;
-}
-
-.missing-course-result .figma-add-button.is-added {
-  background: #e5f7ec;
-  border-color: #b9e8cc;
-  color: #087446;
 }
 
 .search-page .figma-results-layout .figma-selected-panel {
@@ -3995,7 +3888,7 @@ button {
   }
 
   .missing-course-lookup {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .search-page .figma-results-layout .figma-selected-panel {
@@ -4067,57 +3960,20 @@ button {
     align-items: start;
     gap: 8px;
     grid-template-columns: 1fr;
+    min-width: 0;
   }
 
   .missing-course-heading h2 {
     white-space: normal;
   }
 
-  .missing-course-form > div {
+  .missing-course-form,
+  .missing-course-controls {
+    min-width: 0;
+  }
+
+  .missing-course-controls {
     align-items: stretch;
-    border-radius: 14px;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    padding: 8px 8px 8px 13px;
-  }
-
-  .missing-course-form > div > svg {
-    align-self: center;
-  }
-
-  .missing-course-form button {
-    grid-column: 1 / -1;
-    width: 100%;
-  }
-
-  .missing-course-result {
-    align-items: stretch;
-    gap: 0;
-    grid-template-areas:
-      "thumbnail"
-      "copy"
-      "actions";
-    grid-template-columns: minmax(0, 1fr);
-    padding: 0;
-  }
-
-  .missing-course-result .course-thumbnail,
-  .missing-course-result .course-thumbnail-compact {
-    border-radius: 13px 13px 0 0;
-    height: 112px;
-    min-height: 112px;
-    width: 100%;
-  }
-
-  .missing-course-copy {
-    align-self: center;
-    padding: 12px 16px 8px;
-  }
-
-  .missing-course-result .figma-add-button {
-    border-radius: 999px;
-    justify-self: stretch;
-    margin: 0 16px 12px;
   }
 }
 
@@ -5894,7 +5750,8 @@ button {
     gap: 12px;
     grid-template-columns: minmax(0, 1fr) auto;
     padding: 12px 16px;
-    z-index: 32;
+    pointer-events: auto;
+    z-index: 100;
   }
 
   .mobile-selection-toggle {
@@ -6298,7 +6155,6 @@ button {
 
   .search-page .figma-course-list .course-actions .button-ghost,
   .search-page .figma-course-list .figma-add-button,
-  .missing-course-result .figma-add-button,
   .figma-hole-options button,
   .figma-reset-filters {
     min-height: 44px;
@@ -6340,20 +6196,6 @@ button {
 
   .search-page .figma-course-list .figma-add-button.is-added::after {
     content: "Added";
-  }
-
-  .missing-course-result .course-thumbnail,
-  .missing-course-result .course-thumbnail-compact {
-    aspect-ratio: auto;
-    height: 88px;
-    min-height: 88px;
-  }
-
-  .missing-course-result .course-monitoring-status small {
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    display: -webkit-box;
-    overflow: hidden;
   }
 
   .search-page .figma-course-list .course-rank-overlay {
@@ -7035,8 +6877,6 @@ button {
 }
 
 @media (max-width: 700px) {
-  .course-report-button,
-  .missing-course-secondary-actions > a,
   .figma-add-recipient,
   .figma-recipient-row > button {
     min-height: 44px;

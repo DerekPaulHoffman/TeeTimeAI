@@ -1068,11 +1068,25 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
     await missingCourseInput.fill("Bethpage Black, Farmingdale NY");
     await page.getByRole("button", { name: "Find course" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "3 matches found" })).toBeVisible();
-    const missingCourseResults = page.locator(".missing-course-result");
+    await expect(page.getByRole("status").filter({ hasText: "3 matches found" })).toHaveCount(1);
     await expect(
-      missingCourseResults.getByText("Photo unavailable"),
-      "photo-less lookup results should show an intentional placeholder instead of an empty media block"
+      page.locator(".course-results-divider").filter({
+        hasText: 'Direct search · "Bethpage Black, Farmingdale NY"'
+      })
+    ).toBeVisible();
+    await expect(
+      page.locator(".course-results-divider").filter({ hasText: "Courses near you" })
+    ).toBeVisible();
+    const missingCourseResults = page
+      .getByRole("list", { name: "Direct course matches" })
+      .locator(".course-row");
+    await expect(
+      page.locator(".missing-course-lookup .course-row"),
+      "the lookup bar should remain an input-only control"
+    ).toHaveCount(0);
+    await expect(
+      missingCourseResults.locator(".course-thumbnail-empty"),
+      "photo-less lookup results should use the same intentional placeholder as nearby cards"
     ).toHaveCount(3);
     await expect(
       missingCourseResults
@@ -1099,18 +1113,16 @@ test.describe("Tee Time Spot UI smoke", () => {
         name: /Open official site for Yale University Golf Course/i
       })
     ).toHaveAttribute("href", "https://app.whoosh.io/patron/club/yale-golf-course");
-    if (isMobile) {
-      const resultBox = await blockedCourseResult.boundingBox();
-      const thumbnailBox = await blockedCourseResult.locator(".course-thumbnail").boundingBox();
-      expect(resultBox).not.toBeNull();
-      expect(thumbnailBox).not.toBeNull();
-      expect(resultBox!.height, "manual course results should stay compact on mobile").toBeLessThan(360);
-      expect(thumbnailBox!.width).toBeGreaterThan(resultBox!.width - 4);
-      expect(Math.abs(thumbnailBox!.y - resultBox!.y)).toBeLessThan(2);
-    }
+    await expect(
+      blockedCourseResult,
+      "direct matches should use the same course-row component as nearby results"
+    ).toHaveClass(/course-row/);
+    await captureUiScreenshot(page, testInfo, "search-direct-results");
     await blockedCourseResult.getByRole("button", { name: "Add Fairview Farm Golf Course" }).click();
     if (usesSelectionDrawer) {
-      await page.locator(".mobile-selection-toggle").click();
+      const mobileSelectionToggle = page.locator(".mobile-selection-toggle");
+      await expect(mobileSelectionToggle).toBeVisible();
+      await mobileSelectionToggle.press("Enter");
     }
     await expect(page.getByText("Choose at least one course Tee Time Spot can monitor automatically.")).toBeVisible();
     if (usesSelectionDrawer) {
@@ -1175,7 +1187,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       const selectionToggle = page.locator(".mobile-selection-toggle");
       await expect(selectionToggle).toContainText("5 courses picked");
       await expect(selectionToggle).toContainText("Reorder priority");
-      await page.getByRole("button", { name: "Review alert" }).click();
+      await page.getByRole("button", { name: "Review alert" }).press("Enter");
       await expect(page.locator(".figma-selected-panel.is-mobile-open")).toBeVisible();
     }
 

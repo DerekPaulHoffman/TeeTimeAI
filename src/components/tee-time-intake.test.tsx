@@ -242,6 +242,10 @@ describe("TeeTimeIntake", () => {
     await screen.findByRole("heading", {
       name: "Wheeler Family Traditions Golf Club"
     });
+    expect(
+      screen.getByText('Direct search · "wheeler family tranditions in wallinford"')
+    ).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Direct course matches" })).toBeTruthy();
     expect(screen.getByText("Possible course")).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", {
@@ -252,7 +256,7 @@ describe("TeeTimeIntake", () => {
     await screen.findByText(
       "Wheeler Family Traditions Golf Club was added to your list and saved for public-course review. Alerts can start after it is verified."
     );
-    expect(screen.getByText("Public access verification needed")).toBeTruthy();
+    expect(screen.getAllByText("Public access verification needed")).toHaveLength(2);
     expect(
       (screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
         .disabled
