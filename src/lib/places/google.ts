@@ -66,6 +66,11 @@ export type CoursePhotoAttribution = {
   photoUri?: string;
 };
 
+export type GooglePlacePhoto = {
+  photoReference: string;
+  authorAttributions: CoursePhotoAttribution[];
+};
+
 export type CourseCandidate = {
   courseId?: string;
   googlePlaceId: string;
@@ -526,6 +531,45 @@ export async function searchGolfCoursesByName(
       ? { ...candidate, distanceMeters: getDistanceMeters(origin, candidate) }
       : candidate;
   });
+}
+
+export async function getGooglePlacePhoto(
+  googlePlaceId: string
+): Promise<GooglePlacePhoto | null> {
+  const apiKey = getGooglePlacesApiKey();
+  const normalizedPlaceId = googlePlaceId.trim();
+  if (!apiKey || !normalizedPlaceId) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(normalizedPlaceId)}`,
+      {
+        cache: "no-store",
+        headers: {
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask": "photos"
+        }
+      }
+    );
+    if (!response.ok) {
+      return null;
+    }
+
+    const place = (await response.json()) as Pick<GooglePlace, "photos">;
+    const photo = place.photos?.[0];
+    if (!photo?.name) {
+      return null;
+    }
+
+    return {
+      photoReference: photo.name,
+      authorAttributions: photo.authorAttributions ?? []
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function searchPublicGolfCoursePlacesByName(input: CourseNameSearchInput) {

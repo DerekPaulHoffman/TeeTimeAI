@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   dedupeGolfCoursePlaces,
   filterPublicGolfCoursePlaces as filterPublicGolfCoursePlacesWithReviews,
+  getGooglePlacePhoto,
   getGooglePlacesApiKey,
   mapGooglePlaceToCourseCandidate as mapGooglePlaceToCourseCandidateWithReviews,
   searchGolfCoursesByName as searchGolfCoursesByNameWithReviews,
@@ -273,6 +274,56 @@ describe("Google Places mapping", () => {
         }
       ]
     });
+  });
+
+  it("loads a fresh Google Places photo and its required attribution", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        photos: [
+          {
+            name: "places/course-1/photos/photo-1",
+            authorAttributions: [
+              {
+                displayName: "Course Photographer",
+                uri: "https://maps.google.com/maps/contrib/example"
+              }
+            ]
+          }
+        ]
+      })
+    } as Response);
+
+    await expect(getGooglePlacePhoto("course/with spaces")).resolves.toEqual({
+      photoReference: "places/course-1/photos/photo-1",
+      authorAttributions: [
+        {
+          displayName: "Course Photographer",
+          uri: "https://maps.google.com/maps/contrib/example"
+        }
+      ]
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://places.googleapis.com/v1/places/course%2Fwith%20spaces",
+      {
+        cache: "no-store",
+        headers: {
+          "X-Goog-Api-Key": "test-key",
+          "X-Goog-FieldMask": "photos"
+        }
+      }
+    );
+  });
+
+  it("falls back when Google has no current course photo", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({})
+    } as Response);
+
+    await expect(getGooglePlacePhoto("course-1")).resolves.toBeNull();
   });
 
   it("normalizes copied Google Places API keys before use in headers", () => {

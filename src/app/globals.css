@@ -6267,7 +6267,7 @@ button {
   position: absolute;
 }
 
-.dashboard-course-image span {
+.dashboard-course-rank {
   color: #ffffff;
   display: grid;
   font-size: 0.75rem;
@@ -6501,7 +6501,7 @@ button {
   content: none;
 }
 
-.dashboard-course-image span {
+.dashboard-course-rank {
   align-items: center;
   backdrop-filter: blur(2px);
   background: rgba(17, 26, 34, 0.55);
@@ -6511,6 +6511,34 @@ button {
   inset: 8px auto auto 8px;
   justify-content: center;
   width: 24px;
+}
+
+.dashboard-course-image-empty {
+  align-items: center;
+  background: #e7eee8;
+  display: flex;
+  justify-content: center;
+}
+
+.dashboard-course-placeholder-icon {
+  color: #5f746e;
+  height: 22px;
+  width: 22px;
+}
+
+.dashboard-course-attribution {
+  background: rgba(17, 26, 34, 0.72);
+  bottom: 0;
+  color: #ffffff;
+  font-size: 0.5rem;
+  left: 0;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 4px;
+  position: absolute;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .watch-course-copy {

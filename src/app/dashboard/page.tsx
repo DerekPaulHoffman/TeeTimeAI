@@ -31,6 +31,10 @@ import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intel
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
+import {
+  getGooglePlacePhoto,
+  type GooglePlacePhoto
+} from "@/lib/places/google";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
@@ -79,18 +83,28 @@ export default async function DashboardPage() {
     throw error;
   }
   const searches = await listTeeSearchesForUser(user.id);
+  const coursePhotos = await loadDashboardCoursePhotos(searches);
 
-  return <DashboardView searches={searches} canManage showRecipientEmail />;
+  return (
+    <DashboardView
+      searches={searches}
+      canManage
+      coursePhotos={coursePhotos}
+      showRecipientEmail
+    />
+  );
 }
 
 function DashboardView({
   searches,
   canManage,
+  coursePhotos,
   showRecipientEmail,
   notice
 }: {
   searches: DashboardSearches;
   canManage: boolean;
+  coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
   showRecipientEmail: boolean;
   notice?: string;
 }) {
@@ -164,6 +178,7 @@ function DashboardView({
               {activeSearches.map((search) => (
                 <DashboardSearchCard
                   canManage={canManage}
+                  coursePhotos={coursePhotos}
                   key={search.id}
                   search={search}
                   showRecipientEmail={showRecipientEmail}
@@ -180,6 +195,7 @@ function DashboardView({
                 {inactiveSearches.map((search) => (
                   <DashboardSearchCard
                     canManage={canManage}
+                    coursePhotos={coursePhotos}
                     key={search.id}
                     search={search}
                     showRecipientEmail={showRecipientEmail}
@@ -250,10 +266,12 @@ function DashboardView({
 function DashboardSearchCard({
   search,
   canManage,
+  coursePhotos,
   showRecipientEmail
 }: {
   search: DashboardSearches[number];
   canManage: boolean;
+  coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
   showRecipientEmail: boolean;
 }) {
   const now = new Date();
@@ -398,8 +416,12 @@ function DashboardSearchCard({
             return (
               <div className="watch-course-row" key={preference.id}>
                 <CourseImage
-                  index={preference.rank - 1}
                   name={preference.course.name}
+                  photo={
+                    preference.course.googlePlaceId
+                      ? coursePhotos.get(preference.course.googlePlaceId)
+                      : undefined
+                  }
                   rank={preference.rank}
                 />
                 <div className="watch-course-copy">
@@ -588,26 +610,63 @@ function formatTelephoneHref(phone: string) {
   return phone.trim().replace(/(?!^\+)[^\d]/g, "");
 }
 
-const dashboardCourseImages = [
-  "https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=240&q=80",
-  "https://images.unsplash.com/photo-1592919505780-303950717480?auto=format&fit=crop&w=240&q=80",
-  "https://images.unsplash.com/photo-1587174486073-ae5e5cff23aa?auto=format&fit=crop&w=240&q=80",
-  "https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&crop=entropy&w=240&q=80",
-  "https://images.unsplash.com/photo-1592919505780-303950717480?auto=format&fit=crop&crop=entropy&w=240&q=80"
-];
-
-function CourseImage({ index, name, rank }: { index: number; name: string; rank: number }) {
-  const imageUrl = dashboardCourseImages[index % dashboardCourseImages.length];
+function CourseImage({
+  name,
+  photo,
+  rank
+}: {
+  name: string;
+  photo?: GooglePlacePhoto;
+  rank: number;
+}) {
+  const imageUrl = photo
+    ? `/api/courses/photo?ref=${encodeURIComponent(photo.photoReference)}`
+    : null;
+  const attribution = photo?.authorAttributions
+    .map((item) => item.displayName?.trim())
+    .filter((displayName): displayName is string => Boolean(displayName))
+    .join(", ");
 
   return (
     <div
-      aria-hidden="true"
-      className="dashboard-course-image"
-      style={{ backgroundImage: `url("${imageUrl}")` }}
-      title={name}
+      aria-label={imageUrl ? `${name} course photo` : `${name} photo unavailable`}
+      className={`dashboard-course-image${imageUrl ? "" : " dashboard-course-image-empty"}`}
+      role="img"
+      style={imageUrl ? { backgroundImage: `url("${imageUrl}")` } : undefined}
+      title={attribution ? `${name} photo by ${attribution}` : name}
     >
-      <span>{rank}</span>
+      {!imageUrl ? <Trees aria-hidden="true" className="dashboard-course-placeholder-icon" /> : null}
+      <span className="dashboard-course-rank">{rank}</span>
+      {attribution ? (
+        <span className="dashboard-course-attribution">Photo: {attribution}</span>
+      ) : null}
     </div>
+  );
+}
+
+async function loadDashboardCoursePhotos(searches: DashboardSearches) {
+  const googlePlaceIds = Array.from(
+    new Set(
+      searches.flatMap((search) =>
+        search.preferences.flatMap((preference) =>
+          preference.course.googlePlaceId && !preference.course.isManual
+            ? [preference.course.googlePlaceId]
+            : []
+        )
+      )
+    )
+  );
+  const photos = await Promise.all(
+    googlePlaceIds.map(async (googlePlaceId) => {
+      const photo = await getGooglePlacePhoto(googlePlaceId);
+      return [googlePlaceId, photo] as const;
+    })
+  );
+
+  return new Map(
+    photos.filter(
+      (entry): entry is readonly [string, GooglePlacePhoto] => entry[1] !== null
+    )
   );
 }
 
