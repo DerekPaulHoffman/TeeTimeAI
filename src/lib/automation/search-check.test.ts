@@ -506,7 +506,7 @@ describe("runSearchCheck email cadence", () => {
     expect(result.newlyAlertedMatches).toBe(1);
   });
 
-  it("covers only pending matches rendered within the setup email pill limit", async () => {
+  it("covers every pending match in the setup email even beyond the visible pill limit", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -556,11 +556,12 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({
         kind: "SETUP",
         payload: expect.objectContaining({
-          matchIds: localStartsAt.slice(0, 16).map((_, index) => `match-${index + 1}`)
+          matchIds: localStartsAt.map((_, index) => `match-${index + 1}`),
+          displayMatchIds: localStartsAt.map((_, index) => `match-${index + 1}`)
         })
       })
     );
-    expect(result.newlyAlertedMatches).toBe(16);
+    expect(result.newlyAlertedMatches).toBe(17);
   });
 
   it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {
@@ -706,7 +707,7 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("keeps a ninth same-course opening pending when the MATCH email renders eight rows", async () => {
+  it("covers every same-course opening in one MATCH delivery even when the email renders a concise subset", async () => {
     const localStartsAt = Array.from({ length: 9 }, (_, index) => {
       const totalMinutes = 7 * 60 + index * 20;
       const hours = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
@@ -755,23 +756,21 @@ describe("runSearchCheck email cadence", () => {
       finalized: true,
       status: "SENT",
       ownerSent: true,
-      retainedMatchCount: 8,
-      sentMatchCount: 8
+      retainedMatchCount: 9,
+      sentMatchCount: 9
     });
 
     const result = await runSearchCheck("search-1", "test");
 
-    const renderedIds = localStartsAt
-      .slice(0, 8)
-      .map((_, index) => `match-${index + 1}`);
+    const coveredIds = localStartsAt.map((_, index) => `match-${index + 1}`);
     expect(deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
-          matchIds: renderedIds,
-          displayMatchIds: renderedIds,
+          matchIds: coveredIds,
+          displayMatchIds: coveredIds,
           matchReport: expect.objectContaining({
             matches: expect.arrayContaining(
-              renderedIds.map((matchId) => expect.objectContaining({ matchId }))
+              coveredIds.map((matchId) => expect.objectContaining({ matchId }))
             )
           })
         })
@@ -780,11 +779,11 @@ describe("runSearchCheck email cadence", () => {
     const preparedPayload =
       deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mock.calls[0]?.[0]
         .payload;
-    expect(preparedPayload.matchReport.matches).toHaveLength(8);
-    expect(preparedPayload.matchIds).not.toContain("match-9");
+    expect(preparedPayload.matchReport.matches).toHaveLength(9);
+    expect(preparedPayload.matchIds).toContain("match-9");
     expect(result).toEqual(
       expect.objectContaining({
-        newlyAlertedMatches: 8,
+        newlyAlertedMatches: 9,
         statusEmailOutcome: "covered_by_match_alert"
       })
     );

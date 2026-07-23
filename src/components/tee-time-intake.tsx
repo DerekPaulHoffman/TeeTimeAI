@@ -1515,8 +1515,16 @@ function TeeTimeIntakeContent({
                     <span className="selected-course-support">
                       {getAlertSupportLabel(course.alertSupport)}
                     </span>
+                  ) : course.monitoringReadiness === "TEMPORARILY_UNAVAILABLE" ? (
+                    <span className="selected-course-support">
+                      Automatic alerts temporarily unavailable
+                    </span>
+                  ) : course.monitoringReadiness === "UNAVAILABLE" ? (
+                    <span className="selected-course-support">
+                      Automatic alerts unavailable
+                    </span>
                   ) : course.monitoringSupport !== "AUTOMATIC" ? (
-                    <span className="selected-course-support">Alerts not yet confirmed</span>
+                    <span className="selected-course-support">Verdict after first check</span>
                   ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
@@ -1567,6 +1575,16 @@ function TeeTimeIntakeContent({
                 : "Your account email"}
             </span>
             <small>Matching openings link to the official site. You book direct.</small>
+            {selected.some(
+              (course) =>
+                course.monitoringReadiness === "VERIFYING" ||
+                course.monitoringReadiness === undefined
+            ) ? (
+              <small>
+                We&apos;ll email a monitoring verdict for every course after the first
+                check. New-course verification is capped at 30 minutes.
+              </small>
+            ) : null}
           </section>
         ) : null}
         {selected.length > 0 ? (
@@ -2052,12 +2070,24 @@ function CourseMonitoringStatus({
 }) {
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
-  const isAutomatic = course.monitoringSupport === "AUTOMATIC";
-  const isUnconfirmed = isPublicAccessUnverified || (!isManualOnly && !isAutomatic);
+  const isTemporarilyUnavailable =
+    course.monitoringReadiness === "TEMPORARILY_UNAVAILABLE";
+  const isUnavailable = course.monitoringReadiness === "UNAVAILABLE";
+  const isAutomatic =
+    course.monitoringSupport === "AUTOMATIC" &&
+    !isTemporarilyUnavailable &&
+    !isUnavailable;
+  const isUnconfirmed =
+    isPublicAccessUnverified ||
+    (!isManualOnly &&
+      !isAutomatic &&
+      !isTemporarilyUnavailable &&
+      !isUnavailable);
+  const isDirectOnly = isManualOnly || isTemporarilyUnavailable || isUnavailable;
 
   return (
     <p
-      className={`course-monitoring-status${isManualOnly ? " is-manual" : ""}${isUnconfirmed ? " is-unconfirmed" : ""}${compact ? " is-compact" : ""}`}
+      className={`course-monitoring-status${isDirectOnly ? " is-manual" : ""}${isUnconfirmed ? " is-unconfirmed" : ""}${compact ? " is-compact" : ""}`}
     >
       {isAutomatic ? (
         <CircleCheck aria-hidden="true" size={11} />
@@ -2070,9 +2100,13 @@ function CourseMonitoringStatus({
             ? "Public access verification needed"
             : isManualOnly && course.alertSupport
             ? getAlertSupportLabel(course.alertSupport)
+            : isTemporarilyUnavailable
+              ? "Automatic alerts temporarily unavailable"
+              : isUnavailable
+                ? "Automatic alerts unavailable"
             : isAutomatic
-              ? "Automatic availability alerts"
-              : "Automatic alerts not yet confirmed"}
+              ? "Automatic monitoring confirmed"
+              : "Monitoring verdict after first check"}
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
@@ -2080,9 +2114,13 @@ function CourseMonitoringStatus({
               ? "This possible course is saved for review. Alerts can start after it is verified."
               : isManualOnly && course.alertSupport
               ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
+              : isTemporarilyUnavailable
+                ? "The latest automatic check did not finish. Use the official site while Tee Time Spot retries in the background."
+                : isUnavailable
+                  ? "Tee Time Spot could not confirm reliable automatic monitoring. Use the official site for current availability."
               : isAutomatic
                 ? "Tee Time Spot checks public, signed-out booking availability without entering checkout."
-                : "We'll verify whether this course can be checked automatically when your alert starts."}
+                : "We'll email whether automatic monitoring is available after the first check, with a 30-minute limit for a new course."}
           </small>
         ) : null}
       </span>

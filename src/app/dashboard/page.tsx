@@ -372,6 +372,15 @@ function DashboardSearchCard({
             const officialCourseUrl = isPublicCourse
               ? preference.course.detectedBookingUrl ?? preference.course.website
               : preference.course.website;
+            const latestProbe = search.probes.find(
+              (probe) => probe.courseId === preference.course.id
+            );
+            const monitoringVerdict = getDashboardMonitoringVerdict({
+              alertSupport,
+              automationEligibility: preference.course.automationEligibility,
+              latestProbe,
+              upcomingBookingWindow
+            });
             const bookingEvidence = {
               bookingFacts: preference.course.bookingFacts,
               probes: [],
@@ -463,6 +472,16 @@ function DashboardSearchCard({
                         <CircleOff size={11} /> {getAlertSupportLabel(alertSupport)}
                       </span>
                     ) : null}
+                    <span className={`figma-course-pill ${monitoringVerdict.className}`}>
+                      {monitoringVerdict.icon === "watching" ? (
+                        <Play size={11} />
+                      ) : monitoringVerdict.icon === "scheduled" ? (
+                        <CalendarClock size={11} />
+                      ) : (
+                        <CircleOff size={11} />
+                      )}
+                      {monitoringVerdict.label}
+                    </span>
                   </div>
                   <strong>{preference.course.name}</strong>
                   <p className="meta">
@@ -477,6 +496,12 @@ function DashboardSearchCard({
                       {!upcomingBookingWindow.exactTime ? " (time not published)" : ""}
                     </p>
                   ) : null}
+                  <p className="watch-course-release">
+                    {monitoringVerdict.detail}
+                    {latestProbe
+                      ? ` Last checked ${formatObservationDateTime(latestProbe.observedAt)}.`
+                      : ""}
+                  </p>
                 </div>
                 <div className="watch-course-links">
                   <a
@@ -533,6 +558,92 @@ function formatObservationDate(value: Date | string | undefined) {
     day: "numeric",
     year: "numeric"
   });
+}
+
+function formatObservationDateTime(value: Date | string) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "recently";
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
+function getDashboardMonitoringVerdict(input: {
+  alertSupport: ReturnType<typeof getCourseAlertSupport> | null;
+  automationEligibility: string;
+  latestProbe?: {
+    outcome:
+      | "MATCH_FOUND"
+      | "NO_MATCH"
+      | "BLOCKED_POLICY"
+      | "BLOCKED_AUTH"
+      | "BLOCKED_TOOLING"
+      | "FETCH_FAILED"
+      | "NEEDS_ADAPTER";
+    observedAt: Date;
+  };
+  upcomingBookingWindow: ReturnType<typeof getBookingWindowForTargetDate>;
+}) {
+  if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
+    return {
+      label: "Monitoring scheduled",
+      detail: "Automatic checks will begin at the useful booking release time.",
+      icon: "scheduled" as const,
+      className: "is-detail"
+    };
+  }
+  if (
+    input.latestProbe?.outcome === "MATCH_FOUND" ||
+    input.latestProbe?.outcome === "NO_MATCH"
+  ) {
+    return {
+      label: "Automatic monitoring confirmed",
+      detail:
+        input.latestProbe.outcome === "MATCH_FOUND"
+          ? "Matching openings were found and covered by the alert delivery."
+          : "The latest automatic check completed without a matching opening.",
+      icon: "watching" as const,
+      className: "is-public"
+    };
+  }
+  if (
+    input.latestProbe?.outcome === "FETCH_FAILED" ||
+    input.latestProbe?.outcome === "BLOCKED_TOOLING"
+  ) {
+    return {
+      label: "Temporarily unavailable",
+      detail:
+        "The latest automatic check did not finish. Use the official site while Tee Time Spot retries.",
+      icon: "unavailable" as const,
+      className: "is-official-site-only"
+    };
+  }
+  if (
+    input.alertSupport ||
+    input.latestProbe?.outcome === "NEEDS_ADAPTER" ||
+    input.latestProbe?.outcome === "BLOCKED_POLICY" ||
+    input.latestProbe?.outcome === "BLOCKED_AUTH"
+  ) {
+    return {
+      label: "Automatic alerts unavailable",
+      detail:
+        "Use the official course site for current availability. Coverage work may continue in the background.",
+      icon: "unavailable" as const,
+      className: "is-official-site-only"
+    };
+  }
+  return {
+    label: "First verdict pending",
+    detail:
+      input.automationEligibility === "ALLOWED"
+        ? "The first check is starting now and will confirm the current result."
+        : "We’ll email the monitoring verdict after the first check, with a 30-minute limit for a new course.",
+    icon: "scheduled" as const,
+    className: "is-detail"
+  };
 }
 
 function formatCoursePriceRange(range: CoursePriceRange) {

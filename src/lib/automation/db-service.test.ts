@@ -499,6 +499,42 @@ describe("schedule recovery fairness", () => {
     }
   });
 
+  it("recovers a search before a missing first verdict breaches thirty minutes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    try {
+      await listSearchesNeedingScheduleRecovery();
+
+      expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              {
+                AND: [
+                  {
+                    statusEmailSentAt: null,
+                    createdAt: { lte: new Date("2026-07-16T11:40:00.000Z") }
+                  },
+                  {
+                    checkStatus: { in: ["WAITING", "FAILED"] },
+                    OR: [
+                      { checkLeaseExpiresAt: null },
+                      { checkLeaseExpiresAt: { lte: new Date("2026-07-16T12:00:00.000Z") } }
+                    ]
+                  }
+                ]
+              }
+            ])
+          })
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("never preempts a healthy checking lease to retry delivery", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));

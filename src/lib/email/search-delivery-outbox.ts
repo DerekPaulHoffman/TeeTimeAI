@@ -18,7 +18,6 @@ import type {
   SearchStatusCourseReport,
   SearchStatusEmailInput
 } from "@/lib/email/search-status";
-import { getRenderedAvailabilityTimes } from "@/lib/email/customer-email";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 import {
   applyPendingClerkEmailForSearch,
@@ -3210,42 +3209,33 @@ async function validateCurrentStatusDeliveryPayload(
       }
     }
   }
-  const currentRenderedMatchIds = courses.flatMap((course) => {
+  const currentCoveredMatchIds = courses.flatMap((course) => {
     if (
       persistedCourses.find((persisted) => persisted.courseId === course.id)?.outcome !==
       "MATCH_FOUND"
     ) {
       return [];
     }
-    return getRenderedAvailabilityTimes(
-      currentMatches
-        .filter((match) => {
-          if (match.courseId !== course.id || match.availableSpots < players) {
-            return false;
-          }
-          const windowStart = zonedDateTimeToDate(
-            `${targetDate}T${startTime}:00`,
-            course.timeZone
-          );
-          const windowEnd = zonedDateTimeToDate(
-            `${targetDate}T${endTime}:00`,
-            course.timeZone
-          );
-          return match.startsAt >= windowStart && match.startsAt < windowEnd;
-        })
-        .map((match) => ({
-          id: match.id,
-          startsAt: match.startsAt,
-          availableSpots: match.availableSpots,
-          priceCents: match.priceCents,
-          holes: match.holes,
-          isNew: match.alertStatus === "PENDING"
-        })),
+    const windowStart = zonedDateTimeToDate(
+      `${targetDate}T${startTime}:00`,
       course.timeZone
-    ).map((match) => match.id);
+    );
+    const windowEnd = zonedDateTimeToDate(
+      `${targetDate}T${endTime}:00`,
+      course.timeZone
+    );
+    return currentMatches
+      .filter(
+        (match) =>
+          match.courseId === course.id &&
+          match.availableSpots >= players &&
+          match.startsAt >= windowStart &&
+          match.startsAt < windowEnd
+      )
+      .map((match) => match.id);
   });
   if (
-    [...currentRenderedMatchIds].sort().join("\u0000") !==
+    [...currentCoveredMatchIds].sort().join("\u0000") !==
     [...displayMatchIds].sort().join("\u0000")
   ) {
     return "stale";

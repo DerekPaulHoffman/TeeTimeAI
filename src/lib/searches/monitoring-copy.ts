@@ -9,6 +9,11 @@ type MonitoringCourse = {
   name: string;
   alertSupport?: CourseAlertSupport;
   monitoringSupport?: CourseMonitoringSupport;
+  monitoringReadiness?:
+    | "READY"
+    | "VERIFYING"
+    | "UNAVAILABLE"
+    | "TEMPORARILY_UNAVAILABLE";
 };
 
 export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
@@ -19,16 +24,29 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
   const unconfirmed = courses.filter(
     (course) =>
       !isManualOnlyAlertSupport(course.alertSupport) &&
+      course.monitoringReadiness !== "UNAVAILABLE" &&
+      course.monitoringReadiness !== "TEMPORARILY_UNAVAILABLE" &&
       course.monitoringSupport !== "AUTOMATIC"
   );
-  if (manualOnly.length === 0 && unconfirmed.length === 0) {
+  const unavailable = courses.filter(
+    (course) =>
+      !isManualOnlyAlertSupport(course.alertSupport) &&
+      (course.monitoringReadiness === "UNAVAILABLE" ||
+        course.monitoringReadiness === "TEMPORARILY_UNAVAILABLE")
+  );
+  if (manualOnly.length === 0 && unconfirmed.length === 0 && unavailable.length === 0) {
     return "You're all set. We'll email you the moment a matching tee time opens up.";
   }
 
   const details: string[] = [];
   if (unconfirmed.length > 0) {
     details.push(
-      `We'll verify automatic monitoring for ${formatCourseNames(unconfirmed)} as your alert starts.`
+      `We'll email a monitoring verdict for ${formatCourseNames(unconfirmed)} after the first check; new-course verification is capped at 30 minutes.`
+    );
+  }
+  if (unavailable.length > 0) {
+    details.push(
+      `Automatic monitoring is currently unavailable for ${formatCourseNames(unavailable)}. Use the official site while Tee Time Spot continues checking coverage in the background.`
     );
   }
   if (manualOnly.length > 0) {

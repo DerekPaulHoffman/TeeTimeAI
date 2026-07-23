@@ -157,9 +157,41 @@ describe("course alert support enrichment", () => {
     ]);
 
     expect(knownCourse.monitoringSupport).toBe("AUTOMATIC");
+    expect(knownCourse.monitoringReadiness).toBe("READY");
     expect(knownCourse.courseId).toBe("course-timberlin");
     expect(knownCourse.profileUrl).toBe("/courses/timberlin-golf-course-berlin-ct");
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
+    expect(unknownCourse.monitoringReadiness).toBe("VERIFYING");
+  });
+
+  it("warns before selection when the newest automatic check failed", async () => {
+    const observedAt = new Date("2026-07-23T14:05:00.000Z");
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-windham",
+        googlePlaceId: "windham",
+        name: "Windham Golf Course",
+        latitude: 41.72,
+        longitude: -72.2,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        probes: [{ outcome: "FETCH_FAILED", observedAt }]
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "windham",
+        name: "Windham Golf Course",
+        latitude: 41.72,
+        longitude: -72.2,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.monitoringSupport).toBe("AUTOMATIC");
+    expect(course.monitoringReadiness).toBe("TEMPORARILY_UNAVAILABLE");
+    expect(course.monitoringReadinessObservedAt).toBe(observedAt.toISOString());
   });
 
   it("keeps a stale course guide linked while its facts are refreshed", async () => {

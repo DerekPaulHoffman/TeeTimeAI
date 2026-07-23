@@ -1863,6 +1863,7 @@ export async function listSearchesNeedingScheduleRecovery() {
   const now = new Date();
   const queuedOverdueBefore = new Date(now.getTime() - 2 * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - 10 * 60 * 1000);
+  const missingInitialVerdictBefore = new Date(now.getTime() - 20 * 60 * 1000);
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
@@ -1888,6 +1889,21 @@ export async function listSearchesNeedingScheduleRecovery() {
         },
         { checkStatus: "FAILED", nextCheckAt: { lte: now } },
         { checkStatus: "WAITING", nextCheckAt: { lte: overdueBefore } },
+        {
+          AND: [
+            {
+              statusEmailSentAt: null,
+              createdAt: { lte: missingInitialVerdictBefore }
+            },
+            {
+              checkStatus: { in: ["WAITING", "FAILED"] },
+              OR: [
+                { checkLeaseExpiresAt: null },
+                { checkLeaseExpiresAt: { lte: now } }
+              ]
+            }
+          ]
+        },
         {
           AND: [
             {

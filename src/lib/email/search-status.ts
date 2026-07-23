@@ -220,9 +220,13 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
   );
   const hasWorkInProgressCourse = input.courses.some(
     (course) =>
-      course.outcome === "NEEDS_ADAPTER" ||
       getBlockedMonitoringCategory(course) === "POLICY_REMEDIATION" ||
       getBlockedMonitoringCategory(course) === "IDENTITY_RECHECK"
+  );
+  const hasUnavailableCourse = input.courses.some(
+    (course) =>
+      course.outcome === "NEEDS_ADAPTER" ||
+      course.outcome === "FETCH_FAILED"
   );
   const heading = input.kind === "setup"
     ? "Your tee-time alert is active"
@@ -234,6 +238,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
         ? "Your alert is set. Automatic monitoring is paused for any course whose public-course identity is being rechecked; we'll keep checking supported courses."
         : hasDirectOnlyCourse
           ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
+          : hasUnavailableCourse
+            ? "Your alert is set. Every selected course has a result below. We'll monitor supported courses; use the official site where automatic alerts are unavailable."
           : hasWorkInProgressCourse
             ? "Your alert is set. We checked every selected course. Use the official link where monitoring is still being added."
             : "Your alert is set. We checked every selected course and will keep watching automatically."
@@ -309,9 +315,7 @@ function toMonitoringCourse(
     blockedCategory === "IDENTITY_FINAL" ||
     blockedCategory === "IDENTITY_RECHECK";
   const bookingAccess = identityBlocked ? undefined : getBookingAccess(course);
-  const isAddingMonitoring =
-    course.outcome === "NEEDS_ADAPTER" ||
-    blockedCategory === "POLICY_REMEDIATION";
+  const isAddingMonitoring = blockedCategory === "POLICY_REMEDIATION";
   const presentation = identityBlocked
     ? {
         badgeLabel: description.monitoringLabel.toUpperCase(),
@@ -336,6 +340,12 @@ function toMonitoringCourse(
             tone: "monitored" as const,
             detail: `${description.stateLabel}. ${description.detail}`
           }
+        : course.outcome === "NEEDS_ADAPTER"
+          ? {
+              badgeLabel: "AUTOMATIC ALERTS UNAVAILABLE",
+              tone: "direct" as const,
+              detail: `${description.stateLabel}. ${description.detail}`
+            }
         : isAddingMonitoring
           ? {
               badgeLabel: "ADDING MONITORING",
@@ -344,7 +354,7 @@ function toMonitoringCourse(
             }
           : course.outcome === "FETCH_FAILED"
             ? {
-                badgeLabel: "CHECK RETRYING",
+                badgeLabel: "TEMPORARILY UNAVAILABLE",
                 tone: "retrying" as const,
                 detail: `${description.stateLabel}. ${description.detail}`
               }
@@ -462,8 +472,8 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
 
   if (course.outcome === "NEEDS_ADAPTER") {
     return {
-      monitoringLabel: "Official site",
-      stateLabel: "Check this course directly for now",
+      monitoringLabel: "Automatic alerts unavailable",
+      stateLabel: "Use the official site for this course",
       icon: "↗",
       color: "#c75c0a",
       badgeBackground: "#fff0e4",
@@ -472,17 +482,17 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#f3cfad",
       calloutText: "#713706",
       detail: course.bookingUrl
-        ? "We checked this course’s official booking surface. Live availability is not currently available inside Tee Time Spot, so use the official link while we keep working to add monitoring."
+        ? "We checked this course’s official booking surface but could not confirm reliable automatic monitoring. Use the official link for current availability; coverage work can continue in the background."
         : course.phone
-          ? "We checked this course’s public booking information. Call the course directly while we keep working to add monitoring."
-          : "We checked the public course information, but no direct availability source was available."
+          ? "We checked this course’s public booking information but could not confirm reliable automatic monitoring. Call the course directly for current availability."
+          : "We checked the public course information, but no reliable automatic availability source or direct booking page was confirmed."
     };
   }
 
   if (course.outcome === "FETCH_FAILED") {
     return {
-      monitoringLabel: "Official site · retry scheduled",
-      stateLabel: "Latest check incomplete",
+      monitoringLabel: "Automatic alerts temporarily unavailable",
+      stateLabel: "Use the official site while we retry",
       icon: "↻",
       color: "#a23a32",
       badgeBackground: "#fbeae7",
@@ -490,7 +500,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff5f3",
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
-      detail: "This course’s latest availability check did not finish. We’ll retry automatically; its official page is available in the meantime."
+      detail: "This course’s latest availability check did not finish, so Tee Time Spot cannot currently promise automatic alerts. We’ll retry in the background; use the official page in the meantime."
     };
   }
 

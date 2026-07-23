@@ -142,9 +142,9 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("ADDING MONITORING");
-    expect(html).toContain("Check this course directly for now");
-    expect(html).toContain("We checked every selected course");
+    expect(html).toContain("AUTOMATIC ALERTS UNAVAILABLE");
+    expect(html).toContain("Use the official site for this course");
+    expect(html).toContain("Every selected course has a result below");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we're watching for you");
     expect(html).toContain("COURSE LAYOUT");
@@ -235,7 +235,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
-    expect(html).toContain("PRIORITY 2 &middot; ADDING MONITORING");
+    expect(html).toContain("PRIORITY 2 &middot; AUTOMATIC ALERTS UNAVAILABLE");
   });
 
   it("revalidates a generic legacy block instead of treating it as final", () => {
@@ -588,13 +588,39 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(pendingHtml).toContain("ADDING MONITORING");
-    expect(alertedHtml).toContain("ADDING MONITORING");
-    expect(pendingHtml).toContain("Check this course directly for now");
-    expect(alertedHtml).toContain("Check this course directly for now");
+    expect(pendingHtml).toContain("AUTOMATIC ALERTS UNAVAILABLE");
+    expect(alertedHtml).toContain("AUTOMATIC ALERTS UNAVAILABLE");
+    expect(pendingHtml).toContain("Use the official site for this course");
+    expect(alertedHtml).toContain("Use the official site for this course");
     expect(pendingHtml).not.toContain("team has been alerted");
     expect(alertedHtml).not.toContain("team has been alerted");
     expect(alertedHtml).not.toContain("Automatic monitoring isn’t available yet");
+  });
+
+  it("treats an incomplete provider check as an immediate golfer-facing verdict", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-fetch-failed",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-26",
+      startTime: "09:00",
+      endTime: "13:00",
+      players: 2,
+      checkedAt: new Date("2026-07-23T14:15:00.000Z"),
+      courses: [
+        {
+          courseId: "windham",
+          courseName: "Windham Golf Course",
+          outcome: "FETCH_FAILED",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/book"
+        }
+      ]
+    });
+
+    expect(html).toContain("TEMPORARILY UNAVAILABLE");
+    expect(html).toContain("cannot currently promise automatic alerts");
+    expect(html).toContain("Open official booking page");
   });
 
   it("uses the Figma shell, alternating course imagery, and availability-first order", () => {
