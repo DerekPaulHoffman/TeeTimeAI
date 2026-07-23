@@ -53,6 +53,14 @@ export async function createTeeSearchForUser(
   const sortedCourses = input.courses
     .map((course) => applyActivePlaceReview(course, placeReviews))
     .sort((a, b) => a.rank - b.rank);
+  const unverifiedCourse = sortedCourses.find(
+    (course) => course.publicAccessStatus === "UNVERIFIED"
+  );
+  if (unverifiedCourse) {
+    throw new Error(
+      `${unverifiedCourse.name} still needs public-course verification before alerts can start.`
+    );
+  }
   const resolvedPreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
   if (resolvedPreferences.some((preference) => preference.course.isPublic === false)) {
     throw new Error(
@@ -315,6 +323,9 @@ function applyActivePlaceReview(
   }
   return {
     ...course,
+    ...(review.accessOverride === "VERIFIED_PUBLIC"
+      ? { publicAccessStatus: "PUBLIC" as const }
+      : {}),
     googlePlaceId: review.canonicalPlaceId ?? course.googlePlaceId,
     name: review.canonicalName ?? course.name,
     address: review.canonicalAddress ?? course.address,

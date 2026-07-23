@@ -3128,7 +3128,7 @@ button {
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(0, 1fr) 320px;
-  margin-top: 24px;
+  margin-top: 20px;
   scroll-margin-top: 76px;
 }
 
@@ -3237,6 +3237,14 @@ button {
   color: #1f7a4d;
   font-weight: 600;
   padding: 1px 7px;
+}
+
+.figma-course-pill.is-unverified {
+  background: #fff2df;
+  border-radius: 999px;
+  color: #8a4f19;
+  font-weight: 700;
+  padding: 2px 7px;
 }
 
 .figma-course-pill.is-rating {
@@ -3467,43 +3475,47 @@ button {
 }
 
 .missing-course-lookup {
-  border-top: 1px solid #d8e2dd;
-  margin-top: 28px;
-  padding-top: 24px;
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dce4df;
+  border-radius: 16px;
+  box-shadow: 0 1px 4px rgba(17, 26, 34, 0.03);
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.6fr);
+  margin-top: 20px;
+  padding: 16px;
+  scroll-margin-top: 84px;
 }
 
 .missing-course-heading {
-  align-items: end;
+  align-items: center;
   display: grid;
-  gap: 24px;
-  grid-template-columns: minmax(220px, 0.75fr) minmax(280px, 1fr);
-}
-
-.missing-course-heading .eyebrow {
-  color: #557168;
-  font-size: 0.64rem;
-  margin: 0 0 7px;
+  gap: 18px;
+  grid-template-columns: minmax(210px, auto) minmax(140px, 1fr);
 }
 
 .missing-course-heading h2 {
   color: #10251f;
-  font-size: 1.2rem;
+  font-size: 0.94rem;
+  font-weight: 800;
   letter-spacing: -0.02em;
   margin: 0;
+  white-space: nowrap;
 }
 
-.missing-course-heading > p {
+.missing-course-heading p {
   color: #536d65;
-  font-size: 0.82rem;
-  line-height: 1.5;
+  font-size: 0.75rem;
+  line-height: 1.4;
   margin: 0;
 }
 
 .missing-course-form {
-  margin-top: 16px;
+  margin: 0;
 }
 
-.missing-course-form > label {
+.missing-course-form > label:not(.sr-only) {
   color: #506b62;
   display: block;
   font-size: 0.68rem;
@@ -3568,7 +3580,8 @@ button {
 .missing-course-status {
   color: #557168;
   font-size: 0.78rem;
-  margin: 9px 4px 0;
+  grid-column: 1 / -1;
+  margin: -4px 4px 0;
 }
 
 .missing-course-status.is-error {
@@ -3578,6 +3591,7 @@ button {
 .missing-course-results {
   display: grid;
   gap: 8px;
+  grid-column: 1 / -1;
   margin-top: 14px;
 }
 
@@ -3980,6 +3994,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .missing-course-lookup {
+    grid-template-columns: 1fr;
+  }
+
   .search-page .figma-results-layout .figma-selected-panel {
     position: static;
   }
@@ -4049,6 +4067,10 @@ button {
     align-items: start;
     gap: 8px;
     grid-template-columns: 1fr;
+  }
+
+  .missing-course-heading h2 {
+    white-space: normal;
   }
 
   .missing-course-form > div {

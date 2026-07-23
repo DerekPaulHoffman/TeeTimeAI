@@ -350,6 +350,47 @@ describe("Google Places mapping", () => {
     );
   });
 
+  it("returns an operational golf-course result for review when Google uses a sports-club primary type", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          places: [
+            {
+              id: "places/ChIJ99HILg3O54kRiJLIRU3WbfE",
+              displayName: { text: "Wheeler Family Traditions Golf Club" },
+              formattedAddress: "37 Harrison Rd, Wallingford, CT 06492",
+              primaryType: "sports_club",
+              types: ["golf_course", "sports_club", "point_of_interest"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://wheelertraditions.com/",
+              location: { latitude: 41.4262453, longitude: -72.8153967 }
+            }
+          ]
+        })
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ places: [] })
+      } as Response);
+
+    const courses = await searchGolfCoursesByName({
+      query: "wheeler family tranditions in wallinford"
+    });
+
+    expect(courses).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "ChIJ99HILg3O54kRiJLIRU3WbfE",
+        name: "Wheeler Family Traditions Golf Club",
+        publicAccessStatus: "UNVERIFIED",
+        website: "https://wheelertraditions.com/"
+      })
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("corroborates a public course whose name contains Country Club", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const grassyHillPlace = {
@@ -391,13 +432,21 @@ describe("Google Places mapping", () => {
       longitude: -73.064
     });
 
-    expect(courses).toEqual([
-      expect.objectContaining({
-        googlePlaceId: "ChIJHRdhRQt16IkRnZxbawELtdM",
-        name: "Grassy Hill Country Club",
-        distanceMeters: expect.any(Number)
-      })
-    ]);
+    expect(courses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          googlePlaceId: "orange-hills",
+          name: "Orange Hills Country Club",
+          publicAccessStatus: "UNVERIFIED"
+        }),
+        expect.objectContaining({
+          googlePlaceId: "ChIJHRdhRQt16IkRnZxbawELtdM",
+          name: "Grassy Hill Country Club",
+          publicAccessStatus: "PUBLIC",
+          distanceMeters: expect.any(Number)
+        })
+      ])
+    );
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const corroborationBody = JSON.parse(
       (fetchMock.mock.calls[1]?.[1] as RequestInit | undefined)?.body as string

@@ -189,4 +189,89 @@ describe("TeeTimeIntake", () => {
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Trumbull, CT");
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("keeps a possible direct-lookup course in the list while public access is reviewed", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.startsWith("/api/courses/lookup")) {
+        return Response.json({
+          courses: [
+            {
+              address: "37 Harrison Rd, Wallingford, CT 06492",
+              googlePlaceId: "ChIJ99HILg3O54kRiJLIRU3WbfE",
+              latitude: 41.4262453,
+              longitude: -72.8153967,
+              name: "Wheeler Family Traditions Golf Club",
+              publicAccessStatus: "UNVERIFIED",
+              timeZone: "America/New_York",
+              website: "https://wheelertraditions.com/"
+            }
+          ]
+        });
+      }
+
+      if (url === "/api/feedback") {
+        return Response.json({ feedback: { id: "feedback-1" } }, { status: 201 });
+      }
+
+      if (url === "/api/analytics/events") {
+        return Response.json({ event: { id: "event-1" } }, { status: 201 });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+
+    render(
+      <TeeTimeIntake
+        accountEnabled
+        initialValues={{ location: "Wallingford, CT" }}
+      />
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Looking for a specific course?" })
+    ).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Course name and town"), {
+      target: { value: "wheeler family tranditions in wallinford" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Find course" }));
+
+    await screen.findByRole("heading", {
+      name: "Wheeler Family Traditions Golf Club"
+    });
+    expect(screen.getByText("Possible course")).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Add Wheeler Family Traditions Golf Club"
+      })
+    );
+
+    await screen.findByText(
+      "Wheeler Family Traditions Golf Club was added to your list and saved for public-course review. Alerts can start after it is verified."
+    );
+    expect(screen.getByText("Public access verification needed")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true);
+    expect(
+      screen.getByText(
+        "Wheeler Family Traditions Golf Club still needs public-course verification. It is saved to your list, but alerts cannot start for it yet."
+      )
+    ).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/feedback",
+      expect.objectContaining({
+        body: expect.stringContaining("[COURSE_LOOKUP_CANDIDATE]")
+      })
+    );
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toContain(
+        '"publicAccessStatus":"UNVERIFIED"'
+      )
+    );
+  });
 });

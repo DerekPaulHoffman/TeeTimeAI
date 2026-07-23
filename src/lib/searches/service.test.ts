@@ -59,6 +59,33 @@ describe("createTeeSearchForUser", () => {
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
   });
 
+  it("does not persist a review-pending direct lookup candidate as a public course", async () => {
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2027-08-15",
+        startTime: "13:00",
+        endTime: "17:00",
+        players: 2,
+        cadenceMinutes: 15,
+        courses: [
+          {
+            googlePlaceId: "review-pending-course",
+            name: "Review Pending Golf Club",
+            publicAccessStatus: "UNVERIFIED",
+            latitude: 41.47,
+            longitude: -72.8,
+            rank: 1
+          }
+        ]
+      })
+    ).rejects.toThrow(
+      "Review Pending Golf Club still needs public-course verification before alerts can start."
+    );
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
   it("connects demo selections to an existing supported nearby course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

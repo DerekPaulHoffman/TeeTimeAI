@@ -30,6 +30,7 @@ const selectedCourseSchema = z.object({
   googlePlaceId: z.string().min(1).optional(),
   courseId: z.string().min(1).optional(),
   name: z.string().min(1),
+  publicAccessStatus: z.enum(["PUBLIC", "UNVERIFIED"]).optional(),
   address: z.string().optional(),
   city: z.string().max(120).optional(),
   stateCode: z.string().max(2).optional(),

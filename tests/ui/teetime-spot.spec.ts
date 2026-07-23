@@ -409,10 +409,6 @@ test.describe("Tee Time Spot UI smoke", () => {
       "color",
       "rgb(83, 109, 101)"
     );
-    await expect(page.locator(".missing-course-form > label")).toHaveCSS(
-      "color",
-      "rgb(80, 107, 98)"
-    );
     await expect(page.locator(".site-footer-bottom p")).toHaveCSS(
       "color",
       "rgba(255, 255, 255, 0.65)"
@@ -1066,7 +1062,10 @@ test.describe("Tee Time Spot UI smoke", () => {
         })
       });
     });
-    const missingCourseInput = page.getByRole("searchbox", { name: "Course name", exact: true });
+    const missingCourseInput = page.getByRole("searchbox", {
+      name: "Course name and town",
+      exact: true
+    });
     await missingCourseInput.fill("Bethpage Black, Farmingdale NY");
     await page.getByRole("button", { name: "Find course" }).click();
     await expect(page.getByRole("status").filter({ hasText: "3 matches found" })).toBeVisible();

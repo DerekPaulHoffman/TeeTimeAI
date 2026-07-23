@@ -1344,7 +1344,7 @@ function categoryFromFeedback(
   if (/email|alert|stop link|unsubscribe/.test(haystack)) {
     return "email_alerts";
   }
-  if (/missing course|course result|private course|duplicate course|search result/.test(haystack)) {
+  if (/missing[-_ ]course|course result|private course|duplicate course|search result/.test(haystack)) {
     return "search_discovery";
   }
   if (/keyboard|screen reader|contrast|focus|accessible|accessibility/.test(haystack)) {

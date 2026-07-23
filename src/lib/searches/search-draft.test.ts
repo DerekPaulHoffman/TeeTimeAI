@@ -29,6 +29,10 @@ describe("search draft storage", () => {
   });
 
   it("keeps filters, results, and ranked courses available for repeated reads", () => {
+    const reviewPendingCourse = {
+      ...course,
+      publicAccessStatus: "UNVERIFIED" as const
+    };
     storeSearchDraft({
       location: "Trumbull, CT",
       players: 2,
@@ -39,7 +43,7 @@ describe("search draft storage", () => {
       radius: 20,
       coordinates: { latitude: 41.24, longitude: -73.2 },
       courses: [course],
-      selectedCourses: [course]
+      selectedCourses: [reviewPendingCourse]
     });
 
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).not.toBeNull();
@@ -53,7 +57,12 @@ describe("search draft storage", () => {
           layoutHoleCounts: [18]
         }
       ],
-      selectedCourses: [{ googlePlaceId: "course-1" }]
+      selectedCourses: [
+        {
+          googlePlaceId: "course-1",
+          publicAccessStatus: "UNVERIFIED"
+        }
+      ]
     });
     expect(readSearchDraft()?.selectedCourses).toHaveLength(1);
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).not.toBeNull();

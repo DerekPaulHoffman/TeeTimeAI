@@ -148,9 +148,14 @@ function sanitizeCourseCandidate(value: unknown): CourseCandidate | undefined {
     value.layoutHolesStatus === "UNVERIFIED"
     ? value.layoutHolesStatus
     : undefined;
+  const publicAccessStatus = value.publicAccessStatus === "PUBLIC" ||
+    value.publicAccessStatus === "UNVERIFIED"
+    ? value.publicAccessStatus
+    : undefined;
 
   return {
     ...base,
+    ...(publicAccessStatus ? { publicAccessStatus } : {}),
     ...(distanceMeters !== undefined ? { distanceMeters } : {}),
     ...(rating !== undefined ? { rating } : {}),
     ...(par !== undefined ? { par } : {}),

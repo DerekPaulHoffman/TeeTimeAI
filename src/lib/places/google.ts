@@ -70,6 +70,7 @@ export type CourseCandidate = {
   courseId?: string;
   googlePlaceId: string;
   name: string;
+  publicAccessStatus?: "PUBLIC" | "UNVERIFIED";
   address?: string;
   city?: string;
   stateCode?: string;
@@ -321,6 +322,48 @@ function isLikelyPublicGolfCoursePlace(
   return true;
 }
 
+function isPlausibleDirectGolfCourseLookupPlace(
+  place: GooglePlace,
+  reviewIndex: GooglePlaceReviewIndex
+) {
+  const placeId = normalizePlaceId(place.id ?? place.name ?? "");
+  const review = reviewIndex.byPlaceId.get(placeId);
+  const name = review?.canonicalName ?? place.displayName?.text ?? "";
+
+  if (
+    review?.accessOverride === "VERIFIED_PRIVATE" ||
+    review?.accessOverride === "VERIFIED_NON_COURSE"
+  ) {
+    return false;
+  }
+
+  if (place.businessStatus && place.businessStatus !== "OPERATIONAL") {
+    return false;
+  }
+
+  if (review?.accessOverride === "VERIFIED_PUBLIC") {
+    return true;
+  }
+
+  if (!place.types?.includes("golf_course")) {
+    return false;
+  }
+
+  if (PRIVATE_GOLF_COURSE_LABEL_PATTERN.test(place.googleMapsTypeLabel?.text ?? "")) {
+    return false;
+  }
+
+  if (EXPLICIT_PRIVATE_NAME_PATTERNS.some((pattern) => pattern.test(name))) {
+    return false;
+  }
+
+  if (NON_COURSE_NAME_PATTERNS.some((pattern) => pattern.test(name))) {
+    return false;
+  }
+
+  return true;
+}
+
 export async function searchNearbyGolfCourses(
   input: NearbyCourseSearchInput,
   reviewIndex?: GooglePlaceReviewIndex
@@ -439,16 +482,30 @@ export async function searchGolfCoursesByName(
   const origin = hasLocationBias
     ? { latitude: input.latitude as number, longitude: input.longitude as number }
     : null;
+  const filterOptions = {
+    publicCourseEvidenceIds,
+    reviewIndex: activeReviewIndex
+  };
 
   return dedupeGolfCoursePlaces(
-    filterPublicGolfCoursePlaces([...primaryPlaces, ...publicCoursePlaces], {
-      publicCourseEvidenceIds,
-      reviewIndex: activeReviewIndex
-    }),
+    filterVerifiedDuplicateCoursePlaces(
+      [...primaryPlaces, ...publicCoursePlaces].filter((place) =>
+        isPlausibleDirectGolfCourseLookupPlace(place, activeReviewIndex)
+      ),
+      activeReviewIndex
+    ),
     activeReviewIndex
   ).map((place) => {
     const course = mapGooglePlaceToCourseCandidate(place, activeReviewIndex);
-    return origin ? { ...course, distanceMeters: getDistanceMeters(origin, course) } : course;
+    const candidate = {
+      ...course,
+      publicAccessStatus: isLikelyPublicGolfCoursePlace(place, filterOptions)
+        ? "PUBLIC" as const
+        : "UNVERIFIED" as const
+    };
+    return origin
+      ? { ...candidate, distanceMeters: getDistanceMeters(origin, candidate) }
+      : candidate;
   });
 }
 

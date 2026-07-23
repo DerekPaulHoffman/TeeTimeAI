@@ -489,12 +489,17 @@ function TeeTimeIntakeContent({
       getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
       "incompatible"
   );
+  const unverifiedSelectedCourse = selected.find(
+    (course) => course.publicAccessStatus === "UNVERIFIED"
+  );
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
       ? "Choose an end time after the start time."
       : hasInvalidAdditionalEmail
         ? "Enter a valid email for each additional recipient."
+      : unverifiedSelectedCourse
+        ? `${unverifiedSelectedCourse.name} still needs public-course verification. It is saved to your list, but alerts cannot start for it yet.`
       : incompatibleSelectedCourse && requestedLayoutHoles
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : selected.length > 0 && !hasMonitorableCourse
@@ -677,16 +682,16 @@ function TeeTimeIntakeContent({
         type: "error",
         message: `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match this ${requestedLayoutHoles}-hole course search.`
       });
-      return;
+      return false;
     }
 
     if (selected.length >= 5) {
       setNotice({ type: "error", message: "You can prioritize up to 5 courses." });
-      return;
+      return false;
     }
 
     if (selectedIds.has(course.googlePlaceId)) {
-      return;
+      return false;
     }
 
     if (!hasTrackedCourseSelectionRef.current) {
@@ -702,6 +707,7 @@ function TeeTimeIntakeContent({
     }
 
     setSelected((current) => [...current, course]);
+    return true;
   }
 
   function toggleCourse(course: CourseCandidate) {
@@ -1086,6 +1092,16 @@ function TeeTimeIntakeContent({
         </div>
       </form>
 
+      <MissingCourseLookup
+        contactEmail={alertEmail}
+        locationLabel={locationText}
+        origin={searchCoordinates}
+        requestedLayoutHoles={requestedLayoutHoles}
+        selectedIds={selectedIds}
+        onAddCourse={addCourse}
+        onRemoveCourse={removeCourse}
+      />
+
       <div className="figma-results-layout" ref={resultsRef}>
         <div className="figma-results-column">
           {loading ? (
@@ -1289,15 +1305,6 @@ function TeeTimeIntakeContent({
             ) : null}
           </div>
         ) : null}
-        <MissingCourseLookup
-          contactEmail={alertEmail}
-          locationLabel={locationText}
-          origin={searchCoordinates}
-          requestedLayoutHoles={requestedLayoutHoles}
-          selectedIds={selectedIds}
-          onAddCourse={addCourse}
-          onRemoveCourse={removeCourse}
-        />
         </div>
 
       <aside
@@ -1355,7 +1362,11 @@ function TeeTimeIntakeContent({
                   ) : requestedLayoutHoles ? (
                     <span className="selected-course-support">Layout unverified</span>
                   ) : null}
-                  {course.alertSupport ? (
+                  {course.publicAccessStatus === "UNVERIFIED" ? (
+                    <span className="selected-course-support">
+                      Public access verification needed
+                    </span>
+                  ) : course.alertSupport ? (
                     <span className="selected-course-support">
                       {getAlertSupportLabel(course.alertSupport)}
                     </span>
@@ -1604,7 +1615,7 @@ function MissingCourseLookup({
   origin: SearchCoordinates | null;
   requestedLayoutHoles: CourseLayoutHoleCount | null;
   selectedIds: ReadonlySet<string>;
-  onAddCourse: (course: CourseCandidate) => void;
+  onAddCourse: (course: CourseCandidate) => boolean;
   onRemoveCourse: (placeId: string) => void;
 }) {
   const [query, setQuery] = useState("");
@@ -1614,6 +1625,7 @@ function MissingCourseLookup({
   );
   const [lookupMessage, setLookupMessage] = useState("");
   const reportedMisses = useRef(new Set<string>());
+  const reportedCandidates = useRef(new Set<string>());
 
   async function reportMissingCourse(normalizedQuery: string) {
     const reportKey = `${normalizedQuery.toLowerCase()}|${locationLabel.trim().toLowerCase()}`;
@@ -1650,6 +1662,60 @@ function MissingCourseLookup({
     return false;
   }
 
+  async function reportLookupCandidate(course: CourseCandidate) {
+    if (reportedCandidates.current.has(course.googlePlaceId)) {
+      return true;
+    }
+
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sentiment: "broken",
+          message: `[COURSE_LOOKUP_CANDIDATE] Missing course requested for public-course review ${JSON.stringify({
+            query: query.trim(),
+            googlePlaceId: course.googlePlaceId,
+            name: course.name,
+            address: course.address,
+            website: course.website,
+            location: locationLabel.trim() || undefined
+          })}`,
+          page: "/search#missing-course",
+          contactEmail: contactEmail || undefined,
+          trafficClass: detectWebsiteTrafficClass()
+        })
+      });
+
+      if (response.ok) {
+        reportedCandidates.current.add(course.googlePlaceId);
+        return true;
+      }
+    } catch {
+      // The shortlist still remains in this browser if the review request is unavailable.
+    }
+
+    return false;
+  }
+
+  async function addLookupCourse(course: CourseCandidate) {
+    if (!onAddCourse(course)) {
+      return;
+    }
+
+    if (course.publicAccessStatus !== "UNVERIFIED") {
+      setLookupMessage(`${course.name} was added to your list.`);
+      return;
+    }
+
+    const reportSaved = await reportLookupCandidate(course);
+    setLookupMessage(
+      reportSaved
+        ? `${course.name} was added to your list and saved for public-course review. Alerts can start after it is verified.`
+        : `${course.name} was added to your list in this browser, but we couldn't save the review request. Please try again or send it through Feedback.`
+    );
+  }
+
   async function lookupCourse() {
     const normalizedQuery = query.trim();
     if (normalizedQuery.length < 2) {
@@ -1659,7 +1725,7 @@ function MissingCourseLookup({
     }
 
     setLookupState("loading");
-    setLookupMessage("Looking for matching public courses…");
+    setLookupMessage("Looking for matching golf courses…");
 
     try {
       const params = new URLSearchParams({ q: normalizedQuery });
@@ -1697,14 +1763,8 @@ function MissingCourseLookup({
   return (
     <section className="missing-course-lookup" aria-labelledby="missing-course-heading" id="missing-course">
       <div className="missing-course-heading">
-        <div>
-          <p className="eyebrow">Still looking?</p>
-          <h2 id="missing-course-heading">Can&apos;t find your course?</h2>
-        </div>
-        <p>
-          Search its name and town. If we still miss it, we&apos;ll log it for review instead of
-          assuming it doesn&apos;t exist.
-        </p>
+        <h2 id="missing-course-heading">Looking for a specific course?</h2>
+        <p>Can&apos;t find it in the list? Search by name and town.</p>
       </div>
       <form
         className="missing-course-form"
@@ -1713,7 +1773,9 @@ function MissingCourseLookup({
           void lookupCourse();
         }}
       >
-        <label htmlFor="missingCourseQuery">Course name</label>
+        <label className="sr-only" htmlFor="missingCourseQuery">
+          Course name and town
+        </label>
         <div>
           <Search aria-hidden="true" size={17} />
           <input
@@ -1756,8 +1818,17 @@ function MissingCourseLookup({
                 />
                 <div className="missing-course-copy">
                   <div className="figma-course-badges missing-course-badges">
-                    <span className="figma-course-pill is-public">
-                      <Trees size={11} /> Public
+                    <span
+                      className={
+                        course.publicAccessStatus === "UNVERIFIED"
+                          ? "figma-course-pill is-unverified"
+                          : "figma-course-pill is-public"
+                      }
+                    >
+                      <Trees size={11} />
+                      {course.publicAccessStatus === "UNVERIFIED"
+                        ? "Possible course"
+                        : "Public"}
                     </span>
                     {course.layoutHoleCounts?.length ? (
                       <span className="figma-course-pill">
@@ -1776,7 +1847,13 @@ function MissingCourseLookup({
                       {formatDistance(course.distanceMeters)} away
                     </span>
                   ) : null}
-                  <CourseMonitoringStatus compact course={course} />
+                  {course.publicAccessStatus === "UNVERIFIED" ? (
+                    <span className="missing-course-support">
+                      Public access needs verification before alerts can start
+                    </span>
+                  ) : (
+                    <CourseMonitoringStatus compact course={course} />
+                  )}
                   {isIncompatible && requestedLayoutHoles ? (
                     <span className="missing-course-support">
                       Does not match an {requestedLayoutHoles}-hole course search
@@ -1819,13 +1896,21 @@ function MissingCourseLookup({
                   aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
                   className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
                   disabled={isIncompatible && !isSelected}
-                  onClick={() =>
-                    isSelected ? onRemoveCourse(course.googlePlaceId) : onAddCourse(course)
-                  }
+                  onClick={() => {
+                    if (isSelected) {
+                      onRemoveCourse(course.googlePlaceId);
+                    } else {
+                      void addLookupCourse(course);
+                    }
+                  }}
                   type="button"
                 >
                   {isSelected ? <Check size={13} /> : <Plus size={13} />}
-                  {isSelected ? "Added" : isIncompatible ? "Doesn’t match" : "Add"}
+                  {isSelected
+                    ? "Added"
+                    : isIncompatible
+                      ? "Doesn’t match"
+                      : "Add to my list"}
                 </button>
               </div>
             );
