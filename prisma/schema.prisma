@@ -39,6 +39,18 @@ enum BookingMethod {
   WALK_IN
 }
 
+enum BookingAccessMode {
+  UNKNOWN
+  PUBLIC_SIGNED_OUT
+  ACCOUNT_REQUIRED
+  ACCOUNT_SELF_SERVICE
+  ACCOUNT_STAFF_PROVISIONED
+  PHONE_ONLY
+  CONTACT_COURSE
+  WALK_IN
+  CAPTCHA_OR_QUEUE
+}
+
 enum BookingWindowSource {
   PROVIDER_CONFIG
   PROVIDER_MESSAGE
@@ -254,6 +266,7 @@ model Course {
   bookingWindowObservedAt     DateTime?
   automationEligibility       AutomationEligibility              @default(UNKNOWN)
   automationReason            AutomationReason                   @default(NONE)
+  bookingAccessMode           BookingAccessMode                   @default(UNKNOWN)
   policyNotes                 String?
   bookingMetadata             Json?
   intelligenceVerifiedAt      DateTime?
@@ -522,6 +535,7 @@ model CourseAutomationDiscovery {
   bookingPhone          String?
   automationEligibility AutomationEligibility @default(UNKNOWN)
   automationReason      AutomationReason      @default(NONE)
+  bookingAccessMode     BookingAccessMode     @default(UNKNOWN)
   sourceUrl             String
   bookingUrl            String?
   apiEndpoint           String?

@@ -2480,7 +2480,61 @@ describe("buildBrowserDiscovery", () => {
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_REQUIRED",
       evidence: { learnedFrom: "official-account-required-booking" }
+    });
+  });
+
+  it("classifies official first-time staff setup without calling a public course private", () => {
+    const officialUrl =
+      "https://public-course.example/golf/play/book-a-tee-time.html";
+    const discovery = buildBrowserDiscovery({
+      courseId: "staff-provisioned",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [officialUrl],
+      bookingCallToAction: true,
+      visibleText:
+        "New to the Course? If you have never played here or are not a member, our team will help. To gain access and book your first tee time, please contact the Golf Shop or Reservations. They will assist with setting up your access."
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: true,
+      status: "VERIFIED",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_STAFF_PROVISIONED",
+      bookingUrl: officialUrl,
+      evidence: {
+        learnedFrom: "official-staff-provisioned-account-access"
+      }
+    });
+  });
+
+  it("classifies self-service registration only from the observed booking surface", () => {
+    const officialUrl = "https://public-course.example/tee-times";
+    const discovery = buildBrowserDiscovery({
+      courseId: "self-service",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [officialUrl],
+      bookingCallToAction: true,
+      bookingSurfaceText:
+        "Create an account to book tee times. Sign in to view tee-time availability."
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: true,
+      status: "VERIFIED",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+      evidence: {
+        learnedFrom: "official-self-service-account-access"
+      }
     });
   });
 

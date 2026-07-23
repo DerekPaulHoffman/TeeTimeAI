@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
+import { resolveBookingAccessMode } from "@/lib/courses/intelligence";
 import {
   lockSearchForEmailReconciliation,
   suppressSearchEmailDeliveriesForMatches
@@ -197,6 +198,7 @@ export async function listBrowserProbeTargets(
             providerFamilyKey: true,
             automationEligibility: true,
             automationReason: true,
+            bookingAccessMode: true,
             bookingMethod: true,
             isPublic: true,
             intelligenceVerifiedAt: true,
@@ -500,17 +502,25 @@ export async function recordCourseProbe(input: CourseProbeInput) {
 export async function recordBrowserDiscovery(input: BrowserDiscovery) {
   input = normalizeBrowserDiscoveryForMonitoring(input);
   const learnedOnline = input.status === "LEARNED" && Boolean(input.apiMetadata);
+  const automationEligibility =
+    input.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN");
+  const bookingMethod =
+    input.bookingMethod ?? (learnedOnline && input.bookingUrl ? "PUBLIC_ONLINE" : "UNKNOWN");
   return prisma.courseAutomationDiscovery.create({
     data: {
       courseId: input.courseId,
       status: input.status,
       detectedPlatform: input.detectedPlatform,
-      bookingMethod:
-        input.bookingMethod ?? (learnedOnline && input.bookingUrl ? "PUBLIC_ONLINE" : "UNKNOWN"),
+      bookingMethod,
       bookingPhone: input.bookingPhone,
-      automationEligibility:
-        input.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN"),
+      automationEligibility,
       automationReason: input.automationReason ?? "NONE",
+      bookingAccessMode: resolveBookingAccessMode({
+        automationEligibility,
+        automationReason: input.automationReason,
+        bookingMethod,
+        bookingAccessMode: input.bookingAccessMode
+      }),
       sourceUrl: input.sourceUrl,
       bookingUrl: input.bookingUrl,
       apiEndpoint: input.apiEndpoint,
@@ -565,6 +575,7 @@ export async function retireLegacyPolicyOnlyCourseBlock(
       ...(!preserveProviderAccess ? { bookingMethod: "UNKNOWN" as const } : {}),
       automationEligibility: "NEEDS_REVIEW",
       automationReason: "OTHER",
+      bookingAccessMode: "UNKNOWN",
       policyNotes:
         "Legacy booking-policy text is not a technical monitoring blocker. Current public monitoring support requires fresh verification.",
       intelligenceVerifiedAt: null,
@@ -637,6 +648,7 @@ export async function applyBrowserDiscoveryToCourse(
         bookingMethod: true,
         automationEligibility: true,
         automationReason: true,
+        bookingAccessMode: true,
         intelligenceVerifiedAt: true,
         intelligenceReviewAt: true,
         intelligenceConfidence: true,
@@ -694,6 +706,7 @@ export async function applyBrowserDiscoveryToCourse(
       bookingMethod: true,
       automationEligibility: true,
       automationReason: true,
+      bookingAccessMode: true,
       intelligenceVerifiedAt: true,
       intelligenceReviewAt: true,
       intelligenceConfidence: true,
@@ -790,6 +803,7 @@ export async function applyBrowserDiscoveryToCourse(
             bookingMethod: "UNKNOWN",
             automationEligibility: "BLOCKED",
             automationReason: "OTHER",
+            bookingAccessMode: "UNKNOWN",
             policyNotes: input.policyNotes,
             intelligenceVerifiedAt: new Date(),
             intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
@@ -807,6 +821,12 @@ export async function applyBrowserDiscoveryToCourse(
             ? Prisma.DbNull
             : (input.apiMetadata as Prisma.InputJsonValue),
           bookingMethod,
+          bookingAccessMode: resolveBookingAccessMode({
+            automationEligibility,
+            automationReason: input.automationReason,
+            bookingMethod,
+            bookingAccessMode: input.bookingAccessMode
+          }),
           bookingPhone: corroboratedPrivateReopening
             ? (input.bookingPhone ?? null)
             : input.bookingPhone,

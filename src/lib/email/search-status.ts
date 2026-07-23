@@ -1,7 +1,13 @@
 import type { MonitoringDisposition } from "@/lib/automation/policy";
 import type {
   AutomationReason,
+  BookingAccessMode,
   BookingMethod
+} from "@/lib/courses/intelligence";
+import {
+  getAlertSupportDescription,
+  getAlertSupportLabel,
+  getCourseAlertSupport
 } from "@/lib/courses/intelligence";
 import {
   renderCustomerEmail,
@@ -42,6 +48,7 @@ export type SearchStatusCourseReport = {
   phone?: string;
   bookingMethod?: BookingMethod;
   automationReason?: AutomationReason;
+  bookingAccessMode?: BookingAccessMode;
   monitoringDisposition?: MonitoringDisposition;
   supportStatus?: "TEAM_ALERTED" | "PENDING_ALERT";
   bookingAccess?:
@@ -487,9 +494,18 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   }
 
   if (blockedCategory === "TECHNICAL_FINAL") {
-    const accountRequired = course.automationReason === "ACCOUNT_REQUIRED";
+    const alertSupport =
+      getCourseAlertSupport({
+        automationEligibility: "BLOCKED",
+        automationReason: course.automationReason,
+        bookingMethod: course.bookingMethod,
+        bookingAccessMode: course.bookingAccessMode
+      }) ??
+      (course.automationReason === "ACCOUNT_REQUIRED"
+        ? "ACCOUNT_REQUIRED"
+        : "CAPTCHA_OR_QUEUE");
     return {
-      monitoringLabel: accountRequired ? "Account required" : "Captcha or queue",
+      monitoringLabel: getAlertSupportLabel(alertSupport),
       stateLabel: "Check this course directly for now",
       icon: "⚠",
       color: "#b66500",
@@ -498,30 +514,20 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff9eb",
       calloutBorder: "#edd39a",
       calloutText: "#734500",
-      detail: accountRequired
-        ? "We can’t automatically monitor this course because current availability requires a golfer account. Use the official booking page directly."
-        : "We can’t automatically monitor this course because current availability is behind a captcha, queue, or equivalent access control. We don’t bypass those controls; use the official booking page directly."
+      detail: getAlertSupportDescription(alertSupport)
     };
   }
 
   if (blockedCategory === "MANUAL_FINAL") {
-    const bookingAccess = getBookingAccess(course);
-    const monitoringLabel = bookingAccess === "PHONE_ONLY"
-      ? "Phone only"
-      : bookingAccess === "CONTACT_COURSE"
-        ? "Contact course"
-        : bookingAccess === "WALK_IN"
-          ? "Walk-in only"
-          : "Official site only";
-    const detail = bookingAccess === "PHONE_ONLY"
-      ? "We can’t automatically monitor this course. Call the course to check availability and book directly."
-      : bookingAccess === "CONTACT_COURSE"
-        ? "We can’t automatically monitor this course. Contact the course directly to check availability and book."
-        : bookingAccess === "WALK_IN"
-          ? "We can’t automatically monitor this course. Check with the course in person for availability and booking."
-          : `We can’t automatically monitor this course because its current booking method is direct-only. Check the official site${course.phone ? " or call the course" : ""} to book directly.`;
+    const alertSupport =
+      getCourseAlertSupport({
+        automationEligibility: "BLOCKED",
+        automationReason: course.automationReason,
+        bookingMethod: course.bookingMethod,
+        bookingAccessMode: course.bookingAccessMode
+      }) ?? "OFFICIAL_SITE_ONLY";
     return {
-      monitoringLabel,
+      monitoringLabel: getAlertSupportLabel(alertSupport),
       stateLabel: "Direct booking required",
       icon: "⚠",
       color: "#b66500",
@@ -530,7 +536,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff9eb",
       calloutBorder: "#edd39a",
       calloutText: "#734500",
-      detail
+      detail: getAlertSupportDescription(alertSupport)
     };
   }
 
@@ -649,6 +655,7 @@ function getCourseState(course: SearchStatusCourseReport) {
       course.outcome,
       course.monitoringDisposition ?? "UNSPECIFIED",
       course.automationReason ?? "NONE",
+      course.bookingAccessMode ?? "UNKNOWN",
       course.bookingMethod ?? getBookingAccess(course) ?? "UNKNOWN"
     ].join(":");
   }

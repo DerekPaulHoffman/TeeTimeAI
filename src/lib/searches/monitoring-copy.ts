@@ -1,5 +1,5 @@
 import {
-  getAlertSupportLabel,
+  getAlertSupportSavedStatus,
   isManualOnlyAlertSupport,
   type CourseAlertSupport,
   type CourseMonitoringSupport
@@ -34,9 +34,7 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
   if (manualOnly.length > 0) {
     const statuses = manualOnly
       .map((course) =>
-        course.alertSupport === "DIRECT_ONLINE"
-          ? `${course.name} can be booked online directly`
-          : `${course.name} is ${getAlertSupportLabel(course.alertSupport).toLowerCase()}`
+        getAlertSupportSavedStatus(course.name, course.alertSupport)
       )
       .join("; ");
     const pronoun = manualOnly.length === 1 ? "It" : "They";

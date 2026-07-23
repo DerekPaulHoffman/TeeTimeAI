@@ -48,7 +48,11 @@ import {
   type BookingWindowEvidenceSource,
   type TargetBookingWindow
 } from "@/lib/courses/booking-window";
-import type { AutomationReason, BookingMethod } from "@/lib/courses/intelligence";
+import type {
+  AutomationReason,
+  BookingAccessMode,
+  BookingMethod
+} from "@/lib/courses/intelligence";
 import {
   getCourseLayoutCompatibility,
   getCourseLayoutLabel
@@ -106,6 +110,7 @@ type AutomationCourse = AutomationCourseProviderRead & {
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
+  bookingAccessMode: BookingAccessMode;
   intelligenceVerifiedAt: Date | null;
   intelligenceReviewAt: Date | null;
   intelligenceConfidence: number | null;
@@ -321,6 +326,7 @@ async function checkSearch(
           ? undefined
           : course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
+        bookingAccessMode: course.bookingAccessMode,
         bookingAccess: identityBlocked ? undefined : getCourseBookingAccess(course),
         automationReason: course.automationReason,
         monitoringDisposition: monitoringGate.disposition
@@ -361,6 +367,7 @@ async function checkSearch(
         bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
+        bookingAccessMode: course.bookingAccessMode,
         bookingAccess: getCourseBookingAccess(course)
       });
       return;
@@ -391,6 +398,7 @@ async function checkSearch(
           bookingUrl: getCustomerBookingUrl(course),
           phone: course.bookingPhone ?? course.phone ?? undefined,
           bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
           bookingAccess: getCourseBookingAccess(course)
         });
         return;
@@ -431,6 +439,7 @@ async function checkSearch(
         bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
+        bookingAccessMode: course.bookingAccessMode,
         bookingAccess: getCourseBookingAccess(course),
         supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
@@ -485,6 +494,7 @@ async function checkSearch(
           bookingUrl: getCustomerBookingUrl(course),
           phone: course.bookingPhone ?? course.phone ?? undefined,
           bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
           bookingAccess: getCourseBookingAccess(course)
         });
         return;
@@ -611,6 +621,7 @@ async function checkSearch(
             bookingUrl: getCustomerBookingUrl(course),
             phone: course.bookingPhone ?? course.phone ?? undefined,
             bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
             bookingAccess: getCourseBookingAccess(course)
           });
           return;
@@ -654,6 +665,9 @@ async function checkSearch(
         bookingMethod: safeRawSlots[0]?.bookingUrl
           ? "PUBLIC_ONLINE"
           : course.bookingMethod,
+        bookingAccessMode: safeRawSlots[0]?.bookingUrl
+          ? "PUBLIC_SIGNED_OUT"
+          : course.bookingAccessMode,
         bookingAccess: safeRawSlots[0]?.bookingUrl
           ? "BOOKING_PAGE"
           : getCourseBookingAccess(course),
@@ -705,6 +719,7 @@ async function checkSearch(
         bookingUrl: getCustomerBookingUrl(course),
         phone: course.bookingPhone ?? course.phone ?? undefined,
         bookingMethod: course.bookingMethod,
+        bookingAccessMode: course.bookingAccessMode,
         bookingAccess: getCourseBookingAccess(course),
         supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
       });
@@ -1587,6 +1602,7 @@ function buildBookingWindowCourseReport(
     bookingUrl: getCustomerBookingUrl(course),
     phone: course.bookingPhone ?? course.phone ?? undefined,
     bookingMethod: course.bookingMethod,
+    bookingAccessMode: course.bookingAccessMode,
     bookingAccess: getCourseBookingAccess(course),
     bookingWindow: {
       releaseDate: bookingWindow.releaseDate,

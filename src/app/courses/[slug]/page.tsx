@@ -163,7 +163,7 @@ export default async function CourseProfilePage({ params }: PageProps) {
           <section>
             <p className="knowledge-kicker">Tee Time Spot alerts</p>
             <h2>Tee time alerts for {course.name}</h2>
-            <p>{supported ? "Get notified when a public tee time matches your date, time, group size, and course preference." : getUnsupportedAlertCopy(course.automationReason)}</p>
+            <p>{supported ? "Get notified when a public tee time matches your date, time, group size, and course preference." : getUnsupportedAlertCopy(course.automationReason, course.bookingAccessMode, course.bookingMethod)}</p>
             <p className="knowledge-date">Alert coverage reviewed {formatDate(course.intelligenceVerifiedAt ?? profile.profileVerifiedAt)}.</p>
             {supported ? <CourseProfileActions slug={profile.canonicalSlug} supported selectedCourse={selectedCourse} website={null} bookingUrl={null} /> : <Link className="button button-primary knowledge-inline-action" href="/search">Browse supported courses <ArrowRight size={16} /></Link>}
             <div className="knowledge-boundary">

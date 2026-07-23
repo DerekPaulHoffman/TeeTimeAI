@@ -1,5 +1,6 @@
 import type {
   AutomationReason,
+  BookingAccessMode,
   BookingMethod
 } from "@/lib/courses/intelligence";
 import {
@@ -79,6 +80,7 @@ export type BrowserDiscovery = {
   bookingPhone?: string;
   automationEligibility?: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason?: AutomationReason;
+  bookingAccessMode?: BookingAccessMode;
   policyNotes?: string;
   intelligenceReviewAt?: Date | string;
   apiEndpoint?: string;
@@ -563,6 +565,15 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return withCourseIdentityCorroboration(agilysysDiscovery, evidence);
   }
 
+  const accountRequiredClassification = learnAccountRequiredClassification(
+    providerEvidence,
+    providerObservedUrls
+  );
+
+  if (accountRequiredClassification) {
+    return withCourseIdentityCorroboration(accountRequiredClassification, evidence);
+  }
+
   const phoneReservationClassification = learnOfficialPhoneReservationClassification(
     providerEvidence,
     providerObservedUrls
@@ -604,15 +615,6 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       },
       evidence
     );
-  }
-
-  const accountRequiredClassification = learnAccountRequiredClassification(
-    providerEvidence,
-    providerObservedUrls
-  );
-
-  if (accountRequiredClassification) {
-    return withCourseIdentityCorroboration(accountRequiredClassification, evidence);
   }
 
   const providerDiscoveries = [
@@ -957,6 +959,9 @@ function learnKnownProviderAccessBarrierClassification(
     bookingMethod: "PUBLIC_ONLINE",
     automationEligibility: "BLOCKED",
     automationReason: accountRequired
+      ? "ACCOUNT_REQUIRED"
+      : "CAPTCHA_OR_QUEUE",
+    bookingAccessMode: accountRequired
       ? "ACCOUNT_REQUIRED"
       : "CAPTCHA_OR_QUEUE",
     policyNotes: accountRequired
@@ -2104,7 +2109,17 @@ function learnAccountRequiredClassification(
   evidence: BrowserDiscoveryEvidence,
   observedUrls: string[]
 ): BrowserDiscovery | null {
-  const bookingSurfaceText = evidence.bookingSurfaceText?.replace(/\s+/g, " ").trim() ?? "";
+  const accountGuidanceText = [
+    evidence.bookingSurfaceText,
+    evidence.officialPage?.visibleText,
+    evidence.visibleText
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const bookingSurfaceText =
+    evidence.bookingSurfaceText?.replace(/\s+/g, " ").trim() ?? "";
   const whooshBookingUrl = getWhooshPublicBookingUrl(observedUrls);
   const registrationRequired =
     /\bplayers? must register(?: in whoosh)? before booking\b/i.test(bookingSurfaceText);
@@ -2116,33 +2131,98 @@ function learnAccountRequiredClassification(
     /\b(?:sign|log) in\b[^.]{0,120}\b(?:view|see|access)\b[^.]{0,80}\b(?:tee[ -]?time )?availability\b/i.test(
       bookingSurfaceText
     );
+  const firstTimeAccess =
+    /\b(?:new to (?:the )?course|first tee[ -]?time|never played|not (?:a|an) [^.]{0,80}member)\b/i.test(
+      accountGuidanceText
+    );
+  const staffSetsUpAccess =
+    /\b(?:set(?:ting)? up|activate|provision)\b[^.]{0,100}\b(?:your )?(?:access|account)\b/i.test(
+      accountGuidanceText
+    );
+  const golferMustContactStaff =
+    /\b(?:contact|call)\b[^.]{0,180}\b(?:golf|pro) shop\b/i.test(
+      accountGuidanceText
+    ) ||
+    /\b(?:contact|call)\b[^.]{0,180}\b(?:reservations?|course staff|our team)\b/i.test(
+      accountGuidanceText
+    );
+  const staffProvisioned = Boolean(
+    firstTimeAccess &&
+      golferMustContactStaff &&
+      (staffSetsUpAccess ||
+        /\bgain access\b[^.]{0,120}\bbook\b/i.test(accountGuidanceText))
+  );
+  const selfServiceRegistration =
+    /\b(?:create|register|sign up for)\b[^.]{0,100}\b(?:account|profile)\b/i.test(
+      bookingSurfaceText
+    ) &&
+    /\b(?:tee[ -]?time|availability|book(?:ing)?)\b/i.test(bookingSurfaceText);
+  const selfServiceAccount = Boolean(
+    selfServiceRegistration && signInRequiredToViewAvailability
+  );
+  const whooshAccountRequired = Boolean(
+    whooshBookingUrl &&
+      (signInRequiredToViewAvailability ||
+        (registrationRequired && availabilityRequiresConfirmation))
+  );
 
   if (
-    !whooshBookingUrl ||
-    (!signInRequiredToViewAvailability &&
-      !(registrationRequired && availabilityRequiresConfirmation))
+    !staffProvisioned &&
+    !selfServiceAccount &&
+    !whooshAccountRequired
   ) {
     return null;
   }
 
+  const safeOfficialAccessUrl = [
+    whooshBookingUrl?.toString(),
+    evidence.finalUrl,
+    evidence.officialPage?.url,
+    evidence.sourceUrl
+  ].find((value) => {
+    const url = parseUrl(value);
+    return Boolean(url && isSafeManualEvidenceUrl(url));
+  });
+  if (!safeOfficialAccessUrl) {
+    return null;
+  }
+
+  const bookingAccessMode: BookingAccessMode = staffProvisioned
+    ? "ACCOUNT_STAFF_PROVISIONED"
+    : selfServiceAccount
+      ? "ACCOUNT_SELF_SERVICE"
+      : "ACCOUNT_REQUIRED";
+  const policyNotes = staffProvisioned
+    ? "The official course guidance says first-time online booking access must be set up by course staff. The course is public, but Tee Time Spot does not create or use golfer accounts, so golfers must contact the course to gain access."
+    : selfServiceAccount
+      ? "The official booking guidance says golfers can create or use an account to view tee-time availability. Tee Time Spot does not create or use golfer accounts, so golfers must use the official booking page directly."
+      : "The official booking guidance says a golfer account is required before tee-time availability can be viewed. Tee Time Spot does not use golfer accounts or account-specific sessions, so golfers must use the official booking page directly.";
+
   return {
     courseId: evidence.courseId,
+    isPublic: true,
     status: "VERIFIED",
     detectedPlatform: "CUSTOM",
     sourceUrl: evidence.sourceUrl,
-    bookingUrl: whooshBookingUrl.toString(),
+    bookingUrl: safeOfficialAccessUrl,
     bookingMethod: "PUBLIC_ONLINE",
     automationEligibility: "BLOCKED",
     automationReason: "ACCOUNT_REQUIRED",
-    policyNotes:
-      "The course's official booking guidance says registration must be confirmed before tee-time availability can be viewed in Whoosh. Tee Time Spot does not use golfer accounts or account-specific sessions, so golfers must check the official booking page directly.",
+    bookingAccessMode,
+    policyNotes,
     intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
     confidence: 0.98,
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
-      visibleText: summarizeVisibleText(evidence.bookingSurfaceText),
-      learnedFrom: "official-account-required-booking"
+      visibleText: summarizeVisibleText(
+        staffProvisioned ? accountGuidanceText : bookingSurfaceText
+      ),
+      learnedFrom: staffProvisioned
+        ? "official-staff-provisioned-account-access"
+        : selfServiceAccount
+          ? "official-self-service-account-access"
+          : "official-account-required-booking"
     }
   };
 }
@@ -6778,6 +6858,8 @@ function learnForeupDiscovery(
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason:
+        accessBarrier.status === 401 ? "ACCOUNT_REQUIRED" : "CAPTCHA_OR_QUEUE",
+      bookingAccessMode:
         accessBarrier.status === 401 ? "ACCOUNT_REQUIRED" : "CAPTCHA_OR_QUEUE",
       policyNotes:
         "The official ForeUP booking page is available for golfers, but signed-out automated retrieval is denied by the provider's access control. Tee Time Spot does not bypass access controls, so golfers should check and book on the official page directly.",

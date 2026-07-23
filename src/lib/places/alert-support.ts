@@ -1,6 +1,8 @@
 import {
   getCourseAlertSupport,
   getCourseMonitoringSupport,
+  type AutomationReason,
+  type BookingAccessMode,
   type BookingMethod
 } from "@/lib/courses/intelligence";
 import {
@@ -19,7 +21,9 @@ const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 type KnownCourseRecord = CourseIdentity & {
   id: string;
   bookingMethod: BookingMethod;
+  bookingAccessMode: BookingAccessMode;
   automationEligibility: string;
+  automationReason: AutomationReason;
   detectedBookingUrl?: string | null;
   profile?: { canonicalSlug: string; status: string } | null;
 };
@@ -53,7 +57,9 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
       website: true,
       phone: true,
       bookingMethod: true,
+      bookingAccessMode: true,
       automationEligibility: true,
+      automationReason: true,
       detectedBookingUrl: true,
       profile: { select: { canonicalSlug: true, status: true } }
     }

@@ -75,6 +75,7 @@ describe("browser discovery persistence", () => {
         bookingPhone: undefined,
         automationEligibility: "ALLOWED",
         automationReason: "NONE",
+        bookingAccessMode: "PUBLIC_SIGNED_OUT",
         sourceUrl: "https://course.example.com",
         bookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
         apiEndpoint: "https://foreupsoftware.com/index.php/api/booking/times",
@@ -138,6 +139,7 @@ describe("browser discovery persistence", () => {
           bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
         },
         bookingMethod: "PUBLIC_ONLINE",
+        bookingAccessMode: "PUBLIC_SIGNED_OUT",
         bookingPhone: undefined,
         automationReason: "NONE",
         policyNotes: undefined,
@@ -490,6 +492,7 @@ describe("browser discovery persistence", () => {
         detectedBookingUrl: null,
         bookingMetadata: Prisma.DbNull,
         bookingMethod: "PHONE_ONLY",
+        bookingAccessMode: "PHONE_ONLY",
         bookingPhone: "(860) 689-1000",
         automationReason: "NO_ONLINE_BOOKING",
         policyNotes: undefined,

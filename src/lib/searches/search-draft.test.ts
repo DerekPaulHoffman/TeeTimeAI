@@ -92,6 +92,25 @@ describe("search draft storage", () => {
     });
   });
 
+  it("preserves every structured account-access classification", () => {
+    expect(
+      sanitizeSearchDraft({
+        courses: [
+          {
+            ...course,
+            monitoringSupport: "MANUAL_ONLY",
+            alertSupport: "ACCOUNT_STAFF_PROVISIONED"
+          }
+        ]
+      }).courses
+    ).toEqual([
+      expect.objectContaining({
+        alertSupport: "ACCOUNT_STAFF_PROVISIONED",
+        monitoringSupport: "MANUAL_ONLY"
+      })
+    ]);
+  });
+
   it("removes the draft when an alert is finished", () => {
     storeSearchDraft({ courses: [course], selectedCourses: [course] });
     clearSearchDraft();

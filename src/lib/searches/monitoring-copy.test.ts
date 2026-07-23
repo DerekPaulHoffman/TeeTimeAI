@@ -27,7 +27,9 @@ describe("buildSearchSavedMessage", () => {
     ]);
 
     expect(message).toContain("We'll monitor supported courses");
-    expect(message).toContain("Fairview Farm Golf Course is phone only");
+    expect(message).toContain(
+      "Fairview Farm Golf Course takes tee-time requests by phone only"
+    );
     expect(message).toContain("won't be checked automatically");
   });
 
@@ -37,9 +39,26 @@ describe("buildSearchSavedMessage", () => {
       { name: "Walk-in Course", alertSupport: "WALK_IN_ONLY" }
     ]);
 
-    expect(message).toContain("Phone Course is phone only");
-    expect(message).toContain("Walk-in Course is walk-in only");
+    expect(message).toContain(
+      "Phone Course takes tee-time requests by phone only"
+    );
+    expect(message).toContain("Walk-in Course handles tee times in person");
     expect(message).toContain("They won't be checked automatically");
+  });
+
+  it("explains staff-provisioned access as setup, not private membership", () => {
+    const message = buildSearchSavedMessage([
+      {
+        name: "Public Resort Golf Course",
+        alertSupport: "ACCOUNT_STAFF_PROVISIONED"
+      }
+    ]);
+
+    expect(message).toContain(
+      "Public Resort Golf Course requires first-time access setup by course staff"
+    );
+    expect(message).not.toContain("private");
+    expect(message).toContain("won't be checked automatically");
   });
 
   it("tells golfers when online booking remains available without automatic monitoring", () => {

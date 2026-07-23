@@ -2194,6 +2194,7 @@ async function reconcileCurrentMatchDeliveryPayload(
       timeZone: true,
       isPublic: true,
       bookingMethod: true,
+      bookingAccessMode: true,
       automationEligibility: true,
       automationReason: true,
       intelligenceVerifiedAt: true,
@@ -2999,6 +3000,7 @@ async function validateCurrentStatusDeliveryPayload(
         courseAddress: optionalString(course.courseAddress),
         timeZone: optionalString(course.timeZone),
         bookingMethod: optionalString(course.bookingMethod),
+        bookingAccessMode: optionalString(course.bookingAccessMode),
         bookingUrl: optionalString(course.bookingUrl),
         matchingTimes: Array.isArray(course.matchingTimes)
           ? course.matchingTimes
@@ -3098,6 +3100,7 @@ async function validateCurrentStatusDeliveryPayload(
       detectedBookingUrl: true,
       isPublic: true,
       bookingMethod: true,
+      bookingAccessMode: true,
       automationEligibility: true,
       automationReason: true,
       intelligenceVerifiedAt: true,
@@ -3131,6 +3134,8 @@ async function validateCurrentStatusDeliveryPayload(
       currentCourse.timeZone !== course.timeZone ||
       (course.bookingMethod !== undefined &&
         currentCourse.bookingMethod !== course.bookingMethod) ||
+      (course.bookingAccessMode !== undefined &&
+        currentCourse.bookingAccessMode !== course.bookingAccessMode) ||
       currentDispositionByCourse.get(courseId) !== course.monitoringDisposition
     ) {
       return "stale";

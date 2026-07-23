@@ -37,6 +37,34 @@ describe("course alert support enrichment", () => {
     expect(course.monitoringSupport).toBe("MANUAL_ONLY");
   });
 
+  it("shows staff-provisioned access for a public account-gated course", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        googlePlaceId: "staff-access",
+        name: "Public Resort Golf Course",
+        latitude: 41.815,
+        longitude: -73.071,
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingAccessMode: "ACCOUNT_STAFF_PROVISIONED",
+        automationEligibility: "BLOCKED",
+        automationReason: "ACCOUNT_REQUIRED"
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "staff-access",
+        name: "Public Resort Golf Course",
+        latitude: 41.815,
+        longitude: -73.071,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.alertSupport).toBe("ACCOUNT_STAFF_PROVISIONED");
+    expect(course.monitoringSupport).toBe("MANUAL_ONLY");
+  });
+
   it("distinguishes blocked online booking from courses without a direct booking mode", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

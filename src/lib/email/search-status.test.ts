@@ -331,7 +331,9 @@ describe("renderSearchStatusHtml", () => {
     });
 
     expect(html).toContain("PRIORITY 1 &middot; PHONE ONLY");
-    expect(html).toContain("Call the course to check availability and book directly");
+    expect(html).toContain(
+      "The course does not publish a public online tee sheet. Call the course directly to check availability and book."
+    );
     expect(html).toContain('href="tel:+12035550199"');
     expect(html).toContain("Call +1 (203) 555-0199 &rarr;");
     expect(html).toContain("Open official site &rarr;");
@@ -339,7 +341,7 @@ describe("renderSearchStatusHtml", () => {
   });
 
   it.each([
-    ["ACCOUNT_REQUIRED", "ACCOUNT REQUIRED", "requires a golfer account"],
+    ["ACCOUNT_REQUIRED", "GOLFER ACCOUNT REQUIRED", "requires a golfer account"],
     ["CAPTCHA_OR_QUEUE", "CAPTCHA OR QUEUE", "behind a captcha, queue"]
   ] as const)(
     "renders %s as a technical final even with the same booking page",
@@ -373,6 +375,41 @@ describe("renderSearchStatusHtml", () => {
       expect(html).not.toContain("legacy policy-only");
     }
   );
+
+  it("explains staff-provisioned first-time access without calling the course private", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-staff-access",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-18",
+      startTime: "09:00",
+      endTime: "18:00",
+      players: 2,
+      checkedAt: new Date("2026-07-15T12:15:00.000Z"),
+      courses: [
+        {
+          courseId: "staff-access",
+          courseName: "Public Resort Golf Course",
+          outcome: "BLOCKED_AUTH",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/book-a-tee-time",
+          phone: "+1 (860) 555-0100",
+          bookingMethod: "PUBLIC_ONLINE",
+          automationReason: "ACCOUNT_REQUIRED",
+          bookingAccessMode: "ACCOUNT_STAFF_PROVISIONED",
+          bookingAccess: "BOOKING_PAGE"
+        }
+      ]
+    });
+
+    expect(html).toContain("PRIORITY 1 &middot; FIRST-TIME ACCESS SETUP");
+    expect(html).toContain(
+      "first-time online booking access must be set up by course staff"
+    );
+    expect(html).toContain("Contact the course to get access");
+    expect(html).not.toContain("Not a public course");
+    expect(html).not.toContain("private course");
+  });
 
   it("renders identity finals without any booking or contact action", () => {
     const html = renderSearchStatusHtml({
@@ -652,6 +689,35 @@ describe("search status snapshots", () => {
 
     expect(getChangedCourseNames(current, previous)).toEqual(["Richter Park Golf Course"]);
     expect(getChangedCourseNames(current, current)).toEqual([]);
+  });
+
+  it("treats a newly clarified account-access mode as a meaningful change", () => {
+    const generic = buildSearchStatusSnapshot([
+      {
+        courseId: "course-access",
+        courseName: "Public Resort Golf Course",
+        outcome: "BLOCKED_AUTH",
+        availableMatches: 0,
+        automationReason: "ACCOUNT_REQUIRED",
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingAccessMode: "ACCOUNT_REQUIRED"
+      }
+    ]);
+    const staffProvisioned = buildSearchStatusSnapshot([
+      {
+        courseId: "course-access",
+        courseName: "Public Resort Golf Course",
+        outcome: "BLOCKED_AUTH",
+        availableMatches: 0,
+        automationReason: "ACCOUNT_REQUIRED",
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingAccessMode: "ACCOUNT_STAFF_PROVISIONED"
+      }
+    ]);
+
+    expect(getChangedCourseNames(staffProvisioned, generic)).toEqual([
+      "Public Resort Golf Course"
+    ]);
   });
 });
 

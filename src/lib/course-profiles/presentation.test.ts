@@ -47,11 +47,17 @@ describe("course profile presentation", () => {
   });
 
   it("describes unavailable alert coverage as a customer-facing fact", () => {
-    expect(getUnsupportedAlertCopy("ACCOUNT_REQUIRED")).toBe(
-      "Automatic tee time alerts are not available because the booking flow requires a golfer account."
+    expect(
+      getUnsupportedAlertCopy(
+        "ACCOUNT_REQUIRED",
+        "ACCOUNT_STAFF_PROVISIONED",
+        "PUBLIC_ONLINE"
+      )
+    ).toContain(
+      "first-time online booking access must be set up by course staff"
     );
-    expect(getUnsupportedAlertCopy("UNKNOWN")).toBe(
-      "Automatic tee time alerts are not currently available for this course."
+    expect(getUnsupportedAlertCopy("UNKNOWN")).toContain(
+      "Check the course's official site for current booking information"
     );
   });
 });
