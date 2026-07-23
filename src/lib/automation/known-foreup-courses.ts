@@ -19,6 +19,21 @@ export type KnownForeupCourse = {
 
 export const KNOWN_FOREUP_COURSES: readonly KnownForeupCourse[] = [
   {
+    name: "River Ridge Golf Course",
+    stateCode: "CT",
+    detectedBookingUrl:
+      "https://foreupsoftware.com/index.php/booking/21530/8294#/teetimes",
+    policyNotes:
+      "The official course site links public online tee-time reservations to ForeUP; Tee Time Spot reads the signed-out public schedule for alert-only monitoring.",
+    bookingMetadata: {
+      scheduleId: 8294,
+      bookingBaseUrl:
+        "https://foreupsoftware.com/index.php/booking/21530/8294#/teetimes"
+    },
+    officialSourceUrl: "https://www.riverridgegolf.com/",
+    officialWebsite: "https://www.riverridgegolf.com/"
+  },
+  {
     name: "Longshore Golf Course",
     detectedBookingUrl:
       "https://foreupsoftware.com/index.php/booking/23148/12897#/teetimes",

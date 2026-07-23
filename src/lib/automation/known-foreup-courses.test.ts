@@ -41,6 +41,30 @@ describe("known ForeUP course evidence", () => {
     );
   });
 
+  it("keeps the official River Ridge ForeUP schedule runnable", () => {
+    const [riverRidge] = selectKnownForeupCourses("River Ridge Golf Course");
+
+    expect(riverRidge).toMatchObject({
+      name: "River Ridge Golf Course",
+      stateCode: "CT",
+      officialWebsite: "https://www.riverridgegolf.com/",
+      bookingMetadata: {
+        scheduleId: 8294,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/21530/8294#/teetimes"
+      }
+    });
+    expect(
+      resolveProviderCapability({
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        detectedBookingUrl: riverRidge?.detectedBookingUrl,
+        website: riverRidge?.officialWebsite,
+        bookingMetadata: riverRidge?.bookingMetadata
+      }).isRunnable
+    ).toBe(true);
+  });
+
   it("never overwrites a newer access-control disposition with static source evidence", () => {
     const [westwoods] = selectKnownForeupCourses("Westwoods Golf Course");
 
