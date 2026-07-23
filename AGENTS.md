@@ -5,12 +5,12 @@ This file is the operating contract for Codex and other coding agents working in
 ## Repo Guardrails
 
 - Work in the existing repo folder: `C:\dev\TeeTimeAI`.
-- Do not create a new repository folder, clone directory, or linked worktree unless the user first gives explicit approval.
+- Any Codex thread may create a linked Git worktree without requesting user approval when isolation is useful. Creating a new clone or independent repository folder still requires explicit user approval.
 - Do not prefix new git branch names with `codex/` unless the user explicitly asks for that naming convention.
 - Every Codex thread that may edit, commit, push, or deploy must use its own named task branch created from current `origin/main` before file edits. Never implement or commit directly on `main`.
 - If the thread already owns a task branch, preserve it. Otherwise fetch `origin/main` and create a concise branch such as `fix/course-dedupe`, `feature/alert-controls`, or `chore/automation-policy`.
 - Read-only threads and read-only automations must not create branches because they must not change git state.
-- If unrelated work makes branch creation unsafe in the current checkout, do not switch, stash, or absorb it. Use an already-approved isolated worktree or ask for explicit worktree approval.
+- If unrelated work makes branch creation unsafe in the current checkout, do not switch, stash, or absorb it. Create an isolated linked worktree from current `origin/main` without asking for approval, and give that worktree its own task branch.
 - Never revert user changes you did not make.
 - Never run destructive commands such as `git reset --hard` or `git checkout --` without explicit user approval.
 - Never commit secrets, `.env*` files, `.vercel/`, provider tokens, API keys, or copied credential values.
@@ -52,7 +52,7 @@ The app must not:
 
 Use copy such as "official site", "official booking page", "direct link", and "you book direct". Avoid copy such as "we book", "Tee Time Spot books", or anything implying guaranteed availability.
 
-Booking, reservation, purchase, and checkout policies govern those transactions; they do not govern observation of public availability. Public, read-only tee-time data is eligible for monitoring regardless of provider or course terms about booking automation. Policy text alone must never set `BLOCKED` or `BLOCKED_POLICY`, overwrite a working official booking link, or stop adapter investigation. Terms may be retained as evidence, but current observed access is the source of truth for monitoring eligibility. Monitoring may use direct HTTP or browser automation to reproduce the public booking site's ordinary read path, including public session setup and browser-compatibility techniques. It must remain observational: do not use private/account-specific data, submit a reservation or purchase, or proceed into booking or checkout.
+Booking, reservation, purchase, and checkout policies govern those transactions; they do not govern observation of public availability. Public, signed-out, read-only tee-time data is eligible for monitoring regardless of provider or course terms about booking automation. Policy text alone must never set `BLOCKED` or `BLOCKED_POLICY`, overwrite a working official booking link, or stop adapter investigation. Terms may be retained as evidence, but current observed public access is the source of truth for monitoring eligibility.
 
 ## Product Mental Model
 
@@ -110,7 +110,7 @@ discover public courses -> save ranked demand -> check official availability
 ### 5. Recover From Missing Or Unsupported Coverage
 
 - A missing discovery result goes through exact provider-shape inspection, direct lookup, official-site corroboration, and, when justified, a `GooglePlaceReview` correction.
-- A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Reusable support for public, read-only availability belongs in an adapter. Prefer direct provider endpoints when stable, and use bounded browser automation when the public site requires browser execution or session setup. Phone-only, account-required, private/non-course, or otherwise non-retrievable surfaces are classified honestly; a captcha, managed challenge, or queue observation is diagnostic evidence for adapter work rather than an automatic terminal disposition.
+- A monitoring gap goes through official-site discovery and durable `CourseAutomationDiscovery` evidence. Reusable support for public, signed-out, read-only availability belongs in an adapter. Phone-only, account-required, captcha/queue, private/non-course, or otherwise technically inaccessible surfaces are classified honestly; provider terms or booking policy alone are not a terminal monitoring disposition.
 - `NEEDS_ADAPTER` and `FETCH_FAILED` can open a deduplicated `CourseSupportIncident`. The dedicated 10-minute course-support responder owns discovery, reusable implementation, fresh-runtime verification, retry, and final disposition; the broad hourly loop must not select these incidents. Ordinary one-check `TEST`/`AUTOMATION` searches remain excluded, but an explicitly opted-in `syntheticMultiCycle` search may open an `engineeringOnly` incident. Engineering-only incidents never send customer or operator support email, remain actionable after the source search ends, and must stay open until reusable monitoring works or a conclusive technical-access/contact/identity disposition is persisted. Real demand on the same course promotes the incident to normal customer-demand priority.
 - Customer copy should say what Tee Time Spot can do now and offer the official site; do not expose terms such as adapter, probe, queue, Prisma, Neon, Codex, or automation incident.
 
@@ -118,8 +118,7 @@ discover public courses -> save ranked demand -> check official availability
 
 - `WebsiteEvent`, `WebsiteFeedback`, lookup misses, support incidents, probes, matches, and automation runs are the product-learning surfaces.
 - Analytics are aggregate and traffic-classed as `PUBLIC`, `AUTOMATION`, `TEST`, or `UNCLASSIFIED`. Never add a persistent visitor/session identifier just to improve reporting.
-- Requests to Tee Time Spot's own analytics endpoints must classify automated and test traffic internally so it does not count as customer demand. Provider-facing browser identity may match an ordinary supported browser when needed for reliable read-only monitoring.
-- Treat feedback as an input to diagnosis and prioritization, not as permission to enter a booking transaction or use private/account-specific data. Do not let booking-policy text override stronger current evidence that a surface is publicly readable.
+- Treat feedback as an input to diagnosis and prioritization, not as permission to bypass technical access controls or enter a booking transaction. Do not let booking-policy text override stronger current evidence that a surface is publicly readable.
 
 ## Canonical Decisions
 
@@ -386,9 +385,9 @@ Important behavior:
 - The central provider-capability registry owns family detection, metadata validation, runnable support, failure classes, and consumer dispositions. Recognition alone is not runnable coverage.
 - Claim only from a clean `automation/course-support-*` branch whose `HEAD` equals current `origin/main`; persist the real owner task and base SHA, inspect the ordinal-only packet, then claim every planned path before editing it. Heartbeat the 15-minute batch lease and persist the candidate release SHA immediately after commit.
 - The responder uses the transaction-scoped `tee-time-spot:course-support-writer` lease for its own inspect, claim, recovery, and closeout transitions. A durable batch plus unfinished responder `AutomationRun` owns that responder implementation interval without blocking the hourly lane.
-- The responder and hourly automations must use separate already-approved persistent checkouts; never point both schedules at one mutable Git worktree.
+- The responder and hourly automations must use separate persistent checkouts; never point both schedules at one mutable Git worktree.
 - Code remediation requires a new per-course runnable-provider proof snapshot from the exact deployed release: `CourseProbe.runtimeVersion` must equal the release SHA and the observation must be newer than the pre-claim/deployment and latest-incident boundaries. A Workflow id, layout skip, or older success is insufficient.
-- Classification-only closeout requires a current, sufficiently confident official-source discovery that agrees with the persisted phone/contact/walk-in, no-online-booking, account-required, private/non-course, or other non-retrievable disposition. A captcha, managed challenge, queue, provider term, or prohibited-automation statement alone cannot close public read-only monitoring work; first evaluate reusable HTTP and browser-based read strategies. Exact private/non-course identity remains in the reviewed-place path.
+- Classification-only closeout requires a current, sufficiently confident official-source discovery that agrees with the persisted phone/contact/walk-in, no-online-booking, account-required, CAPTCHA/queue, or other technical-access disposition. Provider terms or a prohibited-automation statement alone cannot close public read-only monitoring work. Exact private/non-course identity remains in the reviewed-place path.
 - Terminal closeout waits for complete affected-search dispatch, healthy scheduler state, and a fresh post-dispatch check. Global provider I/O is capped at two requests and one request per provider family.
 - Retry transient failures on the persisted 15-minute, 1-hour, 6-hour, then 24-hour ladder with jitter; honor bounded rate-limit `Retry-After`. Explicit recovery requires expired ownership and exact branch/HEAD/dirty-path provenance.
 - Auto-archive only routine results after durable closeout: no due work, durably deferred busy, success, classification-only, partial, or retryable failure with a future `nextAttemptAt`. Keep active/recovery/human, privacy, delivery, unsafe-provider, migration/deploy/production-verification, auth/env/Git, command, and repeated-SLA tasks visible.
@@ -441,17 +440,17 @@ Before fetching a tee sheet:
 - Check `Course.automationEligibility` and `Course.policyNotes` as historical evidence, not as unquestioned authority. Re-check the live public surface when either says `BLOCKED` or `BLOCKED_POLICY`.
 - Check the requested physical layout against verified `Course.layoutHoleCounts`; skip a known mismatch before provider retrieval.
 - Never infer that booking, reservation, purchase, or checkout restrictions prohibit read-only monitoring. Policy text alone does not determine monitoring eligibility.
-- If public availability can be read without transacting or using private/account-specific data, monitoring is allowed regardless of provider or course terms.
-- A captcha, managed challenge, waiting room, or automation-specific response is a signal to evaluate a bounded browser-based adapter, not a reason by itself to skip retrieval. Skip only when current evidence shows that no reusable read-only strategy works or that retrieval requires private/account-specific data or a transactional action. A stored `BLOCKED` value is not sufficient without that current evidence.
-- Do not record `BLOCKED_POLICY` for a public read-only monitoring surface. Use a precise current disposition such as `ACCOUNT_REQUIRED`, `CAPTCHA_OR_QUEUE`, or `NEEDS_ADAPTER`; `CAPTCHA_OR_QUEUE` describes the current adapter result and does not prohibit later browser-based remediation.
+- If public availability can be read without bypassing a technical access control, monitoring is allowed regardless of provider or course terms.
+- Skip retrieval only when current evidence shows that the read itself requires an account-specific/private session, an active captcha or waiting-room token, access-control circumvention, or another prohibited technical bypass. A stored `BLOCKED` value is not sufficient without that current evidence.
+- Do not record `BLOCKED_POLICY` for a public read-only monitoring surface. Use the precise technical disposition, such as `ACCOUNT_REQUIRED` or `CAPTCHA_OR_QUEUE`, only when current observed behavior supports it.
 - Record `NEEDS_ADAPTER` for unsupported public platforms when no technical access boundary has been demonstrated.
 - Record `NO_MATCH` for supported checks with no qualifying time.
 - Record `MATCH_FOUND` when a slot qualifies.
 
 Adapter behavior:
 
-- Prefer stable public tee-sheet endpoints, but use bounded Playwright, Puppeteer, or equivalent browser automation when browser execution, public session setup, or ordinary-browser compatibility is required. Stealth or fingerprint-compatibility plugins are acceptable for read-only monitoring when they do not introduce private/account-specific data or transactional behavior.
-- Keep browser adapters narrowly scoped to availability reads. Do not add booking selections, cart actions, reservation holds, purchases, verification-code flows, or checkout behavior.
+- Use public, signed-out tee-sheet endpoints only.
+- Distinguish visible UI from network access requirements. An invisible or background captcha token is still a captcha requirement even when the golfer sees no checkbox; do not generate, replay, solve, or bypass it.
 - Run official-site/provider discovery before declaring a new course unsupported, and append evidence to `CourseAutomationDiscovery`.
 - Treat contradictory provider platform, booking URL, and metadata signals as non-runnable source conflict. Do not call any provider until current official-source evidence reconciles them to one family.
 - Prefer stable source IDs to dedupe matches.
@@ -730,7 +729,7 @@ Provider/setup gaps can drift, so verify before acting. Last known items:
 - Clerk account mode is active in production with owner-scoped dashboards and email/password plus Google sign-in. `CLERK_AUTH_READY` remains the required safety gate; verify live provider state before changing it.
 - Google Places key should remain restricted and should be rotated after confirming healthy production behavior.
 - Google place corrections are operator-command-only by design; there is no public/admin review editor.
-- Adapter coverage is intentionally narrow; add adapters only with current evidence of reusable public, read-only retrieval through direct HTTP or bounded browser automation. Retrieval must not depend on private/account-specific data or enter a reservation, purchase, or checkout flow.
+- Adapter coverage is intentionally narrow; add adapters only with current evidence of public, signed-out, read-only retrieval that does not require bypassing a technical access control.
 - Resend/provider acceptance is recorded, but the current architecture has no separate inbox-delivery/open ledger.
 - Admin/reporting for feedback, events, probes, and adapter gaps can be improved.
 - No Redis, warehouse, read replica, separate queue, or full course-catalog cache is currently justified.
