@@ -1361,10 +1361,10 @@ test.describe("Tee Time Spot UI smoke", () => {
     const morningFrame = page.frameLocator("iframe[title='Rendered morning update email']");
     await expect(morningFrame.locator("body")).toContainText("MORNING UPDATE");
     await expect(morningFrame.locator("body")).toContainText("Pinebrook Golf Club");
-    await expect(morningFrame.locator("body")).toContainText("Ridgecrest Golf Course");
+    await expect(morningFrame.locator("body")).toContainText("Ridgecrest Links");
     await expect(morningFrame.getByText("Pinebrook Golf Club", { exact: true })).toHaveCount(1);
-    await expect(morningFrame.getByText("Ridgecrest Golf Course", { exact: true })).toHaveCount(1);
-    await expect(morningFrame.locator("body")).toContainText("9H/18H");
+    await expect(morningFrame.getByText("Ridgecrest Links", { exact: true })).toHaveCount(1);
+    await expect(morningFrame.locator("body")).toContainText("18 holes");
     await expect(morningFrame.locator("body")).toContainText("NEW");
     await expect(morningFrame.locator("body")).toContainText("What we're watching for you");
     await expect(morningFrame.locator("body")).toContainText("PRIORITY 5");
@@ -1403,7 +1403,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     const instantFrame = page.frameLocator("iframe[title='Rendered instant alert email']");
     await expect(instantFrame.locator("body")).toContainText("NEW TEE TIME ALERT");
     await expect(instantFrame.locator("body")).toContainText("Pinebrook Golf Club");
-    await expect(instantFrame.locator("body")).toContainText("9H/18H");
+    await expect(instantFrame.locator("body")).toContainText("18 holes");
     await expect(
       instantFrame.getByRole("link", { name: "Open official booking page" }).first()
     ).toBeVisible();

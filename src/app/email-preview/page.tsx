@@ -36,12 +36,22 @@ const previewStopUrls = {
   cancelled: "/alerts/stop?token=preview-cancelled"
 };
 
+function buildPreviewTimes(times: string[], priceCents: number) {
+  return times.map((time, index) => ({
+    startsAt: `2026-07-18T${time}:00-04:00`,
+    availableSpots: 4,
+    priceCents,
+    holes: 18,
+    isNew: index < 2
+  }));
+}
+
 const previewCourses: SearchStatusEmailInput["courses"] = [
   {
     courseId: "pinebrook",
     courseName: "Pinebrook Golf Club",
     rank: 1,
-    courseAddress: "1 Pinebrook Drive, Glastonbury, CT 06033, United States",
+    courseAddress: "1 Pinebrook Drive, Maplewood, CT 06440, United States",
     timeZone: "America/New_York",
     isPublic: true,
     rating: 4.1,
@@ -61,43 +71,38 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     },
     courseGuideUrl: "/courses/pinebrook-golf-club",
     outcome: "MATCH_FOUND",
-    availableMatches: 3,
+    availableMatches: 13,
     bookingUrl: "https://example.com/pinebrook-booking",
     bookingMethod: "PUBLIC_ONLINE",
     bookingAccess: "BOOKING_PAGE",
     availability: {
-      visibleSlotCount: 14,
-      playerEligibleSlotCount: 12
+      visibleSlotCount: 13,
+      playerEligibleSlotCount: 13
     },
-    matchingTimes: [
-      {
-        startsAt: "2026-07-18T07:42:00-04:00",
-        availableSpots: 4,
-        priceCents: 5800,
-        bookableHoleCounts: [9, 18],
-        isNew: true
-      },
-      {
-        startsAt: "2026-07-18T08:05:00-04:00",
-        availableSpots: 3,
-        priceCents: 6200,
-        holes: 18,
-        isNew: false
-      },
-      {
-        startsAt: "2026-07-18T08:20:00-04:00",
-        availableSpots: 4,
-        priceCents: 6200,
-        holes: 18,
-        isNew: false
-      }
-    ]
+    matchingTimes: buildPreviewTimes(
+      [
+        "09:30",
+        "09:44",
+        "10:08",
+        "10:22",
+        "10:36",
+        "10:50",
+        "11:04",
+        "11:18",
+        "11:32",
+        "11:46",
+        "12:00",
+        "12:14",
+        "12:28"
+      ],
+      4800
+    )
   },
   {
     courseId: "ridgecrest",
-    courseName: "Ridgecrest Golf Course",
+    courseName: "Ridgecrest Links",
     rank: 2,
-    courseAddress: "220 Ridge Road, Orange, CT 06477, USA",
+    courseAddress: "220 Ridge Road, Cedarville, CT 06477, USA",
     timeZone: "America/New_York",
     isPublic: true,
     rating: 4.4,
@@ -117,30 +122,29 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     },
     courseGuideUrl: "/courses/ridgecrest-golf-course",
     outcome: "MATCH_FOUND",
-    availableMatches: 2,
+    availableMatches: 10,
     bookingUrl: "https://example.com/ridgecrest-booking",
     bookingMethod: "PUBLIC_ONLINE",
     bookingAccess: "BOOKING_PAGE",
     availability: {
       visibleSlotCount: 10,
-      playerEligibleSlotCount: 8
+      playerEligibleSlotCount: 10
     },
-    matchingTimes: [
-      {
-        startsAt: "2026-07-18T08:12:00-04:00",
-        availableSpots: 2,
-        priceCents: 5400,
-        holes: 18,
-        isNew: true
-      },
-      {
-        startsAt: "2026-07-18T08:36:00-04:00",
-        availableSpots: 4,
-        priceCents: 5400,
-        holes: 18,
-        isNew: false
-      }
-    ]
+    matchingTimes: buildPreviewTimes(
+      [
+        "13:15",
+        "13:29",
+        "14:03",
+        "14:17",
+        "14:31",
+        "14:45",
+        "15:00",
+        "15:14",
+        "15:28",
+        "16:00"
+      ],
+      6200
+    )
   },
   {
     courseId: "cedar-valley",
@@ -198,9 +202,9 @@ const baseStatusPreview = {
   searchId: "preview-search",
   to: "preview@teetimespot.com",
   targetDate: "2026-07-18",
-  startTime: "07:30",
-  endTime: "09:00",
-  players: 2,
+  startTime: "08:00",
+  endTime: "16:00",
+  players: 4,
   requestedLayoutHoles: 18 as const,
   userTimeZone: "America/New_York",
   checkedAt: new Date("2026-07-15T08:15:00-04:00"),

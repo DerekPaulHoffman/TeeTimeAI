@@ -232,7 +232,7 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("9H/18H");
+    expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
     expect(html).toContain("PRIORITY 2 &middot; ADDING MONITORING");
@@ -714,7 +714,18 @@ describe("renderSearchStatusHtml", () => {
     );
     expect(html).toContain("Course Guide");
     expect(html).toContain(">NEW</span>");
-    expect(html).toContain("8:10 AM EDT – 8:20 AM EDT");
+    expect(html).toContain("7:40 AM");
+    expect(html).toContain("8:10 AM");
+    expect(html).toContain("8:20 AM");
+    expect(html).not.toContain("time slots available");
+    expect(html).toContain(
+      'bgcolor="#14231d" style="background:#14231d;border:1px solid #1f7a4d'
+    );
+    expect(html).toContain(
+      'bgcolor="#eaf3ee" style="background:#eaf3ee;border:1px solid #c8e6d2'
+    );
+    expect(html).toContain("$58&ndash;$62");
+    expect(html).toContain("18 holes");
     expect(html.indexOf("AVAILABLE NOW")).toBeLessThan(
       html.indexOf("What we're watching for you")
     );

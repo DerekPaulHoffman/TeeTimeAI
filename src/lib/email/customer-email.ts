@@ -7,7 +7,7 @@ import {
   zonedDateTimeToDate
 } from "@/lib/timezones";
 
-export const MAX_EMAIL_AVAILABILITY_ROWS_PER_COURSE = 8;
+export const MAX_EMAIL_AVAILABILITY_PILLS_PER_COURSE = 16;
 
 export type CustomerEmailVariant = "setup" | "morning" | "instant";
 
@@ -76,13 +76,6 @@ export type CustomerEmailRenderInput = {
   showCadenceNote?: boolean;
 };
 
-type CustomerEmailAvailabilityWindow = {
-  matches: Array<CustomerEmailAvailabilityTime & { startsAtDate: Date }>;
-  startsAt: Date;
-  endsAt: Date;
-  isNew: boolean;
-};
-
 const EMAIL_COLORS = {
   cream: "#f7f4eb",
   dark: "#14231d",
@@ -138,6 +131,7 @@ export function renderCustomerEmail(input: CustomerEmailRenderInput) {
         .email-card { border-radius: 0 !important; }
         .email-pad { padding-left: 16px !important; padding-right: 16px !important; }
         .summary-cell { display: inline-block !important; width: 50% !important; box-sizing: border-box !important; }
+        .time-pill-cell { display: inline-block !important; width: 50% !important; box-sizing: border-box !important; }
         .course-location { display: block !important; padding-top: 8px !important; text-align: left !important; white-space: normal !important; }
         .footer-copy, .footer-link { display: block !important; text-align: left !important; width: 100% !important; }
         .footer-link { padding-top: 8px !important; }
@@ -290,21 +284,44 @@ function renderAvailabilityCard(
   assetBaseUrl?: string
 ) {
   const timeZone = normalizeTimeZone(course.courseTimeZone, DEFAULT_TIME_ZONE);
-  const rows = buildAvailabilityRows(course.times, timeZone);
-  const visibleRows = selectVisibleAvailabilityRows(rows);
-  const hiddenRowCount = rows.length - visibleRows.length;
-  const date = visibleRows[0]?.startsAt.toLocaleDateString("en-US", {
+  const normalizedTimes = normalizeAvailabilityTimes(course.times, timeZone);
+  const visibleTimes = selectVisibleAvailabilityTimes(normalizedTimes);
+  const hiddenTimeCount = normalizedTimes.length - visibleTimes.length;
+  const date = visibleTimes[0]?.startsAtDate.toLocaleDateString("en-US", {
     weekday: "long",
     month: "short",
     day: "numeric",
     timeZone
   }) ?? "";
-  const bodyRows = visibleRows
-    .map((row, index) => renderAvailabilityRow(row, index, timeZone, userTimeZone))
+  const bodyRows = chunkAvailabilityTimes(visibleTimes)
+    .map((row) => renderAvailabilityPillRow(row, timeZone, userTimeZone))
     .join("");
-  const overflow = hiddenRowCount > 0
-    ? `<p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:10px 20px 0">${hiddenRowCount} more time window${hiddenRowCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
+  const overflow = hiddenTimeCount > 0
+    ? `<p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:8px 4px 0">${hiddenTimeCount} more tee time${hiddenTimeCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
     : "";
+  const price = formatPriceRange(
+    visibleTimes.flatMap((time) => time.priceCents == null ? [] : [time.priceCents])
+  );
+  const holes = [...new Set(visibleTimes.flatMap((time) => [
+    ...(time.bookableHoleCounts ?? []),
+    ...(time.holes ? [time.holes] : [])
+  ]))].filter((value): value is 9 | 18 => value === 9 || value === 18)
+    .sort((left, right) => left - right);
+  const holesLabel = holes.length > 0
+    ? `${holes.join("/")} holes`
+    : "";
+  const metaItems = [
+    price
+      ? `<span style="color:${EMAIL_COLORS.dark};font-weight:700">${price}</span>`
+      : "",
+    holesLabel
+      ? `<span>${holesLabel}</span>`
+      : "",
+    `<span>${date} &middot; course local time</span>`
+  ].filter(Boolean);
+  const meta = metaItems.join(
+    `<span style="color:${EMAIL_COLORS.line};padding:0 8px">&middot;</span>`
+  );
   const safeBookingUrl = getSafeCustomerBookingUrl(course.bookingUrl);
   const factLine = course.factLine
     ? `
@@ -348,24 +365,18 @@ function renderAvailabilityCard(
         courseName: course.courseName,
         courseAddress: course.courseAddress,
         rank: course.rank,
-        subline: `${date} &middot; course local time (${escapeHtml(timeZone)})`,
+        subline: date,
         assetBaseUrl
       })}
       ${factLine}
       <tr>
-        <td style="background:#f7f9f7;padding:8px 20px">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed">
-            <tr>
-              <td width="68%" style="color:${EMAIL_COLORS.paleMuted};font-family:Inter,Arial,sans-serif;font-size:9px;font-weight:800;letter-spacing:.9px;line-height:14px">TEE TIME</td>
-              <td width="18%" style="color:${EMAIL_COLORS.paleMuted};font-family:Inter,Arial,sans-serif;font-size:9px;font-weight:800;letter-spacing:.9px;line-height:14px;text-align:right">PRICE</td>
-              <td width="14%" style="color:${EMAIL_COLORS.paleMuted};font-family:Inter,Arial,sans-serif;font-size:9px;font-weight:800;letter-spacing:.9px;line-height:14px;text-align:right">HOLES</td>
-            </tr>
-          </table>
+        <td style="background:#f7f9f7;border-bottom:1px solid #e8eeeb;color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;padding:9px 20px">
+          ${meta}
         </td>
       </tr>
       <tr>
-        <td style="padding:0">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed">
+        <td style="padding:12px 16px">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate!important;table-layout:fixed">
             ${bodyRows}
           </table>
           ${overflow}
@@ -377,44 +388,53 @@ function renderAvailabilityCard(
   `;
 }
 
-function renderAvailabilityRow(
-  window: CustomerEmailAvailabilityWindow,
-  index: number,
+function renderAvailabilityPillRow(
+  times: Array<CustomerEmailAvailabilityTime & { startsAtDate: Date }>,
+  courseTimeZone: string,
+  userTimeZone?: string
+) {
+  const cells = times.map((time) =>
+    renderAvailabilityPill(time, courseTimeZone, userTimeZone)
+  );
+  while (cells.length < 4) {
+    cells.push(
+      '<td class="time-pill-cell" width="25%" style="box-sizing:border-box;padding:4px;vertical-align:top"></td>'
+    );
+  }
+
+  return `<tr>${cells.join("")}</tr>`;
+}
+
+function renderAvailabilityPill(
+  time: CustomerEmailAvailabilityTime & { startsAtDate: Date },
   courseTimeZone: string,
   userTimeZone?: string
 ) {
   const normalizedUserTimeZone = normalizeTimeZone(userTimeZone, courseTimeZone);
-  const primaryTime = formatAvailabilityWindow(window, courseTimeZone);
+  const primaryTime = formatAvailabilityTime(time.startsAtDate, courseTimeZone);
   const userLocalTime = normalizedUserTimeZone === courseTimeZone
     ? ""
-    : `${formatAvailabilityWindow(window, normalizedUserTimeZone, true)} for you`;
-  const slotNote = window.isNew
-    ? ""
-    : `<div style="color:${EMAIL_COLORS.paleMuted};font-size:10px;font-weight:500;line-height:14px;margin-top:1px">(${window.matches.length} time slot${window.matches.length === 1 ? "" : "s"} available)</div>`;
+    : `${formatAvailabilityTime(time.startsAtDate, normalizedUserTimeZone, true)} for you`;
   const userNote = userLocalTime
-    ? `<div style="color:${EMAIL_COLORS.muted};font-size:10px;font-weight:500;line-height:14px;margin-top:1px">${escapeHtml(userLocalTime)}</div>`
+    ? `<span style="color:${time.isNew ? "rgba(255,255,255,.58)" : EMAIL_COLORS.muted};display:block;font-size:9px;font-weight:500;line-height:13px;margin-top:2px">${escapeHtml(userLocalTime)}</span>`
     : "";
-  const newBadge = window.isNew
-    ? '<span style="background:#e2f1e7;border-radius:999px;color:#105338;display:inline-block;font-size:9px;font-weight:800;line-height:13px;margin-left:7px;padding:2px 6px;vertical-align:1px">NEW</span>'
+  const newBadge = time.isNew
+    ? `<span style="color:${EMAIL_COLORS.orange};display:inline-block;font-size:8px;font-weight:800;letter-spacing:.64px;line-height:12px;margin-left:6px;vertical-align:1px">NEW</span>`
     : "";
-  const background = window.isNew ? "#f2f8f4" : index % 2 === 0 ? "#ffffff" : "#f7f9f7";
-  const price = formatPriceRange(
-    window.matches.flatMap((match) => match.priceCents == null ? [] : [match.priceCents])
-  ) ?? "&mdash;";
-  const holes = [...new Set(window.matches.flatMap((match) => [
-    ...(match.bookableHoleCounts ?? []),
-    ...(match.holes ? [match.holes] : [])
-  ]))].filter((value): value is 9 | 18 => value === 9 || value === 18);
-  const holesLabel = holes.length === 1 ? `${holes[0]}H` : holes.length > 1 ? holes.sort((a, b) => a - b).map((value) => `${value}H`).join("/") : "&mdash;";
+  const background = time.isNew ? EMAIL_COLORS.dark : "#eaf3ee";
+  const border = time.isNew ? "#1f7a4d" : "#c8e6d2";
+  const textColor = time.isNew ? "#6dbf9c" : "#1f7a4d";
 
   return `
-    <tr style="background:${background}">
-      <td width="68%" style="border-top:1px solid #edf1ee;color:${EMAIL_COLORS.dark};font-family:Inter,Arial,sans-serif;font-size:13px;font-weight:700;line-height:20px;padding:9px 20px;vertical-align:middle">
-        ${escapeHtml(primaryTime)}${newBadge}${slotNote}${userNote}
-      </td>
-      <td width="18%" align="right" style="border-top:1px solid #edf1ee;color:${EMAIL_COLORS.dark};font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:700;line-height:18px;padding:9px 10px;vertical-align:middle">${price}</td>
-      <td width="14%" align="right" style="border-top:1px solid #edf1ee;color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:11px;font-weight:600;line-height:18px;padding:9px 20px 9px 8px;vertical-align:middle">${holesLabel}</td>
-    </tr>
+    <td class="time-pill-cell" width="25%" style="box-sizing:border-box;padding:4px;vertical-align:top">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate!important">
+        <tr>
+          <td align="center" bgcolor="${background}" style="background:${background};border:1px solid ${border};border-radius:10px;font-family:Inter,Arial,sans-serif;line-height:18px;padding:8px 6px;white-space:nowrap">
+            <span style="color:${textColor};font-size:12px;font-weight:${time.isNew ? 700 : 500}">${escapeHtml(primaryTime)}</span>${newBadge}${userNote}
+          </td>
+        </tr>
+      </table>
+    </td>
   `;
 }
 
@@ -542,11 +562,11 @@ function renderCoursePhotoHeader(input: {
   `;
 }
 
-function buildAvailabilityRows(
-  times: CustomerEmailAvailabilityTime[],
+function normalizeAvailabilityTimes<T extends CustomerEmailAvailabilityTime>(
+  times: T[],
   timeZone: string
-): CustomerEmailAvailabilityWindow[] {
-  const normalized = times
+): Array<T & { startsAtDate: Date }> {
+  return times
     .map((time) => ({
       ...time,
       startsAtDate: time.startsAt instanceof Date
@@ -555,42 +575,29 @@ function buildAvailabilityRows(
     }))
     .filter((time) => !Number.isNaN(time.startsAtDate.getTime()))
     .sort((left, right) => left.startsAtDate.getTime() - right.startsAtDate.getTime());
-  const exactRows = normalized
-    .filter((time) => time.isNew)
-    .map<CustomerEmailAvailabilityWindow>((time) => ({
-      matches: [time],
-      startsAt: time.startsAtDate,
-      endsAt: time.startsAtDate,
-      isNew: true
-    }));
-  const grouped = new Map<string, typeof normalized>();
-  for (const time of normalized.filter((candidate) => !candidate.isNew)) {
-    const key = getCourseLocalHourKey(time.startsAtDate, timeZone);
-    const group = grouped.get(key) ?? [];
-    group.push(time);
-    grouped.set(key, group);
-  }
-  const groupedRows = [...grouped.values()].map<CustomerEmailAvailabilityWindow>((matches) => ({
-    matches,
-    startsAt: matches[0].startsAtDate,
-    endsAt: matches[matches.length - 1].startsAtDate,
-    isNew: false
-  }));
-
-  return [...exactRows, ...groupedRows].sort(
-    (left, right) => left.startsAt.getTime() - right.startsAt.getTime()
-  );
 }
 
-function selectVisibleAvailabilityRows(rows: CustomerEmailAvailabilityWindow[]) {
-  return [...rows]
+function selectVisibleAvailabilityTimes<
+  T extends CustomerEmailAvailabilityTime & { startsAtDate: Date }
+>(times: T[]) {
+  return [...times]
     .sort(
       (left, right) =>
-        Number(right.isNew) - Number(left.isNew) ||
-        left.startsAt.getTime() - right.startsAt.getTime()
+        Number(right.isNew === true) - Number(left.isNew === true) ||
+        left.startsAtDate.getTime() - right.startsAtDate.getTime()
     )
-    .slice(0, MAX_EMAIL_AVAILABILITY_ROWS_PER_COURSE)
-    .sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
+    .slice(0, MAX_EMAIL_AVAILABILITY_PILLS_PER_COURSE)
+    .sort((left, right) => left.startsAtDate.getTime() - right.startsAtDate.getTime());
+}
+
+function chunkAvailabilityTimes<
+  T extends CustomerEmailAvailabilityTime & { startsAtDate: Date }
+>(times: T[]) {
+  const rows: T[][] = [];
+  for (let index = 0; index < times.length; index += 4) {
+    rows.push(times.slice(index, index + 4));
+  }
+  return rows;
 }
 
 export function getRenderedAvailabilityStartTimes(
@@ -606,34 +613,22 @@ export function getRenderedAvailabilityTimes<
   T extends CustomerEmailAvailabilityTime
 >(times: T[], timeZone?: string) {
   const normalizedTimeZone = normalizeTimeZone(timeZone, DEFAULT_TIME_ZONE);
-  return selectVisibleAvailabilityRows(
-    buildAvailabilityRows(times, normalizedTimeZone)
-  )
-    .flatMap((row) => row.matches) as Array<T & { startsAtDate: Date }>;
+  return selectVisibleAvailabilityTimes(
+    normalizeAvailabilityTimes(times, normalizedTimeZone)
+  );
 }
 
-function formatAvailabilityWindow(
-  window: CustomerEmailAvailabilityWindow,
+function formatAvailabilityTime(
+  startsAt: Date,
   timeZone: string,
   includeWeekday = false
 ) {
-  const start = window.startsAt.toLocaleString("en-US", {
+  return startsAt.toLocaleString("en-US", {
     ...(includeWeekday ? { weekday: "short" as const } : {}),
     hour: "numeric",
     minute: "2-digit",
-    timeZoneName: "short",
     timeZone
   });
-  if (window.startsAt.getTime() === window.endsAt.getTime()) {
-    return start;
-  }
-  const end = window.endsAt.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-    timeZone
-  });
-  return `${start} – ${end}`;
 }
 
 function formatCheckedAt(value: Date, timeZone?: string) {
@@ -677,19 +672,6 @@ function getCourseAssetUrl(rank: number, assetBaseUrl?: string) {
     return new URL(assetPath, assetBaseUrl).toString();
   }
   return absoluteUrl(assetPath);
-}
-
-function getCourseLocalHourKey(date: Date, timeZone: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    hourCycle: "h23",
-    timeZone
-  }).formatToParts(date);
-  const values = new Map(parts.map((part) => [part.type, part.value]));
-  return [values.get("year"), values.get("month"), values.get("day"), values.get("hour")].join("-");
 }
 
 function formatPriceRange(prices: number[]) {

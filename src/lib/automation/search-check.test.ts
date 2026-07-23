@@ -506,7 +506,7 @@ describe("runSearchCheck email cadence", () => {
     expect(result.newlyAlertedMatches).toBe(1);
   });
 
-  it("covers only pending matches rendered within the setup email row limit", async () => {
+  it("covers only pending matches rendered within the setup email pill limit", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -523,8 +523,8 @@ describe("runSearchCheck email cadence", () => {
         }
       ]
     });
-    const localStartsAt = Array.from({ length: 9 }, (_, index) => {
-      const totalMinutes = 7 * 60 + index * 20;
+    const localStartsAt = Array.from({ length: 17 }, (_, index) => {
+      const totalMinutes = 7 * 60 + index * 10;
       const hours = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
       const minutes = String(totalMinutes % 60).padStart(2, "0");
       return `2026-07-12T${hours}:${minutes}:00-04:00`;
@@ -556,11 +556,11 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({
         kind: "SETUP",
         payload: expect.objectContaining({
-          matchIds: localStartsAt.slice(0, 8).map((_, index) => `match-${index + 1}`)
+          matchIds: localStartsAt.slice(0, 16).map((_, index) => `match-${index + 1}`)
         })
       })
     );
-    expect(result.newlyAlertedMatches).toBe(8);
+    expect(result.newlyAlertedMatches).toBe(16);
   });
 
   it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {

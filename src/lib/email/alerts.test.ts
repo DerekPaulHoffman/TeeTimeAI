@@ -30,9 +30,9 @@ describe("renderAlertHtml", () => {
       ]
     });
 
-    expect(html).toContain("9:00 AM EDT");
-    expect(html).toContain("6:00 AM PDT for you");
-    expect(html).toContain("course local time (America/New_York)");
+    expect(html).toContain("9:00 AM");
+    expect(html).toContain("Sat 6:00 AM for you");
+    expect(html).toContain("course local time");
   });
 
   it("escapes dynamic email fields", () => {
@@ -90,7 +90,7 @@ describe("renderAlertHtml", () => {
       ]
     });
 
-    expect(html).toContain("9H/18H");
+    expect(html).toContain("9/18 holes");
   });
 
   it("shows the reusable course strip and Course Guide in instant alerts", () => {
@@ -120,7 +120,7 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("Course Guide");
   });
 
-  it("keeps separate hourly windows and renders both stop-alert controls", () => {
+  it("keeps separate times and renders both stop-alert controls", () => {
     const html = renderAlertHtml({
       to: "player@example.com",
       searchId: "search-1",
@@ -152,7 +152,7 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("Cancel this alert");
   });
 
-  it("summarizes a dense tee sheet into hourly windows with a bounded list", () => {
+  it("shows a dense tee sheet as bounded individual time pills", () => {
     const matches = Array.from({ length: 54 }, (_, index) => ({
       courseName: "Blue Rock Golf Course",
       courseTimeZone: "America/New_York",
@@ -161,7 +161,7 @@ describe("renderAlertHtml", () => {
       bookingUrl: "https://example.com/blue-rock",
       priceCents: 7200,
       holes: 18,
-      isNew: index >= 12
+      isNew: index >= 12 && index < 20
     }));
 
     const html = renderAlertHtml({
@@ -173,15 +173,18 @@ describe("renderAlertHtml", () => {
     expect(getMatchAlertSubject(matches)).toBe(
       "New tee time windows opened at Blue Rock Golf Course"
     );
-    expect(html).not.toContain("9:00 AM EDT – 9:50 AM EDT");
+    expect(html).not.toContain("9:00 AM EDT");
     expect(html.match(/6 time slots available/g)).toBeNull();
     expect(html.match(/>NEW<\/span>/g)).toHaveLength(8);
-    expect(html).toContain("36 more time windows are available on the official booking page");
-    expect(html).toContain("12:00 PM EDT");
+    expect(html).toContain("38 more tee times are available on the official booking page");
+    expect(html).toContain("9:00 AM");
+    expect(html).toContain("12:10 PM");
+    expect(html).toContain("background:#eaf3ee");
+    expect(html).toContain("border:1px solid #c8e6d2");
   });
 
-  it("returns only the exact match IDs rendered within each course row cap", () => {
-    const matches = Array.from({ length: 9 }, (_, index) => ({
+  it("returns only the exact match IDs rendered within each course pill cap", () => {
+    const matches = Array.from({ length: 17 }, (_, index) => ({
       matchId: `match-${index + 1}`,
       courseId: "course-1",
       courseName: "Blue Rock Golf Course",
@@ -193,12 +196,12 @@ describe("renderAlertHtml", () => {
     }));
 
     expect(getRenderedTeeTimeAlertMatchIds(matches)).toEqual(
-      matches.slice(0, 8).map((match) => match.matchId)
+      matches.slice(0, 16).map((match) => match.matchId)
     );
   });
 
-  it("keeps a later new opening when eight older hourly windows fill the row cap", () => {
-    const older = Array.from({ length: 8 }, (_, index) => ({
+  it("keeps a later new opening when older times fill the pill cap", () => {
+    const older = Array.from({ length: 16 }, (_, index) => ({
       matchId: `old-${index + 1}`,
       courseId: "course-1",
       courseName: "Blue Rock Golf Course",
@@ -218,7 +221,7 @@ describe("renderAlertHtml", () => {
     const rendered = getRenderedTeeTimeAlertMatchIds([...older, opening]);
 
     expect(rendered).toContain("new-opening");
-    expect(rendered).not.toContain("old-8");
+    expect(rendered).not.toContain("old-16");
   });
 });
 
