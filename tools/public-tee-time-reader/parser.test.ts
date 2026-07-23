@@ -40,6 +40,25 @@ describe("public tee-time response reader", () => {
     });
   });
 
+  it("does not classify ordinary JSON containing CAPTCHA labels as a challenge", () => {
+    expect(
+      analyzePublicResponse({
+        method: "GET",
+        url: "https://course.example/assets/translations.json",
+        status: 200,
+        mimeType: "application/json",
+        headers: [],
+        body: JSON.stringify({
+          labels: {
+            recaptcha: "Verification is available when required"
+          }
+        })
+      })
+    ).toMatchObject({
+      kind: "json"
+    });
+  });
+
   it("parses CPS-shaped slots without depending on a tenant hostname", () => {
     const result = analyzePublicResponse({
       method: "GET",
@@ -117,6 +136,32 @@ describe("public tee-time response reader", () => {
         course: "Example Municipal",
         available: 4,
         price: 42
+      }
+    ]);
+  });
+
+  it("parses public TenFore booking-time rows", () => {
+    expect(
+      extractTeeTimeSlots({
+        successful: true,
+        data: [
+          {
+            id: 6692125,
+            date: "2026-07-24",
+            time: "07:00:00",
+            spots: 2,
+            maxHoles: 18,
+            fullPrice18: 57.81,
+            fullPrice9: 34.34
+          }
+        ]
+      })
+    ).toEqual([
+      {
+        time: "2026-07-24T07:00:00",
+        holes: 18,
+        available: 2,
+        price: 57.81
       }
     ]);
   });

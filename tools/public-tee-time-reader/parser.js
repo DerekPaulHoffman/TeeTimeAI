@@ -14,6 +14,7 @@ const SENSITIVE_KEY_PATTERN =
 
 const TIME_KEYS = new Set([
   "starttime",
+  "time",
   "teetime",
   "teeofftime",
   "dateandtime",
@@ -31,7 +32,8 @@ const AVAILABILITY_KEYS = new Set([
   "maxplayers",
   "openslots",
   "participants",
-  "remaining"
+  "remaining",
+  "spots"
 ]);
 const SLOT_ID_KEYS = new Set([
   "slotid",
@@ -41,6 +43,8 @@ const SLOT_ID_KEYS = new Set([
 ]);
 const PRICE_KEYS = new Set([
   "displayprice",
+  "fullprice18",
+  "fullprice9",
   "price",
   "rate",
   "teesheetprice"
@@ -54,11 +58,26 @@ export function analyzePublicResponse(input) {
   const headers = normalizeHeaders(input.headers);
   const mimeType = String(input.mimeType || "");
   const body = String(input.body || "").slice(0, MAX_BODY_CHARACTERS);
+  const sensitive = isSensitiveUrl(rawUrl);
+  if (sensitive) {
+    return {
+      kind: "ignored",
+      method,
+      status,
+      url,
+      title: "Sensitive endpoint ignored",
+      detail: "The reader does not inspect authentication, account, or transaction responses."
+    };
+  }
+
+  const bodyLooksLikeMarkup =
+    /(?:text\/html|application\/xhtml\+xml)/i.test(mimeType) ||
+    /^\s*</.test(body);
   const challenge =
     status === 401 ||
     status === 403 ||
     headers.get("cf-mitigated")?.toLowerCase() === "challenge" ||
-    CHALLENGE_PATTERN.test(body);
+    (bodyLooksLikeMarkup && CHALLENGE_PATTERN.test(body));
 
   if (challenge) {
     return {
@@ -68,17 +87,6 @@ export function analyzePublicResponse(input) {
       url,
       title: "Managed access challenge observed",
       detail: challengeDetail(status, body)
-    };
-  }
-
-  if (isSensitiveUrl(rawUrl)) {
-    return {
-      kind: "ignored",
-      method,
-      status,
-      url,
-      title: "Sensitive endpoint ignored",
-      detail: "The reader does not inspect authentication, account, or transaction responses."
     };
   }
 
@@ -274,7 +282,10 @@ function normalizeSlot(record) {
   }
 
   const slot = {
-    time: String(timeEntry[1])
+    time: combineDateAndTime(
+      findValue(normalized, ["date"]),
+      timeEntry[1]
+    )
   };
   const course = findValue(normalized, [
     "coursename",
@@ -283,7 +294,7 @@ function normalizeSlot(record) {
     "facilityname",
     "facilityid"
   ]);
-  const holes = findValue(normalized, ["holes", "defaultholes"]);
+  const holes = findValue(normalized, ["holes", "defaultholes", "maxholes"]);
   const startingTee = findValue(normalized, ["startingtee", "teebox", "tee"]);
   const teeSuffix = findValue(normalized, ["teesuffix"]);
   const compactStartingTee = compactValue(startingTee);
@@ -349,6 +360,16 @@ function isUsefulTime(value) {
     value.length <= 100 &&
     /(?:\d{1,2}:\d{2}|T\d{2}:\d{2})/.test(value)
   );
+}
+
+function combineDateAndTime(date, time) {
+  const compactDate = compactValue(date);
+  const compactTime = String(time);
+  return typeof compactDate === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(compactDate) &&
+    /^\d{1,2}:\d{2}(?::\d{2})?$/.test(compactTime)
+    ? `${compactDate}T${compactTime}`
+    : compactTime;
 }
 
 function normalizeKey(value) {
