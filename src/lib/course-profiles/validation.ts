@@ -50,6 +50,16 @@ export type CourseProfileDraft = {
   courseCharacter: string;
   notableFacts: string[];
   profileVerifiedAt: string;
+  physicalLayout?: {
+    holeCounts: Array<9 | 18>;
+    evidenceUrl: string;
+    verifiedAt: string;
+  };
+  par?: {
+    value: number;
+    evidenceUrl: string;
+    verifiedAt: string;
+  };
   sources: CourseProfileSourceDraft[];
 };
 
@@ -103,6 +113,10 @@ export function validateCourseProfileDraft(value: unknown) {
     errors
   );
   const sources = validateSources(value.sources, errors);
+  const physicalLayout = validatePhysicalLayout(value.physicalLayout, errors);
+  const par = validatePar(value.par, errors);
+  validateStructuredFactEvidence(physicalLayout, "physical_layout", sources, errors);
+  validateStructuredFactEvidence(par, "par", sources, errors);
   if (
     officialWebsiteUrl &&
     !sources.some(
@@ -172,11 +186,87 @@ export function validateCourseProfileDraft(value: unknown) {
           courseCharacter,
           notableFacts,
           profileVerifiedAt,
+          ...(physicalLayout ? { physicalLayout } : {}),
+          ...(par ? { par } : {}),
           sources
         } satisfies CourseProfileDraft)
       : null;
 
   return { valid: errors.length === 0 && Boolean(draft), errors, draft };
+}
+
+function validatePhysicalLayout(value: unknown, errors: string[]) {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    errors.push("physicalLayout must be an object");
+    return undefined;
+  }
+  const holeCounts = Array.isArray(value.holeCounts)
+    ? [...new Set(value.holeCounts.filter((holes): holes is 9 | 18 => holes === 9 || holes === 18))]
+    : [];
+  if (
+    !Array.isArray(value.holeCounts) ||
+    holeCounts.length === 0 ||
+    holeCounts.length !== value.holeCounts.length
+  ) {
+    errors.push("physicalLayout.holeCounts must contain unique 9 and/or 18 values");
+  }
+  const evidenceUrl = httpUrl(
+    value.evidenceUrl,
+    "physicalLayout.evidenceUrl",
+    errors
+  );
+  const verifiedAt = validDateString(
+    value.verifiedAt,
+    "physicalLayout.verifiedAt",
+    errors
+  );
+  return holeCounts.length > 0 && evidenceUrl && verifiedAt
+    ? { holeCounts, evidenceUrl, verifiedAt }
+    : undefined;
+}
+
+function validatePar(value: unknown, errors: string[]) {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    errors.push("par must be an object");
+    return undefined;
+  }
+  const parValue =
+    typeof value.value === "number" && Number.isInteger(value.value)
+      ? value.value
+      : null;
+  if (parValue === null || parValue < 25 || parValue > 90) {
+    errors.push("par.value must be an integer from 25 through 90");
+  }
+  const evidenceUrl = httpUrl(value.evidenceUrl, "par.evidenceUrl", errors);
+  const verifiedAt = validDateString(value.verifiedAt, "par.verifiedAt", errors);
+  return parValue !== null &&
+    parValue >= 25 &&
+    parValue <= 90 &&
+    evidenceUrl &&
+    verifiedAt
+    ? { value: parValue, evidenceUrl, verifiedAt }
+    : undefined;
+}
+
+function validateStructuredFactEvidence(
+  fact: { evidenceUrl: string } | undefined,
+  claimKey: string,
+  sources: CourseProfileSourceDraft[],
+  errors: string[]
+) {
+  if (
+    fact &&
+    !sources.some(
+      (source) =>
+        source.url === fact.evidenceUrl && source.claimKeys.includes(claimKey)
+    )
+  ) {
+    errors.push(
+      `${claimKey} evidenceUrl must match a source carrying the ${claimKey} claim`
+    );
+  }
 }
 
 export function hashCourseProfileDraft(draft: CourseProfileDraft) {

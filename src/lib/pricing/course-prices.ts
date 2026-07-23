@@ -4,6 +4,7 @@ export type CoursePriceRange = {
   minPriceCents: number;
   maxPriceCents: number;
   sampleSize: number;
+  observedAt?: string;
 };
 
 export type CoursePriceEstimate = {
@@ -16,7 +17,17 @@ export type CoursePriceEstimate = {
 export type CoursePriceView = "any" | "9" | "18";
 export type BookableHoleCount = 9 | 18;
 
+export type CourseBookingFactRecord = {
+  holes: number;
+  minPriceCents: number | null;
+  maxPriceCents: number | null;
+  priceSampleSize: number | null;
+  priceObservedAt: Date | null;
+  bookableObservedAt: Date | null;
+};
+
 type CoursePriceEvidence = {
+  bookingFacts?: CourseBookingFactRecord[];
   probes: Array<{ observedAt: Date; rawSummary: unknown }>;
   matches: Array<{
     priceCents: number | null;
@@ -105,45 +116,166 @@ export function getHeadlineCoursePrice(
 export function buildCoursePriceEstimate(
   evidence: CoursePriceEvidence
 ): CoursePriceEstimate | undefined {
+  const durableEstimate = buildDurableCoursePriceEstimate(evidence.bookingFacts ?? []);
   const probeSnapshots = evidence.probes
     .map((probe) => parseStoredPriceSnapshot(probe.rawSummary, probe.observedAt))
     .filter((snapshot): snapshot is CoursePriceEstimate => snapshot !== undefined);
 
-  if (probeSnapshots.length > 0) return mergePriceEstimates(probeSnapshots);
+  const probeEstimate =
+    probeSnapshots.length > 0 ? mergePriceEstimates(probeSnapshots) : undefined;
 
   const pricesByHoles = new Map<9 | 18, number[]>([[9, []], [18, []]]);
-  let observedAt: Date | undefined;
+  let matchObservedAt: Date | undefined;
   for (const match of evidence.matches) {
     if (!isSupportedHoles(match.holes) || !isPrice(match.priceCents)) continue;
     pricesByHoles.get(match.holes)?.push(match.priceCents);
-    if (!observedAt || match.lastConfirmedAt > observedAt) observedAt = match.lastConfirmedAt;
+    if (!matchObservedAt || match.lastConfirmedAt > matchObservedAt) {
+      matchObservedAt = match.lastConfirmedAt;
+    }
   }
+  const matchEstimate = matchObservedAt
+    ? buildEstimateFromPrices(pricesByHoles, matchObservedAt)
+    : undefined;
+  const legacyEstimate = mergePriceEstimateCoverage(probeEstimate, matchEstimate);
 
-  return observedAt ? buildEstimateFromPrices(pricesByHoles, observedAt) : undefined;
+  return mergePriceEstimateCoverage(durableEstimate, legacyEstimate);
 }
 
 export function buildObservedBookableHoleCounts(evidence: CoursePriceEvidence) {
+  return buildObservedBookableHoleSummary(evidence).holeCounts;
+}
+
+export function buildObservedBookableHoleSummary(evidence: CoursePriceEvidence) {
   const observed = new Set<BookableHoleCount>();
+  let observedAt: Date | undefined;
+
+  for (const fact of evidence.bookingFacts ?? []) {
+    if (
+      isSupportedHoles(fact.holes) &&
+      (fact.bookableObservedAt || fact.priceObservedAt)
+    ) {
+      observed.add(fact.holes);
+      const factObservedAt = fact.bookableObservedAt ?? fact.priceObservedAt;
+      if (factObservedAt && (!observedAt || factObservedAt > observedAt)) {
+        observedAt = factObservedAt;
+      }
+    }
+  }
 
   for (const probe of evidence.probes) {
     if (!isRecord(probe.rawSummary)) continue;
+    let probeObservedBookableHoles = false;
     for (const holes of Array.isArray(probe.rawSummary.bookableHoleCounts)
       ? probe.rawSummary.bookableHoleCounts
       : []) {
-      if (isSupportedHoles(holes)) observed.add(holes);
+      if (isSupportedHoles(holes)) {
+        observed.add(holes);
+        probeObservedBookableHoles = true;
+      }
     }
 
     if (isRecord(probe.rawSummary.pricing)) {
-      if (parseRange(probe.rawSummary.pricing.nineHoles)) observed.add(9);
-      if (parseRange(probe.rawSummary.pricing.eighteenHoles)) observed.add(18);
+      if (parseRange(probe.rawSummary.pricing.nineHoles)) {
+        observed.add(9);
+        probeObservedBookableHoles = true;
+      }
+      if (parseRange(probe.rawSummary.pricing.eighteenHoles)) {
+        observed.add(18);
+        probeObservedBookableHoles = true;
+      }
+    }
+    if (probeObservedBookableHoles && (!observedAt || probe.observedAt > observedAt)) {
+      observedAt = probe.observedAt;
     }
   }
 
   for (const match of evidence.matches) {
-    if (isSupportedHoles(match.holes)) observed.add(match.holes);
+    if (isSupportedHoles(match.holes)) {
+      observed.add(match.holes);
+      if (!observedAt || match.lastConfirmedAt > observedAt) {
+        observedAt = match.lastConfirmedAt;
+      }
+    }
   }
 
-  return ([9, 18] as const).filter((holes) => observed.has(holes));
+  return {
+    holeCounts: ([9, 18] as const).filter((holes) => observed.has(holes)),
+    observedAt: observedAt?.toISOString()
+  };
+}
+
+function buildDurableCoursePriceEstimate(facts: CourseBookingFactRecord[]) {
+  const nineHoles = buildDurableRange(facts.find((fact) => fact.holes === 9));
+  const eighteenHoles = buildDurableRange(facts.find((fact) => fact.holes === 18));
+  if (!nineHoles && !eighteenHoles) return undefined;
+
+  const observedAt = [nineHoles?.observedAt, eighteenHoles?.observedAt]
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+  if (!observedAt) return undefined;
+
+  return {
+    currency: "USD" as const,
+    observedAt,
+    ...(nineHoles ? { nineHoles } : {}),
+    ...(eighteenHoles ? { eighteenHoles } : {})
+  };
+}
+
+function buildDurableRange(
+  fact: CourseBookingFactRecord | undefined
+): CoursePriceRange | undefined {
+  if (
+    !fact?.priceObservedAt ||
+    !isPrice(fact.minPriceCents) ||
+    !isPrice(fact.maxPriceCents) ||
+    !fact.priceSampleSize ||
+    fact.priceSampleSize < 1 ||
+    fact.minPriceCents > fact.maxPriceCents
+  ) {
+    return undefined;
+  }
+
+  return {
+    minPriceCents: fact.minPriceCents,
+    maxPriceCents: fact.maxPriceCents,
+    sampleSize: fact.priceSampleSize,
+    observedAt: fact.priceObservedAt.toISOString()
+  };
+}
+
+function mergePriceEstimateCoverage(
+  primary: CoursePriceEstimate | undefined,
+  fallback: CoursePriceEstimate | undefined
+) {
+  if (!primary) return fallback;
+  if (!fallback) return primary;
+
+  const nineHoles =
+    primary.nineHoles ??
+    addRangeObservedAt(fallback.nineHoles, fallback.observedAt);
+  const eighteenHoles =
+    primary.eighteenHoles ??
+    addRangeObservedAt(fallback.eighteenHoles, fallback.observedAt);
+  const observedAt = [nineHoles?.observedAt, eighteenHoles?.observedAt]
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+
+  return {
+    currency: "USD" as const,
+    observedAt: observedAt ?? primary.observedAt,
+    ...(nineHoles ? { nineHoles } : {}),
+    ...(eighteenHoles ? { eighteenHoles } : {})
+  };
+}
+
+function addRangeObservedAt(
+  range: CoursePriceRange | undefined,
+  observedAt: string
+) {
+  return range
+    ? { ...range, observedAt: range.observedAt ?? observedAt }
+    : undefined;
 }
 
 function parseStoredPriceSnapshot(rawSummary: unknown, fallbackObservedAt: Date) {

@@ -9,6 +9,13 @@ import { StructuredData } from "@/components/structured-data";
 import { getBookingWindowPresentation, getPublicFacilityFacts, getUnsupportedAlertCopy } from "@/lib/course-profiles/presentation";
 import { getPublishedCourseProfile, getRelatedSupportedCourses } from "@/lib/course-profiles/service";
 import { absoluteUrl, buildPageMetadata } from "@/lib/seo";
+import {
+  buildCoursePriceEstimate,
+  buildObservedBookableHoleSummary,
+  getHeadlineBookableHoleCount,
+  getHeadlineCoursePrice,
+  type CoursePriceRange
+} from "@/lib/pricing/course-prices";
 
 type PageProps = { params: Promise<{ slug: string }> };
 
@@ -44,6 +51,20 @@ export default async function CourseProfilePage({ params }: PageProps) {
   const bookingWindow = getBookingWindowPresentation(course);
   const courseType = formatCourseType(profile.courseType);
   const publicNotableFacts = getPublicFacilityFacts(profile.notableFacts);
+  const bookingEvidence = {
+    bookingFacts: course.bookingFacts,
+    probes: [],
+    matches: []
+  };
+  const priceEstimate = buildCoursePriceEstimate(bookingEvidence);
+  const observedHoles = buildObservedBookableHoleSummary(bookingEvidence);
+  const physicalHoleCount = getHeadlineBookableHoleCount(course.layoutHoleCounts);
+  const bookableHoleCount =
+    physicalHoleCount ?? getHeadlineBookableHoleCount(observedHoles.holeCounts);
+  const headlinePrice = getHeadlineCoursePrice(
+    priceEstimate,
+    bookableHoleCount ? [bookableHoleCount] : []
+  );
   const officialLinks = [...new Map(
     [
       course.website ? { href: course.website, label: "Official course website" } : null,
@@ -65,6 +86,20 @@ export default async function CourseProfilePage({ params }: PageProps) {
     latitude: course.latitude,
     longitude: course.longitude,
     timeZone: course.timeZone,
+    rating: course.rating ?? undefined,
+    ratingObservedAt: course.ratingObservedAt?.toISOString(),
+    par: course.par ?? undefined,
+    parEvidenceUrl: course.parEvidenceUrl ?? undefined,
+    parVerifiedAt: course.parVerifiedAt?.toISOString(),
+    layoutHoleCounts: course.layoutHoleCounts.filter(
+      (holes): holes is 9 | 18 => holes === 9 || holes === 18
+    ),
+    layoutHolesStatus: course.layoutHolesVerifiedAt ? "VERIFIED" as const : "UNVERIFIED" as const,
+    layoutHolesEvidenceUrl: course.layoutHolesEvidenceUrl ?? undefined,
+    layoutHolesVerifiedAt: course.layoutHolesVerifiedAt?.toISOString(),
+    priceEstimate,
+    bookableHoleCounts: observedHoles.holeCounts,
+    bookableHoleCountsObservedAt: observedHoles.observedAt,
     website: course.website ?? undefined,
     profileUrl: path
   };
@@ -123,13 +158,36 @@ export default async function CourseProfilePage({ params }: PageProps) {
             <Link href="/">Home</Link><span>/</span>{hasConnecticutHub ? <><Link href="/locations/connecticut">Connecticut</Link><span>/</span></> : null}<span>{course.name}</span>
           </nav>
           <div className="knowledge-hero-copy">
-            <p className="eyebrow">Golf course guide</p>
+            <p className="eyebrow">Course Guide</p>
             <h1>{course.name}</h1>
             <p className="knowledge-location"><MapPin aria-hidden="true" size={17} />{location}</p>
             <p className="knowledge-lede">{profile.accessSummary}</p>
             <div className="knowledge-pills">
               <span>{courseType}</span>
-              <span>{course.isPublic ? "Public access" : "Access restricted"}</span>
+              <span>{course.isPublic ? "Public" : "Access restricted"}</span>
+              {typeof course.rating === "number" ? (
+                <span title={`Rating last observed ${formatDate(course.ratingObservedAt)}`}>
+                  {course.rating.toFixed(1)} rating
+                </span>
+              ) : null}
+              {bookableHoleCount ? (
+                <span
+                  title={
+                    physicalHoleCount
+                      ? `Physical layout verified ${formatDate(course.layoutHolesVerifiedAt)}`
+                      : `Booking option last observed ${formatDateValue(observedHoles.observedAt)}`
+                  }
+                >
+                  {bookableHoleCount}H
+                </span>
+              ) : null}
+              {headlinePrice ? (
+                <span
+                  title={`Official ${headlinePrice.holes}-hole rates last observed ${formatDateValue(headlinePrice.range.observedAt ?? priceEstimate?.observedAt)}`}
+                >
+                  {formatCoursePriceRange(headlinePrice.range)}
+                </span>
+              ) : null}
             </div>
             <CourseProfileActions slug={profile.canonicalSlug} supported={supported} selectedCourse={selectedCourse} website={course.website} bookingUrl={course.detectedBookingUrl} showAlert={false} />
           </div>
@@ -182,7 +240,7 @@ export default async function CourseProfilePage({ params }: PageProps) {
 
         <aside className="knowledge-aside">
           <h2>At a glance</h2>
-          <dl><div><dt>Location</dt><dd>{location}</dd></div><div><dt>Access</dt><dd>{course.isPublic ? "Public" : "Restricted"}</dd></div><div><dt>Course type</dt><dd>{courseType}</dd></div><div><dt>Tee time alerts</dt><dd>{supported ? "Available" : "Not currently available"}</dd></div></dl>
+          <dl><div><dt>Location</dt><dd>{location}</dd></div><div><dt>Access</dt><dd>{course.isPublic ? "Public" : "Restricted"}</dd></div><div><dt>Course type</dt><dd>{courseType}</dd></div>{typeof course.rating === "number" ? <div><dt>Rating</dt><dd>{course.rating.toFixed(1)} <small>last observed {formatDate(course.ratingObservedAt)}</small></dd></div> : null}{bookableHoleCount ? <div><dt>{physicalHoleCount ? "Physical layout" : "Booking options"}</dt><dd>{bookableHoleCount} holes</dd></div> : null}{headlinePrice ? <div><dt>Last observed rate</dt><dd>{formatCoursePriceRange(headlinePrice.range)} <small>{formatDateValue(headlinePrice.range.observedAt ?? priceEstimate?.observedAt)}</small></dd></div> : null}<div><dt>Tee time alerts</dt><dd>{supported ? "Available" : "Not currently available"}</dd></div></dl>
           <div className="knowledge-aside-links">{officialLinks.map((link) => <a href={link.href} key={link.href} rel="noreferrer" target="_blank">{link.label}<ArrowRight aria-hidden="true" size={14} /></a>)}</div>
         </aside>
       </div>
@@ -205,4 +263,22 @@ function formatCourseType(value: string | null) {
 
 function formatDate(value: Date | null) {
   return value ? new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: "UTC" }).format(value) : "not yet verified";
+}
+
+function formatDateValue(value: string | undefined) {
+  if (!value) return "an earlier check";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "an earlier check" : formatDate(date);
+}
+
+function formatCoursePriceRange(range: CoursePriceRange) {
+  const format = (value: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: value % 100 === 0 ? 0 : 2
+    }).format(value / 100);
+  const minimum = format(range.minPriceCents);
+  const maximum = format(range.maxPriceCents);
+  return minimum === maximum ? minimum : `${minimum}–${maximum}`;
 }

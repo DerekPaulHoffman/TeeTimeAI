@@ -648,6 +648,22 @@ describe("renderSearchStatusHtml", () => {
           rank: 2,
           courseAddress: "2 Ridge Road, Orange, CT 06477",
           timeZone: "America/New_York",
+          isPublic: true,
+          rating: 4.4,
+          ratingObservedAt: "2026-07-20T12:00:00.000Z",
+          bookableHoleCounts: [18],
+          bookableHoleCountsObservedAt: "2026-07-21T12:00:00.000Z",
+          priceEstimate: {
+            currency: "USD",
+            observedAt: "2026-07-22T12:00:00.000Z",
+            eighteenHoles: {
+              minPriceCents: 8500,
+              maxPriceCents: 9800,
+              sampleSize: 3,
+              observedAt: "2026-07-22T12:00:00.000Z"
+            }
+          },
+          courseGuideUrl: "/courses/ridgecrest-golf-course-orange-ct",
           outcome: "NO_MATCH",
           availableMatches: 0,
           availability: { visibleSlotCount: 0, playerEligibleSlotCount: 0 }
@@ -669,6 +685,13 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("https://assets.example.com/email/course-card-2.png");
     expect(html).toContain("Glastonbury, CT");
     expect(html).toContain("Orange, CT");
+    expect(html).toContain("Public · 4.4 rating");
+    expect(html).toContain("18H booking option");
+    expect(html).toContain("$85–$98 last observed Jul 22, 2026");
+    expect(html).toContain(
+      'href="https://teetimespot.com/courses/ridgecrest-golf-course-orange-ct"'
+    );
+    expect(html).toContain("Course Guide");
     expect(html).toContain(">NEW</span>");
     expect(html).toContain("8:10 AM EDT – 8:20 AM EDT");
     expect(html.indexOf("AVAILABLE NOW")).toBeLessThan(

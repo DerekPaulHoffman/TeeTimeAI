@@ -67,6 +67,57 @@ describe("course prices", () => {
     })).toEqual([9, 18]);
   });
 
+  it("keeps durable price and hole observations regardless of age", () => {
+    const observedAt = new Date("2024-01-10T14:00:00Z");
+    const evidence = {
+      bookingFacts: [{
+        holes: 18,
+        minPriceCents: 8500,
+        maxPriceCents: 9800,
+        priceSampleSize: 6,
+        priceObservedAt: observedAt,
+        bookableObservedAt: observedAt
+      }],
+      probes: [],
+      matches: []
+    };
+
+    expect(buildCoursePriceEstimate(evidence)?.eighteenHoles).toEqual({
+      minPriceCents: 8500,
+      maxPriceCents: 9800,
+      sampleSize: 6,
+      observedAt: "2024-01-10T14:00:00.000Z"
+    });
+    expect(buildObservedBookableHoleCounts(evidence)).toEqual([18]);
+  });
+
+  it("uses legacy evidence for a hole count that has not been durably observed", () => {
+    const estimate = buildCoursePriceEstimate({
+      bookingFacts: [{
+        holes: 9,
+        minPriceCents: 3200,
+        maxPriceCents: 3800,
+        priceSampleSize: 2,
+        priceObservedAt: new Date("2026-07-10T14:00:00Z"),
+        bookableObservedAt: new Date("2026-07-10T14:00:00Z")
+      }],
+      probes: [],
+      matches: [{
+        holes: 18,
+        priceCents: 7500,
+        lastConfirmedAt: new Date("2025-05-10T14:00:00Z")
+      }]
+    });
+
+    expect(estimate?.nineHoles?.minPriceCents).toBe(3200);
+    expect(estimate?.eighteenHoles).toEqual({
+      minPriceCents: 7500,
+      maxPriceCents: 7500,
+      sampleSize: 1,
+      observedAt: "2025-05-10T14:00:00.000Z"
+    });
+  });
+
   it("uses confirmed matches to bootstrap existing data", () => {
     expect(buildCoursePriceEstimate({
       probes: [],

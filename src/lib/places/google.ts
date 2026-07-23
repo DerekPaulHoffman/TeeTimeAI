@@ -82,6 +82,7 @@ export type CourseCandidate = {
   timeZone: string;
   distanceMeters?: number;
   rating?: number;
+  ratingObservedAt?: string;
   par?: number;
   parEvidenceUrl?: string;
   parVerifiedAt?: string;
@@ -91,6 +92,7 @@ export type CourseCandidate = {
   photoAttributions?: CoursePhotoAttribution[];
   priceEstimate?: CoursePriceEstimate;
   bookableHoleCounts?: BookableHoleCount[];
+  bookableHoleCountsObservedAt?: string;
   alertSupport?: CourseAlertSupport;
   monitoringSupport?: CourseMonitoringSupport;
   layoutHoleCounts?: CourseLayoutHoleCount[];

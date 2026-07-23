@@ -61,7 +61,10 @@ export async function createTeeSearchForUser(
       `${unverifiedCourse.name} still needs public-course verification before alerts can start.`
     );
   }
-  const resolvedPreferences = await Promise.all(sortedCourses.map(buildCoursePreferenceCreate));
+  const observedAt = new Date();
+  const resolvedPreferences = await Promise.all(
+    sortedCourses.map((course) => buildCoursePreferenceCreate(course, observedAt))
+  );
   if (resolvedPreferences.some((preference) => preference.course.isPublic === false)) {
     throw new Error(
       "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again."
@@ -75,36 +78,61 @@ export async function createTeeSearchForUser(
   }
   const coursePreferences = resolvedPreferences.map((preference) => preference.create);
 
-  const teeSearch = await prisma.teeSearch.create({
-    data: {
-      userId,
-      date: parseLocalDate(input.date),
-      startTime: input.startTime,
-      endTime: input.endTime,
-      userTimeZone: normalizeTimeZone(input.userTimeZone),
-      players: input.players,
-      requestedLayoutHoles: input.requestedLayoutHoles ?? null,
-      cadenceMinutes: input.cadenceMinutes,
-      additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
-      trafficClass,
-      syntheticMultiCycle,
-      preferences: {
-        create: coursePreferences
+  const teeSearch = await prisma.$transaction(async (transaction) => {
+    for (const preference of resolvedPreferences) {
+      if (preference.ratingUpdate) {
+        await transaction.course.update({
+          where: { id: preference.ratingUpdate.courseId },
+          data: {
+            rating: preference.ratingUpdate.rating,
+            ratingObservedAt: preference.ratingUpdate.observedAt
+          }
+        });
       }
-    },
-    include: searchInclude
+    }
+
+    return transaction.teeSearch.create({
+      data: {
+        userId,
+        date: parseLocalDate(input.date),
+        startTime: input.startTime,
+        endTime: input.endTime,
+        userTimeZone: normalizeTimeZone(input.userTimeZone),
+        players: input.players,
+        requestedLayoutHoles: input.requestedLayoutHoles ?? null,
+        cadenceMinutes: input.cadenceMinutes,
+        additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
+        trafficClass,
+        syntheticMultiCycle,
+        preferences: {
+          create: coursePreferences
+        }
+      },
+      include: searchInclude
+    });
   });
 
   return teeSearch;
 }
 
-async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
+async function buildCoursePreferenceCreate(
+  course: SelectedCourseInput,
+  observedAt: Date
+) {
   const reusableCourse = await findReusableCourse(course);
 
   if (reusableCourse) {
     return {
       automationEligibility: reusableCourse.automationEligibility,
       course: reusableCourse,
+      ratingUpdate:
+        typeof course.rating === "number"
+          ? {
+              courseId: reusableCourse.id,
+              rating: course.rating,
+              observedAt
+            }
+          : null,
       create: {
         rank: course.rank,
         course: {
@@ -119,6 +147,7 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
 
   return {
     automationEligibility: "UNKNOWN",
+    ratingUpdate: null,
     course: {
       name: course.name,
       isPublic: true,
@@ -145,6 +174,8 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput) {
             longitude: course.longitude,
             timeZone,
             rating: course.rating,
+            ratingObservedAt:
+              typeof course.rating === "number" ? observedAt : undefined,
             phone: course.phone,
             website: course.website,
             isManual: !course.googlePlaceId
@@ -662,6 +693,24 @@ export const searchInclude = {
 
 const searchListInclude = {
   ...searchInclude,
+  preferences: {
+    orderBy: { rank: "asc" },
+    include: {
+      course: {
+        include: {
+          bookingFacts: {
+            orderBy: { holes: "asc" }
+          },
+          profile: {
+            select: {
+              canonicalSlug: true,
+              status: true
+            }
+          }
+        }
+      }
+    }
+  },
   user: {
     select: { email: true }
   }

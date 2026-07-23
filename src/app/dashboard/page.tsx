@@ -4,6 +4,7 @@ import { auth } from "@clerk/nextjs/server";
 import {
   CalendarDays,
   CalendarClock,
+  BookOpenText,
   CircleOff,
   CirclePause,
   Clock3,
@@ -33,6 +34,13 @@ import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
+import {
+  buildCoursePriceEstimate,
+  buildObservedBookableHoleSummary,
+  getHeadlineBookableHoleCount,
+  getHeadlineCoursePrice,
+  type CoursePriceRange
+} from "@/lib/pricing/course-prices";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
 
@@ -363,6 +371,28 @@ function DashboardSearchCard({
             const officialCourseUrl = isPublicCourse
               ? preference.course.detectedBookingUrl ?? preference.course.website
               : preference.course.website;
+            const bookingEvidence = {
+              bookingFacts: preference.course.bookingFacts,
+              probes: [],
+              matches: []
+            };
+            const priceEstimate = buildCoursePriceEstimate(bookingEvidence);
+            const observedHoles = buildObservedBookableHoleSummary(bookingEvidence);
+            const physicalHoleCount = getHeadlineBookableHoleCount(
+              preference.course.layoutHoleCounts
+            );
+            const bookableHoleCount =
+              physicalHoleCount ??
+              getHeadlineBookableHoleCount(observedHoles.holeCounts);
+            const headlinePrice = getHeadlineCoursePrice(
+              priceEstimate,
+              bookableHoleCount ? [bookableHoleCount] : []
+            );
+            const courseGuideUrl =
+              preference.course.profile &&
+              ["PUBLISHED", "STALE"].includes(preference.course.profile.status)
+                ? `/courses/${preference.course.profile.canonicalSlug}`
+                : null;
 
             return (
               <div className="watch-course-row" key={preference.id}>
@@ -385,6 +415,40 @@ function DashboardSearchCard({
                           : "Not a public course"}
                       </span>
                     )}
+                    {typeof preference.course.rating === "number" ? (
+                      <span
+                        className="figma-course-pill is-detail"
+                        title={
+                          preference.course.ratingObservedAt
+                            ? `Rating last observed ${formatObservationDate(preference.course.ratingObservedAt)}`
+                            : "Last observed course rating"
+                        }
+                      >
+                        {preference.course.rating.toFixed(1)}
+                      </span>
+                    ) : null}
+                    {bookableHoleCount ? (
+                      <span
+                        className="figma-course-pill is-detail"
+                        title={
+                          physicalHoleCount
+                            ? "Verified physical course layout"
+                            : observedHoles.observedAt
+                              ? `Official booking options last observed ${formatObservationDate(observedHoles.observedAt)}`
+                              : "Last observed official booking options"
+                        }
+                      >
+                        {bookableHoleCount}H
+                      </span>
+                    ) : null}
+                    {headlinePrice ? (
+                      <span
+                        className="figma-course-pill is-price"
+                        title={`Official ${headlinePrice.holes}-hole rates last observed ${formatObservationDate(headlinePrice.range.observedAt ?? priceEstimate?.observedAt)}`}
+                      >
+                        {formatCoursePriceRange(headlinePrice.range)}
+                      </span>
+                    ) : null}
                     {alertSupport ? (
                       <span className="figma-course-pill is-official-site-only">
                         <CircleOff size={11} /> {getAlertSupportLabel(alertSupport)}
@@ -423,6 +487,11 @@ function DashboardSearchCard({
                       <ExternalLink size={11} />
                     </a>
                   ) : null}
+                  {courseGuideUrl ? (
+                    <Link href={courseGuideUrl as `/courses/${string}`}>
+                      Course Guide <BookOpenText size={11} />
+                    </Link>
+                  ) : null}
                   {bookingPhone ? (
                     <a href={`tel:${formatTelephoneHref(bookingPhone)}`}>
                       Call course
@@ -444,6 +513,29 @@ function formatDashboardDate(date: Date) {
     month: "short",
     day: "numeric"
   });
+}
+
+function formatObservationDate(value: Date | string | undefined) {
+  if (!value) return "an earlier check";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "an earlier check";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
+}
+
+function formatCoursePriceRange(range: CoursePriceRange) {
+  const format = (value: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: value % 100 === 0 ? 0 : 2
+    }).format(value / 100);
+  const minimum = format(range.minPriceCents);
+  const maximum = format(range.maxPriceCents);
+  return minimum === maximum ? minimum : `${minimum}–${maximum}`;
 }
 
 function formatDashboardMatch(date: Date, timeZone: string) {

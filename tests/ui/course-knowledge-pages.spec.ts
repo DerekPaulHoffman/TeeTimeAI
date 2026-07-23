@@ -20,7 +20,7 @@ test("renders a facility-first supported course guide without browser errors", a
 
   expect(response?.status()).toBe(200);
   await expect(page.getByRole("heading", { level: 1, name: "Tashua Knolls Golf Course" })).toBeVisible();
-  await expect(page.getByText("Golf course guide", { exact: true })).toBeVisible();
+  await expect(page.getByText("Course Guide", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "About Tashua Knolls Golf Course" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Facility highlights" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Booking at Tashua Knolls Golf Course" })).toBeVisible();

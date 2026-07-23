@@ -10,6 +10,7 @@ import {
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 import { haveCompatibleCourseNames } from "@/lib/places/course-identity";
+import { recordCourseBookingFacts } from "@/lib/pricing/course-booking-facts";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
 import {
@@ -39,6 +40,8 @@ import {
 import { evaluateMonitoringGate } from "./policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 
+export { recordCourseBookingFacts };
+
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 const REOPEN_ALERT_MINIMUM_ABSENCE_MS = 30 * 60 * 1000;
 const SEARCH_CHECK_LEASE_MS = 15 * 60 * 1000;
@@ -47,7 +50,21 @@ const activeSearchInclude = {
   user: true,
   preferences: {
     orderBy: { rank: "asc" },
-    include: { course: true }
+    include: {
+      course: {
+        include: {
+          bookingFacts: {
+            orderBy: { holes: "asc" }
+          },
+          profile: {
+            select: {
+              canonicalSlug: true,
+              status: true
+            }
+          }
+        }
+      }
+    }
   },
   matches: true
 } satisfies Prisma.TeeSearchInclude;

@@ -10,6 +10,7 @@ import {
   markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
   markSearchStatusEmailSent,
+  recordCourseBookingFacts,
   recordCourseBookingWindowEvidence,
   recordCourseProbe,
   recordCourseProbeIfChanged,
@@ -83,6 +84,8 @@ import {
   type SearchStatusCourseReport
 } from "@/lib/email/search-status";
 import {
+  buildCoursePriceEstimate,
+  buildObservedBookableHoleSummary,
   summarizeBookableHoleCounts,
   summarizeCourseSlotPrices
 } from "@/lib/pricing/course-prices";
@@ -258,6 +261,14 @@ async function checkSearch(
     }))
   };
   const courseResults: SearchCheckCourseResult[] = [];
+  const observedBookingFactsByCourse = new Map<
+    string,
+    {
+      pricing: ReturnType<typeof summarizeCourseSlotPrices>;
+      bookableHoleCounts: ReturnType<typeof summarizeBookableHoleCounts>;
+      observedAt: Date;
+    }
+  >();
   const supportIssues: Array<{
     courseId: string;
     incidentId: string | null;
@@ -542,6 +553,17 @@ async function checkSearch(
       const availability = summarizeSearchStatusAvailability(searchWindow, safeRawSlots);
       const bookableHoleCounts = summarizeBookableHoleCounts(safeRawSlots);
       const pricing = summarizeCourseSlotPrices(safeRawSlots);
+      await recordCourseBookingFacts({
+        courseId: course.id,
+        pricing,
+        bookableHoleCounts,
+        observedAt: checkStartedAt
+      });
+      observedBookingFactsByCourse.set(course.id, {
+        pricing,
+        bookableHoleCounts,
+        observedAt: checkStartedAt
+      });
       const currentMatches = rankMatches(
         searchWindow,
         dedupeMatches(filterSlotsForSearch(searchWindow, safeRawSlots), [])
@@ -728,18 +750,62 @@ async function checkSearch(
   );
 
   const preferenceContext = new Map(
-    search.preferences.map((preference) => [
-      preference.course.id,
-      {
+    search.preferences.map((preference) => {
+      const observedFacts = observedBookingFactsByCourse.get(preference.course.id);
+      const storedPriceEstimate = buildCoursePriceEstimate({
+        bookingFacts: preference.course.bookingFacts,
+        probes: [],
+        matches: []
+      });
+      const storedHoleSummary = buildObservedBookableHoleSummary({
+        bookingFacts: preference.course.bookingFacts,
+        probes: [],
+        matches: []
+      });
+      return [
+        preference.course.id,
+        {
         rank: preference.rank,
-        courseAddress: preference.course.address ?? undefined
-      }
-    ])
+        courseAddress: preference.course.address ?? undefined,
+        isPublic: preference.course.isPublic,
+        rating: preference.course.rating ?? undefined,
+        ratingObservedAt:
+          preference.course.ratingObservedAt?.toISOString(),
+        layoutHoleCounts: preference.course.layoutHoleCounts,
+        layoutHolesVerifiedAt:
+          preference.course.layoutHolesVerifiedAt?.toISOString(),
+        priceEstimate: observedFacts?.pricing ?? storedPriceEstimate,
+        bookableHoleSummary:
+          observedFacts && observedFacts.bookableHoleCounts.length > 0
+            ? {
+                holeCounts: observedFacts.bookableHoleCounts,
+                observedAt: observedFacts.observedAt.toISOString()
+              }
+            : storedHoleSummary,
+        courseGuideUrl:
+          preference.course.profile &&
+          ["PUBLISHED", "STALE"].includes(preference.course.profile.status)
+            ? `/courses/${preference.course.profile.canonicalSlug}`
+            : undefined
+        }
+      ] as const;
+    })
   );
   for (const courseResult of courseResults) {
     const context = preferenceContext.get(courseResult.courseId);
     courseResult.rank = context?.rank;
     courseResult.courseAddress = context?.courseAddress;
+    courseResult.isPublic = context?.isPublic;
+    courseResult.rating = context?.rating;
+    courseResult.ratingObservedAt = context?.ratingObservedAt;
+    courseResult.layoutHoleCounts = context?.layoutHoleCounts;
+    courseResult.layoutHolesVerifiedAt = context?.layoutHolesVerifiedAt;
+    courseResult.priceEstimate = context?.priceEstimate;
+    courseResult.bookableHoleCounts =
+      context?.bookableHoleSummary.holeCounts;
+    courseResult.bookableHoleCountsObservedAt =
+      context?.bookableHoleSummary.observedAt;
+    courseResult.courseGuideUrl = context?.courseGuideUrl;
   }
   courseResults.sort((left, right) => (left.rank ?? 99) - (right.rank ?? 99));
 

@@ -152,6 +152,90 @@ describe("createTeeSearchForUser", () => {
     );
   });
 
+  it("refreshes a reusable course rating without clearing it when Places omits one", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "course-1",
+      googlePlaceId: "course-place",
+      name: "Example Golf Course",
+      address: "1 Main St",
+      latitude: 41.2,
+      longitude: -72.8,
+      website: null,
+      phone: null,
+      isPublic: true,
+      automationEligibility: "ALLOWED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null
+    } as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "13:00",
+      endTime: "17:00",
+      players: 2,
+      cadenceMinutes: 15,
+      courses: [
+        {
+          googlePlaceId: "course-place",
+          name: "Example Golf Course",
+          address: "1 Main St",
+          latitude: 41.2,
+          longitude: -72.8,
+          rating: 4.6,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith({
+      where: { id: "course-1" },
+      data: {
+        rating: 4.6,
+        ratingObservedAt: expect.any(Date)
+      }
+    });
+
+    vi.clearAllMocks();
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "course-1",
+      googlePlaceId: "course-place",
+      name: "Example Golf Course",
+      address: "1 Main St",
+      latitude: 41.2,
+      longitude: -72.8,
+      website: null,
+      phone: null,
+      isPublic: true,
+      automationEligibility: "ALLOWED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null
+    } as never);
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
+    mockedPrisma.teeSearch.count.mockResolvedValue(0);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-2" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-08-16",
+      startTime: "13:00",
+      endTime: "17:00",
+      players: 2,
+      cadenceMinutes: 15,
+      courses: [
+        {
+          googlePlaceId: "course-place",
+          name: "Example Golf Course",
+          address: "1 Main St",
+          latitude: 41.2,
+          longitude: -72.8,
+          rank: 1
+        }
+      ]
+    });
+
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+
   it("connects composite Google facility names to an existing supported nearby course", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

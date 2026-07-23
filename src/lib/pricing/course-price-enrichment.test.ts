@@ -8,7 +8,7 @@ const mockedPrisma = vi.mocked(prisma, { deep: true });
 describe("course price enrichment", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("adds recent official observations to a discovery result", async () => {
+  it("adds retained official observations to a discovery result", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([pricingCourse({
       probes: [{
         observedAt: new Date("2026-07-10T12:00:00Z"),
@@ -26,6 +26,36 @@ describe("course price enrichment", () => {
     expect(course.priceEstimate?.nineHoles?.minPriceCents).toBe(3200);
     expect(course.priceEstimate?.eighteenHoles?.maxPriceCents).toBe(6800);
     expect(course.bookableHoleCounts).toEqual([9, 18]);
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          bookingFacts: expect.any(Object),
+          probes: expect.not.objectContaining({ where: expect.anything() })
+        })
+      })
+    );
+  });
+
+  it("prefers durable course facts that survive alert deletion", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([pricingCourse({
+      bookingFacts: [{
+        holes: 18,
+        minPriceCents: 8500,
+        maxPriceCents: 9800,
+        priceSampleSize: 6,
+        priceObservedAt: new Date("2025-07-10T12:00:00Z"),
+        bookableObservedAt: new Date("2025-07-10T12:00:00Z")
+      }]
+    })] as never);
+
+    const [course] = await enrichCoursesWithBookingEvidence([candidate()]);
+
+    expect(course.priceEstimate?.eighteenHoles).toMatchObject({
+      minPriceCents: 8500,
+      maxPriceCents: 9800,
+      observedAt: "2025-07-10T12:00:00.000Z"
+    });
+    expect(course.bookableHoleCounts).toEqual([18]);
   });
 
   it("adds observed booking options when no price was published", async () => {
@@ -60,6 +90,7 @@ function pricingCourse(overrides: Partial<PricingCourseRecord> = {}): PricingCou
     name: "H Smith Richardson Golf Course",
     latitude: 41.1906,
     longitude: -73.2704,
+    bookingFacts: [],
     probes: [],
     matches: [],
     ...overrides

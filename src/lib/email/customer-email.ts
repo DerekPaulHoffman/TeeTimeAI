@@ -55,6 +55,8 @@ export type CustomerEmailMonitoringCourse = {
   bookingUrl?: string;
   bookingLinkLabel?: string;
   phone?: string;
+  factLine?: string;
+  courseGuideUrl?: string;
 };
 
 export type CustomerEmailRenderInput = {
@@ -442,6 +444,12 @@ function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUr
   const phoneLink = phoneHref
     ? `<a href="${escapeHtml(phoneHref)}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;margin:10px 0 0;text-decoration:none">Call ${escapeHtml(course.phone ?? "the course")} &rarr;</a>`
     : "";
+  const courseGuideLink = course.courseGuideUrl
+    ? `<a href="${escapeHtml(absoluteUrl(course.courseGuideUrl))}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;margin:10px 16px 0 0;text-decoration:none">Course Guide &rarr;</a>`
+    : "";
+  const factLine = course.factLine
+    ? `<p style="color:${EMAIL_COLORS.dark};font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:700;line-height:19px;margin:0 0 8px">${escapeHtml(course.factLine)}</p>`
+    : "";
 
   return `
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid ${EMAIL_COLORS.line};border-collapse:separate!important;border-radius:16px;margin:0 0 12px;overflow:hidden">
@@ -455,8 +463,9 @@ function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUr
       })}
       <tr>
         <td style="background:#ffffff;color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:13px;line-height:20px;padding:16px 20px">
+          ${factLine}
           &bull; ${escapeHtml(course.detail)}
-          ${bookingLink || phoneLink ? `<div>${bookingLink}${phoneLink}</div>` : ""}
+          ${bookingLink || phoneLink || courseGuideLink ? `<div>${bookingLink}${courseGuideLink}${phoneLink}</div>` : ""}
         </td>
       </tr>
     </table>

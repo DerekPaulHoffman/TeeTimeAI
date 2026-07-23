@@ -13,6 +13,7 @@ const dbMocks = vi.hoisted(() => ({
   markMatchAlertSuppressed: vi.fn(),
   markMissingMatchesUnavailable: vi.fn(),
   markSearchStatusEmailSent: vi.fn(),
+  recordCourseBookingFacts: vi.fn(),
   recordCourseBookingWindowEvidence: vi.fn(),
   recordBrowserDiscovery: vi.fn(),
   recordCourseProbe: vi.fn(),
@@ -2077,6 +2078,12 @@ describe("runSearchCheck email cadence", () => {
         courseId: "blue-rock",
         outcome: "NO_MATCH",
         rawSummary: expect.objectContaining({ bookableHoleCounts: [9, 18] })
+      })
+    );
+    expect(dbMocks.recordCourseBookingFacts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "blue-rock",
+        bookableHoleCounts: [9, 18]
       })
     );
     expect(supportIncidentMocks.resolveCourseSupportIncident).toHaveBeenCalledWith(

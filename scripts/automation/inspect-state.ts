@@ -13,7 +13,11 @@ import {
 } from "@/lib/automation/provider-capabilities";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
-import { listCourseProfileQueue } from "@/lib/course-profiles/service";
+import {
+  getCourseProfileQueueHealth,
+  listCourseProfileLocationEnrichmentQueue,
+  listCourseProfileQueue
+} from "@/lib/course-profiles/service";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { isEngineeringRemediationSearch } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
@@ -45,6 +49,71 @@ const activeSearchInspectionQuery = {
   orderBy: [{ date: "asc" }, { createdAt: "asc" }]
 } satisfies Prisma.TeeSearchFindManyArgs;
 
+async function getCourseMetadataCoverage() {
+  const [
+    publicCourses,
+    publicCoursesWithRatings,
+    publicCoursesWithVerifiedLayouts,
+    publicCoursesWithVerifiedPar,
+    bookingFactCourses,
+    factFreshness
+  ] = await Promise.all([
+    prisma.course.count({ where: { isPublic: true } }),
+    prisma.course.count({
+      where: { isPublic: true, rating: { not: null } }
+    }),
+    prisma.course.count({
+      where: {
+        isPublic: true,
+        layoutHolesVerifiedAt: { not: null },
+        layoutHoleCounts: { isEmpty: false }
+      }
+    }),
+    prisma.course.count({
+      where: { isPublic: true, par: { not: null }, parVerifiedAt: { not: null } }
+    }),
+    prisma.courseBookingFact.findMany({
+      where: {
+        course: { isPublic: true },
+        OR: [
+          { priceObservedAt: { not: null } },
+          { bookableObservedAt: { not: null } }
+        ]
+      },
+      distinct: ["courseId"],
+      select: { courseId: true }
+    }),
+    prisma.courseBookingFact.aggregate({
+      where: { course: { isPublic: true } },
+      _min: {
+        priceObservedAt: true,
+        bookableObservedAt: true
+      },
+      _max: {
+        priceObservedAt: true,
+        bookableObservedAt: true
+      }
+    })
+  ]);
+
+  return {
+    publicCourses,
+    ratings: {
+      present: publicCoursesWithRatings,
+      missing: publicCourses - publicCoursesWithRatings
+    },
+    verifiedPhysicalLayouts: publicCoursesWithVerifiedLayouts,
+    verifiedPar: publicCoursesWithVerifiedPar,
+    coursesWithDurableBookingFacts: bookingFactCourses.length,
+    durableFactObservationRange: {
+      oldestPrice: factFreshness._min.priceObservedAt,
+      newestPrice: factFreshness._max.priceObservedAt,
+      oldestBookableHoles: factFreshness._min.bookableObservedAt,
+      newestBookableHoles: factFreshness._max.bookableObservedAt
+    }
+  };
+}
+
 async function main() {
   const recentSince = new Date(Date.now() - RECENT_HOURS * 60 * 60 * 1000);
   const websiteFunnelSince = new Date(
@@ -68,7 +137,10 @@ async function main() {
     websiteEventCounts,
     courseDiscoveryEvents,
     unresolvedWebsiteFeedback,
-    courseProfileQueue
+    courseProfileQueue,
+    courseProfileLocationQueue,
+    courseProfileQueueHealth,
+    courseMetadataCoverage
   ] =
     await Promise.all([
       prisma.automationRun.findMany({
@@ -223,7 +295,10 @@ async function main() {
         orderBy: { createdAt: "desc" },
         take: 20
       }),
-      listCourseProfileQueue(3)
+      listCourseProfileQueue(3),
+      listCourseProfileLocationEnrichmentQueue(3),
+      getCourseProfileQueueHealth(),
+      getCourseMetadataCoverage()
     ]);
 
   const activeSearchIds = activeSearches.map((search) => search.id);
@@ -401,9 +476,28 @@ async function main() {
           bookingUrl: sanitizeExternalUrl(course.detectedBookingUrl),
           eligibility: course.automationEligibility,
           profileStatus: course.profile?.status ?? "MISSING",
+          queuedAt:
+            course.profile?.reviewDueAt ??
+            course.profile?.createdAt ??
+            course.createdAt,
           reviewDueAt: course.profile?.reviewDueAt ?? null,
           failureReason: summarize(course.profile?.failureReason ?? null)
         })),
+        courseProfileQueueHealth,
+        courseProfileLocationQueue: courseProfileLocationQueue.map((course) => ({
+          courseId: course.id,
+          name: course.name,
+          city: course.city,
+          stateCode: course.stateCode,
+          county: course.county,
+          website: sanitizeExternalUrl(course.website),
+          bookingUrl: sanitizeExternalUrl(course.detectedBookingUrl),
+          eligibility: course.automationEligibility,
+          queuedAt: course.createdAt,
+          nextAction:
+            "Verify and persist city/state from an authoritative source before creating the Course Guide."
+        })),
+        courseMetadataCoverage,
         activeSearches: activeSearches.map((search) => ({
           id: search.id,
           trafficClass: search.trafficClass,

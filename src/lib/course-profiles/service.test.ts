@@ -7,13 +7,20 @@ import {
   ensurePendingCourseProfile,
   getPublishedCourseProfile,
   getRelatedSupportedCourses,
+  listCourseProfileLocationEnrichmentQueue,
+  listCourseProfileQueue,
   queuePendingCourseProfiles
 } from "./service";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     course: { findMany: vi.fn(), findUnique: vi.fn() },
-    courseProfile: { create: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
+    courseProfile: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      upsert: vi.fn()
+    },
     courseProfileSlugAlias: { create: vi.fn(), findUnique: vi.fn() }
   }
 }));
@@ -153,6 +160,68 @@ describe("course profile service", () => {
     warning.mockRestore();
   });
 
+  it("keeps previously published content stale after a failed refresh", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "course-1",
+      name: "Existing Golf Course",
+      city: "Fairfield",
+      stateCode: "CT",
+      profile: {
+        canonicalSlug: "existing-golf-course-fairfield-ct",
+        publishedAt: new Date("2026-07-01T12:00:00.000Z")
+      }
+    } as never);
+
+    await applyCourseProfileDraft({ courseId: "course-1" }, true);
+
+    expect(mockedPrisma.courseProfile.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          status: "STALE",
+          failureReason: expect.any(String)
+        })
+      })
+    );
+  });
+
+  it("serves the oldest profile maintenance work first", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      queuedCourse("newer", "2026-07-22T12:00:00.000Z"),
+      queuedCourse("older", "2026-07-20T12:00:00.000Z")
+    ] as never);
+
+    const queue = await listCourseProfileQueue(2);
+
+    expect(queue.map((course) => course.id)).toEqual(["older", "newer"]);
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          city: { not: null },
+          stateCode: { not: null }
+        })
+      })
+    );
+  });
+
+  it("keeps courses with missing city or state in a separate enrichment queue", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      { ...queuedCourse("missing-location", "2026-07-19T12:00:00.000Z"), city: null, profile: undefined }
+    ] as never);
+
+    const queue = await listCourseProfileLocationEnrichmentQueue(3);
+
+    expect(queue[0]?.id).toBe("missing-location");
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          profile: null,
+          OR: [{ city: null }, { stateCode: null }]
+        }),
+        orderBy: { createdAt: "asc" }
+      })
+    );
+  });
+
   it("prefers nearby supported profiles and falls back only within the same state", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       candidate("near", 41.01, -73.01, "CT"),
@@ -168,8 +237,36 @@ describe("course profile service", () => {
     });
 
     expect(related.map((course) => course.id)).toEqual(["near", "same-state"]);
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          profile: { status: { in: ["PUBLISHED", "STALE"] } }
+        })
+      })
+    );
   });
 });
+
+function queuedCourse(id: string, createdAt: string) {
+  const date = new Date(createdAt);
+  return {
+    id,
+    createdAt: date,
+    name: id,
+    city: "Example",
+    stateCode: "CT",
+    county: "Fairfield",
+    website: `https://${id}.example.com`,
+    detectedBookingUrl: null,
+    automationEligibility: "ALLOWED",
+    profile: {
+      status: "PENDING",
+      createdAt: date,
+      reviewDueAt: null,
+      failureReason: null
+    }
+  };
+}
 
 function candidate(id: string, latitude: number, longitude: number, stateCode: string) {
   return {

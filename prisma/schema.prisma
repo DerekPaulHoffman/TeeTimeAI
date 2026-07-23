@@ -248,6 +248,7 @@ model Course {
   longitude                   Float
   timeZone                    String                             @default("America/New_York")
   rating                      Float?
+  ratingObservedAt            DateTime?
   website                     String?
   phone                       String?
   isPublic                    Boolean                            @default(true)
@@ -266,7 +267,7 @@ model Course {
   bookingWindowObservedAt     DateTime?
   automationEligibility       AutomationEligibility              @default(UNKNOWN)
   automationReason            AutomationReason                   @default(NONE)
-  bookingAccessMode           BookingAccessMode                   @default(UNKNOWN)
+  bookingAccessMode           BookingAccessMode                  @default(UNKNOWN)
   policyNotes                 String?
   bookingMetadata             Json?
   intelligenceVerifiedAt      DateTime?
@@ -283,6 +284,7 @@ model Course {
   preferences                 CoursePreference[]
   probes                      CourseProbe[]
   matches                     TeeTimeMatch[]
+  bookingFacts                CourseBookingFact[]
   automationDiscoveries       CourseAutomationDiscovery[]
   supportIncident             CourseSupportIncident?
   supportBatchIncidents       CourseSupportBatchIncident[]
@@ -295,6 +297,22 @@ model Course {
   @@index([providerFamilyKey, automationEligibility])
   @@index([bookingMethod, automationEligibility])
   @@index([intelligenceReviewAt])
+}
+
+model CourseBookingFact {
+  courseId           String
+  holes              Int
+  minPriceCents      Int?
+  maxPriceCents      Int?
+  priceSampleSize    Int?
+  priceObservedAt    DateTime?
+  bookableObservedAt DateTime?
+  updatedAt          DateTime  @updatedAt
+  course             Course    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@id([courseId, holes])
+  @@index([priceObservedAt])
+  @@index([bookableObservedAt])
 }
 
 model CourseProfile {

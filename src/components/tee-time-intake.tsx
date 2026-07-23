@@ -1405,7 +1405,8 @@ function TeeTimeIntakeContent({
         {courses.length > 0 ? (
           <p className="course-pricing-note">
             <CircleDollarSign size={14} aria-hidden="true" />
-            Estimates use recently observed official tee-sheet rates. Final rates can vary.
+            Estimates use last-observed official tee-sheet rates. Hover or focus a price
+            for its observation date. Final rates can vary.
           </p>
         ) : null}
         {requestedLayoutHoles && incompatibleCourseCount > 0 ? (
@@ -1764,7 +1765,14 @@ function CourseResultCard({
             {isPublicAccessUnverified ? "Possible course" : "Public"}
           </span>
           {course.rating ? (
-            <span className="figma-course-pill is-rating">
+            <span
+              className="figma-course-pill is-rating"
+              title={
+                course.ratingObservedAt
+                  ? `Rating last observed ${formatObservationDate(course.ratingObservedAt)}`
+                  : "Current course rating"
+              }
+            >
               <Star aria-hidden="true" fill="currentColor" size={10} />
               {course.rating.toFixed(1)}
             </span>
@@ -1777,7 +1785,13 @@ function CourseResultCard({
           {cardHoleCount ? (
             <span
               className="figma-course-pill is-detail"
-              title="Recently observed official booking options"
+              title={
+                course.layoutHoleCounts?.length
+                  ? "Verified physical course layout"
+                  : course.bookableHoleCountsObservedAt
+                    ? `Official booking options last observed ${formatObservationDate(course.bookableHoleCountsObservedAt)}`
+                    : "Last observed official booking options"
+              }
             >
               <span aria-hidden="true">·</span> {cardHoleCount}H
             </span>
@@ -1820,7 +1834,7 @@ function CourseResultCard({
             href={course.profileUrl as `/courses/${string}`}
           >
             <BookOpenText aria-hidden="true" size={10} />
-            Course guide
+            Course Guide
           </Link>
         ) : null}
         {course.website ? (
@@ -2530,7 +2544,7 @@ function CourseHeadlinePrice({
   if (!headlinePrice) return null;
 
   const observedLabel = estimate
-    ? new Date(estimate.observedAt).toLocaleDateString("en-US", {
+    ? new Date(headlinePrice.range.observedAt ?? estimate.observedAt).toLocaleDateString("en-US", {
         month: "short",
         day: "numeric"
       })
@@ -2540,7 +2554,7 @@ function CourseHeadlinePrice({
     <span
       aria-label={`Estimated ${headlinePrice.holes}-hole course cost ${formatAccessiblePriceRange(headlinePrice.range)}`}
       className="figma-course-pill is-price"
-      title={observedLabel ? `Based on official ${headlinePrice.holes}-hole rates observed through ${observedLabel}` : undefined}
+      title={observedLabel ? `Last observed official ${headlinePrice.holes}-hole rates from ${observedLabel}` : undefined}
     >
       <span aria-hidden="true">·</span> {formatPriceRange(headlinePrice.range)}
     </span>
@@ -2565,6 +2579,17 @@ function formatUsd(priceCents: number) {
     currency: "USD",
     maximumFractionDigits: priceCents % 100 === 0 ? 0 : 2
   }).format(priceCents / 100);
+}
+
+function formatObservationDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "an earlier check"
+    : date.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric"
+      });
 }
 
 function sortCoursesByDistance(courses: CourseCandidate[]) {

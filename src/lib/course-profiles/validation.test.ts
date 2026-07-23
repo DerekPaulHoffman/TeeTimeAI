@@ -65,6 +65,48 @@ describe("course profile validation", () => {
       "At least one source must support the notable_fact_0 claim"
     );
   });
+
+  it("accepts source-backed physical layout and par facts", () => {
+    const draft = validDraft();
+    draft.sources[0].claimKeys.push("physical_layout", "par");
+    const validation = validateCourseProfileDraft({
+      ...draft,
+      physicalLayout: {
+        holeCounts: [9, 18],
+        evidenceUrl: draft.sources[0].url,
+        verifiedAt: "2026-07-15T12:00:00.000Z"
+      },
+      par: {
+        value: 72,
+        evidenceUrl: draft.sources[0].url,
+        verifiedAt: "2026-07-15T12:00:00.000Z"
+      }
+    });
+
+    expect(validation).toMatchObject({
+      valid: true,
+      draft: {
+        physicalLayout: { holeCounts: [9, 18] },
+        par: { value: 72 }
+      }
+    });
+  });
+
+  it("rejects structured course facts without matching source claims", () => {
+    const draft = validDraft();
+    const validation = validateCourseProfileDraft({
+      ...draft,
+      physicalLayout: {
+        holeCounts: [18],
+        evidenceUrl: draft.sources[0].url,
+        verifiedAt: "2026-07-15T12:00:00.000Z"
+      }
+    });
+
+    expect(validation.errors).toContain(
+      "physical_layout evidenceUrl must match a source carrying the physical_layout claim"
+    );
+  });
 });
 
 function validDraft() {

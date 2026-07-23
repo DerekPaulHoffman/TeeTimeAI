@@ -42,20 +42,23 @@ export async function queuePendingCourseProfiles(courseIds: readonly string[]) {
 
 export async function listCourseProfileQueue(limit = COURSE_PROFILE_QUEUE_BATCH_SIZE) {
   const now = new Date();
-  return prisma.course.findMany({
+  const courses = await prisma.course.findMany({
     where: {
       isPublic: true,
       automationEligibility: { in: ["ALLOWED", "BLOCKED"] },
+      city: { not: null },
+      stateCode: { not: null },
       OR: [
         { profile: null },
         { profile: { status: { in: ["PENDING", "STALE", "BLOCKED_EVIDENCE"] } } },
         { profile: { status: "PUBLISHED", reviewDueAt: { lte: now } } }
       ]
     },
-    orderBy: [{ automationEligibility: "asc" }, { updatedAt: "desc" }],
-    take: Math.min(Math.max(limit, 1), 25),
+    orderBy: [{ automationEligibility: "asc" }, { createdAt: "asc" }],
+    take: 100,
     select: {
       id: true,
+      createdAt: true,
       name: true,
       address: true,
       city: true,
@@ -64,9 +67,106 @@ export async function listCourseProfileQueue(limit = COURSE_PROFILE_QUEUE_BATCH_
       website: true,
       detectedBookingUrl: true,
       automationEligibility: true,
-      profile: { select: { status: true, reviewDueAt: true, failureReason: true } }
+      profile: {
+        select: {
+          status: true,
+          createdAt: true,
+          reviewDueAt: true,
+          failureReason: true
+        }
+      }
     }
   });
+  return courses
+    .sort(
+      (left, right) =>
+        getCourseProfileQueueDate(left).getTime() -
+        getCourseProfileQueueDate(right).getTime()
+    )
+    .slice(0, Math.min(Math.max(limit, 1), 25));
+}
+
+export async function listCourseProfileLocationEnrichmentQueue(
+  limit = COURSE_PROFILE_QUEUE_BATCH_SIZE
+) {
+  return prisma.course.findMany({
+    where: {
+      isPublic: true,
+      automationEligibility: { in: ["ALLOWED", "BLOCKED"] },
+      profile: null,
+      OR: [{ city: null }, { stateCode: null }]
+    },
+    orderBy: { createdAt: "asc" },
+    take: Math.min(Math.max(limit, 1), 25),
+    select: {
+      id: true,
+      createdAt: true,
+      name: true,
+      address: true,
+      city: true,
+      stateCode: true,
+      county: true,
+      website: true,
+      detectedBookingUrl: true,
+      automationEligibility: true
+    }
+  });
+}
+
+export async function getCourseProfileQueueHealth() {
+  const actionableWhere: Prisma.CourseWhereInput = {
+    isPublic: true,
+    automationEligibility: { in: ["ALLOWED", "BLOCKED"] },
+    city: { not: null },
+    stateCode: { not: null },
+    OR: [
+      { profile: null },
+      { profile: { status: { in: ["PENDING", "STALE", "BLOCKED_EVIDENCE"] } } },
+      { profile: { status: "PUBLISHED", reviewDueAt: { lte: new Date() } } }
+    ]
+  };
+  const locationWhere: Prisma.CourseWhereInput = {
+    isPublic: true,
+    automationEligibility: { in: ["ALLOWED", "BLOCKED"] },
+    profile: null,
+    OR: [{ city: null }, { stateCode: null }]
+  };
+  const [
+    publicCourseCount,
+    publishedCount,
+    staleCount,
+    missingProfileCount,
+    actionableCount,
+    locationEnrichmentCount,
+    oldestActionable,
+    oldestLocation
+  ] = await Promise.all([
+    prisma.course.count({ where: { isPublic: true } }),
+    prisma.courseProfile.count({
+      where: { course: { isPublic: true }, status: "PUBLISHED" }
+    }),
+    prisma.courseProfile.count({
+      where: { course: { isPublic: true }, status: "STALE" }
+    }),
+    prisma.course.count({ where: { isPublic: true, profile: null } }),
+    prisma.course.count({ where: actionableWhere }),
+    prisma.course.count({ where: locationWhere }),
+    listCourseProfileQueue(1),
+    listCourseProfileLocationEnrichmentQueue(1)
+  ]);
+  return {
+    publicCourseCount,
+    publishedCount,
+    staleCount,
+    missingProfileCount,
+    visibleProfileCount: publishedCount + staleCount,
+    actionableCount,
+    locationEnrichmentCount,
+    oldestActionableAt: oldestActionable[0]
+      ? getCourseProfileQueueDate(oldestActionable[0])
+      : null,
+    oldestLocationEnrichmentAt: oldestLocation[0]?.createdAt ?? null
+  };
 }
 
 export async function getCourseProfileResearchPacket(courseId: string) {
@@ -119,7 +219,24 @@ export async function applyCourseProfileDraft(value: unknown, apply = false) {
   const result = await prisma.$transaction(async (tx) => {
     await tx.course.update({
       where: { id: course.id },
-      data: { ...draft.location, ...(draft.officialWebsiteUrl ? { website: draft.officialWebsiteUrl } : {}) }
+      data: {
+        ...draft.location,
+        ...(draft.officialWebsiteUrl ? { website: draft.officialWebsiteUrl } : {}),
+        ...(draft.physicalLayout
+          ? {
+              layoutHoleCounts: draft.physicalLayout.holeCounts,
+              layoutHolesEvidenceUrl: draft.physicalLayout.evidenceUrl,
+              layoutHolesVerifiedAt: new Date(draft.physicalLayout.verifiedAt)
+            }
+          : {}),
+        ...(draft.par
+          ? {
+              par: draft.par.value,
+              parEvidenceUrl: draft.par.evidenceUrl,
+              parVerifiedAt: new Date(draft.par.verifiedAt)
+            }
+          : {})
+      }
     });
     const profile = await tx.courseProfile.upsert({
       where: { courseId: course.id },
@@ -158,12 +275,34 @@ export async function getPublishedCourseProfile(slug: string) {
       status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] },
       course: { isPublic: true }
     },
-    include: { course: true, sources: { orderBy: [{ sourceType: "asc" }, { publisher: "asc" }] } }
+    include: {
+      course: {
+        include: {
+          bookingFacts: {
+            orderBy: { holes: "asc" }
+          }
+        }
+      },
+      sources: { orderBy: [{ sourceType: "asc" }, { publisher: "asc" }] }
+    }
   });
   if (direct) return { profile: direct, redirectSlug: null };
   const alias = await prisma.courseProfileSlugAlias.findUnique({
     where: { slug },
-    include: { courseProfile: { include: { course: true, sources: true } } }
+    include: {
+      courseProfile: {
+        include: {
+          course: {
+            include: {
+              bookingFacts: {
+                orderBy: { holes: "asc" }
+              }
+            }
+          },
+          sources: true
+        }
+      }
+    }
   });
   if (
     !alias ||
@@ -202,7 +341,12 @@ export async function createCourseProfileSlugAlias(courseId: string, slug: strin
 
 export async function getRelatedSupportedCourses(course: { id: string; latitude: number; longitude: number; stateCode: string | null }) {
   const candidates = await prisma.course.findMany({
-    where: { id: { not: course.id }, isPublic: true, automationEligibility: "ALLOWED", profile: { status: "PUBLISHED" } },
+    where: {
+      id: { not: course.id },
+      isPublic: true,
+      automationEligibility: "ALLOWED",
+      profile: { status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] } }
+    },
     select: { id: true, name: true, city: true, stateCode: true, latitude: true, longitude: true, profile: { select: { canonicalSlug: true } } }
   });
   return candidates
@@ -213,7 +357,21 @@ export async function getRelatedSupportedCourses(course: { id: string; latitude:
 }
 
 async function markCourseProfileBlocked(courseId: string, failureReason: string) {
-  const course = await prisma.course.findUnique({ where: { id: courseId }, select: { id: true, name: true, city: true, stateCode: true, profile: { select: { canonicalSlug: true } } } });
+  const course = await prisma.course.findUnique({
+    where: { id: courseId },
+    select: {
+      id: true,
+      name: true,
+      city: true,
+      stateCode: true,
+      profile: {
+        select: {
+          canonicalSlug: true,
+          publishedAt: true
+        }
+      }
+    }
+  });
   if (!course || !course.city || !course.stateCode) return;
   const baseSlug = buildCourseProfileSlug({ name: course.name, city: course.city, stateCode: course.stateCode });
   let canonicalSlug = course.profile?.canonicalSlug ?? baseSlug;
@@ -224,8 +382,27 @@ async function markCourseProfileBlocked(courseId: string, failureReason: string)
   await prisma.courseProfile.upsert({
     where: { courseId },
     create: { courseId, canonicalSlug, status: "BLOCKED_EVIDENCE", failureReason: failureReason.slice(0, 1000), lastResearchAttemptAt: new Date(), failedResearchAt: new Date() },
-    update: { status: "BLOCKED_EVIDENCE", failureReason: failureReason.slice(0, 1000), lastResearchAttemptAt: new Date(), failedResearchAt: new Date() }
+    update: {
+      status: course.profile?.publishedAt ? "STALE" : "BLOCKED_EVIDENCE",
+      failureReason: failureReason.slice(0, 1000),
+      lastResearchAttemptAt: new Date(),
+      failedResearchAt: new Date()
+    }
   });
+}
+
+function getCourseProfileQueueDate(course: {
+  createdAt: Date;
+  profile: {
+    createdAt: Date;
+    reviewDueAt: Date | null;
+  } | null;
+}) {
+  return (
+    course.profile?.reviewDueAt ??
+    course.profile?.createdAt ??
+    course.createdAt
+  );
 }
 
 function profileCreateData(courseId: string, canonicalSlug: string, draft: CourseProfileDraft, contentHash: string, verifiedAt: Date, reviewDueAt: Date, now: Date): Prisma.CourseProfileCreateInput {

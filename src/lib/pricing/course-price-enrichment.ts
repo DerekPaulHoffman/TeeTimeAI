@@ -2,10 +2,10 @@ import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
 import {
   buildCoursePriceEstimate,
-  buildObservedBookableHoleCounts
+  buildObservedBookableHoleSummary,
+  type CourseBookingFactRecord
 } from "@/lib/pricing/course-prices";
 
-const BOOKING_EVIDENCE_LOOKBACK_DAYS = 30;
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
 export type PricingCourseRecord = {
@@ -13,25 +13,25 @@ export type PricingCourseRecord = {
   name: string;
   latitude: number;
   longitude: number;
+  bookingFacts: CourseBookingFactRecord[];
   probes: Array<{ observedAt: Date; rawSummary: unknown }>;
   matches: Array<{ priceCents: number | null; holes: number | null; lastConfirmedAt: Date }>;
 };
 
-export async function enrichCoursesWithBookingEvidence(candidates: CourseCandidate[], now = new Date()) {
+export async function enrichCoursesWithBookingEvidence(candidates: CourseCandidate[]) {
   if (candidates.length === 0) return candidates;
   const latitudes = candidates.map((course) => course.latitude);
   const longitudes = candidates.map((course) => course.longitude);
-  const cutoff = new Date(now.getTime() - BOOKING_EVIDENCE_LOOKBACK_DAYS * 86_400_000);
   const bookingEvidence = {
-    holes: { in: [9, 18] },
-    lastConfirmedAt: { gte: cutoff }
+    holes: { in: [9, 18] }
   };
   const courses = await prisma.course.findMany({
     where: {
       latitude: { gte: Math.min(...latitudes) - 0.06, lte: Math.max(...latitudes) + 0.06 },
       longitude: { gte: Math.min(...longitudes) - 0.06, lte: Math.max(...longitudes) + 0.06 },
       OR: [
-        { probes: { some: { observedAt: { gte: cutoff } } } },
+        { bookingFacts: { some: {} } },
+        { probes: { some: {} } },
         { matches: { some: bookingEvidence } }
       ]
     },
@@ -41,8 +41,19 @@ export async function enrichCoursesWithBookingEvidence(candidates: CourseCandida
       name: true,
       latitude: true,
       longitude: true,
+      bookingFacts: {
+        where: { holes: { in: [9, 18] } },
+        orderBy: { holes: "asc" },
+        select: {
+          holes: true,
+          minPriceCents: true,
+          maxPriceCents: true,
+          priceSampleSize: true,
+          priceObservedAt: true,
+          bookableObservedAt: true
+        }
+      },
       probes: {
-        where: { observedAt: { gte: cutoff } },
         orderBy: { observedAt: "desc" },
         take: 30,
         select: { observedAt: true, rawSummary: true }
@@ -59,14 +70,22 @@ export async function enrichCoursesWithBookingEvidence(candidates: CourseCandida
   return candidates.map((candidate) => {
     const matchedCourse = findPricingCourse(candidate, courses);
     const priceEstimate = matchedCourse ? buildCoursePriceEstimate(matchedCourse) : undefined;
-    const bookableHoleCounts = matchedCourse
-      ? buildObservedBookableHoleCounts(matchedCourse)
-      : [];
+    const bookableHoleSummary = matchedCourse
+      ? buildObservedBookableHoleSummary(matchedCourse)
+      : { holeCounts: [], observedAt: undefined };
+    const bookableHoleCounts = bookableHoleSummary.holeCounts;
     return priceEstimate || bookableHoleCounts.length > 0
       ? {
           ...candidate,
           ...(priceEstimate ? { priceEstimate } : {}),
-          ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {})
+          ...(bookableHoleCounts.length > 0
+            ? {
+                bookableHoleCounts,
+                ...(bookableHoleSummary.observedAt
+                  ? { bookableHoleCountsObservedAt: bookableHoleSummary.observedAt }
+                  : {})
+              }
+            : {})
         }
       : candidate;
   });

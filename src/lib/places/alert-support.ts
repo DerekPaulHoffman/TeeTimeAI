@@ -20,6 +20,8 @@ const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
 type KnownCourseRecord = CourseIdentity & {
   id: string;
+  rating?: number | null;
+  ratingObservedAt?: Date | null;
   bookingMethod: BookingMethod;
   bookingAccessMode: BookingAccessMode;
   automationEligibility: string;
@@ -56,6 +58,8 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
       longitude: true,
       website: true,
       phone: true,
+      rating: true,
+      ratingObservedAt: true,
       bookingMethod: true,
       bookingAccessMode: true,
       automationEligibility: true,
@@ -83,10 +87,22 @@ function mapCourseAlertSupport(
     course.bookingMethod === "PUBLIC_ONLINE" && course.detectedBookingUrl
       ? { ...candidate, website: course.detectedBookingUrl }
       : candidate;
+  const candidateWithRating =
+    candidateWithOfficialBooking.rating === undefined &&
+    course.rating !== null &&
+    course.rating !== undefined
+      ? {
+          ...candidateWithOfficialBooking,
+          rating: course.rating,
+          ...(course.ratingObservedAt
+            ? { ratingObservedAt: course.ratingObservedAt.toISOString() }
+            : {})
+        }
+      : candidateWithOfficialBooking;
   const candidateWithProfile = {
-    ...candidateWithOfficialBooking,
+    ...candidateWithRating,
     courseId: course.id,
-    ...(course.profile?.status === "PUBLISHED"
+    ...(course.profile && ["PUBLISHED", "STALE"].includes(course.profile.status)
       ? { profileUrl: `/courses/${course.profile.canonicalSlug}` }
       : {})
   };

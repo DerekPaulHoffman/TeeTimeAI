@@ -162,6 +162,77 @@ describe("course alert support enrichment", () => {
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
   });
 
+  it("keeps a stale course guide linked while its facts are refreshed", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-timberlin",
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        profile: {
+          canonicalSlug: "timberlin-golf-course-berlin-ct",
+          status: "STALE"
+        }
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.profileUrl).toBe("/courses/timberlin-golf-course-berlin-ct");
+  });
+
+  it("uses a saved rating only when the current Places response omits one", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-timberlin",
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        rating: 4.4,
+        ratingObservedAt: new Date("2026-07-20T12:00:00.000Z")
+      }
+    ] as never);
+
+    const [fallback, live] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        timeZone: "America/New_York"
+      },
+      {
+        googlePlaceId: "timberlin",
+        name: "Timberlin Golf Course",
+        latitude: 41.62,
+        longitude: -72.75,
+        timeZone: "America/New_York",
+        rating: 4.7
+      }
+    ]);
+
+    expect(fallback).toMatchObject({
+      rating: 4.4,
+      ratingObservedAt: "2026-07-20T12:00:00.000Z"
+    });
+    expect(live.rating).toBe(4.7);
+    expect(live.ratingObservedAt).toBeUndefined();
+  });
+
   it("uses a uniquely linked confirmed facility instead of an unreviewed exact-id duplicate", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {
