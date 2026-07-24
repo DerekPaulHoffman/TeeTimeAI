@@ -1613,7 +1613,7 @@ describe("runSearchCheck email cadence", () => {
       timeZone: "America/New_York",
       confirmedMatches: []
     });
-    expect(dbMocks.listPendingMatchAlerts).toHaveBeenCalledWith("search-1");
+    expect(dbMocks.listPendingMatchAlerts).toHaveBeenCalledWith("search-1", []);
     expect(dbMocks.markMatchAlertSuppressed).not.toHaveBeenCalled();
     expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
       expect.objectContaining({

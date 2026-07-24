@@ -6,6 +6,9 @@ import {
   closeHourlyImprovementRun,
   completeScheduledSearchCheck,
   failScheduledSearchCheck,
+  getActiveSearchForAutomation,
+  listAvailableMatchAlerts,
+  listPendingMatchAlerts,
   markMatchAlertSent,
   markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
@@ -56,6 +59,69 @@ vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 import { prisma } from "@/lib/prisma";
 
 const mockedPrisma = vi.mocked(prisma);
+
+describe("automation query payloads", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("loads an active check without historical matches or unused user fields", async () => {
+    mockedPrisma.teeSearch.findFirst.mockResolvedValue(null);
+
+    await getActiveSearchForAutomation("search-1");
+
+    expect(mockedPrisma.teeSearch.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          user: {
+            select: {
+              email: true
+            }
+          },
+          preferences: expect.any(Object)
+        })
+      })
+    );
+    const query = mockedPrisma.teeSearch.findFirst.mock.calls[0]?.[0];
+    expect(query?.include).not.toHaveProperty("matches");
+  });
+
+  it("limits pending alert hydration to the current rendered matches", async () => {
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+
+    await listPendingMatchAlerts("search-1", ["match-1", "match-2"]);
+
+    expect(mockedPrisma.teeTimeMatch.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { in: ["match-1", "match-2"] },
+          teeSearch: {
+            status: "ACTIVE",
+            id: "search-1"
+          }
+        }),
+        select: expect.objectContaining({
+          id: true,
+          course: {
+            select: {
+              id: true,
+              name: true,
+              address: true,
+              timeZone: true
+            }
+          }
+        })
+      })
+    );
+  });
+
+  it("skips match queries when the current check rendered no matches", async () => {
+    await expect(listPendingMatchAlerts("search-1", [])).resolves.toEqual([]);
+    await expect(listAvailableMatchAlerts("search-1", [])).resolves.toEqual([]);
+
+    expect(mockedPrisma.teeTimeMatch.findMany).not.toHaveBeenCalled();
+  });
+});
 
 describe("search check row lease", () => {
   beforeEach(() => {

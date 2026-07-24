@@ -46,44 +46,83 @@ const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 const REOPEN_ALERT_MINIMUM_ABSENCE_MS = 30 * 60 * 1000;
 const SEARCH_CHECK_LEASE_MS = 15 * 60 * 1000;
 
+const activeSearchCourseInclude = {
+  bookingFacts: {
+    orderBy: { holes: "asc" }
+  },
+  profile: {
+    select: {
+      canonicalSlug: true,
+      status: true
+    }
+  }
+} satisfies Prisma.CourseInclude;
+
 const activeSearchInclude = {
   user: true,
   preferences: {
     orderBy: { rank: "asc" },
     include: {
       course: {
-        include: {
-          bookingFacts: {
-            orderBy: { holes: "asc" }
-          },
-          profile: {
-            select: {
-              canonicalSlug: true,
-              status: true
-            }
-          }
-        }
+        include: activeSearchCourseInclude
       }
     }
   },
   matches: true
 } satisfies Prisma.TeeSearchInclude;
 
-export type ActiveAutomationSearch = Prisma.TeeSearchGetPayload<{
-  include: typeof activeSearchInclude;
-}>;
-
-const pendingAlertInclude = {
-  course: true,
-  teeSearch: {
+const activeSearchCheckInclude = {
+  user: {
+    select: {
+      email: true
+    }
+  },
+  preferences: {
+    orderBy: { rank: "asc" },
     include: {
-      user: true
+      course: {
+        include: activeSearchCourseInclude
+      }
     }
   }
-} satisfies Prisma.TeeTimeMatchInclude;
+} satisfies Prisma.TeeSearchInclude;
+
+export type ActiveAutomationSearch = Prisma.TeeSearchGetPayload<{
+  include: typeof activeSearchCheckInclude;
+}>;
+
+const pendingAlertSelect = {
+  id: true,
+  availabilityCycle: true,
+  startsAt: true,
+  availableSpots: true,
+  bookingUrl: true,
+  priceCents: true,
+  holes: true,
+  course: {
+    select: {
+      id: true,
+      name: true,
+      address: true,
+      timeZone: true
+    }
+  },
+  teeSearch: {
+    select: {
+      alertGeneration: true,
+      additionalEmails: true,
+      userTimeZone: true,
+      user: {
+        select: {
+          email: true
+        }
+      }
+    }
+  }
+} satisfies Prisma.TeeTimeMatchSelect;
 
 export type PendingAlertMatch = Prisma.TeeTimeMatchGetPayload<{
-  include: typeof pendingAlertInclude;
+  select: typeof pendingAlertSelect;
 }>;
 
 export type BrowserProbeTarget = {
@@ -169,7 +208,7 @@ export async function getActiveSearchForAutomation(
         gte: startOfUtcCalendarDay()
       }
     },
-    include: activeSearchInclude
+    include: activeSearchCheckInclude
   });
 }
 
@@ -466,9 +505,17 @@ function getIncidentMonitoringFailureEvidence(incident: {
   };
 }
 
-export async function listPendingMatchAlerts(searchId?: string): Promise<PendingAlertMatch[]> {
+export async function listPendingMatchAlerts(
+  searchId?: string,
+  matchIds?: readonly string[]
+): Promise<PendingAlertMatch[]> {
+  if (matchIds?.length === 0) {
+    return [];
+  }
+
   return prisma.teeTimeMatch.findMany({
     where: {
+      ...(matchIds ? { id: { in: [...matchIds] } } : {}),
       alertStatus: "PENDING",
       availabilityStatus: "AVAILABLE",
       teeSearch: {
@@ -479,7 +526,7 @@ export async function listPendingMatchAlerts(searchId?: string): Promise<Pending
     orderBy: {
       firstSeenAt: "asc"
     },
-    include: pendingAlertInclude
+    select: pendingAlertSelect
   });
 }
 
@@ -1996,7 +2043,13 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
       teeSearchId: input.searchId,
       courseId: input.courseId
     },
-    orderBy: { observedAt: "desc" }
+    orderBy: { observedAt: "desc" },
+    select: {
+      outcome: true,
+      message: true,
+      runtimeVersion: true,
+      rawSummary: true
+    }
   });
 
   if (
@@ -2019,17 +2072,25 @@ function getProviderExecutionMarker(value: unknown) {
   return (value as Record<string, unknown>).providerExecution ?? null;
 }
 
-export async function listAvailableMatchAlerts(searchId: string): Promise<PendingAlertMatch[]> {
+export async function listAvailableMatchAlerts(
+  searchId: string,
+  matchIds?: readonly string[]
+): Promise<PendingAlertMatch[]> {
+  if (matchIds?.length === 0) {
+    return [];
+  }
+
   return prisma.teeTimeMatch.findMany({
     where: {
       teeSearchId: searchId,
+      ...(matchIds ? { id: { in: [...matchIds] } } : {}),
       availabilityStatus: "AVAILABLE",
       teeSearch: {
         status: "ACTIVE"
       }
     },
     orderBy: [{ course: { name: "asc" } }, { startsAt: "asc" }],
-    include: pendingAlertInclude
+    select: pendingAlertSelect
   });
 }
 

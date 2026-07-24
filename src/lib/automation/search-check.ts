@@ -905,7 +905,10 @@ async function checkSearch(
 
   if (pendingStatusReplacement) {
     try {
-      const pendingMatches = await listPendingMatchAlerts(searchId);
+      const pendingMatches = await listPendingMatchAlerts(
+        searchId,
+        getCurrentMatchIds(courseResults)
+      );
       const renderedPendingMatchIds = getRenderedPendingMatchIds(
         pendingMatches,
         courseResults
@@ -943,7 +946,10 @@ async function checkSearch(
     }
   } else if (statusEmailKind === "setup") {
     try {
-      const setupPendingMatches = await listPendingMatchAlerts(searchId);
+      const setupPendingMatches = await listPendingMatchAlerts(
+        searchId,
+        getCurrentMatchIds(courseResults)
+      );
       const renderedPendingMatchIds = getRenderedPendingMatchIds(
         setupPendingMatches,
         courseResults
@@ -1042,6 +1048,18 @@ function getRenderedPendingMatchIds(
             (matchId): matchId is string =>
               typeof matchId === "string" && pendingMatchIds.has(matchId)
           )
+      )
+    )
+  ];
+}
+
+function getCurrentMatchIds(courseResults: SearchCheckCourseResult[]) {
+  return [
+    ...new Set(
+      courseResults.flatMap((course) =>
+        (course.matchingTimes ?? []).flatMap((time) =>
+          typeof time.matchId === "string" ? [time.matchId] : []
+        )
       )
     )
   ];
@@ -1231,7 +1249,10 @@ async function deliverSearchStatusReport(input: {
     input.search.user.email,
     input.search.additionalEmails
   );
-  const availableMatches = await listAvailableMatchAlerts(input.search.id);
+  const availableMatches = await listAvailableMatchAlerts(
+    input.search.id,
+    getCurrentMatchIds(input.courseResults)
+  );
   const displayMatchIds = getRenderedPendingMatchIds(
     availableMatches,
     input.courseResults
@@ -1382,20 +1403,16 @@ async function sendPendingMatchAlerts(
     assertCurrent?: () => Promise<void>;
   }
 ) {
-  const pendingMatches = await listPendingMatchAlerts(searchId);
+  const currentMatchIds = new Set(getCurrentMatchIds(input.courseResults));
+  const pendingMatches = await listPendingMatchAlerts(searchId, [...currentMatchIds]);
   if (pendingMatches.length === 0) {
     return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
   const search = pendingMatches[0].teeSearch;
 
-  const allAvailableMatches = await listAvailableMatchAlerts(searchId);
-  const currentMatchIds = new Set(
-    input.courseResults.flatMap((course) =>
-      (course.matchingTimes ?? []).flatMap((time) =>
-        typeof time.matchId === "string" ? [time.matchId] : []
-      )
-    )
-  );
+  const allAvailableMatches = await listAvailableMatchAlerts(searchId, [
+    ...currentMatchIds
+  ]);
   const availableMatches = allAvailableMatches.filter((match) =>
     currentMatchIds.has(match.id)
   );

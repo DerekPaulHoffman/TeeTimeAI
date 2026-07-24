@@ -19,7 +19,10 @@ import {
   listCourseProfileQueue
 } from "@/lib/course-profiles/service";
 import { sanitizePagePath } from "@/lib/engagement/page-path";
-import { isEngineeringRemediationSearch } from "@/lib/engagement/traffic-class";
+import {
+  isEngineeringRemediationSearch,
+  type WebsiteTrafficClassValue
+} from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 const RECENT_HOURS = 6;
@@ -33,6 +36,24 @@ type LatestActiveProbeEvidence = {
   observedAt: Date;
   rawSummary: Prisma.JsonValue | null;
   runtimeVersion: string | null;
+};
+type LatestActiveProbeRow = LatestActiveProbeEvidence & {
+  id: string;
+  automationRunId: string | null;
+  automationRunOutcome: string | null;
+  message: string | null;
+  courseName: string;
+  courseDetectedPlatform: string;
+  courseAutomationEligibility: string;
+  courseBookingMethod: string;
+  courseAutomationReason: string;
+  courseIsPublic: boolean;
+  courseIntelligenceVerifiedAt: Date | null;
+  courseIntelligenceReviewAt: Date | null;
+  courseIntelligenceConfidence: number | null;
+  userEmail: string;
+  trafficClass: WebsiteTrafficClassValue;
+  syntheticMultiCycle: boolean;
 };
 const activeSearchInspectionQuery = {
   where: {
@@ -309,50 +330,89 @@ async function main() {
       search.preferences.map((preference) => preference.courseId)
     )
   );
-  const recentActiveProbes =
-    activeSearchIds.length > 0
-      ? await prisma.courseProbe.findMany({
-          where: {
-            observedAt: {
-              gte: recentSince
-            },
-            teeSearchId: {
-              in: activeSearchIds
-            },
-            courseId: {
-              in: [...activePreferenceCourseIds]
-            }
-          },
-          orderBy: {
-            observedAt: "desc"
-          },
-          include: {
-            course: true,
-            teeSearch: {
-              include: {
-                user: true
-              }
-            },
-            automationRun: true
-          }
-        })
-      : [];
-  const latestActiveProbeEvidence =
+  const latestActiveProbeRows =
     activeSearchIds.length > 0 && activePreferenceCourseIds.size > 0
-      ? await prisma.$queryRaw<LatestActiveProbeEvidence[]>(Prisma.sql`
-          SELECT DISTINCT ON ("teeSearchId", "courseId")
-            "teeSearchId",
-            "courseId",
-            "outcome",
-            "observedAt",
-            "rawSummary",
-            "runtimeVersion"
-          FROM "CourseProbe"
-          WHERE "teeSearchId" IN (${Prisma.join(activeSearchIds)})
-            AND "courseId" IN (${Prisma.join([...activePreferenceCourseIds])})
-          ORDER BY "teeSearchId", "courseId", "observedAt" DESC, "id" DESC
+      ? await prisma.$queryRaw<LatestActiveProbeRow[]>(Prisma.sql`
+          SELECT DISTINCT ON (probe."teeSearchId", probe."courseId")
+            probe."id",
+            probe."teeSearchId",
+            probe."courseId",
+            probe."automationRunId",
+            probe."outcome",
+            probe."observedAt",
+            probe."message",
+            probe."rawSummary",
+            probe."runtimeVersion",
+            course."name" AS "courseName",
+            course."detectedPlatform" AS "courseDetectedPlatform",
+            course."automationEligibility" AS "courseAutomationEligibility",
+            course."bookingMethod" AS "courseBookingMethod",
+            course."automationReason" AS "courseAutomationReason",
+            course."isPublic" AS "courseIsPublic",
+            course."intelligenceVerifiedAt" AS "courseIntelligenceVerifiedAt",
+            course."intelligenceReviewAt" AS "courseIntelligenceReviewAt",
+            course."intelligenceConfidence" AS "courseIntelligenceConfidence",
+            account."email" AS "userEmail",
+            search."trafficClass" AS "trafficClass",
+            search."syntheticMultiCycle",
+            run."outcome" AS "automationRunOutcome"
+          FROM "CourseProbe" AS probe
+          INNER JOIN "Course" AS course ON course."id" = probe."courseId"
+          INNER JOIN "TeeSearch" AS search ON search."id" = probe."teeSearchId"
+          INNER JOIN "User" AS account ON account."id" = search."userId"
+          LEFT JOIN "AutomationRun" AS run ON run."id" = probe."automationRunId"
+          WHERE probe."teeSearchId" IN (${Prisma.join(activeSearchIds)})
+            AND probe."courseId" IN (${Prisma.join([...activePreferenceCourseIds])})
+          ORDER BY
+            probe."teeSearchId",
+            probe."courseId",
+            probe."observedAt" DESC,
+            probe."id" DESC
         `)
       : [];
+  const latestActiveProbeEvidence: LatestActiveProbeEvidence[] =
+    latestActiveProbeRows.map((probe) => ({
+      teeSearchId: probe.teeSearchId,
+      courseId: probe.courseId,
+      outcome: probe.outcome,
+      observedAt: probe.observedAt,
+      rawSummary: probe.rawSummary,
+      runtimeVersion: probe.runtimeVersion
+    }));
+  const recentActiveProbes = latestActiveProbeRows
+    .filter((probe) => probe.observedAt >= recentSince)
+    .map((probe) => ({
+      id: probe.id,
+      teeSearchId: probe.teeSearchId,
+      courseId: probe.courseId,
+      automationRunId: probe.automationRunId,
+      observedAt: probe.observedAt,
+      outcome: probe.outcome,
+      message: probe.message,
+      course: {
+        name: probe.courseName,
+        detectedPlatform: probe.courseDetectedPlatform,
+        automationEligibility: probe.courseAutomationEligibility,
+        bookingMethod: probe.courseBookingMethod,
+        automationReason: probe.courseAutomationReason,
+        isPublic: probe.courseIsPublic,
+        intelligenceVerifiedAt: probe.courseIntelligenceVerifiedAt,
+        intelligenceReviewAt: probe.courseIntelligenceReviewAt,
+        intelligenceConfidence: probe.courseIntelligenceConfidence
+      },
+      teeSearch: {
+        trafficClass: probe.trafficClass,
+        syntheticMultiCycle: probe.syntheticMultiCycle,
+        user: {
+          email: probe.userEmail
+        }
+      },
+      automationRun: probe.automationRunId
+        ? {
+            outcome: probe.automationRunOutcome
+          }
+        : null
+    }));
   const newestActiveProbeBySearchCourse = new Map(
     latestActiveProbeEvidence.map((probe) => [
       searchCourseKey(probe.teeSearchId, probe.courseId),
