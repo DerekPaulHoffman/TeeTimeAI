@@ -296,9 +296,17 @@ async function checkSearch(
     async (preference) => {
     await maintainSearchCheckLease(lease);
     const course = preference.course as AutomationCourse;
+    const customerBookingUrl = getCustomerBookingUrl(course);
+    const localReaderEligible =
+      getLocalReaderCourseKey(customerBookingUrl) !== null;
 
     const monitoringGate = evaluateMonitoringGate(course);
-    if (monitoringGate.disposition !== "ACTIONABLE") {
+    const localReaderCanOverrideGate =
+      localReaderEligible && monitoringGate.disposition === "TECHNICAL_FINAL";
+    if (
+      monitoringGate.disposition !== "ACTIONABLE" &&
+      !localReaderCanOverrideGate
+    ) {
       const technicalFinal = monitoringGate.disposition === "TECHNICAL_FINAL";
       const identityBlocked =
         monitoringGate.disposition === "IDENTITY_FINAL" ||
@@ -391,7 +399,7 @@ async function checkSearch(
       return;
     }
 
-    if (!hasSupportedAdapter(course)) {
+    if (!hasSupportedAdapter(course) && !localReaderEligible) {
       if (monitoringPreparationFailed || monitoringDeferredCourseIds.has(course.id)) {
         monitoringRetryCourseIds.add(course.id);
         const message =
@@ -487,9 +495,6 @@ async function checkSearch(
 
     let providerRequestStarted = false;
     try {
-      const localReaderEligible = getLocalReaderCourseKey(
-        getCustomerBookingUrl(course)
-      );
       const localTeeSheet = localReaderEligible
         ? await getFreshLocalReaderTeeSheet({
             searchId: search.id,
@@ -501,6 +506,9 @@ async function checkSearch(
         : null;
       let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
       let providerExecutionLabel = "LOCAL_BROWSER_READER";
+      if (!teeSheet && localReaderEligible && !hasSupportedAdapter(course)) {
+        throw new Error("No reusable server adapter is available for this course.");
+      }
       if (!teeSheet) {
         const providerExecution = await runWithProviderRequestLease(
           resolveProviderCapability(course).providerFamilyKey,
@@ -733,7 +741,6 @@ async function checkSearch(
     } catch (error) {
       await maintainSearchCheckLease(lease);
       const message = error instanceof Error ? error.message : "Unknown adapter error";
-      const customerBookingUrl = getCustomerBookingUrl(course);
       const localReaderJob = customerBookingUrl
         ? await queueLocalReaderJob({
             searchId: search.id,

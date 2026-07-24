@@ -1374,6 +1374,64 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
   });
 
+  it("lets the exact Grassy Hill local reader override a stored technical block", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Grassy Hill Country Club",
+            isPublic: true,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "UNKNOWN",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "BLOCKED",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            policyNotes: null,
+            bookingMetadata: null
+          }
+        }
+      ]
+    });
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2
+    });
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2,
+      bookingUrl
+    });
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "FETCH_FAILED",
+      message: expect.stringContaining("local public-page reader")
+    });
+    expect(dbMocks.recordCourseProbeIfChanged).not.toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "BLOCKED_AUTH" })
+    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+  });
+
   it("uses a fresh local reader result without calling the server adapter", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
