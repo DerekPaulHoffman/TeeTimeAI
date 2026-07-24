@@ -51,22 +51,33 @@
       .split("-")
       .map(Number);
     const expectedMonth = `${MONTH_NAMES[targetMonth - 1]} ${targetYear}`;
-    const displayedMonth = document.querySelector(".topbar-title")?.textContent?.trim();
-    if (displayedMonth && displayedMonth !== expectedMonth) {
-      throw new Error(
-        `Target month ${expectedMonth} is not currently displayed (${displayedMonth}).`
-      );
-    }
-
     const targetDay = String(targetDayNumber);
-    const dayUnit = Array.from(document.querySelectorAll(".day-unit")).find(
-      (element) => visibleDayNumber(element) === targetDay
-    );
-    const button = dayUnit?.querySelector("button.btn-day-unit, button");
-    if (!button || button.disabled) {
-      throw new Error(`Target date ${targetDate} is not selectable.`);
+    const selectionDeadline = Date.now() + 10_000;
+    while (Date.now() < selectionDeadline) {
+      const displayedMonth = document
+        .querySelector(".topbar-title")
+        ?.textContent?.trim();
+      if (displayedMonth && displayedMonth !== expectedMonth) {
+        throw new Error(
+          `Target month ${expectedMonth} is not currently displayed (${displayedMonth}).`
+        );
+      }
+
+      const dayUnit = Array.from(document.querySelectorAll(".day-unit")).find(
+        (element) => visibleDayNumber(element) === targetDay
+      );
+      const button = dayUnit?.querySelector("button.btn-day-unit, button");
+      if (
+        button &&
+        button.disabled !== true &&
+        button.getAttribute("aria-disabled") !== "true"
+      ) {
+        button.click();
+        return;
+      }
+      await delay(250);
     }
-    button.click();
+    throw new Error(`Target date ${targetDate} did not become selectable.`);
   }
 
   async function waitForTargetPage(targetDate) {
@@ -130,7 +141,9 @@
         type: "LOCAL_READER_RESULT",
         result: snapshot
       });
-    } catch {
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : String(error || "Unknown error");
       await chrome.runtime.sendMessage({
         type: "LOCAL_READER_RESULT",
         result: {
@@ -138,7 +151,7 @@
           status: "READER_ERROR",
           observedAt: new Date().toISOString(),
           pageUrl: location.href,
-          pageTitle: document.title || "Grassy Hill Country Club",
+          pageTitle: `Reader error: ${detail}`.slice(0, 200),
           slots: [],
           readerVersion:
             globalThis.TeeTimeSpotGrassyHillReader?.READER_VERSION ||

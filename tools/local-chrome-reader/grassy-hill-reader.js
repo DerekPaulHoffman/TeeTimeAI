@@ -1,7 +1,7 @@
 (function initializeGrassyHillReader(root) {
   "use strict";
 
-  const READER_VERSION = "grassy-hill-rendered-v3";
+  const READER_VERSION = "grassy-hill-rendered-v4";
   const ALLOWED_HOST = "grassyhill.cps.golf";
   const ALLOWED_PATH = /^\/onlineresweb\/search-teetime\/?$/;
   const LOCAL_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;

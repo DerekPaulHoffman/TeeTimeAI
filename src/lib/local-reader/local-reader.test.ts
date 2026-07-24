@@ -135,7 +135,7 @@ describe("local Chrome reader contract", () => {
     ).toMatchObject({
       status: "READER_ERROR",
       slots: [],
-      readerVersion: "grassy-hill-rendered-v3"
+      readerVersion: "grassy-hill-rendered-v4"
     });
   });
 
@@ -204,6 +204,28 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).toContain(
       "const [targetYear, targetMonth, targetDayNumber] = targetDate"
     );
+    expect(contentSource).toContain(
+      "const selectionDeadline = Date.now() + 10_000"
+    );
+    expect(contentSource).toContain(
+      'button.getAttribute("aria-disabled") !== "true"'
+    );
+  });
+
+  it("surfaces reader setup errors without exposing private browser state", () => {
+    const contentSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
+      "utf8"
+    );
+    const backgroundSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
+      "utf8"
+    );
+
+    expect(contentSource).toContain("`Reader error: ${detail}`.slice(0, 200)");
+    expect(backgroundSource).toContain(': result.status,');
+    expect(backgroundSource).not.toContain("document.cookie");
+    expect(backgroundSource).not.toContain("localStorage");
   });
 
   it("rejects slots for the wrong date or an unsupported player count", () => {

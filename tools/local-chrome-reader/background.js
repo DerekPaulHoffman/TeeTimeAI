@@ -131,9 +131,15 @@ async function finishJob(tabId, result) {
     if (!response.ok) {
       throw new Error(`Result API returned ${response.status}`);
     }
+    const resultDetail =
+      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+        ? `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
+        : `${pending.job.courseKey} ${pending.job.targetDate}: ${result.pageTitle}`;
     await setLastStatus(
-      "COMPLETED",
-      `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
+      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+        ? "COMPLETED"
+        : result.status,
+      resultDetail
     );
   } catch (error) {
     await setLastStatus(
