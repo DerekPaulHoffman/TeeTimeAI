@@ -82,7 +82,34 @@ describe("local reader job service", () => {
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
   });
 
+  it("reuses a pending job from an earlier schedule version", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      id: "job-earlier-version",
+      scheduleVersion: 2,
+      status: "PENDING",
+      jobExpiresAt: new Date("2026-07-24T16:30:00.000Z"),
+    });
+
+    await expect(
+      queueLocalReaderJob({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 4,
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+      }),
+    ).resolves.toMatchObject({
+      id: "job-earlier-version",
+      scheduleVersion: 2,
+      status: "PENDING",
+    });
+    expect(prismaMocks.localReaderJob.findUnique).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+  });
+
   it("does not erase an unexpired completed result during an overlapping retry", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       status: "COMPLETED",
@@ -149,6 +176,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       teeSearchId: "search-1",
+      courseId: "course-1",
       courseKey: "grassy-hill",
       targetDate: "2026-07-25",
       players: 2,
@@ -192,6 +220,21 @@ describe("local reader job service", () => {
       completedAt: new Date("2026-07-24T16:00:00.000Z"),
     });
     expect(schedulerMocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: { not: "job-1" },
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        status: "PENDING",
+      },
+      data: {
+        status: "EXPIRED",
+        leaseToken: null,
+        leaseExpiresAt: null,
+      },
+    });
   });
 
   it("turns only availability results into provider-compatible slots", async () => {

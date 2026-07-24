@@ -17,7 +17,7 @@ import { getLocalReaderCourseKey } from "./course-key";
 
 export { getLocalReaderCourseKey } from "./course-key";
 
-const JOB_LIFETIME_MS = 10 * 60_000;
+const JOB_LIFETIME_MS = 30 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
 
@@ -33,6 +33,34 @@ export async function queueLocalReaderJob(input: {
   if (!courseKey) return null;
   const course = LOCAL_READER_COURSES[courseKey];
   const now = new Date();
+  const reusableAcrossScheduleVersions =
+    await prisma.localReaderJob.findFirst({
+      where: {
+        teeSearchId: input.searchId,
+        courseId: input.courseId,
+        targetDate: input.targetDate,
+        players: input.players,
+        OR: [
+          {
+            status: "PENDING",
+            jobExpiresAt: { gt: now },
+          },
+          {
+            status: "LEASED",
+            jobExpiresAt: { gt: now },
+            leaseExpiresAt: { gt: now },
+          },
+          {
+            status: "COMPLETED",
+            resultExpiresAt: { gt: now },
+          },
+        ],
+      },
+      orderBy: { createdAt: "asc" },
+    });
+  if (reusableAcrossScheduleVersions) {
+    return reusableAcrossScheduleVersions;
+  }
   const unique = {
     teeSearchId: input.searchId,
     courseId: input.courseId,
@@ -196,6 +224,22 @@ export async function completeLocalReaderJob(input: {
     },
   });
   if (updated.count !== 1) throw new Error("The local reader lease changed");
+
+  await prisma.localReaderJob.updateMany({
+    where: {
+      id: { not: current.id },
+      teeSearchId: current.teeSearchId,
+      courseId: current.courseId,
+      targetDate: current.targetDate,
+      players: current.players,
+      status: "PENDING",
+    },
+    data: {
+      status: "EXPIRED",
+      leaseToken: null,
+      leaseExpiresAt: null,
+    },
+  });
 
   try {
     await startSearchSchedule(current.teeSearchId);
