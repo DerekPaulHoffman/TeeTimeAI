@@ -6911,7 +6911,7 @@ describe("Agilysys public booking discovery", () => {
 });
 
 describe("TenFore public booking enrichment", () => {
-  it("keeps public browser-visible TenFore availability in adapter review", () => {
+  it("classifies browser-visible TenFore availability as CAPTCHA-bound", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "gainfield",
       courseName: "Gainfield Farms Golf Course",
@@ -6924,19 +6924,21 @@ describe("TenFore public booking enrichment", () => {
     });
 
     expect(discovery).toMatchObject({
-      status: "INSPECTED",
+      status: "VERIFIED",
       detectedPlatform: "CUSTOM",
       bookingUrl: "https://fox.tenfore.golf/gainfieldfarms",
       bookingMethod: "PUBLIC_ONLINE",
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "NONE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      bookingAccessMode: "CAPTCHA_OR_QUEUE",
       confidence: 0.95,
       evidence: expect.objectContaining({
-        learnedFrom: "tenfore-public-browser-availability"
+        learnedFrom: "tenfore-public-browser-captcha-bound-availability"
       })
     });
     expect(discovery.policyNotes).toContain("renders public tee-time availability");
-    expect(discovery.policyNotes).toContain("keep adapter work open");
+    expect(discovery.policyNotes).toContain("does not generate, replay, solve, or bypass CAPTCHA tokens");
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 });
 

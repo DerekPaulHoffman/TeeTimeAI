@@ -2106,21 +2106,23 @@ function learnTenForeDiscovery(
 
   return {
     courseId: evidence.courseId,
-    status: "INSPECTED",
+    status: "VERIFIED",
     detectedPlatform: "CUSTOM",
     sourceUrl: evidence.sourceUrl,
     bookingUrl: canonicalizeTenForeBookingUrl(bookingUrl),
     bookingMethod: "PUBLIC_ONLINE",
-    automationEligibility: "NEEDS_REVIEW",
-    automationReason: "NONE",
+    automationEligibility: "BLOCKED",
+    automationReason: "CAPTCHA_OR_QUEUE",
+    bookingAccessMode: "CAPTCHA_OR_QUEUE",
     policyNotes:
-      "The official signed-out TenFore page renders public tee-time availability in a normal browser. Its consumer availability request uses invisible reCAPTCHA, so direct server retrieval is not yet implemented; keep adapter work open instead of treating provider policy or the visible CAPTCHA badge as a terminal monitoring classification.",
+      "The official signed-out TenFore page renders public tee-time availability in a normal browser, but its consumer availability request requires invisible reCAPTCHA. Tee Time Spot does not generate, replay, solve, or bypass CAPTCHA tokens, so golfers should check and book on the official page directly.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     confidence: 0.95,
     evidence: {
       finalUrl: evidence.finalUrl,
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
-      learnedFrom: "tenfore-public-browser-availability"
+      learnedFrom: "tenfore-public-browser-captcha-bound-availability"
     }
   };
 }

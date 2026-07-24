@@ -3442,12 +3442,13 @@ describe("search monitoring discovery", () => {
 
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "INSPECTED",
+        status: "VERIFIED",
         detectedPlatform: "CUSTOM",
         bookingUrl: "https://fox.tenfore.golf/gainfieldfarms",
         bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "NEEDS_REVIEW",
-        automationReason: "NONE"
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        bookingAccessMode: "CAPTCHA_OR_QUEUE"
       })
     );
   });
