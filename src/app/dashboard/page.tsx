@@ -399,7 +399,11 @@ function DashboardSearchCard({
               alertSupport,
               automationEligibility: preference.course.automationEligibility,
               latestProbe,
-              upcomingBookingWindow
+              upcomingBookingWindow,
+              firstTimeLookup:
+                Math.abs(
+                  preference.course.createdAt.getTime() - search.createdAt.getTime()
+                ) <= 2 * 60 * 1000
             });
             const bookingEvidence = {
               bookingFacts: preference.course.bookingFacts,
@@ -614,6 +618,7 @@ function getDashboardMonitoringVerdict(input: {
     observedAt: Date;
   };
   upcomingBookingWindow: ReturnType<typeof getBookingWindowForTargetDate>;
+  firstTimeLookup: boolean;
 }) {
   if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
     return {
@@ -664,11 +669,13 @@ function getDashboardMonitoringVerdict(input: {
     };
   }
   return {
-    label: "First verdict pending",
+    label: input.firstTimeLookup ? "First-time course lookup" : "First verdict pending",
     detail:
       input.automationEligibility === "ALLOWED"
         ? "The first check is starting now and will confirm the current result."
-        : "We’ll email the monitoring verdict after the first check, with a 30-minute limit for a new course.",
+        : input.firstTimeLookup
+          ? "Tee Time Spot hasn't checked this course before. We'll email the verdict after the first check, usually within 10 minutes. If coverage takes longer, we'll alert our course coverage team."
+          : "We’ll email the monitoring verdict after the first check, usually within 10 minutes.",
     icon: "scheduled" as const,
     className: "is-detail"
   };

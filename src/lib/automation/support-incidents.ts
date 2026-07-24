@@ -488,7 +488,7 @@ async function notifyCourseSupportIssueBatchWithLease(
   const incidents = await prisma.courseSupportIncident.findMany({
     where: {
       id: { in: incidentIds },
-      status: "NEEDS_HUMAN",
+      status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] },
       engineeringOnly: false,
       ownerNotifiedAt: null,
       escalationNotifiedAt: null
@@ -500,35 +500,57 @@ async function notifyCourseSupportIssueBatchWithLease(
   }
 
   try {
-    const delivery = await sendCourseSupportOperatorSummaryEmail({
-      incidents: incidents.map((incident) => ({
-        incidentId: incident.id,
-        cycle: incident.cycle,
-        courseId: incident.courseId,
-        courseName: incident.courseNameSnapshot,
-        platform: incident.platformSnapshot,
-        bookingUrl: incident.bookingUrlSnapshot,
-        firstAffectedSearchId: incident.firstAffectedSearchId,
-        affectedSearchCount: incident.affectedSearchCount,
-        kind: incident.kind,
-        message: incident.latestMessage,
-        nextAction: incident.nextAction,
-        firstSeenAt: incident.firstSeenAt
-      }))
-    });
-    if (delivery.deliveryStatus !== "sent") {
-      return {
-        notifiedIncidentIds: [],
-        pendingIncidentIds: incidents.map((incident) => incident.id)
-      };
+    const openedIncidents = incidents.filter(
+      (incident) => incident.status === "AUTO_INVESTIGATING"
+    );
+    const escalatedIncidents = incidents.filter(
+      (incident) => incident.status === "NEEDS_HUMAN"
+    );
+    const notifiedIncidentIds: string[] = [];
+
+    for (const incident of openedIncidents) {
+      const notified = await notifyIncidentEvent(incident, "opened", now);
+      if (notified.ownerNotifiedAt) {
+        notifiedIncidentIds.push(incident.id);
+      }
     }
 
-    const notifiedIncidentIds = incidents.map((incident) => incident.id);
-    await prisma.courseSupportIncident.updateMany({
-      where: { id: { in: notifiedIncidentIds } },
-      data: { escalationNotifiedAt: now }
-    });
-    return { notifiedIncidentIds, pendingIncidentIds: [] };
+    if (escalatedIncidents.length > 0) {
+      const delivery = await sendCourseSupportOperatorSummaryEmail({
+        incidents: escalatedIncidents.map((incident) => ({
+          incidentId: incident.id,
+          cycle: incident.cycle,
+          courseId: incident.courseId,
+          courseName: incident.courseNameSnapshot,
+          platform: incident.platformSnapshot,
+          bookingUrl: incident.bookingUrlSnapshot,
+          firstAffectedSearchId: incident.firstAffectedSearchId,
+          affectedSearchCount: incident.affectedSearchCount,
+          kind: incident.kind,
+          message: incident.latestMessage,
+          nextAction: incident.nextAction,
+          firstSeenAt: incident.firstSeenAt
+        }))
+      });
+      if (delivery.deliveryStatus === "sent") {
+        const escalatedIncidentIds = escalatedIncidents.map(
+          (incident) => incident.id
+        );
+        await prisma.courseSupportIncident.updateMany({
+          where: { id: { in: escalatedIncidentIds } },
+          data: { escalationNotifiedAt: now }
+        });
+        notifiedIncidentIds.push(...escalatedIncidentIds);
+      }
+    }
+
+    const notifiedIncidentIdSet = new Set(notifiedIncidentIds);
+    return {
+      notifiedIncidentIds,
+      pendingIncidentIds: incidents
+        .filter((incident) => !notifiedIncidentIdSet.has(incident.id))
+        .map((incident) => incident.id)
+    };
   } catch (error) {
     console.error("[email:operator-summary-failed]", {
       incidents: incidents.map((incident) => incident.id),

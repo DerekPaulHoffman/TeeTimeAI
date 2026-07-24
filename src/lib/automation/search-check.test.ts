@@ -1700,13 +1700,16 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("opens a persistent operator incident for unsupported courses", async () => {
+    const createdAt = new Date("2026-07-11T12:09:30.000Z");
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
+      createdAt,
       preferences: [
         {
           rank: 1,
           course: {
             ...search.preferences[0].course,
+            createdAt,
             automationEligibility: "UNKNOWN",
             policyNotes: null
           }
@@ -1727,7 +1730,8 @@ describe("runSearchCheck email cadence", () => {
     expect(result.courseResults[0]).toEqual(
       expect.objectContaining({
         outcome: "NEEDS_ADAPTER",
-        supportStatus: "TEAM_ALERTED"
+        supportStatus: "TEAM_ALERTED",
+        firstTimeLookup: true
       })
     );
     expect(result.supportRetryNeeded).toBe(false);

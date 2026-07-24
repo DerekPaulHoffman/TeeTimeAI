@@ -106,6 +106,7 @@ export type CourseCandidate = {
     | "UNAVAILABLE"
     | "TEMPORARILY_UNAVAILABLE";
   monitoringReadinessObservedAt?: string;
+  firstTimeLookup?: boolean;
   layoutHoleCounts?: CourseLayoutHoleCount[];
   layoutHolesStatus?: "VERIFIED" | "UNVERIFIED";
   layoutHolesEvidenceUrl?: string;

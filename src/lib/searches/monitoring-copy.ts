@@ -14,6 +14,7 @@ type MonitoringCourse = {
     | "VERIFYING"
     | "UNAVAILABLE"
     | "TEMPORARILY_UNAVAILABLE";
+  firstTimeLookup?: boolean;
 };
 
 export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
@@ -34,14 +35,21 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
       (course.monitoringReadiness === "UNAVAILABLE" ||
         course.monitoringReadiness === "TEMPORARILY_UNAVAILABLE")
   );
+  const firstTimeLookups = unconfirmed.filter((course) => course.firstTimeLookup);
+  const otherUnconfirmed = unconfirmed.filter((course) => !course.firstTimeLookup);
   if (manualOnly.length === 0 && unconfirmed.length === 0 && unavailable.length === 0) {
     return "You're all set. We'll email you the moment a matching tee time opens up.";
   }
 
   const details: string[] = [];
-  if (unconfirmed.length > 0) {
+  if (firstTimeLookups.length > 0) {
     details.push(
-      `We'll email a monitoring verdict for ${formatCourseNames(unconfirmed)} after the first check; new-course verification is capped at 30 minutes.`
+      `${formatCourseNames(firstTimeLookups)} ${firstTimeLookups.length === 1 ? "is a first-time course lookup" : "are first-time course lookups"}. We'll email the monitoring verdict after the first check, usually within 10 minutes. If coverage takes longer, we'll alert our course coverage team.`
+    );
+  }
+  if (otherUnconfirmed.length > 0) {
+    details.push(
+      `We'll email a monitoring verdict for ${formatCourseNames(otherUnconfirmed)} after the first check, usually within 10 minutes.`
     );
   }
   if (unavailable.length > 0) {

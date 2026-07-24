@@ -64,6 +64,7 @@ export type SearchStatusCourseReport = {
   bookingAccessMode?: BookingAccessMode;
   monitoringDisposition?: MonitoringDisposition;
   supportStatus?: "TEAM_ALERTED" | "PENDING_ALERT";
+  firstTimeLookup?: boolean;
   bookingAccess?:
     | "BOOKING_PAGE"
     | "OFFICIAL_SITE"
@@ -471,6 +472,11 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   }
 
   if (course.outcome === "NEEDS_ADAPTER") {
+    const firstLookupDetail = course.firstTimeLookup
+      ? course.supportStatus === "TEAM_ALERTED"
+        ? "This is the first time Tee Time Spot has checked this course. We alerted our course coverage team about the longer setup and will work to add reliable monitoring as quickly as possible."
+        : "This is the first time Tee Time Spot has checked this course. We are reviewing its official booking setup and will keep working on coverage in the background."
+      : null;
     return {
       monitoringLabel: "Automatic alerts unavailable",
       stateLabel: "Use the official site for this course",
@@ -482,14 +488,19 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#f3cfad",
       calloutText: "#713706",
       detail: course.bookingUrl
-        ? "We checked this course’s official booking surface but could not confirm reliable automatic monitoring. Use the official link for current availability; coverage work can continue in the background."
+        ? `${firstLookupDetail ? `${firstLookupDetail} ` : ""}We could not confirm reliable automatic monitoring yet. Use the official link for current availability.`
         : course.phone
-          ? "We checked this course’s public booking information but could not confirm reliable automatic monitoring. Call the course directly for current availability."
-          : "We checked the public course information, but no reliable automatic availability source or direct booking page was confirmed."
+          ? `${firstLookupDetail ? `${firstLookupDetail} ` : ""}We could not confirm reliable automatic monitoring yet. Call the course directly for current availability.`
+          : `${firstLookupDetail ? `${firstLookupDetail} ` : ""}No reliable automatic availability source or direct booking page was confirmed.`
     };
   }
 
   if (course.outcome === "FETCH_FAILED") {
+    const firstLookupDetail = course.firstTimeLookup
+      ? course.supportStatus === "TEAM_ALERTED"
+        ? "This is the first time Tee Time Spot has checked this course. We alerted our course coverage team about the longer setup."
+        : "This is the first time Tee Time Spot has checked this course, and the initial review needs more time."
+      : null;
     return {
       monitoringLabel: "Automatic alerts temporarily unavailable",
       stateLabel: "Use the official site while we retry",
@@ -500,7 +511,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff5f3",
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
-      detail: "This course’s latest availability check did not finish, so Tee Time Spot cannot currently promise automatic alerts. We’ll retry in the background; use the official page in the meantime."
+      detail: `${firstLookupDetail ? `${firstLookupDetail} ` : ""}The latest availability check did not finish, so Tee Time Spot cannot currently promise automatic alerts. We’ll retry in the background; use the official page in the meantime.`
     };
   }
 

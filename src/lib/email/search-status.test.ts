@@ -554,7 +554,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("Please check directly with the course");
   });
 
-  it("keeps internal escalation state out of customer-facing course copy", () => {
+  it("only tells a first-time lookup golfer that the team was alerted after confirmed delivery", () => {
     const baseInput = {
       searchId: "search-1",
       to: "player@example.com",
@@ -573,7 +573,8 @@ describe("renderSearchStatusHtml", () => {
           courseName: "Pequabuck Golf Club",
           outcome: "NEEDS_ADAPTER",
           availableMatches: 0,
-          supportStatus: "PENDING_ALERT"
+          supportStatus: "PENDING_ALERT",
+          firstTimeLookup: true
         }
       ]
     });
@@ -585,7 +586,8 @@ describe("renderSearchStatusHtml", () => {
           courseName: "Pequabuck Golf Club",
           outcome: "NEEDS_ADAPTER",
           availableMatches: 0,
-          supportStatus: "TEAM_ALERTED"
+          supportStatus: "TEAM_ALERTED",
+          firstTimeLookup: true
         }
       ]
     });
@@ -594,9 +596,10 @@ describe("renderSearchStatusHtml", () => {
     expect(alertedHtml).toContain("AUTOMATIC ALERTS UNAVAILABLE");
     expect(pendingHtml).toContain("Use the official site for this course");
     expect(alertedHtml).toContain("Use the official site for this course");
-    expect(pendingHtml).not.toContain("team has been alerted");
-    expect(alertedHtml).not.toContain("team has been alerted");
-    expect(alertedHtml).not.toContain("Automatic monitoring isn’t available yet");
+    expect(pendingHtml).toContain("first time Tee Time Spot has checked this course");
+    expect(alertedHtml).toContain("first time Tee Time Spot has checked this course");
+    expect(pendingHtml).not.toContain("alerted our course coverage team");
+    expect(alertedHtml).toContain("alerted our course coverage team");
   });
 
   it("treats an incomplete provider check as an immediate golfer-facing verdict", () => {

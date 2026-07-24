@@ -1923,7 +1923,7 @@ export async function listSearchesNeedingScheduleRecovery() {
   const now = new Date();
   const queuedOverdueBefore = new Date(now.getTime() - 2 * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - 10 * 60 * 1000);
-  const missingInitialVerdictBefore = new Date(now.getTime() - 20 * 60 * 1000);
+  const missingInitialVerdictBefore = new Date(now.getTime() - 5 * 60 * 1000);
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",

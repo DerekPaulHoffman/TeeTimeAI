@@ -102,6 +102,7 @@ import {
 } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
+const FIRST_TIME_LOOKUP_CREATION_WINDOW_MS = 2 * 60 * 1000;
 const SHORT_SEARCH_RETRY_FAILURES = new Set([
   "HTTP_5XX",
   "TIMEOUT",
@@ -857,7 +858,12 @@ async function checkSearch(
           preference.course.profile &&
           ["PUBLISHED", "STALE"].includes(preference.course.profile.status)
             ? `/courses/${preference.course.profile.canonicalSlug}`
-            : undefined
+            : undefined,
+        firstTimeLookup:
+          isFirstTimeCourseLookup(
+            search.createdAt,
+            preference.course.createdAt
+          )
         }
       ] as const;
     })
@@ -878,6 +884,7 @@ async function checkSearch(
     courseResult.bookableHoleCountsObservedAt =
       context?.bookableHoleSummary.observedAt;
     courseResult.courseGuideUrl = context?.courseGuideUrl;
+    courseResult.firstTimeLookup = context?.firstTimeLookup;
     courseResult.factLine = buildCourseFactLine(courseResult);
   }
   courseResults.sort((left, right) => (left.rank ?? 99) - (right.rank ?? 99));
@@ -1660,6 +1667,19 @@ function createEmailSnapshotKey(value: unknown) {
 
 function createSearchLogReference(searchId: string) {
   return createHash("sha256").update(searchId).digest("hex").slice(0, 16);
+}
+
+function isFirstTimeCourseLookup(
+  searchCreatedAt: Date | undefined,
+  courseCreatedAt: Date | undefined
+) {
+  if (!(searchCreatedAt instanceof Date) || !(courseCreatedAt instanceof Date)) {
+    return false;
+  }
+  return (
+    Math.abs(courseCreatedAt.getTime() - searchCreatedAt.getTime()) <=
+    FIRST_TIME_LOOKUP_CREATION_WINDOW_MS
+  );
 }
 
 function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {

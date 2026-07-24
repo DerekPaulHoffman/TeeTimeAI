@@ -162,6 +162,7 @@ describe("course alert support enrichment", () => {
     expect(knownCourse.profileUrl).toBe("/courses/timberlin-golf-course-berlin-ct");
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
     expect(unknownCourse.monitoringReadiness).toBe("VERIFYING");
+    expect(unknownCourse.firstTimeLookup).toBe(true);
   });
 
   it("warns before selection when the newest automatic check failed", async () => {

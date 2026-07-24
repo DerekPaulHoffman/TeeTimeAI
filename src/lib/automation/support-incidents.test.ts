@@ -900,6 +900,40 @@ describe("course support incidents", () => {
     });
   });
 
+  it("alerts the operator immediately when real demand opens an automated investigation", async () => {
+    const opened = incident({ status: "AUTO_INVESTIGATING" });
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([opened]);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({ ownerNotifiedAt: now })
+    );
+
+    const result = await notifyCourseSupportIssueBatch(["incident-1"], now);
+
+    expect(emailMocks.sendCourseSupportOperatorEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "opened",
+        incidentId: "incident-1"
+      })
+    );
+    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] },
+          engineeringOnly: false
+        })
+      })
+    );
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: { ownerNotifiedAt: now }
+    });
+    expect(result).toEqual({
+      notifiedIncidentIds: ["incident-1"],
+      pendingIncidentIds: []
+    });
+  });
+
   it("records resolution and sends a resolution email", async () => {
     const existing = incident({ ownerNotifiedAt: now });
     const resolved = incident({

@@ -565,7 +565,7 @@ describe("schedule recovery fairness", () => {
     }
   });
 
-  it("recovers a search before a missing first verdict breaches thirty minutes", async () => {
+  it("recovers a search in time for the ten-minute first-verdict target", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-16T12:00:00.000Z"));
     mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
@@ -581,7 +581,7 @@ describe("schedule recovery fairness", () => {
                 AND: [
                   {
                     statusEmailSentAt: null,
-                    createdAt: { lte: new Date("2026-07-16T11:40:00.000Z") }
+                    createdAt: { lte: new Date("2026-07-16T11:55:00.000Z") }
                   },
                   {
                     checkStatus: { in: ["WAITING", "FAILED"] },

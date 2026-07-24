@@ -12,13 +12,23 @@ describe("buildSearchSavedMessage", () => {
   });
 
   it("does not promise alerts before monitoring has been confirmed", () => {
-    const message = buildSearchSavedMessage([{ name: "Unreviewed Golf Course" }]);
+    const message = buildSearchSavedMessage([
+      { name: "Unreviewed Golf Course", firstTimeLookup: true }
+    ]);
+
+    expect(message).toContain("Unreviewed Golf Course is a first-time course lookup");
+    expect(message).toContain("usually within 10 minutes");
+    expect(message).toContain("alert our course coverage team");
+    expect(message).not.toContain("the moment a matching tee time opens up");
+  });
+
+  it("gives a ten-minute expectation without calling a reused course a first lookup", () => {
+    const message = buildSearchSavedMessage([{ name: "Pending Golf Course" }]);
 
     expect(message).toContain(
-      "We'll email a monitoring verdict for Unreviewed Golf Course after the first check"
+      "We'll email a monitoring verdict for Pending Golf Course after the first check, usually within 10 minutes"
     );
-    expect(message).toContain("capped at 30 minutes");
-    expect(message).not.toContain("the moment a matching tee time opens up");
+    expect(message).not.toContain("first-time course lookup");
   });
 
   it("names a phone-only course without claiming it is monitored", () => {

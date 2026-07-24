@@ -1537,6 +1537,8 @@ function TeeTimeIntakeContent({
                     <span className="selected-course-support">
                       Automatic alerts unavailable
                     </span>
+                  ) : course.firstTimeLookup ? (
+                    <span className="selected-course-support">First-time course lookup</span>
                   ) : course.monitoringSupport !== "AUTOMATIC" ? (
                     <span className="selected-course-support">Verdict after first check</span>
                   ) : null}
@@ -1595,8 +1597,9 @@ function TeeTimeIntakeContent({
                 course.monitoringReadiness === undefined
             ) ? (
               <small>
-                We&apos;ll email a monitoring verdict for every course after the first
-                check. New-course verification is capped at 30 minutes.
+                Some selected courses may be first-time lookups. We&apos;ll email every
+                monitoring verdict after the first check, usually within 10 minutes. If
+                coverage takes longer, we&apos;ll alert our course coverage team.
               </small>
             ) : null}
           </section>
@@ -2134,7 +2137,9 @@ function CourseMonitoringStatus({
                   ? "Tee Time Spot could not confirm reliable automatic monitoring. Use the official site for current availability."
               : isAutomatic
                 ? "Tee Time Spot checks public, signed-out booking availability without entering checkout."
-                : "We'll email whether automatic monitoring is available after the first check, with a 30-minute limit for a new course."}
+                : course.firstTimeLookup
+                  ? "Tee Time Spot hasn't checked this course before. We'll email the monitoring verdict after the first check, usually within 10 minutes. If coverage takes longer, we'll alert our course coverage team."
+                  : "We'll email whether automatic monitoring is available after the first check, usually within 10 minutes."}
           </small>
         ) : null}
       </span>

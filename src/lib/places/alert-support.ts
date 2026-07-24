@@ -104,7 +104,8 @@ function mapCourseAlertSupport(
     return {
       ...candidate,
       monitoringSupport,
-      monitoringReadiness: "VERIFYING" as const
+      monitoringReadiness: "VERIFYING" as const,
+      firstTimeLookup: true
     };
   }
 
