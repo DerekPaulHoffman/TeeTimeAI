@@ -2779,6 +2779,76 @@ describe("search email delivery outbox", () => {
     );
   });
 
+  it("sends a Grassy Hill local-reader status through a stored technical final", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      displayMatchIds: [],
+      statusSnapshot: [{ courseId: "course-1", state: "NO_MATCH" }],
+      statusReport: {
+        kind: "setup",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Grassy Hill Country Club",
+            timeZone: "America/New_York",
+            outcome: "NO_MATCH",
+            availableMatches: 0
+          }
+        ]
+      }
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "status-group",
+      payload: statusPayload
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        ...currentCourse,
+        name: "Grassy Hill Country Club",
+        detectedBookingUrl: bookingUrl,
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+        intelligenceConfidence: 0.95
+      }
+    ] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now }
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "SETUP",
+        groupKey: "status-group",
+        send,
+        now: () => now
+      })
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: statusPayload })
+    );
+  });
+
   it.each([
     {
       description: "sends a current status when optional provider details are omitted",

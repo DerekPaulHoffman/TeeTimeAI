@@ -142,6 +142,18 @@ function isRecipientAuthorityRetired(delivery: DeliveryState) {
   return delivery.lastError === DELIVERY_RECIPIENT_REKEYED;
 }
 
+function getDeliveryMonitoringDisposition(
+  course: Parameters<typeof evaluateMonitoringGate>[0],
+  bookingUrl: string | null | undefined,
+  now: Date
+) {
+  const disposition = evaluateMonitoringGate({ ...course, now }).disposition;
+  return disposition === "TECHNICAL_FINAL" &&
+    getLocalReaderCourseKey(bookingUrl) !== null
+    ? ("ACTIONABLE" as const)
+    : disposition;
+}
+
 export type SearchEmailDeliveryPayload = {
   schemaVersion: 2;
   checkedAt: string;
@@ -2241,13 +2253,9 @@ async function reconcileCurrentMatchDeliveryPayload(
       staleMatchIds.push(persisted.matchId);
       continue;
     }
-    const monitoringGate = evaluateMonitoringGate({ ...course, now });
-    const localReaderCanOverrideGate =
-      monitoringGate.disposition === "TECHNICAL_FINAL" &&
-      getLocalReaderCourseKey(current.bookingUrl) !== null;
     if (
-      monitoringGate.disposition !== "ACTIONABLE" &&
-      !localReaderCanOverrideGate
+      getDeliveryMonitoringDisposition(course, current.bookingUrl, now) !==
+      "ACTIONABLE"
     ) {
       terminalMatchIds.push(persisted.matchId);
       continue;
@@ -3136,7 +3144,11 @@ async function validateCurrentStatusDeliveryPayload(
   const currentDispositionByCourse = new Map(
     courses.map((course) => [
       course.id,
-      evaluateMonitoringGate({ ...course, now }).disposition
+      getDeliveryMonitoringDisposition(
+        course,
+        course.detectedBookingUrl || course.website,
+        now
+      )
     ])
   );
   const currentCourseById = new Map(courses.map((course) => [course.id, course]));
