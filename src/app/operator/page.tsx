@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import {
@@ -7,14 +7,18 @@ import {
   BellRing,
   CheckCircle2,
   Clock3,
+  ExternalLink,
   Eye,
   Flag,
   Gauge,
+  Link2,
   MailCheck,
   MessageSquareWarning,
   Search,
+  ShieldAlert,
   UserPlus,
-  Users
+  Users,
+  Wrench
 } from "lucide-react";
 
 import {
@@ -22,6 +26,12 @@ import {
   RetryIncidentControl
 } from "@/components/operator-action-controls";
 import { getCurrentOperator } from "@/lib/operator/auth";
+import {
+  COURSE_STATUS_GUIDE,
+  filterCourseInventory,
+  parseCourseInventoryView,
+  type CourseInventoryItem
+} from "@/lib/operator/course-status";
 import {
   loadOperatorOverview,
   type OperatorOverview
@@ -43,6 +53,8 @@ export const metadata: Metadata = {
 
 type OperatorPageProps = {
   searchParams: Promise<{
+    courseView?: string;
+    q?: string;
     range?: string;
   }>;
 };
@@ -58,15 +70,32 @@ export default async function OperatorPage({
   const params = await searchParams;
   const days = parseOperatorRange(params.range);
   const overview = await loadOperatorOverview({ days });
+  const filters = {
+    query: params.q?.trim().slice(0, 80) ?? "",
+    view: parseCourseInventoryView(params.courseView)
+  };
 
-  return <OperatorDashboard overview={overview} />;
+  return <OperatorDashboard filters={filters} overview={overview} />;
 }
 
-function OperatorDashboard({ overview }: { overview: OperatorOverview }) {
+function OperatorDashboard({
+  filters,
+  overview
+}: {
+  filters: {
+    query: string;
+    view: ReturnType<typeof parseCourseInventoryView>;
+  };
+  overview: OperatorOverview;
+}) {
   const maximumPageViews = Math.max(
     ...overview.dailyActivity.map((day) => day.pageViews),
     1
   );
+  const filteredCourses = filterCourseInventory(overview.courseFleet.courses, {
+    query: filters.query,
+    view: filters.view
+  });
 
   return (
     <main className="operator-page">
@@ -89,6 +118,52 @@ function OperatorDashboard({ overview }: { overview: OperatorOverview }) {
           </span>
         </div>
       </header>
+
+      <section
+        aria-labelledby="course-work-heading"
+        className="operator-section operator-course-command"
+      >
+        <SectionHeading
+          eyebrow="Developer work queue"
+          id="course-work-heading"
+          title="Courses to address"
+          supporting="Active customer demand is first. Then come broken monitoring, provider work, stale checks, and records that still need a reliable source."
+        />
+        <CourseFleetSummary overview={overview} />
+        <CourseWorkQueue courses={overview.courseFleet.courses} />
+      </section>
+
+      <section
+        aria-labelledby="all-courses-heading"
+        className="operator-section"
+      >
+        <SectionHeading
+          eyebrow="Complete course inventory"
+          id="all-courses-heading"
+          title="All courses"
+          supporting="Every durable course record, using its newest real-customer check. Healthy courses stay compact; problems include a concrete next action."
+        />
+        <CourseFilters
+          days={overview.range.days}
+          filters={filters}
+          resultCount={filteredCourses.length}
+          totalCount={overview.courseFleet.courses.length}
+        />
+        <CourseInventoryTable courses={filteredCourses} />
+      </section>
+
+      <section
+        aria-labelledby="course-status-guide-heading"
+        className="operator-section"
+      >
+        <SectionHeading
+          eyebrow="Status reference"
+          id="course-status-guide-heading"
+          title="What every course status means"
+          supporting="A successful “no match” is healthy monitoring. Failures, access barriers, missing sources, and stale active monitoring are shown separately."
+        />
+        <CourseStatusGuide />
+      </section>
 
       <section aria-labelledby="today-heading" className="operator-section">
         <SectionHeading
@@ -505,6 +580,346 @@ function OperatorDashboard({ overview }: { overview: OperatorOverview }) {
       </section>
     </main>
   );
+}
+
+function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
+  const { counts } = overview.courseFleet;
+  return (
+    <div className="operator-course-summary" aria-label="Course status totals">
+      <CourseFleetCount
+        count={counts.action}
+        icon={<ShieldAlert size={17} />}
+        label="Fix now"
+        tone="critical"
+      />
+      <CourseFleetCount
+        count={counts.watch}
+        icon={<Wrench size={17} />}
+        label="Investigate"
+        tone="warning"
+      />
+      <CourseFleetCount
+        count={counts.limitations}
+        icon={<AlertTriangle size={17} />}
+        label="Known limitations"
+        tone="neutral"
+      />
+      <CourseFleetCount
+        count={counts.unchecked}
+        icon={<Search size={17} />}
+        label="Not checked"
+        tone="neutral"
+      />
+      <CourseFleetCount
+        count={counts.working}
+        icon={<CheckCircle2 size={17} />}
+        label="Working"
+        tone="positive"
+      />
+    </div>
+  );
+}
+
+function CourseFleetCount({
+  count,
+  icon,
+  label,
+  tone
+}: {
+  count: number;
+  icon: React.ReactNode;
+  label: string;
+  tone: "critical" | "warning" | "neutral" | "positive";
+}) {
+  return (
+    <div className={`operator-course-count is-${tone}`}>
+      <span>{icon}</span>
+      <strong>{count}</strong>
+      <small>{label}</small>
+    </div>
+  );
+}
+
+function CourseWorkQueue({
+  courses
+}: {
+  courses: OperatorOverview["courseFleet"]["courses"];
+}) {
+  const work = courses
+    .filter(
+      (course) =>
+        course.priorityGroup !== "WORKING" &&
+        course.priorityGroup !== "UNCHECKED"
+    )
+    .slice(0, 15);
+
+  if (work.length === 0) {
+    return <EmptyState>No known course repair work.</EmptyState>;
+  }
+
+  return (
+    <div className="operator-course-work-list">
+      {work.map((course) => {
+        const evidence =
+          course.incident?.latestMessage ?? course.latestProbe?.message;
+        return (
+          <article
+            className={`operator-course-work-row is-${course.tone}`}
+            key={course.id}
+          >
+            <div className="operator-course-work-priority">
+              <span>{formatPriority(course.priorityGroup)}</span>
+              {course.activeAlertCount > 0 ? (
+                <strong>
+                  {course.activeAlertCount} active{" "}
+                  {course.activeAlertCount === 1 ? "alert" : "alerts"}
+                </strong>
+              ) : null}
+            </div>
+            <div className="operator-course-work-main">
+              <div className="operator-course-work-title">
+                <h3>{course.name}</h3>
+                <StatusPill course={course} />
+              </div>
+              <p className="operator-course-work-context">
+                {formatProvider(course.providerFamilyKey)}
+                <span aria-hidden="true">·</span>
+                {course.latestProbe
+                  ? `Last checked ${formatDateTime(course.latestProbe.observedAt)}`
+                  : "No real-customer check yet"}
+              </p>
+              <p className="operator-course-next-action">
+                <strong>Next:</strong> {course.recommendedAction}
+              </p>
+              {evidence ? (
+                <details className="operator-details">
+                  <summary>Latest evidence</summary>
+                  <p>{evidence}</p>
+                </details>
+              ) : null}
+            </div>
+            <CourseDeepLinks course={course} />
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function CourseFilters({
+  days,
+  filters,
+  resultCount,
+  totalCount
+}: {
+  days: 7 | 30;
+  filters: {
+    query: string;
+    view: ReturnType<typeof parseCourseInventoryView>;
+  };
+  resultCount: number;
+  totalCount: number;
+}) {
+  return (
+    <form className="operator-course-filters" method="get">
+      <input name="range" type="hidden" value={`${days}d`} />
+      <label>
+        <span>Find a course or provider</span>
+        <input
+          defaultValue={filters.query}
+          maxLength={80}
+          name="q"
+          placeholder="Course, provider, or status"
+          type="search"
+        />
+      </label>
+      <label>
+        <span>Show</span>
+        <select defaultValue={filters.view} name="courseView">
+          <option value="all">All courses</option>
+          <option value="attention">Fix now and investigate</option>
+          <option value="limitations">Known limitations</option>
+          <option value="unchecked">Not checked</option>
+          <option value="working">Working</option>
+        </select>
+      </label>
+      <button className="button button-secondary" type="submit">
+        Apply
+      </button>
+      {filters.query || filters.view !== "all" ? (
+        <Link href={`/operator?range=${days}d`}>Clear</Link>
+      ) : null}
+      <small aria-live="polite">
+        Showing {resultCount} of {totalCount}
+      </small>
+    </form>
+  );
+}
+
+function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
+  if (courses.length === 0) {
+    return <EmptyState>No courses match these filters.</EmptyState>;
+  }
+
+  return (
+    <div className="operator-table-wrap operator-course-table-wrap">
+      <table className="operator-table operator-course-table">
+        <thead>
+          <tr>
+            <th>Course</th>
+            <th>Status</th>
+            <th>Meaning and next action</th>
+            <th>Demand</th>
+            <th>Last checked</th>
+            <th>Links</th>
+          </tr>
+        </thead>
+        <tbody>
+          {courses.map((course) => (
+            <tr className={`is-${course.tone}`} key={course.id}>
+              <td data-label="Course">
+                <span>
+                  <strong>{course.name}</strong>
+                  <small>{formatProvider(course.providerFamilyKey)}</small>
+                </span>
+              </td>
+              <td data-label="Status">
+                <StatusPill course={course} />
+                <small className="operator-priority-label">
+                  {formatPriority(course.priorityGroup)}
+                </small>
+              </td>
+              <td data-label="Meaning and next action">
+                <p className="operator-course-meaning">
+                  {course.statusMeaning}
+                </p>
+                {course.priorityGroup !== "WORKING" ? (
+                  <p className="operator-course-table-action">
+                    <strong>Next:</strong> {course.recommendedAction}
+                  </p>
+                ) : null}
+              </td>
+              <td data-label="Demand">
+                <strong>{course.activeAlertCount} active</strong>
+                <small>{course.selectionCount} total selections</small>
+              </td>
+              <td data-label="Last checked">
+                {course.latestProbe ? (
+                  <>
+                    <span>{formatRelativeAge(course.latestProbe.observedAt)}</span>
+                    <small>{formatDateTime(course.latestProbe.observedAt)}</small>
+                  </>
+                ) : (
+                  "Never"
+                )}
+              </td>
+              <td data-label="Links">
+                <CourseDeepLinks course={course} compact />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CourseStatusGuide() {
+  return (
+    <dl className="operator-course-status-guide">
+      {COURSE_STATUS_GUIDE.map((status) => (
+        <div key={status.key}>
+          <dt>{status.label}</dt>
+          <dd>
+            <span>{status.meaning}</span>
+            <small>{status.action}</small>
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function StatusPill({ course }: { course: CourseInventoryItem }) {
+  return (
+    <span className={`operator-course-status is-${course.tone}`}>
+      {course.tone === "positive" ? (
+        <CheckCircle2 size={13} />
+      ) : course.tone === "critical" ? (
+        <ShieldAlert size={13} />
+      ) : (
+        <AlertTriangle size={13} />
+      )}
+      {course.statusLabel}
+    </span>
+  );
+}
+
+function CourseDeepLinks({
+  compact = false,
+  course
+}: {
+  compact?: boolean;
+  course: CourseInventoryItem;
+}) {
+  const externalLinks = [
+    course.website
+      ? {
+          href: course.website,
+          label: compact ? "Site" : "Official site"
+        }
+      : null,
+    course.detectedBookingUrl
+      ? {
+          href: course.detectedBookingUrl,
+          label: compact ? "Book" : "Booking page"
+        }
+      : null,
+    course.latestProbe?.evidenceUrl
+      ? {
+          href: course.latestProbe.evidenceUrl,
+          label: compact ? "Evidence" : "Latest evidence"
+        }
+      : null
+  ].filter((link): link is { href: string; label: string } => Boolean(link));
+
+  if (!course.profileSlug && externalLinks.length === 0) {
+    return <span className="operator-no-links">No saved links</span>;
+  }
+
+  return (
+    <div
+      className={`operator-course-links ${compact ? "is-compact" : ""}`}
+      aria-label={`${course.name} links`}
+    >
+      {course.profileSlug ? (
+        <Link href={`/courses/${course.profileSlug}` as Route}>
+          <Link2 size={13} />
+          {compact ? "Guide" : "Course guide"}
+        </Link>
+      ) : null}
+      {externalLinks.map((link) => (
+        <a
+          href={link.href}
+          key={`${link.label}-${link.href}`}
+          referrerPolicy="no-referrer"
+          rel="noreferrer"
+          target="_blank"
+        >
+          <ExternalLink size={13} />
+          {link.label}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
+  if (value === "ACTION") return "Fix now";
+  if (value === "WATCH") return "Investigate";
+  if (value === "LIMITATION") return "Known limitation";
+  if (value === "UNCHECKED") return "Verify when needed";
+  return "Healthy";
 }
 
 function RangeTabs({ days }: { days: 7 | 30 }) {

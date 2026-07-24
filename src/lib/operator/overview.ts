@@ -13,6 +13,10 @@ import {
   getOperatorDateRange,
   type OperatorDateRange
 } from "./time";
+import {
+  buildCourseInventory,
+  summarizeCourseInventory
+} from "./course-status";
 
 const NON_SYNTHETIC_TRAFFIC: { notIn: WebsiteTrafficClass[] } = {
   notIn: [...syntheticWebsiteTrafficClasses]
@@ -57,7 +61,8 @@ export async function loadOperatorOverview(input: {
     recentUsers,
     problemSearches,
     problemDeliveries,
-    probeCounts
+    probeCounts,
+    allCourses
   ] = await Promise.all([
     prisma.websiteEvent.findMany({
       where: {
@@ -335,31 +340,147 @@ export async function loadOperatorOverview(input: {
       _count: {
         _all: true
       }
+    }),
+    prisma.course.findMany({
+      orderBy: { name: "asc" },
+      select: {
+        id: true,
+        name: true,
+        providerFamilyKey: true,
+        automationEligibility: true,
+        automationReason: true,
+        bookingAccessMode: true,
+        bookingMethod: true,
+        detectedBookingUrl: true,
+        website: true,
+        profile: {
+          select: {
+            canonicalSlug: true,
+            status: true
+          }
+        },
+        supportIncident: {
+          select: {
+            id: true,
+            status: true,
+            kind: true,
+            activeRealSearchCount: true,
+            firstSeenAt: true,
+            latestMessage: true,
+            nextAction: true,
+            failureClass: true
+          }
+        }
+      }
     })
   ]);
 
   const topCourses = buildTopCourses(rangePreferences);
   const topCourseIds = topCourses.map((course) => course.id);
-  const latestProbes =
-    topCourseIds.length > 0
-      ? await prisma.courseProbe.findMany({
-          where: {
-            courseId: { in: topCourseIds },
-            teeSearch: {
-              trafficClass: NON_SYNTHETIC_TRAFFIC
+  const allCourseIds = allCourses.map((course) => course.id);
+  const [latestProbes, allLatestProbes, selectionCounts, activeAlertCounts] =
+    await Promise.all([
+      topCourseIds.length > 0
+        ? prisma.courseProbe.findMany({
+            where: {
+              courseId: { in: topCourseIds },
+              teeSearch: {
+                trafficClass: NON_SYNTHETIC_TRAFFIC
+              }
+            },
+            orderBy: { observedAt: "desc" },
+            distinct: ["courseId"],
+            select: {
+              courseId: true,
+              outcome: true,
+              observedAt: true
             }
-          },
-          orderBy: { observedAt: "desc" },
-          distinct: ["courseId"],
-          select: {
-            courseId: true,
-            outcome: true,
-            observedAt: true
+          })
+        : [],
+      allCourseIds.length > 0
+        ? prisma.courseProbe.findMany({
+            where: {
+              courseId: { in: allCourseIds },
+              teeSearch: {
+                trafficClass: NON_SYNTHETIC_TRAFFIC
+              }
+            },
+            orderBy: { observedAt: "desc" },
+            distinct: ["courseId"],
+            select: {
+              courseId: true,
+              outcome: true,
+              observedAt: true,
+              message: true,
+              evidenceUrl: true
+            }
+          })
+        : [],
+      prisma.coursePreference.groupBy({
+        by: ["courseId"],
+        where: {
+          teeSearch: {
+            trafficClass: NON_SYNTHETIC_TRAFFIC
           }
-        })
-      : [];
+        },
+        _count: {
+          _all: true
+        }
+      }),
+      prisma.coursePreference.groupBy({
+        by: ["courseId"],
+        where: {
+          teeSearch: {
+            status: "ACTIVE",
+            trafficClass: NON_SYNTHETIC_TRAFFIC
+          }
+        },
+        _count: {
+          _all: true
+        }
+      })
+    ]);
   const latestProbeByCourse = new Map(
     latestProbes.map((probe) => [probe.courseId, probe])
+  );
+  const allLatestProbeByCourse = new Map(
+    allLatestProbes.map((probe) => [probe.courseId, probe])
+  );
+  const selectionCountByCourse = new Map(
+    selectionCounts.map((group) => [group.courseId, group._count._all])
+  );
+  const activeAlertCountByCourse = new Map(
+    activeAlertCounts.map((group) => [group.courseId, group._count._all])
+  );
+  const courseInventory = buildCourseInventory(
+    allCourses.map((course) => {
+      const latestProbe = allLatestProbeByCourse.get(course.id);
+      return {
+        id: course.id,
+        name: course.name,
+        providerFamilyKey: course.providerFamilyKey,
+        automationEligibility: course.automationEligibility,
+        automationReason: course.automationReason,
+        bookingAccessMode: course.bookingAccessMode,
+        bookingMethod: course.bookingMethod,
+        detectedBookingUrl: sanitizeOperatorUrl(course.detectedBookingUrl),
+        website: sanitizeOperatorUrl(course.website),
+        activeAlertCount: activeAlertCountByCourse.get(course.id) ?? 0,
+        selectionCount: selectionCountByCourse.get(course.id) ?? 0,
+        incident: course.supportIncident,
+        latestProbe: latestProbe
+          ? {
+              ...latestProbe,
+              evidenceUrl: sanitizeOperatorUrl(latestProbe.evidenceUrl)
+            }
+          : null,
+        profileSlug:
+          course.profile?.status === "PUBLISHED"
+            ? course.profile.canonicalSlug
+            : null
+      };
+    }),
+    now
   );
 
   const dailyActivity = buildDailyActivity({
@@ -413,6 +534,10 @@ export async function loadOperatorOverview(input: {
       ...course,
       latestProbe: latestProbeByCourse.get(course.id) ?? null
     })),
+    courseFleet: {
+      courses: courseInventory,
+      counts: summarizeCourseInventory(courseInventory)
+    },
     incidents: openIncidents,
     recentUsers: recentUsers.map((user) => ({
       id: user.id,
@@ -440,6 +565,23 @@ export async function loadOperatorOverview(input: {
       unresolvedFeedbackCount: unresolvedFeedback.length
     }
   };
+}
+
+function sanitizeOperatorUrl(value: string | null) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username ||
+      url.password
+    ) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 type CoursePreferenceSummary = {
