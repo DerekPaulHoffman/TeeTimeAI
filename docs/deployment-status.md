@@ -16,6 +16,8 @@ Last updated: 2026-07-23
 
 ## Verified
 
+- 2026-07-23 hourly product loop pinned transitive `find-my-way` to patched release `9.7.0`. Prisma 7.9.0's tooling package declared vulnerable `9.6.0` exactly; the override removes the current high-severity HTTP/2 denial-of-service advisory without changing the application or database contract.
+
 - 2026-07-23 hourly product loop refreshed three stale public Course Guides from current official sources. Orchards now records its verified nine-hole layout plus current pro-shop and irrigation details; Short Beach retains its seasonal municipal par-three positioning, six-day reservation guidance, carts, and waterfront park context; The Tradition at Oak Lane retains its verified 18-hole, par-72 layout plus current range, bunker, and on-site dining details. All three profile drafts passed the protected dry run before the production upsert, and alert creation/provider monitoring state was unchanged.
 
 - 2026-07-23 course-support repair added a reusable TeeItUp fallback for newer public booking pages whose booking-host alias no longer matches the provider API alias. When the legacy facility lookup returns 404, the adapter reads the signed-out booking page's bounded `alias` and `gnFacilityIds` bootstrap fields, keeps the official booking origin, uses the course's persisted timezone, and reads only the selected public tee-time inventory. It does not enter login, cart, reservation, or checkout.
