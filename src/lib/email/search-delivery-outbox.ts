@@ -142,14 +142,24 @@ function isRecipientAuthorityRetired(delivery: DeliveryState) {
   return delivery.lastError === DELIVERY_RECIPIENT_REKEYED;
 }
 
+function canLocalReaderOverrideTechnicalFinal(
+  course: Parameters<typeof evaluateMonitoringGate>[0],
+  bookingUrl: string | null | undefined,
+  now: Date
+) {
+  return (
+    evaluateMonitoringGate({ ...course, now }).disposition ===
+      "TECHNICAL_FINAL" && getLocalReaderCourseKey(bookingUrl) !== null
+  );
+}
+
 function getDeliveryMonitoringDisposition(
   course: Parameters<typeof evaluateMonitoringGate>[0],
   bookingUrl: string | null | undefined,
   now: Date
 ) {
   const disposition = evaluateMonitoringGate({ ...course, now }).disposition;
-  return disposition === "TECHNICAL_FINAL" &&
-    getLocalReaderCourseKey(bookingUrl) !== null
+  return canLocalReaderOverrideTechnicalFinal(course, bookingUrl, now)
     ? ("ACTIONABLE" as const)
     : disposition;
 }
@@ -3151,6 +3161,16 @@ async function validateCurrentStatusDeliveryPayload(
       )
     ])
   );
+  const localReaderOverrideByCourse = new Map(
+    courses.map((course) => [
+      course.id,
+      canLocalReaderOverrideTechnicalFinal(
+        course,
+        course.detectedBookingUrl || course.website,
+        now
+      )
+    ])
+  );
   const currentCourseById = new Map(courses.map((course) => [course.id, course]));
   const latestProbeByCourse = await getLatestCourseProbeByCourse(
     transaction,
@@ -3169,7 +3189,8 @@ async function validateCurrentStatusDeliveryPayload(
       (course.bookingMethod !== undefined &&
         currentCourse.bookingMethod !== course.bookingMethod) ||
       (course.bookingAccessMode !== undefined &&
-        currentCourse.bookingAccessMode !== course.bookingAccessMode) ||
+        currentCourse.bookingAccessMode !== course.bookingAccessMode &&
+        !localReaderOverrideByCourse.get(courseId)) ||
       currentDispositionByCourse.get(courseId) !== course.monitoringDisposition
     ) {
       return "stale";

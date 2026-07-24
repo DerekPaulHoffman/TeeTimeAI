@@ -2800,6 +2800,7 @@ describe("search email delivery outbox", () => {
             courseId: "course-1",
             courseName: "Grassy Hill Country Club",
             timeZone: "America/New_York",
+            bookingAccessMode: "PUBLIC_SIGNED_OUT",
             outcome: "NO_MATCH",
             availableMatches: 0
           }
@@ -2819,6 +2820,7 @@ describe("search email delivery outbox", () => {
         ...currentCourse,
         name: "Grassy Hill Country Club",
         detectedBookingUrl: bookingUrl,
+        bookingAccessMode: "CAPTCHA_OR_QUEUE",
         automationEligibility: "BLOCKED",
         automationReason: "CAPTCHA_OR_QUEUE",
         intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
