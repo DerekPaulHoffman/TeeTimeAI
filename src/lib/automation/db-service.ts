@@ -138,7 +138,7 @@ export type BrowserProbeTarget = {
     automationEligibility: string;
     automationReason: string;
     bookingMethod: string;
-    isPublic: boolean;
+    isPublic: boolean | null;
     intelligenceVerifiedAt: Date | null;
     intelligenceReviewAt: Date | null;
     intelligenceConfidence: number | null;
@@ -816,10 +816,22 @@ export async function applyBrowserDiscoveryToCourse(
         current.name
       )
   );
+  const corroboratedPendingPublicCourse = Boolean(
+    current.isPublic === null &&
+      (learnedOnlineAdapter ||
+        (verifiedClassification &&
+          input.bookingMethod === "PUBLIC_ONLINE")) &&
+      hasPersistedOfficialCourseProviderCorroboration(
+        input,
+        current.website,
+        current.name
+      )
+  );
   const trustedPersistedReplacement =
     replacingLegacyPolicyOnlyBlock ||
     corroboratedLearnedReplacement ||
-    corroboratedPrivateReopening;
+    corroboratedPrivateReopening ||
+    corroboratedPendingPublicCourse;
   const sourceUnavailableWouldReplaceProviderState = Boolean(
     sourceUnavailableClassification &&
       !canApplySourceUnavailableClassification({
@@ -874,7 +886,8 @@ export async function applyBrowserDiscoveryToCourse(
             intelligenceConfidence: input.confidence
           }
       : {
-          ...(corroboratedPrivateReopening
+          ...(corroboratedPrivateReopening ||
+            corroboratedPendingPublicCourse
             ? { isPublic: true, policyNotes: null }
             : { policyNotes: input.policyNotes }),
           detectedPlatform: input.detectedPlatform,

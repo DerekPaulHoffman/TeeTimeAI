@@ -530,17 +530,12 @@ function TeeTimeIntakeContent({
       getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
       "incompatible"
   );
-  const unverifiedSelectedCourse = selected.find(
-    (course) => course.publicAccessStatus === "UNVERIFIED"
-  );
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
       ? "Choose an end time after the start time."
       : hasInvalidAdditionalEmail
         ? "Enter a valid email for each additional recipient."
-      : unverifiedSelectedCourse
-        ? `We're still confirming that ${unverifiedSelectedCourse.name} is a public golf course. It is saved to your list, but alerts cannot start for it yet.`
       : incompatibleSelectedCourse && requestedLayoutHoles
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : selected.length > 0 && !hasMonitorableCourse
@@ -826,7 +821,7 @@ function TeeTimeIntakeContent({
     const reportSaved = await reportCourseLookupCandidate(course);
     setCourseLookupMessage(
       reportSaved
-        ? `${course.name} was added to your list. We're confirming that it is a public golf course, and alerts can start after we finish.`
+        ? `${course.name} was added to your list. Start the alert and we'll verify the course before checking for tee times.`
         : `${course.name} was added to your list in this browser, but we couldn't save it for review. Please try again or send it through Feedback.`
     );
   }
@@ -1528,7 +1523,7 @@ function TeeTimeIntakeContent({
                   ) : null}
                   {course.publicAccessStatus === "UNVERIFIED" ? (
                     <span className="selected-course-support">
-                      Confirming course details
+                      Verify with this alert
                     </span>
                   ) : course.alertSupport ? (
                     <span className="selected-course-support">
@@ -2086,7 +2081,7 @@ function CourseMonitoringStatus({
       <span>
         <strong>
           {isPublicAccessUnverified
-            ? "Confirming course details"
+            ? "Verified after the alert starts"
             : isManualOnly && course.alertSupport
             ? getAlertSupportLabel(course.alertSupport)
             : isAutomatic
@@ -2096,7 +2091,7 @@ function CourseMonitoringStatus({
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
             {isPublicAccessUnverified
-              ? "We're confirming that this listing is a public golf course. Alerts can start after we finish."
+              ? "Start an alert and we'll verify the official course before treating any tee times as real."
               : isManualOnly && course.alertSupport
               ? getAlertSupportDescription(course.alertSupport)
               : isAutomatic

@@ -326,6 +326,13 @@ describe("TeeTimeIntake", () => {
         return Response.json({ event: { id: "event-1" } }, { status: 201 });
       }
 
+      if (url === "/api/searches") {
+        return Response.json(
+          { search: { id: "pending-course-search" }, schedule: null },
+          { status: 201 }
+        );
+      }
+
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -361,16 +368,17 @@ describe("TeeTimeIntake", () => {
     );
 
     await screen.findByText(
-      "Wheeler Family Traditions Golf Club was added to your list. We're confirming that it is a public golf course, and alerts can start after we finish."
+      "Wheeler Family Traditions Golf Club was added to your list. Start the alert and we'll verify the course before checking for tee times."
     );
-    expect(screen.getAllByText("Confirming course details")).toHaveLength(2);
+    expect(screen.getByText("Verify with this alert")).toBeTruthy();
+    expect(screen.getByText("Verified after the alert starts")).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
         .disabled
-    ).toBe(true);
+    ).toBe(false);
     expect(
       screen.getByText(
-        "We're still confirming that Wheeler Family Traditions Golf Club is a public golf course. It is saved to your list, but alerts cannot start for it yet."
+        "Alerts will be sent to golfer@example.com and stay manageable from your account."
       )
     ).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -382,6 +390,16 @@ describe("TeeTimeIntake", () => {
     await waitFor(() =>
       expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toContain(
         '"publicAccessStatus":"UNVERIFIED"'
+      )
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/searches",
+        expect.objectContaining({
+          body: expect.stringContaining('"publicAccessStatus":"UNVERIFIED"')
+        })
       )
     );
   });

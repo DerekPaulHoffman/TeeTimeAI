@@ -116,7 +116,7 @@ type AutomationCourse = AutomationCourseProviderRead & {
   address: string | null;
   phone: string | null;
   bookingPhone: string | null;
-  isPublic: boolean;
+  isPublic: boolean | null;
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
@@ -869,7 +869,7 @@ async function checkSearch(
     courseResult.rank = context?.rank;
     courseResult.distanceMeters = context?.distanceMeters;
     courseResult.courseAddress = context?.courseAddress;
-    courseResult.isPublic = context?.isPublic;
+    courseResult.isPublic = context?.isPublic ?? undefined;
     courseResult.rating = context?.rating;
     courseResult.ratingObservedAt = context?.ratingObservedAt;
     courseResult.layoutHoleCounts = context?.layoutHoleCounts;

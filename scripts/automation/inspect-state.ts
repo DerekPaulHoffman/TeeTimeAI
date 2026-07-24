@@ -887,7 +887,7 @@ function getProbeTargetDateStatus(rawSummary: Record<string, unknown>) {
 }
 
 function hasPersistedFinalConsumerClassification(course: {
-  isPublic: boolean;
+  isPublic: boolean | null;
   bookingMethod: string;
   automationEligibility: string;
   automationReason: string;

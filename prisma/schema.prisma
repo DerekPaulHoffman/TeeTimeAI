@@ -259,7 +259,7 @@ model Course {
   ratingObservedAt            DateTime?
   website                     String?
   phone                       String?
-  isPublic                    Boolean                            @default(true)
+  isPublic                    Boolean?                           @default(true)
   isManual                    Boolean                            @default(false)
   detectedBookingUrl          String?
   detectedPlatform            DetectedPlatform                   @default(UNKNOWN)

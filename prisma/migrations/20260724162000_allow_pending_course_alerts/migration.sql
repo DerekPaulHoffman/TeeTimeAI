@@ -1,0 +1,2 @@
+ALTER TABLE "Course"
+ALTER COLUMN "isPublic" DROP NOT NULL;

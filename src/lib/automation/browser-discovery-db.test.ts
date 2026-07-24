@@ -1163,6 +1163,73 @@ describe("browser discovery persistence", () => {
     expect(update?.data).not.toHaveProperty("bookingMetadata");
   });
 
+  it("verifies a pending course from an exact official runnable-provider link", async () => {
+    const updatedAt = new Date("2026-07-24T16:20:00.000Z");
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/20359/4358#/teetimes";
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        name: "Orange Hills Country Club",
+        providerFamilyKey: "orangehillscountryclub.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://orangehillscountryclub.com/",
+        bookingMetadata: null,
+        isPublic: null,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        policyNotes: null,
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "orange-hills", isPublic: true } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "orange-hills",
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://orangehillscountryclub.com/",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        scheduleId: 4358,
+        bookingClassId: 20359,
+        bookingBaseUrl: bookingUrl
+      },
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "foreup-api-request",
+        observedUrls: [bookingUrl],
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          courseName: "Orange Hills Country Club",
+          officialWebsiteUrl: "https://orangehillscountryclub.com/",
+          officialPageUrl: "https://orangehillscountryclub.com/",
+          providerUrl: bookingUrl
+        }
+      }
+    });
+
+    expect(result).toEqual({ id: "orange-hills", isPublic: true });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "orange-hills", updatedAt },
+      data: expect.objectContaining({
+        isPublic: true,
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        detectedBookingUrl: bookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED"
+      })
+    });
+  });
+
   it("reopens a private identity only from an exact official runnable-provider link", async () => {
     const updatedAt = new Date("2026-07-21T14:10:00.000Z");
     const bookingUrl =

@@ -81,7 +81,7 @@ discover public courses -> save ranked demand -> check official availability
 2. The app geocodes the location, discovers likely-public courses, applies exact reviewed exceptions plus generic safety filters, deduplicates provider aliases, and enriches results with available photos and recent price evidence.
 3. The visitor may filter for a verified physical 9-hole or 18-hole course layout. Physical layout is independent from whether a provider sells a 9-hole or 18-hole round.
 4. The visitor selects and ranks 1 to 5 courses. Rank and selection must remain stable while browsing; selecting a course must not unexpectedly reshuffle the discovery list.
-5. If a course is missing, the visitor can search by course name and town. A zero-result direct lookup is a recovery signal, not proof that the course does not exist; persist a `[COURSE_LOOKUP_MISS]` feedback record with bounded context for investigation.
+5. If a course is missing, the visitor can search by course name and town. A zero-result direct lookup is a recovery signal, not proof that the course does not exist; persist a `[COURSE_LOOKUP_MISS]` feedback record with bounded context for investigation. A plausible direct-lookup candidate whose public-course identity is still unverified may be selected and included in a saved alert. Persist that course with pending public access, start the alert, and let its first workflow verify the exact official course and booking surface. Do not treat the candidate as public or send availability for it until corroborated; confirmed private/non-course results remain ineligible, while inconclusive verification stays pending without suppressing checks for the alert's other courses.
 
 ### 2. Create An Alert
 

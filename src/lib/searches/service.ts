@@ -53,14 +53,6 @@ export async function createTeeSearchForUser(
   const sortedCourses = input.courses
     .map((course) => applyActivePlaceReview(course, placeReviews))
     .sort((a, b) => a.rank - b.rank);
-  const unverifiedCourse = sortedCourses.find(
-    (course) => course.publicAccessStatus === "UNVERIFIED"
-  );
-  if (unverifiedCourse) {
-    throw new Error(
-      `${unverifiedCourse.name} still needs public-course verification before alerts can start.`
-    );
-  }
   const observedAt = new Date();
   const resolvedPreferences = await Promise.all(
     sortedCourses.map((course) => buildCoursePreferenceCreate(course, observedAt))
@@ -153,7 +145,8 @@ async function buildCoursePreferenceCreate(
     ratingUpdate: null,
     course: {
       name: course.name,
-      isPublic: true,
+      isPublic:
+        course.publicAccessStatus === "UNVERIFIED" ? null : true,
       layoutHoleCounts: [] as number[],
       layoutHolesVerifiedAt: null
     },
@@ -184,6 +177,8 @@ async function buildCoursePreferenceCreate(
               typeof course.rating === "number" ? observedAt : undefined,
             phone: course.phone,
             website: course.website,
+            isPublic:
+              course.publicAccessStatus === "UNVERIFIED" ? null : true,
             isManual: !course.googlePlaceId
           }
         }

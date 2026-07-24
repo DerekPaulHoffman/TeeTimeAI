@@ -5,6 +5,7 @@ import {
   CalendarDays,
   CalendarClock,
   BookOpenText,
+  CircleAlert,
   CircleOff,
   CirclePause,
   Clock3,
@@ -363,7 +364,8 @@ function DashboardSearchCard({
         </div>
         <div className="watch-course-list">
           {search.preferences.map((preference) => {
-            const isPublicCourse = preference.course.isPublic !== false;
+            const isPublicCourse = preference.course.isPublic === true;
+            const isPendingCourse = preference.course.isPublic === null;
             const monitoringGate = evaluateMonitoringGate({
               ...preference.course,
               now
@@ -429,6 +431,10 @@ function DashboardSearchCard({
                     {isPublicCourse ? (
                       <span className="figma-course-pill is-public">
                         <Trees size={11} /> Public
+                      </span>
+                    ) : isPendingCourse ? (
+                      <span className="figma-course-pill is-unverified">
+                        <CircleAlert size={11} /> Verifying course
                       </span>
                     ) : (
                       <span className="figma-course-pill is-official-site-only">

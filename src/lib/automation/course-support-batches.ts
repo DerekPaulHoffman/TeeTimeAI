@@ -255,7 +255,7 @@ export type CourseSupportRetryBatchEvidence = {
 };
 
 export type CourseSupportCourseEvidence = {
-  isPublic: boolean;
+  isPublic: boolean | null;
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;

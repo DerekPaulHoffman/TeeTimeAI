@@ -24,7 +24,7 @@ export type ProviderCoverageCategory =
   | "PRIVATE_OR_INVALID";
 
 type CoverageCourse = {
-  isPublic: boolean;
+  isPublic: boolean | null;
   website: string | null;
   detectedBookingUrl: string | null;
   detectedPlatform: string;

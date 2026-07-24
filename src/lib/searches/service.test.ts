@@ -59,9 +59,11 @@ describe("createTeeSearchForUser", () => {
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
   });
 
-  it("does not persist a review-pending direct lookup candidate as a public course", async () => {
-    await expect(
-      createTeeSearchForUser("user-1", {
+  it("persists a review-pending direct lookup candidate without marking it public", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
         date: "2027-08-15",
         startTime: "13:00",
         endTime: "17:00",
@@ -72,18 +74,34 @@ describe("createTeeSearchForUser", () => {
             googlePlaceId: "review-pending-course",
             name: "Review Pending Golf Club",
             publicAccessStatus: "UNVERIFIED",
+            website: "https://review-pending.example/",
             latitude: 41.47,
             longitude: -72.8,
             rank: 1
           }
         ]
-      })
-    ).rejects.toThrow(
-      "Review Pending Golf Club still needs public-course verification before alerts can start."
-    );
+      });
 
-    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
-    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          preferences: {
+            create: [
+              expect.objectContaining({
+                course: {
+                  connectOrCreate: expect.objectContaining({
+                    create: expect.objectContaining({
+                      isPublic: null,
+                      website: "https://review-pending.example/"
+                    })
+                  })
+                }
+              })
+            ]
+          }
+        })
+      })
+    );
   });
 
   it("connects demo selections to an existing supported nearby course", async () => {
