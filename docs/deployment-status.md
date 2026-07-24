@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 ## Live Vercel Deployment
 
@@ -15,6 +15,8 @@ Last updated: 2026-07-23
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
+
+- 2026-07-24 hourly product loop refreshed Chris Bargas Golf Club at Whitney Farms, Tashua Knolls, and Fairchild Wheeler from their current official course pages. All three protected drafts passed dry-run validation before the production upsert and returned to `PUBLISHED`. Whitney Farms now records a verified 18-hole physical layout, Tashua Knolls records its separate 9- and 18-hole layouts, and Fairchild Wheeler records its two 18-hole courses without collapsing their different pars into one fact. All three canonical routes return `200`, remain indexable with self-canonicals and structured data, and appear in the live sitemap. Alert scheduling and provider-remediation state were unchanged.
 
 - 2026-07-23 hourly product loop pinned transitive `find-my-way` to patched release `9.7.0`. Prisma 7.9.0's tooling package declared vulnerable `9.6.0` exactly; the override removes the current high-severity HTTP/2 denial-of-service advisory without changing the application or database contract.
 
