@@ -1967,6 +1967,62 @@ describe("search email delivery outbox", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("sends a Grassy Hill local-reader match through a stored technical final", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const grassyPayload = {
+      ...payload,
+      matchReport: {
+        ...payload.matchReport,
+        matches: payload.matchReport.matches.map((match) => ({
+          ...match,
+          courseName: "Grassy Hill Country Club",
+          bookingUrl
+        }))
+      }
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      payload: grassyPayload,
+      status: "FAILED",
+      attemptCount: 1,
+      nextAttemptAt: new Date(now.getTime() - 1)
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, bookingUrl }
+    ] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        ...currentCourse,
+        name: "Grassy Hill Country Club",
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+        intelligenceConfidence: 0.95
+      }
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now
+      })
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: grassyPayload })
+    );
+  });
+
   it("reconciles an unattempted group to its confirmed subset before claiming it", async () => {
     const validRow = payload.matchReport.matches[0];
     const terminalRow = {

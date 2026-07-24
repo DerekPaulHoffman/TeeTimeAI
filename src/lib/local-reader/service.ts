@@ -11,23 +11,13 @@ import {
   validateLocalReaderResultForJob,
   type LocalReaderResult
 } from "./contracts";
+import { getLocalReaderCourseKey } from "./course-key";
+
+export { getLocalReaderCourseKey } from "./course-key";
 
 const JOB_LIFETIME_MS = 10 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
-
-export function getLocalReaderCourseKey(bookingUrl: string | null | undefined) {
-  try {
-    const url = new URL(bookingUrl || "");
-    return url.protocol === "https:" &&
-      url.hostname === "grassyhill.cps.golf" &&
-      /^\/(?:onlineresweb(?:\/search-teetime)?\/?)?$/u.test(url.pathname)
-      ? ("grassy-hill" as const)
-      : null;
-  } catch {
-    return null;
-  }
-}
 
 export async function queueLocalReaderJob(input: {
   searchId: string;

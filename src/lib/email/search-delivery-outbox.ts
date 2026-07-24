@@ -24,6 +24,7 @@ import {
   applyPendingClerkEmailForSearch,
   SearchEmailDeliveryInProgressError
 } from "@/lib/users/pending-email";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
 
 const DELIVERY_CLAIM_MS = 5 * 60 * 1000;
 const DELIVERY_HEARTBEAT_MS = 60 * 1000;
@@ -2240,7 +2241,14 @@ async function reconcileCurrentMatchDeliveryPayload(
       staleMatchIds.push(persisted.matchId);
       continue;
     }
-    if (evaluateMonitoringGate({ ...course, now }).disposition !== "ACTIONABLE") {
+    const monitoringGate = evaluateMonitoringGate({ ...course, now });
+    const localReaderCanOverrideGate =
+      monitoringGate.disposition === "TECHNICAL_FINAL" &&
+      getLocalReaderCourseKey(current.bookingUrl) !== null;
+    if (
+      monitoringGate.disposition !== "ACTIONABLE" &&
+      !localReaderCanOverrideGate
+    ) {
       terminalMatchIds.push(persisted.matchId);
       continue;
     }
