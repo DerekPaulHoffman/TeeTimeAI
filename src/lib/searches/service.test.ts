@@ -431,6 +431,47 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
   });
 
+  it("allows an alert containing only the exact Grassy Hill local-reader course", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "grassy-hill",
+      googlePlaceId: "grassy-hill-place",
+      name: "Grassy Hill Country Club",
+      address: "441 Clark Ln, Orange, CT 06477",
+      latitude: 41.27,
+      longitude: -73.02,
+      website: "http://www.grassyhillcountryclub.com/",
+      detectedBookingUrl: "https://grassyhill.cps.golf/",
+      phone: null,
+      isPublic: true,
+      automationEligibility: "BLOCKED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null
+    } as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await expect(
+      createTeeSearchForUser("user-1", {
+        date: "2026-08-15",
+        startTime: "06:00",
+        endTime: "16:00",
+        players: 4,
+        cadenceMinutes: 5,
+        courses: [
+          {
+            courseId: "grassy-hill",
+            googlePlaceId: "grassy-hill-place",
+            name: "Grassy Hill Country Club",
+            latitude: 41.27,
+            longitude: -73.02,
+            rank: 1
+          }
+        ]
+      })
+    ).resolves.toEqual({ id: "search-1" });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
+  });
+
   it("reuses a nearby official-site-only course when its Google place id changed", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

@@ -15,6 +15,7 @@ import {
 } from "@/lib/places/course-identity";
 import type { CourseCandidate } from "@/lib/places/google";
 import { prisma } from "@/lib/prisma";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
 
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
@@ -78,7 +79,11 @@ function mapCourseAlertSupport(
   candidate: CourseCandidate,
   course: KnownCourseRecord | undefined
 ) {
-  const monitoringSupport = getCourseMonitoringSupport(course);
+  const localReaderSupported =
+    getLocalReaderCourseKey(course?.detectedBookingUrl) !== null;
+  const monitoringSupport = localReaderSupported
+    ? ("AUTOMATIC" as const)
+    : getCourseMonitoringSupport(course);
   if (!course) {
     return { ...candidate, monitoringSupport };
   }
@@ -106,7 +111,9 @@ function mapCourseAlertSupport(
       ? { profileUrl: `/courses/${course.profile.canonicalSlug}` }
       : {})
   };
-  const alertSupport = getCourseAlertSupport(course);
+  const alertSupport = localReaderSupported
+    ? undefined
+    : getCourseAlertSupport(course);
   return alertSupport
     ? { ...candidateWithProfile, alertSupport, monitoringSupport }
     : { ...candidateWithProfile, monitoringSupport };

@@ -26,6 +26,7 @@ import {
   type TeeSearchInput
 } from "@/lib/validation/search";
 import { parseLocalDate } from "@/lib/validation/search";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -115,7 +116,11 @@ async function buildCoursePreferenceCreate(
 
   if (reusableCourse) {
     return {
-      automationEligibility: reusableCourse.automationEligibility,
+      automationEligibility:
+        reusableCourse.automationEligibility === "BLOCKED" &&
+        getLocalReaderCourseKey(reusableCourse.detectedBookingUrl) !== null
+          ? "ALLOWED"
+          : reusableCourse.automationEligibility,
       course: reusableCourse,
       ratingUpdate:
         typeof course.rating === "number"
@@ -199,6 +204,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
         latitude: true,
         longitude: true,
         website: true,
+        detectedBookingUrl: true,
         phone: true,
         isPublic: true,
         automationEligibility: true,
@@ -223,8 +229,9 @@ async function findReusableCourse(course: SelectedCourseInput) {
           address: true,
           latitude: true,
           longitude: true,
-          website: true,
-          phone: true,
+        website: true,
+        detectedBookingUrl: true,
+        phone: true,
           isPublic: true,
           automationEligibility: true,
           layoutHoleCounts: true,
@@ -287,6 +294,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
       latitude: true,
       longitude: true,
       website: true,
+      detectedBookingUrl: true,
       phone: true,
       isPublic: true,
       automationEligibility: true,

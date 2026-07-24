@@ -162,6 +162,37 @@ describe("course alert support enrichment", () => {
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
   });
 
+  it("makes the exact Grassy Hill local-reader course selectable for alerts", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "grassy-hill",
+        googlePlaceId: "grassy-hill-place",
+        name: "Grassy Hill Country Club",
+        latitude: 41.27,
+        longitude: -73.02,
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingAccessMode: "CAPTCHA_OR_QUEUE",
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        detectedBookingUrl: "https://grassyhill.cps.golf/"
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "grassy-hill-place",
+        name: "Grassy Hill Country Club",
+        latitude: 41.27,
+        longitude: -73.02,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.monitoringSupport).toBe("AUTOMATIC");
+    expect(course.alertSupport).toBeUndefined();
+    expect(course.website).toBe("https://grassyhill.cps.golf/");
+  });
+
   it("keeps a stale course guide linked while its facts are refreshed", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {
