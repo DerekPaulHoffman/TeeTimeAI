@@ -320,6 +320,14 @@ Required for automation endpoints/scripts:
 
 - `AUTOMATION_API_KEY`
 
+Required when the allowlisted local Chrome reader is enabled:
+
+- `LOCAL_READER_DEVICE_TOKEN` (HMAC secret shared only with the operator-owned
+  Chrome extension; keep separate from every other application authority)
+
+The extension setup and read-only boundary are documented in
+`tools/local-chrome-reader/README.md`.
+
 Historical engagement URLs can be reduced to pathnames and legacy `metadata.searchId` fields removed
 with the aggregate-only maintenance utility below. This mutates production data, so run it only with
 explicit approval; the confirmation value is intentionally required and the utility never prints row

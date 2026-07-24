@@ -26,6 +26,7 @@
     "automation:course-profile": "tsx scripts/automation/course-profile.ts",
     "automation:backfill-synthetic-remediation": "tsx scripts/automation/backfill-synthetic-remediation.ts",
     "automation:repair-synthetic-delivery-state": "tsx scripts/automation/repair-synthetic-delivery-state.ts",
+    "local-reader:proof-backend": "tsx tools/local-chrome-reader/mock-backend.ts",
     "maintenance:scrub-engagement-privacy": "tsx scripts/maintenance/scrub-engagement-privacy.ts",
     "qa:public-browser-reader": "vitest run --config tools/public-tee-time-reader/vitest.config.ts",
     "seed:foreup": "tsx scripts/seed-foreup.ts"

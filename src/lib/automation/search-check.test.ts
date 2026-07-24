@@ -80,6 +80,12 @@ const providerRequestLeaseMocks = vi.hoisted(() => ({
   runWithProviderRequestLease: vi.fn()
 }));
 
+const localReaderMocks = vi.hoisted(() => ({
+  getFreshLocalReaderTeeSheet: vi.fn(),
+  getLocalReaderCourseKey: vi.fn(),
+  queueLocalReaderJob: vi.fn()
+}));
+
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
@@ -96,6 +102,7 @@ vi.mock("@/lib/adapters/clubcaddie", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerRequestLeaseMocks);
+vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
 import { buildMatchDeliveryGroupKey, runSearchCheck } from "./search-check";
 
@@ -110,6 +117,7 @@ const search = {
   statusEmailSentAt: null as Date | null,
   statusEmailSnapshot: null,
   alertGeneration: 0,
+  scheduleVersion: 1,
   additionalEmails: [],
   user: { email: "player@resend.dev" },
   preferences: [
@@ -215,6 +223,9 @@ describe("runSearchCheck email cadence", () => {
     providerRequestLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamily, worker) => ({ acquired: true, value: await worker() })
     );
+    localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue(null);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue(null);
     dbMocks.recordCourseProbeIfChanged.mockResolvedValue(undefined);
     dbMocks.recordTeeTimeMatch.mockImplementation(async (input) => ({
       id: String(input.sourceId).replace(/^slot-/, "match-"),
@@ -1301,6 +1312,128 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(supportIncidentMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
+  });
+
+  it("queues Grassy Hill for the local public-page reader after a CPS 403", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Grassy Hill Country Club",
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "grassyhill",
+              bookingBaseUrl: "https://grassyhill.cps.golf/",
+              courseIds: [1]
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(
+      new Error("CPS configuration returned 403")
+    );
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2,
+      bookingUrl
+    });
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "FETCH_FAILED",
+      message: expect.stringContaining("local public-page reader")
+    });
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER_PENDING"
+        }
+      })
+    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+  });
+
+  it("uses a fresh local reader result without calling the server adapter", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl:
+              "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "grassyhill",
+              bookingBaseUrl: "https://grassyhill.cps.golf/",
+              courseIds: [1]
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "local-grassy-hill-2026-07-12T08:10:00-18",
+          courseId: "course-1",
+          startsAt: "2026-07-12T08:10:00",
+          availableSpots: 4,
+          bookingUrl:
+            "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          priceCents: 8200,
+          holes: 18,
+          bookableHoleCounts: [9, 18]
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "MATCH_FOUND",
+      availableMatches: 1
+    });
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rawSummary: expect.objectContaining({
+          providerExecution: "LOCAL_BROWSER_READER"
+        })
+      })
+    );
   });
 
   it("retries a persisted match delivery group even after no match remains globally pending", async () => {

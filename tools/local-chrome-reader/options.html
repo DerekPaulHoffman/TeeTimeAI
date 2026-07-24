@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Tee Time Spot Local Reader</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; margin: 32px; max-width: 680px; color: #18251d; }
+      label { display: block; margin: 18px 0 6px; font-weight: 650; }
+      input[type="text"], input[type="password"] { box-sizing: border-box; width: 100%; padding: 10px; }
+      button { margin-top: 20px; padding: 10px 16px; }
+      #status { margin-top: 18px; white-space: pre-wrap; }
+      .note { color: #526158; }
+    </style>
+  </head>
+  <body>
+    <h1>Tee Time Spot Local Reader</h1>
+    <p class="note">
+      This extension reads only allowlisted, signed-out public tee-time pages.
+      Keep Chrome running for alerts that need the local reader.
+    </p>
+    <label for="backendOrigin">Backend origin</label>
+    <input id="backendOrigin" type="text" value="https://teetimespot.com">
+    <label for="deviceId">Device ID</label>
+    <input id="deviceId" type="text">
+    <label for="deviceToken">Device token</label>
+    <input id="deviceToken" type="password" autocomplete="off">
+    <label><input id="enabled" type="checkbox"> Enable polling</label>
+    <button id="save" type="button">Save and poll now</button>
+    <div id="status" role="status"></div>
+    <script src="options.js"></script>
+  </body>
+</html>

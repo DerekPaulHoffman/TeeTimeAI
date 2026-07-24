@@ -29,11 +29,17 @@ import {
 } from "@/lib/automation/provider-capabilities";
 import {
   fetchCourseTeeSheet,
-  type AutomationCourseProviderRead
+  type AutomationCourseProviderRead,
+  type CourseTeeSheetResult
 } from "@/lib/automation/course-provider-read";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import {
+  getFreshLocalReaderTeeSheet,
+  getLocalReaderCourseKey,
+  queueLocalReaderJob
+} from "@/lib/local-reader/service";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { prepareSearchMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import {
@@ -481,37 +487,54 @@ async function checkSearch(
 
     let providerRequestStarted = false;
     try {
-      const providerExecution = await runWithProviderRequestLease(
-        resolveProviderCapability(course).providerFamilyKey,
-        () => {
-          providerRequestStarted = true;
-          return fetchCourseTeeSheet(
-            course,
-            search.date,
-            search.players,
-            refreshBookingWindow
-          );
-        }
+      const localReaderEligible = getLocalReaderCourseKey(
+        getCustomerBookingUrl(course)
       );
-      if (!providerExecution.acquired) {
-        monitoringRetryCourseIds.add(course.id);
-        courseResults.push({
-          courseId: course.id,
-          courseName: course.name,
-          timeZone: course.timeZone,
-          outcome: "FETCH_FAILED",
-          availableMatches: 0,
-          message:
-            "This provider check was deferred by the global concurrency guard and will retry.",
-          bookingUrl: getCustomerBookingUrl(course),
-          phone: course.bookingPhone ?? course.phone ?? undefined,
-          bookingMethod: course.bookingMethod,
-          bookingAccessMode: course.bookingAccessMode,
-          bookingAccess: getCourseBookingAccess(course)
-        });
-        return;
+      const localTeeSheet = localReaderEligible
+        ? await getFreshLocalReaderTeeSheet({
+            searchId: search.id,
+            courseId: course.id,
+            scheduleVersion: search.scheduleVersion,
+            targetDate: searchWindow.date,
+            players: search.players
+          })
+        : null;
+      let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
+      let providerExecutionLabel = "LOCAL_BROWSER_READER";
+      if (!teeSheet) {
+        const providerExecution = await runWithProviderRequestLease(
+          resolveProviderCapability(course).providerFamilyKey,
+          () => {
+            providerRequestStarted = true;
+            return fetchCourseTeeSheet(
+              course,
+              search.date,
+              search.players,
+              refreshBookingWindow
+            );
+          }
+        );
+        if (!providerExecution.acquired) {
+          monitoringRetryCourseIds.add(course.id);
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome: "FETCH_FAILED",
+            availableMatches: 0,
+            message:
+              "This provider check was deferred by the global concurrency guard and will retry.",
+            bookingUrl: getCustomerBookingUrl(course),
+            phone: course.bookingPhone ?? course.phone ?? undefined,
+            bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
+            bookingAccess: getCourseBookingAccess(course)
+          });
+          return;
+        }
+        teeSheet = providerExecution.value;
+        providerExecutionLabel = "RUNNABLE_PROVIDER_CHECK";
       }
-      const teeSheet = providerExecution.value;
       await maintainSearchCheckLease(lease);
       const rawSlots = teeSheet.slots;
       let bookingWindow = storedBookingWindow;
@@ -630,7 +653,7 @@ async function checkSearch(
             outcome: "FETCH_FAILED",
             message: unsafeBookingMessage,
             rawSummary: {
-              providerExecution: "RUNNABLE_PROVIDER_CHECK",
+              providerExecution: providerExecutionLabel,
               unsafeBookingUrlCount
             }
           });
@@ -662,7 +685,7 @@ async function checkSearch(
             ? `Confirmed ${currentMatches.length} qualifying tee times.`
             : "No qualifying tee times in the requested window",
         rawSummary: {
-          providerExecution: "RUNNABLE_PROVIDER_CHECK",
+          providerExecution: providerExecutionLabel,
           ...availability,
           ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
           ...(pricing ? { pricing } : {}),
@@ -710,6 +733,46 @@ async function checkSearch(
     } catch (error) {
       await maintainSearchCheckLease(lease);
       const message = error instanceof Error ? error.message : "Unknown adapter error";
+      const customerBookingUrl = getCustomerBookingUrl(course);
+      const localReaderJob = customerBookingUrl
+        ? await queueLocalReaderJob({
+            searchId: search.id,
+            courseId: course.id,
+            scheduleVersion: search.scheduleVersion,
+            targetDate: searchWindow.date,
+            players: search.players,
+            bookingUrl: customerBookingUrl
+          })
+        : null;
+      if (localReaderJob) {
+        monitoringRetryCourseIds.add(course.id);
+        const waitingMessage =
+          "Waiting for the local public-page reader to complete this tee-time check.";
+        await recordCourseProbe({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          outcome: "FETCH_FAILED",
+          message: waitingMessage,
+          rawSummary: {
+            providerExecution: "LOCAL_BROWSER_READER_PENDING"
+          }
+        });
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "FETCH_FAILED",
+          availableMatches: 0,
+          message: waitingMessage,
+          bookingUrl: getCustomerBookingUrl(course),
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
+          bookingAccess: getCourseBookingAccess(course)
+        });
+        return;
+      }
       if (SHORT_SEARCH_RETRY_FAILURES.has(classifyProviderFailure({ error }).failureClass)) {
         monitoringRetryCourseIds.add(course.id);
       }
