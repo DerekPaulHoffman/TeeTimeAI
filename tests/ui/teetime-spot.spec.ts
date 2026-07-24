@@ -1231,7 +1231,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByText("Choose a future date for alerts.")).toBeVisible();
     await expect(page.getByLabel("Date")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(alertActionButton).toBeDisabled();
-    await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), 1)));
+    const selectedAlertDate = addLocalDays(new Date(), 6);
+    const selectedAlertDateValue = formatLocalDate(selectedAlertDate);
+    await page.getByLabel("Date").fill(selectedAlertDateValue);
+    await page.getByLabel("Date").press("Tab");
+    await expect(page.getByLabel("Date")).toHaveValue(selectedAlertDateValue);
+    await expect(alertPreview).toContainText(formatReadableLocalDate(selectedAlertDate));
 
     const editableTimeSummary = page.locator(".figma-time-summary");
     await editableTimeSummary.evaluate((button: HTMLButtonElement) => button.click());
@@ -1271,6 +1276,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(saveRequestCount, "a successful alert save should submit once before redirecting").toBe(1);
       expect(lastSavePayload).toEqual(
         expect.objectContaining({
+          date: selectedAlertDateValue,
           additionalEmails: ["friend@example.com", "teammate@example.com"]
         })
       );
@@ -1760,4 +1766,12 @@ function formatLocalDate(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function formatReadableLocalDate(date: Date) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }).format(date);
 }

@@ -10,7 +10,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode
+  type ReactNode,
+  type SyntheticEvent
 } from "react";
 import type * as Leaflet from "leaflet";
 import {
@@ -340,6 +341,10 @@ function TeeTimeIntakeContent({
   const reportedCourseLookupMissesRef = useRef(new Set<string>());
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
   const shouldRefreshRestoredCoursesRef = useRef(false);
+
+  function reconcileDateFromControl(event: SyntheticEvent<HTMLInputElement>) {
+    setDate(event.currentTarget.value);
+  }
 
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
@@ -1151,7 +1156,9 @@ function TeeTimeIntakeContent({
                 min={minSearchDate}
                 type="date"
                 value={date}
-                onChange={(event) => setDate(event.target.value)}
+                onBlur={reconcileDateFromControl}
+                onChange={reconcileDateFromControl}
+                onInput={reconcileDateFromControl}
               />
             </div>
           </label>

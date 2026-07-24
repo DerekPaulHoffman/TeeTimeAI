@@ -99,6 +99,74 @@ describe("TeeTimeIntake", () => {
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
   });
 
+  it("reconciles the browser date value before previewing and saving the alert", async () => {
+    const course = {
+      address: "100 Public Links Rd, Trumbull, CT",
+      googlePlaceId: "course-1",
+      latitude: 41.24,
+      longitude: -73.2,
+      monitoringSupport: "AUTOMATIC",
+      name: "Test Public Golf Course",
+      timeZone: "America/New_York",
+      website: "https://example.com/course-1"
+    };
+    window.sessionStorage.setItem(
+      SEARCH_DRAFT_STORAGE_KEY,
+      JSON.stringify({
+        date: "2099-01-01",
+        courses: [course],
+        selectedCourses: [course]
+      })
+    );
+
+    let savedPayload: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "/api/searches") {
+        savedPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ search: { id: "search-date-sync" } }, { status: 201 });
+      }
+
+      if (url === "/api/analytics/events") {
+        return Response.json({ event: { id: "event-1" } }, { status: 201 });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+
+    render(<TeeTimeIntake accountEnabled />);
+
+    await waitFor(() =>
+      expect(document.querySelector(".figma-alert-preview")?.textContent).toContain(
+        "Thursday, January 1"
+      )
+    );
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    const nativeValueSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value"
+    )?.set;
+    nativeValueSetter?.call(dateInput, "2099-12-31");
+    expect(dateInput.value).toBe("2099-12-31");
+
+    fireEvent.blur(dateInput);
+
+    await waitFor(() =>
+      expect(document.querySelector(".figma-alert-preview")?.textContent).toContain(
+        "Thursday, December 31"
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+
+    await waitFor(() =>
+      expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-date-sync")
+    );
+    expect(savedPayload).toEqual(expect.objectContaining({ date: "2099-12-31" }));
+  });
+
   it("restores discovered courses and their ranking after the search page remounts", async () => {
     let maximumPriceCents = 50000;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
