@@ -528,6 +528,12 @@ export type BrowserProbeCourseInput = {
 
 export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): BrowserDiscovery {
   evidence = sanitizeClubCaddieDiscoveryEvidence(evidence);
+  const unscopedEvidence = evidence;
+  const unscopedObservedUrls = uniqueUrls([
+    evidence.finalUrl,
+    evidence.sourceUrl,
+    ...evidence.observedUrls
+  ]);
   evidence = scopeBrowserDiscoveryProviderEvidence(evidence);
   const observedUrls = uniqueUrls([
     evidence.finalUrl,
@@ -545,6 +551,19 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   if (unavailableOfficialSiteClassification) {
     return unavailableOfficialSiteClassification;
+  }
+
+  const upcomingOnlineBookingClassification =
+    learnUpcomingOnlineBookingClassification(
+      unscopedEvidence,
+      unscopedObservedUrls
+    );
+
+  if (upcomingOnlineBookingClassification) {
+    return withCourseIdentityCorroboration(
+      upcomingOnlineBookingClassification,
+      evidence
+    );
   }
 
   const privateClubClassification = learnPrivateClubClassification(evidence, observedUrls);
@@ -2785,6 +2804,19 @@ function isLikelyTargetCourseAlias(candidate: string, courseName: string) {
   );
 }
 
+function hasLikelyTargetCourseAliasSuffix(
+  candidate: string,
+  courseName: string
+) {
+  if (isLikelyTargetCourseAlias(candidate, courseName)) {
+    return true;
+  }
+  const tokens = candidate.split(/\s+/u).filter(Boolean);
+  return tokens.some((_, index) =>
+    isLikelyTargetCourseAlias(tokens.slice(index).join(" "), courseName)
+  );
+}
+
 function buildWalkInDiscovery(
   evidence: BrowserDiscoveryEvidence,
   manualEvidence: NonNullable<ReturnType<typeof getSafeManualEvidence>>,
@@ -2807,6 +2839,128 @@ function buildWalkInDiscovery(
       observedUrls: manualEvidence.observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: input.learnedFrom
+    }
+  };
+}
+
+function learnUpcomingOnlineBookingClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = normalizeTeeTimeTypography(
+    evidence.visibleText?.replace(/\s+/g, " ").trim() ?? ""
+  );
+  const upcomingBookingMatches = [
+    ...visibleText.matchAll(
+      /\bonline\s+(?:tee\s*time\s+)?booking\b.{0,60}\b(?:coming\s+soon|available\s+soon|launching\s+soon|not\s+yet\s+available)\b/gi
+    )
+  ];
+  if (upcomingBookingMatches.length === 0) {
+    return null;
+  }
+
+  const hasScopedEvidence = upcomingBookingMatches.some((match) => {
+    const matchStart = match.index ?? -1;
+    if (matchStart < 0) {
+      return false;
+    }
+    const precedingContext = visibleText.slice(
+      Math.max(0, matchStart - 1_000),
+      matchStart
+    );
+    const namedCourseMatches = [
+      ...precedingContext.matchAll(
+        /\b((?:[\p{L}\p{N}'â€™&-]+\s+){0,6}(?:golf\s+(?:course|club|center|centre|links)|country\s+club))\b/giu
+      )
+    ];
+    const nearestNamedCourse =
+      namedCourseMatches[namedCourseMatches.length - 1]?.[1];
+    return Boolean(
+      nearestNamedCourse &&
+        hasLikelyTargetCourseAliasSuffix(
+          nearestNamedCourse,
+          evidence.courseName
+        )
+    );
+  });
+  if (!hasScopedEvidence || hasUnsafeManualEvidenceUrl(evidence, observedUrls)) {
+    return null;
+  }
+
+  const officialWebsite = parseUrl(evidence.officialCourseWebsite);
+  const scopedSource = parseUrl(evidence.sourceUrl);
+  const officialEvidenceUrl =
+    officialWebsite &&
+    scopedSource &&
+    officialWebsite.protocol === "https:" &&
+    isSafeManualEvidenceUrl(officialWebsite) &&
+    haveSamePublicWebsiteOrigin(
+      officialWebsite.toString(),
+      scopedSource.toString()
+    )
+      ? canonicalizeManualUrl(officialWebsite.toString())
+      : null;
+  const manualEvidence = officialEvidenceUrl
+    ? {
+        evidenceUrl: officialEvidenceUrl,
+        observedUrls: [
+          ...new Set(
+            uniqueUrls([...observedUrls, officialEvidenceUrl]).flatMap((url) => {
+              const parsed = parseUrl(url);
+              const sanitized = canonicalizeManualUrl(url);
+              return parsed?.protocol === "https:" && sanitized
+                ? [sanitized]
+                : [];
+            })
+          )
+        ]
+      }
+    : getSafeManualEvidence(evidence, observedUrls);
+  if (!manualEvidence) {
+    return null;
+  }
+
+  const candidateUrls = uniqueUrls([
+    ...observedUrls,
+    ...(evidence.linkCandidates ?? []).map(({ url }) => url)
+  ]);
+  const hasCurrentProviderDestination = candidateUrls.some((url) =>
+    Boolean(resolveProviderCapability({ detectedBookingUrl: url }).capability)
+  );
+  const hasDistinctExternalTeeTimeDestination = candidateUrls.some((url) => {
+    const parsed = parseUrl(url);
+    return Boolean(
+      parsed &&
+        hasExplicitTeeTimeDestination(parsed) &&
+        canonicalizeManualUrl(url) !== manualEvidence.evidenceUrl &&
+        !haveSamePublicWebsiteOrigin(url, manualEvidence.evidenceUrl)
+    );
+  });
+  if (
+    hasCurrentProviderDestination ||
+    hasDistinctExternalTeeTimeDestination
+  ) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: manualEvidence.evidenceUrl,
+    bookingUrl: manualEvidence.evidenceUrl,
+    bookingMethod: "CONTACT_COURSE",
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    policyNotes:
+      "The official course page says online tee-time booking is coming soon but does not expose a current public booking destination. Tee Time Spot must direct golfers to the course until the announced online surface becomes available.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: 0.95,
+    evidence: {
+      finalUrl: manualEvidence.evidenceUrl,
+      observedUrls: manualEvidence.observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-upcoming-online-booking"
     }
   };
 }

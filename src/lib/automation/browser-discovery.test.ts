@@ -4093,6 +4093,115 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies identity-scoped online booking coming soon copy as contact-only", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "upcoming-online-booking",
+      courseName: "Example Golf Course",
+      sourceUrl: "https://park-golf.example/park-event-rentals",
+      finalUrl: "https://donate.example/public-campaign",
+      officialCourseWebsite: "https://park-golf.example/",
+      officialPage: {
+        url: "https://park-golf.example/park-event-rentals",
+        courseName: "Example Golf Course",
+        linkCandidates: [],
+        visibleText: "Private event rentals and booking."
+      },
+      observedUrls: [
+        "https://park-golf.example/",
+        "https://park-golf.example/park-event-rentals",
+        "https://donate.example/public-campaign"
+      ],
+      linkCandidates: [
+        {
+          url: "https://park-golf.example/book-a-tee-time",
+          label: "Book a Tee Time"
+        }
+      ],
+      visibleText:
+        "Our facilities are located across from Example Park Golf Course, a 9 hole public course. Ready to play? Online Booking Coming Soon! Book a Tee Time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://park-golf.example/",
+      bookingUrl: "https://park-golf.example/",
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.95,
+      evidence: { learnedFrom: "official-upcoming-online-booking" }
+    });
+  });
+
+  it("preserves a real provider destination despite online booking coming soon copy", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "upcoming-with-provider",
+      courseName: "Example Park Golf Course",
+      sourceUrl: "https://park-golf.example/",
+      finalUrl: "https://park-golf.example/",
+      observedUrls: [
+        "https://park-golf.example/",
+        "https://app.whoosh.io/patron/club/example-park"
+      ],
+      linkCandidates: [
+        {
+          url: "https://app.whoosh.io/patron/club/example-park",
+          label: "Book a Tee Time"
+        }
+      ],
+      visibleText:
+        "Example Park Golf Course. Online Booking Coming Soon! Book a Tee Time."
+    });
+
+    expect(discovery.evidence.learnedFrom).not.toBe(
+      "official-upcoming-online-booking"
+    );
+    expect(discovery.automationReason).not.toBe("NO_ONLINE_BOOKING");
+  });
+
+  it("preserves an unknown external tee-time destination despite coming soon copy", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "upcoming-with-external-booking",
+      courseName: "Example Park Golf Course",
+      sourceUrl: "https://park-golf.example/",
+      finalUrl: "https://park-golf.example/",
+      observedUrls: [
+        "https://park-golf.example/",
+        "https://booking.vendor.example/tee-times"
+      ],
+      linkCandidates: [
+        {
+          url: "https://booking.vendor.example/tee-times",
+          label: "Book a Tee Time"
+        }
+      ],
+      visibleText:
+        "Example Park Golf Course. Online Booking Coming Soon! Book a Tee Time."
+    });
+
+    expect(discovery.evidence.learnedFrom).not.toBe(
+      "official-upcoming-online-booking"
+    );
+    expect(discovery.automationReason).not.toBe("NO_ONLINE_BOOKING");
+  });
+
+  it("does not apply a sibling course's upcoming booking notice to the target", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "shared-upcoming-booking-page",
+      courseName: "Target Municipal Golf Course",
+      sourceUrl: "https://parks.example/golf/",
+      finalUrl: "https://parks.example/golf/",
+      observedUrls: ["https://parks.example/golf/"],
+      visibleText:
+        "Target Municipal Golf Course is open daily. Sibling Hills Golf Course Online Booking Coming Soon!"
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+  });
+
   it("does not apply a sibling course's first-come policy to the selected course", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "shared-walk-in-page",
