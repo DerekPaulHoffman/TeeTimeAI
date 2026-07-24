@@ -1,8 +1,13 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { randomUUID } from "node:crypto";
 
 import {
   LOCAL_READER_COURSES,
+  localReaderCourseKeySchema,
   localReaderJobSchema,
   localReaderResultSchema,
   serializeSignedPayload,
@@ -10,7 +15,7 @@ import {
   validateLocalReaderResultForJob,
   verifyLocalReaderSignature,
   type LocalReaderJob,
-  type LocalReaderResult
+  type LocalReaderResult,
 } from "../../src/lib/local-reader/contracts";
 
 const host = "127.0.0.1";
@@ -35,7 +40,7 @@ const jobs = new Map<string, JobRecord>();
 function sendJson(response: ServerResponse, status: number, value: unknown) {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "cache-control": "no-store"
+    "cache-control": "no-store",
   });
   response.end(JSON.stringify(value));
 }
@@ -60,7 +65,7 @@ function hasDeviceAuthorization(request: IncomingMessage, serializedBody = "") {
   return verifyLocalReaderSignature(
     deviceSecret,
     `${request.method}\n${request.url}\n${timestamp}\n${serializedBody}`,
-    signature
+    signature,
   );
 }
 
@@ -72,8 +77,8 @@ function signResponse(request: IncomingMessage, payload: unknown) {
     timestamp,
     signature: signLocalReaderPayload(
       deviceSecret,
-      `${request.method}\n${request.url}\n${timestamp}\n${serialized}`
-    )
+      `${request.method}\n${request.url}\n${timestamp}\n${serialized}`,
+    ),
   };
 }
 
@@ -87,25 +92,39 @@ const server = createServer(async (request, response) => {
         sendJson(response, 401, { error: "unauthorized" });
         return;
       }
-      const input = JSON.parse(body) as { targetDate?: unknown; players?: unknown };
+      const input = JSON.parse(body) as {
+        courseKey?: unknown;
+        targetDate?: unknown;
+        players?: unknown;
+      };
+      const courseKey = localReaderCourseKeySchema.parse(
+        input.courseKey ?? "grassy-hill",
+      );
+      const course = LOCAL_READER_COURSES[courseKey];
       const requestedAt = new Date();
       const job = localReaderJobSchema.parse({
         id: randomUUID(),
-        courseKey: "grassy-hill",
+        courseKey,
         targetDate: input.targetDate,
         players: input.players,
         requestedAt: requestedAt.toISOString(),
         expiresAt: new Date(requestedAt.getTime() + 5 * 60_000).toISOString(),
-        bookingUrl: LOCAL_READER_COURSES["grassy-hill"].bookingUrl
+        courseName: course.courseName,
+        bookingUrl: course.bookingUrl,
+        cardTextIncludes: [...course.cardTextIncludes],
       });
       jobs.set(job.id, {
         job,
         status: "PENDING",
         leaseToken: null,
         leaseExpiresAt: null,
-        result: null
+        result: null,
       });
-      sendJson(response, 201, signResponse(request, { jobId: job.id, status: "PENDING" }));
+      sendJson(
+        response,
+        201,
+        signResponse(request, { jobId: job.id, status: "PENDING" }),
+      );
       return;
     }
 
@@ -123,13 +142,16 @@ const server = createServer(async (request, response) => {
         (candidate) =>
           Date.parse(candidate.job.expiresAt) > now &&
           (candidate.status === "PENDING" ||
-            (candidate.status === "LEASED" && (candidate.leaseExpiresAt || 0) <= now))
+            (candidate.status === "LEASED" &&
+              (candidate.leaseExpiresAt || 0) <= now)),
       );
       if (!record) {
         sendJson(
           response,
           200,
-          url.pathname.startsWith("/api/") ? { job: null } : signResponse(request, { job: null })
+          url.pathname.startsWith("/api/")
+            ? { job: null }
+            : signResponse(request, { job: null }),
         );
         return;
       }
@@ -140,7 +162,9 @@ const server = createServer(async (request, response) => {
       sendJson(
         response,
         200,
-        url.pathname.startsWith("/api/") ? { job } : signResponse(request, { job })
+        url.pathname.startsWith("/api/")
+          ? { job }
+          : signResponse(request, { job }),
       );
       return;
     }
@@ -181,7 +205,7 @@ const server = createServer(async (request, response) => {
         200,
         url.pathname.startsWith("/api/")
           ? { status: record.status }
-          : signResponse(request, { status: record.status })
+          : signResponse(request, { status: record.status }),
       );
       return;
     }
@@ -203,8 +227,8 @@ const server = createServer(async (request, response) => {
         signResponse(request, {
           jobId: record.job.id,
           status: record.status,
-          result: record.result
-        })
+          result: record.result,
+        }),
       );
       return;
     }
@@ -212,7 +236,7 @@ const server = createServer(async (request, response) => {
     sendJson(response, 404, { error: "not_found" });
   } catch (error) {
     sendJson(response, 400, {
-      error: error instanceof Error ? error.message : "invalid_request"
+      error: error instanceof Error ? error.message : "invalid_request",
     });
   }
 });

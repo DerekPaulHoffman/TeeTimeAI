@@ -1,15 +1,21 @@
-# Grassy Hill local Chrome reader
+# CPS local Chrome reader
 
-This proof separates a backend job from a local, rendered-page read:
+This worker separates a backend job from a local, rendered-page read:
 
 ```text
 signed backend job -> local Chrome page -> normalized slots -> signed backend result
 ```
 
-The reader accepts only Grassy Hill's public CPS tee-time search route. It reads the
-rendered tee-time card's local start time, hole options, public golfer capacity,
-price, and cart label. It does not inspect cookies or browser storage, call private
-provider APIs, click a tee time, sign in, enter a cart, or continue to checkout.
+It reads only exact, allowlisted, signed-out CPS tee-time search routes. It
+normalizes rendered start time, hole options, public golfer capacity, price, and
+cart labels from both current and legacy CPS card layouts. It does not inspect
+cookies or browser storage, call private provider APIs, click a tee time, sign
+in, enter a cart, or continue to checkout.
+
+The current allowlist includes Grassy Hill, Overpeck, Glen Mills, Bayberry Hills,
+Oak Lane, Candia Woods, Oxford Greens, Shennecossett, Stanley, Colonie,
+Springfield Township, Pine Hollow, and Capital Hills. Fenwick is deliberately
+excluded because its public route redirects to email verification.
 
 ## Run the local proof backend
 
@@ -21,9 +27,11 @@ $env:LOCAL_READER_DEVICE_TOKEN = '<at-least-16-random-characters>'
 npx tsx tools/local-chrome-reader/mock-backend.ts
 ```
 
-The proof backend binds only to `127.0.0.1:4317`. It keeps jobs in memory and exists
-to verify the signed job, lease, rendered-page result, and completion flow. It is
-not a production queue and does not write tee-time matches or send alerts.
+The proof backend binds only to `127.0.0.1:4317`. It keeps jobs in memory and
+exists to verify the signed job, lease, rendered-page result, and completion
+flow. It is not a production queue and does not write tee-time matches or send
+alerts. POST `/jobs` accepts `courseKey`, `targetDate`, and `players`;
+`courseKey` defaults to `grassy-hill`.
 
 ## Install the production worker
 
@@ -31,18 +39,22 @@ not a production queue and does not write tee-time matches or send alerts.
 2. Select this `tools/local-chrome-reader` folder.
 3. In the options page, enter the device token configured as
    `LOCAL_READER_DEVICE_TOKEN` in production, check **Enable polling**, and save.
-4. Leave Chrome running. The extension polls outbound once per minute and opens an
-   inactive Grassy Hill tab only when a signed job is waiting.
+4. Leave Chrome running. The extension polls outbound once per minute and opens
+   an inactive tab only when a signed allowlisted CPS job is waiting.
 
-The production backend persists short-lived jobs and leases in Neon. The extension
-signs every request with HMAC-SHA256 and accepts jobs only for Grassy Hill's exact
-public booking route. A completed read requeues the normal search workflow, which
-owns match persistence and alert email delivery.
+After pulling a reader update, use the extension's reload button on
+`chrome://extensions` so Chrome applies the new manifest and scripts.
+
+The production backend persists short-lived jobs and leases in Neon. The
+extension signs every request with HMAC-SHA256 and accepts only jobs whose
+course key, course name, card filter, host, and route match its static allowlist.
+A completed read requeues the normal search workflow, which owns match
+persistence and alert email delivery.
 
 ## Security and product boundary
 
-The home machine polls outbound; the backend never opens an inbound connection to
-the machine or submits arbitrary URLs, prompts, or commands. The reader does not
-inspect cookies or browser storage, sign in, choose a tee time, enter a cart, book,
-reserve, pay, or continue to checkout. Chrome must be running and the extension
-enabled when a local-reader job is queued.
+The home machine polls outbound; the backend never opens an inbound connection
+to the machine or submits arbitrary URLs, prompts, or commands. The reader does
+not inspect cookies or browser storage, sign in, choose a tee time, enter a cart,
+book, reserve, pay, or continue to checkout. Chrome must be running and the
+extension enabled when a local-reader job is queued.

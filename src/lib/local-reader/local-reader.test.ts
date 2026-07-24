@@ -5,165 +5,268 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 import {
+  LOCAL_READER_COURSES,
   isAllowedLocalReaderUrl,
   localReaderJobSchema,
   localReaderResultSchema,
   signLocalReaderPayload,
   validateLocalReaderResultForJob,
-  verifyLocalReaderSignature
+  verifyLocalReaderSignature,
+  type LocalReaderJob,
 } from "./contracts";
+import { LOCAL_READER_COURSE_KEYS } from "./course-key";
 
 type Reader = {
-  readSnapshot: (documentRoot: Document, pageUrl: string) => {
+  readSnapshot: (
+    documentRoot: Document,
+    pageUrl: string,
+    job: LocalReaderJob,
+  ) => {
     status: string;
     slots: Array<Record<string, unknown>>;
   };
 };
 
+function jobFor(
+  courseKey: keyof typeof LOCAL_READER_COURSES = "grassy-hill",
+): LocalReaderJob {
+  const course = LOCAL_READER_COURSES[courseKey];
+  return {
+    id: "job-1",
+    courseKey,
+    targetDate: "2026-07-25",
+    players: 2,
+    requestedAt: "2026-07-24T12:00:00.000Z",
+    expiresAt: "2026-07-24T12:05:00.000Z",
+    courseName: course.courseName,
+    bookingUrl: course.bookingUrl,
+    cardTextIncludes: [...course.cardTextIncludes],
+  };
+}
+
 function loadReader() {
   const source = readFileSync(
-    resolve(process.cwd(), "tools", "local-chrome-reader", "grassy-hill-reader.js"),
-    "utf8"
+    resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
+    "utf8",
   );
   const context: Record<string, unknown> = { URL };
   context.globalThis = context;
   runInNewContext(source, context);
-  return context.TeeTimeSpotGrassyHillReader as Reader;
+  return context.TeeTimeSpotCpsReader as Reader;
 }
 
 describe("local Chrome reader contract", () => {
-  it("accepts only Grassy Hill's public tee-time search route", () => {
+  it("accepts every exact allowlisted CPS route and rejects other routes", () => {
+    for (const courseKey of LOCAL_READER_COURSE_KEYS) {
+      expect(
+        isAllowedLocalReaderUrl(
+          courseKey,
+          `${LOCAL_READER_COURSES[courseKey].bookingUrl}?TeeOffTimeMin=0`,
+        ),
+      ).toBe(true);
+    }
     expect(
       isAllowedLocalReaderUrl(
         "grassy-hill",
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0"
-      )
-    ).toBe(true);
-    expect(
-      isAllowedLocalReaderUrl(
-        "grassy-hill",
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout"
-      )
+        "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout",
+      ),
     ).toBe(false);
     expect(
       isAllowedLocalReaderUrl(
         "grassy-hill",
-        "https://example.com/onlineresweb/search-teetime"
-      )
+        "https://fenwick.cps.golf/onlineresweb/search-teetime",
+      ),
     ).toBe(false);
   });
 
-  it("parses only rendered public card fields", () => {
+  it("keeps the extension permissions and job allowlist synchronized", () => {
+    const manifest = JSON.parse(
+      readFileSync(
+        resolve(process.cwd(), "tools", "local-chrome-reader", "manifest.json"),
+        "utf8",
+      ),
+    ) as {
+      host_permissions: string[];
+      content_scripts: Array<{ matches: string[] }>;
+    };
+    const backgroundSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
+      "utf8",
+    );
+    const contentMatches = manifest.content_scripts.flatMap(
+      (entry) => entry.matches,
+    );
+
+    for (const courseKey of LOCAL_READER_COURSE_KEYS) {
+      const course = LOCAL_READER_COURSES[courseKey];
+      const hostname = new URL(course.bookingUrl).hostname;
+      expect(manifest.host_permissions).toContain(`https://${hostname}/*`);
+      expect(contentMatches).toContain(`${course.bookingUrl}*`);
+      expect(backgroundSource).toContain(courseKey);
+      expect(backgroundSource).toContain(`"${course.courseName}"`);
+      expect(backgroundSource).toContain(`"${hostname}"`);
+    }
+    expect(JSON.stringify(manifest)).not.toContain("fenwick.cps.golf");
+    expect(backgroundSource).not.toContain("fenwick.cps.golf");
+  });
+
+  it("parses the current rendered CPS card layout", () => {
     document.title = "Grassy Hill Country Club";
     document.body.innerHTML = `
       <button class="btn-teesheet">
-        <time role="timer" datetime="2026-07-24T11:02:00">11:02</time>
+        <time role="timer" datetime="2026-07-25T11:02:00">11:02</time>
         <div>CART INCLUDED</div>
         <div>9 or 18 HOLES | 2 - 4 GOLFERS</div>
         <div>$70.00</div>
       </button>
       <button class="btn-teesheet">
-        <time role="timer" datetime="2026-07-24T15:50:00">3:50</time>
-        <div>CART INCLUDED</div>
+        <time role="timer" datetime="2026-07-25T15:50:00">3:50</time>
+        <div>CART RATE $17.00</div>
         <div>9 HOLES | 2 - 4 GOLFERS</div>
         <div>$43.00</div>
       </button>
+      <button class="btn-teesheet">
+        <time role="timer" datetime="2026-07-25T16:10:00">4:10</time>
+        <div>18 HOLES | 1 GOLFERS</div>
+        <div>$55.00</div>
+      </button>
     `;
 
+    const job = jobFor();
     const snapshot = loadReader().readSnapshot(
       document,
-      "https://grassyhill.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0"
+      `${job.bookingUrl}?TeeOffTimeMin=0`,
+      job,
     );
 
     expect(snapshot).toMatchObject({
       status: "AVAILABLE",
       slots: [
         {
-          startsAtLocal: "2026-07-24T11:02:00",
+          startsAtLocal: "2026-07-25T11:02:00",
           timeLabel: "11:02 AM",
           holes: [9, 18],
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 7000,
-          cartIncluded: true
+          cartIncluded: true,
         },
         {
-          startsAtLocal: "2026-07-24T15:50:00",
+          startsAtLocal: "2026-07-25T15:50:00",
           timeLabel: "3:50 PM",
           holes: [9],
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 4300,
-          cartIncluded: true
-        }
-      ]
+          cartIncluded: false,
+        },
+      ],
     });
+  });
+
+  it("parses the legacy CPS material-card layout", () => {
+    document.title = "Overpeck Golf Course";
+    document.body.innerHTML = `
+      <mat-card class="mat-card">
+        <time datetime="2026-07-25T08:20:00">8:20 AM</time>
+        <div>18 HOLES | 1 - 4 GOLFERS</div>
+        <div>$52</div>
+      </mat-card>
+    `;
+    const job = jobFor("overpeck");
+
+    expect(
+      loadReader().readSnapshot(document, job.bookingUrl, job),
+    ).toMatchObject({
+      status: "AVAILABLE",
+      slots: [
+        {
+          startsAtLocal: "2026-07-25T08:20:00",
+          holes: [18],
+          minimumPlayers: 1,
+          availableSpots: 4,
+          priceCents: 5200,
+        },
+      ],
+    });
+  });
+
+  it("keeps Candia Woods isolated from The Oaks tenant", () => {
+    document.title = "Candia Woods Golf Links";
+    document.body.innerHTML = `
+      <button class="btn-teesheet">
+        <time datetime="2026-07-25T09:10:00">9:10 AM</time>
+        <div>18 HOLES | 2 - 4 GOLFERS</div>
+      </button>
+    `;
+    const job = jobFor("candia-woods");
+
+    expect(
+      loadReader().readSnapshot(document, job.bookingUrl, job),
+    ).toMatchObject({
+      status: "AVAILABLE",
+      slots: [{ startsAtLocal: "2026-07-25T09:10:00" }],
+    });
+    expect(job.bookingUrl).toContain("candiawoods.cps.golf");
+    expect(
+      isAllowedLocalReaderUrl(
+        "candia-woods",
+        "https://oaksgolflinks.cps.golf/onlineresweb/search-teetime",
+      ),
+    ).toBe(false);
   });
 
   it("reports challenge and page mismatch states without returning slots", () => {
     document.title = "Just a moment";
-    document.body.innerHTML = "<main>Checking your browser before accessing this site</main>";
+    document.body.innerHTML =
+      "<main>Checking your browser before accessing this site</main>";
     const reader = loadReader();
+    const job = jobFor();
 
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "ACCESS_CHALLENGE",
+      slots: [],
+    });
     expect(
-      reader.readSnapshot(
-        document,
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime"
-      )
-    ).toMatchObject({ status: "ACCESS_CHALLENGE", slots: [] });
-    expect(
-      reader.readSnapshot(
-        document,
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout"
-      )
+      reader.readSnapshot(document, `${job.bookingUrl}/checkout`, job),
     ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
-  it("fails closed when tee cards are visible but their fields cannot be parsed", () => {
+  it("fails closed when tee cards are visible but cannot be parsed", () => {
     document.title = "Grassy Hill Country Club";
     document.body.innerHTML = `
       <button class="btn-teesheet">
         <div>Loading tee-time details</div>
       </button>
     `;
+    const job = jobFor();
 
     expect(
-      loadReader().readSnapshot(
-        document,
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime"
-      )
+      loadReader().readSnapshot(document, job.bookingUrl, job),
     ).toMatchObject({
       status: "READER_ERROR",
       slots: [],
-      readerVersion: "grassy-hill-rendered-v4"
+      readerVersion: "cps-rendered-v1",
     });
   });
 
   it("validates jobs and results and rejects malformed availability", () => {
-    const requestedAt = "2026-07-24T12:00:00.000Z";
-    expect(
-      localReaderJobSchema.parse({
-        id: "job-1",
-        courseKey: "grassy-hill",
-        targetDate: "2026-07-25",
-        players: 2,
-        requestedAt,
-        expiresAt: "2026-07-24T12:05:00.000Z",
-        bookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime"
-      })
-    ).toMatchObject({ courseKey: "grassy-hill", players: 2 });
+    expect(localReaderJobSchema.parse(jobFor())).toMatchObject({
+      courseKey: "grassy-hill",
+      players: 2,
+    });
 
     expect(() =>
       localReaderResultSchema.parse({
         jobId: "job-1",
         courseKey: "grassy-hill",
         status: "AVAILABLE",
-        observedAt: requestedAt,
-        pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+        observedAt: "2026-07-24T12:00:00.000Z",
+        pageUrl: LOCAL_READER_COURSES["grassy-hill"].bookingUrl,
         pageTitle: "Grassy Hill Country Club",
         slots: [],
-        readerVersion: "test"
-      })
+        readerVersion: "test",
+      }),
     ).toThrow(/at least one slot/u);
   });
 
@@ -173,77 +276,73 @@ describe("local Chrome reader contract", () => {
     const signature = signLocalReaderPayload(secret, payload);
 
     expect(verifyLocalReaderSignature(secret, payload, signature)).toBe(true);
-    expect(verifyLocalReaderSignature(secret, '{"jobId":"job-2"}', signature)).toBe(false);
+    expect(
+      verifyLocalReaderSignature(secret, '{"jobId":"job-2"}', signature),
+    ).toBe(false);
   });
 
   it("normalizes copied device tokens before saving and signing", () => {
     const backgroundSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
-      "utf8"
+      "utf8",
     );
     const optionsSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "options.js"),
-      "utf8"
+      "utf8",
     );
 
     expect(backgroundSource).toContain(
-      'deviceToken: (settings.deviceToken || "").replace(/^\\uFEFF/u, "").trim()'
+      'deviceToken: (settings.deviceToken || "").replace(/^\\uFEFF/u, "").trim()',
     );
     expect(optionsSource).toContain('.value.replace(/^\\uFEFF/u, "")');
     expect(optionsSource).toContain(".trim();");
   });
 
-  it("selects local dates without relying on page locale globals", () => {
+  it("selects courses and local dates without using page locale globals", () => {
     const contentSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
-      "utf8"
+      "utf8",
     );
 
     expect(contentSource).not.toContain("Intl.DateTimeFormat");
     expect(contentSource).toContain("MONTH_NAMES[targetMonth - 1]");
+    expect(contentSource).toContain("async function chooseCourse(job)");
+    expect(contentSource).toContain("async function choosePlayers(players)");
     expect(contentSource).toContain(
-      "const [targetYear, targetMonth, targetDayNumber] = targetDate"
+      "const [targetYear, targetMonth, targetDayNumber] = targetDate",
     );
     expect(contentSource).toContain(
-      "const selectionDeadline = Date.now() + 10_000"
+      "const selectionDeadline = Date.now() + 10_000",
     );
     expect(contentSource).toContain(
-      'button.getAttribute("aria-disabled") !== "true"'
+      'button.getAttribute("aria-disabled") !== "true"',
     );
   });
 
   it("surfaces reader setup errors without exposing private browser state", () => {
     const contentSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
-      "utf8"
+      "utf8",
     );
     const backgroundSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
-      "utf8"
+      "utf8",
     );
 
     expect(contentSource).toContain("`Reader error: ${detail}`.slice(0, 200)");
-    expect(backgroundSource).toContain(': result.status,');
+    expect(backgroundSource).toContain(": result.status,");
     expect(backgroundSource).not.toContain("document.cookie");
     expect(backgroundSource).not.toContain("localStorage");
   });
 
   it("rejects slots for the wrong date or an unsupported player count", () => {
-    const job = localReaderJobSchema.parse({
-      id: "job-1",
-      courseKey: "grassy-hill",
-      targetDate: "2026-07-25",
-      players: 2,
-      requestedAt: "2026-07-24T12:00:00.000Z",
-      expiresAt: "2026-07-24T12:05:00.000Z",
-      bookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime"
-    });
+    const job = localReaderJobSchema.parse(jobFor());
     const result = localReaderResultSchema.parse({
       jobId: "job-1",
       courseKey: "grassy-hill",
       status: "AVAILABLE",
       observedAt: "2026-07-24T12:01:00.000Z",
-      pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+      pageUrl: LOCAL_READER_COURSES["grassy-hill"].bookingUrl,
       pageTitle: "Grassy Hill Country Club",
       slots: [
         {
@@ -253,20 +352,20 @@ describe("local Chrome reader contract", () => {
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 7000,
-          cartIncluded: true
-        }
+          cartIncluded: true,
+        },
       ],
-      readerVersion: "test"
+      readerVersion: "test",
     });
 
     expect(() => validateLocalReaderResultForJob(job, result)).toThrow(
-      /requested local date/u
+      /requested local date/u,
     );
     expect(() =>
       validateLocalReaderResultForJob(
         { ...job, targetDate: "2026-07-24", players: 1 },
-        result
-      )
+        result,
+      ),
     ).toThrow(/requested players/u);
   });
 });

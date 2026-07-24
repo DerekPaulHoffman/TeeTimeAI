@@ -7,9 +7,11 @@ import { prisma } from "@/lib/prisma";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 import {
+  LOCAL_READER_COURSES,
+  localReaderCourseKeySchema,
   localReaderResultSchema,
   validateLocalReaderResultForJob,
-  type LocalReaderResult
+  type LocalReaderResult,
 } from "./contracts";
 import { getLocalReaderCourseKey } from "./course-key";
 
@@ -29,18 +31,19 @@ export async function queueLocalReaderJob(input: {
 }) {
   const courseKey = getLocalReaderCourseKey(input.bookingUrl);
   if (!courseKey) return null;
+  const course = LOCAL_READER_COURSES[courseKey];
   const now = new Date();
   const unique = {
     teeSearchId: input.searchId,
     courseId: input.courseId,
     scheduleVersion: input.scheduleVersion,
     targetDate: input.targetDate,
-    players: input.players
+    players: input.players,
   };
   const existing = await prisma.localReaderJob.findUnique({
     where: {
-      teeSearchId_courseId_scheduleVersion_targetDate_players: unique
-    }
+      teeSearchId_courseId_scheduleVersion_targetDate_players: unique,
+    },
   });
   if (
     existing &&
@@ -57,7 +60,7 @@ export async function queueLocalReaderJob(input: {
   }
   return prisma.localReaderJob.upsert({
     where: {
-      teeSearchId_courseId_scheduleVersion_targetDate_players: unique
+      teeSearchId_courseId_scheduleVersion_targetDate_players: unique,
     },
     create: {
       teeSearchId: input.searchId,
@@ -66,11 +69,12 @@ export async function queueLocalReaderJob(input: {
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
-      bookingUrl:
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime",
-      jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS)
+      bookingUrl: course.bookingUrl,
+      jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
     },
     update: {
+      courseKey,
+      bookingUrl: course.bookingUrl,
       status: "PENDING",
       leaseToken: null,
       leaseExpiresAt: null,
@@ -80,8 +84,8 @@ export async function queueLocalReaderJob(input: {
       result: undefined,
       resultExpiresAt: null,
       readerVersion: null,
-      completedAt: null
-    }
+      completedAt: null,
+    },
   });
 }
 
@@ -90,19 +94,19 @@ export async function claimNextLocalReaderJob(deviceId: string) {
   await prisma.localReaderJob.updateMany({
     where: {
       status: { in: ["PENDING", "LEASED"] },
-      jobExpiresAt: { lte: now }
+      jobExpiresAt: { lte: now },
     },
-    data: { status: "EXPIRED", leaseToken: null, leaseExpiresAt: null }
+    data: { status: "EXPIRED", leaseToken: null, leaseExpiresAt: null },
   });
   const candidate = await prisma.localReaderJob.findFirst({
     where: {
       jobExpiresAt: { gt: now },
       OR: [
         { status: "PENDING" },
-        { status: "LEASED", leaseExpiresAt: { lte: now } }
-      ]
+        { status: "LEASED", leaseExpiresAt: { lte: now } },
+      ],
     },
-    orderBy: { createdAt: "asc" }
+    orderBy: { createdAt: "asc" },
   });
   if (!candidate) return null;
 
@@ -114,27 +118,30 @@ export async function claimNextLocalReaderJob(deviceId: string) {
       jobExpiresAt: { gt: now },
       OR: [
         { status: "PENDING" },
-        { status: "LEASED", leaseExpiresAt: { lte: now } }
-      ]
+        { status: "LEASED", leaseExpiresAt: { lte: now } },
+      ],
     },
     data: {
       status: "LEASED",
       leaseToken,
       leaseExpiresAt,
       claimedAt: now,
-      deviceId
-    }
+      deviceId,
+    },
   });
   if (claimed.count !== 1) return null;
+  const courseKey = localReaderCourseKeySchema.parse(candidate.courseKey);
   return {
     id: candidate.id,
-    courseKey: candidate.courseKey,
+    courseKey,
     targetDate: candidate.targetDate,
     players: candidate.players,
     requestedAt: candidate.createdAt.toISOString(),
     expiresAt: candidate.jobExpiresAt.toISOString(),
+    courseName: LOCAL_READER_COURSES[courseKey].courseName,
     bookingUrl: candidate.bookingUrl,
-    leaseToken
+    cardTextIncludes: [...LOCAL_READER_COURSES[courseKey].cardTextIncludes],
+    leaseToken,
   };
 }
 
@@ -144,7 +151,7 @@ export async function completeLocalReaderJob(input: {
   result: LocalReaderResult;
 }) {
   const current = await prisma.localReaderJob.findUnique({
-    where: { id: input.jobId }
+    where: { id: input.jobId },
   });
   if (
     !current ||
@@ -155,17 +162,20 @@ export async function completeLocalReaderJob(input: {
   ) {
     throw new Error("The local reader lease is no longer valid");
   }
+  const courseKey = localReaderCourseKeySchema.parse(current.courseKey);
   validateLocalReaderResultForJob(
     {
       id: current.id,
-      courseKey: "grassy-hill",
+      courseKey,
       targetDate: current.targetDate,
       players: current.players,
       requestedAt: current.createdAt.toISOString(),
       expiresAt: current.jobExpiresAt.toISOString(),
-      bookingUrl: current.bookingUrl
+      courseName: LOCAL_READER_COURSES[courseKey].courseName,
+      bookingUrl: current.bookingUrl,
+      cardTextIncludes: [...LOCAL_READER_COURSES[courseKey].cardTextIncludes],
     },
-    input.result
+    input.result,
   );
   const completedAt = new Date();
   const updated = await prisma.localReaderJob.updateMany({
@@ -173,7 +183,7 @@ export async function completeLocalReaderJob(input: {
       id: current.id,
       status: "LEASED",
       leaseToken: input.leaseToken,
-      leaseExpiresAt: { gt: completedAt }
+      leaseExpiresAt: { gt: completedAt },
     },
     data: {
       status: "COMPLETED",
@@ -182,8 +192,8 @@ export async function completeLocalReaderJob(input: {
       readerVersion: input.result.readerVersion,
       completedAt,
       leaseToken: null,
-      leaseExpiresAt: null
-    }
+      leaseExpiresAt: null,
+    },
   });
   if (updated.count !== 1) throw new Error("The local reader lease changed");
 
@@ -191,7 +201,8 @@ export async function completeLocalReaderJob(input: {
     await startSearchSchedule(current.teeSearchId);
   } catch (error) {
     console.error("[local-reader:search-schedule-start-failed]", {
-      message: error instanceof Error ? error.message : "Unknown scheduling error"
+      message:
+        error instanceof Error ? error.message : "Unknown scheduling error",
     });
   }
   return { searchId: current.teeSearchId, completedAt };
@@ -211,35 +222,33 @@ export async function getFreshLocalReaderTeeSheet(input: {
       targetDate: input.targetDate,
       players: input.players,
       status: "COMPLETED",
-      resultExpiresAt: { gt: new Date() }
+      resultExpiresAt: { gt: new Date() },
     },
-    orderBy: { completedAt: "desc" }
+    orderBy: { completedAt: "desc" },
   });
   if (!row?.result) return null;
   const result = localReaderResultSchema.parse(row.result);
-  if (
-    result.status !== "AVAILABLE" &&
-    result.status !== "NO_AVAILABILITY"
-  ) {
+  if (result.status !== "AVAILABLE" && result.status !== "NO_AVAILABILITY") {
     return null;
   }
   const slots: TeeTimeSlot[] = result.slots.map((slot) => {
     const holes = slot.holes.includes(18) ? 18 : slot.holes[0];
     return {
-      sourceId: `local-grassy-hill-${slot.startsAtLocal}`,
+      sourceId: `local-${result.courseKey}-${slot.startsAtLocal}`,
       courseId: input.courseId,
       startsAt: slot.startsAtLocal,
       availableSpots: slot.availableSpots,
       bookingUrl: result.pageUrl,
       ...(slot.priceCents === null ? {} : { priceCents: slot.priceCents }),
       holes,
-      bookableHoleCounts: slot.holes
+      bookableHoleCounts: slot.holes,
     };
   });
   return {
     slots,
-    targetDateStatus: result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
+    targetDateStatus:
+      result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
     bookingWindowEvidence: null,
-    readerVersion: result.readerVersion
+    readerVersion: result.readerVersion,
   };
 }

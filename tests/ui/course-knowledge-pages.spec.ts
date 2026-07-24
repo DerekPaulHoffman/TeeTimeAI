@@ -52,6 +52,34 @@ test("renders a facility-first supported course guide without browser errors", a
 
 test("course CTA transfers the selected course through session storage", async ({ page }) => {
   const errors = watchForBrowserErrors(page);
+  await page.route("**/api/courses/discover?**", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        courses: [
+          {
+            googlePlaceId: "ChIJ4fPLr0MI6IkR_Dq6ichUi0U",
+            name: "Tashua Knolls Golf Course",
+            publicAccessStatus: "PUBLIC",
+            address: "40 Tashua Knolls Ln, Trumbull, CT",
+            city: "Trumbull",
+            stateCode: "CT",
+            stateName: "Connecticut",
+            county: "Greater Bridgeport Planning Region",
+            countryCode: "US",
+            latitude: 41.242,
+            longitude: -73.209,
+            timeZone: "America/New_York",
+            distanceMeters: 0,
+            website: "https://www.tashuaknolls.com/",
+            profileUrl:
+              "/courses/tashua-knolls-golf-course-trumbull-ct"
+          }
+        ]
+      }),
+      contentType: "application/json",
+      status: 200
+    });
+  });
   await page.goto(coursePath, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Create an alert here" }).first().click();
 

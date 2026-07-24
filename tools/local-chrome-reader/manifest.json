@@ -1,13 +1,25 @@
 {
   "manifest_version": 3,
   "name": "Tee Time Spot Local Reader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Reads allowlisted public tee-time pages for Tee Time Spot alerts.",
   "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": [
     "https://teetimespot.com/*",
     "http://127.0.0.1:4317/*",
-    "https://grassyhill.cps.golf/*"
+    "https://grassyhill.cps.golf/*",
+    "https://overpeckgc.cps.golf/*",
+    "https://golfatglenmills.cps.golf/*",
+    "https://yarmouthpublic.cps.golf/*",
+    "https://traditionoaklane.cps.golf/*",
+    "https://candiawoods.cps.golf/*",
+    "https://oxfordgreens.cps.golf/*",
+    "https://shennecossett.cps.golf/*",
+    "https://stanleygolf.cps.golf/*",
+    "https://colonie.cps.golf/*",
+    "https://springfield.cps.golf/*",
+    "https://pinehollow.cps.golf/*",
+    "https://capitalhillsny.cps.golf/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -19,9 +31,21 @@
   "content_scripts": [
     {
       "matches": [
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime*"
+        "https://grassyhill.cps.golf/onlineresweb/search-teetime*",
+        "https://overpeckgc.cps.golf/onlineresweb/search-teetime*",
+        "https://golfatglenmills.cps.golf/onlineresweb/search-teetime*",
+        "https://yarmouthpublic.cps.golf/onlineresweb/search-teetime*",
+        "https://traditionoaklane.cps.golf/onlineresweb/search-teetime*",
+        "https://candiawoods.cps.golf/onlineresweb/search-teetime*",
+        "https://oxfordgreens.cps.golf/onlineresweb/search-teetime*",
+        "https://shennecossett.cps.golf/onlineresweb/search-teetime*",
+        "https://stanleygolf.cps.golf/onlineresweb/search-teetime*",
+        "https://colonie.cps.golf/onlineresweb/search-teetime*",
+        "https://springfield.cps.golf/onlineresweb/search-teetime*",
+        "https://pinehollow.cps.golf/onlineresweb/search-teetime*",
+        "https://capitalhillsny.cps.golf/onlineresweb/search-teetime*"
       ],
-      "js": ["grassy-hill-reader.js", "content.js"],
+      "js": ["cps-reader.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

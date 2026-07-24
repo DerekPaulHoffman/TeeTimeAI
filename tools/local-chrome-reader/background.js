@@ -3,10 +3,68 @@
 const DEFAULT_BACKEND_ORIGIN = "https://teetimespot.com";
 const POLL_ALARM = "tee-time-spot-local-reader-poll";
 const POLL_PERIOD_MINUTES = 1;
+const ALLOWED_COURSES = Object.freeze({
+  "grassy-hill": ["Grassy Hill Country Club", "grassyhill.cps.golf", []],
+  overpeck: ["Overpeck Golf Course", "overpeckgc.cps.golf", []],
+  "glen-mills": [
+    "The Golf Course at Glen Mills",
+    "golfatglenmills.cps.golf",
+    [],
+  ],
+  "bayberry-hills": [
+    "Bayberry Hills Golf Course",
+    "yarmouthpublic.cps.golf",
+    [],
+  ],
+  "oak-lane": [
+    "The Tradition Golf Club at Oak Lane",
+    "traditionoaklane.cps.golf",
+    [],
+  ],
+  "candia-woods": ["Candia Woods Golf Links", "candiawoods.cps.golf", []],
+  "oxford-greens": [
+    "The Golf Club at Oxford Greens",
+    "oxfordgreens.cps.golf",
+    [],
+  ],
+  shennecossett: ["Shennecossett Golf Course", "shennecossett.cps.golf", []],
+  stanley: ["Stanley Golf Course SGC", "stanleygolf.cps.golf", []],
+  colonie: ["Colonie Golf Course", "colonie.cps.golf", []],
+  "springfield-township": [
+    "Springfield Twp Golf Course",
+    "springfield.cps.golf",
+    [],
+  ],
+  "pine-hollow": ["Pine Hollow Golf Club", "pinehollow.cps.golf", []],
+  "capital-hills": ["Capital Hills at Albany", "capitalhillsny.cps.golf", []],
+});
 let pollInProgress = false;
 
+function isAllowlistedJob(job) {
+  try {
+    const allowed = ALLOWED_COURSES[job?.courseKey];
+    if (!allowed) return false;
+    const [courseName, hostname, cardTextIncludes] = allowed;
+    const url = new URL(job.bookingUrl);
+    return (
+      job.courseName === courseName &&
+      JSON.stringify(job.cardTextIncludes) ===
+        JSON.stringify(cardTextIncludes) &&
+      url.protocol === "https:" &&
+      url.hostname === hostname &&
+      /^\/onlineresweb\/search-teetime\/?$/u.test(url.pathname) &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function bytesToHex(bytes) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 async function hmacHex(secret, value) {
@@ -15,12 +73,12 @@ async function hmacHex(secret, value) {
     new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign"]
+    ["sign"],
   );
   return bytesToHex(
     new Uint8Array(
-      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value))
-    )
+      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)),
+    ),
   );
 }
 
@@ -29,13 +87,13 @@ async function getSettings() {
     "enabled",
     "backendOrigin",
     "deviceId",
-    "deviceToken"
+    "deviceToken",
   ]);
   return {
     enabled: settings.enabled === true,
     backendOrigin: settings.backendOrigin || DEFAULT_BACKEND_ORIGIN,
     deviceId: settings.deviceId || "",
-    deviceToken: (settings.deviceToken || "").replace(/^\uFEFF/u, "").trim()
+    deviceToken: (settings.deviceToken || "").replace(/^\uFEFF/u, "").trim(),
   };
 }
 
@@ -46,7 +104,7 @@ async function signedFetch(path, options = {}) {
   const timestamp = String(Date.now());
   const signature = await hmacHex(
     settings.deviceToken,
-    `${method}\n${path}\n${timestamp}\n${body}`
+    `${method}\n${path}\n${timestamp}\n${body}`,
   );
   return fetch(`${settings.backendOrigin}${path}`, {
     method,
@@ -57,9 +115,9 @@ async function signedFetch(path, options = {}) {
       "x-local-reader-signature": signature,
       ...(options.leaseToken
         ? { "x-local-reader-lease": options.leaseToken }
-        : {})
+        : {}),
     },
-    cache: "no-store"
+    cache: "no-store",
   });
 }
 
@@ -67,7 +125,7 @@ async function setLastStatus(status, detail) {
   await chrome.storage.local.set({
     lastStatus: status,
     lastDetail: detail,
-    lastStatusAt: new Date().toISOString()
+    lastStatusAt: new Date().toISOString(),
   });
 }
 
@@ -126,7 +184,7 @@ async function finishJob(tabId, result) {
     const response = await signedFetch(path, {
       method: "POST",
       body,
-      leaseToken: pending.job.leaseToken
+      leaseToken: pending.job.leaseToken,
     });
     if (!response.ok) {
       throw new Error(`Result API returned ${response.status}`);
@@ -139,12 +197,12 @@ async function finishJob(tabId, result) {
       result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
         ? "COMPLETED"
         : result.status,
-      resultDetail
+      resultDetail,
     );
   } catch (error) {
     await setLastStatus(
       "RESULT_FAILED",
-      error instanceof Error ? error.message : String(error)
+      error instanceof Error ? error.message : String(error),
     );
   } finally {
     await closePendingTab(tabId);
@@ -177,19 +235,22 @@ async function poll() {
       await setLastStatus("IDLE", "No reader job is waiting.");
       return;
     }
-    if (payload.job.courseKey !== "grassy-hill") {
-      throw new Error("The backend returned a non-allowlisted course.");
+    if (!isAllowlistedJob(payload.job)) {
+      throw new Error("The backend returned a non-allowlisted CPS job.");
     }
     const tab = await chrome.tabs.create({
       url: payload.job.bookingUrl,
-      active: false
+      active: false,
     });
     if (!tab.id) throw new Error("Chrome did not create a worker tab.");
-    jobs[String(tab.id)] = { job: payload.job, openedAt: new Date().toISOString() };
+    jobs[String(tab.id)] = {
+      job: payload.job,
+      openedAt: new Date().toISOString(),
+    };
     await savePendingJobs(jobs);
     await setLastStatus(
       "READING",
-      `${payload.job.courseKey} ${payload.job.targetDate}`
+      `${payload.job.courseKey} ${payload.job.targetDate}`,
     );
     try {
       await chrome.tabs.sendMessage(tab.id, { type: "LOCAL_READER_WAKE" });
@@ -199,7 +260,7 @@ async function poll() {
   } catch (error) {
     await setLastStatus(
       "POLL_FAILED",
-      error instanceof Error ? error.message : String(error)
+      error instanceof Error ? error.message : String(error),
     );
   } finally {
     pollInProgress = false;
@@ -210,16 +271,16 @@ chrome.runtime.onInstalled.addListener(async () => {
   const settings = await chrome.storage.local.get([
     "backendOrigin",
     "deviceId",
-    "enabled"
+    "enabled",
   ]);
   await chrome.storage.local.set({
     backendOrigin: settings.backendOrigin || DEFAULT_BACKEND_ORIGIN,
     deviceId: settings.deviceId || `chrome-${crypto.randomUUID()}`,
-    enabled: settings.enabled === true
+    enabled: settings.enabled === true,
   });
   await chrome.alarms.create(POLL_ALARM, {
     delayInMinutes: 0.1,
-    periodInMinutes: POLL_PERIOD_MINUTES
+    periodInMinutes: POLL_PERIOD_MINUTES,
   });
   await chrome.runtime.openOptionsPage();
 });
@@ -227,7 +288,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(async () => {
   await chrome.alarms.create(POLL_ALARM, {
     delayInMinutes: 0.1,
-    periodInMinutes: POLL_PERIOD_MINUTES
+    periodInMinutes: POLL_PERIOD_MINUTES,
   });
   await poll();
 });
