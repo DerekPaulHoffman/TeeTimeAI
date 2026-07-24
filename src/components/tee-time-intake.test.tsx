@@ -99,7 +99,7 @@ describe("TeeTimeIntake", () => {
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
   });
 
-  it("reconciles the browser date value before previewing and saving the alert", async () => {
+  it("reconciles browser date and time values before previewing and saving the alert", async () => {
     const course = {
       address: "100 Public Links Rd, Trumbull, CT",
       googlePlaceId: "course-1",
@@ -125,7 +125,7 @@ describe("TeeTimeIntake", () => {
 
       if (url === "/api/searches") {
         savedPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return Response.json({ search: { id: "search-date-sync" } }, { status: 201 });
+        return Response.json({ search: { id: "search-input-sync" } }, { status: 201 });
       }
 
       if (url === "/api/analytics/events") {
@@ -159,12 +159,33 @@ describe("TeeTimeIntake", () => {
         "Thursday, December 31"
       )
     );
+
+    const startTimeInput = document.querySelector("#startTime") as HTMLInputElement;
+    const endTimeInput = document.querySelector("#endTime") as HTMLInputElement;
+    nativeValueSetter?.call(startTimeInput, "11:00");
+    expect(startTimeInput.value).toBe("11:00");
+    fireEvent.blur(startTimeInput);
+    nativeValueSetter?.call(endTimeInput, "14:00");
+    expect(endTimeInput.value).toBe("14:00");
+    fireEvent.blur(endTimeInput);
+
+    await waitFor(() =>
+      expect(document.querySelector(".figma-alert-preview")?.textContent).toContain(
+        "11 AM – 2 PM"
+      )
+    );
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
 
     await waitFor(() =>
-      expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-date-sync")
+      expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-input-sync")
     );
-    expect(savedPayload).toEqual(expect.objectContaining({ date: "2099-12-31" }));
+    expect(savedPayload).toEqual(
+      expect.objectContaining({
+        date: "2099-12-31",
+        startTime: "11:00",
+        endTime: "14:00"
+      })
+    );
   });
 
   it("restores discovered courses and their ranking after the search page remounts", async () => {

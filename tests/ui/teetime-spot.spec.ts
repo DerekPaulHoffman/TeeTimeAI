@@ -1246,6 +1246,15 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(alertActionButton).toBeDisabled();
     await page.getByLabel("End time").fill("18:00");
+    const selectedStartTime = "11:00";
+    const selectedEndTime = "14:00";
+    await page.getByLabel("Start time").fill(selectedStartTime);
+    await page.getByLabel("Start time").press("Tab");
+    await page.getByLabel("End time").fill(selectedEndTime);
+    await page.getByLabel("End time").press("Tab");
+    await expect(page.getByLabel("Start time")).toHaveValue(selectedStartTime);
+    await expect(page.getByLabel("End time")).toHaveValue(selectedEndTime);
+    await expect(editableTimeSummary).toContainText("11 AM – 2 PM");
     await page.getByRole("button", { name: "Done" }).click({ force: true });
 
     const alertActionText = await alertActionButton.innerText();
@@ -1277,6 +1286,8 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(lastSavePayload).toEqual(
         expect.objectContaining({
           date: selectedAlertDateValue,
+          startTime: selectedStartTime,
+          endTime: selectedEndTime,
           additionalEmails: ["friend@example.com", "teammate@example.com"]
         })
       );

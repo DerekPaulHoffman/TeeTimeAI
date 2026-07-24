@@ -346,6 +346,14 @@ function TeeTimeIntakeContent({
     setDate(event.currentTarget.value);
   }
 
+  function reconcileStartTimeFromControl(event: SyntheticEvent<HTMLInputElement>) {
+    setStartTime(event.currentTarget.value);
+  }
+
+  function reconcileEndTimeFromControl(event: SyntheticEvent<HTMLInputElement>) {
+    setEndTime(event.currentTarget.value);
+  }
+
   useEffect(() => {
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
     const draft = transferred ? undefined : readSearchDraft();
@@ -1191,7 +1199,9 @@ function TeeTimeIntakeContent({
                   id="startTime"
                   type="time"
                   value={startTime}
-                  onChange={(event) => setStartTime(event.target.value)}
+                  onBlur={reconcileStartTimeFromControl}
+                  onChange={reconcileStartTimeFromControl}
+                  onInput={reconcileStartTimeFromControl}
                 />
                 <span aria-hidden="true">–</span>
                 <input
@@ -1201,7 +1211,9 @@ function TeeTimeIntakeContent({
                   id="endTime"
                   type="time"
                   value={endTime}
-                  onChange={(event) => setEndTime(event.target.value)}
+                  onBlur={reconcileEndTimeFromControl}
+                  onChange={reconcileEndTimeFromControl}
+                  onInput={reconcileEndTimeFromControl}
                 />
                 <button
                   className="figma-time-editor-done"
