@@ -5876,6 +5876,19 @@ describe("browser probe target selection", () => {
     expect(getBestProbeUrl(course)).toBe("https://course.example/");
   });
 
+  it("routes a recognized unsupported family to adapter repair, not repeat browser discovery", () => {
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "TENFORE",
+        automationEligibility: "NEEDS_REVIEW",
+        website: "https://course.example/",
+        detectedBookingUrl: "https://fox.tenfore.golf/course",
+        bookingMetadata: null
+      })
+    ).toBe(false);
+  });
+
   it("preserves a runnable provider after newer successful evidence", () => {
     const latestFailureAt = new Date(Date.now() - 60_000);
     expect(

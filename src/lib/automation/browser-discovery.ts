@@ -26,6 +26,7 @@ import {
   haveCompatibleCourseNames,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
+import { selectMonitoringStrategy } from "@/lib/automation/monitoring-strategy";
 
 export const OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES =
   "The saved official course site currently serves a not-found page and exposes no trustworthy public booking surface. Tee Time Spot will retry discovery without following unrelated page links.";
@@ -4633,22 +4634,18 @@ function findTargetCourseContactEvidence(courseName: string, visibleText: string
 }
 
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
-  // Stored blocks and structurally runnable providers stay on the non-interactive,
-  // address-pinned remediation path. The Playwright probe follows page links and
-  // must not be used to reclassify access controls or retry a known adapter.
-  if (course.automationEligibility === "BLOCKED") {
-    return false;
-  }
-
-  if (!evaluateMonitoringGate(course).adapterAllowed) {
-    return false;
-  }
-
-  if (resolveProviderCapability(course).isRunnable) {
-    return false;
-  }
-
-  return Boolean(getBestProbeUrl(course));
+  // The ordinary browser is a bounded discovery fallback after direct HTTP
+  // could not identify reusable provider metadata. It is never a retry
+  // transport for a known adapter or a recognized unsupported family.
+  const strategy = selectMonitoringStrategy({
+    ...course,
+    discoveryAttempt: "HTTP_INCONCLUSIVE"
+  });
+  return Boolean(
+    strategy.action === "DISCOVER_WITH_BROWSER" &&
+      strategy.browserAllowed &&
+      getBestProbeUrl(course)
+  );
 }
 
 export function hasCurrentRepeatedMonitoringFailure(

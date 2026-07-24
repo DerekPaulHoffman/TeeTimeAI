@@ -2,10 +2,16 @@ import { prisma } from "@/lib/prisma";
 
 import { evaluateMonitoringGate } from "./policy";
 import {
+  type CourseSupportFailureClass,
   resolveProviderCapability,
   SOURCE_CONFLICT_PROVIDER_FAMILY,
   SOURCE_MISSING_PROVIDER_FAMILY
 } from "./provider-capabilities";
+import {
+  MONITORING_STRATEGY_ACTIONS,
+  selectMonitoringStrategy,
+  type MonitoringStrategyAction
+} from "./monitoring-strategy";
 
 export type ProviderCoverageCategory =
   | "MONITORED"
@@ -37,7 +43,7 @@ type CoverageCourse = {
     resolution: string | null;
     activeRealSearchCount: number;
     engineeringOnly: boolean;
-    failureClass: string;
+    failureClass: CourseSupportFailureClass;
     attemptCount: number;
     firstSeenAt: Date;
   } | null;
@@ -48,7 +54,7 @@ export function classifyProviderCoverage(
   now = new Date()
 ): ProviderCoverageCategory {
   const gate = evaluateMonitoringGate({ ...course, now });
-  if (!course.isPublic || gate.disposition === "IDENTITY_FINAL") {
+  if (gate.disposition === "IDENTITY_FINAL") {
     return "PRIVATE_OR_INVALID";
   }
   if (gate.disposition === "IDENTITY_RECHECK") {
@@ -93,6 +99,21 @@ export function classifyProviderCoverage(
   return latestOutcome ? "SUPPORTED_DEGRADED" : "SUPPORTED_READY";
 }
 
+export function recommendProviderCoverageAction(
+  course: CoverageCourse,
+  now = new Date()
+): MonitoringStrategyAction {
+  const currentFailureClass =
+    course.supportIncident?.status !== "RESOLVED"
+      ? course.supportIncident?.failureClass
+      : null;
+  return selectMonitoringStrategy({
+    ...course,
+    failureClass: currentFailureClass,
+    now
+  }).action;
+}
+
 export async function getProviderCoverageDashboard(input?: { now?: Date }) {
   const now = input?.now ?? new Date();
   const courses = await prisma.course.findMany({
@@ -130,6 +151,7 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
   });
 
   const categoryCounts = new Map<ProviderCoverageCategory, number>();
+  const strategyCounts = new Map<MonitoringStrategyAction, number>();
   const familyCounts = new Map<
     string,
     {
@@ -146,7 +168,9 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
 
   for (const course of courses as CoverageCourse[]) {
     const category = classifyProviderCoverage(course, now);
+    const strategy = recommendProviderCoverageAction(course, now);
     categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + 1);
+    strategyCounts.set(strategy, (strategyCounts.get(strategy) ?? 0) + 1);
     const family = resolveProviderCapability(course).providerFamilyKey;
     const current = familyCounts.get(family) ?? {
       courseCount: 0,
@@ -201,7 +225,7 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
   const eligibleCount = courses.length - (categoryCounts.get("PRIVATE_OR_INVALID") ?? 0);
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     observedAt: now.toISOString(),
     totalCourseCount: courses.length,
     eligibleCourseCount: eligibleCount,
@@ -210,6 +234,12 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
       eligibleCount === 0 ? 0 : Math.round((monitoredCount / eligibleCount) * 1000) / 10,
     categories: Object.fromEntries(
       categoryOrder.map((category) => [category, categoryCounts.get(category) ?? 0])
+    ),
+    recommendedActions: Object.fromEntries(
+      MONITORING_STRATEGY_ACTIONS.map((action) => [
+        action,
+        strategyCounts.get(action) ?? 0
+      ])
     ),
     sourceUnverifiedFinalCandidateCount,
     providerGroups: [...familyCounts.entries()]

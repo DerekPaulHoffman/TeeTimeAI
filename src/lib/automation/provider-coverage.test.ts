@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyProviderCoverage } from "./provider-coverage";
+import {
+  classifyProviderCoverage,
+  recommendProviderCoverageAction
+} from "./provider-coverage";
 
 const baseCourse = {
   isPublic: true,
@@ -119,5 +122,50 @@ describe("provider coverage classification", () => {
         now
       )
     ).toBe("TECHNICAL_CONSTRAINT");
+  });
+
+  it("reports the dynamic action behind each coverage category", () => {
+    expect(recommendProviderCoverageAction(baseCourse)).toBe("RUN_TYPED_ADAPTER");
+    expect(
+      recommendProviderCoverageAction({
+        ...baseCourse,
+        detectedBookingUrl: "https://fox.tenfore.golf/example",
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "TENFORE",
+        bookingMetadata: null,
+        probes: [],
+        supportIncident: {
+          status: "AUTO_INVESTIGATING",
+          resolvedAt: null,
+          resolution: null,
+          activeRealSearchCount: 0,
+          engineeringOnly: true,
+          failureClass: "UNSUPPORTED_FAMILY",
+          attemptCount: 1,
+          firstSeenAt: new Date()
+        }
+      })
+    ).toBe("REPAIR_PROVIDER_ADAPTER");
+    expect(
+      recommendProviderCoverageAction({
+        ...baseCourse,
+        website: "https://unknown-course.example/",
+        detectedBookingUrl: null,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        bookingMetadata: null,
+        probes: [],
+        supportIncident: {
+          status: "AUTO_INVESTIGATING",
+          resolvedAt: null,
+          resolution: null,
+          activeRealSearchCount: 0,
+          engineeringOnly: true,
+          failureClass: "MISSING_SOURCE",
+          attemptCount: 1,
+          firstSeenAt: new Date()
+        }
+      })
+    ).toBe("DISCOVER_WITH_HTTP");
   });
 });

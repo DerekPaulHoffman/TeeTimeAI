@@ -25,6 +25,7 @@ import {
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
+import { shouldStopBrowserDiscovery } from "@/lib/automation/monitoring-strategy";
 import { prisma } from "@/lib/prisma";
 
 const PROMPT_VERSION = "tee-time-spot-browser-probe-v1";
@@ -245,20 +246,98 @@ async function collectBrowserEvidence(
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const landingPageUrl = page.url();
   const landingPageEvidence = await collectPageEvidence(page);
+  if (
+    shouldStopBrowserDiscovery({
+      accessBarrierCount: accessBarriers.size,
+      accessControlDetected: landingPageEvidence.accessControlDetected
+    })
+  ) {
+    return finalizeBrowserEvidence({
+      input,
+      page,
+      observedUrls,
+      accessBarrierUrls,
+      accessBarriers,
+      landingPageUrl,
+      landingPageEvidence,
+      firstDestinationPageUrl: landingPageUrl,
+      firstDestinationPageEvidence: landingPageEvidence,
+      destinationPageUrl: landingPageUrl,
+      destinationPageEvidence: landingPageEvidence
+    });
+  }
 
   await clickLikelyBookingLink(page);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const firstDestinationPageUrl = page.url();
   const firstDestinationPageEvidence = await collectPageEvidence(page);
 
-  if (haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)) {
+  if (
+    !shouldStopBrowserDiscovery({
+      accessBarrierCount: accessBarriers.size,
+      accessControlDetected: firstDestinationPageEvidence.accessControlDetected
+    }) &&
+    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
+  ) {
     await clickLikelyBookingLink(page);
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   }
-  await trySelectSearchDate(page);
+  const preDatePageEvidence = await collectPageEvidence(page);
+  if (
+    !shouldStopBrowserDiscovery({
+      accessBarrierCount: accessBarriers.size,
+      accessControlDetected: preDatePageEvidence.accessControlDetected
+    })
+  ) {
+    await trySelectSearchDate(page);
+  }
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const destinationPageUrl = page.url();
   const destinationPageEvidence = await collectPageEvidence(page);
+
+  return finalizeBrowserEvidence({
+    input,
+    page,
+    observedUrls,
+    accessBarrierUrls,
+    accessBarriers,
+    landingPageUrl,
+    landingPageEvidence,
+    firstDestinationPageUrl,
+    firstDestinationPageEvidence,
+    destinationPageUrl,
+    destinationPageEvidence
+  });
+}
+
+function finalizeBrowserEvidence(input: {
+  input: Pick<
+    BrowserDiscoveryEvidence,
+    "courseId" | "courseName" | "sourceUrl" | "officialCourseWebsite"
+  >;
+  page: Page;
+  observedUrls: Set<string>;
+  accessBarrierUrls: Set<string>;
+  accessBarriers: Map<string, 401 | 403>;
+  landingPageUrl: string;
+  landingPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
+  firstDestinationPageUrl: string;
+  firstDestinationPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
+  destinationPageUrl: string;
+  destinationPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
+}): BrowserDiscoveryEvidence {
+  const {
+    page,
+    observedUrls,
+    accessBarrierUrls,
+    accessBarriers,
+    landingPageUrl,
+    landingPageEvidence,
+    firstDestinationPageUrl,
+    firstDestinationPageEvidence,
+    destinationPageUrl,
+    destinationPageEvidence
+  } = input;
   const officialPageEvidence = haveSamePublicWebsiteOrigin(
     landingPageUrl,
     destinationPageUrl
@@ -289,7 +368,7 @@ async function collectBrowserEvidence(
   }
 
   return {
-    ...input,
+    ...input.input,
     sourceUrl: officialPageEvidence.url,
     finalUrl: page.url(),
     observedUrls: [...observedUrls],
@@ -301,7 +380,7 @@ async function collectBrowserEvidence(
     officialPage: {
       url: officialPageEvidence.url,
       linkCandidates: officialPageEvidence.evidence.linkCandidates,
-      courseName: input.courseName,
+      courseName: input.input.courseName,
       visibleText: officialPageEvidence.evidence.visibleText.slice(0, 12_000)
     },
     accessBarrierUrls: [...accessBarrierUrls],
@@ -328,6 +407,20 @@ async function collectPageEvidence(page: Page) {
       .filter((candidate) => Boolean(candidate.url))
       .slice(0, 200);
     const pageText = document.body?.innerText?.replace(/\s+/g, " ").trim() ?? "";
+    const pageTitle = document.title?.replace(/\s+/g, " ").trim() ?? "";
+    const accessControlDetected = Boolean(
+      document.querySelector(
+        [
+          "iframe[src*='challenges.cloudflare.com']",
+          "[name='cf-turnstile-response']",
+          ".cf-turnstile",
+          "#challenge-stage",
+          "[data-sitekey][class*='captcha' i]"
+        ].join(",")
+      ) ||
+        /^(?:just a moment|attention required|security check)$/i.test(pageTitle) ||
+        /\b403200\s*client-dependent\s+cps\s+challenge\b/i.test(pageText)
+    );
     const frameCandidates = /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
       ? Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe[src]"))
           .map((frame) => ({
@@ -367,6 +460,7 @@ async function collectPageEvidence(page: Page) {
       .slice(0, 8000);
     return {
       anchors,
+      accessControlDetected,
       linkCandidates,
       scripts,
       visibleText: [
