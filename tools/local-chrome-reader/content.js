@@ -2,18 +2,28 @@
 
 (function startLocalReader() {
   let running = false;
+  const MONTH_NAMES = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ];
 
   function delay(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
   }
 
   function targetDateLabel(targetDate) {
-    return new Intl.DateTimeFormat("en-US", {
-      weekday: "long",
-      month: "long",
-      day: "numeric",
-      timeZone: "UTC"
-    }).format(new Date(`${targetDate}T12:00:00Z`));
+    const [year, month, day] = targetDate.split("-").map(Number);
+    return `${MONTH_NAMES[month - 1]} ${day}, ${year}`;
   }
 
   function visibleDayNumber(element) {
@@ -37,12 +47,10 @@
       await delay(500);
     }
 
-    const target = new Date(`${targetDate}T12:00:00Z`);
-    const expectedMonth = new Intl.DateTimeFormat("en-US", {
-      month: "long",
-      year: "numeric",
-      timeZone: "UTC"
-    }).format(target);
+    const [targetYear, targetMonth, targetDayNumber] = targetDate
+      .split("-")
+      .map(Number);
+    const expectedMonth = `${MONTH_NAMES[targetMonth - 1]} ${targetYear}`;
     const displayedMonth = document.querySelector(".topbar-title")?.textContent?.trim();
     if (displayedMonth && displayedMonth !== expectedMonth) {
       throw new Error(
@@ -50,7 +58,7 @@
       );
     }
 
-    const targetDay = String(target.getUTCDate());
+    const targetDay = String(targetDayNumber);
     const dayUnit = Array.from(document.querySelectorAll(".day-unit")).find(
       (element) => visibleDayNumber(element) === targetDay
     );

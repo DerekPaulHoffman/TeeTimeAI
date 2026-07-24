@@ -135,7 +135,7 @@ describe("local Chrome reader contract", () => {
     ).toMatchObject({
       status: "READER_ERROR",
       slots: [],
-      readerVersion: "grassy-hill-rendered-v2"
+      readerVersion: "grassy-hill-rendered-v3"
     });
   });
 
@@ -191,6 +191,19 @@ describe("local Chrome reader contract", () => {
     );
     expect(optionsSource).toContain('.value.replace(/^\\uFEFF/u, "")');
     expect(optionsSource).toContain(".trim();");
+  });
+
+  it("selects local dates without relying on page locale globals", () => {
+    const contentSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
+      "utf8"
+    );
+
+    expect(contentSource).not.toContain("Intl.DateTimeFormat");
+    expect(contentSource).toContain("MONTH_NAMES[targetMonth - 1]");
+    expect(contentSource).toContain(
+      "const [targetYear, targetMonth, targetDayNumber] = targetDate"
+    );
   });
 
   it("rejects slots for the wrong date or an unsupported player count", () => {
