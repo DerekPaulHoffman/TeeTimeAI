@@ -215,8 +215,11 @@ describe("local reader job service", () => {
       })
     ).resolves.toMatchObject({
       slots: [
-        { holes: 9, availableSpots: 4 },
-        { holes: 18, availableSpots: 4 }
+        {
+          holes: 18,
+          bookableHoleCounts: [9, 18],
+          availableSpots: 4
+        }
       ]
     });
   });

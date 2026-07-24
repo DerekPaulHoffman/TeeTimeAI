@@ -233,9 +233,10 @@ export async function getFreshLocalReaderTeeSheet(input: {
   ) {
     return null;
   }
-  const slots: TeeTimeSlot[] = result.slots.flatMap((slot) =>
-    slot.holes.map((holes) => ({
-      sourceId: `local-grassy-hill-${slot.startsAtLocal}-${holes}`,
+  const slots: TeeTimeSlot[] = result.slots.map((slot) => {
+    const holes = slot.holes.includes(18) ? 18 : slot.holes[0];
+    return {
+      sourceId: `local-grassy-hill-${slot.startsAtLocal}`,
       courseId: input.courseId,
       startsAt: slot.startsAtLocal,
       availableSpots: slot.availableSpots,
@@ -243,8 +244,8 @@ export async function getFreshLocalReaderTeeSheet(input: {
       ...(slot.priceCents === null ? {} : { priceCents: slot.priceCents }),
       holes,
       bookableHoleCounts: slot.holes
-    }))
-  );
+    };
+  });
   return {
     slots,
     targetDateStatus: result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
