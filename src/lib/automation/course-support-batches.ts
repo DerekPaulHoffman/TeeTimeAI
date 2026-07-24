@@ -1049,6 +1049,21 @@ export function chooseCourseSupportReleaseDiffBase(input: {
     : trustedBaseSha;
 }
 
+export function canVerifyUnchangedCourseSupportRuntime(input: {
+  allowUnchangedRuntime: boolean;
+  baseSha: string;
+  persistedReleaseSha: string | null;
+  requestedReleaseSha: string;
+  plannedPaths: string[];
+}) {
+  return Boolean(
+    input.allowUnchangedRuntime &&
+      input.persistedReleaseSha === null &&
+      input.requestedReleaseSha === input.baseSha &&
+      input.plannedPaths.length === 0
+  );
+}
+
 export function orderCourseSupportBatchIncidents<
   T extends { id: string; createdAt: Date; course: { name: string } }
 >(entries: readonly T[]) {

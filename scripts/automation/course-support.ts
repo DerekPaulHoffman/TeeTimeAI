@@ -16,6 +16,7 @@ import {
   claimCourseSupportBatch,
   chooseCourseSupportReleaseDiffBase,
   closeoutCourseSupportBatch,
+  canVerifyUnchangedCourseSupportRuntime,
   getCourseSupportBatchPacket,
   getCourseSupportBatchRecoveryProvenance,
   getOwnedCourseSupportLeaseToken,
@@ -198,12 +199,21 @@ async function heartbeat(args: string[]) {
   }
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
-  const releaseSha = readOption(args, "--release-sha");
+  const currentRuntime = args.includes("--current-runtime");
+  const requestedReleaseSha = readOption(args, "--release-sha");
+  if (currentRuntime && requestedReleaseSha) {
+    throw new Error("--current-runtime cannot be combined with --release-sha.");
+  }
+  const provenance = currentRuntime
+    ? await getCourseSupportBatchRecoveryProvenance(batchId)
+    : null;
+  const releaseSha = currentRuntime ? provenance!.baseSha : requestedReleaseSha;
   let releaseAdvanceProof: CourseSupportReleaseAdvanceProof | undefined;
   if (releaseSha) {
     ({ releaseAdvanceProof } = await assertReleaseGitProvenance(
       batchId,
-      releaseSha
+      releaseSha,
+      { allowUnchangedRuntime: currentRuntime }
     ));
   }
   return heartbeatCourseSupportBatch({
@@ -224,9 +234,19 @@ async function verify(args: string[]) {
   }
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
-  const releaseSha = readOption(args, "--release-sha");
+  const currentRuntime = args.includes("--current-runtime");
+  const requestedReleaseSha = readOption(args, "--release-sha");
+  if (currentRuntime && requestedReleaseSha) {
+    throw new Error("--current-runtime cannot be combined with --release-sha.");
+  }
+  const provenance = currentRuntime
+    ? await getCourseSupportBatchRecoveryProvenance(batchId)
+    : null;
+  const releaseSha = currentRuntime ? provenance!.baseSha : requestedReleaseSha;
   if (releaseSha) {
-    await assertReleaseGitProvenance(batchId, releaseSha);
+    await assertReleaseGitProvenance(batchId, releaseSha, {
+      allowUnchangedRuntime: currentRuntime
+    });
   }
   return verifyCourseSupportBatch({
     batchId,
@@ -298,7 +318,11 @@ async function resolveBatchId(args: string[]) {
   return resolveCourseSupportBatchReference(requireOption(args, "--batch-ref"));
 }
 
-async function assertReleaseGitProvenance(batchId: string, releaseSha: string) {
+async function assertReleaseGitProvenance(
+  batchId: string,
+  releaseSha: string,
+  options?: { allowUnchangedRuntime?: boolean }
+) {
   if (!/^[a-f0-9]{40}$/i.test(releaseSha)) {
     throw new Error("--release-sha must be a full 40-character Git commit SHA.");
   }
@@ -337,7 +361,18 @@ async function assertReleaseGitProvenance(batchId: string, releaseSha: string) {
   const plannedPaths = new Set(provenance.plannedPaths);
   const committedPaths = readCommittedPaths(releaseDiffBase, git.headSha);
   if (committedPaths.length === 0) {
-    throw new Error("Responder release must contain a committed planned change.");
+    if (
+      !canVerifyUnchangedCourseSupportRuntime({
+        allowUnchangedRuntime: options?.allowUnchangedRuntime === true,
+        baseSha: provenance.baseSha,
+        persistedReleaseSha: provenance.releaseSha,
+        requestedReleaseSha: releaseSha,
+        plannedPaths: provenance.plannedPaths
+      })
+    ) {
+      throw new Error("Responder release must contain a committed planned change.");
+    }
+    return { releaseAdvanceProof: undefined };
   }
   const unplannedPaths = committedPaths.filter((path) => !plannedPaths.has(path));
   if (unplannedPaths.length > 0) {

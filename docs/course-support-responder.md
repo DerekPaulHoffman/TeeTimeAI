@@ -134,6 +134,13 @@ npm run automation:course-support -- claim-path --batch-ref <batch-ref> --path s
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status IMPLEMENTING
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING --release-sha <git-sha>
 
+# When investigation justifies no code change, verify the shared adapter on the
+# exact production deployment of the clean claimed base SHA. This is permitted
+# only before paths or a release have been recorded.
+npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING --current-runtime
+npm run deployment:wait -- --sha <claimed-base-sha>
+npm run automation:course-support -- verify --batch-ref <batch-ref> --current-runtime --deployed-at <iso-timestamp>
+
 # Verify classification evidence, or first run deployment:wait and then verify fresh probes from the exact deployed SHA.
 npm run automation:course-support -- verify --batch-ref <batch-ref>
 npm run deployment:wait -- --sha <git-sha>
@@ -150,8 +157,11 @@ npm run automation:course-support -- mark-needs-human --batch-ref <batch-ref> --
 # Close from independently derived persisted evidence.
 npm run automation:course-support -- closeout --batch-ref <batch-ref> --outcome success
 
-# Recovery is explicit and provenance checked. Continue the recovered batch
-# directly; an owner-aware inspect may report resume_owned_work for this task.
+# Recovery is explicit and provenance checked. When inspect returns
+# recovery_required, make no provider, implementation, or deployment change;
+# call recover once from the persistent responder checkout. It may adopt only
+# matching clean work and rejects dirty, unplanned, or committed foreign work.
+# Continue a successfully recovered batch directly and stop on rejection.
 npm run automation:course-support -- recover --batch-ref <batch-ref>
 
 # Responder-state backfill is dry-run by default. Existing synthetic cohorts first

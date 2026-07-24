@@ -67,6 +67,7 @@ import {
   classifyFreshBatchEvidence,
   claimCourseSupportBatch,
   closeoutCourseSupportBatch,
+  canVerifyUnchangedCourseSupportRuntime,
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
   deriveCourseSupportCurrentDemand,
@@ -2963,6 +2964,56 @@ describe("course-support release Git reconciliation", () => {
         originMainIsAncestorOfRequestedRelease: true
       })
     ).toBeNull();
+  });
+
+  it("allows evidence-only verification on the unchanged claimed runtime", () => {
+    expect(
+      canVerifyUnchangedCourseSupportRuntime({
+        allowUnchangedRuntime: true,
+        baseSha,
+        persistedReleaseSha: null,
+        requestedReleaseSha: baseSha,
+        plannedPaths: []
+      })
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "without an explicit current-runtime request",
+      allowUnchangedRuntime: false,
+      persistedReleaseSha: null,
+      requestedReleaseSha: baseSha,
+      plannedPaths: [] as string[]
+    },
+    {
+      label: "after a release was already fenced",
+      allowUnchangedRuntime: true,
+      persistedReleaseSha,
+      requestedReleaseSha: baseSha,
+      plannedPaths: [] as string[]
+    },
+    {
+      label: "for a different commit",
+      allowUnchangedRuntime: true,
+      persistedReleaseSha: null,
+      requestedReleaseSha,
+      plannedPaths: [] as string[]
+    },
+    {
+      label: "after implementation paths were claimed",
+      allowUnchangedRuntime: true,
+      persistedReleaseSha: null,
+      requestedReleaseSha: baseSha,
+      plannedPaths: ["src/lib/adapters/example.ts"]
+    }
+  ])("rejects unchanged-runtime verification $label", (candidate) => {
+    expect(
+      canVerifyUnchangedCourseSupportRuntime({
+        ...candidate,
+        baseSha
+      })
+    ).toBe(false);
   });
 });
 
