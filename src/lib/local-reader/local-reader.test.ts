@@ -119,6 +119,26 @@ describe("local Chrome reader contract", () => {
     ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
+  it("fails closed when tee cards are visible but their fields cannot be parsed", () => {
+    document.title = "Grassy Hill Country Club";
+    document.body.innerHTML = `
+      <button class="btn-teesheet">
+        <div>Loading tee-time details</div>
+      </button>
+    `;
+
+    expect(
+      loadReader().readSnapshot(
+        document,
+        "https://grassyhill.cps.golf/onlineresweb/search-teetime"
+      )
+    ).toMatchObject({
+      status: "READER_ERROR",
+      slots: [],
+      readerVersion: "grassy-hill-rendered-v2"
+    });
+  });
+
   it("validates jobs and results and rejects malformed availability", () => {
     const requestedAt = "2026-07-24T12:00:00.000Z";
     expect(
@@ -154,6 +174,23 @@ describe("local Chrome reader contract", () => {
 
     expect(verifyLocalReaderSignature(secret, payload, signature)).toBe(true);
     expect(verifyLocalReaderSignature(secret, '{"jobId":"job-2"}', signature)).toBe(false);
+  });
+
+  it("normalizes copied device tokens before saving and signing", () => {
+    const backgroundSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
+      "utf8"
+    );
+    const optionsSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "options.js"),
+      "utf8"
+    );
+
+    expect(backgroundSource).toContain(
+      'deviceToken: (settings.deviceToken || "").replace(/^\\uFEFF/u, "").trim()'
+    );
+    expect(optionsSource).toContain('.value.replace(/^\\uFEFF/u, "")');
+    expect(optionsSource).toContain(".trim();");
   });
 
   it("rejects slots for the wrong date or an unsupported player count", () => {

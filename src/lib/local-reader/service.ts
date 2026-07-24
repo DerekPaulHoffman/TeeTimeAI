@@ -58,7 +58,10 @@ export async function queueLocalReaderJob(input: {
     (existing.status === "PENDING" ||
       (existing.status === "LEASED" &&
         existing.leaseExpiresAt !== null &&
-        existing.leaseExpiresAt > now))
+        existing.leaseExpiresAt > now) ||
+      (existing.status === "COMPLETED" &&
+        existing.resultExpiresAt !== null &&
+        existing.resultExpiresAt > now))
   ) {
     return existing;
   }

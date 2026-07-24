@@ -64,16 +64,34 @@
   async function waitForTargetPage(targetDate) {
     const expectedLabel = targetDateLabel(targetDate);
     const deadline = Date.now() + 20_000;
+    let slotCount = 0;
+    let slotsStableSince = null;
+    let emptyStableSince = null;
     while (Date.now() < deadline) {
-      if (document.querySelector(`time[datetime^="${CSS.escape(targetDate)}T"]`)) {
-        return;
+      const now = Date.now();
+      const currentSlotCount = document.querySelectorAll(
+        `button.btn-teesheet time[datetime^="${CSS.escape(targetDate)}T"]`
+      ).length;
+      if (currentSlotCount > 0) {
+        if (currentSlotCount !== slotCount) {
+          slotCount = currentSlotCount;
+          slotsStableSince = now;
+        } else if (slotsStableSince !== null && now - slotsStableSince >= 750) {
+          return;
+        }
+      } else {
+        slotCount = 0;
+        slotsStableSince = null;
       }
       const body = document.body?.innerText || "";
       if (
         body.includes(expectedLabel) &&
         /\b(?:no tee times|no availability|no results)\b/i.test(body)
       ) {
-        return;
+        emptyStableSince ??= now;
+        if (now - emptyStableSince >= 5_000) return;
+      } else {
+        emptyStableSince = null;
       }
       await delay(250);
     }

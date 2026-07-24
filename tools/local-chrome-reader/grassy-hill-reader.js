@@ -1,7 +1,7 @@
 (function initializeGrassyHillReader(root) {
   "use strict";
 
-  const READER_VERSION = "grassy-hill-rendered-v1";
+  const READER_VERSION = "grassy-hill-rendered-v2";
   const ALLOWED_HOST = "grassyhill.cps.golf";
   const ALLOWED_PATH = /^\/onlineresweb\/search-teetime\/?$/;
   const LOCAL_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
@@ -103,10 +103,17 @@
       slots.push(slot);
     }
     slots.sort((left, right) => left.startsAtLocal.localeCompare(right.startsAtLocal));
+    const visibleCardCount =
+      documentRoot.querySelectorAll("button.btn-teesheet").length;
 
     return {
       courseKey: "grassy-hill",
-      status: slots.length > 0 ? "AVAILABLE" : "NO_AVAILABILITY",
+      status:
+        slots.length > 0
+          ? "AVAILABLE"
+          : visibleCardCount > 0
+            ? "READER_ERROR"
+            : "NO_AVAILABILITY",
       observedAt: new Date().toISOString(),
       pageUrl,
       pageTitle: pageTitle || "Grassy Hill Country Club",

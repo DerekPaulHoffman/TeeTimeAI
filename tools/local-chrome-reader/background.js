@@ -35,7 +35,7 @@ async function getSettings() {
     enabled: settings.enabled === true,
     backendOrigin: settings.backendOrigin || DEFAULT_BACKEND_ORIGIN,
     deviceId: settings.deviceId || "",
-    deviceToken: settings.deviceToken || ""
+    deviceToken: (settings.deviceToken || "").replace(/^\uFEFF/u, "").trim()
   };
 }
 

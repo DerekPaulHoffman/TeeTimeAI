@@ -73,6 +73,32 @@ describe("local reader job service", () => {
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
   });
 
+  it("does not erase an unexpired completed result during an overlapping retry", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-1",
+      status: "COMPLETED",
+      leaseExpiresAt: null,
+      jobExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
+      result: {
+        status: "NO_AVAILABILITY",
+        slots: []
+      }
+    });
+
+    await expect(
+      queueLocalReaderJob({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 3,
+        targetDate: "2026-07-25",
+        players: 4,
+        bookingUrl
+      })
+    ).resolves.toMatchObject({ id: "job-1", status: "COMPLETED" });
+    expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+  });
+
   it("claims an eligible job with a bounded lease", async () => {
     prismaMocks.localReaderJob.updateMany
       .mockResolvedValueOnce({ count: 0 })
