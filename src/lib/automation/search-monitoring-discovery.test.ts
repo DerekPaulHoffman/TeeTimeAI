@@ -919,6 +919,88 @@ describe("search monitoring discovery", () => {
     );
   });
 
+  it("learns Chronogolf metadata from an official reservation-page iframe", async () => {
+    const officialUrl = "https://public-course.example/";
+    const reservationUrl =
+      "https://public-course.example/online-tee-time-reservations/";
+    const widgetUrl =
+      "https://www.chronogolf.com/en/club/19622/widget?medium=widget&source=club";
+    const profileUrl = "https://www.chronogolf.com/club/19622";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === officialUrl) {
+        return new Response(
+          `<html><head><title>Public Course</title></head><body><a href="${reservationUrl}">Tee Time Reservations</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === reservationUrl) {
+        return new Response(
+          `<html><head><title>Public Course Tee Times</title></head><body><iframe src="${widgetUrl}"></iframe></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      expect(value).toBe(profileUrl);
+      return new Response(
+        `<html><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+          props: {
+            pageProps: {
+              club: {
+                id: 19622,
+                features: { onlineBookingEnabled: true },
+                courses: [{ uuid: "public-course-uuid" }]
+              }
+            }
+          }
+        })}</script></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+    const search = {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "public-course",
+            name: "Public Course",
+            website: officialUrl,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            automationEligibility: "UNKNOWN",
+            bookingMethod: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    } as never;
+
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      officialUrl,
+      reservationUrl,
+      profileUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "LEARNED",
+        detectedPlatform: "CHRONOGOLF",
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED",
+        bookingUrl: profileUrl,
+        apiMetadata: {
+          clubId: 19622,
+          courseIds: ["public-course-uuid"],
+          bookingBaseUrl: profileUrl
+        },
+        evidence: expect.objectContaining({
+          learnedFrom: "chronogolf-public-club-profile",
+          observedUrls: expect.arrayContaining([profileUrl])
+        })
+      })
+    );
+  });
+
   it("learns minimal CPS metadata from the exact tenant public configuration", async () => {
     const officialUrl = "https://town.example/golf";
     const bookingUrl =

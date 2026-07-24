@@ -454,6 +454,7 @@ type CollectedLinkCandidate = {
   label: string;
   targetScopedRedirect?: boolean;
   inferredCourseBookingRoute?: boolean;
+  embeddedProviderEvidence?: boolean;
   legacyProphetConfiguration?: LegacyProphetConfiguration;
 };
 
@@ -2014,6 +2015,7 @@ export async function collectOfficialSiteEvidence(
     ]);
     const unvisitedCandidates = linkCandidates.filter(
       (candidate) =>
+        !candidate.embeddedProviderEvidence &&
         !visited.has(normalizeSourceKey(candidate.url)) &&
         isInspectablePublicHtmlLink(candidate.url)
     );
@@ -3218,11 +3220,24 @@ function extractHtmlEvidence(
     /<iframe\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi
   )) {
     const url = resolveHttpUrl(match[1] ?? match[2] ?? match[3], pageUrl);
-    if (!url || !isLegacyTeeItUpPlayUrl(url)) {
+    if (!url) {
+      continue;
+    }
+    const chronogolfProfileUrl = deriveChronogolfWidgetProfileUrl(url);
+    if (!isLegacyTeeItUpPlayUrl(url) && !chronogolfProfileUrl) {
       continue;
     }
     observedUrls.push(url);
-    linkCandidates.push({ url, label: "Book tee times" });
+    if (chronogolfProfileUrl) {
+      observedUrls.push(chronogolfProfileUrl);
+      linkCandidates.push({
+        url: chronogolfProfileUrl,
+        label: "Book tee times",
+        embeddedProviderEvidence: true
+      });
+    } else {
+      linkCandidates.push({ url, label: "Book tee times" });
+    }
   }
 
   for (const match of decodedHtml.matchAll(
@@ -3304,6 +3319,47 @@ function extractHtmlEvidence(
       pageUrl
     )
   };
+}
+
+function deriveChronogolfWidgetProfileUrl(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !/^(?:www\.)?chronogolf\.com$/iu.test(url.hostname) ||
+    url.hash
+  ) {
+    return null;
+  }
+  const clubId = url.pathname.match(
+    /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?club\/([1-9]\d{0,9})\/widget\/?$/iu
+  )?.[1];
+  if (!clubId || Number(clubId) > 2_147_483_647) {
+    return null;
+  }
+  const entries = [...url.searchParams.entries()];
+  const keys = entries.map(([key]) => key.toLocaleLowerCase("en-US"));
+  if (
+    new Set(keys).size !== keys.length ||
+    entries.some(([key, value]) => {
+      const normalizedKey = key.toLocaleLowerCase("en-US");
+      const normalizedValue = value.toLocaleLowerCase("en-US");
+      return !(
+        (normalizedKey === "medium" && normalizedValue === "widget") ||
+        (normalizedKey === "source" && normalizedValue === "club")
+      );
+    })
+  ) {
+    return null;
+  }
+  return `https://www.chronogolf.com/club/${clubId}`;
 }
 
 function extractTeeItUpLegacyConfigurations(
