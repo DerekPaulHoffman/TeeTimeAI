@@ -4319,6 +4319,34 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("recognizes an official clubhouse number listed after the reservation instruction", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "dutcher-golf-course",
+      courseName: "Dutcher Golf Course",
+      sourceUrl: "https://dutchergolfcourse.com/",
+      finalUrl: "https://dutchergolfcourse.com/",
+      observedUrls: [
+        "https://dutchergolfcourse.com/",
+        "tel:8458559845"
+      ],
+      visibleText:
+        "Dutcher Golf Course. The Dutcher Golf Course is open daily with tee times starting at 8:00 a.m. on weekdays and 7:00 a.m. on weekends. Tee Times. We take reservations daily up to 7 days in advance. Times are available in 10-minute intervals throughout the day. Payment reserves your time, first come first serve basis. Please call the clubhouse in advance to schedule your game at 845-855-9845."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "845-855-9845",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.92,
+      evidence: {
+        learnedFrom: "official-phone-reservation-contact"
+      }
+    });
+  });
+
   it("preserves phone-only access when the official evidence is explicitly exclusive", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "phone-only-course",

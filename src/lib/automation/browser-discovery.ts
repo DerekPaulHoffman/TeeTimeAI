@@ -3059,7 +3059,7 @@ function hasStrongCourseIdentityEvidence(
     "public"
   ]);
   if (
-    meaningfulTokens.length < 2 ||
+    meaningfulTokens.length === 0 ||
     !meaningfulTokens.some((token) => token.length >= 3 && !genericTokens.has(token))
   ) {
     return false;
@@ -3069,6 +3069,17 @@ function hasStrongCourseIdentityEvidence(
     Math.max(0, directPhone.matchStart - 600),
     directPhone.matchStart
   );
+  if (
+    meaningfulTokens.length === 1 &&
+    (
+      meaningfulTokens[0].length < 5 ||
+      !precedingContext
+        .toLocaleLowerCase("en-US")
+        .includes(courseName.toLocaleLowerCase("en-US"))
+    )
+  ) {
+    return false;
+  }
   const normalizedContext = normalizeCourseIdentityName(precedingContext);
   if (!` ${normalizedContext} `.includes(` ${normalizedCourseName} `)) {
     return false;
@@ -3092,12 +3103,17 @@ function hasStrongCourseIdentityEvidence(
   );
   const hasNearbyNormalizedAlias =
     targetStart < 0 && betweenTargetAndInstruction.length <= 240;
+  const hasExactSingleNameClubhouseScope =
+    meaningfulTokens.length === 1 &&
+    targetStart >= 0 &&
+    directPhone.explicitClubhouseContact;
   if (
     hasDifferentExplicitCourseIdentity(
       `${betweenTargetAndInstruction} ${afterInstruction}`,
       courseName
     ) ||
     (!hasNearbyNormalizedAlias &&
+      !hasExactSingleNameClubhouseScope &&
       hasUnscopedPhoneAssociationContext(
         betweenTargetAndInstruction,
         afterInstruction
@@ -3390,11 +3406,18 @@ function isSafePhoneAssociationPart(value: string) {
 type DirectReservationPhone =
   | { kind: "NONE" }
   | { kind: "AMBIGUOUS" }
-  | { kind: "FOUND"; phone: string; matchStart: number; matchEnd: number };
+  | {
+      kind: "FOUND";
+      phone: string;
+      matchStart: number;
+      matchEnd: number;
+      explicitClubhouseContact: boolean;
+    };
 
 function findDirectTeeTimeReservationPhone(visibleText: string): DirectReservationPhone {
   const patterns = [
     /\b(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s*(?:,|\s)*(?:to|for)\s+(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)/gi,
+    /\b(?:please\s+)?call\s+(?:(?:the\s+)?(?:clubhouse|pro\s+shop)\s*)?(?:in\s+advance\s+)?to\s+(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:game|round|tee\s*times?|tee\s*time\s+reservations?)\s+(?:at\s+)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\b(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s+(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\b(?:for\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s*[:,;-]?\s*(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\btee\s*times?\b[^.!?]{0,80}\b(?:made|booked|reserved|scheduled)\b[^.!?]{0,60}\b(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
@@ -3402,7 +3425,12 @@ function findDirectTeeTimeReservationPhone(visibleText: string): DirectReservati
   ];
   const phoneByDigits = new Map<
     string,
-    { phone: string; matchStart: number; matchEnd: number }
+    {
+      phone: string;
+      matchStart: number;
+      matchEnd: number;
+      explicitClubhouseContact: boolean;
+    }
   >();
   for (const pattern of patterns) {
     for (const match of visibleText.matchAll(pattern)) {
@@ -3417,7 +3445,8 @@ function findDirectTeeTimeReservationPhone(visibleText: string): DirectReservati
           phoneByDigits.set(normalizedDigits, {
             phone,
             matchStart,
-            matchEnd: matchStart + match[0].length
+            matchEnd: matchStart + match[0].length,
+            explicitClubhouseContact: /\bthe\s+clubhouse\b/i.test(match[0])
           });
         }
       }
