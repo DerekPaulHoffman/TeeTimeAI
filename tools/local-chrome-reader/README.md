@@ -1,4 +1,4 @@
-# CPS local Chrome reader
+# Local Chrome tee-time reader
 
 This worker separates a backend job from a local, rendered-page read:
 
@@ -6,9 +6,10 @@ This worker separates a backend job from a local, rendered-page read:
 signed backend job -> local Chrome page -> normalized slots -> signed backend result
 ```
 
-It reads only exact, allowlisted, signed-out CPS tee-time search routes. It
-normalizes rendered start time, hole options, public golfer capacity, price, and
-cart labels from both current and legacy CPS card layouts. It does not inspect
+It reads only exact, allowlisted, signed-out CPS tee-time search routes and
+Chronogolf public club profiles. It normalizes rendered start time, hole
+options, public golfer capacity, price, and cart labels from current and legacy
+CPS card layouts plus Chronogolf's public tee-time cards. It does not inspect
 cookies or browser storage, call private provider APIs, click a tee time, sign
 in, enter a cart, or continue to checkout.
 
@@ -16,6 +17,11 @@ The current allowlist includes Grassy Hill, Overpeck, Glen Mills, Bayberry Hills
 Oak Lane, Candia Woods, Oxford Greens, Shennecossett, Stanley, Colonie,
 Springfield Township, Pine Hollow, and Capital Hills. Fenwick is deliberately
 excluded because its public route redirects to email verification.
+
+The Chronogolf allowlist contains only the exact public profiles owned by
+current course-support work. Those pages are opened with a date, tee-time step,
+and public player-count selection; unrelated club paths and unexpected page
+shapes fail closed.
 
 ## Run the local proof backend
 
@@ -40,7 +46,7 @@ alerts. POST `/jobs` accepts `courseKey`, `targetDate`, and `players`;
 3. In the options page, enter the device token configured as
    `LOCAL_READER_DEVICE_TOKEN` in production, check **Enable polling**, and save.
 4. Leave Chrome running. The extension polls outbound once per minute and opens
-   an inactive tab only when a signed allowlisted CPS job is waiting.
+   an inactive tab only when a signed allowlisted reader job is waiting.
 
 After pulling a reader update, use the extension's reload button on
 `chrome://extensions` so Chrome applies the new manifest and scripts.

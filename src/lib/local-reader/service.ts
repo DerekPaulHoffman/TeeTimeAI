@@ -13,7 +13,7 @@ import {
   validateLocalReaderResultForJob,
   type LocalReaderResult,
 } from "./contracts";
-import { getLocalReaderCourseKey } from "./course-key";
+import { getLocalReaderCourseKey, getLocalReaderJobUrl } from "./course-key";
 
 export { getLocalReaderCourseKey } from "./course-key";
 
@@ -31,33 +31,31 @@ export async function queueLocalReaderJob(input: {
 }) {
   const courseKey = getLocalReaderCourseKey(input.bookingUrl);
   if (!courseKey) return null;
-  const course = LOCAL_READER_COURSES[courseKey];
   const now = new Date();
-  const reusableAcrossScheduleVersions =
-    await prisma.localReaderJob.findFirst({
-      where: {
-        teeSearchId: input.searchId,
-        courseId: input.courseId,
-        targetDate: input.targetDate,
-        players: input.players,
-        OR: [
-          {
-            status: "PENDING",
-            jobExpiresAt: { gt: now },
-          },
-          {
-            status: "LEASED",
-            jobExpiresAt: { gt: now },
-            leaseExpiresAt: { gt: now },
-          },
-          {
-            status: "COMPLETED",
-            resultExpiresAt: { gt: now },
-          },
-        ],
-      },
-      orderBy: { createdAt: "asc" },
-    });
+  const reusableAcrossScheduleVersions = await prisma.localReaderJob.findFirst({
+    where: {
+      teeSearchId: input.searchId,
+      courseId: input.courseId,
+      targetDate: input.targetDate,
+      players: input.players,
+      OR: [
+        {
+          status: "PENDING",
+          jobExpiresAt: { gt: now },
+        },
+        {
+          status: "LEASED",
+          jobExpiresAt: { gt: now },
+          leaseExpiresAt: { gt: now },
+        },
+        {
+          status: "COMPLETED",
+          resultExpiresAt: { gt: now },
+        },
+      ],
+    },
+    orderBy: { createdAt: "asc" },
+  });
   if (reusableAcrossScheduleVersions) {
     return reusableAcrossScheduleVersions;
   }
@@ -97,12 +95,12 @@ export async function queueLocalReaderJob(input: {
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
-      bookingUrl: course.bookingUrl,
+      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate),
       jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
     },
     update: {
       courseKey,
-      bookingUrl: course.bookingUrl,
+      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate),
       status: "PENDING",
       leaseToken: null,
       leaseExpiresAt: null,

@@ -4,39 +4,96 @@ const DEFAULT_BACKEND_ORIGIN = "https://teetimespot.com";
 const POLL_ALARM = "tee-time-spot-local-reader-poll";
 const POLL_PERIOD_MINUTES = 1;
 const ALLOWED_COURSES = Object.freeze({
-  "grassy-hill": ["Grassy Hill Country Club", "grassyhill.cps.golf", []],
-  overpeck: ["Overpeck Golf Course", "overpeckgc.cps.golf", []],
+  "grassy-hill": [
+    "Grassy Hill Country Club",
+    "grassyhill.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
+  overpeck: [
+    "Overpeck Golf Course",
+    "overpeckgc.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
   "glen-mills": [
     "The Golf Course at Glen Mills",
     "golfatglenmills.cps.golf",
+    "/onlineresweb/search-teetime",
     [],
   ],
   "bayberry-hills": [
     "Bayberry Hills Golf Course",
     "yarmouthpublic.cps.golf",
+    "/onlineresweb/search-teetime",
     [],
   ],
   "oak-lane": [
     "The Tradition Golf Club at Oak Lane",
     "traditionoaklane.cps.golf",
+    "/onlineresweb/search-teetime",
     [],
   ],
-  "candia-woods": ["Candia Woods Golf Links", "candiawoods.cps.golf", []],
+  "candia-woods": [
+    "Candia Woods Golf Links",
+    "candiawoods.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
   "oxford-greens": [
     "The Golf Club at Oxford Greens",
     "oxfordgreens.cps.golf",
+    "/onlineresweb/search-teetime",
     [],
   ],
-  shennecossett: ["Shennecossett Golf Course", "shennecossett.cps.golf", []],
-  stanley: ["Stanley Golf Course SGC", "stanleygolf.cps.golf", []],
-  colonie: ["Colonie Golf Course", "colonie.cps.golf", []],
+  shennecossett: [
+    "Shennecossett Golf Course",
+    "shennecossett.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
+  stanley: [
+    "Stanley Golf Course SGC",
+    "stanleygolf.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
+  colonie: [
+    "Colonie Golf Course",
+    "colonie.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
   "springfield-township": [
     "Springfield Twp Golf Course",
     "springfield.cps.golf",
+    "/onlineresweb/search-teetime",
     [],
   ],
-  "pine-hollow": ["Pine Hollow Golf Club", "pinehollow.cps.golf", []],
-  "capital-hills": ["Capital Hills at Albany", "capitalhillsny.cps.golf", []],
+  "pine-hollow": [
+    "Pine Hollow Golf Club",
+    "pinehollow.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
+  "capital-hills": [
+    "Capital Hills at Albany",
+    "capitalhillsny.cps.golf",
+    "/onlineresweb/search-teetime",
+    [],
+  ],
+  crestbrook: [
+    "Crestbrook Golf Course",
+    "www.chronogolf.com",
+    "/club/crestbrook-park-golf-course",
+    [],
+  ],
+  "crystal-lake": [
+    "crystal lake golf",
+    "www.chronogolf.com",
+    "/club/crystal-lake-golf-club-rhode-island-mapleville",
+    [],
+  ],
 });
 let pollInProgress = false;
 
@@ -44,17 +101,22 @@ function isAllowlistedJob(job) {
   try {
     const allowed = ALLOWED_COURSES[job?.courseKey];
     if (!allowed) return false;
-    const [courseName, hostname, cardTextIncludes] = allowed;
+    const [courseName, hostname, pathname, cardTextIncludes] = allowed;
     const url = new URL(job.bookingUrl);
+    const isChronogolf = hostname === "www.chronogolf.com";
+    const date = url.searchParams.get("date");
+    const step = url.searchParams.get("step");
     return (
       job.courseName === courseName &&
       JSON.stringify(job.cardTextIncludes) ===
         JSON.stringify(cardTextIncludes) &&
       url.protocol === "https:" &&
       url.hostname === hostname &&
-      /^\/onlineresweb\/search-teetime\/?$/u.test(url.pathname) &&
+      url.pathname === pathname &&
       url.username === "" &&
-      url.password === ""
+      url.password === "" &&
+      (!isChronogolf ||
+        (/^\d{4}-\d{2}-\d{2}$/u.test(date || "") && step === "teetimes"))
     );
   } catch {
     return false;
@@ -236,7 +298,7 @@ async function poll() {
       return;
     }
     if (!isAllowlistedJob(payload.job)) {
-      throw new Error("The backend returned a non-allowlisted CPS job.");
+      throw new Error("The backend returned a non-allowlisted reader job.");
     }
     const tab = await chrome.tabs.create({
       url: payload.job.bookingUrl,

@@ -55,14 +55,32 @@ function loadReader() {
   return context.TeeTimeSpotCpsReader as Reader;
 }
 
+function loadChronogolfReader() {
+  const source = readFileSync(
+    resolve(
+      process.cwd(),
+      "tools",
+      "local-chrome-reader",
+      "chronogolf-reader.js",
+    ),
+    "utf8",
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotChronogolfReader as Reader;
+}
+
 describe("local Chrome reader contract", () => {
-  it("accepts every exact allowlisted CPS route and rejects other routes", () => {
+  it("accepts every exact allowlisted reader route and rejects other routes", () => {
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
+      const course = LOCAL_READER_COURSES[courseKey];
+      const suffix =
+        course.provider === "CPS"
+          ? "?TeeOffTimeMin=0"
+          : "?date=2026-07-25&step=teetimes";
       expect(
-        isAllowedLocalReaderUrl(
-          courseKey,
-          `${LOCAL_READER_COURSES[courseKey].bookingUrl}?TeeOffTimeMin=0`,
-        ),
+        isAllowedLocalReaderUrl(courseKey, `${course.bookingUrl}${suffix}`),
       ).toBe(true);
     }
     expect(
@@ -162,6 +180,79 @@ describe("local Chrome reader contract", () => {
         },
       ],
     });
+  });
+
+  it("parses current signed-out Chronogolf tee-time cards", () => {
+    document.title = "Book Crestbrook Park Golf Course Tee Times";
+    document.body.innerHTML = `
+      <div role="dialog">
+        <div data-testid="teeTimeCard" role="button" tabindex="0">
+          <span>8:40 AM</span>
+          <span>from</span>
+          <span>$50</span>
+          <span title="1 player available">1</span>
+          <span title="Hole count">9, 18</span>
+        </div>
+        <div data-testid="teeTimeCard" role="button" tabindex="0">
+          <span>12:20 PM</span>
+          <span>from</span>
+          <span>$50</span>
+          <span title="# of players available">2 - 4</span>
+          <span title="Hole count">9, 18</span>
+        </div>
+      </div>
+    `;
+    const job = jobFor("crestbrook");
+    const datedJob = {
+      ...job,
+      targetDate: "2026-07-26",
+      bookingUrl: `${job.bookingUrl}?date=2026-07-26&step=teetimes`,
+    };
+
+    expect(
+      loadChronogolfReader().readSnapshot(
+        document,
+        `${datedJob.bookingUrl}&groupSize=2`,
+        datedJob,
+      ),
+    ).toMatchObject({
+      status: "AVAILABLE",
+      slots: [
+        {
+          startsAtLocal: "2026-07-26T12:20:00",
+          timeLabel: "12:20 PM",
+          holes: [9, 18],
+          minimumPlayers: 2,
+          availableSpots: 4,
+          priceCents: 5000,
+        },
+      ],
+    });
+  });
+
+  it("fails closed on malformed Chronogolf cards and unsafe paths", () => {
+    document.title = "Book Crystal Lake Golf Club Tee Times";
+    document.body.innerHTML = `
+      <div data-testid="teeTimeCard" role="button">
+        <span>Loading tee-time details</span>
+      </div>
+    `;
+    const job = jobFor("crystal-lake");
+
+    expect(
+      loadChronogolfReader().readSnapshot(document, job.bookingUrl, job),
+    ).toMatchObject({
+      status: "READER_ERROR",
+      slots: [],
+      readerVersion: "chronogolf-rendered-v1",
+    });
+    expect(
+      loadChronogolfReader().readSnapshot(
+        document,
+        `${job.bookingUrl}/checkout`,
+        job,
+      ),
+    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
   it("parses the legacy CPS material-card layout", () => {
@@ -316,6 +407,9 @@ describe("local Chrome reader contract", () => {
     );
     expect(contentSource).toContain(
       'button.getAttribute("aria-disabled") !== "true"',
+    );
+    expect(contentSource).toContain(
+      'if (dayNumbers.length > 0) return (visible?.textContent || "").trim()',
     );
   });
 

@@ -200,6 +200,7 @@ The public site is live as an email-alert proof of concept:
 
 ## Notes
 
+- 2026-07-25 Chronogolf rendered-reader candidate: the signed local Chrome reader now supports two exact public Chronogolf club profiles that return public tee-time inventory in the browser while rejecting the hosted adapter. The extension reads only rendered, signed-out tee-time cards, filters by the requested public player count, and fails closed for unrelated paths, challenge pages, and malformed cards. The same change corrects CPS calendar selection so a disabled duplicate date from the previous month cannot win. Pre-release verification passed 68 focused local-reader tests, all 3,152 Vitest tests, lint with only the existing generated Workflow warning, the production build, and 72 non-database UI checks; 16 course-knowledge UI checks were unavailable because the local smoke server had no Postgres connection.
 - `npm run build` runs `prisma generate` before `next build` so clean Vercel builders have Prisma client types available.
 - `.vercel/` and local env files are intentionally ignored. Do not commit provider credentials.
 - The Codex loop remains alert-only and must not enter checkout, payment, verification-code, or account-specific booking flows.

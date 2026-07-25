@@ -94,10 +94,12 @@
   }
 
   function visibleDayNumber(element) {
+    const dayNumbers = element.querySelectorAll(".day-background-upper");
     const visible = element.querySelector(
       ".day-background-upper[aria-hidden='false']",
     );
-    return (visible?.textContent || element.textContent || "").trim();
+    if (dayNumbers.length > 0) return (visible?.textContent || "").trim();
+    return (element.textContent || "").trim();
   }
 
   async function chooseWithDateArrows(targetDate) {
@@ -172,6 +174,17 @@
   }
 
   async function chooseTargetDate(targetDate) {
+    try {
+      const currentUrl = new URL(location.href);
+      if (
+        currentUrl.hostname === "www.chronogolf.com" &&
+        currentUrl.searchParams.get("date") === targetDate
+      ) {
+        return;
+      }
+    } catch {
+      // Continue with the rendered date controls.
+    }
     if (
       document.querySelector(`time[datetime^="${CSS.escape(targetDate)}T"]`)
     ) {
@@ -265,9 +278,38 @@
       (candidate) =>
         String(candidate.textContent || "").trim() === String(players),
     );
-    if (!button || button.getAttribute("aria-pressed") === "true") return;
-    button.click();
-    await delay(500);
+    if (button) {
+      if (button.getAttribute("aria-pressed") !== "true") {
+        button.click();
+        await delay(500);
+      }
+      return;
+    }
+
+    const expectedLabel = `${players} ${players === 1 ? "player" : "players"}`;
+    const radio = Array.from(
+      document.querySelectorAll("input[type='radio'], [role='radio']"),
+    ).find((candidate) =>
+      String(
+        candidate.getAttribute("aria-label") ||
+          candidate.closest("label")?.textContent ||
+          document.querySelector(`label[for="${candidate.id}"]`)?.textContent ||
+          "",
+      )
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase()
+        .includes(expectedLabel),
+    );
+    if (!radio)
+      throw new Error(`Group size ${players} did not become selectable.`);
+    if (
+      radio.getAttribute("aria-checked") !== "true" &&
+      radio.checked !== true
+    ) {
+      radio.click();
+      await delay(1_000);
+    }
   }
 
   async function waitForTargetPage(targetDate) {
@@ -279,7 +321,7 @@
     while (Date.now() < deadline) {
       const now = Date.now();
       const currentSlotCount = document.querySelectorAll(
-        `time[datetime^="${CSS.escape(targetDate)}T"]`,
+        `time[datetime^="${CSS.escape(targetDate)}T"], [data-testid='teeTimeCard'][role='button']`,
       ).length;
       if (currentSlotCount > 0) {
         if (currentSlotCount !== slotCount) {
@@ -329,13 +371,13 @@
     const pending =
       (tabId && stored.pendingJobs?.[tabId]) ||
       (entries.length === 1 ? entries[0][1] : null);
-    if (
-      !pending?.job ||
-      !globalThis.TeeTimeSpotCpsReader?.isAllowedPageUrl(
-        pending.job,
-        location.href,
-      )
-    ) {
+    const reader = [
+      globalThis.TeeTimeSpotCpsReader,
+      globalThis.TeeTimeSpotChronogolfReader,
+    ].find((candidate) =>
+      candidate?.isAllowedPageUrl(pending?.job, location.href),
+    );
+    if (!pending?.job || !reader) {
       return;
     }
 
@@ -345,7 +387,7 @@
       await choosePlayers(pending.job.players);
       await chooseTargetDate(pending.job.targetDate);
       await waitForTargetPage(pending.job.targetDate);
-      const snapshot = globalThis.TeeTimeSpotCpsReader.readSnapshot(
+      const snapshot = reader.readSnapshot(
         document,
         location.href,
         pending.job,
@@ -374,9 +416,7 @@
           pageUrl: location.href,
           pageTitle: `Reader error: ${detail}`.slice(0, 200),
           slots: [],
-          readerVersion:
-            globalThis.TeeTimeSpotCpsReader?.READER_VERSION ||
-            "cps-rendered-v1",
+          readerVersion: reader?.READER_VERSION || "rendered-reader-v1",
         },
       });
     }

@@ -25,6 +25,8 @@ import {
 } from "./service";
 
 const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+const chronogolfBookingUrl =
+  "https://www.chronogolf.com/club/crestbrook-park-golf-course";
 
 describe("local reader job service", () => {
   beforeEach(() => {
@@ -61,6 +63,30 @@ describe("local reader job service", () => {
     ).toBeNull();
   });
 
+  it("allowlists only the exact supported public Chronogolf profiles", () => {
+    expect(getLocalReaderCourseKey(chronogolfBookingUrl)).toBe("crestbrook");
+    expect(
+      getLocalReaderCourseKey(
+        `${chronogolfBookingUrl}?date=2026-07-26&step=teetimes&groupSize=2`,
+      ),
+    ).toBe("crestbrook");
+    expect(
+      getLocalReaderCourseKey(
+        "https://www.chronogolf.com/club/unclaimed-course",
+      ),
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey(
+        `${chronogolfBookingUrl}/checkout?date=2026-07-26`,
+      ),
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey(
+        `${chronogolfBookingUrl}?date=2026-07-26&step=checkout`,
+      ),
+    ).toBeNull();
+  });
+
   it("does not replace a pending or live leased job during a retry", async () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
@@ -80,6 +106,31 @@ describe("local reader job service", () => {
       }),
     ).resolves.toMatchObject({ id: "job-1", status: "LEASED" });
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("queues a dated public Chronogolf profile for the rendered reader", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-chrono" });
+
+    await queueLocalReaderJob({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 3,
+      targetDate: "2026-07-26",
+      players: 2,
+      bookingUrl: chronogolfBookingUrl,
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "crestbrook",
+          bookingUrl:
+            "https://www.chronogolf.com/club/crestbrook-park-golf-course?date=2026-07-26&step=teetimes",
+        }),
+      }),
+    );
   });
 
   it("reuses a pending job from an earlier schedule version", async () => {
