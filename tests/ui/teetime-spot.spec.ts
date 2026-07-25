@@ -391,6 +391,9 @@ test.describe("Tee Time Spot UI smoke", () => {
   });
 
   test("keeps search labels and supporting copy at AA contrast colors", async ({ page }) => {
+    if (useMockedSearchProviders) {
+      await mockSmokeCourseSearch(page);
+    }
     await page.goto("/search");
 
     await expect(page.locator(".figma-search-field > label").first()).toHaveCSS(
@@ -413,6 +416,38 @@ test.describe("Tee Time Spot UI smoke", () => {
       "color",
       "rgba(255, 255, 255, 0.65)"
     );
+    await expect(page.locator(".figma-selected-panel .selected-empty")).toHaveCSS(
+      "color",
+      "rgb(118, 141, 151)"
+    );
+    await expect(page.getByRole("group", { name: "Course layout" })).toBeVisible();
+    await expect(page.locator(".figma-search-submit")).toHaveCSS(
+      "background-color",
+      "rgb(179, 95, 16)"
+    );
+
+    if (useMockedSearchProviders) {
+      await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
+      await page.getByRole("button", { name: /^Search$/i }).click();
+      const firstCourse = page.locator(".course-row").first();
+      await expect(firstCourse).toBeVisible();
+      await expect(firstCourse.locator(".figma-course-pill.is-detail").first()).toHaveCSS(
+        "color",
+        "rgb(82, 107, 96)"
+      );
+      await expect(firstCourse.locator(".course-address-link")).toHaveCSS(
+        "color",
+        "rgb(82, 107, 96)"
+      );
+      await expect(firstCourse.locator(".course-monitoring-status small")).toHaveCSS(
+        "color",
+        "rgb(82, 107, 96)"
+      );
+      await expect(page.locator(".course-pricing-note").first()).toHaveCSS(
+        "color",
+        "rgb(82, 107, 96)"
+      );
+    }
   });
 
   test("keeps homepage supporting text at AA contrast colors", async ({ page }) => {
@@ -666,7 +701,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
     await expect(page.locator(".figma-search-submit")).toHaveCSS(
       "background-color",
-      "rgb(217, 134, 47)"
+      "rgb(179, 95, 16)"
     );
     await expect(page.locator(".figma-search-submit")).toHaveCSS("color", "rgb(255, 255, 255)");
 

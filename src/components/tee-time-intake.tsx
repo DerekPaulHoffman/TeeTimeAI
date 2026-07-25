@@ -1223,7 +1223,7 @@ function TeeTimeIntakeContent({
               Times use each course&apos;s local time zone.
             </span>
           </div>
-          <div className="figma-hole-filter" aria-label="Course layout">
+          <div className="figma-hole-filter" aria-label="Course layout" role="group">
             <strong>
               <span className="figma-desktop-copy">Course layout</span>
               <span className="figma-mobile-copy">Holes</span>

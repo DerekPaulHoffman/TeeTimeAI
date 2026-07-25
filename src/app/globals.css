@@ -4584,7 +4584,7 @@ button {
   align-items: center;
   background: transparent;
   border-radius: 0;
-  color: #8fa89c;
+  color: #526b60;
   display: inline-flex;
   font-size: 0.6875rem;
   font-weight: 400;
@@ -4654,7 +4654,7 @@ button {
 
 .search-page .figma-course-list .course-address-link,
 .search-page .figma-course-list .course-copy > .meta {
-  color: #8fa89c;
+  color: #526b60;
   font-size: 0.6875rem;
   line-height: 1.2;
   margin: 0;
@@ -4675,6 +4675,10 @@ button {
   font-size: 0.7rem;
   font-weight: 700;
   margin: 5px 0 0;
+}
+
+.search-page .course-pricing-note {
+  color: #526b60;
 }
 
 .course-monitoring-status {
@@ -4702,7 +4706,7 @@ button {
 }
 
 .course-monitoring-status small {
-  color: #8fa89c;
+  color: #526b60;
   font-size: 0.625rem;
   font-weight: 400;
 }
@@ -4713,7 +4717,7 @@ button {
 
 .course-monitoring-status.is-manual small,
 .course-monitoring-status.is-unconfirmed small {
-  color: #8fa89c;
+  color: #526b60;
 }
 
 .course-monitoring-status.is-unconfirmed {
@@ -4968,7 +4972,7 @@ button {
   background: transparent;
   border: 1px dashed #3d4d57;
   border-radius: 14px;
-  color: #71858f;
+  color: #768d97;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -5137,7 +5141,7 @@ button {
 }
 
 .figma-recipient-footer > span {
-  color: #71858f;
+  color: #768d97;
   font-size: 0.67rem;
   white-space: nowrap;
 }
@@ -7897,12 +7901,12 @@ button {
 }
 
 .figma-search-submit {
-  background: #d9862f;
+  background: #b35f10;
   color: #ffffff;
 }
 
 .figma-search-submit:hover:not(:disabled) {
-  background: #c87929;
+  background: #9a4c06;
 }
 
 @media (min-width: 621px) {
@@ -7985,7 +7989,7 @@ button {
   }
 
   .figma-use-location {
-    color: #8fa89c;
+    color: #526b60;
     display: inline-flex;
     height: 32px;
     min-height: 32px;
@@ -8208,7 +8212,7 @@ button {
 
   .figma-search-submit {
     align-self: center;
-    background: #d9862f;
+    background: #b35f10;
     border-radius: 14px;
     color: #ffffff;
     font-size: 14px;
@@ -8500,7 +8504,7 @@ button {
 
 .figma-search-submit {
   align-self: center;
-  background: #d9862f;
+  background: #b35f10;
   border-radius: 14px;
   color: #ffffff;
   font-size: 14px;
