@@ -50,7 +50,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "resend": "^6.17.2",
-    "workflow": "4.6.2",
+    "workflow": "4.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -69,24 +69,11 @@
     "vitest": "^4.1.10"
   },
   "overrides": {
-    "@swc/cli": {
-      "minimatch": "10.2.5"
-    },
-    "ejs": {
-      "jake": "12.10.1"
-    },
     "fast-uri": "3.1.4",
-    "filelist": {
-      "minimatch": "10.2.5"
-    },
     "find-my-way": "9.7.0",
-    "jake": {
-      "filelist": "2.0.2"
-    },
-    "postcss": "8.5.21",
     "next": {
+      "postcss": "8.5.21",
       "sharp": "0.35.3"
-    },
-    "valibot": "1.4.2"
+    }
   }
 }
