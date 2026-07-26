@@ -6,6 +6,7 @@ import type {
 } from "@prisma/client";
 
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
+import { classifyProviderCoverage } from "@/lib/automation/provider-coverage";
 import { prisma } from "@/lib/prisma";
 
 import {
@@ -346,11 +347,17 @@ export async function loadOperatorOverview(input: {
       select: {
         id: true,
         name: true,
+        isPublic: true,
+        detectedPlatform: true,
         providerFamilyKey: true,
         automationEligibility: true,
         automationReason: true,
         bookingAccessMode: true,
         bookingMethod: true,
+        bookingMetadata: true,
+        intelligenceVerifiedAt: true,
+        intelligenceReviewAt: true,
+        intelligenceConfidence: true,
         detectedBookingUrl: true,
         website: true,
         profile: {
@@ -366,9 +373,13 @@ export async function loadOperatorOverview(input: {
             kind: true,
             activeRealSearchCount: true,
             firstSeenAt: true,
+            resolvedAt: true,
+            resolution: true,
+            engineeringOnly: true,
             latestMessage: true,
             nextAction: true,
-            failureClass: true
+            failureClass: true,
+            attemptCount: true
           }
         }
       }
@@ -400,10 +411,7 @@ export async function loadOperatorOverview(input: {
       allCourseIds.length > 0
         ? prisma.courseProbe.findMany({
             where: {
-              courseId: { in: allCourseIds },
-              teeSearch: {
-                trafficClass: NON_SYNTHETIC_TRAFFIC
-              }
+              courseId: { in: allCourseIds }
             },
             orderBy: { observedAt: "desc" },
             distinct: ["courseId"],
@@ -455,6 +463,32 @@ export async function loadOperatorOverview(input: {
   const courseInventory = buildCourseInventory(
     allCourses.map((course) => {
       const latestProbe = allLatestProbeByCourse.get(course.id);
+      const coverageCategory = classifyProviderCoverage(
+        {
+          isPublic: course.isPublic,
+          website: course.website,
+          detectedBookingUrl: course.detectedBookingUrl,
+          detectedPlatform: course.detectedPlatform,
+          providerFamilyKey: course.providerFamilyKey,
+          bookingMethod: course.bookingMethod,
+          automationEligibility: course.automationEligibility,
+          automationReason: course.automationReason,
+          bookingMetadata: course.bookingMetadata,
+          intelligenceVerifiedAt: course.intelligenceVerifiedAt,
+          intelligenceReviewAt: course.intelligenceReviewAt,
+          intelligenceConfidence: course.intelligenceConfidence,
+          probes: latestProbe
+            ? [
+                {
+                  outcome: latestProbe.outcome,
+                  observedAt: latestProbe.observedAt
+                }
+              ]
+            : [],
+          supportIncident: course.supportIncident
+        },
+        now
+      );
       return {
         id: course.id,
         name: course.name,
@@ -474,6 +508,7 @@ export async function loadOperatorOverview(input: {
               evidenceUrl: sanitizeOperatorUrl(latestProbe.evidenceUrl)
             }
           : null,
+        coverageCategory,
         profileSlug:
           course.profile?.status === "PUBLISHED"
             ? course.profile.canonicalSlug

@@ -1,3 +1,5 @@
+import type { ProviderCoverageCategory } from "@/lib/automation/provider-coverage";
+
 export const COURSE_STATUS_GUIDE = [
   {
     key: "SITE_FAILED",
@@ -72,6 +74,13 @@ export const COURSE_STATUS_GUIDE = [
       "Verify it when demand arrives, or run a bounded engineering check when the course is a current priority."
   },
   {
+    key: "MONITORING_RESTORED",
+    label: "Working · monitoring restored",
+    meaning:
+      "Fresh production evidence confirms that Tee Time Spot can read this course again.",
+    action: "No course repair is needed."
+  },
+  {
     key: "WORKING_MATCH",
     label: "Working · match found",
     meaning:
@@ -135,6 +144,7 @@ export type CourseStatusInput = {
     evidenceUrl: string | null;
   } | null;
   profileSlug: string | null;
+  coverageCategory: ProviderCoverageCategory;
 };
 
 export type CourseInventoryItem = CourseStatusInput & {
@@ -253,6 +263,106 @@ function classifyCourseStatus(
           ? "critical"
           : "warning",
       actionOverride: openIncident.nextAction
+    });
+  }
+
+  if (course.coverageCategory === "MONITORED") {
+    const latestSuccessfulProbe =
+      course.latestProbe &&
+      (course.latestProbe.outcome === "MATCH_FOUND" ||
+        course.latestProbe.outcome === "NO_MATCH")
+        ? course.latestProbe
+        : null;
+    if (
+      latestSuccessfulProbe &&
+      course.activeAlertCount > 0 &&
+      now.getTime() - latestSuccessfulProbe.observedAt.getTime() >
+        STALE_WITH_DEMAND_MS
+    ) {
+      return withStatus(course, "STALE", {
+        priorityGroup: "ACTION",
+        priorityScore: 1,
+        tone: "critical"
+      });
+    }
+    return withStatus(
+      course,
+      latestSuccessfulProbe?.outcome === "MATCH_FOUND"
+        ? "WORKING_MATCH"
+        : latestSuccessfulProbe?.outcome === "NO_MATCH"
+          ? "WORKING_NO_MATCH"
+          : "MONITORING_RESTORED",
+      {
+        priorityGroup: "WORKING",
+        priorityScore: 5,
+        tone: "positive"
+      }
+    );
+  }
+
+  if (course.coverageCategory === "TECHNICAL_CONSTRAINT") {
+    const statusKey =
+      course.bookingAccessMode === "CAPTCHA_OR_QUEUE"
+        ? "CAPTCHA_OR_QUEUE"
+        : "ACCOUNT_REQUIRED";
+    return withStatus(course, statusKey, {
+      priorityGroup: "LIMITATION",
+      priorityScore: 3,
+      tone: "neutral",
+      labelOverride:
+        statusKey === "ACCOUNT_REQUIRED"
+          ? "Technical access limitation"
+          : undefined
+    });
+  }
+
+  if (course.coverageCategory === "PHONE_OR_WALK_IN") {
+    return withStatus(course, "ACCOUNT_REQUIRED", {
+      priorityGroup: "LIMITATION",
+      priorityScore: 3,
+      tone: "neutral",
+      labelOverride: "No public online tee sheet",
+      meaningOverride:
+        "Current official evidence points to phone, walk-in, contact-only, or another non-public booking path.",
+      actionOverride:
+        "Keep the official course link and re-check only if a public online tee sheet becomes available."
+    });
+  }
+
+  if (course.coverageCategory === "PRIVATE_OR_INVALID") {
+    return withStatus(course, "REVIEW_REQUIRED", {
+      priorityGroup: "LIMITATION",
+      priorityScore: 3,
+      tone: "neutral",
+      labelOverride: "Private or invalid course record",
+      meaningOverride:
+        "Current exact identity evidence shows that this is private, not a playable public course, or no longer a valid course record.",
+      actionOverride:
+        "No monitoring work is needed unless new official identity evidence changes this classification."
+    });
+  }
+
+  if (course.coverageCategory === "UNSUPPORTED_FAMILY") {
+    return withStatus(course, "NEEDS_ADAPTER", {
+      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
+      priorityScore: course.activeAlertCount > 0 ? 0 : 2,
+      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+    });
+  }
+
+  if (course.coverageCategory === "SOURCE_UNVERIFIED") {
+    return withStatus(course, "SOURCE_MISSING", {
+      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
+      priorityScore: course.activeAlertCount > 0 ? 0 : 2,
+      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+    });
+  }
+
+  if (course.coverageCategory === "SUPPORTED_READY") {
+    return withStatus(course, "NOT_CHECKED", {
+      priorityGroup: "UNCHECKED",
+      priorityScore: 4,
+      tone: "neutral"
     });
   }
 

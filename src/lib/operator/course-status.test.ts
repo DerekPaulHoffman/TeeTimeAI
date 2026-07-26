@@ -16,6 +16,7 @@ describe("operator course inventory", () => {
         course({
           id: "working",
           name: "Working Municipal",
+          coverageCategory: "MONITORED",
           latestProbe: probe("NO_MATCH", "2026-07-24T17:30:00.000Z")
         }),
         course({
@@ -53,6 +54,7 @@ describe("operator course inventory", () => {
     const [result] = buildCourseInventory(
       [
         course({
+          coverageCategory: "MONITORED",
           latestProbe: probe("NO_MATCH", "2026-07-24T17:30:00.000Z")
         })
       ],
@@ -68,6 +70,7 @@ describe("operator course inventory", () => {
       [
         course({
           activeAlertCount: 1,
+          coverageCategory: "MONITORED",
           latestProbe: probe("MATCH_FOUND", "2026-07-23T16:00:00.000Z")
         })
       ],
@@ -85,6 +88,7 @@ describe("operator course inventory", () => {
     const [result] = buildCourseInventory(
       [
         course({
+          coverageCategory: "SUPPORTED_DEGRADED",
           latestProbe: probe("BLOCKED_POLICY", "2026-07-24T17:30:00.000Z")
         })
       ],
@@ -104,12 +108,14 @@ describe("operator course inventory", () => {
           id: "foreup",
           name: "Pine Valley Municipal",
           providerFamilyKey: "FOREUP",
+          coverageCategory: "MONITORED",
           latestProbe: probe("NO_MATCH", "2026-07-24T17:30:00.000Z")
         }),
         course({
           id: "missing",
           name: "Unknown Links",
           providerFamilyKey: "SOURCE_MISSING",
+          coverageCategory: "SOURCE_UNVERIFIED",
           detectedBookingUrl: null
         })
       ],
@@ -125,6 +131,37 @@ describe("operator course inventory", () => {
     expect(summarizeCourseInventory(inventory)).toMatchObject({
       watch: 1,
       working: 1
+    });
+  });
+
+  it("uses canonical coverage evidence for restored and final courses", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "restored",
+          coverageCategory: "MONITORED",
+          latestProbe: probe("FETCH_FAILED", "2026-07-24T17:30:00.000Z")
+        }),
+        course({
+          id: "manual",
+          coverageCategory: "PHONE_OR_WALK_IN",
+          bookingMethod: "CONTACT_COURSE"
+        }),
+        course({
+          id: "private",
+          coverageCategory: "PRIVATE_OR_INVALID"
+        })
+      ],
+      NOW
+    );
+
+    expect(summarizeCourseInventory(inventory)).toMatchObject({
+      limitations: 2,
+      working: 1
+    });
+    expect(inventory.find((item) => item.id === "restored")).toMatchObject({
+      statusKey: "MONITORING_RESTORED",
+      priorityGroup: "WORKING"
     });
   });
 });
@@ -147,6 +184,7 @@ function course(
     incident: null,
     latestProbe: null,
     profileSlug: null,
+    coverageCategory: "SUPPORTED_READY",
     ...overrides
   };
 }

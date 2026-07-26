@@ -141,7 +141,7 @@ function OperatorDashboard({
           eyebrow="Complete course inventory"
           id="all-courses-heading"
           title="All courses"
-          supporting="Every durable course record, using its newest real-customer check. Healthy courses stay compact; problems include a concrete next action."
+          supporting="Every durable course record, using the newest production check, restored-monitoring proof, or final evidence-backed limitation. Healthy courses stay compact; problems include a concrete next action."
         />
         <CourseFilters
           days={overview.range.days}
