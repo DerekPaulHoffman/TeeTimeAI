@@ -2459,14 +2459,29 @@ function learnWalkInClassification(
   const courseScopedStatementContext = targetContextStart >= 0
     ? statementContext.slice(targetContextStart)
     : statementContext;
+  const officialWebsite = evidence.officialCourseWebsite;
+  const sourceIsOfficialCourseWebsite = Boolean(
+    officialWebsite &&
+      haveSamePublicWebsiteOrigin(officialWebsite, evidence.sourceUrl) &&
+      hasTargetCourseIdentity(visibleText, evidence.courseName)
+  );
   const identifiesTargetCourse =
     hasTargetCourseIdentity(statement, evidence.courseName) ||
     (hasTargetCourseIdentity(statementContext, evidence.courseName) &&
       /\bpublic\b/i.test(statementContext) &&
-      /\b(?:nine|9|eighteen|18)[- ]holes?\b/i.test(statementContext));
-  const explicitlyFirstCome = /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
-    statement
-  );
+      /\b(?:nine|9|eighteen|18)[- ]holes?\b/i.test(statementContext)) ||
+    sourceIsOfficialCourseWebsite;
+  const explicitlyFirstCome =
+    /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
+      statement
+    ) ||
+    (sourceIsOfficialCourseWebsite &&
+      /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
+        visibleText.slice(
+          noReservationMatch.index,
+          noReservationMatch.index + 240
+        )
+      ));
   const scopedToNonCourseFacility =
     /\b(?:driving|practice)\s+(?:range|facility|stalls?)\b/i.test(statement);
   const contradictsWalkInOnly =
@@ -2974,6 +2989,14 @@ function learnOfficialPhoneReservationClassification(
   const visibleText = normalizeTeeTimeTypography(
     evidence.visibleText?.replace(/\s+/g, " ").trim() ?? ""
   );
+  const explicitPhoneOnly = learnExplicitPhoneOnlyBookingClassification(
+    evidence,
+    observedUrls,
+    visibleText
+  );
+  if (explicitPhoneOnly) {
+    return explicitPhoneOnly;
+  }
   const directPhone = findDirectTeeTimeReservationPhone(visibleText);
   if (directPhone.kind === "NONE") {
     return null;
@@ -3037,6 +3060,163 @@ function learnOfficialPhoneReservationClassification(
         : "official-phone-reservation-contact"
     }
   };
+}
+
+function learnExplicitPhoneOnlyBookingClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[],
+  visibleText: string
+): BrowserDiscovery | null {
+  const personalCallBooking =
+    /\bgive\s+us\s+a\s+call\b.{0,260}\bbest\s+tee\s*time\b/i.test(visibleText) &&
+    /\bwe\s+haven.{0,8}\s+replaced\b.{0,120}\bautomated\s+booking\s+systems?\b/iu.test(
+      visibleText
+    );
+  const sameDayPhoneOrWalkOn =
+    /\bphone\s+ahead\b.{0,100}\bsame\s+day\s+tee\s*times?\b.{0,100}\bor\s+just\s+show\s+up(?:\s+and\s+play)?\b/i.test(
+      visibleText
+    ) &&
+    /\bcall\s+(?:us\s+)?at\b.{0,40}\bif\s+you\s+need\s+(?:a\s+|your\s+)?tee\s*time\b/i.test(
+      visibleText
+    );
+  if (
+    (!personalCallBooking && !sameDayPhoneOrWalkOn) ||
+    !hasTargetCourseIdentity(visibleText, evidence.courseName)
+  ) {
+    return null;
+  }
+
+  const phone = findSingleOfficialPhoneNumber(visibleText);
+  if (!phone || hasUnsafeManualEvidenceUrl(evidence, observedUrls)) {
+    return null;
+  }
+  const manualEvidence = getExplicitPhoneOnlySourceEvidence(
+    evidence,
+    observedUrls
+  );
+  if (
+    !manualEvidence ||
+    hasExplicitOnlineBookingAlternative(
+      evidence,
+      manualEvidence.evidenceUrl
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: manualEvidence.evidenceUrl,
+    bookingUrl: manualEvidence.evidenceUrl,
+    bookingMethod: "PHONE_ONLY",
+    bookingPhone: phone,
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    policyNotes:
+      "The official course page explicitly limits tee-time reservations to a published phone contact or walk-on play and exposes no public online tee sheet. Tee Time Spot cannot monitor phone-only inventory, so golfers should call the course directly.",
+    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    confidence: 0.98,
+    evidence: {
+      finalUrl: manualEvidence.evidenceUrl,
+      observedUrls: manualEvidence.observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-phone-only-tee-time-access"
+    }
+  };
+}
+
+function hasExplicitOnlineBookingAlternative(
+  evidence: BrowserDiscoveryEvidence,
+  evidenceUrl: string
+) {
+  const visibleText = evidence.visibleText ?? "";
+  if (
+    /\b(?:book|reserve|schedule)\b.{0,80}\bonline\b|\bonline\s+booking\s+(?:is\s+)?available\b/i.test(
+      visibleText
+    ) &&
+    !/\b(?:no|without)\s+online\s+booking\b|\bonline\s+booking\s+(?:is\s+)?(?:not\s+available|unavailable|disabled)\b/i.test(
+      visibleText
+    )
+  ) {
+    return true;
+  }
+  return (evidence.linkCandidates ?? []).some(({ url, label }) => {
+    const parsed = parseUrl(url);
+    const canonical = canonicalizeManualUrl(url);
+    if (
+      !parsed ||
+      parsed.protocol !== "https:" ||
+      !canonical ||
+      canonical === evidenceUrl
+    ) {
+      return false;
+    }
+    const explicitlyOnline =
+      /\bonline\s+(?:booking|reservations?|tee\s*times?)\b/i.test(label) ||
+      /\b(?:book|reserve|schedule)\b.{0,60}\bonline\b/i.test(label);
+    const providerBooking =
+      /\b(?:book|reserve|tee\s*times?)\b/i.test(label) &&
+      Boolean(resolveProviderCapability({ detectedBookingUrl: url }).capability);
+    return explicitlyOnline || providerBooking;
+  });
+}
+
+function getExplicitPhoneOnlySourceEvidence(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): SafeManualEvidence | null {
+  const source = parseUrl(evidence.sourceUrl);
+  const officialWebsite = parseUrl(evidence.officialCourseWebsite);
+  const evidenceUrl = canonicalizeManualUrl(evidence.sourceUrl);
+  if (
+    !source ||
+    source.protocol !== "https:" ||
+    !isSafeManualEvidenceUrl(source) ||
+    !evidenceUrl ||
+    (officialWebsite &&
+      !haveSamePublicWebsiteOrigin(
+        officialWebsite.toString(),
+        source.toString()
+      ))
+  ) {
+    return null;
+  }
+  return {
+    evidenceUrl,
+    observedUrls: [
+      ...new Set(
+        uniqueUrls([evidenceUrl, ...observedUrls]).flatMap((value) => {
+          const url = parseUrl(value);
+          const canonical = canonicalizeManualUrl(value);
+          return url?.protocol === "https:" &&
+            canonical &&
+            isSafeManualEvidenceUrl(url)
+            ? [canonical]
+            : [];
+        })
+      )
+    ]
+  };
+}
+
+function findSingleOfficialPhoneNumber(value: string) {
+  const phones = new Map<string, string>();
+  for (const match of value.matchAll(
+    /(?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}/gu
+  )) {
+    const phone = match[0].replace(/\s+/g, " ").trim();
+    const digits = phone.replace(/\D/g, "");
+    const normalizedDigits =
+      digits.length === 11 && digits.startsWith("1")
+        ? digits.slice(1)
+        : digits;
+    if (normalizedDigits.length === 10 && !phones.has(normalizedDigits)) {
+      phones.set(normalizedDigits, phone);
+    }
+  }
+  return phones.size === 1 ? [...phones.values()][0] : null;
 }
 
 function hasStrongCourseIdentityEvidence(
@@ -3421,7 +3601,10 @@ function findDirectTeeTimeReservationPhone(visibleText: string): DirectReservati
     /\b(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s+(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\b(?:for\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s*[:,;-]?\s*(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\btee\s*times?\b[^.!?]{0,80}\b(?:made|booked|reserved|scheduled)\b[^.!?]{0,60}\b(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
-    /\b(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s*(?:,|\s)*(?:for\s+)?tee\s*times?\b/gi
+    /\b(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s*(?:,|\s)*(?:for\s+)?tee\s*times?\b/gi,
+    /\bcall\s+(?:us\s+)?at\s+((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s+if\s+you\s+need\s+(?:a\s+|your\s+)?tee\s*times?\b/gi,
+    /\bgive\s+us\s+a\s+call\b.{0,320}\btee\s*time\b.{0,160}?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
+    /\b((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b.{0,180}\bcall\s+to\s+book\s+(?:a\s+|your\s+)?tee\s*time\b/gi
   ];
   const phoneByDigits = new Map<
     string,
@@ -3469,7 +3652,9 @@ function hasExplicitPhoneOnlyEvidence(value: string) {
     /\bmust\s+call\b.{0,80}\b(?:tee\s*times?|reservations?)\b/i,
     /\bno\s+online\s+(?:booking|reservations?|tee\s*times?)\b/i,
     /\bonline\s+(?:booking|reservations?|tee\s*times?)\b.{0,40}\b(?:is|are)\s+(?:not\s+available|unavailable|disabled|not\s+offered)\b/i,
-    /\bwe\s+do\s+not\s+(?:offer|accept|take)\s+online\s+(?:booking|reservations?|tee\s*times?)\b/i
+    /\bwe\s+do\s+not\s+(?:offer|accept|take)\s+online\s+(?:booking|reservations?|tee\s*times?)\b/i,
+    /\bwe\s+haven['’]?t\s+replaced\b.{0,100}\bautomated\s+booking\s+systems?\b/i,
+    /\bphone\s+ahead\b.{0,100}\btee\s*times?\b.{0,100}\bor\s+just\s+show\s+up(?:\s+and\s+play)?\b/i
   ].some((pattern) => pattern.test(value));
 }
 

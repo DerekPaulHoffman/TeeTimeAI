@@ -2630,6 +2630,29 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies a course-first official contact page with no tee times as walk-in", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "twin-lakes",
+      courseName: "Twin Lakes Golf Club",
+      sourceUrl: "https://twinlakesgolfclub.example/contact",
+      finalUrl: "https://twinlakesgolfclub.example/contact",
+      observedUrls: ["https://twinlakesgolfclub.example/contact"],
+      officialCourseWebsite: "https://twinlakesgolfclub.example/",
+      visibleText:
+        "no tee times needed... first come first serve! Come Play Today! We Are Always Open! Twin Lakes Golf Club 241 Twin Lakes Road, North Branford, Connecticut."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-walk-in-access" }
+    });
+  });
+
   it("classifies and replays an exact official private course profile", () => {
     const sourceUrl = "https://community.example/golf/deer-creek";
     const discovery = buildBrowserDiscovery({
@@ -4365,6 +4388,50 @@ describe("buildBrowserDiscovery", () => {
       status: "VERIFIED",
       bookingMethod: "PHONE_ONLY",
       bookingPhone: "919-555-0142",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-phone-only-tee-time-access" }
+    });
+  });
+
+  it("classifies personal call booking with no automated system as phone-only", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "sleeping-giant",
+      courseName: "Sleeping Giant Golf Course",
+      sourceUrl: "https://sleeping-giant.example/book-a-tee-time",
+      finalUrl: "https://sleeping-giant.example/book-a-tee-time",
+      observedUrls: ["https://sleeping-giant.example/book-a-tee-time"],
+      visibleText:
+        "Sleeping Giant Golf Course. Book a Tee Time. When you're ready to play, simply give us a call. A real person will answer, help you find the best tee time, and make sure everything is just right. 203-281-9456. We haven't replaced people with automated booking systems. Call to Book Your Tee Time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PHONE_ONLY",
+      bookingPhone: "203-281-9456",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-phone-only-tee-time-access" }
+    });
+  });
+
+  it("classifies same-day phone reservations plus walk-ons as phone-only booking", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "highland-greens",
+      courseName: "Highland Greens Golf Course",
+      sourceUrl: "https://highland-greens.example/golf-course",
+      finalUrl: "https://highland-greens.example/golf-course",
+      observedUrls: ["https://highland-greens.example/golf-course"],
+      visibleText:
+        "Highland Greens Golf Course. You can phone ahead for same day tee-times or just show up and play. We alternate open starter's times, designated for walk-on players, with same day reserve times. Call us at 203-758-4022 if you need a tee-time or more info."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "PHONE_ONLY",
+      bookingPhone: "203-758-4022",
       automationEligibility: "BLOCKED",
       automationReason: "NO_ONLINE_BOOKING",
       confidence: 0.98,
