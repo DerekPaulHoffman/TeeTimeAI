@@ -1,4 +1,5 @@
 .knowledge-page {
+  --knowledge-muted: #5c6c64;
   background: #f7f4eb;
   color: #14231d;
   min-height: 100svh;
@@ -212,7 +213,7 @@
 .knowledge-reference-list { border-top: 1px solid #d4dfd8; display: grid; gap: 0; list-style: none; margin: 0 0 20px; padding: 0; }
 .knowledge-reference-list li { align-items: baseline; border-bottom: 1px solid #d4dfd8; display: flex; flex-wrap: wrap; gap: 5px 12px; padding: 14px 0; }
 .knowledge-reference-list a { align-items: center; display: inline-flex; font-size: 0.84rem; gap: 7px; }
-.knowledge-reference-list span { color: #75847c; font-size: 0.75rem; font-weight: 700; }
+.knowledge-reference-list span { color: var(--knowledge-muted); font-size: 0.75rem; font-weight: 700; }
 
 .knowledge-aside {
   border-top: 3px solid #14231d;
@@ -223,7 +224,7 @@
 .knowledge-aside > h2 { display: block; font-size: 0.75rem; letter-spacing: 0.12em; margin: 0; padding: 18px 0; text-transform: uppercase; }
 .knowledge-aside dl { margin: 0; }
 .knowledge-aside dl div { border-top: 1px solid #d4dfd8; padding: 15px 0; }
-.knowledge-aside dt { color: #75847c; font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
+.knowledge-aside dt { color: var(--knowledge-muted); font-size: 0.7rem; font-weight: 800; text-transform: uppercase; }
 .knowledge-aside dd { color: #14231d; font-size: 0.88rem; font-weight: 750; margin: 6px 0 0; }
 .knowledge-aside-links { display: grid; gap: 12px; margin-top: 22px; }
 .knowledge-aside-links a { align-items: center; color: #105338; display: inline-flex; font-size: 0.82rem; font-weight: 850; gap: 8px; }
@@ -241,7 +242,7 @@
 .location-course-list { border-top: 1px solid #cbd8d0; }
 .knowledge-related-list a { align-items: center; border-bottom: 1px solid #cbd8d0; display: grid; gap: 10px 24px; grid-template-columns: 150px minmax(0, 1fr) auto auto; min-height: 100px; padding: 22px 0; transition: color 160ms ease, padding 160ms ease; }
 .knowledge-related-list a:hover { color: #1f7a4d; padding-left: 8px; }
-.knowledge-related-list span, .knowledge-related-list small { color: #75847c; font-size: 0.76rem; font-weight: 750; }
+.knowledge-related-list span, .knowledge-related-list small { color: var(--knowledge-muted); font-size: 0.76rem; font-weight: 750; }
 
 .knowledge-final-cta {
   align-items: center;
@@ -256,7 +257,7 @@
 }
 
 .knowledge-final-cta h2 { color: #fff; font-size: clamp(2rem, 4vw, 3.4rem); letter-spacing: -0.04em; line-height: 1; margin: 8px 0 15px; max-width: 16ch; }
-.knowledge-final-cta p:not(.eyebrow) { color: rgba(255, 255, 255, 0.62); line-height: 1.65; margin: 0; max-width: 650px; }
+.knowledge-final-cta p:not(.eyebrow) { color: #c7d0cc; line-height: 1.65; margin: 0; max-width: 650px; }
 .knowledge-final-cta .knowledge-actions { flex: 0 0 auto; margin: 0; }
 
 .location-course-section { padding-top: 90px; }
@@ -267,7 +268,7 @@
 .location-course-list a { align-items: center; border-bottom: 1px solid #cbd8d0; display: grid; gap: 20px; grid-template-columns: 60px minmax(0, 1fr) auto auto; padding: 28px 0; transition: padding 160ms ease; }
 .location-course-list a:hover { padding-left: 8px; }
 .location-course-number { color: #1f7a4d; font-size: 0.72rem; font-weight: 900; letter-spacing: 0.12em; }
-.location-course-list small { color: #75847c; display: block; font-size: 0.72rem; font-weight: 800; margin-bottom: 7px; text-transform: uppercase; }
+.location-course-list small { color: var(--knowledge-muted); display: block; font-size: 0.72rem; font-weight: 800; margin-bottom: 7px; text-transform: uppercase; }
 .location-course-list strong { display: block; font-size: clamp(1.15rem, 2vw, 1.55rem); }
 .location-course-list p { color: #5c6c64; font-size: 0.84rem; line-height: 1.5; margin: 8px 0 0; max-width: 700px; }
 .location-course-status { background: #e0eee6; border-radius: 999px; color: #105338; font-size: 0.72rem; font-weight: 850; padding: 8px 11px; white-space: nowrap; }
@@ -282,7 +283,7 @@
 .location-verified-windows li { display: grid; gap: 3px; grid-template-columns: minmax(0, 1fr) auto; }
 .location-verified-windows li a { font-size: 0.86rem; margin: 0; }
 .location-verified-windows li span { color: #31483d; font-size: 0.8rem; font-weight: 750; }
-.location-verified-windows li small { color: #75847c; font-size: 0.7rem; grid-column: 1 / -1; }
+.location-verified-windows li small { color: var(--knowledge-muted); font-size: 0.7rem; grid-column: 1 / -1; }
 
 @keyframes knowledge-enter { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
 

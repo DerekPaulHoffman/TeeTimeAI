@@ -90,6 +90,31 @@ test("course CTA transfers the selected course through session storage", async (
   expect(errors).toEqual([]);
 });
 
+test("keeps Course Guide supporting text at AA contrast colors", async ({ page }) => {
+  await page.goto(coursePath, { waitUntil: "networkidle" });
+
+  await expect(page.locator(".knowledge-reference-list span").first()).toHaveCSS(
+    "color",
+    "rgb(92, 108, 100)"
+  );
+  await expect(page.locator(".knowledge-aside dt").first()).toHaveCSS(
+    "color",
+    "rgb(92, 108, 100)"
+  );
+  await expect(page.locator(".knowledge-related-list span").first()).toHaveCSS(
+    "color",
+    "rgb(92, 108, 100)"
+  );
+  await expect(page.locator(".knowledge-related-list small").first()).toHaveCSS(
+    "color",
+    "rgb(92, 108, 100)"
+  );
+  await expect(page.locator(".knowledge-final-cta p:not(.eyebrow)")).toHaveCSS(
+    "color",
+    "rgb(199, 208, 204)"
+  );
+});
+
 test("renders a verified booking window as a direct course fact", async ({ page }) => {
   const errors = watchForBrowserErrors(page);
   const response = await page.goto(knownBookingWindowCoursePath, { waitUntil: "networkidle" });
