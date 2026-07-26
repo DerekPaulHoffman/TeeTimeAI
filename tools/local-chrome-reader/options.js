@@ -1,6 +1,10 @@
 "use strict";
 
 async function load() {
+  const manifest = chrome.runtime.getManifest();
+  document.querySelector("#readerVersion").textContent =
+    `Reader version ${manifest.version}`;
+
   const settings = await chrome.storage.local.get([
     "backendOrigin",
     "deviceId",

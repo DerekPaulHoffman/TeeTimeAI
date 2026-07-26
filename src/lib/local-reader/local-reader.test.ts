@@ -128,6 +128,21 @@ describe("local Chrome reader contract", () => {
     expect(backgroundSource).not.toContain("fenwick.cps.golf");
   });
 
+  it("shows the installed manifest version on the extension options page", () => {
+    const optionsHtml = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "options.html"),
+      "utf8",
+    );
+    const optionsSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "options.js"),
+      "utf8",
+    );
+
+    expect(optionsHtml).toContain('id="readerVersion"');
+    expect(optionsSource).toContain("chrome.runtime.getManifest()");
+    expect(optionsSource).toContain("Reader version ${manifest.version}");
+  });
+
   it("parses the current rendered CPS card layout", () => {
     document.title = "Grassy Hill Country Club";
     document.body.innerHTML = `
