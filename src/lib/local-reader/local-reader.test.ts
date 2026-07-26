@@ -270,6 +270,21 @@ describe("local Chrome reader contract", () => {
     ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
+  it("recognizes the official Chanticlair Chronogolf profile", () => {
+    const job = jobFor("chanticlair");
+
+    expect(job).toMatchObject({
+      courseName: "Chanticlair Golf Course",
+      bookingUrl: "https://www.chronogolf.com/club/chanticlair-golf-club",
+    });
+    expect(
+      isAllowedLocalReaderUrl(
+        "chanticlair",
+        `${job.bookingUrl}?date=2026-07-27&step=teetimes`,
+      ),
+    ).toBe(true);
+  });
+
   it("parses the legacy CPS material-card layout", () => {
     document.title = "Overpeck Golf Course";
     document.body.innerHTML = `

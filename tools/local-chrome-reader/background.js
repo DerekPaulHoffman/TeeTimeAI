@@ -94,6 +94,12 @@ const ALLOWED_COURSES = Object.freeze({
     "/club/crystal-lake-golf-club-rhode-island-mapleville",
     [],
   ],
+  chanticlair: [
+    "Chanticlair Golf Course",
+    "www.chronogolf.com",
+    "/club/chanticlair-golf-club",
+    [],
+  ],
 });
 let pollInProgress = false;
 

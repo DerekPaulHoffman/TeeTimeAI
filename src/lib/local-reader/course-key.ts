@@ -14,6 +14,7 @@ export const LOCAL_READER_COURSE_KEYS = [
   "capital-hills",
   "crestbrook",
   "crystal-lake",
+  "chanticlair",
 ] as const;
 
 export type LocalReaderCourseKey = (typeof LOCAL_READER_COURSE_KEYS)[number];
@@ -61,6 +62,10 @@ export const LOCAL_READER_COURSES = {
   "crystal-lake": chronogolfCourse(
     "crystal lake golf",
     "crystal-lake-golf-club-rhode-island-mapleville",
+  ),
+  chanticlair: chronogolfCourse(
+    "Chanticlair Golf Course",
+    "chanticlair-golf-club",
   ),
 } as const satisfies Record<LocalReaderCourseKey, LocalReaderCourse>;
 
