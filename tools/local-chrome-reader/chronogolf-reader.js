@@ -5,6 +5,7 @@
   const PROFILE_PATHS = new Set([
     "/club/crestbrook-park-golf-course",
     "/club/crystal-lake-golf-club-rhode-island-mapleville",
+    "/club/chanticlair-golf-club",
   ]);
   const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
   const CHALLENGE_TEXT =

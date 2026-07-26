@@ -283,6 +283,12 @@ describe("local Chrome reader contract", () => {
         `${job.bookingUrl}?date=2026-07-27&step=teetimes`,
       ),
     ).toBe(true);
+    expect(
+      loadChronogolfReader().isAllowedPageUrl(
+        job,
+        `${job.bookingUrl}?date=2026-07-27&step=teetimes`,
+      ),
+    ).toBe(true);
   });
 
   it("parses the legacy CPS material-card layout", () => {
