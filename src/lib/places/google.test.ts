@@ -54,6 +54,8 @@ const TEST_REVIEW_INDEX = buildGooglePlaceReviewIndex([
     ["ChIJ7dQcqrv5wokRIats-Rg1dZo", "BackyardSwingsStudio", "NON_COURSE_BUSINESS"],
     ["ChIJdZB9I4hhwokRFfvXRLrWvi8", "Q5C9+8VQ New York", "NON_COURSE_BUSINESS"],
     ["ChIJy4_CTDEtDogR9wxAr-a-VGI", "Chicago Golf Authority", "INDOOR_SIMULATOR"],
+    ["ChIJaySh2CcTkFQRyJfaM-7Y78w", "Five Iron Golf Kirkland", "INDOOR_SIMULATOR"],
+    ["ChIJgy-09XVrkFQRykcpEPAheXI", "Five Iron Golf Capitol Hill", "INDOOR_SIMULATOR"],
     ["ChIJ67JAVPK12YgRnl_JdjR_gFs", "Green Girls Golf", "SERVICE_OR_MEDIA"],
     ["ChIJ6xdB1Jq02YgR4mExla8UqpE", "South Florida Golf Magazine", "SERVICE_OR_MEDIA"],
     ["ChIJQfF9gY612YgRgEZ2p_DUI0M", "Celebrity Amputee Golf Classic", "EVENT_ORGANIZATION"],
@@ -945,6 +947,69 @@ describe("Google Places mapping", () => {
     );
 
     expect(places).toEqual([]);
+  });
+
+  it("filters Five Iron's exact Seattle simulators while preserving public courses", () => {
+    const places = filterPublicGolfCoursePlaces(
+      [
+        {
+          id: "places/ChIJaySh2CcTkFQRyJfaM-7Y78w",
+          displayName: { text: "Five Iron Golf" },
+          formattedAddress: "425 Urban Plz Ste 200, Kirkland, WA 98033, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://fiveirongolf.com/locations/seattle-kirkland/",
+          location: { latitude: 47.6775147, longitude: -122.1997945 }
+        },
+        {
+          id: "places/ChIJgy-09XVrkFQRykcpEPAheXI",
+          displayName: { text: "Five Iron Golf" },
+          formattedAddress: "1525 11th Ave Ste 100, Seattle, WA 98122, USA",
+          primaryType: "golf_course",
+          types: ["golf_course"],
+          businessStatus: "OPERATIONAL",
+          websiteUri: "https://fiveirongolf.com/locations/seattle-capitol-hill/",
+          location: { latitude: 47.6148686, longitude: -122.3183918 }
+        },
+        makeOperationalGolfCoursePlace({
+          id: "interbay-golf-center",
+          name: "Interbay Golf Center",
+          address: "2501 15th Ave W, Seattle, WA 98119, USA",
+          latitude: 47.6436332,
+          longitude: -122.3783731
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "jefferson-park",
+          name: "Bill Wright Golf Complex At Jefferson Park",
+          address: "4101 Beacon Ave S, Seattle, WA 98108, USA",
+          latitude: 47.5666788,
+          longitude: -122.3072535
+        }),
+        makeOperationalGolfCoursePlace({
+          id: "west-seattle",
+          name: "West Seattle Golf Course",
+          address: "4470 35th Ave SW, Seattle, WA 98126, USA",
+          latitude: 47.5621047,
+          longitude: -122.3730709
+        })
+      ],
+      {
+        publicCourseEvidenceIds: new Set([
+          "ChIJaySh2CcTkFQRyJfaM-7Y78w",
+          "ChIJgy-09XVrkFQRykcpEPAheXI",
+          "interbay-golf-center",
+          "jefferson-park",
+          "west-seattle"
+        ])
+      }
+    );
+
+    expect(places.map((place) => place.displayName?.text)).toEqual([
+      "Interbay Golf Center",
+      "Bill Wright Golf Complex At Jefferson Park",
+      "West Seattle Golf Course"
+    ]);
   });
 
   it("filters Harmony's exact Rochester simulator while preserving nearby public courses", () => {
