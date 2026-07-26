@@ -301,7 +301,9 @@ async function checkSearch(
 
     const monitoringGate = evaluateMonitoringGate(course);
     const localReaderCanOverrideGate =
-      localReaderEligible && monitoringGate.disposition === "TECHNICAL_FINAL";
+      localReaderEligible &&
+      monitoringGate.disposition === "TECHNICAL_FINAL" &&
+      course.automationReason === "CAPTCHA_OR_QUEUE";
     if (
       monitoringGate.disposition !== "ACTIONABLE" &&
       !localReaderCanOverrideGate
@@ -494,7 +496,7 @@ async function checkSearch(
 
     let providerRequestStarted = false;
     try {
-      const localTeeSheet = localReaderEligible
+      const localTeeSheet = localReaderCanOverrideGate
         ? await getFreshLocalReaderTeeSheet({
             searchId: search.id,
             courseId: course.id,
@@ -505,7 +507,7 @@ async function checkSearch(
         : null;
       let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
       let providerExecutionLabel = "LOCAL_BROWSER_READER";
-      if (!teeSheet && localReaderEligible && !hasSupportedAdapter(course)) {
+      if (!teeSheet && !hasSupportedAdapter(course)) {
         throw new Error("No reusable server adapter is available for this course.");
       }
       if (!teeSheet) {
@@ -740,7 +742,11 @@ async function checkSearch(
     } catch (error) {
       await maintainSearchCheckLease(lease);
       const message = error instanceof Error ? error.message : "Unknown adapter error";
-      const localReaderJob = customerBookingUrl
+      const providerFailure = classifyProviderFailure({ error });
+      const localReaderFallbackAllowed =
+        localReaderEligible &&
+        (localReaderCanOverrideGate || providerFailure.failureClass === "CHALLENGE");
+      const localReaderJob = customerBookingUrl && localReaderFallbackAllowed
         ? await queueLocalReaderJob({
             searchId: search.id,
             courseId: course.id,
@@ -779,7 +785,7 @@ async function checkSearch(
         });
         return;
       }
-      if (SHORT_SEARCH_RETRY_FAILURES.has(classifyProviderFailure({ error }).failureClass)) {
+      if (SHORT_SEARCH_RETRY_FAILURES.has(providerFailure.failureClass)) {
         monitoringRetryCourseIds.add(course.id);
       }
       await recordCourseProbe({

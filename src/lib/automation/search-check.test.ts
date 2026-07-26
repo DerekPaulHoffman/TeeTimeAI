@@ -1313,7 +1313,7 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
-  it("queues Grassy Hill for the local public-page reader after a CPS 403", async () => {
+  it("does not queue Grassy Hill for the local reader after a generic CPS 403", async () => {
     const bookingUrl =
       "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
@@ -1345,6 +1345,61 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.fetchCpsTeeSheet.mockRejectedValue(
       new Error("CPS configuration returned 403")
     );
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "FETCH_FAILED",
+      message: "CPS configuration returned 403"
+    });
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        course: expect.objectContaining({ id: "course-1" }),
+        kind: "FETCH_FAILED"
+      })
+    );
+  });
+
+  it("queues Grassy Hill for the local reader after a verified challenge", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Grassy Hill Country Club",
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "grassyhill",
+              bookingBaseUrl: "https://grassyhill.cps.golf/",
+              courseIds: [1]
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(
+      Object.assign(new Error("Provider challenge detected"), {
+        failureClass: "CHALLENGE"
+      })
+    );
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
@@ -1431,7 +1486,7 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
   });
 
-  it("uses a fresh local reader result without calling the server adapter", async () => {
+  it("prefers the normal server adapter over a fresh local-reader result", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -1479,15 +1534,16 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(localReaderMocks.getFreshLocalReaderTeeSheet).not.toHaveBeenCalled();
+    expect(adapterMocks.fetchCpsTeeSheet).toHaveBeenCalled();
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "MATCH_FOUND",
-      availableMatches: 1
+      outcome: "NO_MATCH",
+      availableMatches: 0
     });
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
         rawSummary: expect.objectContaining({
-          providerExecution: "LOCAL_BROWSER_READER"
+          providerExecution: "RUNNABLE_PROVIDER_CHECK"
         })
       })
     );
