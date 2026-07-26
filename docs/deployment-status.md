@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-24
+Last updated: 2026-07-26
 
 ## Live Vercel Deployment
 
@@ -15,6 +15,8 @@ Last updated: 2026-07-24
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
+
+- 2026-07-26 hourly product loop published source-backed Course Guides for Harrisville Golf Course, Dudley Hill Golf Club at Nichols College, and Raceway Golf Club. All three protected drafts passed dry-run validation before the production upsert and read back `PUBLISHED`. Harrisville and Dudley Hill now record verified nine-hole physical layouts, while Raceway records its verified 18-hole layout; no unsupported course-level par was added. The three canonical routes changed from `404` to indexable `200`, expose descriptive metadata, self-canonicals, structured data, and crawlable internal links, and joined the live sitemap. Provider eligibility, alert scheduling, and responder ownership were unchanged.
 
 - 2026-07-24 hourly product loop published River Ridge Golf Course and Windham Golf Course and refreshed Quarry Ridge Golf Course from current authoritative sources. All three protected drafts passed dry-run validation before production apply and read back `PUBLISHED`. Quarry Ridge and River Ridge now record verified 18-hole, par-72 facts; Windham records its verified 18-hole routing without adding an unsupported course-level par. River Ridge and Windham changed from `404` to indexable `200` Course Guides, while Quarry Ridge stayed available and returned to current status. All three routes have descriptive metadata, self-canonicals, structured data, crawlable internal links, and sitemap membership; the live sitemap grew from 41 to 43 URLs. Provider eligibility, customer scheduling, and course-support ownership were unchanged.
 
