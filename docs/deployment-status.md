@@ -57,5 +57,12 @@ Record release and automation evidence in the systems that own it:
 - `AutomationWorkerState` for current worker cadence, heartbeat, completion, and
   overdue/recovery notification state.
 
+Database-backed Course Guide publication does not require a new application
+deployment when the current production release already serves the profile
+routes. Verify the published profile row, canonical route metadata and
+structured data, sitemap membership, both production aliases, and current
+runtime logs. Record the per-run sources, changed routes, and measurements in
+`AutomationRun.audit` rather than appending a release narrative here.
+
 Keep secrets, customer identifiers, raw recipient data, and copied error payloads
 out of documentation and audit summaries.
