@@ -6453,12 +6453,12 @@ button {
 .scenario-section {
   background: #14231d;
   color: #ffffff;
-  padding: 64px;
+  padding: 64px max(32px, calc((100vw - 1400px) / 2 + 32px));
 }
 
 .scenario-inner {
   margin: 0 auto;
-  max-width: 1000px;
+  max-width: 1336px;
 }
 
 .scenario-section .eyebrow {
@@ -6647,14 +6647,14 @@ button {
 
 .section-tight {
   background: #f7f4eb;
-  padding: 80px 64px;
+  padding: 80px max(32px, calc((100vw - 1400px) / 2 + 32px));
 }
 
 .section-tight > .section-heading,
 .home-intake-layout,
 .how-it-works-section > * {
   margin-inline: auto;
-  max-width: 1000px;
+  max-width: 1336px;
 }
 
 .section-tight > .section-heading {
@@ -6737,7 +6737,7 @@ button {
 .how-it-works-section {
   background: #eaf3ee;
   border-block: 1px solid #d9e3dc;
-  padding: 80px 64px;
+  padding: 80px max(32px, calc((100vw - 1400px) / 2 + 32px));
 }
 
 .how-it-works-section .section-heading {
@@ -6788,7 +6788,7 @@ button {
 
 .community-section {
   background: #f7f4eb;
-  padding: 64px;
+  padding: 64px max(32px, calc((100vw - 1400px) / 2 + 32px));
 }
 
 .community-card {
@@ -6796,7 +6796,7 @@ button {
   border-radius: 16px;
   display: flex;
   margin: 0 auto;
-  max-width: 1000px;
+  max-width: 1336px;
   min-height: 220px;
   overflow: hidden;
 }

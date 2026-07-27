@@ -498,12 +498,12 @@
 
 .home-trust-section {
   background: #f7f4eb;
-  padding: 80px 64px;
+  padding: 80px max(32px, calc((100vw - 1400px) / 2 + 32px));
 }
 
 .home-trust-inner {
   margin: 0 auto;
-  max-width: 1000px;
+  max-width: 1336px;
 }
 
 .home-trust-heading {

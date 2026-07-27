@@ -146,9 +146,27 @@ test.describe("Tee Time Spot UI smoke", () => {
         page.locator(".brand").boundingBox(),
         page.locator(".hero-content").boundingBox()
       ]);
+      const moduleBoxes = await Promise.all(
+        [
+          ".scenario-inner",
+          ".home-intake-layout",
+          ".how-steps-grid",
+          ".home-trust-inner",
+          ".community-card"
+        ].map((selector) => page.locator(selector).boundingBox())
+      );
+      const viewport = page.viewportSize();
       expect(brandBox).not.toBeNull();
       expect(heroContentBox).not.toBeNull();
+      expect(viewport).not.toBeNull();
       expect(Math.abs(brandBox!.x - heroContentBox!.x)).toBeLessThanOrEqual(1);
+      for (const moduleBox of moduleBoxes) {
+        expect(moduleBox).not.toBeNull();
+        expect(Math.abs(moduleBox!.x - heroContentBox!.x)).toBeLessThanOrEqual(1);
+        expect(
+          Math.abs(moduleBox!.width - (viewport!.width - moduleBox!.x * 2))
+        ).toBeLessThanOrEqual(1);
+      }
     }
     await captureUiScreenshot(page, testInfo, "home-viewport");
     await expect(
