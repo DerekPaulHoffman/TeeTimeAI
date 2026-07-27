@@ -434,11 +434,44 @@ function getStablePlaceId(course: SelectedCourseInput) {
 }
 
 export async function listTeeSearchesForUser(userId: string) {
-  return prisma.teeSearch.findMany({
+  const searches = await prisma.teeSearch.findMany({
     where: { userId },
     orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
     include: searchListInclude
   });
+
+  if (searches.length === 0) {
+    return searches.map((search) => ({ ...search, probes: [] }));
+  }
+
+  const latestProbeIds = await prisma.$queryRaw<Array<{ id: string }>>(
+    Prisma.sql`
+      SELECT DISTINCT ON ("teeSearchId", "courseId") id
+      FROM "CourseProbe"
+      WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
+      ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
+    `
+  );
+  const latestProbes =
+    latestProbeIds.length === 0
+      ? []
+      : await prisma.courseProbe.findMany({
+          where: { id: { in: latestProbeIds.map((probe) => probe.id) } },
+          orderBy: { observedAt: "desc" },
+          include: { course: true }
+        });
+  const probesBySearch = new Map<string, typeof latestProbes>();
+
+  for (const probe of latestProbes) {
+    const probes = probesBySearch.get(probe.teeSearchId) ?? [];
+    probes.push(probe);
+    probesBySearch.set(probe.teeSearchId, probes);
+  }
+
+  return searches.map((search) => ({
+    ...search,
+    probes: probesBySearch.get(search.id) ?? []
+  }));
 }
 
 export async function getTeeSearchForUser(userId: string, searchId: string) {
@@ -706,6 +739,7 @@ export const searchInclude = {
 
 const searchListInclude = {
   ...searchInclude,
+  probes: false,
   preferences: {
     orderBy: { rank: "asc" },
     include: {

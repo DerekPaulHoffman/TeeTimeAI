@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import {
   createTeeSearchForUser,
   deleteTeeSearchForUser,
+  listTeeSearchesForUser,
   updateTeeSearchForUser,
   updateTeeSearchStatusForUser
 } from "./service";
@@ -19,10 +20,14 @@ const courseMonitoringMocks = vi.hoisted(() => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
     course: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn()
+    },
+    courseProbe: {
+      findMany: vi.fn()
     },
     googlePlaceReview: {
       findMany: vi.fn()
@@ -36,6 +41,7 @@ vi.mock("@/lib/prisma", () => ({
     teeSearch: {
       count: vi.fn(),
       create: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn(),
       delete: vi.fn(),
@@ -57,6 +63,102 @@ beforeEach(() => {
   });
   courseMonitoringMocks.requestTechnicalFinalRevalidationForDemand.mockResolvedValue({
     requestedCourseIds: []
+  });
+});
+
+describe("listTeeSearchesForUser", () => {
+  it("returns the newest probe for every selected course after repeated multi-course checks", async () => {
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-1",
+        preferences: [
+          { course: { id: "course-1" } },
+          { course: { id: "course-2" } },
+          { course: { id: "course-3" } },
+          { course: { id: "course-4" } },
+          { course: { id: "course-5" } }
+        ],
+        matches: []
+      }
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      { id: "probe-course-1-latest" },
+      { id: "probe-course-2-latest" },
+      { id: "probe-course-3-latest" },
+      { id: "probe-course-4-unchanged" },
+      { id: "probe-course-5-unchanged" }
+    ] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      {
+        id: "probe-course-3-latest",
+        teeSearchId: "search-1",
+        courseId: "course-3",
+        outcome: "FETCH_FAILED",
+        observedAt: new Date("2026-07-27T17:19:31.000Z")
+      },
+      {
+        id: "probe-course-2-latest",
+        teeSearchId: "search-1",
+        courseId: "course-2",
+        outcome: "MATCH_FOUND",
+        observedAt: new Date("2026-07-27T17:19:30.000Z")
+      },
+      {
+        id: "probe-course-1-latest",
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        outcome: "MATCH_FOUND",
+        observedAt: new Date("2026-07-27T17:19:29.000Z")
+      },
+      {
+        id: "probe-course-5-unchanged",
+        teeSearchId: "search-1",
+        courseId: "course-5",
+        outcome: "NEEDS_ADAPTER",
+        observedAt: new Date("2026-07-27T17:15:27.000Z")
+      },
+      {
+        id: "probe-course-4-unchanged",
+        teeSearchId: "search-1",
+        courseId: "course-4",
+        outcome: "NEEDS_ADAPTER",
+        observedAt: new Date("2026-07-27T17:15:26.000Z")
+      }
+    ] as never);
+
+    const searches = await listTeeSearchesForUser("user-1");
+
+    expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: "user-1" },
+        include: expect.objectContaining({ probes: false })
+      })
+    );
+    expect(mockedPrisma.courseProbe.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: {
+            in: [
+              "probe-course-1-latest",
+              "probe-course-2-latest",
+              "probe-course-3-latest",
+              "probe-course-4-unchanged",
+              "probe-course-5-unchanged"
+            ]
+          }
+        }
+      })
+    );
+    expect(searches[0]?.probes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ courseId: "course-1", outcome: "MATCH_FOUND" }),
+        expect.objectContaining({ courseId: "course-2", outcome: "MATCH_FOUND" }),
+        expect.objectContaining({ courseId: "course-3", outcome: "FETCH_FAILED" }),
+        expect.objectContaining({ courseId: "course-4", outcome: "NEEDS_ADAPTER" }),
+        expect.objectContaining({ courseId: "course-5", outcome: "NEEDS_ADAPTER" })
+      ])
+    );
+    expect(searches[0]?.probes).toHaveLength(5);
   });
 });
 
