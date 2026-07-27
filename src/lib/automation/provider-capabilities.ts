@@ -166,7 +166,9 @@ export const PROVIDER_CAPABILITIES = {
     family: "WEBTRAC",
     detectedPlatform: "CUSTOM",
     supportsAutomation: true,
-    matchesHostname: (hostname) => matchesDomain(hostname, "navyaims.com"),
+    matchesHostname: (hostname) =>
+      matchesDomain(hostname, "navyaims.com") ||
+      matchesDomain(hostname, "myvscloud.com"),
     validatesMetadata: isWebTracMetadata
   },
   EZLINKS: {
@@ -736,10 +738,19 @@ function isProviderFamilyPublicBookingLandingUrl(
       );
     case "WEBTRAC":
       return Boolean(
-        (hostname === "navyaims.com" || hostname.endsWith(".navyaims.com")) &&
-          /^\/(?:[^/]+\/)*web\/search\.html\/?$/iu.test(pathname) &&
+        (
+          hostname === "navyaims.com" ||
+          hostname.endsWith(".navyaims.com") ||
+          hostname === "myvscloud.com" ||
+          hostname.endsWith(".myvscloud.com")
+        ) &&
+          /^\/(?:[a-z0-9_-]+\/)?webtrac\/web\/search\.html\/?$/iu.test(pathname) &&
           url.searchParams.get("module")?.toUpperCase() === "GR" &&
-          url.searchParams.get("secondarycode") &&
+          (
+            hostname === "myvscloud.com" ||
+            hostname.endsWith(".myvscloud.com") ||
+            Boolean(url.searchParams.get("secondarycode"))
+          ) &&
           !url.hash
       );
     case "EZLINKS": {
@@ -1048,10 +1059,15 @@ function hasAllowedProviderBookingLandingQuery(
       "secondarycode"
     ]);
     const secondaryCode = query.get("secondarycode");
+    const isMyVsCloud =
+      url.hostname === "myvscloud.com" ||
+      url.hostname.endsWith(".myvscloud.com");
     return Boolean(
       query.get("module")?.toUpperCase() === "GR" &&
-        secondaryCode &&
-        /^[a-z0-9_-]{1,24}$/iu.test(secondaryCode) &&
+        (
+          (secondaryCode && /^[a-z0-9_-]{1,24}$/iu.test(secondaryCode)) ||
+          (isMyVsCloud && !secondaryCode)
+        ) &&
         [...query.entries()].every(([key, entry]) => {
           if (!allowedKeys.has(key)) {
             return false;

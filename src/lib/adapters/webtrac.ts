@@ -3,12 +3,13 @@ import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 
-const WEBTRAC_SEARCH_PATH = "/navyeast/webtrac/web/search.html";
+const WEBTRAC_SEARCH_PATH =
+  /^\/(?:[a-z0-9_-]+\/)?webtrac\/web\/search\.html$/i;
 
 export type WebTracMetadata = {
   provider: "WEBTRAC";
   bookingBaseUrl: string;
-  courseCode: string;
+  courseCode?: string;
   bookingWindowDaysAhead?: number;
   bookingWindowEvidenceUrl?: string;
 };
@@ -27,8 +28,9 @@ export function isWebTracMetadata(value: unknown): value is WebTracMetadata {
   if (
     metadata.provider !== "WEBTRAC" ||
     typeof metadata.bookingBaseUrl !== "string" ||
-    typeof metadata.courseCode !== "string" ||
-    !/^[a-z0-9_-]{1,24}$/i.test(metadata.courseCode) ||
+    (metadata.courseCode !== undefined &&
+      (typeof metadata.courseCode !== "string" ||
+        !/^[a-z0-9_-]{1,24}$/i.test(metadata.courseCode))) ||
     (metadata.bookingWindowDaysAhead !== undefined &&
       (!Number.isInteger(metadata.bookingWindowDaysAhead) ||
         metadata.bookingWindowDaysAhead < 0 ||
@@ -39,12 +41,33 @@ export function isWebTracMetadata(value: unknown): value is WebTracMetadata {
 
   try {
     const url = new URL(metadata.bookingBaseUrl);
+    const isNavyWebTrac =
+      url.hostname === "navyaims.com" || url.hostname.endsWith(".navyaims.com");
+    const isMyVsCloudWebTrac =
+      url.hostname === "myvscloud.com" || url.hostname.endsWith(".myvscloud.com");
+    const secondaryCode = url.searchParams.get("secondarycode") ?? undefined;
+    const allowedQueryKeys = new Set([
+      "interfaceparameter",
+      "module",
+      "secondarycode"
+    ]);
     return (
       url.protocol === "https:" &&
-      (url.hostname === "navyaims.com" || url.hostname.endsWith(".navyaims.com")) &&
-      url.pathname.toLowerCase() === WEBTRAC_SEARCH_PATH &&
+      (isNavyWebTrac || isMyVsCloudWebTrac) &&
+      WEBTRAC_SEARCH_PATH.test(url.pathname) &&
       url.searchParams.get("module")?.toUpperCase() === "GR" &&
-      url.searchParams.get("secondarycode") === metadata.courseCode
+      secondaryCode === metadata.courseCode &&
+      (!isNavyWebTrac || Boolean(metadata.courseCode)) &&
+      [...url.searchParams.entries()].every(([key, entry]) => {
+        const normalizedKey = key.toLowerCase();
+        if (!allowedQueryKeys.has(normalizedKey)) {
+          return false;
+        }
+        if (normalizedKey === "interfaceparameter") {
+          return entry.toLowerCase() === "webtrac_se";
+        }
+        return /^[a-z0-9_-]{1,24}$/i.test(entry);
+      })
     );
   } catch {
     return false;
@@ -107,7 +130,11 @@ function buildSearchUrl(metadata: WebTracMetadata, date: Date, players: number) 
   url.searchParams.set("numberofplayers", String(Math.max(1, Math.min(5, players))));
   url.searchParams.set("page", "1");
   url.searchParams.set("search", "yes");
-  url.searchParams.set("secondarycode", metadata.courseCode);
+  if (metadata.courseCode) {
+    url.searchParams.set("secondarycode", metadata.courseCode);
+  } else {
+    url.searchParams.delete("secondarycode");
+  }
   return url.toString();
 }
 
@@ -130,7 +157,7 @@ function parseWebTracSlots(
         return [];
       }
       return [{
-        sourceId: `webtrac-${input.metadata.courseCode}-${providerId}`,
+        sourceId: `webtrac-${input.metadata.courseCode ?? "default"}-${providerId}`,
         courseId: input.courseId,
         startsAt,
         availableSpots: openSlots,

@@ -141,7 +141,7 @@ export type BrowserDiscovery = {
   } | {
     provider: "WEBTRAC";
     bookingBaseUrl: string;
-    courseCode: string;
+    courseCode?: string;
     bookingWindowDaysAhead?: number;
     bookingWindowEvidenceUrl?: string;
   } | {
@@ -1700,14 +1700,18 @@ function learnWebTracDiscovery(
     .map(parseUrl)
     .find((url) => Boolean(
       url &&
-      (url.hostname === "navyaims.com" || url.hostname.endsWith(".navyaims.com")) &&
+      (
+        url.hostname === "navyaims.com" ||
+        url.hostname.endsWith(".navyaims.com") ||
+        url.hostname === "myvscloud.com" ||
+        url.hostname.endsWith(".myvscloud.com")
+      ) &&
       /\/webtrac\/web\/search\.html$/i.test(url.pathname) &&
       isProviderPublicBookingLandingUrl(url) &&
-      url.searchParams.get("module")?.toUpperCase() === "GR" &&
-      url.searchParams.get("secondarycode")
+      url.searchParams.get("module")?.toUpperCase() === "GR"
     ));
   const courseCode = bookingUrl?.searchParams.get("secondarycode");
-  if (!bookingUrl || !courseCode) {
+  if (!bookingUrl) {
     return null;
   }
   const bookingWindowDays = [...(evidence.visibleText ?? "").matchAll(/\b(\d{1,2})\s+DAYS?\s+(?:prior|in advance)\b/gi)]
@@ -1726,11 +1730,13 @@ function learnWebTracDiscovery(
     automationReason: "NONE",
     policyNotes:
       "The official Vermont Systems WebTrac golf search exposes signed-out tee-time availability. Tee Time Spot reads only search results and leaves cart, account, and booking actions to the golfer on the provider site.",
-    apiEndpoint: `${bookingUrl.origin}${bookingUrl.pathname}?module=GR&secondarycode=${encodeURIComponent(courseCode)}&begindate={date}`,
+    apiEndpoint: `${bookingUrl.origin}${bookingUrl.pathname}?module=GR${
+      courseCode ? `&secondarycode=${encodeURIComponent(courseCode)}` : ""
+    }&begindate={date}`,
     apiMetadata: {
       provider: "WEBTRAC",
       bookingBaseUrl,
-      courseCode,
+      ...(courseCode ? { courseCode } : {}),
       ...(bookingWindowDays.length > 0
         ? {
             bookingWindowDaysAhead: Math.min(...bookingWindowDays),

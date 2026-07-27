@@ -5761,6 +5761,35 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("learns a trusted single-course MyVSCloud golf search without inventing a course code", () => {
+    const bookingUrl =
+      "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
+    const discovery = buildBrowserDiscovery({
+      courseId: "single-course-webtrac",
+      courseName: "Guilford Lakes Golf Course",
+      sourceUrl: "https://www.guilfordlakesgolf.com/",
+      observedUrls: [bookingUrl],
+      visibleText:
+        "To reserve a tee time as guest choose players, time, and date. Tee Time Search Results."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiEndpoint:
+        "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR&begindate={date}",
+      apiMetadata: {
+        provider: "WEBTRAC",
+        bookingBaseUrl: bookingUrl
+      },
+      evidence: { learnedFrom: "webtrac-public-golf-search" }
+    });
+    expect(discovery.apiMetadata).not.toHaveProperty("courseCode");
+  });
+
   it("does not treat an arbitrary WebTrac-shaped host as trusted provider metadata", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "untrusted",

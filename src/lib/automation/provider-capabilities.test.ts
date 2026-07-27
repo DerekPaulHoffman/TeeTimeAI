@@ -167,6 +167,7 @@ describe("provider capability registry", () => {
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&module=XX&secondarycode=25&secondarycode=99",
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR",
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&utm_source=course",
+    "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR&action=checkout",
     "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=999999999999999999999999"
   ])("rejects invalid provider booking query shape %s", (url) => {
     expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
@@ -194,6 +195,7 @@ describe("provider capability registry", () => {
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25",
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25&interfaceparameter=webtrac_se",
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=course-code-123456789012",
+    "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR",
     "https://public-course.book.teeitup.golf/?course=24680&date=2026-07-24&max=10"
   ])("keeps an explicit provider-family booking query shape %s", (url) => {
     expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
@@ -299,6 +301,7 @@ describe("provider capability registry", () => {
     "https://public-course.ezlinksgolf.com/tee-times/account",
     "https://public-course.ezlinksgolf.com/tee-times/cart",
     "https://public-course.ezlinksgolf.com/tee-times/payment",
+    "https://ctguilfordweb.myvscloud.com/webtrac/web/cart.html?module=GR",
     "https://course.whoosh.io/patron/club/public-course/checkout",
     "https://capitalhillsny.cps.golf/onlineresweb/search-teetime/checkout?CourseId=7",
     "https://foreupsoftware.com/index.php/booking/21017/checkout#/teetimes",
@@ -495,6 +498,7 @@ describe("provider capability registry", () => {
     ["golfwithaccess.com", "GOLF_WITH_ACCESS"],
     ["cdn.golfwithaccess.com", "GOLF_WITH_ACCESS"],
     ["course.navyaims.com", "WEBTRAC"],
+    ["ctguilfordweb.myvscloud.com", "WEBTRAC"],
     ["public-course.ezlinksgolf.com", "EZLINKS"],
     ["www.golfnow.com", "GOLFNOW"],
     ["book.onagilysys.com", "AGILYSYS"],
