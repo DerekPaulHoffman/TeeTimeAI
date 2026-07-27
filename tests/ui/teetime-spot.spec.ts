@@ -90,7 +90,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     ).toBeVisible();
     const heroCards = page.locator(".hero-strip-item");
     await expect(heroCards).toHaveCount(3);
-    await expect(page.locator('.brand img[src="/icon.svg"]')).toBeVisible();
+    const brandLogo = page.locator(".brand img");
+    await expect(brandLogo).toBeVisible();
+    await expect(brandLogo).toHaveAttribute("src", /icon\.svg/);
     await expect(page.locator('.hero-strip-item[href="/search"]')).toHaveCount(3);
     await expect(page.getByText("Tell us your courses", { exact: true })).toBeVisible();
     await expect(
