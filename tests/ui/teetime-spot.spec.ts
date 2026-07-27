@@ -90,6 +90,8 @@ test.describe("Tee Time Spot UI smoke", () => {
     ).toBeVisible();
     const heroCards = page.locator(".hero-strip-item");
     await expect(heroCards).toHaveCount(3);
+    await expect(page.locator('.brand img[src="/icon.svg"]')).toBeVisible();
+    await expect(page.locator('.hero-strip-item[href="/search"]')).toHaveCount(3);
     await expect(page.getByText("Tell us your courses", { exact: true })).toBeVisible();
     await expect(
       page.getByText(
@@ -137,6 +139,14 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(Math.abs(cardRects[0].top - cardRects[1].top)).toBeLessThanOrEqual(1);
       expect(cardRects[2].top).toBeGreaterThan(cardRects[0].bottom);
       expect(cardRects[2].width).toBeGreaterThan(cardRects[0].width * 1.9);
+    } else {
+      const [brandBox, heroContentBox] = await Promise.all([
+        page.locator(".brand").boundingBox(),
+        page.locator(".hero-content").boundingBox()
+      ]);
+      expect(brandBox).not.toBeNull();
+      expect(heroContentBox).not.toBeNull();
+      expect(Math.abs(brandBox!.x - heroContentBox!.x)).toBeLessThanOrEqual(1);
     }
     await captureUiScreenshot(page, testInfo, "home-viewport");
     await expect(

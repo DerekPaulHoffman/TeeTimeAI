@@ -6296,17 +6296,24 @@ button {
 }
 
 .brand {
-  font-size: 0.94rem;
+  font-size: 1rem;
   gap: 10px;
   text-shadow: none;
 }
 
 .brand-mark {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: #6dbf9c;
-  height: 30px;
-  width: 30px;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  height: 38px;
+  overflow: hidden;
+  width: 38px;
+}
+
+.brand-mark img {
+  display: block;
+  height: 100%;
+  width: 100%;
 }
 
 .topbar .button {
@@ -6340,7 +6347,7 @@ button {
   flex-direction: column;
   height: min(100svh, 820px);
   min-height: 700px;
-  padding: 60px 64px 32px;
+  padding: 60px max(32px, calc((100vw - 1400px) / 2 + 32px)) 32px;
 }
 
 .hero-content {
@@ -6388,22 +6395,59 @@ button {
   background: rgba(17, 29, 24, 0.62);
   border-color: rgba(255, 255, 255, 0.18);
   border-radius: 12px;
+  display: flex;
+  flex-direction: column;
   min-height: 128px;
   padding: 16px;
+  position: relative;
+  transition:
+    background 180ms ease,
+    border-color 180ms ease,
+    transform 180ms ease;
+}
+
+.hero-strip-item:hover,
+.hero-strip-item:focus-visible {
+  background: rgba(24, 42, 34, 0.82);
+  border-color: rgba(255, 255, 255, 0.42);
+  outline: none;
+  transform: translateY(-3px);
 }
 
 .hero-strip-item:nth-child(3) {
   background: rgba(66, 118, 71, 0.88);
 }
 
+.hero-strip-item:nth-child(3):hover,
+.hero-strip-item:nth-child(3):focus-visible {
+  background: rgba(76, 137, 82, 0.96);
+}
+
 .hero-strip-item strong {
   font-size: 0.94rem;
+  padding-right: 30px;
 }
 
 .hero-strip-item span {
   color: rgba(255, 255, 255, 0.65);
   font-size: 0.81rem;
   line-height: 1.45;
+}
+
+.hero-strip-arrow {
+  opacity: 0.72;
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.hero-strip-item:hover .hero-strip-arrow,
+.hero-strip-item:focus-visible .hero-strip-arrow {
+  opacity: 1;
+  transform: translateX(3px);
 }
 
 .scenario-section {
@@ -7609,8 +7653,8 @@ button {
   }
 
   .brand-mark {
-    height: 30px;
-    width: 30px;
+    height: 34px;
+    width: 34px;
   }
 
   .brand-text,

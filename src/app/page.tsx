@@ -116,21 +116,36 @@ export default function HomePage() {
           </div>
         </div>
         <div className="hero-strip" aria-label="How Tee Time Spot works">
-          <div className="hero-strip-item">
+          <Link
+            className="hero-strip-item"
+            data-analytics-event="start_search_clicked"
+            href="/search"
+          >
             <strong>Tell us your courses</strong>
             <span>Pick the public courses you want to play and rank them by priority.</span>
-          </div>
-          <div className="hero-strip-item">
+            <ArrowRight aria-hidden="true" className="hero-strip-arrow" size={18} />
+          </Link>
+          <Link
+            className="hero-strip-item"
+            data-analytics-event="start_search_clicked"
+            href="/search"
+          >
             <strong>Book what you can now</strong>
             <span>See what&apos;s currently available and grab a tee time to hold your day.</span>
-          </div>
-          <div className="hero-strip-item">
+            <ArrowRight aria-hidden="true" className="hero-strip-arrow" size={18} />
+          </Link>
+          <Link
+            className="hero-strip-item"
+            data-analytics-event="start_search_clicked"
+            href="/search"
+          >
             <strong>We&apos;ll alert you when a priority opens</strong>
             <span>
               If your top picks are full, we watch them around the clock and notify you the
               moment a spot becomes available.
             </span>
-          </div>
+            <ArrowRight aria-hidden="true" className="hero-strip-arrow" size={18} />
+          </Link>
         </div>
       </section>
 

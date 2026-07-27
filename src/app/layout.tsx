@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Image from "next/image";
 import Link from "next/link";
-import { Flag } from "lucide-react";
 
 import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
 import { AuthNav } from "@/components/auth-nav";
@@ -96,7 +96,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             <header className="topbar">
               <Link className="brand" href="/" aria-label="Tee Time Spot home">
                 <span className="brand-mark" aria-hidden="true">
-                  <Flag size={18} />
+                  <Image alt="" height={38} priority src="/icon.svg" width={38} />
                 </span>
                 <span className="brand-text">Tee Time Spot</span>
               </Link>
