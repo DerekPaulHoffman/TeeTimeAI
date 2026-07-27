@@ -2,7 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { Prisma } from "@prisma/client";
 
+import { recordCourseMonitoringSuccess } from "@/lib/automation/course-monitoring";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
+import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { prisma } from "@/lib/prisma";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
@@ -306,6 +308,38 @@ export async function completeLocalReaderJob(input: {
     },
   });
   if (updated.count !== 1) throw new Error("The local reader lease changed");
+
+  if (
+    current.purpose === "COURSE_VERIFICATION" &&
+    (input.result.status === "AVAILABLE" ||
+      input.result.status === "NO_AVAILABILITY")
+  ) {
+    try {
+      const outcome =
+        input.result.status === "AVAILABLE" ? "MATCH_FOUND" : "NO_MATCH";
+      await recordCourseMonitoringSuccess({
+        courseId: current.courseId,
+        outcome,
+        source: "LOCAL_READER",
+        message:
+          input.result.status === "AVAILABLE"
+            ? "Fresh signed local public-page verification found availability."
+            : "Fresh signed local public-page verification completed without availability.",
+        now: completedAt,
+        runtimeVersion: input.result.readerVersion
+      });
+      await resolveCourseSupportIncident({
+        courseId: current.courseId,
+        resolution: "MONITORING_RESTORED",
+        message: `Fresh signed local public-page verification completed successfully with outcome ${outcome}.`,
+        now: completedAt
+      });
+    } catch {
+      console.error("[local-reader:course-verification-reconciliation-failed]", {
+        category: "monitoring_reconciliation_failed"
+      });
+    }
+  }
 
   if (current.teeSearchId) {
     await prisma.localReaderJob.updateMany({

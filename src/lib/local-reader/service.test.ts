@@ -16,8 +16,19 @@ const schedulerMocks = vi.hoisted(() => ({
   startSearchSchedule: vi.fn(),
 }));
 
+const monitoringMocks = vi.hoisted(() => ({
+  recordCourseMonitoringSuccess: vi.fn(),
+  resolveCourseSupportIncident: vi.fn(),
+}));
+
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 vi.mock("@/lib/automation/search-scheduler", () => schedulerMocks);
+vi.mock("@/lib/automation/course-monitoring", () => ({
+  recordCourseMonitoringSuccess: monitoringMocks.recordCourseMonitoringSuccess,
+}));
+vi.mock("@/lib/automation/support-incidents", () => ({
+  resolveCourseSupportIncident: monitoringMocks.resolveCourseSupportIncident,
+}));
 
 import {
   claimNextLocalReaderJob,
@@ -303,6 +314,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       teeSearchId: "search-1",
+      purpose: "ALERT_CHECK",
       courseId: "course-1",
       courseKey: "grassy-hill",
       targetDate: "2026-07-25",
@@ -368,6 +380,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-verification",
       teeSearchId: null,
+      purpose: "COURSE_VERIFICATION",
       courseId: "course-1",
       courseKey: "grassy-hill",
       targetDate: "2026-07-25",
@@ -401,6 +414,60 @@ describe("local reader job service", () => {
       completedAt: new Date("2026-07-24T16:00:00.000Z"),
     });
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledTimes(1);
+    expect(schedulerMocks.startSearchSchedule).not.toHaveBeenCalled();
+    expect(monitoringMocks.recordCourseMonitoringSuccess).toHaveBeenCalledWith({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      source: "LOCAL_READER",
+      message:
+        "Fresh signed local public-page verification completed without availability.",
+      now: new Date("2026-07-24T16:00:00.000Z"),
+      runtimeVersion: "1.3.2",
+    });
+    expect(monitoringMocks.resolveCourseSupportIncident).toHaveBeenCalledWith({
+      courseId: "course-1",
+      resolution: "MONITORING_RESTORED",
+      message:
+        "Fresh signed local public-page verification completed successfully with outcome NO_MATCH.",
+      now: new Date("2026-07-24T16:00:00.000Z"),
+    });
+  });
+
+  it("keeps challenged detached verification in engineering", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-challenge",
+      teeSearchId: null,
+      courseId: "course-1",
+      purpose: "COURSE_VERIFICATION",
+      courseKey: "grassy-hill",
+      targetDate: "2026-07-25",
+      players: 2,
+      createdAt: new Date("2026-07-24T15:59:00.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+      status: "LEASED",
+      leaseToken: "lease-challenge",
+      leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
+      bookingUrl,
+    });
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+
+    await completeLocalReaderJob({
+      jobId: "job-challenge",
+      leaseToken: "lease-challenge",
+      result: {
+        jobId: "job-challenge",
+        courseKey: "grassy-hill",
+        status: "ACCESS_CHALLENGE",
+        observedAt: "2026-07-24T16:00:00.000Z",
+        pageUrl: bookingUrl,
+        pageTitle: "Checking your browser",
+        slots: [],
+        readerVersion: "1.4.0",
+      },
+    });
+
+    expect(monitoringMocks.recordCourseMonitoringSuccess).not.toHaveBeenCalled();
+    expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
     expect(schedulerMocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
