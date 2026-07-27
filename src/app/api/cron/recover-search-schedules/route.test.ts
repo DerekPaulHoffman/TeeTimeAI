@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
   listSearchesNeedingScheduleRecovery: vi.fn(),
   checkAutomationWorkerHealth: vi.fn(),
+  runCourseMonitoringWatchdog: vi.fn(),
   recoverDueCourseSupportVerificationRequests: vi.fn(),
   recoverPendingClerkEmailUpdates: vi.fn(),
   startSearchSchedule: vi.fn()
@@ -26,9 +27,12 @@ vi.mock("@/lib/automation/worker-state", () => ({
   checkAutomationWorkerHealth: mocks.checkAutomationWorkerHealth
 }));
 
+vi.mock("@/lib/automation/course-monitoring", () => ({
+  runCourseMonitoringWatchdog: mocks.runCourseMonitoringWatchdog
+}));
+
 vi.mock("@/lib/automation/course-support-verification-scheduler", () => ({
-  recoverDueCourseSupportVerificationRequests:
-    mocks.recoverDueCourseSupportVerificationRequests
+  recoverDueCourseSupportVerificationRequests: mocks.recoverDueCourseSupportVerificationRequests
 }));
 
 vi.mock("@/lib/users/pending-email", () => ({
@@ -64,6 +68,13 @@ describe("GET /api/cron/recover-search-schedules", () => {
       notified: 0,
       recovered: 0
     });
+    mocks.runCourseMonitoringWatchdog.mockResolvedValue({
+      checked: 0,
+      scheduled: 0,
+      escalated: 0,
+      remindersSent: 0,
+      failed: 0
+    });
   });
 
   afterEach(() => {
@@ -87,9 +98,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
     });
     expect(mocks.listSearchesNeedingScheduleRecovery).not.toHaveBeenCalled();
     expect(mocks.recoverPendingClerkEmailUpdates).not.toHaveBeenCalled();
-    expect(
-      mocks.recoverDueCourseSupportVerificationRequests
-    ).not.toHaveBeenCalled();
+    expect(mocks.recoverDueCourseSupportVerificationRequests).not.toHaveBeenCalled();
     expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
@@ -138,6 +147,13 @@ describe("GET /api/cron/recover-search-schedules", () => {
         recovered: 0,
         failed: 0
       },
+      courseMonitoring: {
+        checked: 0,
+        scheduled: 0,
+        escalated: 0,
+        remindersSent: 0,
+        failed: 0
+      },
       considered: 3,
       restarted: 2,
       failed: 1
@@ -147,9 +163,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(2, "search-2");
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(3, "search-3");
     expect(mocks.recoverPendingClerkEmailUpdates).toHaveBeenCalledTimes(1);
-    expect(
-      mocks.recoverDueCourseSupportVerificationRequests
-    ).toHaveBeenCalledTimes(1);
+    expect(mocks.recoverDueCourseSupportVerificationRequests).toHaveBeenCalledTimes(1);
   });
 
   it("continues customer schedule recovery when provider verification recovery fails", async () => {
@@ -157,9 +171,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
     mocks.recoverDueCourseSupportVerificationRequests.mockRejectedValue(
       new Error("verification recovery unavailable")
     );
-    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
-      { id: "search-1" }
-    ]);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
     mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
 
     const response = await GET(
@@ -184,9 +196,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
 
   it("continues every customer recovery path when worker health fails", async () => {
     mocks.hasDatabaseConfig.mockReturnValue(true);
-    mocks.checkAutomationWorkerHealth.mockRejectedValue(
-      new Error("worker health unavailable")
-    );
+    mocks.checkAutomationWorkerHealth.mockRejectedValue(new Error("worker health unavailable"));
     mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
       considered: 1,
       applied: 1,
@@ -199,9 +209,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
       skipped: 0,
       failed: 0
     });
-    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
-      { id: "search-1" }
-    ]);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
     mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
 
     const response = await GET(
@@ -219,11 +227,42 @@ describe("GET /api/cron/recover-search-schedules", () => {
     });
   });
 
+  it("continues customer, email, and provider recovery when course monitoring fails", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.runCourseMonitoringWatchdog.mockRejectedValue(new Error("course lifecycle unavailable"));
+    mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
+      considered: 1,
+      applied: 1,
+      deferred: 0,
+      failed: 0
+    });
+    mocks.recoverDueCourseSupportVerificationRequests.mockResolvedValue({
+      considered: 1,
+      started: 1,
+      skipped: 0,
+      failed: 0
+    });
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      pendingEmailRecovery: { applied: 1 },
+      courseSupportVerification: { started: 1 },
+      courseMonitoring: { failed: 1 },
+      restarted: 1
+    });
+  });
+
   it("starts customer schedule recovery before awaiting detached verification", async () => {
     mocks.hasDatabaseConfig.mockReturnValue(true);
-    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
-      { id: "search-1" }
-    ]);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
     mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
     let releaseDetachedRecovery!: (value: {
       considered: number;
@@ -244,9 +283,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
     );
     await vi.waitFor(() => {
       expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
-      expect(
-        mocks.recoverDueCourseSupportVerificationRequests
-      ).toHaveBeenCalledTimes(1);
+      expect(mocks.recoverDueCourseSupportVerificationRequests).toHaveBeenCalledTimes(1);
     });
 
     releaseDetachedRecovery({
@@ -260,9 +297,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
   });
 
   it("configures a Pro recovery heartbeat every five minutes", () => {
-    const config = JSON.parse(
-      readFileSync(resolve(process.cwd(), "vercel.json"), "utf8")
-    ) as {
+    const config = JSON.parse(readFileSync(resolve(process.cwd(), "vercel.json"), "utf8")) as {
       crons?: Array<{ path: string; schedule: string }>;
     };
 

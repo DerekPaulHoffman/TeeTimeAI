@@ -2,19 +2,10 @@ import { createHash } from "node:crypto";
 
 import { Resend } from "resend";
 
-import {
-  getRenderedAvailabilityTimes,
-  renderCustomerEmail
-} from "@/lib/email/customer-email";
+import { getRenderedAvailabilityTimes, renderCustomerEmail } from "@/lib/email/customer-email";
 import { isVercelProduction } from "@/lib/env";
-import {
-  renderSearchStatusHtml,
-  type SearchStatusEmailInput
-} from "@/lib/email/search-status";
-import {
-  buildEmailStopUrls,
-  type EmailStopUrls
-} from "@/lib/email/search-actions";
+import { renderSearchStatusHtml, type SearchStatusEmailInput } from "@/lib/email/search-status";
+import { buildEmailStopUrls, type EmailStopUrls } from "@/lib/email/search-actions";
 import { DEFAULT_TIME_ZONE, normalizeTimeZone } from "@/lib/timezones";
 
 export type TeeTimeAlertMatch = {
@@ -63,10 +54,9 @@ export function getRenderedTeeTimeAlertMatchIds(
   }
 
   return [...courseGroups.values()].flatMap((courseMatches) => {
-    return getRenderedAvailabilityTimes(
-      courseMatches,
-      courseMatches[0]?.courseTimeZone
-    ).map((match) => match.matchId);
+    return getRenderedAvailabilityTimes(courseMatches, courseMatches[0]?.courseTimeZone).map(
+      (match) => match.matchId
+    );
   });
 }
 
@@ -75,7 +65,6 @@ type TeeTimeAlertWindow = {
   startsAt: Date;
   endsAt: Date;
 };
-
 
 export type EmailDelivery =
   | {
@@ -142,9 +131,11 @@ export type CourseSupportOperatorSummaryInput = {
   }>;
 };
 
-export type OperatorEmailDelivery = EmailDelivery | {
-  deliveryStatus: "not_configured";
-};
+export type OperatorEmailDelivery =
+  | EmailDelivery
+  | {
+      deliveryStatus: "not_configured";
+    };
 
 export type AutomationWorkerHealthEmailInput = {
   workerKey: string;
@@ -181,10 +172,7 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   const resend = new Resend(apiKey);
   const stopUrls =
     input.stopUrls ??
-    buildStableEmailStopUrls(
-      input.searchId,
-      input.matches[0]?.startsAt.toISOString().slice(0, 10)
-    );
+    buildStableEmailStopUrls(input.searchId, input.matches[0]?.startsAt.toISOString().slice(0, 10));
   const email = {
     from,
     to: input.to,
@@ -214,9 +202,7 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   return { ...result.data, deliveryStatus: "sent" };
 }
 
-export async function sendSearchStatusEmail(
-  input: SearchStatusEmailInput
-): Promise<EmailDelivery> {
+export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Promise<EmailDelivery> {
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
 
@@ -327,9 +313,7 @@ export async function sendCourseSupportOperatorSummaryEmail(
 
   if (!to) {
     console.error("[email:operator-summary-not-configured]", {
-      incidentRefs: input.incidents.map((incident) =>
-        createLogReference(incident.incidentId)
-      )
+      incidentRefs: input.incidents.map((incident) => createLogReference(incident.incidentId))
     });
     return { deliveryStatus: "not_configured" };
   }
@@ -353,7 +337,9 @@ export async function sendCourseSupportOperatorSummaryEmail(
     from,
     to,
     subject: `${sortedIncidents.length} concrete course blocker${sortedIncidents.length === 1 ? "" : "s"} need your input`,
-    html: renderCourseSupportOperatorSummaryHtml({ incidents: sortedIncidents })
+    html: renderCourseSupportOperatorSummaryHtml({
+      incidents: sortedIncidents
+    })
   };
   const result = await new Resend(apiKey).emails.send(email, {
     idempotencyKey: `course-support-summary/${scope}`
@@ -406,10 +392,7 @@ export function buildContentScopedEmailIdempotencyKey(
   email: { from: string; to: string; subject: string; html: string }
 ) {
   const scopeHash = createHash("sha256").update(baseKey).digest("hex").slice(0, 16);
-  const contentHash = createHash("sha256")
-    .update(JSON.stringify(email))
-    .digest("hex")
-    .slice(0, 24);
+  const contentHash = createHash("sha256").update(JSON.stringify(email)).digest("hex").slice(0, 24);
 
   return `tee-time-email-${scopeHash}-${contentHash}`;
 }
@@ -458,10 +441,9 @@ export function renderCourseSupportOperatorHtml(input: CourseSupportOperatorEmai
           <h1 style="font-size:24px;line-height:1.15;margin:0 0 16px">${escapeHtml(input.courseName)}</h1>
           <p><strong>Status event:</strong> ${escapeHtml(input.event)}</p>
           <p><strong>Incident:</strong> ${escapeHtml(input.incidentId)} · cycle ${input.cycle}</p>
-          <p><strong>Course ID:</strong> ${escapeHtml(input.courseId)}</p>
+          <p><strong>Course reference:</strong> ${escapeHtml(input.courseId)}</p>
           <p><strong>Detected platform:</strong> ${escapeHtml(input.platform)}</p>
           <p><strong>Issue:</strong> ${escapeHtml(input.kind.replaceAll("_", " ").toLowerCase())}</p>
-          <p><strong>First affected search:</strong> ${escapeHtml(input.firstAffectedSearchId ?? "unknown")}</p>
           <p><strong>Affected active searches when opened:</strong> ${input.affectedSearchCount}</p>
           <p><strong>First seen:</strong> ${escapeHtml(input.firstSeenAt.toISOString())}</p>
           ${input.message ? `<p><strong>Evidence:</strong> ${escapeHtml(input.message)}</p>` : ""}
@@ -475,9 +457,7 @@ export function renderCourseSupportOperatorHtml(input: CourseSupportOperatorEmai
   `;
 }
 
-export function renderCourseSupportOperatorSummaryHtml(
-  input: CourseSupportOperatorSummaryInput
-) {
+export function renderCourseSupportOperatorSummaryHtml(input: CourseSupportOperatorSummaryInput) {
   const groups = new Map<string, CourseSupportOperatorSummaryInput["incidents"]>();
   for (const incident of input.incidents) {
     const provider = getSupportProviderLabel(incident.platform, incident.bookingUrl);
@@ -588,24 +568,21 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
   const subjectMatches = newMatches.length > 0 ? newMatches : matches;
   const newWindowCount = groupAlertMatchesIntoWindows(subjectMatches).length;
   const courseCount = courseGroups.size;
-  const heading = newWindowCount === 1
-    ? "A tee time just opened!"
-    : "New tee times just opened!";
-  const intro = matches.length === 1
-    ? "We found a tee time matching your search. Open the course's official booking page before it's gone."
-    : `We found matching tee times across ${courseCount} course${courseCount === 1 ? "" : "s"}. Book what's available now — we'll keep watching your priorities.`;
+  const heading = newWindowCount === 1 ? "A tee time just opened!" : "New tee times just opened!";
+  const intro =
+    matches.length === 1
+      ? "We found a tee time matching your search. Open the course's official booking page before it's gone."
+      : `We found matching tee times across ${courseCount} course${courseCount === 1 ? "" : "s"}. Book what's available now — we'll keep watching your priorities.`;
   const firstMatch = matches[0];
-  const fallbackTimeZone = normalizeTimeZone(
-    firstMatch?.courseTimeZone,
-    DEFAULT_TIME_ZONE
-  );
-  const targetDate = input.targetDate
-    ?? (firstMatch ? getCourseLocalDateKey(firstMatch.startsAt, fallbackTimeZone) : "1970-01-01");
-  const startTime = input.startTime
-    ?? (firstMatch ? formatTime24(firstMatch.startsAt, fallbackTimeZone) : "00:00");
+  const fallbackTimeZone = normalizeTimeZone(firstMatch?.courseTimeZone, DEFAULT_TIME_ZONE);
+  const targetDate =
+    input.targetDate ??
+    (firstMatch ? getCourseLocalDateKey(firstMatch.startsAt, fallbackTimeZone) : "1970-01-01");
+  const startTime =
+    input.startTime ?? (firstMatch ? formatTime24(firstMatch.startsAt, fallbackTimeZone) : "00:00");
   const lastMatch = matches.at(-1);
-  const endTime = input.endTime
-    ?? (lastMatch ? formatTime24(lastMatch.startsAt, fallbackTimeZone) : startTime);
+  const endTime =
+    input.endTime ?? (lastMatch ? formatTime24(lastMatch.startsAt, fallbackTimeZone) : startTime);
 
   return renderCustomerEmail({
     variant: "instant",
@@ -693,12 +670,7 @@ function getCourseLocalDateTimeParts(date: Date, timeZone: string) {
     timeZone
   }).formatToParts(date);
   const values = new Map(parts.map((part) => [part.type, part.value]));
-  return [
-    values.get("year"),
-    values.get("month"),
-    values.get("day"),
-    values.get("hour")
-  ];
+  return [values.get("year"), values.get("month"), values.get("day"), values.get("hour")];
 }
 
 function buildStableEmailStopUrls(searchId: string, targetDate?: string) {

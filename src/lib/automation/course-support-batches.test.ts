@@ -155,9 +155,8 @@ const transactionClient = {
 beforeEach(() => {
   vi.clearAllMocks();
   prismaMocks.transaction.mockImplementation(
-    async (
-      worker: (transaction: typeof transactionClient) => Promise<unknown>
-    ) => worker(transactionClient)
+    async (worker: (transaction: typeof transactionClient) => Promise<unknown>) =>
+      worker(transactionClient)
   );
   verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue({
     eligible: false,
@@ -173,9 +172,7 @@ beforeEach(() => {
     ineligibleCount: 0,
     requests: []
   });
-  verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
-    "b".repeat(64)
-  );
+  verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("b".repeat(64));
   prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
   prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
   prismaMocks.teeSearchCount.mockResolvedValue(0);
@@ -193,17 +190,14 @@ beforeEach(() => {
   prismaMocks.automationRunFindFirst.mockResolvedValue(null);
   prismaMocks.automationRunCreate.mockResolvedValue({ id: "routine-run" });
   leaseMocks.withPostgresAdvisoryTextLease.mockImplementation(
-    async (
-      _client: unknown,
-      _key: string,
-      worker: () => Promise<unknown>
-    ) => ({ acquired: true, value: await worker() })
+    async (_client: unknown, _key: string, worker: () => Promise<unknown>) => ({
+      acquired: true,
+      value: await worker()
+    })
   );
 });
 
-function candidate(
-  overrides: Partial<CourseSupportCandidate> = {}
-): CourseSupportCandidate {
+function candidate(overrides: Partial<CourseSupportCandidate> = {}): CourseSupportCandidate {
   return {
     id: "incident-1",
     courseId: "course-1",
@@ -412,9 +406,7 @@ describe("course-support batch selection", () => {
     });
 
     expect(selected?.incidents).toHaveLength(5);
-    expect(selected?.incidents.some((incident) => incident.id === "aged-synthetic")).toBe(
-      true
-    );
+    expect(selected?.incidents.some((incident) => incident.id === "aged-synthetic")).toBe(true);
   });
 
   it("claims only the exact due incidents from a completed retryable batch", () => {
@@ -447,11 +439,7 @@ describe("course-support batch selection", () => {
     });
     const last = candidate({ id: "retry-last", courseId: "retry-course-3" });
     const retryBatch = retryBatchEvidence(intended, {
-      incidents: [
-        retryBatchEntry(first),
-        retryBatchEntry(intended),
-        retryBatchEntry(last)
-      ]
+      incidents: [retryBatchEntry(first), retryBatchEntry(intended), retryBatchEntry(last)]
     });
 
     expect(
@@ -565,7 +553,11 @@ describe("course-support batch selection", () => {
     retryBatch.incidents[0].result = "FINAL_DISPOSITION";
 
     expect(() =>
-      selectCourseSupportRetryBatch({ candidates: [intended], retryBatch, now })
+      selectCourseSupportRetryBatch({
+        candidates: [intended],
+        retryBatch,
+        now
+      })
     ).toThrow("non-retryable incident evidence");
     expect(() =>
       selectCourseSupportRetryBatch({
@@ -741,12 +733,8 @@ describe("course-support claim demand fencing", () => {
       }
     ];
     prismaMocks.supportIncidentFindMany
-      .mockResolvedValueOnce([
-        incidentRecord({ engineeringOnly: true, preferences })
-      ])
-      .mockResolvedValueOnce([
-        incidentRecord({ engineeringOnly: true, preferences })
-      ]);
+      .mockResolvedValueOnce([incidentRecord({ engineeringOnly: true, preferences })])
+      .mockResolvedValueOnce([incidentRecord({ engineeringOnly: true, preferences })]);
 
     await expect(
       claimCourseSupportBatch({
@@ -766,17 +754,14 @@ describe("course-support claim demand fencing", () => {
         })
       })
     );
-    expect(prismaMocks.transaction).toHaveBeenCalledWith(
-      expect.any(Function),
-      { isolationLevel: "Serializable" }
-    );
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "Serializable"
+    });
   });
 
   it("rolls back claim creation when live demand changes after selection", async () => {
     prismaMocks.supportIncidentFindMany
-      .mockResolvedValueOnce([
-        incidentRecord({ engineeringOnly: true, preferences: [] })
-      ])
+      .mockResolvedValueOnce([incidentRecord({ engineeringOnly: true, preferences: [] })])
       .mockResolvedValueOnce([
         incidentRecord({
           engineeringOnly: true,
@@ -815,12 +800,8 @@ describe("course-support claim demand fencing", () => {
       }
     ];
     prismaMocks.supportIncidentFindMany
-      .mockResolvedValueOnce([
-        incidentRecord({ engineeringOnly: false, preferences })
-      ])
-      .mockResolvedValueOnce([
-        incidentRecord({ engineeringOnly: false, preferences: [] })
-      ]);
+      .mockResolvedValueOnce([incidentRecord({ engineeringOnly: false, preferences })])
+      .mockResolvedValueOnce([incidentRecord({ engineeringOnly: false, preferences: [] })]);
 
     await expect(
       claimCourseSupportBatch({
@@ -845,11 +826,7 @@ describe("course-support claim demand fencing", () => {
     });
     const last = candidate({ id: "retry-last", courseId: "retry-course-3" });
     const retryBatch = retryBatchEvidence(intended, {
-      incidents: [
-        retryBatchEntry(first),
-        retryBatchEntry(intended),
-        retryBatchEntry(last)
-      ]
+      incidents: [retryBatchEntry(first), retryBatchEntry(intended), retryBatchEntry(last)]
     });
     const incident = {
       ...intended,
@@ -900,9 +877,7 @@ describe("course-support claim demand fencing", () => {
         })
       })
     );
-    const notes = JSON.parse(
-      prismaMocks.automationRunCreate.mock.calls[0][0].data.notes
-    );
+    const notes = JSON.parse(prismaMocks.automationRunCreate.mock.calls[0][0].data.notes);
     expect(notes).toMatchObject({
       targetedRetry: true,
       retryScope: "ENTRY",
@@ -1048,9 +1023,7 @@ describe("course-support retry policy", () => {
 
   it("permits non-transient retry release only for explicit operational failures", () => {
     expect(canCloseCourseSupportRetry("AUTH", "blocked_auth")).toBe(true);
-    expect(canCloseCourseSupportRetry("UNSUPPORTED_FAMILY", "blocked_git")).toBe(
-      true
-    );
+    expect(canCloseCourseSupportRetry("UNSUPPORTED_FAMILY", "blocked_git")).toBe(true);
     expect(canCloseCourseSupportRetry("AUTH", "retryable_failed")).toBe(false);
     expect(canCloseCourseSupportRetry("AUTH")).toBe(false);
   });
@@ -1063,8 +1036,7 @@ describe("fresh runtime verification", () => {
     automationEligibility: "ALLOWED" as const,
     automationReason: "NONE" as const
   };
-  const browserPrivateSourceUrl =
-    "https://course.example/golf/deer-creek";
+  const browserPrivateSourceUrl = "https://course.example/golf/deer-creek";
   const browserPrivatePolicyNotes =
     "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory.";
   const browserPrivateProof = {
@@ -1107,12 +1079,8 @@ describe("fresh runtime verification", () => {
       automationEligibility: "BLOCKED" as const,
       automationReason: "OTHER" as const,
       policyNotes: browserPrivatePolicyNotes,
-      intelligenceVerifiedAt:
-        input?.intelligenceVerifiedAt ??
-        new Date("2026-07-15T19:31:00.000Z"),
-      intelligenceReviewAt:
-        input?.intelligenceReviewAt ??
-        new Date("2027-01-11T19:31:00.000Z"),
+      intelligenceVerifiedAt: input?.intelligenceVerifiedAt ?? new Date("2026-07-15T19:31:00.000Z"),
+      intelligenceReviewAt: input?.intelligenceReviewAt ?? new Date("2027-01-11T19:31:00.000Z"),
       intelligenceConfidence: 0.98,
       latestDiscovery: {
         status: "VERIFIED",
@@ -1127,15 +1095,12 @@ describe("fresh runtime verification", () => {
         apiMetadata: input?.apiMetadata ?? null,
         confidence: 0.98,
         evidence: {
-          learnedFrom:
-            input?.provenance ?? "official-private-course-profile",
+          learnedFrom: input?.provenance ?? "official-private-course-profile",
           finalUrl: browserPrivateSourceUrl,
           observedUrls: [browserPrivateSourceUrl],
           visibleText: "Deer Creek Details Status: Private"
         },
-        createdAt:
-          input?.discoveryCreatedAt ??
-          new Date("2026-07-15T19:30:00.000Z")
+        createdAt: input?.discoveryCreatedAt ?? new Date("2026-07-15T19:30:00.000Z")
       }
     };
   }
@@ -2184,7 +2149,7 @@ describe("fresh runtime verification", () => {
     ).toBe(false);
   });
 
-  it("preserves an explicit real-demand human escalation across verification", () => {
+  it("preserves an explicit human escalation across verification", () => {
     expect(
       preserveExplicitHumanVerification({
         result: "NEEDS_HUMAN",
@@ -2201,7 +2166,10 @@ describe("fresh runtime verification", () => {
         engineeringOnly: true,
         message: "Must remain autonomous."
       })
-    ).toBeNull();
+    ).toMatchObject({
+      result: "NEEDS_HUMAN",
+      message: "Must remain autonomous."
+    });
   });
 });
 
@@ -2480,9 +2448,7 @@ describe("course-support recovery", () => {
   });
 
   it("keeps observed Git-path whitespace exact and blocks a lookalike claimed path", () => {
-    const observedPaths = normalizeCourseSupportObservedGitPaths([
-      " src\\lib\\provider.ts"
-    ]);
+    const observedPaths = normalizeCourseSupportObservedGitPaths([" src\\lib\\provider.ts"]);
 
     expect(observedPaths).toEqual([" src/lib/provider.ts"]);
     expect(
@@ -2515,9 +2481,7 @@ describe("course-support inspection ownership", () => {
   };
 
   it("resumes a healthy batch owned by the requesting task", () => {
-    expect(classifyCourseSupportQueueInspection(inspection)).toBe(
-      "resume_owned_work"
-    );
+    expect(classifyCourseSupportQueueInspection(inspection)).toBe("resume_owned_work");
   });
 
   it.each([undefined, null, "different-thread"])(
@@ -2674,6 +2638,9 @@ describe("course-support inspection ownership", () => {
     });
     expect(prismaMocks.supportIncidentFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: expect.objectContaining({
+          confirmedAt: { not: null }
+        }),
         select: expect.objectContaining({
           course: expect.objectContaining({ select: expect.any(Object) })
         })
@@ -2737,9 +2704,9 @@ describe("course-support inspection ownership", () => {
   );
 
   it("rejects a blank requester identity before reading queue state", async () => {
-    await expect(
-      inspectCourseSupportQueue({ requestingThreadId: " ", now })
-    ).rejects.toThrow("current task id");
+    await expect(inspectCourseSupportQueue({ requestingThreadId: " ", now })).rejects.toThrow(
+      "current task id"
+    );
     expect(prismaMocks.batchFindFirst).not.toHaveBeenCalled();
   });
 });
@@ -3129,9 +3096,7 @@ describe("course-support release heartbeat persistence", () => {
     const updateInput = prismaMocks.batchUpdateMany.mock.calls[0]?.[0] as {
       data: { summary: { releaseHistory: Array<Record<string, unknown>> } };
     };
-    expect(
-      updateInput.data.summary.releaseHistory[0]?.incidentVerifications
-    ).toEqual([
+    expect(updateInput.data.summary.releaseHistory[0]?.incidentVerifications).toEqual([
       expect.objectContaining({ ordinal: 1, result: "FINAL_DISPOSITION" }),
       expect.objectContaining({ ordinal: 2, result: "NEEDS_HUMAN" })
     ]);
@@ -3394,12 +3359,7 @@ describe("detached verification atomic batch fences", () => {
   }
 
   function detachedRequestState(
-    status:
-      | "QUEUED"
-      | "CHECKING"
-      | "SUCCEEDED"
-      | "RETRYABLE_FAILED"
-      | "STALE",
+    status: "QUEUED" | "CHECKING" | "SUCCEEDED" | "RETRYABLE_FAILED" | "STALE",
     overrides: Record<string, unknown> = {}
   ) {
     const failed = status === "RETRYABLE_FAILED" || status === "STALE";
@@ -3408,11 +3368,7 @@ describe("detached verification atomic batch fences", () => {
       releaseSha,
       runtimeVersion: status === "QUEUED" ? null : releaseSha,
       status,
-      outcome: failed
-        ? "FETCH_FAILED"
-        : status === "SUCCEEDED"
-          ? "NO_MATCH"
-          : null,
+      outcome: failed ? "FETCH_FAILED" : status === "SUCCEEDED" ? "NO_MATCH" : null,
       failureClass: failed ? "RATE_LIMIT" : null,
       evidence: failed
         ? {
@@ -3425,18 +3381,13 @@ describe("detached verification atomic batch fences", () => {
           ? proofEvidence()
           : null,
       providerSnapshotFingerprint: providerFingerprint,
-      nextAttemptAt:
-        status === "RETRYABLE_FAILED"
-          ? new Date("2026-07-15T22:00:00.000Z")
-          : null,
+      nextAttemptAt: status === "RETRYABLE_FAILED" ? new Date("2026-07-15T22:00:00.000Z") : null,
       completedAt: status === "SUCCEEDED" || status === "STALE" ? completedAt : null,
       ...overrides
     };
   }
 
-  function currentDetachedFailure(
-    status: "RETRYABLE_FAILED" | "STALE" = "RETRYABLE_FAILED"
-  ) {
+  function currentDetachedFailure(status: "RETRYABLE_FAILED" | "STALE" = "RETRYABLE_FAILED") {
     const request = detachedRequestState(status);
     return {
       current: true as const,
@@ -3577,9 +3528,7 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest());
     prismaMocks.teeSearchCount.mockResolvedValue(1);
-    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
-      eligibleProof()
-    );
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(eligibleProof());
 
     await verifyCourseSupportBatch({
       batchId: "batch-1",
@@ -3604,10 +3553,9 @@ describe("detached verification atomic batch fences", () => {
         preferences: { some: { courseId: "course-1" } }
       }
     });
-    expect(prismaMocks.transaction).toHaveBeenCalledWith(
-      expect.any(Function),
-      { isolationLevel: "Serializable" }
-    );
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "Serializable"
+    });
   });
 
   it.each([
@@ -3639,9 +3587,7 @@ describe("detached verification atomic batch fences", () => {
       prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
       prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
       prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
-      prismaMocks.verificationRequestFindUnique.mockResolvedValue(
-        atomicRequest(currentCourse)
-      );
+      prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest(currentCourse));
       verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
         eligibleProof()
       );
@@ -3660,9 +3606,7 @@ describe("detached verification atomic batch fences", () => {
         })
       );
       expect(prismaMocks.teeSearchCount).not.toHaveBeenCalled();
-      expect(
-        verificationMocks.buildCourseSupportProviderSnapshotFingerprint
-      ).toHaveBeenCalledWith(
+      expect(verificationMocks.buildCourseSupportProviderSnapshotFingerprint).toHaveBeenCalledWith(
         expect.objectContaining({
           isPublic: currentCourse.isPublic,
           intelligenceVerifiedAt: currentCourse.intelligenceVerifiedAt,
@@ -3678,9 +3622,7 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest());
-    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
-      eligibleProof()
-    );
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(eligibleProof());
 
     await verifyCourseSupportBatch({
       batchId: "batch-1",
@@ -3695,9 +3637,7 @@ describe("detached verification atomic batch fences", () => {
         data: expect.objectContaining({ result: "RESTORED" })
       })
     );
-    expect(
-      verificationMocks.buildCourseSupportProviderSnapshotFingerprint
-    ).toHaveBeenCalledWith(
+    expect(verificationMocks.buildCourseSupportProviderSnapshotFingerprint).toHaveBeenCalledWith(
       expect.objectContaining({
         bookingWindowEvidenceUrl: "https://course.example/booking-policy"
       })
@@ -3711,9 +3651,7 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.verificationRequestFindUnique.mockResolvedValue(
       atomicRequest(providerCourse(), false)
     );
-    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
-      eligibleProof()
-    );
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(eligibleProof());
 
     await verifyCourseSupportBatch({
       batchId: "batch-1",
@@ -3741,9 +3679,7 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("QUEUED")
-    ]);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("QUEUED")]);
     verificationMocks.scheduleCourseSupportVerificationRequests.mockResolvedValue({
       createdCount: 1,
       eligibleCount: 1,
@@ -3775,9 +3711,7 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("QUEUED")
-    ]);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("QUEUED")]);
 
     const result = await verifyCourseSupportBatch({
       batchId: "batch-1",
@@ -3787,9 +3721,7 @@ describe("detached verification atomic batch fences", () => {
       now
     });
 
-    expect(
-      verificationMocks.scheduleCourseSupportVerificationRequests
-    ).not.toHaveBeenCalled();
+    expect(verificationMocks.scheduleCourseSupportVerificationRequests).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       detachedVerification: { pendingCount: 0, rerunNeeded: false }
     });
@@ -3889,12 +3821,8 @@ describe("detached verification atomic batch fences", () => {
   it.each(["QUEUED", "CHECKING"] as const)(
     "refuses closeout while detached verification is %s",
     async (status) => {
-      prismaMocks.batchFindFirst.mockResolvedValue(
-        closeoutBatch("RETRY_SCHEDULED")
-      );
-      prismaMocks.verificationRequestFindMany.mockResolvedValue([
-        detachedRequestState(status)
-      ]);
+      prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
+      prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState(status)]);
 
       await expect(
         closeoutCourseSupportBatch({
@@ -3911,9 +3839,7 @@ describe("detached verification atomic batch fences", () => {
 
   it("allows human closeout when an older detached request is still pending", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("NEEDS_HUMAN"));
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("QUEUED")
-    ]);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("QUEUED")]);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
 
@@ -3932,12 +3858,8 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("refuses closeout when detached success finished after the last verify read", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValue(
-      closeoutBatch("RETRY_SCHEDULED")
-    );
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("SUCCEEDED")
-    ]);
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("SUCCEEDED")]);
 
     await expect(
       closeoutCourseSupportBatch({
@@ -3952,9 +3874,7 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("refuses closeout until a current retryable failure is copied by verify", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValue(
-      closeoutBatch("RETRY_SCHEDULED")
-    );
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
     prismaMocks.verificationRequestFindMany.mockResolvedValue([
       detachedRequestState("RETRYABLE_FAILED")
     ]);
@@ -3975,12 +3895,8 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("refuses closeout until current stale cooldown evidence is copied by verify", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValue(
-      closeoutBatch("RETRY_SCHEDULED")
-    );
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("STALE")
-    ]);
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("STALE")]);
     verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
       currentDetachedFailure("STALE")
     );
@@ -3998,12 +3914,8 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("catches a rate-limit request that becomes stale after the pre-closeout evidence read", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValue(
-      closeoutBatch("RETRY_SCHEDULED")
-    );
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("STALE")
-    ]);
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("STALE")]);
 
     await expect(
       closeoutCourseSupportBatch({
@@ -4146,9 +4058,7 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("allows closeout for stale requests without current eligible failure evidence", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValue(
-      closeoutBatch("RETRY_SCHEDULED")
-    );
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
     prismaMocks.verificationRequestFindMany.mockResolvedValue([
       detachedRequestState("STALE", {
         failureClass: "SCHEMA",
@@ -4278,8 +4188,7 @@ describe("course-support provider discovery reconciliation", () => {
     const conflictingProvider = resolveCourseSupportProviderCapability({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
       website: "https://course.example.com/",
       automationDiscoveries: [
         {

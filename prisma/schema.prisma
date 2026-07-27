@@ -164,6 +164,7 @@ enum CourseSupportIncidentStatus {
 enum CourseSupportIncidentKind {
   NEEDS_ADAPTER
   FETCH_FAILED
+  READER_CANDIDATE
   BLOCKED_AUTH
   BLOCKED_TOOLING
 }
@@ -172,12 +173,14 @@ enum CourseSupportResolution {
   MONITORING_RESTORED
   DIRECT_BOOKING_CLASSIFIED
   SOURCE_UNVERIFIED
+  HUMAN_VERIFIED_TECHNICAL_LIMITATION
 }
 
 enum CourseSupportFailureClass {
   MISSING_SOURCE
   MISSING_METADATA
   UNSUPPORTED_FAMILY
+  READER_PARSER_MISSING
   AUTH
   RATE_LIMIT
   CHALLENGE
@@ -187,6 +190,53 @@ enum CourseSupportFailureClass {
   NETWORK
   SCHEMA
   UNKNOWN
+}
+
+enum CourseMonitoringState {
+  UNKNOWN
+  HEALTHY
+  DEGRADED_RETRYING
+  AUTO_INVESTIGATING
+  ENGINEERING_VERIFICATION_NEEDED
+  REVALIDATING_FINAL
+  FINAL_MANUAL
+  FINAL_TECHNICAL
+  FINAL_IDENTITY
+}
+
+enum CourseMonitoringEventType {
+  BASELINE_IMPORTED
+  CHECK_SUCCEEDED
+  CHECK_FAILED
+  STATE_CHANGED
+  AUTOMATION_ATTEMPTED
+  TOOLING_INCIDENT
+  HUMAN_REVIEW_REQUESTED
+  HUMAN_DECISION
+  REVALIDATION_REQUESTED
+  RECOVERED
+  DEPLOYMENT_VERIFIED
+  REMINDER_SENT
+}
+
+enum CourseMonitoringEventSource {
+  SEARCH_WORKFLOW
+  COURSE_SUPPORT_RESPONDER
+  LOCAL_READER
+  RECOVERY_CRON
+  OPERATOR_DASHBOARD
+  OPERATOR_CLI
+  MAINTENANCE
+  DEPLOYMENT
+}
+
+enum CourseHumanReviewReason {
+  CAPTCHA_OR_QUEUE
+  ACCOUNT_REQUIRED
+  SOURCE_UNVERIFIED
+  READER_RELOAD_REQUIRED
+  OFFICIAL_LINK_VERIFICATION_FAILED
+  OTHER_TECHNICAL_LIMITATION
 }
 
 enum CourseSupportBatchStatus {
@@ -323,6 +373,8 @@ model Course {
   bookingFacts                CourseBookingFact[]
   automationDiscoveries       CourseAutomationDiscovery[]
   supportIncident             CourseSupportIncident?
+  monitoringStatus            CourseMonitoringStatus?
+  monitoringEvents            CourseMonitoringEvent[]
   supportBatchIncidents       CourseSupportBatchIncident[]
   supportVerificationRequests CourseSupportVerificationRequest[]
   localReaderJobs             LocalReaderJob[]
@@ -479,17 +531,17 @@ model TeeSearch {
 }
 
 model LocalReaderJob {
-  id              String               @id @default(cuid())
+  id              String                @id @default(cuid())
   teeSearchId     String?
   courseId        String
   scheduleVersion Int?
   purpose         LocalReaderJobPurpose @default(ALERT_CHECK)
-  verificationKey String?              @unique
+  verificationKey String?               @unique
   courseKey       String
   targetDate      String
   players         Int
   bookingUrl      String
-  status          LocalReaderJobStatus @default(PENDING)
+  status          LocalReaderJobStatus  @default(PENDING)
   leaseToken      String?
   leaseExpiresAt  DateTime?
   claimedAt       DateTime?
@@ -499,10 +551,10 @@ model LocalReaderJob {
   resultExpiresAt DateTime?
   readerVersion   String?
   completedAt     DateTime?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  teeSearch       TeeSearch?           @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course          Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  teeSearch       TeeSearch?            @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course          Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([teeSearchId, courseId, scheduleVersion, targetDate, players])
   @@index([status, jobExpiresAt, createdAt])
@@ -626,24 +678,24 @@ model AutomationRun {
 }
 
 model AutomationWorkerState {
-  workerKey                  String                       @id
-  desiredState              AutomationWorkerDesiredState @default(ACTIVE)
-  cadenceSeconds            Int
-  graceSeconds              Int
-  runnerVersion             String?
-  runtimeVersion            String?
-  lastStartedAt             DateTime?
-  lastHeartbeatAt           DateTime?
-  lastCompletedAt           DateTime?
-  lastOutcome               String?
-  nextExpectedAt            DateTime?
-  monitoringStartedAt       DateTime?
-  overdueSince              DateTime?
-  overdueNotifiedFor        DateTime?
-  overdueNotifiedAt         DateTime?
-  recoveredNotifiedAt       DateTime?
-  createdAt                 DateTime                     @default(now())
-  updatedAt                 DateTime                     @updatedAt
+  workerKey           String                       @id
+  desiredState        AutomationWorkerDesiredState @default(ACTIVE)
+  cadenceSeconds      Int
+  graceSeconds        Int
+  runnerVersion       String?
+  runtimeVersion      String?
+  lastStartedAt       DateTime?
+  lastHeartbeatAt     DateTime?
+  lastCompletedAt     DateTime?
+  lastOutcome         String?
+  nextExpectedAt      DateTime?
+  monitoringStartedAt DateTime?
+  overdueSince        DateTime?
+  overdueNotifiedFor  DateTime?
+  overdueNotifiedAt   DateTime?
+  recoveredNotifiedAt DateTime?
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
 
   @@index([desiredState, nextExpectedAt])
   @@index([lastHeartbeatAt])
@@ -675,48 +727,112 @@ model CourseAutomationDiscovery {
   @@index([createdAt])
 }
 
+model CourseMonitoringStatus {
+  courseId                String                @id
+  reference               String                @unique
+  state                   CourseMonitoringState @default(UNKNOWN)
+  lastSuccessfulAt        DateTime?
+  lastFailureAt           DateTime?
+  consecutiveFailures     Int                   @default(0)
+  failureFingerprint      String?
+  firstDegradedAt         DateTime?
+  nextAutomaticAttemptAt  DateTime?
+  revalidationRequestedAt DateTime?
+  stateChangedAt          DateTime              @default(now())
+  revision                Int                   @default(0)
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  course                  Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@index([state, nextAutomaticAttemptAt])
+  @@index([revalidationRequestedAt])
+  @@index([lastSuccessfulAt])
+}
+
+model CourseMonitoringEvent {
+  id                 String                      @id @default(cuid())
+  courseId           String
+  incidentId         String?
+  eventType          CourseMonitoringEventType
+  source             CourseMonitoringEventSource
+  fromState          CourseMonitoringState?
+  toState            CourseMonitoringState?
+  outcome            ProbeOutcome?
+  failureFingerprint String?
+  readPath           String?
+  message            String?
+  evidenceUrl        String?
+  runtimeVersion     String?
+  deploymentSha      String?
+  operatorActorId    String?
+  idempotencyKey     String?                     @unique
+  audit              Json?
+  occurredAt         DateTime                    @default(now())
+  course             Course                      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  incident           CourseSupportIncident?      @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+
+  @@index([courseId, occurredAt])
+  @@index([incidentId, occurredAt])
+  @@index([eventType, occurredAt])
+  @@index([occurredAt])
+}
+
 model CourseSupportIncident {
-  id                    String                       @id @default(cuid())
-  courseId              String                       @unique
-  firstAffectedSearchId String?
-  cycle                 Int                          @default(1)
-  status                CourseSupportIncidentStatus  @default(AUTO_INVESTIGATING)
-  kind                  CourseSupportIncidentKind
-  providerFamilyKey     String                       @default("SOURCE_MISSING")
-  failureClass          CourseSupportFailureClass    @default(UNKNOWN)
-  failureFingerprint    String                       @default("UNKNOWN")
-  courseNameSnapshot    String
-  platformSnapshot      DetectedPlatform
-  bookingUrlSnapshot    String?
-  initialMessage        String?
-  latestMessage         String?
-  nextAction            String?
-  affectedSearchCount   Int                          @default(1)
-  occurrenceCount       Int                          @default(1)
-  engineeringOnly       Boolean                      @default(false)
-  nextAttemptAt         DateTime?
-  lastAttemptAt         DateTime?
-  attemptCount          Int                          @default(0)
-  activeRealSearchCount Int                          @default(0)
-  earliestTargetDate    DateTime?
-  activeBatchId         String?
-  firstSeenAt           DateTime                     @default(now())
-  lastSeenAt            DateTime                     @default(now())
-  ownerNotifiedAt       DateTime?
-  escalatedAt           DateTime?
-  escalationNotifiedAt  DateTime?
-  resolvedAt            DateTime?
-  resolution            CourseSupportResolution?
-  resolutionMessage     String?
-  resolutionNotifiedAt  DateTime?
-  createdAt             DateTime                     @default(now())
-  updatedAt             DateTime                     @updatedAt
-  course                Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  activeBatch           CourseSupportBatch?          @relation("ActiveCourseSupportBatch", fields: [activeBatchId], references: [id], onDelete: SetNull)
-  batchIncidents        CourseSupportBatchIncident[]
+  id                     String                       @id @default(cuid())
+  reference              String                       @unique
+  courseId               String                       @unique
+  firstAffectedSearchId  String?
+  cycle                  Int                          @default(1)
+  status                 CourseSupportIncidentStatus  @default(AUTO_INVESTIGATING)
+  kind                   CourseSupportIncidentKind
+  providerFamilyKey      String                       @default("SOURCE_MISSING")
+  failureClass           CourseSupportFailureClass    @default(UNKNOWN)
+  failureFingerprint     String                       @default("UNKNOWN")
+  courseNameSnapshot     String
+  platformSnapshot       DetectedPlatform
+  bookingUrlSnapshot     String?
+  initialMessage         String?
+  latestMessage          String?
+  nextAction             String?
+  affectedSearchCount    Int                          @default(1)
+  occurrenceCount        Int                          @default(1)
+  engineeringOnly        Boolean                      @default(false)
+  nextAttemptAt          DateTime?
+  confirmedAt            DateTime?
+  escalationDeadlineAt   DateTime?
+  humanReviewReason      CourseHumanReviewReason?
+  nextReminderAt         DateTime?
+  decisionActorId        String?
+  decisionAt             DateTime?
+  decisionNote           String?
+  decisionEvidenceUrl    String?
+  decisionIdempotencyKey String?                      @unique
+  revision               Int                          @default(0)
+  lastAttemptAt          DateTime?
+  attemptCount           Int                          @default(0)
+  activeRealSearchCount  Int                          @default(0)
+  earliestTargetDate     DateTime?
+  activeBatchId          String?
+  firstSeenAt            DateTime                     @default(now())
+  lastSeenAt             DateTime                     @default(now())
+  ownerNotifiedAt        DateTime?
+  escalatedAt            DateTime?
+  escalationNotifiedAt   DateTime?
+  resolvedAt             DateTime?
+  resolution             CourseSupportResolution?
+  resolutionMessage      String?
+  resolutionNotifiedAt   DateTime?
+  createdAt              DateTime                     @default(now())
+  updatedAt              DateTime                     @updatedAt
+  course                 Course                       @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  activeBatch            CourseSupportBatch?          @relation("ActiveCourseSupportBatch", fields: [activeBatchId], references: [id], onDelete: SetNull)
+  batchIncidents         CourseSupportBatchIncident[]
+  monitoringEvents       CourseMonitoringEvent[]
 
   @@index([status, lastSeenAt])
   @@index([status, nextAttemptAt])
+  @@index([status, escalationDeadlineAt])
+  @@index([status, nextReminderAt])
   @@index([providerFamilyKey, failureFingerprint, status])
   @@index([activeBatchId])
   @@index([ownerNotifiedAt])

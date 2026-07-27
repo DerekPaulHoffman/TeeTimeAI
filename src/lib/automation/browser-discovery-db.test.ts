@@ -45,7 +45,9 @@ describe("browser discovery persistence", () => {
   });
 
   it("records browser evidence and learned API metadata", async () => {
-    mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({ id: "discovery-1" } as never);
+    mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({
+      id: "discovery-1"
+    } as never);
 
     await recordBrowserDiscovery({
       courseId: "course-1",
@@ -99,8 +101,7 @@ describe("browser discovery persistence", () => {
       .mockResolvedValueOnce({
         providerFamilyKey: "FOREUP",
         detectedPlatform: "FOREUP",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
         website: "https://course.example.com",
         bookingMetadata: null,
         updatedAt
@@ -156,8 +157,7 @@ describe("browser discovery persistence", () => {
       .mockResolvedValueOnce({
         providerFamilyKey: "CHRONOGOLF",
         detectedPlatform: "CHRONOGOLF",
-        detectedBookingUrl:
-          "https://www.chronogolf.com/club/blue-rock-golf-course",
+        detectedBookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
         website: "https://bluerockgolfcourse.com/",
         bookingMetadata: null,
         updatedAt
@@ -227,9 +227,7 @@ describe("browser discovery persistence", () => {
       confidence: 0.45,
       evidence: {
         learnedFrom: "browser-visible-links",
-        observedUrls: [
-          "https://www.chronogolf.com/club/blue-rock-golf-course"
-        ]
+        observedUrls: ["https://www.chronogolf.com/club/blue-rock-golf-course"]
       }
     });
 
@@ -238,8 +236,7 @@ describe("browser discovery persistence", () => {
       data: {
         detectedPlatform: "CHRONOGOLF",
         providerFamilyKey: "CHRONOGOLF",
-        detectedBookingUrl:
-          "https://www.chronogolf.com/club/blue-rock-golf-course"
+        detectedBookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
       }
     });
   });
@@ -404,12 +401,10 @@ describe("browser discovery persistence", () => {
       current: {
         providerFamilyKey: "FOREUP",
         detectedPlatform: "FOREUP",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
         bookingMetadata: {
           scheduleId: 11739,
-          bookingBaseUrl:
-            "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+          bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
         },
         bookingMethod: "PUBLIC_ONLINE",
         automationEligibility: "ALLOWED"
@@ -503,19 +498,16 @@ describe("browser discovery persistence", () => {
     });
   });
 
-  it("lets newer corroborated technical evidence outrank historical runnable metadata", async () => {
+  it("records technical evidence without overwriting a previously runnable course as blocked", async () => {
     const updatedAt = new Date("2026-07-16T12:05:00.000Z");
-    mockedPrisma.course.findUnique
-      .mockResolvedValueOnce({
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       website: "https://westwoodsgc.com/",
       bookingMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       isPublic: true,
       bookingMethod: "PUBLIC_ONLINE",
@@ -525,17 +517,14 @@ describe("browser discovery persistence", () => {
       intelligenceReviewAt: null,
       intelligenceConfidence: 0.95,
       updatedAt
-    } as never)
-      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
-    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    } as never);
 
     const result = await applyBrowserDiscoveryToCourse({
       courseId: "course-westwoods",
       status: "VERIFIED",
       detectedPlatform: "FOREUP",
       sourceUrl: "https://westwoodsgc.com/",
-      bookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "CAPTCHA_OR_QUEUE",
@@ -547,30 +536,20 @@ describe("browser discovery persistence", () => {
       }
     });
 
-    expect(result).toEqual({ id: "course-westwoods" });
-    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: "course-westwoods", updatedAt },
-        data: expect.objectContaining({
-          automationEligibility: "BLOCKED",
-          automationReason: "CAPTCHA_OR_QUEUE",
-          bookingMetadata: undefined
-        })
-      })
-    );
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
-  it("does not let a corroborated cross-provider discovery overwrite a current technical final", async () => {
+  it("does not let discovery metadata alone overwrite a current technical final", async () => {
+    const updatedAt = new Date("2026-07-16T12:05:00.000Z");
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
       website: "https://westwoodsgc.com/",
       bookingMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       isPublic: true,
       bookingMethod: "PUBLIC_ONLINE",
@@ -579,7 +558,7 @@ describe("browser discovery persistence", () => {
       intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
       intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
       intelligenceConfidence: 0.95,
-      updatedAt: new Date("2026-07-16T12:05:00.000Z")
+      updatedAt
     } as never);
 
     const result = await applyBrowserDiscoveryToCourse({
@@ -614,13 +593,11 @@ describe("browser discovery persistence", () => {
       .mockResolvedValueOnce({
         providerFamilyKey: "FOREUP",
         detectedPlatform: "FOREUP",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
         website: "https://westwoodsgc.com/",
         bookingMetadata: {
           scheduleId: 6123,
-          bookingBaseUrl:
-            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+          bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
         },
         isPublic: true,
         bookingMethod: "PUBLIC_ONLINE",
@@ -674,13 +651,11 @@ describe("browser discovery persistence", () => {
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       website: "https://westwoodsgc.com/",
       bookingMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       isPublic: true,
       bookingMethod: "PUBLIC_ONLINE",
@@ -713,10 +688,8 @@ describe("browser discovery persistence", () => {
         courseIdentityCorroboration: {
           kind: "OFFICIAL_COURSE_PROVIDER_LINK",
           officialWebsiteUrl: "https://westwoodsgc.com/",
-          officialPageUrl:
-            "https://www.chronogolf.com/club/westwoods-golf-course",
-          providerUrl:
-            "https://www.chronogolf.com/club/westwoods-golf-course"
+          officialPageUrl: "https://www.chronogolf.com/club/westwoods-golf-course",
+          providerUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
         }
       }
     });
@@ -729,13 +702,11 @@ describe("browser discovery persistence", () => {
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       website: "https://westwoodsgc.com/",
       bookingMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       isPublic: true,
       bookingMethod: "PUBLIC_ONLINE",
@@ -784,8 +755,7 @@ describe("browser discovery persistence", () => {
         bookingMetadata: {
           provider: "GOLFBACK",
           courseId: "123e4567-e89b-42d3-a456-426614174000",
-          bookingBaseUrl:
-            "https://golfback.com/#/course/123e4567-e89b-42d3-a456-426614174000"
+          bookingBaseUrl: "https://golfback.com/#/course/123e4567-e89b-42d3-a456-426614174000"
         },
         isPublic: true,
         bookingMethod: "PUBLIC_ONLINE",
@@ -856,15 +826,13 @@ describe("browser discovery persistence", () => {
       status: "LEARNED",
       detectedPlatform: "FOREUP",
       sourceUrl: "https://westwoodsgc.com/",
-      bookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "ALLOWED",
       automationReason: "NONE",
       apiMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       confidence: 0.95,
       evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
@@ -909,15 +877,13 @@ describe("browser discovery persistence", () => {
       status: "LEARNED",
       detectedPlatform: "FOREUP",
       sourceUrl: "https://westwoodsgc.com/",
-      bookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "ALLOWED",
       automationReason: "NONE",
       apiMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       confidence: 0.95,
       evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
@@ -958,15 +924,13 @@ describe("browser discovery persistence", () => {
       status: "LEARNED",
       detectedPlatform: "FOREUP",
       sourceUrl: "https://westwoodsgc.com/",
-      bookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "ALLOWED",
       automationReason: "NONE",
       apiMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       confidence: 0.95,
       evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
@@ -979,73 +943,73 @@ describe("browser discovery persistence", () => {
   it.each([
     ["direct evidence", ""],
     ["legacy policy reconciliation", ":legacy-policy-reconciliation"]
-  ])("persists exact verified private identity from %s without fabricating public manual-booking facts", async (_label, provenanceSuffix) => {
-    const updatedAt = new Date("2026-07-21T14:10:00.000Z");
-    mockedPrisma.course.findUnique
-      .mockResolvedValueOnce({
-        name: "Deer Creek Golf Course",
-        providerFamilyKey: "thelandings.com",
-        detectedPlatform: "UNKNOWN",
-        detectedBookingUrl: null,
-        website: "https://thelandings.com/",
-        bookingMetadata: null,
-        isPublic: true,
-        bookingMethod: "UNKNOWN",
-        automationEligibility: "UNKNOWN",
-        automationReason: "NONE",
-        intelligenceVerifiedAt: null,
-        intelligenceReviewAt: null,
-        intelligenceConfidence: null,
-        updatedAt
-      } as never)
-      .mockResolvedValueOnce({ id: "deer-creek", isPublic: false } as never);
-    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
-    const sourceUrl =
-      "https://thelandings.com/golf-and-athletic-club/golf/deer-creek";
-    const discovery = buildBrowserDiscovery({
-      courseId: "deer-creek",
-      courseName:
-        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
-      sourceUrl,
-      finalUrl: sourceUrl,
-      observedUrls: [sourceUrl],
-      officialPage: {
-        url: sourceUrl,
-        courseName:
-          "Deer Creek Golf Course at The Landings Golf & Athletic Club",
-        linkCandidates: [],
+  ])(
+    "persists exact verified private identity from %s without fabricating public manual-booking facts",
+    async (_label, provenanceSuffix) => {
+      const updatedAt = new Date("2026-07-21T14:10:00.000Z");
+      mockedPrisma.course.findUnique
+        .mockResolvedValueOnce({
+          name: "Deer Creek Golf Course",
+          providerFamilyKey: "thelandings.com",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://thelandings.com/",
+          bookingMetadata: null,
+          isPublic: true,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+          updatedAt
+        } as never)
+        .mockResolvedValueOnce({ id: "deer-creek", isPublic: false } as never);
+      mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+      const sourceUrl = "https://thelandings.com/golf-and-athletic-club/golf/deer-creek";
+      const discovery = buildBrowserDiscovery({
+        courseId: "deer-creek",
+        courseName: "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+        sourceUrl,
+        finalUrl: sourceUrl,
+        observedUrls: [sourceUrl],
+        officialPage: {
+          url: sourceUrl,
+          courseName: "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+          linkCandidates: [],
+          visibleText:
+            "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
+        },
         visibleText:
           "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
-      },
-      visibleText:
-        "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
-    });
+      });
 
-    const result = await applyBrowserDiscoveryToCourse({
-      ...discovery,
-      evidence: {
-        ...discovery.evidence,
-        learnedFrom: `${discovery.evidence.learnedFrom}${provenanceSuffix}`
-      }
-    });
+      const result = await applyBrowserDiscoveryToCourse({
+        ...discovery,
+        evidence: {
+          ...discovery.evidence,
+          learnedFrom: `${discovery.evidence.learnedFrom}${provenanceSuffix}`
+        }
+      });
 
-    expect(result).toEqual({ id: "deer-creek", isPublic: false });
-    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
-      where: { id: "deer-creek", updatedAt },
-      data: expect.objectContaining({
-        isPublic: false,
-        bookingMethod: "UNKNOWN",
-        automationEligibility: "BLOCKED",
-        automationReason: "OTHER"
-      })
-    });
-    const update = mockedPrisma.course.updateMany.mock.calls[0]?.[0];
-    expect(update?.data).not.toHaveProperty("providerFamilyKey");
-    expect(update?.data).not.toHaveProperty("detectedPlatform");
-    expect(update?.data).not.toHaveProperty("detectedBookingUrl");
-    expect(update?.data).not.toHaveProperty("bookingMetadata");
-    expect(update?.data).not.toHaveProperty("bookingPhone");
-  });
+      expect(result).toEqual({ id: "deer-creek", isPublic: false });
+      expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+        where: { id: "deer-creek", updatedAt },
+        data: expect.objectContaining({
+          isPublic: false,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER"
+        })
+      });
+      const update = mockedPrisma.course.updateMany.mock.calls[0]?.[0];
+      expect(update?.data).not.toHaveProperty("providerFamilyKey");
+      expect(update?.data).not.toHaveProperty("detectedPlatform");
+      expect(update?.data).not.toHaveProperty("detectedBookingUrl");
+      expect(update?.data).not.toHaveProperty("bookingMetadata");
+      expect(update?.data).not.toHaveProperty("bookingPhone");
+    }
+  );
 
   it("rejects a forged generic private identity discovery", async () => {
     const result = await applyBrowserDiscoveryToCourse({
@@ -1104,13 +1068,11 @@ describe("browser discovery persistence", () => {
       .mockResolvedValueOnce({
         providerFamilyKey: "FOREUP",
         detectedPlatform: "FOREUP",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
         website: "https://thelandings.com/",
         bookingMetadata: {
           scheduleId: 6123,
-          bookingBaseUrl:
-            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+          bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
         },
         isPublic: true,
         bookingMethod: "PUBLIC_ONLINE",
@@ -1123,19 +1085,16 @@ describe("browser discovery persistence", () => {
       } as never)
       .mockResolvedValueOnce({ id: "deer-creek", isPublic: false } as never);
     mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
-    const sourceUrl =
-      "https://thelandings.com/golf-and-athletic-club/golf/deer-creek";
+    const sourceUrl = "https://thelandings.com/golf-and-athletic-club/golf/deer-creek";
     const discovery = buildBrowserDiscovery({
       courseId: "deer-creek",
-      courseName:
-        "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+      courseName: "Deer Creek Golf Course at The Landings Golf & Athletic Club",
       sourceUrl,
       finalUrl: sourceUrl,
       observedUrls: [sourceUrl],
       officialPage: {
         url: sourceUrl,
-        courseName:
-          "Deer Creek Golf Course at The Landings Golf & Athletic Club",
+        courseName: "Deer Creek Golf Course at The Landings Golf & Athletic Club",
         linkCandidates: [],
         visibleText:
           "Deer Creek Details\nArchitect: Tom Fazio\nStats: 7,094 Yards / Par 72\nEstablished: 1991\nStatus: Private\nLocation: Savannah, GA"
@@ -1165,8 +1124,7 @@ describe("browser discovery persistence", () => {
 
   it("verifies a pending course from an exact official runnable-provider link", async () => {
     const updatedAt = new Date("2026-07-24T16:20:00.000Z");
-    const bookingUrl =
-      "https://foreupsoftware.com/index.php/booking/20359/4358#/teetimes";
+    const bookingUrl = "https://foreupsoftware.com/index.php/booking/20359/4358#/teetimes";
     mockedPrisma.course.findUnique
       .mockResolvedValueOnce({
         name: "Orange Hills Country Club",
@@ -1232,8 +1190,7 @@ describe("browser discovery persistence", () => {
 
   it("reopens a private identity only from an exact official runnable-provider link", async () => {
     const updatedAt = new Date("2026-07-21T14:10:00.000Z");
-    const bookingUrl =
-      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const bookingUrl = "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
     mockedPrisma.course.findUnique
       .mockResolvedValueOnce({
         name: "Deer Creek Golf Course",
@@ -1248,9 +1205,7 @@ describe("browser discovery persistence", () => {
         automationReason: "OTHER",
         policyNotes: "Previously verified private.",
         intelligenceVerifiedAt: new Date(),
-        intelligenceReviewAt: new Date(
-          Date.now() + 180 * 24 * 60 * 60 * 1000
-        ),
+        intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
         intelligenceConfidence: 0.98,
         updatedAt
       } as never)
@@ -1315,14 +1270,11 @@ describe("browser discovery persistence", () => {
       automationEligibility: "BLOCKED",
       automationReason: "OTHER",
       intelligenceVerifiedAt: new Date(),
-      intelligenceReviewAt: new Date(
-        Date.now() + 180 * 24 * 60 * 60 * 1000
-      ),
+      intelligenceReviewAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000),
       intelligenceConfidence: 0.98,
       updatedAt: new Date("2026-07-21T14:10:00.000Z")
     } as never);
-    const bookingUrl =
-      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const bookingUrl = "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
 
     const result = await applyBrowserDiscoveryToCourse({
       courseId: "deer-creek",
@@ -1336,7 +1288,10 @@ describe("browser discovery persistence", () => {
         bookingBaseUrl: bookingUrl
       },
       confidence: 0.95,
-      evidence: { learnedFrom: "foreup-api-request", observedUrls: [bookingUrl] }
+      evidence: {
+        learnedFrom: "foreup-api-request",
+        observedUrls: [bookingUrl]
+      }
     });
 
     expect(result).toBeNull();
@@ -1396,15 +1351,11 @@ describe("browser discovery persistence", () => {
       sourceUrl: "https://thelandings.com/golf/deer-creek",
       bookingUrl: discovery.bookingUrl,
       bookingMethod: discovery.bookingMethod,
-      bookingPhone: "bookingPhone" in discovery
-        ? discovery.bookingPhone
-        : undefined,
+      bookingPhone: "bookingPhone" in discovery ? discovery.bookingPhone : undefined,
       automationEligibility: discovery.automationEligibility,
       automationReason: discovery.automationReason,
       policyNotes: discovery.policyNotes,
-      intelligenceReviewAt: new Date(
-        Date.now() + 30 * 24 * 60 * 60 * 1000
-      ),
+      intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
       confidence: 0.95,
       evidence: {
         learnedFrom: discovery.learnedFrom,
@@ -1462,8 +1413,7 @@ describe("browser discovery persistence", () => {
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       providerFamilyKey: "FOREUP",
       detectedPlatform: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
       website: "https://westwoodsgc.com/",
       bookingMetadata: null,
       updatedAt
@@ -1475,12 +1425,10 @@ describe("browser discovery persistence", () => {
       status: "LEARNED",
       detectedPlatform: "FOREUP",
       sourceUrl: "https://westwoodsgc.com/",
-      bookingUrl:
-        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
       apiMetadata: {
         scheduleId: 6123,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
       },
       confidence: 0.95,
       evidence: { learnedFrom: "foreup-api-request", observedUrls: [] }
@@ -1541,8 +1489,7 @@ describe("browser discovery persistence", () => {
           id: "course-1",
           name: "Repeated Failure Course",
           website: "https://course.example/",
-          detectedBookingUrl:
-            "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
+          detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/1/2#/teetimes",
           detectedPlatform: "FOREUP",
           providerFamilyKey: "FOREUP",
           automationEligibility: "ALLOWED",
@@ -1554,8 +1501,7 @@ describe("browser discovery persistence", () => {
           intelligenceConfidence: null,
           bookingMetadata: {
             scheduleId: 2,
-            bookingBaseUrl:
-              "https://foreupsoftware.com/index.php/booking/1/2#/teetimes"
+            bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/1/2#/teetimes"
           },
           probes: [{ outcome: "FETCH_FAILED", observedAt: new Date() }]
         }
@@ -1573,8 +1519,7 @@ describe("browser discovery persistence", () => {
         id: "course-westwoods",
         name: "Westwoods Golf Course",
         website: "https://westwoodsgc.com/",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
         detectedPlatform: "FOREUP",
         providerFamilyKey: "FOREUP",
         automationEligibility: "NEEDS_REVIEW",
@@ -1638,9 +1583,7 @@ describe("browser discovery persistence", () => {
       }
     ] as never);
 
-    await expect(
-      listBrowserProbeTargets(1, "Account Course")
-    ).resolves.toEqual([]);
+    await expect(listBrowserProbeTargets(1, "Account Course")).resolves.toEqual([]);
   });
 
   it("rejects an ambiguous targeted course name", async () => {
@@ -1669,9 +1612,7 @@ describe("browser discovery persistence", () => {
       }
     ] as never);
 
-    await expect(
-      listBrowserProbeTargets(1, "Westwoods Golf Course")
-    ).rejects.toThrow("ambiguous");
+    await expect(listBrowserProbeTargets(1, "Westwoods Golf Course")).rejects.toThrow("ambiguous");
   });
 
   it("does not target an open incident whose course is already runnable", async () => {
@@ -1680,23 +1621,19 @@ describe("browser discovery persistence", () => {
         id: "course-westwoods",
         name: "Westwoods Golf Course",
         website: "https://westwoodsgc.com/",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
         detectedPlatform: "FOREUP",
         providerFamilyKey: "FOREUP",
         automationEligibility: "ALLOWED",
         bookingMetadata: {
           scheduleId: 6123,
-          bookingBaseUrl:
-            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+          bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
         },
         preferences: []
       }
     ] as never);
 
-    await expect(
-      listBrowserProbeTargets(1, "Westwoods Golf Course")
-    ).resolves.toEqual([]);
+    await expect(listBrowserProbeTargets(1, "Westwoods Golf Course")).resolves.toEqual([]);
   });
 
   it("allows an exact targeted browser probe for a runnable course with a current auth failure", async () => {
@@ -1757,10 +1694,7 @@ describe("browser discovery persistence", () => {
       }
     ] as never);
 
-    const targets = await listBrowserProbeTargets(
-      1,
-      "Current Unsupported Course"
-    );
+    const targets = await listBrowserProbeTargets(1, "Current Unsupported Course");
 
     expect(targets).toHaveLength(1);
     expect(targets[0]?.course.automationEligibility).toBe("BLOCKED");

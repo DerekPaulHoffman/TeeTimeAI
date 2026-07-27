@@ -39,18 +39,13 @@ export const KNOWN_PROVIDER_FAMILIES = [
 export type KnownProviderFamily = (typeof KNOWN_PROVIDER_FAMILIES)[number];
 
 export type ExternalDetectedPlatform =
-  | "UNKNOWN"
-  | "FOREUP"
-  | "GOLFNOW"
-  | "TEEITUP"
-  | "CHRONOGOLF"
-  | "CLUB_CADDIE"
-  | "CUSTOM";
+  "UNKNOWN" | "FOREUP" | "GOLFNOW" | "TEEITUP" | "CHRONOGOLF" | "CLUB_CADDIE" | "CUSTOM";
 
 export type CourseSupportFailureClass =
   | "MISSING_SOURCE"
   | "MISSING_METADATA"
   | "UNSUPPORTED_FAMILY"
+  | "READER_PARSER_MISSING"
   | "AUTH"
   | "RATE_LIMIT"
   | "CHALLENGE"
@@ -62,11 +57,7 @@ export type CourseSupportFailureClass =
   | "UNKNOWN";
 
 export type ProviderOperation =
-  | "DISCOVERY"
-  | "METADATA"
-  | "AVAILABILITY"
-  | "BOOKING_WINDOW"
-  | "UNKNOWN";
+  "DISCOVERY" | "METADATA" | "AVAILABILITY" | "BOOKING_WINDOW" | "UNKNOWN";
 
 export type ConsumerDisposition =
   | "MATCH_AVAILABLE"
@@ -137,8 +128,7 @@ export const PROVIDER_CAPABILITIES = {
     family: "CHELSEA",
     detectedPlatform: "CUSTOM",
     supportsAutomation: true,
-    matchesHostname: (hostname) =>
-      matchesDomain(hostname, "chelseareservations.com"),
+    matchesHostname: (hostname) => matchesDomain(hostname, "chelseareservations.com"),
     validatesMetadata: isChelseaMetadata
   },
   TEESNAP: {
@@ -167,8 +157,7 @@ export const PROVIDER_CAPABILITIES = {
     detectedPlatform: "CUSTOM",
     supportsAutomation: true,
     matchesHostname: (hostname) =>
-      matchesDomain(hostname, "navyaims.com") ||
-      matchesDomain(hostname, "myvscloud.com"),
+      matchesDomain(hostname, "navyaims.com") || matchesDomain(hostname, "myvscloud.com"),
     validatesMetadata: isWebTracMetadata
   },
   EZLINKS: {
@@ -238,6 +227,7 @@ const failureClasses = new Set<string>([
   "MISSING_SOURCE",
   "MISSING_METADATA",
   "UNSUPPORTED_FAMILY",
+  "READER_PARSER_MISSING",
   "AUTH",
   "RATE_LIMIT",
   "CHALLENGE",
@@ -278,65 +268,46 @@ export function resolveProviderCapability(
   const platformFamily = platformFamilies[platform];
   const bookingHostname = getSafePublicHostname(input.detectedBookingUrl);
   const websiteHostname = getSafePublicHostname(input.website);
-  const bookingFamily = bookingHostname
-    ? getKnownProviderFamilyForHostname(bookingHostname)
-    : null;
-  const websiteFamily = websiteHostname
-    ? getKnownProviderFamilyForHostname(websiteHostname)
-    : null;
+  const bookingFamily = bookingHostname ? getKnownProviderFamilyForHostname(bookingHostname) : null;
+  const websiteFamily = websiteHostname ? getKnownProviderFamilyForHostname(websiteHostname) : null;
   const persistedFamily = normalizeProviderFamilyKey(input.providerFamilyKey);
-  const persistedKnownFamily = getKnownProviderCapability(persistedFamily)
-    ? persistedFamily
-    : null;
+  const persistedKnownFamily = getKnownProviderCapability(persistedFamily) ? persistedFamily : null;
   const evidenceFamilies = new Set(
-    [
-      metadataFamily,
-      platformFamily,
-      bookingFamily,
-      websiteFamily,
-      persistedKnownFamily
-    ].filter((family): family is string => Boolean(family))
+    [metadataFamily, platformFamily, bookingFamily, websiteFamily, persistedKnownFamily].filter(
+      (family): family is string => Boolean(family)
+    )
   );
   const evidenceConflict = evidenceFamilies.size > 1;
 
   const providerFamilyKey = evidenceConflict
     ? SOURCE_CONFLICT_PROVIDER_FAMILY
-    : metadataFamily ??
+    : (metadataFamily ??
       platformFamily ??
       bookingFamily ??
       bookingHostname ??
       (persistedFamily !== SOURCE_MISSING_PROVIDER_FAMILY ? persistedFamily : null) ??
       websiteFamily ??
       websiteHostname ??
-      SOURCE_MISSING_PROVIDER_FAMILY;
+      SOURCE_MISSING_PROVIDER_FAMILY);
   const capability = getKnownProviderCapability(providerFamilyKey);
   const metadataHasBookingBaseUrl = Boolean(
     isPlainMetadata(input.bookingMetadata) &&
-      typeof input.bookingMetadata.bookingBaseUrl === "string"
+    typeof input.bookingMetadata.bookingBaseUrl === "string"
   );
   const metadataReady = Boolean(
     capability?.supportsAutomation &&
-      validatesSafeProviderMetadata(
-        providerFamilyKey,
-        capability,
-        input.bookingMetadata
-      ) &&
-      (!metadataHasBookingBaseUrl ||
-        !bookingFamily ||
-        (input.detectedBookingUrl &&
-          isProviderPublicBookingLandingUrl(input.detectedBookingUrl)))
+    validatesSafeProviderMetadata(providerFamilyKey, capability, input.bookingMetadata) &&
+    (!metadataHasBookingBaseUrl ||
+      !bookingFamily ||
+      (input.detectedBookingUrl && isProviderPublicBookingLandingUrl(input.detectedBookingUrl)))
   );
 
   return {
     providerFamilyKey,
     capability,
-    detectedPlatform: evidenceConflict
-      ? platform
-      : capability?.detectedPlatform ?? platform,
+    detectedPlatform: evidenceConflict ? platform : (capability?.detectedPlatform ?? platform),
     metadataReady,
-    isRunnable: Boolean(
-      !evidenceConflict && capability?.supportsAutomation && metadataReady
-    ),
+    isRunnable: Boolean(!evidenceConflict && capability?.supportsAutomation && metadataReady),
     evidenceConflict
   };
 }
@@ -352,9 +323,7 @@ export function resolveProviderDiscoveryIdentity(input: {
   }
 
   const bookingHostname = getSafePublicHostname(input.bookingUrl);
-  const bookingFamily = bookingHostname
-    ? getKnownProviderFamilyForHostname(bookingHostname)
-    : null;
+  const bookingFamily = bookingHostname ? getKnownProviderFamilyForHostname(bookingHostname) : null;
   const metadataFamily = getMetadataProviderFamily(input.apiMetadata);
   if (!bookingFamily && !metadataFamily) {
     return null;
@@ -399,14 +368,11 @@ export function getProviderReadinessFailure(
   return "UNSUPPORTED_FAMILY";
 }
 
-export function isProviderMetadataReady(
-  providerFamilyKey: string,
-  metadata: unknown
-) {
+export function isProviderMetadataReady(providerFamilyKey: string, metadata: unknown) {
   const capability = getKnownProviderCapability(providerFamilyKey);
   return Boolean(
     capability?.supportsAutomation &&
-      validatesSafeProviderMetadata(providerFamilyKey, capability, metadata)
+    validatesSafeProviderMetadata(providerFamilyKey, capability, metadata)
   );
 }
 
@@ -432,7 +398,7 @@ function validatesSafeProviderMetadata(
     const url = new URL(bookingBaseUrl);
     return Boolean(
       getKnownProviderFamilyForHostname(url.hostname) === providerFamilyKey &&
-        isProviderPublicBookingLandingUrl(url)
+      isProviderPublicBookingLandingUrl(url)
     );
   } catch {
     return false;
@@ -521,40 +487,32 @@ export function isProviderInfrastructureUrl(value: URL | string) {
     return true;
   }
 
-  const hostnameTokens = url.hostname
-    .toLocaleLowerCase("en-US")
-    .split(".");
+  const hostnameTokens = url.hostname.toLocaleLowerCase("en-US").split(".");
   const pathname = safeDecodeProviderSurfacePart(url.pathname);
-  const pathTokens = pathname
-    .split("/")
-    .filter(Boolean)
-    .flatMap(tokenizeProviderSurfacePart);
+  const pathTokens = pathname.split("/").filter(Boolean).flatMap(tokenizeProviderSurfacePart);
   const hash = safeDecodeProviderSurfacePart(url.hash);
-  const hashTokens = hash
-    .split("/")
-    .filter(Boolean)
-    .flatMap(tokenizeProviderSurfacePart);
+  const hashTokens = hash.split("/").filter(Boolean).flatMap(tokenizeProviderSurfacePart);
   return Boolean(
     hostnameTokens.some(isProviderInfrastructureToken) ||
-      pathTokens.some(isProviderInfrastructureToken) ||
-      hashTokens.some(isProviderInfrastructureToken) ||
-      /\.(?:geojson|jsonp?|m?js|map|xml|ya?ml)$/iu.test(pathname) ||
-      /\.(?:geojson|jsonp?|m?js|map|xml|ya?ml)(?:$|[?#])/iu.test(hash) ||
-      [...url.searchParams.keys()].some((key) =>
-        /^(?:(?:api|endpoint|route|schema|spec)(?:path|url|uri|version)?|(?:json|jsonp)?callback|jsonp|path|url|uri)$/u.test(
-          safeDecodeProviderSurfacePart(key)
-            .normalize("NFKC")
-            .toLocaleLowerCase("en-US")
-            .replace(/[^a-z0-9]/gu, "")
-        )
-      ) ||
-      [...url.searchParams.entries()].some(
-        ([key, entry]) =>
-          !isProviderTrackingQueryParameter(key) &&
-          /^(?:(?:application|text)\/(?:(?:[a-z0-9.+-]+\+)?(?:json|xml|ya?ml|ndjson|geojson)|x-(?:json|xml|ya?ml|ndjson|geojson)|json-seq)|(?:x-)?(?:jsonp?|xml|ya?ml|ndjson|geojson|pjson|jsonl|jsonseq))(?:\s*;.*)?$/iu.test(
-            safeDecodeProviderSurfacePart(entry).trim()
-          )
+    pathTokens.some(isProviderInfrastructureToken) ||
+    hashTokens.some(isProviderInfrastructureToken) ||
+    /\.(?:geojson|jsonp?|m?js|map|xml|ya?ml)$/iu.test(pathname) ||
+    /\.(?:geojson|jsonp?|m?js|map|xml|ya?ml)(?:$|[?#])/iu.test(hash) ||
+    [...url.searchParams.keys()].some((key) =>
+      /^(?:(?:api|endpoint|route|schema|spec)(?:path|url|uri|version)?|(?:json|jsonp)?callback|jsonp|path|url|uri)$/u.test(
+        safeDecodeProviderSurfacePart(key)
+          .normalize("NFKC")
+          .toLocaleLowerCase("en-US")
+          .replace(/[^a-z0-9]/gu, "")
       )
+    ) ||
+    [...url.searchParams.entries()].some(
+      ([key, entry]) =>
+        !isProviderTrackingQueryParameter(key) &&
+        /^(?:(?:application|text)\/(?:(?:[a-z0-9.+-]+\+)?(?:json|xml|ya?ml|ndjson|geojson)|x-(?:json|xml|ya?ml|ndjson|geojson)|json-seq)|(?:x-)?(?:jsonp?|xml|ya?ml|ndjson|geojson|pjson|jsonl|jsonseq))(?:\s*;.*)?$/iu.test(
+          safeDecodeProviderSurfacePart(entry).trim()
+        )
+    )
   );
 }
 
@@ -565,12 +523,7 @@ export function isProviderPublicBookingLandingUrl(value: URL | string) {
   } catch {
     return false;
   }
-  if (
-    url.protocol !== "https:" ||
-    url.username ||
-    url.password ||
-    url.port
-  ) {
+  if (url.protocol !== "https:" || url.username || url.password || url.port) {
     return false;
   }
   const providerFamily = getKnownProviderFamilyForHostname(url.hostname);
@@ -588,16 +541,10 @@ export function isProviderPublicBookingLandingUrl(value: URL | string) {
   if (isProviderInfrastructureUrl(url)) {
     return false;
   }
-  return isProviderFamilyPublicBookingLandingUrl(
-    url,
-    providerFamily,
-    pathname
-  );
+  return isProviderFamilyPublicBookingLandingUrl(url, providerFamily, pathname);
 }
 
-export function getProviderPublicBookingLandingIdentity(
-  value: URL | string
-) {
+export function getProviderPublicBookingLandingIdentity(value: URL | string) {
   let url: URL;
   try {
     url = value instanceof URL ? value : new URL(value);
@@ -611,9 +558,7 @@ export function getProviderPublicBookingLandingIdentity(
   if (!providerFamily) {
     return null;
   }
-  const hostname = url.hostname
-    .toLocaleLowerCase("en-US")
-    .replace(/^www\./u, "");
+  const hostname = url.hostname.toLocaleLowerCase("en-US").replace(/^www\./u, "");
   const pathname = url.pathname.replace(/\/+$/u, "") || "/";
   switch (providerFamily) {
     case "CHELSEA":
@@ -680,127 +625,106 @@ function isProviderFamilyPublicBookingLandingUrl(
     case "FOREUP":
       return Boolean(
         /^(?:www\.)?foreupsoftware\.com$/u.test(hostname) &&
-          /^\/index\.php\/booking\/[1-9]\d{0,9}(?:\/[1-9]\d{0,9})?\/?$/u.test(
-            pathname
-          ) &&
-          (!url.hash || /^#\/?teetimes\/?$/iu.test(url.hash))
+        /^\/index\.php\/booking\/[1-9]\d{0,9}(?:\/[1-9]\d{0,9})?\/?$/u.test(pathname) &&
+        (!url.hash || /^#\/?teetimes\/?$/iu.test(url.hash))
       );
     case "TEEITUP":
       return Boolean(
         /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:book|play)\.teeitup\.(?:golf|com)$/u.test(
           hostname
         ) &&
-          (isRoot || /^\/(?:book(?:ing)?|tee-?times?)\/?$/iu.test(pathname)) &&
-          !url.hash
+        (isRoot || /^\/(?:book(?:ing)?|tee-?times?)\/?$/iu.test(pathname)) &&
+        !url.hash
       );
     case "CHRONOGOLF":
       return Boolean(
         /^(?:www\.)?chronogolf\.com$/u.test(hostname) &&
-          /^\/club\/[a-z0-9][a-z0-9_-]{0,127}\/?$/iu.test(pathname) &&
-          !url.hash
+        /^\/club\/[a-z0-9][a-z0-9_-]{0,127}\/?$/iu.test(pathname) &&
+        !url.hash
       );
     case "CPS":
       return Boolean(
         isSingleProviderTenantHostname(hostname, "cps.golf") &&
-          hostname !== "sc.cps.golf" &&
-          (isRoot ||
-            /^\/onlineresweb(?:\/search-teetime)?\/?$/iu.test(pathname)) &&
-          !url.hash
+        hostname !== "sc.cps.golf" &&
+        (isRoot || /^\/onlineresweb(?:\/search-teetime)?\/?$/iu.test(pathname)) &&
+        !url.hash
       );
     case "CHELSEA":
       return Boolean(
         isSingleProviderTenantHostname(hostname, "chelseareservations.com") &&
-          (isRoot || /^\/gpinprocess\/?$/iu.test(pathname)) &&
-          !url.hash &&
-          hasOnlyProviderTrackingQuery(url)
+        (isRoot || /^\/gpinprocess\/?$/iu.test(pathname)) &&
+        !url.hash &&
+        hasOnlyProviderTrackingQuery(url)
       );
     case "TEESNAP":
       return Boolean(
-        isSingleProviderTenantHostname(hostname, "teesnap.net") &&
-          isRoot &&
-          !url.hash
+        isSingleProviderTenantHostname(hostname, "teesnap.net") && isRoot && !url.hash
       );
     case "GOLFBACK":
       return Boolean(
         /^(?:www\.)?golfback\.com$/u.test(hostname) &&
-          isRoot &&
-          /^#\/course\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/?$/iu.test(
-            url.hash
-          )
+        isRoot &&
+        /^#\/course\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/?$/iu.test(
+          url.hash
+        )
       );
     case "GOLF_WITH_ACCESS":
       return Boolean(
         hostname === "golfwithaccess.com" &&
-          /^\/course\/[a-z0-9][a-z0-9-]{0,127}\/reserve-tee-time\/?$/iu.test(
-            pathname
-          ) &&
-          !url.hash
+        /^\/course\/[a-z0-9][a-z0-9-]{0,127}\/reserve-tee-time\/?$/iu.test(pathname) &&
+        !url.hash
       );
     case "WEBTRAC": {
-      const isMyVsCloud =
-        hostname === "myvscloud.com" ||
-        hostname.endsWith(".myvscloud.com");
+      const isMyVsCloud = hostname === "myvscloud.com" || hostname.endsWith(".myvscloud.com");
       return Boolean(
-        (
-          hostname === "navyaims.com" ||
-          hostname.endsWith(".navyaims.com") ||
-          isMyVsCloud
-        ) &&
-          /^\/(?:[a-z0-9_-]+\/)?webtrac\/web\/search\.html\/?$/iu.test(pathname) &&
-          (
-            url.searchParams.get("module")?.toUpperCase() === "GR" ||
-            (isMyVsCloud && !url.search)
-          ) &&
-          (
-            isMyVsCloud ||
-            Boolean(url.searchParams.get("secondarycode"))
-          ) &&
-          !url.hash
+        (hostname === "navyaims.com" || hostname.endsWith(".navyaims.com") || isMyVsCloud) &&
+        /^\/(?:[a-z0-9_-]+\/)?webtrac\/web\/search\.html\/?$/iu.test(pathname) &&
+        (url.searchParams.get("module")?.toUpperCase() === "GR" || (isMyVsCloud && !url.search)) &&
+        (isMyVsCloud || Boolean(url.searchParams.get("secondarycode"))) &&
+        !url.hash
       );
     }
     case "EZLINKS": {
       const legacySearchHash = /^#\/search\/?$/iu.test(url.hash);
       return Boolean(
         isSingleProviderTenantHostname(hostname, "ezlinksgolf.com") &&
-          !hasUnrelatedProviderHostLabel(hostname, "ezlinksgolf.com") &&
-          (isRoot ||
-            /^\/(?:public-)?(?:book(?:ing)?|tee-?times?)\/?$/iu.test(pathname) ||
-            /^\/[a-z0-9][a-z0-9-]{0,127}\/(?:(?:public-)?(?:book(?:ing)?|tee-?times?)|search)\/?$/iu.test(
-              pathname
-            )) &&
-          (!url.hash || (isRoot && legacySearchHash))
+        !hasUnrelatedProviderHostLabel(hostname, "ezlinksgolf.com") &&
+        (isRoot ||
+          /^\/(?:public-)?(?:book(?:ing)?|tee-?times?)\/?$/iu.test(pathname) ||
+          /^\/[a-z0-9][a-z0-9-]{0,127}\/(?:(?:public-)?(?:book(?:ing)?|tee-?times?)|search)\/?$/iu.test(
+            pathname
+          )) &&
+        (!url.hash || (isRoot && legacySearchHash))
       );
     }
     case "GOLFNOW":
       return Boolean(
         /^(?:www\.)?golfnow\.com$/u.test(hostname) &&
-          (/^\/course\/[a-z0-9][a-z0-9-]{0,127}\/?$/iu.test(pathname) ||
-            /^\/tee-times\/facility\/[a-z0-9][a-z0-9-]{0,127}(?:\/[1-9]\d{0,9})?(?:\/search)?\/?$/iu.test(
-              pathname
-            )) &&
-          !url.hash
+        (/^\/course\/[a-z0-9][a-z0-9-]{0,127}\/?$/iu.test(pathname) ||
+          /^\/tee-times\/facility\/[a-z0-9][a-z0-9-]{0,127}(?:\/[1-9]\d{0,9})?(?:\/search)?\/?$/iu.test(
+            pathname
+          )) &&
+        !url.hash
       );
     case "AGILYSYS":
       return Boolean(
         hostname === "book.onagilysys.com" &&
-          /^\/onecart\/golf\/courses\/[1-9]\d{0,9}\/[a-z0-9][a-z0-9_-]{0,63}\/?$/iu.test(
-            pathname
-          ) &&
-          hasOnlyAgilysysLandingQuery(url) &&
-          !url.hash
+        /^\/onecart\/golf\/courses\/[1-9]\d{0,9}\/[a-z0-9][a-z0-9_-]{0,63}\/?$/iu.test(pathname) &&
+        hasOnlyAgilysysLandingQuery(url) &&
+        !url.hash
       );
     case "WHOOSH":
       return Boolean(
         hostname === "app.whoosh.io" &&
-          /^\/patron\/club\/[a-z0-9][a-z0-9_-]{0,127}\/?$/iu.test(pathname) &&
-          !url.hash
+        /^\/patron\/club\/[a-z0-9][a-z0-9_-]{0,127}\/?$/iu.test(pathname) &&
+        !url.hash
       );
     case "TENFORE":
       return Boolean(
         hostname === "fox.tenfore.golf" &&
-          /^\/[a-z0-9][a-z0-9-]{0,127}\/?$/iu.test(pathname) &&
-          hasOnlyProviderTrackingQuery(url) &&
-          !url.hash
+        /^\/[a-z0-9][a-z0-9-]{0,127}\/?$/iu.test(pathname) &&
+        hasOnlyProviderTrackingQuery(url) &&
+        !url.hash
       );
     case "CLUB_CADDIE":
       return false;
@@ -860,11 +784,9 @@ function isExactClubCaddiePublicViewUrl(
   )?.[1];
   return Boolean(
     slug &&
-      !tokenizeProviderSurfacePart(slug).some(
-        (token) =>
-          isProviderInfrastructureToken(token) ||
-          isProviderTransactionOrAccessToken(token)
-      )
+    !tokenizeProviderSurfacePart(slug).some(
+      (token) => isProviderInfrastructureToken(token) || isProviderTransactionOrAccessToken(token)
+    )
   );
 }
 
@@ -926,11 +848,7 @@ const PROVIDER_TRANSACTION_OR_ACCESS_TOKENS = new Set([
 
 function isProviderTransactionOrAccessUrl(url: URL) {
   const surfaces = [url.hostname, url.pathname, url.hash];
-  if (
-    surfaces
-      .flatMap(tokenizeProviderSurfacePart)
-      .some(isProviderTransactionOrAccessToken)
-  ) {
+  if (surfaces.flatMap(tokenizeProviderSurfacePart).some(isProviderTransactionOrAccessToken)) {
     return true;
   }
   return surfaces
@@ -948,79 +866,74 @@ function isProviderTransactionOrAccessToken(value: string) {
   const compact = value.replace(/[^a-z0-9]/gu, "");
   return Boolean(
     PROVIDER_TRANSACTION_OR_ACCESS_TOKENS.has(compact) ||
-      compact.includes("login") ||
-      /^(?:saml|openid|oidc|oauth\d*|adfs|identity|idp|mfa|2fa|webauthn|captcha|recaptcha|hcaptcha|funcaptcha|turnstile|queue|queueit|waitingroom|checkout|authorize|authorization|authentication|signin|signup|logout|register|registration|password|session|token|magiclink|invite|invitation|verify|verification|wresult)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^auth(?:\d*(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|challenge|login|signin|provider|gateway|server|service|proxy)|n|z|enticate|entication|orize|orization)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:accounts?|myaccount|useraccount|memberaccount|customeraccount|clientaccount|partneraccount|employeeaccount|regionalaccount)(?:(?:login|signin|signup|portal|dashboard|profile|settings|callback|redirect|recovery|recover|reset|management|manage)[a-z0-9]*)?$/u.test(
-        compact
-      ) ||
-      /^(?:admin|staff|member|customer|user)(?:account|dashboard|portal|profile|settings|login|signin)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:admin|staff|member|members|customer|user|client|partner|employee|secure)(?:area|center|centre|dashboard|portal|profile|settings)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:myprofile|profile(?:area|edit|settings))$/u.test(compact) ||
-      /^(?:members?|admin|staff|customer|user|client|partner|employee|regional|secure)(?:center|centre|booking|portal|dashboard|profile|settings|account)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:forgot|reset|recover|recovery|confirm|confirmation|verify|verification)(?:username|email|password|account)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:email|username)(?:verify|verification|confirm|confirmation|reset|recovery)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^billing(?:portal|account|history|settings|payment|invoices?|details?)?$/u.test(
-        compact
-      ) ||
-      /^paymentmethod[a-z0-9]*$/u.test(compact) ||
-      /^(?:credentials?|signature|signed(?:url)?|assertion|relaystate|consent|jsessionid|authcode|nonce|jwt|bearer)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:token|secret|ticket)[a-z0-9]*$/u.test(compact) ||
-      /^(?:access|refresh|id|api|client|service|login|auth)(?:token|key|secret|ticket)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:account|cart|checkout|confirmation|order|payment|purchase|receipt|transaction)(?:complete|confirmation|page|portal|status|success)?$/u.test(
-        compact
-      ) ||
-      /^(?:bookings?|reservations?)(?:cart|checkout|complete|confirm|confirmation|done|payment|receipt|status|success|thankyou)$/u.test(
-        compact
-      ) ||
-      /^(?:complete|completed|confirmation|receipt|success|succeeded)(?:page|status)?$/u.test(
-        compact
-      ) ||
-      /^thankyou(?:page)?$/u.test(compact) ||
-      /^transaction[a-z0-9]*$/u.test(compact) ||
-      /^(?:order|purchase|checkout)(?:complete|confirm|confirmation|done|flow|page|portal|review|start|status|step|success)$/u.test(
-        compact
-      ) ||
-      /^(?:cart|order)(?:review|summary|confirm|confirmation|checkout|payment|billing)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:payment|pay|cart|purchase|order|challenge)(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|page|wait|waiting|progress|checkout)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:pay(?:portal|account|method|ment)?|basket|shoppingbag|placeorder|completepurchase|orderhistory|purchasehistory|transactionhistory)$/u.test(
-        compact
-      ) ||
-      /^(?:log|sign)(?:in|out|up)$/u.test(compact) ||
-      /^(?:my)?account$/u.test(compact) ||
-      /^(?:captcha|challenge|member|members|mfa|password|profile|profiles|queue|register|registration|session|sessions|sso|token|tokens|verification|verify)(?:page|portal)?$/u.test(
-        compact
-      ) ||
-      /^(?:waiting|challenge)(?:area|gate|hold|lobby|room)?$/u.test(compact)
+    compact.includes("login") ||
+    /^(?:saml|openid|oidc|oauth\d*|adfs|identity|idp|mfa|2fa|webauthn|captcha|recaptcha|hcaptcha|funcaptcha|turnstile|queue|queueit|waitingroom|checkout|authorize|authorization|authentication|signin|signup|logout|register|registration|password|session|token|magiclink|invite|invitation|verify|verification|wresult)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^auth(?:\d*(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|challenge|login|signin|provider|gateway|server|service|proxy)|n|z|enticate|entication|orize|orization)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:accounts?|myaccount|useraccount|memberaccount|customeraccount|clientaccount|partneraccount|employeeaccount|regionalaccount)(?:(?:login|signin|signup|portal|dashboard|profile|settings|callback|redirect|recovery|recover|reset|management|manage)[a-z0-9]*)?$/u.test(
+      compact
+    ) ||
+    /^(?:admin|staff|member|customer|user)(?:account|dashboard|portal|profile|settings|login|signin)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:admin|staff|member|members|customer|user|client|partner|employee|secure)(?:area|center|centre|dashboard|portal|profile|settings)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:myprofile|profile(?:area|edit|settings))$/u.test(compact) ||
+    /^(?:members?|admin|staff|customer|user|client|partner|employee|regional|secure)(?:center|centre|booking|portal|dashboard|profile|settings|account)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:forgot|reset|recover|recovery|confirm|confirmation|verify|verification)(?:username|email|password|account)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:email|username)(?:verify|verification|confirm|confirmation|reset|recovery)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^billing(?:portal|account|history|settings|payment|invoices?|details?)?$/u.test(compact) ||
+    /^paymentmethod[a-z0-9]*$/u.test(compact) ||
+    /^(?:credentials?|signature|signed(?:url)?|assertion|relaystate|consent|jsessionid|authcode|nonce|jwt|bearer)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:token|secret|ticket)[a-z0-9]*$/u.test(compact) ||
+    /^(?:access|refresh|id|api|client|service|login|auth)(?:token|key|secret|ticket)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:account|cart|checkout|confirmation|order|payment|purchase|receipt|transaction)(?:complete|confirmation|page|portal|status|success)?$/u.test(
+      compact
+    ) ||
+    /^(?:bookings?|reservations?)(?:cart|checkout|complete|confirm|confirmation|done|payment|receipt|status|success|thankyou)$/u.test(
+      compact
+    ) ||
+    /^(?:complete|completed|confirmation|receipt|success|succeeded)(?:page|status)?$/u.test(
+      compact
+    ) ||
+    /^thankyou(?:page)?$/u.test(compact) ||
+    /^transaction[a-z0-9]*$/u.test(compact) ||
+    /^(?:order|purchase|checkout)(?:complete|confirm|confirmation|done|flow|page|portal|review|start|status|step|success)$/u.test(
+      compact
+    ) ||
+    /^(?:cart|order)(?:review|summary|confirm|confirmation|checkout|payment|billing)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:payment|pay|cart|purchase|order|challenge)(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|page|wait|waiting|progress|checkout)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:pay(?:portal|account|method|ment)?|basket|shoppingbag|placeorder|completepurchase|orderhistory|purchasehistory|transactionhistory)$/u.test(
+      compact
+    ) ||
+    /^(?:log|sign)(?:in|out|up)$/u.test(compact) ||
+    /^(?:my)?account$/u.test(compact) ||
+    /^(?:captcha|challenge|member|members|mfa|password|profile|profiles|queue|register|registration|session|sessions|sso|token|tokens|verification|verify)(?:page|portal)?$/u.test(
+      compact
+    ) ||
+    /^(?:waiting|challenge)(?:area|gate|hold|lobby|room)?$/u.test(compact)
   );
 }
 
-function hasAllowedProviderBookingLandingQuery(
-  url: URL,
-  providerFamily: KnownProviderFamily
-) {
+function hasAllowedProviderBookingLandingQuery(url: URL, providerFamily: KnownProviderFamily) {
   if (!url.search) {
     return true;
   }
@@ -1036,12 +949,9 @@ function hasAllowedProviderBookingLandingQuery(
     );
     return Boolean(
       !unsafeEntry &&
-        facilityFilters.length <= 12 &&
-        new Set(
-          facilityFilters.map(([, value]) =>
-            value.toLocaleLowerCase("en-US")
-          )
-        ).size === facilityFilters.length
+      facilityFilters.length <= 12 &&
+      new Set(facilityFilters.map(([, value]) => value.toLocaleLowerCase("en-US"))).size ===
+        facilityFilters.length
     );
   }
   const query = readUniqueProviderLandingQuery(url);
@@ -1053,53 +963,44 @@ function hasAllowedProviderBookingLandingQuery(
   }
   if (providerFamily === "CPS") {
     return Boolean(
-      query.size === 1 &&
-        readBoundedProviderLandingInteger(query.get("courseid"), 2_147_483_647)
+      query.size === 1 && readBoundedProviderLandingInteger(query.get("courseid"), 2_147_483_647)
     );
   }
   if (providerFamily === "WEBTRAC") {
-    const allowedKeys = new Set([
-      "interfaceparameter",
-      "module",
-      "secondarycode"
-    ]);
+    const allowedKeys = new Set(["interfaceparameter", "module", "secondarycode"]);
     const secondaryCode = query.get("secondarycode");
-    const isMyVsCloud =
-      url.hostname === "myvscloud.com" ||
-      url.hostname.endsWith(".myvscloud.com");
+    const isMyVsCloud = url.hostname === "myvscloud.com" || url.hostname.endsWith(".myvscloud.com");
     return Boolean(
       query.get("module")?.toUpperCase() === "GR" &&
-        (
-          (secondaryCode && /^[a-z0-9_-]{1,24}$/iu.test(secondaryCode)) ||
-          (isMyVsCloud && !secondaryCode)
-        ) &&
-        [...query.entries()].every(([key, entry]) => {
-          if (!allowedKeys.has(key)) {
-            return false;
-          }
-          return key === "interfaceparameter"
-            ? entry.toLocaleLowerCase("en-US") === "webtrac_se"
-            : /^[a-z0-9_-]{1,24}$/iu.test(entry);
-        })
+      ((secondaryCode && /^[a-z0-9_-]{1,24}$/iu.test(secondaryCode)) ||
+        (isMyVsCloud && !secondaryCode)) &&
+      [...query.entries()].every(([key, entry]) => {
+        if (!allowedKeys.has(key)) {
+          return false;
+        }
+        return key === "interfaceparameter"
+          ? entry.toLocaleLowerCase("en-US") === "webtrac_se"
+          : /^[a-z0-9_-]{1,24}$/iu.test(entry);
+      })
     );
   }
   if (providerFamily === "TEEITUP") {
     const allowedKeys = new Set(["course", "date", "holes", "max", "players"]);
     return Boolean(
       readBoundedProviderLandingInteger(query.get("course"), 2_147_483_647) &&
-        [...query.entries()].every(([key, entry]) => {
-          if (!allowedKeys.has(key)) {
-            return false;
-          }
-          if (key === "date") {
-            return isValidProviderLandingDate(entry);
-          }
-          if (key === "holes") {
-            return entry === "9" || entry === "18";
-          }
-          const maximum = key === "players" ? 8 : key === "max" ? 100 : 2_147_483_647;
-          return readBoundedProviderLandingInteger(entry, maximum);
-        })
+      [...query.entries()].every(([key, entry]) => {
+        if (!allowedKeys.has(key)) {
+          return false;
+        }
+        if (key === "date") {
+          return isValidProviderLandingDate(entry);
+        }
+        if (key === "holes") {
+          return entry === "9" || entry === "18";
+        }
+        const maximum = key === "players" ? 8 : key === "max" ? 100 : 2_147_483_647;
+        return readBoundedProviderLandingInteger(entry, maximum);
+      })
     );
   }
   if (providerFamily === "AGILYSYS") {
@@ -1135,10 +1036,7 @@ function hasOnlyProviderTrackingQuery(url: URL) {
   return [...url.searchParams.keys()].every(isProviderTrackingQueryParameter);
 }
 
-function readBoundedProviderLandingInteger(
-  value: string | undefined,
-  maximum: number
-) {
+function readBoundedProviderLandingInteger(value: string | undefined, maximum: number) {
   if (!value || !/^[1-9]\d{0,9}$/u.test(value)) {
     return false;
   }
@@ -1160,9 +1058,7 @@ function isValidProviderLandingDate(value: string) {
 }
 
 function tokenizeProviderSurfacePart(value: string) {
-  const decoded = safeDecodeProviderSurfacePart(value)
-    .normalize("NFKC")
-    .toLocaleLowerCase("en-US");
+  const decoded = safeDecodeProviderSurfacePart(value).normalize("NFKC").toLocaleLowerCase("en-US");
   const tokens = decoded.split(/[^a-z0-9]+/u).filter(Boolean);
   return tokens.length > 0 ? tokens : [decoded];
 }
@@ -1187,20 +1083,20 @@ function isProviderInfrastructureToken(value: string) {
   const compact = value.replace(/[^a-z0-9]/gu, "");
   return Boolean(
     PROVIDER_INFRASTRUCTURE_TOKENS.has(compact) ||
-      /^(?:api|openapi|swagger)(?:v?\d+)?$/u.test(compact) ||
-      /^v\d+(?:(?:alpha|beta|preview|rc)\d*)?$/u.test(compact) ||
-      /^(?:admin|api|assets?|auth|cdn|config(?:uration)?|developer|docs?|graphql|openapi|sandbox|static|status|swagger)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^rest(?:api|endpoint|gateway|private|proxy|public|server|services?|v\d+)[a-z0-9]*$/u.test(
-        compact
-      ) ||
-      /^(?:dev|qa|stage|staging|test)(?:admin|api|app|console|gateway|portal|prod|production|server|services?|v\d+|web)$/u.test(
-        compact
-      ) ||
-      /(?:admin|api|assets?|auth|cdn|config(?:uration)?|developer|docs?|graphql|openapi|static|status|swagger)$/u.test(
-        compact
-      )
+    /^(?:api|openapi|swagger)(?:v?\d+)?$/u.test(compact) ||
+    /^v\d+(?:(?:alpha|beta|preview|rc)\d*)?$/u.test(compact) ||
+    /^(?:admin|api|assets?|auth|cdn|config(?:uration)?|developer|docs?|graphql|openapi|sandbox|static|status|swagger)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^rest(?:api|endpoint|gateway|private|proxy|public|server|services?|v\d+)[a-z0-9]*$/u.test(
+      compact
+    ) ||
+    /^(?:dev|qa|stage|staging|test)(?:admin|api|app|console|gateway|portal|prod|production|server|services?|v\d+|web)$/u.test(
+      compact
+    ) ||
+    /(?:admin|api|assets?|auth|cdn|config(?:uration)?|developer|docs?|graphql|openapi|static|status|swagger)$/u.test(
+      compact
+    )
   );
 }
 
@@ -1219,9 +1115,7 @@ export type ClassifiedProviderFailure = {
   retryAfterSeconds: number | null;
 };
 
-export function classifyProviderFailure(
-  signal: ProviderFailureSignal
-): ClassifiedProviderFailure {
+export function classifyProviderFailure(signal: ProviderFailureSignal): ClassifiedProviderFailure {
   const record = asRecord(signal.error);
   const structuredFailure =
     typeof record?.failureClass === "string" && failureClasses.has(record.failureClass)
@@ -1255,7 +1149,8 @@ export function classifyProviderFailure(
   }
   if (
     !failureClass &&
-    (/^(?:AbortError|TimeoutError)$/i.test(errorName) || /\btimed?\s*out\b|\btimeout\b/i.test(message))
+    (/^(?:AbortError|TimeoutError)$/i.test(errorName) ||
+      /\btimed?\s*out\b|\btimeout\b/i.test(message))
   ) {
     failureClass = "TIMEOUT";
   }
@@ -1263,7 +1158,8 @@ export function classifyProviderFailure(
     !failureClass &&
     (/^(?:EAI_AGAIN|ECONNABORTED|ECONNREFUSED|ECONNRESET|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT)$/i.test(
       errorCode
-    ) || /\bfetch failed\b|\bnetwork error\b|\bsocket hang up\b|\bdns\b/i.test(message))
+    ) ||
+      /\bfetch failed\b|\bnetwork error\b|\bsocket hang up\b|\bdns\b/i.test(message))
   ) {
     failureClass = "NETWORK";
   }
@@ -1330,9 +1226,7 @@ const effectiveConsumerDispositions = new Set<ConsumerDisposition>([
   "BOOKING_NOT_OPEN"
 ]);
 
-export function deriveConsumerDisposition(
-  input: ConsumerDispositionInput
-): ConsumerDisposition {
+export function deriveConsumerDisposition(input: ConsumerDispositionInput): ConsumerDisposition {
   const monitoringGate = evaluateMonitoringGate(input);
   if (monitoringGate.disposition === "IDENTITY_RECHECK") {
     return "SOURCE_UNVERIFIED";
@@ -1341,22 +1235,15 @@ export function deriveConsumerDisposition(
     return "PRIVATE_OR_INVALID";
   }
   if (monitoringGate.disposition === "TECHNICAL_FINAL") {
-    return input.automationReason === "ACCOUNT_REQUIRED"
-      ? "ACCOUNT_REQUIRED"
-      : "CAPTCHA_OR_QUEUE";
+    return input.automationReason === "ACCOUNT_REQUIRED" ? "ACCOUNT_REQUIRED" : "CAPTCHA_OR_QUEUE";
   }
   if (monitoringGate.disposition === "MANUAL_FINAL") {
-    return ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
-      input.bookingMethod ?? ""
-    )
+    return ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(input.bookingMethod ?? "")
       ? "PHONE_OR_WALK_IN"
       : "DIRECT_SITE_ONLY";
   }
 
-  if (
-    input.currentEvidenceTrusted &&
-    isRunnableEvidenceNewEnough(input)
-  ) {
+  if (input.currentEvidenceTrusted && isRunnableEvidenceNewEnough(input)) {
     if (input.latestOutcome === "MATCH_FOUND" && (input.availableMatchCount ?? 0) > 0) {
       return "MATCH_AVAILABLE";
     }
@@ -1413,10 +1300,8 @@ function getKnownProviderCapability(providerFamilyKey: string) {
 
 function getMetadataProviderFamily(metadata: unknown) {
   const record = asRecord(metadata);
-  const provider = typeof record?.provider === "string"
-    ? record.provider.toUpperCase()
-    : null;
-  return provider ? metadataProviderFamilies.get(provider) ?? null : null;
+  const provider = typeof record?.provider === "string" ? record.provider.toUpperCase() : null;
+  return provider ? (metadataProviderFamilies.get(provider) ?? null) : null;
 }
 
 function normalizeExternalDetectedPlatform(value?: string | null): ExternalDetectedPlatform {
@@ -1433,11 +1318,7 @@ function getSafePublicHostname(value?: string | null) {
 
   try {
     const url = new URL(value);
-    if (
-      !["http:", "https:"].includes(url.protocol) ||
-      url.username ||
-      url.password
-    ) {
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
       return null;
     }
     const hostname = url.hostname.toLowerCase().replace(/\.$/u, "");
@@ -1456,17 +1337,13 @@ function isSafeHostname(value: string) {
     labels.length >= 2 &&
     labels.every(
       (label) =>
-        label.length >= 1 &&
-        label.length <= 63 &&
-        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
+        label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
     )
   );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : null;
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
 function getErrorMessage(error: unknown) {

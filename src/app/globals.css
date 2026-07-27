@@ -28,7 +28,13 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
   letter-spacing: 0;
 }
 
@@ -176,8 +182,7 @@ button {
 .email-action-page {
   align-items: center;
   background:
-    radial-gradient(circle at 50% 10%, rgba(216, 238, 245, 0.72), transparent 34rem),
-    var(--paper);
+    radial-gradient(circle at 50% 10%, rgba(216, 238, 245, 0.72), transparent 34rem), var(--paper);
   display: flex;
   min-height: 100svh;
   padding: 108px 20px 72px;
@@ -2645,6 +2650,228 @@ button {
   line-height: 1.45;
 }
 
+.operator-back-link,
+.operator-panel > a,
+.operator-timeline-event a {
+  align-items: center;
+  color: var(--fairway);
+  display: inline-flex;
+  font-size: 0.78rem;
+  font-weight: 800;
+  gap: 6px;
+  text-decoration: none;
+}
+
+.operator-back-link {
+  margin-bottom: 20px;
+}
+
+.operator-course-detail-grid,
+.operator-action-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.operator-panel,
+.operator-action-card {
+  background: #fff;
+  border: 1px solid #d8e3dc;
+  border-radius: 14px;
+  padding: 22px;
+}
+
+.operator-panel h2,
+.operator-action-card h2,
+.operator-section-heading h2 {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.operator-panel h2,
+.operator-action-card h2 {
+  font-size: 1rem;
+  margin: 0 0 18px;
+}
+
+.operator-detail-list {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0 0 20px;
+}
+
+.operator-detail-list div {
+  border-top: 1px solid #e3ebe6;
+  padding-top: 10px;
+}
+
+.operator-detail-list dt {
+  color: #748079;
+  font-size: 0.67rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.operator-detail-list dd {
+  font-size: 0.82rem;
+  font-weight: 800;
+  margin: 3px 0 0;
+}
+
+.operator-panel > p {
+  color: #66736c;
+  font-size: 0.76rem;
+}
+
+.operator-panel > a {
+  margin: 5px 14px 5px 0;
+}
+
+.operator-checklist {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.operator-checklist li {
+  align-items: center;
+  color: #435249;
+  display: flex;
+  font-size: 0.78rem;
+  gap: 9px;
+}
+
+.operator-checklist li svg {
+  color: var(--fairway);
+  flex: 0 0 auto;
+}
+
+.operator-callout {
+  background: #f3f7f4;
+  border-radius: 9px;
+  line-height: 1.5;
+  margin: 18px 0 0;
+  padding: 12px;
+}
+
+.operator-action-card {
+  display: grid;
+  gap: 13px;
+}
+
+.operator-action-card h2 {
+  margin-bottom: 2px;
+}
+
+.operator-action-card label {
+  color: #405047;
+  display: grid;
+  font-size: 0.72rem;
+  font-weight: 800;
+  gap: 6px;
+}
+
+.operator-action-card input,
+.operator-action-card select,
+.operator-action-card textarea {
+  background: #fbfcfb;
+  border: 1px solid #cbd9d0;
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  padding: 10px 11px;
+  width: 100%;
+}
+
+.operator-action-card textarea {
+  resize: vertical;
+}
+
+.operator-action-card button {
+  background: var(--fairway-dark);
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 850;
+  justify-self: start;
+  padding: 10px 14px;
+}
+
+.operator-timeline {
+  border-left: 1px solid #cddbd2;
+  display: grid;
+  gap: 22px;
+  margin-left: 12px;
+  padding-left: 26px;
+}
+
+.operator-timeline-event {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr);
+  position: relative;
+}
+
+.operator-timeline-icon {
+  align-items: center;
+  background: #eef4ef;
+  border: 1px solid #cddbd2;
+  border-radius: 999px;
+  color: var(--fairway);
+  display: flex;
+  height: 34px;
+  justify-content: center;
+  left: -44px;
+  position: absolute;
+  top: -3px;
+  width: 34px;
+}
+
+.operator-timeline-title {
+  align-items: baseline;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+}
+
+.operator-timeline-title strong {
+  font-size: 0.82rem;
+}
+
+.operator-timeline-title time {
+  color: #78857d;
+  font-size: 0.68rem;
+}
+
+.operator-timeline-event p {
+  color: #56655d;
+  font-size: 0.76rem;
+  line-height: 1.55;
+  margin: 6px 0;
+}
+
+.operator-timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.operator-timeline-meta span {
+  background: #edf2ee;
+  border-radius: 999px;
+  color: #526159;
+  font-size: 0.62rem;
+  font-weight: 750;
+  padding: 4px 8px;
+}
+
 .operator-section-heading {
   align-items: end;
   display: flex;
@@ -3362,6 +3589,21 @@ button {
     text-align: left;
   }
 
+  .operator-course-detail-grid,
+  .operator-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .operator-detail-list {
+    grid-template-columns: 1fr;
+  }
+
+  .operator-timeline-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .operator-course-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4014,8 +4256,7 @@ button {
 
 .dashboard-page {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(244, 239, 229, 0) 290px),
-    var(--paper);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(244, 239, 229, 0) 290px), var(--paper);
   max-width: none;
   min-height: 100svh;
 }
@@ -4165,9 +4406,7 @@ button {
 }
 
 .search-page {
-  background:
-    linear-gradient(180deg, #f7faf6 0, #ffffff 210px),
-    #ffffff;
+  background: linear-gradient(180deg, #f7faf6 0, #ffffff 210px), #ffffff;
   max-width: none;
 }
 
@@ -4343,7 +4582,9 @@ button {
 .figma-search-primary {
   align-items: stretch;
   display: grid;
-  grid-template-columns: minmax(200px, 1.45fr) 108px 142px minmax(220px, 1.25fr) 126px;
+  grid-template-columns:
+    minmax(200px, 1.45fr) 108px 142px minmax(220px, 1.25fr)
+    126px;
   min-height: 60px;
 }
 
@@ -4674,7 +4915,9 @@ button {
   overflow: hidden;
   padding: 0;
   scroll-margin-top: 84px;
-  transition: border-color 160ms ease, box-shadow 160ms ease;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .search-page .figma-course-list .course-row:hover {
@@ -4686,7 +4929,9 @@ button {
 
 .search-page .figma-course-list .course-row-selected {
   border: 2px solid #1f7a4d;
-  box-shadow: 0 2px 12px rgba(31, 122, 77, 0.1), 0 0 0 3px rgba(31, 122, 77, 0.06);
+  box-shadow:
+    0 2px 12px rgba(31, 122, 77, 0.1),
+    0 0 0 3px rgba(31, 122, 77, 0.06);
 }
 
 .search-page .figma-course-list .course-thumbnail,
@@ -5307,7 +5552,9 @@ button {
 
 @media (max-width: 1050px) {
   .figma-search-primary {
-    grid-template-columns: minmax(190px, 1.4fr) 102px 132px minmax(190px, 1.2fr) 116px;
+    grid-template-columns:
+      minmax(190px, 1.4fr) 102px 132px minmax(190px, 1.2fr)
+      116px;
   }
 
   .figma-results-layout {
@@ -5947,7 +6194,6 @@ button {
     margin-left: 0;
     width: 100%;
   }
-
 }
 
 .dashboard-check-button {

@@ -33,6 +33,7 @@ const now = new Date("2026-07-12T14:00:00.000Z");
 function incident(overrides: Record<string, unknown> = {}) {
   return {
     id: "incident-1",
+    reference: "csi_1234567890abcdef12345678",
     courseId: "course-1",
     firstAffectedSearchId: "search-1",
     cycle: 1,
@@ -107,7 +108,9 @@ describe("course support incidents", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
-      worker({ $queryRawUnsafe: vi.fn().mockResolvedValue([{ locked: true }]) })
+      worker({
+        $queryRawUnsafe: vi.fn().mockResolvedValue([{ locked: true }])
+      })
     );
     prismaMocks.teeSearch.count.mockResolvedValue(1);
     prismaMocks.teeSearch.aggregate.mockResolvedValue({
@@ -155,14 +158,20 @@ describe("course support incidents", () => {
       status: "AUTO_INVESTIGATING",
       ownerAlerted: false
     });
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          confirmedAt: null,
+          escalationDeadlineAt: null,
+          nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000)
+        })
+      })
+    );
     expect(prismaMocks.teeSearch.count).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
         date: { gte: new Date("2026-07-12T00:00:00.000Z") },
-        OR: [
-          { trafficClass: { notIn: ["AUTOMATION", "TEST"] } },
-          { syntheticMultiCycle: true }
-        ],
+        OR: [{ trafficClass: { notIn: ["AUTOMATION", "TEST"] } }, { syntheticMultiCycle: true }],
         preferences: { some: { courseId: "course-1" } }
       }
     });
@@ -749,7 +758,10 @@ describe("course support incidents", () => {
       })
     );
     prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({ engineeringOnly: false, nextAttemptAt: expectedNextAttemptAt })
+      incident({
+        engineeringOnly: false,
+        nextAttemptAt: expectedNextAttemptAt
+      })
     );
 
     await reportCourseSupportIssue({
@@ -787,7 +799,10 @@ describe("course support incidents", () => {
       })
     );
     prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({ engineeringOnly: false, nextAttemptAt: expectedNextAttemptAt })
+      incident({
+        engineeringOnly: false,
+        nextAttemptAt: expectedNextAttemptAt
+      })
     );
 
     await reportCourseSupportIssue({
@@ -824,7 +839,9 @@ describe("course support incidents", () => {
       .mockResolvedValueOnce(incident());
     prismaMocks.courseSupportIncident.update.mockResolvedValue(blocked);
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([blocked]);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1
+    });
 
     const result = await escalateCourseSupportIncident({
       incidentId: "incident-1",
@@ -850,9 +867,20 @@ describe("course support incidents", () => {
     expect(result).toEqual(blocked);
   });
 
-  it("does not escalate an engineering-only incident", async () => {
+  it("persists human review for an engineering-only incident without emailing", async () => {
     const engineeringIncident = incident({ engineeringOnly: true });
-    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(engineeringIncident);
+    const escalated = incident({
+      engineeringOnly: true,
+      status: "NEEDS_HUMAN",
+      latestMessage: "Provider access is unavailable.",
+      nextAction: "Persist the final direct-booking classification.",
+      escalatedAt: now
+    });
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(engineeringIncident)
+      .mockResolvedValueOnce(engineeringIncident);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(escalated);
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
 
     const result = await escalateCourseSupportIncident({
       incidentId: "incident-1",
@@ -861,8 +889,8 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(result).toEqual(engineeringIncident);
-    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(result).toEqual(escalated);
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
     expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
   });
 
@@ -870,24 +898,28 @@ describe("course support incidents", () => {
     const first = incident({ status: "NEEDS_HUMAN", escalatedAt: now });
     const second = incident({
       id: "incident-2",
+      reference: "csi_abcdef1234567890abcdef12",
       courseId: "course-2",
       courseNameSnapshot: "Dennis Pines",
       status: "NEEDS_HUMAN",
       escalatedAt: now
     });
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([first, second]);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 2 });
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 2
+    });
 
-    const result = await notifyCourseSupportIssueBatch(
-      ["incident-1", "incident-2"],
-      now
-    );
+    const result = await notifyCourseSupportIssueBatch(["incident-1", "incident-2"], now);
 
     expect(emailMocks.sendCourseSupportOperatorSummaryEmail).toHaveBeenCalledOnce();
     expect(emailMocks.sendCourseSupportOperatorSummaryEmail).toHaveBeenCalledWith({
       incidents: [
-        expect.objectContaining({ incidentId: "incident-1" }),
-        expect.objectContaining({ incidentId: "incident-2" })
+        expect.objectContaining({
+          incidentId: "csi_1234567890abcdef12345678"
+        }),
+        expect.objectContaining({
+          incidentId: "csi_abcdef1234567890abcdef12"
+        })
       ]
     });
     expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
@@ -903,16 +935,14 @@ describe("course support incidents", () => {
   it("alerts the operator immediately when real demand opens an automated investigation", async () => {
     const opened = incident({ status: "AUTO_INVESTIGATING" });
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([opened]);
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({ ownerNotifiedAt: now })
-    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(incident({ ownerNotifiedAt: now }));
 
     const result = await notifyCourseSupportIssueBatch(["incident-1"], now);
 
     expect(emailMocks.sendCourseSupportOperatorEmail).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "opened",
-        incidentId: "incident-1"
+        incidentId: "csi_1234567890abcdef12345678"
       })
     );
     expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
@@ -947,7 +977,9 @@ describe("course support incidents", () => {
       .mockResolvedValueOnce(existing)
       .mockResolvedValueOnce(existing)
       .mockResolvedValueOnce(resolved);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1
+    });
     prismaMocks.courseSupportIncident.update.mockResolvedValue(
       incident({ ...resolved, resolutionNotifiedAt: now })
     );
@@ -1018,7 +1050,9 @@ describe("course support incidents", () => {
       _min: { date: now }
     });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(owned);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1
+    });
 
     await expect(
       reportCourseSupportIssue({
@@ -1056,8 +1090,7 @@ describe("course support incidents", () => {
         lastSeenAt: now
       })
     });
-    const promotionData =
-      prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;
+    const promotionData = prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;
     expect(promotionData).not.toHaveProperty("nextAttemptAt");
     expect(promotionData).not.toHaveProperty("cycle");
     expect(promotionData).not.toHaveProperty("failureFingerprint");
@@ -1099,5 +1132,4 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
   });
-
 });

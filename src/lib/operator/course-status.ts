@@ -4,8 +4,7 @@ export const COURSE_STATUS_GUIDE = [
   {
     key: "SITE_FAILED",
     label: "Site or check failed",
-    meaning:
-      "The newest check could not read the expected public availability data.",
+    meaning: "The newest check could not read the expected public availability data.",
     action:
       "Open the exact booking page and evidence, confirm the course identity, then repair the link, metadata, or provider reader."
   },
@@ -14,8 +13,7 @@ export const COURSE_STATUS_GUIDE = [
     label: "Needs adapter",
     meaning:
       "The course has an online booking source, but Tee Time Spot does not yet have reusable support for its provider shape.",
-    action:
-      "Build or repair provider-family support and verify it against this exact course."
+    action: "Build or repair provider-family support and verify it against this exact course."
   },
   {
     key: "CAPTCHA_OR_QUEUE",
@@ -28,8 +26,7 @@ export const COURSE_STATUS_GUIDE = [
   {
     key: "ACCOUNT_REQUIRED",
     label: "Account required",
-    meaning:
-      "Availability is not currently readable from a public signed-out course surface.",
+    meaning: "Availability is not currently readable from a public signed-out course surface.",
     action:
       "Confirm the exact course flow. Keep it as a direct-booking limitation unless a public read-only source exists."
   },
@@ -54,24 +51,21 @@ export const COURSE_STATUS_GUIDE = [
     label: "Source missing",
     meaning:
       "The course record does not have a usable official booking source or provider identity.",
-    action:
-      "Find and save the exact official course and booking links, then run a fresh check."
+    action: "Find and save the exact official course and booking links, then run a fresh check."
   },
   {
     key: "TOOLING_BLOCKED",
     label: "Tooling blocked",
     meaning:
       "The monitor could not run because its runtime, browser, metadata, or parser contract failed.",
-    action:
-      "Repair the monitoring tool or course metadata, then verify with a fresh runtime."
+    action: "Repair the monitoring tool or course metadata, then verify with a fresh runtime."
   },
   {
     key: "REVIEW_REQUIRED",
     label: "Review required",
     meaning:
       "The stored course facts are incomplete, conflicting, or based on an old non-technical policy result.",
-    action:
-      "Inspect the current signed-out public surface and correct the durable course facts."
+    action: "Inspect the current signed-out public surface and correct the durable course facts."
   },
   {
     key: "STALE",
@@ -84,8 +78,7 @@ export const COURSE_STATUS_GUIDE = [
   {
     key: "NOT_CHECKED",
     label: "Not checked",
-    meaning:
-      "The course is configured or known, but there is no real-customer probe yet.",
+    meaning: "The course is configured or known, but there is no real-customer probe yet.",
     action:
       "Verify it when demand arrives, or run a bounded engineering check when the course is a current priority."
   },
@@ -115,15 +108,13 @@ export const COURSE_STATUS_GUIDE = [
   {
     key: "MONITORING_RESTORED",
     label: "Working · monitoring restored",
-    meaning:
-      "Fresh production evidence confirms that Tee Time Spot can read this course again.",
+    meaning: "Fresh production evidence confirms that Tee Time Spot can read this course again.",
     action: "No course repair is needed."
   },
   {
     key: "WORKING_MATCH",
     label: "Working · match found",
-    meaning:
-      "The newest check successfully read availability and found a matching tee time.",
+    meaning: "The newest check successfully read availability and found a matching tee time.",
     action: "No course repair is needed."
   },
   {
@@ -136,30 +127,12 @@ export const COURSE_STATUS_GUIDE = [
 ] as const;
 
 export type CourseStatusKey = (typeof COURSE_STATUS_GUIDE)[number]["key"];
-export type CoursePriorityGroup =
-  | "ACTION"
-  | "WATCH"
-  | "LIMITATION"
-  | "UNCHECKED"
-  | "WORKING";
+export type CoursePriorityGroup = "ACTION" | "WATCH" | "LIMITATION" | "UNCHECKED" | "WORKING";
 export type CourseInventoryView =
-  | "all"
-  | "attention"
-  | "fix-now"
-  | "investigate"
-  | "limitations"
-  | "unchecked"
-  | "working";
+  "all" | "attention" | "fix-now" | "investigate" | "limitations" | "unchecked" | "working";
 export type CourseDiagnosticKey =
-  | CourseStatusKey
-  | "TECHNICAL_ACCESS"
-  | "NO_PUBLIC_ONLINE"
-  | "PRIVATE_OR_INVALID";
-export type CourseStatusTone =
-  | "critical"
-  | "warning"
-  | "neutral"
-  | "positive";
+  CourseStatusKey | "TECHNICAL_ACCESS" | "NO_PUBLIC_ONLINE" | "PRIVATE_OR_INVALID";
+export type CourseStatusTone = "critical" | "warning" | "neutral" | "positive";
 
 export type CourseStatusInput = {
   id: string;
@@ -180,6 +153,14 @@ export type CourseStatusInput = {
   localReaderVersion: string | null;
   activeAlertCount: number;
   selectionCount: number;
+  monitoringStatus?: {
+    reference: string;
+    state: string;
+    lastSuccessfulAt: Date | null;
+    lastFailureAt: Date | null;
+    nextAutomaticAttemptAt: Date | null;
+    revalidationRequestedAt: Date | null;
+  } | null;
   incident: {
     id: string;
     status: string;
@@ -245,8 +226,7 @@ export function filterCourseInventory(
     const matchesView =
       view === "all" ||
       (view === "attention" &&
-        (course.priorityGroup === "ACTION" ||
-          course.priorityGroup === "WATCH")) ||
+        (course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH")) ||
       (view === "fix-now" && course.priorityGroup === "ACTION") ||
       (view === "investigate" && course.priorityGroup === "WATCH") ||
       (view === "limitations" && course.priorityGroup === "LIMITATION") ||
@@ -277,15 +257,9 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
   return {
     action: courses.filter((course) => course.priorityGroup === "ACTION").length,
     watch: courses.filter((course) => course.priorityGroup === "WATCH").length,
-    limitations: courses.filter(
-      (course) => course.priorityGroup === "LIMITATION"
-    ).length,
-    unchecked: courses.filter(
-      (course) => course.priorityGroup === "UNCHECKED"
-    ).length,
-    working: courses.filter(
-      (course) => course.priorityGroup === "WORKING"
-    ).length
+    limitations: courses.filter((course) => course.priorityGroup === "LIMITATION").length,
+    unchecked: courses.filter((course) => course.priorityGroup === "UNCHECKED").length,
+    working: courses.filter((course) => course.priorityGroup === "WORKING").length
   };
 }
 
@@ -299,13 +273,8 @@ export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
   ] as const;
 
   return groups.map((group) => {
-    const matchingCourses = courses.filter(
-      (course) => course.priorityGroup === group.key
-    );
-    const subcategoryCounts = new Map<
-      CourseDiagnosticKey,
-      { count: number; label: string }
-    >();
+    const matchingCourses = courses.filter((course) => course.priorityGroup === group.key);
+    const subcategoryCounts = new Map<CourseDiagnosticKey, { count: number; label: string }>();
     for (const course of matchingCourses) {
       const current = subcategoryCounts.get(course.diagnosticKey);
       subcategoryCounts.set(course.diagnosticKey, {
@@ -319,10 +288,7 @@ export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
       count: matchingCourses.length,
       subcategories: [...subcategoryCounts.entries()]
         .map(([key, value]) => ({ key, ...value }))
-        .sort(
-          (left, right) =>
-            right.count - left.count || left.label.localeCompare(right.label)
-        )
+        .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
     };
   });
 }
@@ -338,9 +304,7 @@ export function listCourseStates(courses: CourseInventoryItem[]) {
     .sort((left, right) => left.stateCode.localeCompare(right.stateCode));
 }
 
-export function parseCourseInventoryView(
-  value: string | undefined
-): CourseInventoryView {
+export function parseCourseInventoryView(value: string | undefined): CourseInventoryView {
   if (
     value === "attention" ||
     value === "fix-now" ||
@@ -374,28 +338,78 @@ export function parseCourseStateFilter(value: string | undefined) {
   return /^[A-Z]{2}$/u.test(normalized) ? normalized : "all";
 }
 
-function classifyCourseStatus(
-  course: CourseStatusInput,
-  now: Date
-): CourseInventoryItem {
+function classifyCourseStatus(course: CourseStatusInput, now: Date): CourseInventoryItem {
+  if (course.monitoringStatus?.state === "DEGRADED_RETRYING") {
+    return withStatus(course, "SITE_FAILED", {
+      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
+      priorityScore: course.activeAlertCount > 0 ? 0 : 1,
+      tone: course.activeAlertCount > 0 ? "critical" : "warning",
+      labelOverride: "Degraded · retrying",
+      meaningOverride:
+        "One public read failed. The previous working state is preserved while an independent retry runs.",
+      actionOverride:
+        "Wait for the fresh-session retry and independent verification before confirming an incident."
+    });
+  }
+  if (course.monitoringStatus?.state === "AUTO_INVESTIGATING") {
+    return withStatus(course, "NEEDS_ADAPTER", {
+      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
+      priorityScore: course.activeAlertCount > 0 ? 0 : 1,
+      tone: course.activeAlertCount > 0 ? "critical" : "warning",
+      labelOverride: "Auto investigating",
+      meaningOverride:
+        "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
+      actionOverride:
+        "Automation owns safe provider, browser, metadata, reader, adapter, and fresh-runtime verification until the deadline."
+    });
+  }
+  if (course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED") {
+    return withStatus(course, "REVIEW_REQUIRED", {
+      priorityGroup: "ACTION",
+      priorityScore: 0,
+      tone: "critical",
+      labelOverride: "Engineering verification needed",
+      meaningOverride:
+        "Safe automated recovery did not produce conclusive runnable proof or an engineer-approved final limitation.",
+      actionOverride:
+        "Open the redacted course history, inspect the official surface, and record an evidence-backed decision."
+    });
+  }
+  if (course.monitoringStatus?.state === "REVALIDATING_FINAL") {
+    return withStatus(course, "REVIEW_REQUIRED", {
+      priorityGroup: "WATCH",
+      priorityScore: 1,
+      tone: "warning",
+      labelOverride: "Revalidating prior final",
+      meaningOverride:
+        "New real demand triggered one safe revalidation while the prior engineer decision remains visible.",
+      actionOverride:
+        "Allow the immediate revalidation to restore monitoring, reconfirm the same limitation, or reopen changed evidence."
+    });
+  }
+  if (course.monitoringStatus?.state === "FINAL_TECHNICAL") {
+    const statusKey =
+      course.bookingAccessMode === "CAPTCHA_OR_QUEUE" ? "CAPTCHA_OR_QUEUE" : "ACCOUNT_REQUIRED";
+    return withStatus(course, statusKey, {
+      priorityGroup: "LIMITATION",
+      priorityScore: 3,
+      tone: "neutral",
+      labelOverride: "Engineer-verified limitation",
+      meaningOverride:
+        "An engineer reviewed current official evidence and approved this precise technical limitation.",
+      actionOverride:
+        "No timer-based polling is scheduled. New real demand will trigger one safe revalidation."
+    });
+  }
+
   const openIncident =
-    course.incident && course.incident.status !== "RESOLVED"
-      ? course.incident
-      : null;
+    course.incident && course.incident.status !== "RESOLVED" ? course.incident : null;
   if (openIncident) {
-    const statusKey = statusKeyForFailure(
-      openIncident.kind,
-      course.bookingAccessMode
-    );
+    const statusKey = statusKeyForFailure(openIncident.kind, course.bookingAccessMode);
     return withStatus(course, statusKey, {
       priorityGroup:
-        openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0
-          ? "ACTION"
-          : "WATCH",
-      priorityScore:
-        openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0
-          ? 0
-          : 1,
+        openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0 ? "ACTION" : "WATCH",
+      priorityScore: openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0 ? 0 : 1,
       tone:
         openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0
           ? "critical"
@@ -407,15 +421,13 @@ function classifyCourseStatus(
   if (course.coverageCategory === "MONITORED") {
     const latestSuccessfulProbe =
       course.latestProbe &&
-      (course.latestProbe.outcome === "MATCH_FOUND" ||
-        course.latestProbe.outcome === "NO_MATCH")
+      (course.latestProbe.outcome === "MATCH_FOUND" || course.latestProbe.outcome === "NO_MATCH")
         ? course.latestProbe
         : null;
     if (
       latestSuccessfulProbe &&
       course.activeAlertCount > 0 &&
-      now.getTime() - latestSuccessfulProbe.observedAt.getTime() >
-        STALE_WITH_DEMAND_MS
+      now.getTime() - latestSuccessfulProbe.observedAt.getTime() > STALE_WITH_DEMAND_MS
     ) {
       return withStatus(course, "STALE", {
         priorityGroup: "ACTION",
@@ -442,9 +454,7 @@ function classifyCourseStatus(
     if (course.localReaderSupported) {
       return withStatus(
         course,
-        course.localReaderVerifiedAt
-          ? "LOCAL_READER_VERIFIED"
-          : "LOCAL_READER_READY",
+        course.localReaderVerifiedAt ? "LOCAL_READER_VERIFIED" : "LOCAL_READER_READY",
         course.localReaderVerifiedAt
           ? {
               priorityGroup: "WORKING",
@@ -452,8 +462,7 @@ function classifyCourseStatus(
               tone: "positive"
             }
           : {
-              priorityGroup:
-                course.activeAlertCount > 0 ? "ACTION" : "UNCHECKED",
+              priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "UNCHECKED",
               priorityScore: course.activeAlertCount > 0 ? 1 : 4,
               tone: course.activeAlertCount > 0 ? "critical" : "neutral"
             }
@@ -467,19 +476,13 @@ function classifyCourseStatus(
       });
     }
     const statusKey =
-      course.bookingAccessMode === "CAPTCHA_OR_QUEUE"
-        ? "CAPTCHA_OR_QUEUE"
-        : "ACCOUNT_REQUIRED";
+      course.bookingAccessMode === "CAPTCHA_OR_QUEUE" ? "CAPTCHA_OR_QUEUE" : "ACCOUNT_REQUIRED";
     return withStatus(course, statusKey, {
       priorityGroup: "LIMITATION",
       priorityScore: 3,
       tone: "neutral",
-      diagnosticKeyOverride:
-        statusKey === "ACCOUNT_REQUIRED" ? "TECHNICAL_ACCESS" : undefined,
-      labelOverride:
-        statusKey === "ACCOUNT_REQUIRED"
-          ? "Technical access limitation"
-          : undefined
+      diagnosticKeyOverride: statusKey === "ACCOUNT_REQUIRED" ? "TECHNICAL_ACCESS" : undefined,
+      labelOverride: statusKey === "ACCOUNT_REQUIRED" ? "Technical access limitation" : undefined
     });
   }
 
@@ -536,14 +539,10 @@ function classifyCourseStatus(
   }
 
   if (course.latestProbe) {
-    if (
-      course.latestProbe.outcome === "MATCH_FOUND" ||
-      course.latestProbe.outcome === "NO_MATCH"
-    ) {
+    if (course.latestProbe.outcome === "MATCH_FOUND" || course.latestProbe.outcome === "NO_MATCH") {
       if (
         course.activeAlertCount > 0 &&
-        now.getTime() - course.latestProbe.observedAt.getTime() >
-          STALE_WITH_DEMAND_MS
+        now.getTime() - course.latestProbe.observedAt.getTime() > STALE_WITH_DEMAND_MS
       ) {
         return withStatus(course, "STALE", {
           priorityGroup: "ACTION",
@@ -553,9 +552,7 @@ function classifyCourseStatus(
       }
       return withStatus(
         course,
-        course.latestProbe.outcome === "MATCH_FOUND"
-          ? "WORKING_MATCH"
-          : "WORKING_NO_MATCH",
+        course.latestProbe.outcome === "MATCH_FOUND" ? "WORKING_MATCH" : "WORKING_NO_MATCH",
         {
           priorityGroup: "WORKING",
           priorityScore: 5,
@@ -564,13 +561,9 @@ function classifyCourseStatus(
       );
     }
 
-    const statusKey = statusKeyForFailure(
-      course.latestProbe.outcome,
-      course.bookingAccessMode
-    );
+    const statusKey = statusKeyForFailure(course.latestProbe.outcome, course.bookingAccessMode);
     const isKnownLimitation =
-      (statusKey === "CAPTCHA_OR_QUEUE" ||
-        statusKey === "ACCOUNT_REQUIRED") &&
+      (statusKey === "CAPTCHA_OR_QUEUE" || statusKey === "ACCOUNT_REQUIRED") &&
       course.activeAlertCount === 0;
     return withStatus(course, statusKey, {
       priorityGroup: isKnownLimitation
@@ -578,16 +571,8 @@ function classifyCourseStatus(
         : course.activeAlertCount > 0
           ? "ACTION"
           : "WATCH",
-      priorityScore: isKnownLimitation
-        ? 3
-        : course.activeAlertCount > 0
-          ? 1
-          : 2,
-      tone: isKnownLimitation
-        ? "neutral"
-        : course.activeAlertCount > 0
-          ? "critical"
-          : "warning"
+      priorityScore: isKnownLimitation ? 3 : course.activeAlertCount > 0 ? 1 : 2,
+      tone: isKnownLimitation ? "neutral" : course.activeAlertCount > 0 ? "critical" : "warning"
     });
   }
 
@@ -668,10 +653,7 @@ function classifyCourseStatus(
     });
   }
 
-  if (
-    course.automationEligibility === "ALLOWED" ||
-    course.automationEligibility === "UNKNOWN"
-  ) {
+  if (course.automationEligibility === "ALLOWED" || course.automationEligibility === "UNKNOWN") {
     return withStatus(course, "NOT_CHECKED", {
       priorityGroup: "UNCHECKED",
       priorityScore: 4,
@@ -686,17 +668,11 @@ function classifyCourseStatus(
   });
 }
 
-function statusKeyForFailure(
-  value: string,
-  bookingAccessMode: string
-): CourseStatusKey {
+function statusKeyForFailure(value: string, bookingAccessMode: string): CourseStatusKey {
   if (value === "NEEDS_ADAPTER") return "NEEDS_ADAPTER";
   if (value === "FETCH_FAILED") return "SITE_FAILED";
   if (value === "BLOCKED_TOOLING") return "TOOLING_BLOCKED";
-  if (
-    value === "BLOCKED_AUTH" &&
-    bookingAccessMode === "CAPTCHA_OR_QUEUE"
-  ) {
+  if (value === "BLOCKED_AUTH" && bookingAccessMode === "CAPTCHA_OR_QUEUE") {
     return "CAPTCHA_OR_QUEUE";
   }
   if (value === "BLOCKED_AUTH") return "ACCOUNT_REQUIRED";

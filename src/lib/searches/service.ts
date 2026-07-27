@@ -1,5 +1,6 @@
 import { Prisma, type WebsiteTrafficClass } from "@prisma/client";
 
+import { requestTechnicalFinalRevalidationForDemand } from "@/lib/automation/course-monitoring";
 import {
   getCourseLayoutCompatibility,
   getCourseLayoutLabel,
@@ -27,6 +28,7 @@ import {
 } from "@/lib/validation/search";
 import { parseLocalDate } from "@/lib/validation/search";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
+import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -64,11 +66,6 @@ export async function createTeeSearchForUser(
     );
   }
   assertCourseLayoutsCompatible(resolvedPreferences, input.requestedLayoutHoles);
-  if (resolvedPreferences.every((preference) => preference.automationEligibility === "BLOCKED")) {
-    throw new Error(
-      "None of the selected courses offers a supported public online tee-time page. Choose at least one course Tee Time Spot can monitor."
-    );
-  }
   const coursePreferences = resolvedPreferences.map((preference) => preference.create);
 
   const teeSearch = await prisma.$transaction(async (transaction) => {
@@ -105,13 +102,26 @@ export async function createTeeSearchForUser(
     });
   });
 
+  if (!isSyntheticWebsiteTrafficClass(trafficClass)) {
+    try {
+      await requestTechnicalFinalRevalidationForDemand({
+        courseIds: resolvedPreferences.flatMap((preference) =>
+          "id" in preference.course ? [preference.course.id] : []
+        )
+      });
+    } catch {
+      // The saved alert remains authoritative. The five-minute invariant
+      // watchdog independently requests any missed final-state revalidation.
+      console.error("[course-monitoring:revalidation-request-failed]", {
+        selectedCourseCount: resolvedPreferences.length
+      });
+    }
+  }
+
   return teeSearch;
 }
 
-async function buildCoursePreferenceCreate(
-  course: SelectedCourseInput,
-  observedAt: Date
-) {
+async function buildCoursePreferenceCreate(course: SelectedCourseInput, observedAt: Date) {
   const reusableCourse = await findReusableCourse(course);
 
   if (reusableCourse) {
@@ -150,8 +160,7 @@ async function buildCoursePreferenceCreate(
     ratingUpdate: null,
     course: {
       name: course.name,
-      isPublic:
-        course.publicAccessStatus === "UNVERIFIED" ? null : true,
+      isPublic: course.publicAccessStatus === "UNVERIFIED" ? null : true,
       layoutHoleCounts: [] as number[],
       layoutHolesVerifiedAt: null
     },
@@ -178,12 +187,10 @@ async function buildCoursePreferenceCreate(
             longitude: course.longitude,
             timeZone,
             rating: course.rating,
-            ratingObservedAt:
-              typeof course.rating === "number" ? observedAt : undefined,
+            ratingObservedAt: typeof course.rating === "number" ? observedAt : undefined,
             phone: course.phone,
             website: course.website,
-            isPublic:
-              course.publicAccessStatus === "UNVERIFIED" ? null : true,
+            isPublic: course.publicAccessStatus === "UNVERIFIED" ? null : true,
             isManual: !course.googlePlaceId
           }
         }
@@ -195,23 +202,23 @@ async function buildCoursePreferenceCreate(
 async function findReusableCourse(course: SelectedCourseInput) {
   const existingById = course.courseId
     ? await prisma.course.findUnique({
-      where: { id: course.courseId },
-      select: {
-        id: true,
-        name: true,
-        googlePlaceId: true,
-        address: true,
-        latitude: true,
-        longitude: true,
-        website: true,
-        detectedBookingUrl: true,
-        phone: true,
-        isPublic: true,
-        automationEligibility: true,
-        layoutHoleCounts: true,
-        layoutHolesVerifiedAt: true
-      }
-    })
+        where: { id: course.courseId },
+        select: {
+          id: true,
+          name: true,
+          googlePlaceId: true,
+          address: true,
+          latitude: true,
+          longitude: true,
+          website: true,
+          detectedBookingUrl: true,
+          phone: true,
+          isPublic: true,
+          automationEligibility: true,
+          layoutHoleCounts: true,
+          layoutHolesVerifiedAt: true
+        }
+      })
     : null;
   if (course.courseId && !existingById) {
     throw new Error(
@@ -229,9 +236,9 @@ async function findReusableCourse(course: SelectedCourseInput) {
           address: true,
           latitude: true,
           longitude: true,
-        website: true,
-        detectedBookingUrl: true,
-        phone: true,
+          website: true,
+          detectedBookingUrl: true,
+          phone: true,
           isPublic: true,
           automationEligibility: true,
           layoutHoleCounts: true,
@@ -390,10 +397,8 @@ function isConfirmedCourseAlias(
 ) {
   return (
     haveCompatibleCourseNames(input.name, canonical.name) &&
-    Math.abs(input.latitude - canonical.latitude) <=
-      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
-    Math.abs(input.longitude - canonical.longitude) <=
-      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
+    Math.abs(input.latitude - canonical.latitude) <= SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+    Math.abs(input.longitude - canonical.longitude) <= SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
   );
 }
 
@@ -417,11 +422,10 @@ function isConfirmedPersistedCourseAlias(
 ) {
   return Boolean(
     haveCompatibleCourseNames(canonical.name, exact.name) &&
-      Math.abs(canonical.latitude - exact.latitude) <=
-        SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
-      Math.abs(canonical.longitude - exact.longitude) <=
-        SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
-      haveStrongCourseIdentityLink(canonical, exact)
+    Math.abs(canonical.latitude - exact.latitude) <= SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+    Math.abs(canonical.longitude - exact.longitude) <=
+      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+    haveStrongCourseIdentityLink(canonical, exact)
   );
 }
 

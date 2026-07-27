@@ -36,10 +36,7 @@ import {
   type CourseDiagnosticKey,
   type CourseInventoryItem
 } from "@/lib/operator/course-status";
-import {
-  loadOperatorOverview,
-  type OperatorOverview
-} from "@/lib/operator/overview";
+import { loadOperatorOverview, type OperatorOverview } from "@/lib/operator/overview";
 import { parseOperatorRange } from "@/lib/operator/time";
 
 export const dynamic = "force-dynamic";
@@ -65,9 +62,7 @@ type OperatorPageProps = {
   }>;
 };
 
-export default async function OperatorPage({
-  searchParams
-}: OperatorPageProps) {
+export default async function OperatorPage({ searchParams }: OperatorPageProps) {
   if (!hasClerkConfig()) {
     notFound();
   }
@@ -105,10 +100,7 @@ function OperatorDashboard({
   };
   overview: OperatorOverview;
 }) {
-  const maximumPageViews = Math.max(
-    ...overview.dailyActivity.map((day) => day.pageViews),
-    1
-  );
+  const maximumPageViews = Math.max(...overview.dailyActivity.map((day) => day.pageViews), 1);
   const filteredCourses = filterCourseInventory(overview.courseFleet.courses, {
     diagnostic: filters.diagnostic,
     query: filters.query,
@@ -126,15 +118,12 @@ function OperatorDashboard({
           </p>
           <h1>Site overview</h1>
           <p className="operator-header-copy">
-            Demand, customer activity, delivery health, and course coverage in
-            one daily view.
+            Demand, customer activity, delivery health, and course coverage in one daily view.
           </p>
         </div>
         <div className="operator-header-tools">
           <RangeTabs days={overview.range.days} />
-          <span className="operator-freshness">
-            Updated {formatDateTime(overview.generatedAt)}
-          </span>
+          <span className="operator-freshness">Updated {formatDateTime(overview.generatedAt)}</span>
         </div>
       </header>
 
@@ -157,10 +146,7 @@ function OperatorDashboard({
         <CourseWorkQueue courses={overview.courseFleet.courses} />
       </section>
 
-      <section
-        aria-labelledby="all-courses-heading"
-        className="operator-section"
-      >
+      <section aria-labelledby="all-courses-heading" className="operator-section">
         <SectionHeading
           eyebrow="Complete course inventory"
           id="all-courses-heading"
@@ -177,10 +163,7 @@ function OperatorDashboard({
         <CourseInventoryTable courses={filteredCourses} />
       </section>
 
-      <section
-        aria-labelledby="course-status-guide-heading"
-        className="operator-section"
-      >
+      <section aria-labelledby="course-status-guide-heading" className="operator-section">
         <SectionHeading
           eyebrow="Status reference"
           id="course-status-guide-heading"
@@ -197,11 +180,7 @@ function OperatorDashboard({
           title="What changed today"
         />
         <div className="operator-metric-grid">
-          <Metric
-            icon={<UserPlus size={18} />}
-            label="New users"
-            value={overview.today.newUsers}
-          />
+          <Metric icon={<UserPlus size={18} />} label="New users" value={overview.today.newUsers} />
           <Metric
             icon={<BellRing size={18} />}
             label="Alerts created"
@@ -212,11 +191,7 @@ function OperatorDashboard({
             label="Active alerts"
             value={overview.today.activeAlerts}
           />
-          <Metric
-            icon={<Eye size={18} />}
-            label="Page views"
-            value={overview.today.pageViews}
-          />
+          <Metric icon={<Eye size={18} />} label="Page views" value={overview.today.pageViews} />
           <Metric
             icon={<Flag size={18} />}
             label="Matches found"
@@ -242,10 +217,7 @@ function OperatorDashboard({
         </div>
       </section>
 
-      <section
-        aria-labelledby="attention-heading"
-        className="operator-section operator-attention"
-      >
+      <section aria-labelledby="attention-heading" className="operator-section operator-attention">
         <SectionHeading
           eyebrow="Priority queue"
           id="attention-heading"
@@ -265,10 +237,7 @@ function OperatorDashboard({
             count={overview.attention.problemDeliveries.length}
             label="delivery problems"
           />
-          <AttentionCount
-            count={overview.attention.brokenFeedback.length}
-            label="broken reports"
-          />
+          <AttentionCount count={overview.attention.brokenFeedback.length} label="broken reports" />
         </div>
       </section>
 
@@ -302,39 +271,19 @@ function OperatorDashboard({
           </div>
           <dl className="operator-funnel">
             <FunnelStep label="Page views" value={overview.funnel.pageViews} />
-            <FunnelStep
-              label="Search starts"
-              value={overview.funnel.searchStarts}
-            />
-            <FunnelStep
-              label="Discoveries completed"
-              value={overview.funnel.discoveries}
-            />
-            <FunnelStep
-              label="Course selections"
-              value={overview.funnel.selections}
-            />
-            <FunnelStep
-              label="Sign-in clicks"
-              value={overview.funnel.signInClicks}
-            />
-            <FunnelStep
-              label="Submit attempts"
-              value={overview.funnel.submissions}
-            />
-            <FunnelStep
-              label="Persisted alerts"
-              value={overview.funnel.savedAlerts}
-              emphasized
-            />
+            <FunnelStep label="Search starts" value={overview.funnel.searchStarts} />
+            <FunnelStep label="Discoveries completed" value={overview.funnel.discoveries} />
+            <FunnelStep label="Course selections" value={overview.funnel.selections} />
+            <FunnelStep label="Sign-in clicks" value={overview.funnel.signInClicks} />
+            <FunnelStep label="Submit attempts" value={overview.funnel.submissions} />
+            <FunnelStep label="Persisted alerts" value={overview.funnel.savedAlerts} emphasized />
           </dl>
         </div>
         {overview.funnel.submissionFailures > 0 ? (
           <p className="operator-inline-warning">
             <AlertTriangle size={14} />
             {overview.funnel.submissionFailures} failed submission{" "}
-            {overview.funnel.submissionFailures === 1 ? "event" : "events"} in
-            this range.
+            {overview.funnel.submissionFailures === 1 ? "event" : "events"} in this range.
           </p>
         ) : null}
       </section>
@@ -446,10 +395,10 @@ function OperatorDashboard({
                   </dl>
                 </div>
                 <div className="operator-incident-action">
-                  <IncidentQueueState
-                    generatedAt={overview.generatedAt}
-                    incident={incident}
-                  />
+                  <IncidentQueueState generatedAt={overview.generatedAt} incident={incident} />
+                  <Link href={`/operator/courses/${incident.reference}` as Route}>
+                    View course history
+                  </Link>
                 </div>
               </article>
             ))}
@@ -469,9 +418,7 @@ function OperatorDashboard({
           <HealthItem
             label="Probe success"
             value={
-              overview.health.successRate === null
-                ? "No checks"
-                : `${overview.health.successRate}%`
+              overview.health.successRate === null ? "No checks" : `${overview.health.successRate}%`
             }
             detail={`${overview.health.successfulProbes} successful of ${overview.health.totalProbes}`}
           />
@@ -523,9 +470,7 @@ function OperatorDashboard({
             label="Recent automation runs"
             value={overview.operations.recentRuns.length}
             detail={`${overview.operations.recentRuns.filter((run) => run.status === "FAILED").length} failed in the latest sample`}
-            warning={overview.operations.recentRuns.some(
-              (run) => run.status === "FAILED"
-            )}
+            warning={overview.operations.recentRuns.some((run) => run.status === "FAILED")}
           />
           <HealthItem
             label="Active public alerts"
@@ -623,9 +568,7 @@ function CourseDiagnosticBreakdown({
   state: ReturnType<typeof parseCourseStateFilter>;
 }) {
   const scopedCourses =
-    state === "all"
-      ? courses
-      : courses.filter((course) => course.stateCode === state);
+    state === "all" ? courses : courses.filter((course) => course.stateCode === state);
   const groups = summarizeCourseDiagnostics(scopedCourses).filter(
     (group) => group.key !== "WORKING"
   );
@@ -654,10 +597,7 @@ function CourseDiagnosticBreakdown({
         {groups.map((group) => {
           const view = viewForPriorityGroup(group.key);
           return (
-            <article
-              className={`is-${group.key.toLowerCase()}`}
-              key={group.key}
-            >
+            <article className={`is-${group.key.toLowerCase()}`} key={group.key}>
               <div className="operator-diagnostic-card-header">
                 <Link
                   href={buildCourseFilterHref({
@@ -699,17 +639,9 @@ function CourseDiagnosticBreakdown({
   );
 }
 
-function CourseWorkQueue({
-  courses
-}: {
-  courses: OperatorOverview["courseFleet"]["courses"];
-}) {
+function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]["courses"] }) {
   const work = courses
-    .filter(
-      (course) =>
-        course.priorityGroup !== "WORKING" &&
-        course.priorityGroup !== "UNCHECKED"
-    )
+    .filter((course) => course.priorityGroup !== "WORKING" && course.priorityGroup !== "UNCHECKED")
     .slice(0, 15);
 
   if (work.length === 0) {
@@ -720,10 +652,7 @@ function CourseWorkQueue({
     <div className="operator-course-work-list">
       {work.map((course) => {
         return (
-          <article
-            className={`operator-course-work-row is-${course.tone}`}
-            key={course.id}
-          >
+          <article className={`operator-course-work-row is-${course.tone}`} key={course.id}>
             <div className="operator-course-work-priority">
               <span>{formatPriority(course.priorityGroup)}</span>
               {course.activeAlertCount > 0 ? (
@@ -802,27 +731,20 @@ function CourseFilters({
         <select defaultValue={filters.view} name="courseView">
           <option value="all">All courses</option>
           <option value="fix-now">
-            Fix now (
-            {diagnostics.find((group) => group.key === "ACTION")?.count ?? 0})
+            Fix now ({diagnostics.find((group) => group.key === "ACTION")?.count ?? 0})
           </option>
           <option value="investigate">
-            Investigate (
-            {diagnostics.find((group) => group.key === "WATCH")?.count ?? 0})
+            Investigate ({diagnostics.find((group) => group.key === "WATCH")?.count ?? 0})
           </option>
           <option value="limitations">
-            Known limitations (
-            {diagnostics.find((group) => group.key === "LIMITATION")?.count ??
-              0}
+            Known limitations ({diagnostics.find((group) => group.key === "LIMITATION")?.count ?? 0}
             )
           </option>
           <option value="unchecked">
-            Not checked (
-            {diagnostics.find((group) => group.key === "UNCHECKED")?.count ?? 0}
-            )
+            Not checked ({diagnostics.find((group) => group.key === "UNCHECKED")?.count ?? 0})
           </option>
           <option value="working">
-            Working (
-            {diagnostics.find((group) => group.key === "WORKING")?.count ?? 0})
+            Working ({diagnostics.find((group) => group.key === "WORKING")?.count ?? 0})
           </option>
         </select>
       </label>
@@ -901,11 +823,7 @@ function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
                   <>
                     <span>{course.address}</span>
                     {course.city || course.stateCode ? (
-                      <small>
-                        {[course.city, course.stateCode]
-                          .filter(Boolean)
-                          .join(", ")}
-                      </small>
+                      <small>{[course.city, course.stateCode].filter(Boolean).join(", ")}</small>
                     ) : null}
                   </>
                 ) : (
@@ -919,9 +837,7 @@ function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
                 </small>
               </td>
               <td data-label="Meaning and next action">
-                <p className="operator-course-meaning">
-                  {course.statusMeaning}
-                </p>
+                <p className="operator-course-meaning">{course.statusMeaning}</p>
                 {course.priorityGroup !== "WORKING" ? (
                   <p className="operator-course-table-action">
                     <strong>Next:</strong> {course.recommendedAction}
@@ -1012,7 +928,7 @@ function CourseDeepLinks({
       : null
   ].filter((link): link is { href: string; label: string } => Boolean(link));
 
-  if (!course.profileSlug && externalLinks.length === 0) {
+  if (!course.monitoringStatus?.reference && !course.profileSlug && externalLinks.length === 0) {
     return <span className="operator-no-links">No saved links</span>;
   }
 
@@ -1021,6 +937,12 @@ function CourseDeepLinks({
       className={`operator-course-links ${compact ? "is-compact" : ""}`}
       aria-label={`${course.name} links`}
     >
+      {course.monitoringStatus?.reference ? (
+        <Link href={`/operator/courses/${course.monitoringStatus.reference}` as Route}>
+          <Activity size={13} />
+          {compact ? "History" : "Monitoring history"}
+        </Link>
+      ) : null}
       {course.profileSlug ? (
         <Link href={`/courses/${course.profileSlug}` as Route}>
           <Link2 size={13} />
@@ -1170,11 +1092,7 @@ function FunnelStep({
   );
 }
 
-function MonitoringStatus({
-  course
-}: {
-  course: OperatorOverview["topCourses"][number];
-}) {
+function MonitoringStatus({ course }: { course: OperatorOverview["topCourses"][number] }) {
   if (course.incident && course.incident.status !== "RESOLVED") {
     return (
       <span className="operator-monitoring-status is-warning">
@@ -1185,14 +1103,9 @@ function MonitoringStatus({
   }
   if (course.latestProbe) {
     const successful =
-      course.latestProbe.outcome === "MATCH_FOUND" ||
-      course.latestProbe.outcome === "NO_MATCH";
+      course.latestProbe.outcome === "MATCH_FOUND" || course.latestProbe.outcome === "NO_MATCH";
     return (
-      <span
-        className={`operator-monitoring-status ${
-          successful ? "is-positive" : "is-warning"
-        }`}
-      >
+      <span className={`operator-monitoring-status ${successful ? "is-positive" : "is-warning"}`}>
         {successful ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
         {formatEnum(course.latestProbe.outcome)}
       </span>
@@ -1224,10 +1137,7 @@ function IncidentQueueState({
       </span>
     );
   }
-  if (
-    !incident.nextAttemptAt ||
-    incident.nextAttemptAt.getTime() <= generatedAt.getTime()
-  ) {
+  if (!incident.nextAttemptAt || incident.nextAttemptAt.getTime() <= generatedAt.getTime()) {
     return (
       <span className="operator-queue-label">
         <Clock3 size={14} />
@@ -1314,10 +1224,7 @@ function formatShortDay(dayKey: string) {
 }
 
 function formatRelativeAge(value: Date) {
-  const hours = Math.max(
-    0,
-    Math.floor((Date.now() - value.getTime()) / (60 * 60 * 1000))
-  );
+  const hours = Math.max(0, Math.floor((Date.now() - value.getTime()) / (60 * 60 * 1000)));
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }

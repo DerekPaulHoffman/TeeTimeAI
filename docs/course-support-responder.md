@@ -1,6 +1,6 @@
 # Course-Support Responder
 
-The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER` and `FETCH_FAILED` outcomes. It checks for due work every 10 minutes, groups reusable work, and either restores public read-only monitoring or records a final evidence-backed technical-access/contact/identity/source disposition. It is separate from per-search scheduling and from the broad product-improvement loop.
+The course-support responder is the dedicated engineering path for persistent `NEEDS_ADAPTER`, `FETCH_FAILED`, and reader-candidate outcomes. It checks for due work every 10 minutes, groups reusable work, and either restores public read-only monitoring, records an authoritative manual/identity disposition, or asks an operator to approve a precise technical limitation. It is separate from per-search scheduling and from the broad product-improvement loop.
 
 ## Ownership And Cadence
 
@@ -9,7 +9,7 @@ The course-support responder is the dedicated engineering path for persistent `N
 - The responder runs from the already-approved dedicated checkout `C:\dev\TeeTimeAi-CourseSupportResponder`; the bounded product-improvement loop remains in `C:\dev\TeeTimeAI-automation`. They must never share one mutable checkout. The database writer lease still serializes release ownership across both checkouts.
 - A due batch contains one provider family and one failure fingerprint. The default claim is 5 courses; the command clamps all requests to 1 through 20.
 - Batches prioritize near-date active real-demand fetch failures, then other active real demand, then historical non-engineering incidents whose searches have ended, then engineering-only synthetic coverage. Aged engineering-only evidence receives bounded fairness when no critical real demand is waiting.
-- Every 10-minute run may claim one due bounded batch, including engineering-only work. Active real demand remains higher priority, while the durable batch owner and responder lease prevent duplicate claims. This lets the responder continuously drain engineering incidents without allowing parallel responders to mutate the same batch.
+- Each 10-minute inspection may describe up to three read-only provider/fingerprint groups with no more than five courses per group. Read-only provider work retains the global two-request limit and one request per provider family. One serialized writer batch owns code, migration, commit, and deployment changes, ordered by active demand and the nearest escalation deadline.
 - The broad product-improvement loop uses an independent writer lane and may proceed while a responder batch is active or requires recovery. Responder state remains informational there, and course-support incidents are never portfolio candidates for that loop.
 
 `CourseSupportIncident` is the durable per-course problem. `CourseSupportBatch` is the short-lived provider-family/fingerprint engineering claim. `CourseSupportBatchIncident` preserves the per-course pre-remediation evidence and final batch result.
@@ -26,7 +26,20 @@ Provider identity and runnable support come from `src/lib/automation/provider-ca
 
 Customer-facing readiness is derived independently from internal engineering state. The canonical dispositions are `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, `BOOKING_NOT_OPEN`, `DIRECT_SITE_ONLY`, `PHONE_OR_WALK_IN`, `ACCOUNT_REQUIRED`, `POLICY_BLOCKED`, `CAPTCHA_OR_QUEUE`, `PRIVATE_OR_INVALID`, `SOURCE_UNVERIFIED`, `RETRYING`, and `ENGINEERING`. Only `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, and `BOOKING_NOT_OPEN` count as effective monitored coverage.
 
-A responder may resolve without a runnable adapter only when a current, sufficiently confident `CourseAutomationDiscovery` record cites an official HTTP(S) source and agrees with the persisted course state: booking is `PHONE_ONLY`, `CONTACT_COURSE`, or `WALK_IN`; or current technical access is blocked for `NO_ONLINE_BOOKING`, `ACCOUNT_REQUIRED`, or `CAPTCHA_OR_QUEUE`. `AUTOMATION_PROHIBITED` and policy text are legacy evidence, never terminal monitoring dispositions. A stale course snapshot, unsupported URL guess, or internally contradictory discovery is never a final disposition. Private/non-course identity still requires the separate exact-place review path; when that review is applied during an active responder claim, verification accepts it only if the active exact review is newer than the latest incident evidence and the persisted course is reconciled to non-public, blocked state. Terminal discovery or exact-review evidence must belong to the current incident cycle and agree with the reconciled course state; later repeats of the same unresolved observation do not invalidate that durable classification. Restored runnable monitoring remains stricter and must supersede the newest failure with fresh exact-runtime workflow proof.
+A responder may close a course automatically without runnable monitoring only for authoritative phone/contact/walk-in booking evidence or a verified invalid/private identity. Account-required, CAPTCHA/queue, source-unverified, reader reload/install, official-link verification failure, and other technical limitations require an audited engineer decision. `AUTOMATION_PROHIBITED` and policy text are legacy evidence, never terminal monitoring dispositions. A stale course snapshot, unsupported URL guess, or internally contradictory discovery is never final. Restored runnable monitoring remains stricter and must supersede the newest failure with fresh exact-runtime workflow proof.
+
+## Durable Monitoring Lifecycle
+
+`CourseMonitoringStatus` is the one-row current state for each course. `CourseMonitoringEvent` is its append-only, redacted operator history. Search-scoped probes remain on `CourseProbe`; source evidence remains on `CourseAutomationDiscovery`.
+
+- `HEALTHY`: the latest public signed-out read returned `MATCH_FOUND` or `NO_MATCH`.
+- `DEGRADED_RETRYING`: the first failure is recorded without erasing the last working time. The search retries within two minutes.
+- `AUTO_INVESTIGATING`: two independent read paths failed within 15 minutes, or the same path failed three times. Active real demand gets a six-hour automation deadline; inactive engineering work gets 24 hours.
+- `ENGINEERING_VERIFICATION_NEEDED`: the bounded playbook could not prove recovery or a safe automatic final. Active demand retries every six hours with daily operator reminders. Inactive work retries and reminds weekly.
+- `FINAL_MANUAL` and `FINAL_IDENTITY`: strong official manual-booking or identity evidence may close automatically.
+- `FINAL_TECHNICAL`: an operator approved a precise technical reason with official evidence. It has no timer-based retry. New real demand triggers exactly one revalidation while keeping the prior decision visible.
+
+If independent verification cannot complete the first-failure window, the five-minute watchdog records an explicit tooling incident instead of leaving the course degraded indefinitely. A successful read from any safe retry restores `HEALTHY` automatically. Material changes to the official link, provider family, access evidence, or failure fingerprint reopen automated investigation.
 
 ## Claim, Lease, And Repository Safety
 
@@ -95,7 +108,7 @@ Keep the queue payload minimal. Do not log raw message bodies, database ids, wor
 
 ## Retry And Closeout
 
-The normal retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`. Repeated `SOURCE_MISSING` or `SOURCE_CONFLICT` evidence does not retry forever: after at least four verified attempts spanning at least 24 hours, and only when no active real demand exists, the incident closes as `SOURCE_UNVERIFIED`. Matching synthetic evidence does not immediately reopen it; new real demand or changed provider evidence does. This is an honest lack-of-source result, not proof that monitoring is impossible. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day at inspection and claim time instead of trusting a stale incident snapshot. A historical real-demand incident keeps `engineeringOnly=false` after those searches end, but no longer outranks active demand and becomes eligible for no-email detached verification. When an unclaimed engineering-only incident gains real demand, it becomes immediately due unless the unchanged failure is rate-limited. Claimed work keeps its current ownership and proof fences.
+The normal provider retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`. Repeated `SOURCE_MISSING` or `SOURCE_CONFLICT` evidence does not retry forever: after at least four verified attempts spanning at least 24 hours, it becomes `ENGINEERING_VERIFICATION_NEEDED` with `SOURCE_UNVERIFIED`; automation does not approve that final itself. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day instead of trusting a stale incident snapshot. New real demand promotes priority and makes a missed engineer-approved-final revalidation immediately recoverable by the watchdog.
 
 Closeout independently derives per-course and batch outcomes from persisted evidence:
 
@@ -105,7 +118,7 @@ Closeout independently derives per-course and batch outcomes from persisted evid
 - `retryable_failed`: all unresolved work has a persisted future retry.
 - `needs_human`: a concrete unavoidable action remains after safe automated work.
 
-Terminal closeout additionally requires immutable proof snapshots, an unchanged incident cycle/version, complete recheck dispatch, a healthy workflow (or a later golfer stop) for every affected search, and a fresh post-dispatch check. Authentication, challenge, and not-found restrictions cannot use the transient retry ladder; they require a current final classification or an explicit visible human action. Engineering-only incidents cannot be escalated to the owner.
+Terminal closeout additionally requires immutable proof snapshots, an unchanged incident cycle/version, complete recheck dispatch, a healthy workflow (or a later golfer stop) for every affected search, and a fresh post-dispatch check. Authentication, challenge, source, reader, and not-found restrictions require an explicit visible human decision before becoming final. Engineering-only incidents may enter human review, but they never send course-support email unless real customer demand is active.
 
 Privacy, delivery, unsafe-provider, migration, deployment, production-verification, authentication, environment, Git, command, recovery, and repeated-SLA failures are never routine closeouts.
 
@@ -151,7 +164,7 @@ npm run automation:course-support -- verify --batch-ref <batch-ref> --release-sh
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING
 npm run automation:course-support -- verify --batch-ref <batch-ref>
 
-# Only real-demand incidents may record a concrete unavoidable external action.
+# Record a concrete unavoidable external action after the safe playbook is exhausted.
 npm run automation:course-support -- mark-needs-human --batch-ref <batch-ref> --ordinal 01 --evidence "<bounded evidence>" --next-action "<one exact action>"
 
 # Close from independently derived persisted evidence.
@@ -168,6 +181,16 @@ npm run automation:course-support -- recover --batch-ref <batch-ref>
 # use the bounded cohort backfill shown in the rollout section.
 npm run automation:course-support -- backfill
 npm run automation:course-support -- backfill --apply
+
+# Course lifecycle and operator actions are dry-run by default.
+npm run automation:course-monitoring -- inspect --course-ref <course-ref>
+npm run automation:course-monitoring -- backfill
+npm run automation:course-monitoring -- correct-link --course-ref <course-ref> --status-revision <n> --incident-cycle <n> --incident-revision <n> --booking-url <https-url> --evidence-url <https-url> --note "<bounded note>" --idempotency-key <key>
+npm run automation:course-monitoring -- recheck --course-ref <course-ref> --status-revision <n> --incident-cycle <n> --incident-revision <n> --note "<bounded note>" --idempotency-key <key>
+npm run automation:course-monitoring -- approve-final --course-ref <course-ref> --status-revision <n> --incident-cycle <n> --incident-revision <n> --reason <reason> --evidence-url <https-url> --note "<bounded note>" --idempotency-key <key>
+npm run automation:course-monitoring -- reopen --course-ref <course-ref> --status-revision <n> --incident-cycle <n> --incident-revision <n> --evidence-url <https-url> --note "<bounded note>" --idempotency-key <key>
+
+# Add --apply and a non-email --actor-id only after reviewing the dry run.
 ```
 
 Coverage status is evidence-based: `MONITORED` requires a current successful probe
@@ -181,13 +204,13 @@ Do not paste task ids, batch references, database ids, or workflow ids into cust
 
 ## Migration And Rollout
 
-The dispatcher schema change is additive: it adds provider-family/failure/retry fields, search lease/recheck and alert-generation fields, probe runtime versions, the generation-scoped email outbox, provider request leases, versioned batch/proof tables and indexes, and the isolated engineering-only provider-verification request table. Apply the production migration before deploying application code that depends on it. Use the direct production Neon connection for `prisma migrate deploy`, inspect migration status, and never print the resolved URL.
+The lifecycle schema change is additive: it adds monitoring state/events, incident public references, confirmation/deadline/reminder and decision metadata, reader-candidate classifications, and the human-verified technical resolution. Apply it before application code. Validate migration and dry-run/apply backfill on an isolated Neon branch first, use the direct production Neon connection for `prisma migrate deploy`, inspect migration status, and never print the resolved URL.
 
 Roll out in this order:
 
 1. Validate focused tests, the full suite, lint, build, UI smoke, and `git diff --check`.
 2. Apply the additive migration in production.
-3. Seed missing cohort incidents from persisted newest outcomes with `npm run automation:backfill-synthetic-remediation -- --email-tag +tts-stress-20260714-`, inspect only aggregate/redacted output, then repeat with `--apply`. Next run `automation:course-support -- backfill` without and then with `--apply`. Both commands derive state from existing rows and make no provider request.
+3. Run `automation:course-monitoring -- backfill`, record aggregate counts, then repeat with `--apply` and verify matching readback counts. The command imports one baseline event per course, preserves manual/identity/human-approved finals, confirms existing open work, and reopens only AI-final technical rows.
 4. Push the verified commit to `origin/main`, wait for the exact Git-created Vercel deployment, and verify the queue consumer/configuration, production routes, schedules, and logs without running extra provider probes.
 5. Run three responder cycles in inspect-only canary mode. Then enable claims at the default batch size of 5.
 6. Keep the batch size at 5 for at least three clean completed batches. Raise it only deliberately, and never above 20.

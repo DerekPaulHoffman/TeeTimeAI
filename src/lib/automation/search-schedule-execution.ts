@@ -4,6 +4,7 @@ import {
   failScheduledSearchCheck,
   getSearchScheduleTiming
 } from "@/lib/automation/db-service";
+import { shouldSleepTechnicalFinalSearch } from "@/lib/automation/course-monitoring";
 import { runSearchCheck } from "@/lib/automation/search-check";
 import {
   getBookingWindowForTargetDate,
@@ -69,7 +70,14 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
           refreshedTiming?.preferences.map((preference) => preference.course) ??
             timing.preferences.map((preference) => preference.course),
           result.supportRetryNeeded,
-          checkStartedAt
+          checkStartedAt,
+          {
+            supportRetryAt: result.supportRetryAt,
+            sleepUntilExpiration: shouldSleepTechnicalFinalSearch(
+              refreshedTiming?.preferences.map((preference) => preference.course) ??
+                timing.preferences.map((preference) => preference.course)
+            )
+          }
         );
     const completion = await completeScheduledSearchCheck({
       searchId,
@@ -116,10 +124,17 @@ export function calculateNextCheckAt(
   searchExpiresAt = endOfSearchDate(date),
   courses: CourseBookingWindowFields[] = [],
   supportRetryNeeded = false,
-  checkStartedAt = now
+  checkStartedAt = now,
+  options?: {
+    supportRetryAt?: Date | null;
+    sleepUntilExpiration?: boolean;
+  }
 ) {
   if (now >= searchExpiresAt) {
     return null;
+  }
+  if (options?.sleepUntilExpiration) {
+    return searchExpiresAt;
   }
 
   const schedulingCourses = courses.length > 0 ? courses : [{ timeZone: "America/New_York" }];
@@ -136,9 +151,7 @@ export function calculateNextCheckAt(
     (opensAt): opensAt is Date => opensAt !== null
   );
   const nextBookingWindowOpening = Math.min(
-    ...bookingWindowOpenings
-      .filter((opensAt) => opensAt > now)
-      .map((opensAt) => opensAt.getTime())
+    ...bookingWindowOpenings.filter((opensAt) => opensAt > now).map((opensAt) => opensAt.getTime())
   );
   const hasCourseReadyToCheck =
     hasUnknownBookingWindow || bookingWindowOpenings.some((opensAt) => opensAt <= now);
@@ -153,7 +166,8 @@ export function calculateNextCheckAt(
       new Date(Math.min(nextBookingWindowOpening, searchExpiresAt.getTime())),
       supportRetryNeeded,
       now,
-      searchExpiresAt
+      searchExpiresAt,
+      options?.supportRetryAt
     );
   }
 
@@ -166,7 +180,8 @@ export function calculateNextCheckAt(
     next < searchExpiresAt ? next : searchExpiresAt,
     supportRetryNeeded,
     now,
-    searchExpiresAt
+    searchExpiresAt,
+    options?.supportRetryAt
   );
 }
 
@@ -174,14 +189,17 @@ function applySupportDiscoveryRetry(
   normalNextCheckAt: Date,
   supportRetryNeeded: boolean,
   now: Date,
-  searchExpiresAt: Date
+  searchExpiresAt: Date,
+  requestedRetryAt?: Date | null
 ) {
   if (!supportRetryNeeded) {
     return normalNextCheckAt;
   }
   const supportRetryAt = new Date(
     Math.min(
-      now.getTime() + SUPPORT_DISCOVERY_RETRY_MINUTES * 60 * 1000,
+      requestedRetryAt
+        ? Math.max(now.getTime(), requestedRetryAt.getTime())
+        : now.getTime() + SUPPORT_DISCOVERY_RETRY_MINUTES * 60 * 1000,
       searchExpiresAt.getTime()
     )
   );

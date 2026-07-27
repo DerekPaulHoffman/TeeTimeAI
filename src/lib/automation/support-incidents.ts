@@ -15,7 +15,16 @@ import {
 } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
+import { sanitizeResponderText } from "./course-support-responder-policy";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import {
+  createCourseMonitoringSafeReference,
+  createIncidentReference,
+  getCourseMonitoringEscalationDeadline,
+  inferHumanReviewReason,
+  recordCourseMonitoringFailure,
+  sanitizeEvidenceUrl
+} from "./course-monitoring";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
   buildProviderFailureFingerprint,
@@ -40,6 +49,7 @@ export type CourseSupportIssueInput = {
   message?: string;
   error?: unknown;
   nextAction?: string;
+  readPath?: string;
   now?: Date;
 };
 
@@ -65,7 +75,11 @@ export async function reportCourseSupportIssue(
 
   return lease.acquired
     ? lease.value
-    : { incidentId: null, status: "UNRECORDED", ownerAlerted: false };
+    : {
+        incidentId: null,
+        status: "UNRECORDED",
+        ownerAlerted: false
+      };
 }
 
 export async function resolveCourseSupportIncident(input: {
@@ -114,10 +128,8 @@ export async function notifyCourseSupportIssueBatch(
     return { notifiedIncidentIds: [], pendingIncidentIds: [] };
   }
 
-  const lease = await withPostgresAdvisoryTextLease(
-    prisma,
-    "course-support:operator-summary",
-    () => notifyCourseSupportIssueBatchWithLease(uniqueIncidentIds, now)
+  const lease = await withPostgresAdvisoryTextLease(prisma, "course-support:operator-summary", () =>
+    notifyCourseSupportIssueBatchWithLease(uniqueIncidentIds, now)
   );
   return lease.acquired
     ? lease.value
@@ -133,7 +145,7 @@ export async function escalateCourseSupportIncident(input: {
   const current = await prisma.courseSupportIncident.findUnique({
     where: { id: input.incidentId }
   });
-  if (!current || current.status === "RESOLVED" || current.engineeringOnly) {
+  if (!current || current.status === "RESOLVED") {
     return current;
   }
 
@@ -152,10 +164,18 @@ export async function escalateCourseSupportIncident(input: {
         where: { id: latest.id },
         data: {
           status: "NEEDS_HUMAN",
-          latestMessage: input.message,
-          nextAction: input.nextAction,
+          latestMessage: sanitizeResponderText(input.message).slice(0, 500),
+          nextAction: sanitizeResponderText(input.nextAction).slice(0, 500),
+          humanReviewReason:
+            latest.humanReviewReason ??
+            inferHumanReviewReason({
+              kind: latest.kind,
+              failureClass: latest.failureClass
+            }),
+          nextReminderAt: now,
           escalatedAt: latest.escalatedAt ?? now,
-          lastSeenAt: now
+          lastSeenAt: now,
+          revision: { increment: 1 }
         }
       });
     }
@@ -170,10 +190,13 @@ export async function escalateCourseSupportIncident(input: {
 
 async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
   const now = input.now ?? new Date();
-  const dateBoundary = getCourseLocalDateStorageBoundary(
-    input.course.timeZone,
-    now
-  );
+  const safeMessage = input.message
+    ? sanitizeResponderText(input.message).slice(0, 500)
+    : undefined;
+  const safeNextAction = input.nextAction
+    ? sanitizeResponderText(input.nextAction).slice(0, 500)
+    : undefined;
+  const dateBoundary = getCourseLocalDateStorageBoundary(input.course.timeZone, now);
   const [sourceSearch, affectedSearchCount, realDemand, existing] = await Promise.all([
     prisma.teeSearch.findUnique({
       where: { id: input.searchId },
@@ -211,13 +234,13 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
 
   const disposableSyntheticSearch = Boolean(
     sourceSearch &&
-      isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
-      !sourceSearch.syntheticMultiCycle
+    isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
+    !sourceSearch.syntheticMultiCycle
   );
   const engineeringOnlySource = Boolean(
     sourceSearch &&
-      isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
-      sourceSearch.syntheticMultiCycle
+    isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
+    sourceSearch.syntheticMultiCycle
   );
   const activeRealSearchCount = realDemand._count.id;
   const earliestTargetDate = realDemand._min.date;
@@ -229,9 +252,11 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     error: input.error ?? input.message,
     readinessFailure
   });
+  const failureClass =
+    input.kind === "READER_CANDIDATE" ? ("READER_PARSER_MISSING" as const) : failure.failureClass;
   const failureFingerprint = buildProviderFailureFingerprint({
     providerFamilyKey: provider.providerFamilyKey,
-    failureClass: failure.failureClass,
+    failureClass,
     operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
     httpStatus: failure.httpStatus
   });
@@ -252,8 +277,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           status: "RESOLVED",
           resolvedAt: now,
           resolution: null,
-          resolutionMessage:
-            "Closed because this course has only synthetic test demand.",
+          resolutionMessage: "Closed because this course has only synthetic test demand.",
           nextAction: null,
           lastSeenAt: now
         }
@@ -262,6 +286,37 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
 
     return {
       incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    } satisfies CourseSupportIssueState;
+  }
+
+  const monitoringFailure = await recordCourseMonitoringFailure({
+    courseId: input.course.id,
+    outcome:
+      input.kind === "NEEDS_ADAPTER" || input.kind === "READER_CANDIDATE"
+        ? "NEEDS_ADAPTER"
+        : input.kind === "BLOCKED_AUTH"
+          ? "BLOCKED_AUTH"
+          : input.kind === "BLOCKED_TOOLING"
+            ? "BLOCKED_TOOLING"
+            : "FETCH_FAILED",
+    failureFingerprint,
+    readPath:
+      input.readPath ??
+      (input.kind === "NEEDS_ADAPTER"
+        ? "OFFICIAL_SOURCE_DISCOVERY"
+        : input.kind === "READER_CANDIDATE"
+          ? "LOCAL_READER_ALLOWLIST"
+          : "TYPED_PROVIDER_ADAPTER"),
+    message: safeMessage,
+    activeRealSearchCount,
+    now
+  });
+
+  if (monitoringFailure.retainedHumanFinal) {
+    return {
+      incidentId: existing?.id ?? null,
       status: "UNRECORDED",
       ownerAlerted: false
     } satisfies CourseSupportIssueState;
@@ -287,27 +342,17 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       existing.activeRealSearchCount,
       activeRealSearchCount
     );
-    const nextAffectedSearchCount = Math.max(
-      existing.affectedSearchCount,
-      affectedSearchCount,
-      1
-    );
+    const nextAffectedSearchCount = Math.max(existing.affectedSearchCount, affectedSearchCount, 1);
     const nextEarliestTargetDate =
       existing.earliestTargetDate && earliestTargetDate
-        ? new Date(
-            Math.min(
-              existing.earliestTargetDate.getTime(),
-              earliestTargetDate.getTime()
-            )
-          )
+        ? new Date(Math.min(existing.earliestTargetDate.getTime(), earliestTargetDate.getTime()))
         : (existing.earliestTargetDate ?? earliestTargetDate);
     const shouldPromoteRealDemand =
       activeRealSearchCount > 0 &&
       (existing.engineeringOnly ||
         nextActiveRealSearchCount !== existing.activeRealSearchCount ||
         nextAffectedSearchCount !== existing.affectedSearchCount ||
-        nextEarliestTargetDate?.getTime() !==
-          existing.earliestTargetDate?.getTime());
+        nextEarliestTargetDate?.getTime() !== existing.earliestTargetDate?.getTime());
 
     if (shouldPromoteRealDemand) {
       await prisma.courseSupportIncident.updateMany({
@@ -323,44 +368,56 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           engineeringOnly: false,
           activeRealSearchCount: nextActiveRealSearchCount,
           earliestTargetDate: nextEarliestTargetDate,
-          lastSeenAt: now
+          lastSeenAt: now,
+          confirmedAt: existing.confirmedAt ?? (monitoringFailure.confirmed ? now : null),
+          escalationDeadlineAt:
+            existing.escalationDeadlineAt ??
+            (monitoringFailure.confirmed
+              ? getCourseMonitoringEscalationDeadline(now, nextActiveRealSearchCount)
+              : null),
+          revision: { increment: 1 }
         }
       });
     }
 
     return {
       incidentId: existing.id,
-      status:
-        existing.status === "NEEDS_HUMAN"
-          ? "NEEDS_HUMAN"
-          : "AUTO_INVESTIGATING",
-      ownerAlerted: Boolean(
-        existing.ownerNotifiedAt || existing.escalationNotifiedAt
-      )
+      status: existing.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
+      ownerAlerted: Boolean(existing.ownerNotifiedAt || existing.escalationNotifiedAt)
     } satisfies CourseSupportIssueState;
   }
 
-  const initialNextAttemptAt = getInitialCourseSupportAttemptAt(failure, now);
+  const initialNextAttemptAt =
+    failureClass === "RATE_LIMIT"
+      ? getInitialCourseSupportAttemptAt(failure, now)
+      : (monitoringFailure.nextAttemptAt ?? now);
+  const confirmedAt = monitoringFailure.confirmed ? now : null;
+  const escalationDeadlineAt = confirmedAt
+    ? getCourseMonitoringEscalationDeadline(now, activeRealSearchCount)
+    : null;
   let incident: CourseSupportIncident;
 
   if (!existing) {
     incident = await prisma.courseSupportIncident.create({
       data: {
+        reference: createIncidentReference(),
         courseId: input.course.id,
         firstAffectedSearchId: input.searchId,
         kind: input.kind,
         providerFamilyKey: provider.providerFamilyKey,
-        failureClass: failure.failureClass,
+        failureClass,
         failureFingerprint,
         courseNameSnapshot: input.course.name,
         platformSnapshot: input.course.detectedPlatform,
         bookingUrlSnapshot: bookingUrl,
-        initialMessage: input.message,
-        latestMessage: input.message,
-        nextAction: input.nextAction,
+        initialMessage: safeMessage,
+        latestMessage: safeMessage,
+        nextAction: safeNextAction,
         affectedSearchCount: Math.max(affectedSearchCount, 1),
         engineeringOnly: engineeringOnlySource && activeRealSearchCount === 0,
         nextAttemptAt: initialNextAttemptAt,
+        confirmedAt,
+        escalationDeadlineAt,
         activeRealSearchCount,
         earliestTargetDate,
         firstSeenAt: now,
@@ -375,15 +432,15 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         status: "AUTO_INVESTIGATING",
         kind: input.kind,
         providerFamilyKey: provider.providerFamilyKey,
-        failureClass: failure.failureClass,
+        failureClass,
         failureFingerprint,
         courseNameSnapshot: input.course.name,
         platformSnapshot: input.course.detectedPlatform,
         bookingUrlSnapshot: bookingUrl,
         firstAffectedSearchId: input.searchId,
-        initialMessage: input.message,
-        latestMessage: input.message,
-        nextAction: input.nextAction,
+        initialMessage: safeMessage,
+        latestMessage: safeMessage,
+        nextAction: safeNextAction,
         affectedSearchCount: Math.max(affectedSearchCount, 1),
         occurrenceCount: 1,
         engineeringOnly: engineeringOnlySource && activeRealSearchCount === 0,
@@ -401,23 +458,27 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         resolvedAt: null,
         resolution: null,
         resolutionMessage: null,
-        resolutionNotifiedAt: null
+        resolutionNotifiedAt: null,
+        confirmedAt,
+        escalationDeadlineAt,
+        humanReviewReason: null,
+        nextReminderAt: null,
+        decisionActorId: null,
+        decisionAt: null,
+        decisionNote: null,
+        decisionEvidenceUrl: null,
+        decisionIdempotencyKey: null,
+        revision: { increment: 1 }
       }
     });
   } else {
     const fingerprintChanged =
       existing.providerFamilyKey !== provider.providerFamilyKey ||
       existing.failureFingerprint !== failureFingerprint;
-    const promotedToRealDemand =
-      existing.engineeringOnly && activeRealSearchCount > 0;
+    const promotedToRealDemand = existing.engineeringOnly && activeRealSearchCount > 0;
     const promotedNextAttemptAt =
-      failure.failureClass === "RATE_LIMIT"
-        ? new Date(
-            Math.max(
-              existing.nextAttemptAt?.getTime() ?? 0,
-              initialNextAttemptAt.getTime()
-            )
-          )
+      failureClass === "RATE_LIMIT"
+        ? new Date(Math.max(existing.nextAttemptAt?.getTime() ?? 0, initialNextAttemptAt.getTime()))
         : now;
     incident = await prisma.courseSupportIncident.update({
       where: { id: existing.id },
@@ -427,7 +488,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
               cycle: { increment: 1 },
               status: "AUTO_INVESTIGATING" as const,
               firstAffectedSearchId: input.searchId,
-              initialMessage: input.message,
+              initialMessage: safeMessage,
               firstSeenAt: now,
               lastAttemptAt: null,
               attemptCount: 0,
@@ -438,16 +499,14 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           : {}),
         kind: input.kind,
         providerFamilyKey: provider.providerFamilyKey,
-        failureClass: failure.failureClass,
+        failureClass,
         failureFingerprint,
-        latestMessage: input.message,
-        nextAction: input.nextAction,
+        latestMessage: safeMessage,
+        nextAction: safeNextAction,
         affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
         occurrenceCount: { increment: 1 },
         engineeringOnly:
-          existing.engineeringOnly &&
-          engineeringOnlySource &&
-          activeRealSearchCount === 0,
+          existing.engineeringOnly && engineeringOnlySource && activeRealSearchCount === 0,
         nextAttemptAt: fingerprintChanged
           ? initialNextAttemptAt
           : promotedToRealDemand
@@ -455,7 +514,12 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
             : (existing.nextAttemptAt ?? initialNextAttemptAt),
         activeRealSearchCount,
         earliestTargetDate,
-        lastSeenAt: now
+        lastSeenAt: now,
+        confirmedAt: fingerprintChanged ? confirmedAt : (existing.confirmedAt ?? confirmedAt),
+        escalationDeadlineAt: fingerprintChanged
+          ? escalationDeadlineAt
+          : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
+        revision: { increment: 1 }
       }
     });
   }
@@ -490,6 +554,7 @@ async function notifyCourseSupportIssueBatchWithLease(
       id: { in: incidentIds },
       status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] },
       engineeringOnly: false,
+      confirmedAt: { not: null },
       ownerNotifiedAt: null,
       escalationNotifiedAt: null
     },
@@ -503,9 +568,7 @@ async function notifyCourseSupportIssueBatchWithLease(
     const openedIncidents = incidents.filter(
       (incident) => incident.status === "AUTO_INVESTIGATING"
     );
-    const escalatedIncidents = incidents.filter(
-      (incident) => incident.status === "NEEDS_HUMAN"
-    );
+    const escalatedIncidents = incidents.filter((incident) => incident.status === "NEEDS_HUMAN");
     const notifiedIncidentIds: string[] = [];
 
     for (const incident of openedIncidents) {
@@ -518,24 +581,25 @@ async function notifyCourseSupportIssueBatchWithLease(
     if (escalatedIncidents.length > 0) {
       const delivery = await sendCourseSupportOperatorSummaryEmail({
         incidents: escalatedIncidents.map((incident) => ({
-          incidentId: incident.id,
+          incidentId: incident.reference,
           cycle: incident.cycle,
-          courseId: incident.courseId,
+          courseId: createCourseMonitoringSafeReference(incident.courseId),
           courseName: incident.courseNameSnapshot,
           platform: incident.platformSnapshot,
-          bookingUrl: incident.bookingUrlSnapshot,
-          firstAffectedSearchId: incident.firstAffectedSearchId,
+          bookingUrl: sanitizeEvidenceUrl(incident.bookingUrlSnapshot),
           affectedSearchCount: incident.affectedSearchCount,
           kind: incident.kind,
-          message: incident.latestMessage,
-          nextAction: incident.nextAction,
+          message: incident.latestMessage
+            ? sanitizeResponderText(incident.latestMessage).slice(0, 500)
+            : null,
+          nextAction: incident.nextAction
+            ? sanitizeResponderText(incident.nextAction).slice(0, 500)
+            : null,
           firstSeenAt: incident.firstSeenAt
         }))
       });
       if (delivery.deliveryStatus === "sent") {
-        const escalatedIncidentIds = escalatedIncidents.map(
-          (incident) => incident.id
-        );
+        const escalatedIncidentIds = escalatedIncidents.map((incident) => incident.id);
         await prisma.courseSupportIncident.updateMany({
           where: { id: { in: escalatedIncidentIds } },
           data: { escalationNotifiedAt: now }
@@ -590,10 +654,12 @@ async function resolveCourseSupportIncidentWithLease(input: {
         status: "RESOLVED",
         resolvedAt: now,
         resolution: input.resolution,
-        resolutionMessage: input.message,
+        resolutionMessage: sanitizeResponderText(input.message).slice(0, 500),
         lastSeenAt: now,
         nextAttemptAt: null,
-        activeBatchId: null
+        activeBatchId: null,
+        nextReminderAt: null,
+        revision: { increment: 1 }
       }
     });
     if (updated.count !== 1) {
@@ -643,20 +709,25 @@ async function notifyIncidentEvent(
   try {
     const delivery = await sendCourseSupportOperatorEmail({
       event,
-      incidentId: incident.id,
+      incidentId: incident.reference,
       cycle: incident.cycle,
-      courseId: incident.courseId,
+      courseId: createCourseMonitoringSafeReference(incident.courseId),
       courseName: incident.courseNameSnapshot,
       platform: incident.platformSnapshot,
-      bookingUrl: incident.bookingUrlSnapshot,
-      firstAffectedSearchId: incident.firstAffectedSearchId,
+      bookingUrl: sanitizeEvidenceUrl(incident.bookingUrlSnapshot),
       affectedSearchCount: incident.affectedSearchCount,
       kind: incident.kind,
-      message: incident.initialMessage,
-      nextAction: incident.nextAction,
+      message: incident.initialMessage
+        ? sanitizeResponderText(incident.initialMessage).slice(0, 500)
+        : null,
+      nextAction: incident.nextAction
+        ? sanitizeResponderText(incident.nextAction).slice(0, 500)
+        : null,
       firstSeenAt: incident.firstSeenAt,
       resolution: incident.resolution,
       resolutionMessage: incident.resolutionMessage
+        ? sanitizeResponderText(incident.resolutionMessage).slice(0, 500)
+        : null
     });
 
     if (delivery.deliveryStatus !== "sent") {
@@ -669,8 +740,8 @@ async function notifyIncidentEvent(
     });
   } catch (error) {
     console.error("[email:operator-failed]", {
-      incidentId: incident.id,
-      courseId: incident.courseId,
+      incidentRef: incident.reference,
+      courseRef: createCourseMonitoringSafeReference(incident.courseId),
       event,
       message: error instanceof Error ? error.message : "Unknown operator email failure"
     });

@@ -7,22 +7,12 @@ import type {
 
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { classifyProviderCoverage } from "@/lib/automation/provider-coverage";
-import {
-  getLocalReaderCourseKey,
-  isLocalReaderCandidateUrl
-} from "@/lib/local-reader/course-key";
+import { getLocalReaderCourseKey, isLocalReaderCandidateUrl } from "@/lib/local-reader/course-key";
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
 
-import {
-  formatOperatorDayKey,
-  getOperatorDateRange,
-  type OperatorDateRange
-} from "./time";
-import {
-  buildCourseInventory,
-  summarizeCourseInventory
-} from "./course-status";
+import { formatOperatorDayKey, getOperatorDateRange, type OperatorDateRange } from "./time";
+import { buildCourseInventory, summarizeCourseInventory } from "./course-status";
 
 const NON_SYNTHETIC_TRAFFIC: { notIn: WebsiteTrafficClass[] } = {
   notIn: [...syntheticWebsiteTrafficClasses]
@@ -44,15 +34,10 @@ type TrackedEventName = (typeof EVENT_NAMES)[number];
 
 export type OperatorOverview = Awaited<ReturnType<typeof loadOperatorOverview>>;
 
-export async function loadOperatorOverview(input: {
-  days: 7 | 30;
-  now?: Date;
-}) {
+export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) {
   const now = input.now ?? new Date();
   const range = getOperatorDateRange(input.days, now);
-  const recentProbeSince = new Date(
-    now.getTime() - RECENT_PROBE_HOURS * 60 * 60 * 1000
-  );
+  const recentProbeSince = new Date(now.getTime() - RECENT_PROBE_HOURS * 60 * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - OVERDUE_SEARCH_GRACE_MS);
   const recentLocalReaderSince = new Date(
     now.getTime() - RECENT_LOCAL_READER_DAYS * 24 * 60 * 60 * 1000
@@ -182,6 +167,7 @@ export async function loadOperatorOverview(input: {
       ],
       select: {
         id: true,
+        reference: true,
         courseId: true,
         status: true,
         kind: true,
@@ -394,6 +380,16 @@ export async function loadOperatorOverview(input: {
             attemptCount: true
           }
         },
+        monitoringStatus: {
+          select: {
+            reference: true,
+            state: true,
+            lastSuccessfulAt: true,
+            lastFailureAt: true,
+            nextAutomaticAttemptAt: true,
+            revalidationRequestedAt: true
+          }
+        },
         localReaderJobs: {
           where: {
             status: "COMPLETED",
@@ -414,71 +410,66 @@ export async function loadOperatorOverview(input: {
   const topCourses = buildTopCourses(rangePreferences);
   const topCourseIds = topCourses.map((course) => course.id);
   const allCourseIds = allCourses.map((course) => course.id);
-  const [latestProbes, allLatestProbes, selectionCounts, activeAlertCounts] =
-    await Promise.all([
-      topCourseIds.length > 0
-        ? prisma.courseProbe.findMany({
-            where: {
-              courseId: { in: topCourseIds },
-              teeSearch: {
-                trafficClass: NON_SYNTHETIC_TRAFFIC
-              }
-            },
-            orderBy: { observedAt: "desc" },
-            distinct: ["courseId"],
-            select: {
-              courseId: true,
-              outcome: true,
-              observedAt: true
+  const [latestProbes, allLatestProbes, selectionCounts, activeAlertCounts] = await Promise.all([
+    topCourseIds.length > 0
+      ? prisma.courseProbe.findMany({
+          where: {
+            courseId: { in: topCourseIds },
+            teeSearch: {
+              trafficClass: NON_SYNTHETIC_TRAFFIC
             }
-          })
-        : [],
-      allCourseIds.length > 0
-        ? prisma.courseProbe.findMany({
-            where: {
-              courseId: { in: allCourseIds }
-            },
-            orderBy: { observedAt: "desc" },
-            distinct: ["courseId"],
-            select: {
-              courseId: true,
-              outcome: true,
-              observedAt: true,
-              message: true,
-              evidenceUrl: true
-            }
-          })
-        : [],
-      prisma.coursePreference.groupBy({
-        by: ["courseId"],
-        where: {
-          teeSearch: {
-            trafficClass: NON_SYNTHETIC_TRAFFIC
+          },
+          orderBy: { observedAt: "desc" },
+          distinct: ["courseId"],
+          select: {
+            courseId: true,
+            outcome: true,
+            observedAt: true
           }
-        },
-        _count: {
-          _all: true
-        }
-      }),
-      prisma.coursePreference.groupBy({
-        by: ["courseId"],
-        where: {
-          teeSearch: {
-            status: "ACTIVE",
-            trafficClass: NON_SYNTHETIC_TRAFFIC
+        })
+      : [],
+    allCourseIds.length > 0
+      ? prisma.courseProbe.findMany({
+          where: {
+            courseId: { in: allCourseIds }
+          },
+          orderBy: { observedAt: "desc" },
+          distinct: ["courseId"],
+          select: {
+            courseId: true,
+            outcome: true,
+            observedAt: true,
+            message: true,
+            evidenceUrl: true
           }
-        },
-        _count: {
-          _all: true
+        })
+      : [],
+    prisma.coursePreference.groupBy({
+      by: ["courseId"],
+      where: {
+        teeSearch: {
+          trafficClass: NON_SYNTHETIC_TRAFFIC
         }
-      })
-    ]);
-  const latestProbeByCourse = new Map(
-    latestProbes.map((probe) => [probe.courseId, probe])
-  );
-  const allLatestProbeByCourse = new Map(
-    allLatestProbes.map((probe) => [probe.courseId, probe])
-  );
+      },
+      _count: {
+        _all: true
+      }
+    }),
+    prisma.coursePreference.groupBy({
+      by: ["courseId"],
+      where: {
+        teeSearch: {
+          status: "ACTIVE",
+          trafficClass: NON_SYNTHETIC_TRAFFIC
+        }
+      },
+      _count: {
+        _all: true
+      }
+    })
+  ]);
+  const latestProbeByCourse = new Map(latestProbes.map((probe) => [probe.courseId, probe]));
+  const allLatestProbeByCourse = new Map(allLatestProbes.map((probe) => [probe.courseId, probe]));
   const selectionCountByCourse = new Map(
     selectionCounts.map((group) => [group.courseId, group._count._all])
   );
@@ -535,11 +526,8 @@ export async function loadOperatorOverview(input: {
         bookingMethod: course.bookingMethod,
         detectedBookingUrl: sanitizeOperatorUrl(course.detectedBookingUrl),
         website: sanitizeOperatorUrl(course.website),
-        localReaderSupported:
-          getLocalReaderCourseKey(course.detectedBookingUrl) !== null,
-        localReaderCandidate: isLocalReaderCandidateUrl(
-          course.detectedBookingUrl
-        ),
+        localReaderSupported: getLocalReaderCourseKey(course.detectedBookingUrl) !== null,
+        localReaderCandidate: isLocalReaderCandidateUrl(course.detectedBookingUrl),
         localReaderVerifiedAt: localReaderVerified
           ? (latestLocalReaderJob?.completedAt ?? null)
           : null,
@@ -548,6 +536,7 @@ export async function loadOperatorOverview(input: {
           : null,
         activeAlertCount: activeAlertCountByCourse.get(course.id) ?? 0,
         selectionCount: selectionCountByCourse.get(course.id) ?? 0,
+        monitoringStatus: course.monitoringStatus,
         incident: course.supportIncident,
         latestProbe: latestProbe
           ? {
@@ -556,10 +545,7 @@ export async function loadOperatorOverview(input: {
             }
           : null,
         coverageCategory,
-        profileSlug:
-          course.profile?.status === "PUBLISHED"
-            ? course.profile.canonicalSlug
-            : null
+        profileSlug: course.profile?.status === "PUBLISHED" ? course.profile.canonicalSlug : null
       };
     }),
     now
@@ -645,9 +631,8 @@ export async function loadOperatorOverview(input: {
     },
     dailyActivity,
     attention: {
-      realDemandIncidents: openIncidents.filter(
-        (incident) => incident.activeRealSearchCount > 0
-      ).length,
+      realDemandIncidents: openIncidents.filter((incident) => incident.activeRealSearchCount > 0)
+        .length,
       problemSearches: problemSearches.map((search) => ({
         ...search,
         user: { email: "[redacted]" }
@@ -657,9 +642,7 @@ export async function loadOperatorOverview(input: {
         lastError: delivery.lastError ? "Retry pending" : null,
         teeSearch: { user: { email: "[redacted]" } }
       })),
-      brokenFeedback: unresolvedFeedback.filter(
-        (feedback) => feedback.sentiment === "BROKEN"
-      )
+      brokenFeedback: unresolvedFeedback.filter((feedback) => feedback.sentiment === "BROKEN")
     },
     topCourses: topCourses.map((course) => ({
       ...course,
@@ -675,9 +658,7 @@ export async function loadOperatorOverview(input: {
       email: user.email,
       createdAt: user.createdAt,
       totalAlerts: user.teeSearches.length,
-      activeAlerts: user.teeSearches.filter(
-        (search) => search.status === "ACTIVE"
-      ).length,
+      activeAlerts: user.teeSearches.filter((search) => search.status === "ACTIVE").length,
       latestAlertAt: user.teeSearches[0]?.createdAt ?? null,
       courseNames: [
         ...new Set(
@@ -711,11 +692,7 @@ function sanitizeOperatorUrl(value: string | null) {
   if (!value) return null;
   try {
     const url = new URL(value);
-    if (
-      (url.protocol !== "https:" && url.protocol !== "http:") ||
-      url.username ||
-      url.password
-    ) {
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) {
       return null;
     }
     return url.toString();
@@ -806,9 +783,10 @@ export function buildTopCourses(preferences: CoursePreferenceSummary[]) {
 }
 
 export function countEvents(events: Array<{ name: string }>) {
-  const counts = Object.fromEntries(
-    EVENT_NAMES.map((name) => [name, 0])
-  ) as Record<TrackedEventName, number>;
+  const counts = Object.fromEntries(EVENT_NAMES.map((name) => [name, 0])) as Record<
+    TrackedEventName,
+    number
+  >;
   for (const event of events) {
     if (EVENT_NAMES.includes(event.name as TrackedEventName)) {
       counts[event.name as TrackedEventName] += 1;
@@ -852,18 +830,12 @@ function buildDailyActivity(input: {
   return [...days.values()];
 }
 
-function summarizeProbeHealth(
-  groups: Array<{ outcome: ProbeOutcome; _count: { _all: number } }>
-) {
+function summarizeProbeHealth(groups: Array<{ outcome: ProbeOutcome; _count: { _all: number } }>) {
   const byOutcome = Object.fromEntries(
     groups.map((group) => [group.outcome, group._count._all])
   ) as Partial<Record<ProbeOutcome, number>>;
-  const successful =
-    (byOutcome.MATCH_FOUND ?? 0) + (byOutcome.NO_MATCH ?? 0);
-  const total = Object.values(byOutcome).reduce(
-    (sum, count) => sum + (count ?? 0),
-    0
-  );
+  const successful = (byOutcome.MATCH_FOUND ?? 0) + (byOutcome.NO_MATCH ?? 0);
+  const total = Object.values(byOutcome).reduce((sum, count) => sum + (count ?? 0), 0);
 
   return {
     successfulProbes: successful,

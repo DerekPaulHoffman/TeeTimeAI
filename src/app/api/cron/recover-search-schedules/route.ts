@@ -2,6 +2,7 @@ import { listSearchesNeedingScheduleRecovery } from "@/lib/automation/db-service
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { recoverDueCourseSupportVerificationRequests } from "@/lib/automation/course-support-verification-scheduler";
 import { checkAutomationWorkerHealth } from "@/lib/automation/worker-state";
+import { runCourseMonitoringWatchdog } from "@/lib/automation/course-monitoring";
 import { hasDatabaseConfig } from "@/lib/env";
 import { recoverPendingClerkEmailUpdates } from "@/lib/users/pending-email";
 
@@ -31,8 +32,7 @@ export async function GET(request: Request) {
     failed: 1
   };
   try {
-    courseSupportVerification =
-      await recoverDueCourseSupportVerificationRequests();
+    courseSupportVerification = await recoverDueCourseSupportVerificationRequests();
   } catch {
     // Provider-verification recovery must not suppress customer schedule recovery.
   }
@@ -54,10 +54,28 @@ export async function GET(request: Request) {
     automationWorkerHealth.failed = 1;
   }
 
+  let courseMonitoring = {
+    checked: 0,
+    scheduled: 0,
+    escalated: 0,
+    remindersSent: 0,
+    failed: 0
+  };
+  try {
+    courseMonitoring = {
+      ...(await runCourseMonitoringWatchdog()),
+      failed: 0
+    };
+  } catch {
+    // Course-lifecycle recovery must never suppress customer or delivery recovery.
+    courseMonitoring.failed = 1;
+  }
+
   return Response.json({
     pendingEmailRecovery,
     courseSupportVerification,
     automationWorkerHealth,
+    courseMonitoring,
     considered: searches.length,
     restarted: results.filter((result) => result.status === "fulfilled").length,
     failed: results.filter((result) => result.status === "rejected").length

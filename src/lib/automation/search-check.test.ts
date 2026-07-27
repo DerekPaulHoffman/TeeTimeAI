@@ -62,8 +62,8 @@ const adapterMocks = vi.hoisted(() => ({
   isChronogolfMetadata: vi.fn(),
   isClubCaddieMetadata: vi.fn(),
   isForeupMetadata: vi.fn(),
-  isGolfBackMetadata: vi.fn()
-  ,isWebTracMetadata: vi.fn()
+  isGolfBackMetadata: vi.fn(),
+  isWebTracMetadata: vi.fn()
 }));
 
 const supportIncidentMocks = vi.hoisted(() => ({
@@ -74,6 +74,12 @@ const supportIncidentMocks = vi.hoisted(() => ({
 
 const monitoringDiscoveryMocks = vi.hoisted(() => ({
   prepareSearchMonitoring: vi.fn()
+}));
+
+const courseMonitoringMocks = vi.hoisted(() => ({
+  getCourseMonitoringRetryAt: vi.fn(),
+  recordCourseMonitoringFinalClassification: vi.fn(),
+  recordCourseMonitoringSuccess: vi.fn()
 }));
 
 const providerRequestLeaseMocks = vi.hoisted(() => ({
@@ -101,6 +107,10 @@ vi.mock("@/lib/adapters/chronogolf", () => adapterMocks);
 vi.mock("@/lib/adapters/clubcaddie", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
+vi.mock("@/lib/automation/course-monitoring", () => ({
+  FIRST_FAILURE_RETRY_MS: 2 * 60 * 1000,
+  ...courseMonitoringMocks
+}));
 vi.mock("@/lib/automation/provider-request-lease", () => providerRequestLeaseMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
@@ -178,12 +188,8 @@ const pendingMatch = {
 
 describe("buildMatchDeliveryGroupKey", () => {
   it("creates a new idempotency group when the same tee time reopens", () => {
-    const initial = buildMatchDeliveryGroupKey([
-      { id: "match-1", availabilityCycle: 0 }
-    ]);
-    const reopened = buildMatchDeliveryGroupKey([
-      { id: "match-1", availabilityCycle: 1 }
-    ]);
+    const initial = buildMatchDeliveryGroupKey([{ id: "match-1", availabilityCycle: 0 }]);
+    const reopened = buildMatchDeliveryGroupKey([{ id: "match-1", availabilityCycle: 1 }]);
 
     expect(reopened).not.toBe(initial);
     expect(
@@ -198,7 +204,6 @@ describe("buildMatchDeliveryGroupKey", () => {
       ])
     );
   });
-
 });
 
 describe("runSearchCheck email cadence", () => {
@@ -206,6 +211,9 @@ describe("runSearchCheck email cadence", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-11T12:10:00.000Z"));
+    courseMonitoringMocks.getCourseMonitoringRetryAt.mockResolvedValue(null);
+    courseMonitoringMocks.recordCourseMonitoringFinalClassification.mockResolvedValue(null);
+    courseMonitoringMocks.recordCourseMonitoringSuccess.mockResolvedValue(null);
     dbMocks.startAutomationRun.mockResolvedValue({ id: "run-1" });
     dbMocks.finishAutomationRun.mockResolvedValue(undefined);
     dbMocks.heartbeatSearchCheckLease.mockResolvedValue(true);
@@ -221,7 +229,10 @@ describe("runSearchCheck email cadence", () => {
       })
     }));
     providerRequestLeaseMocks.runWithProviderRequestLease.mockImplementation(
-      async (_providerFamily, worker) => ({ acquired: true, value: await worker() })
+      async (_providerFamily, worker) => ({
+        acquired: true,
+        value: await worker()
+      })
     );
     localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue(null);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
@@ -257,38 +268,35 @@ describe("runSearchCheck email cadence", () => {
       current: true,
       count: 1
     });
-    deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        deliveryOutboxMocks.preparedPayload = input.payload;
-        return { prepared: true, deliveries: [], continuationGroups: [] };
-      }
-    );
-    deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mockImplementation(
-      async (input) => {
-        deliveryOutboxMocks.preparedPayload = input.payload;
-        return {
-          prepared: true,
-          groups: [{ groupKey: `recipient-${input.sourceGroupKey}`, recipient: "player@resend.dev" }]
-        };
-      }
-    );
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        await input.send({
-          recipient: "player@resend.dev",
-          idempotencyKey: "tee-search-delivery-delivery-1",
-          payload: deliveryOutboxMocks.preparedPayload,
-          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
-        });
-        return [{ id: "delivery-1", status: "SENT" }];
-      }
-    );
-    deliveryOutboxMocks.hydrateSearchStatusEmailPayload.mockImplementation(
-      async (payload) => ({
-        ...payload.statusReport,
-        checkedAt: new Date(payload.checkedAt)
-      })
-    );
+    deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      deliveryOutboxMocks.preparedPayload = input.payload;
+      return { prepared: true, deliveries: [], continuationGroups: [] };
+    });
+    deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mockImplementation(async (input) => {
+      deliveryOutboxMocks.preparedPayload = input.payload;
+      return {
+        prepared: true,
+        groups: [
+          {
+            groupKey: `recipient-${input.sourceGroupKey}`,
+            recipient: "player@resend.dev"
+          }
+        ]
+      };
+    });
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      await input.send({
+        recipient: "player@resend.dev",
+        idempotencyKey: "tee-search-delivery-delivery-1",
+        payload: deliveryOutboxMocks.preparedPayload,
+        assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+      });
+      return [{ id: "delivery-1", status: "SENT" }];
+    });
+    deliveryOutboxMocks.hydrateSearchStatusEmailPayload.mockImplementation(async (payload) => ({
+      ...payload.statusReport,
+      checkedAt: new Date(payload.checkedAt)
+    }));
     deliveryOutboxMocks.hydrateMatchAlertPayload.mockResolvedValue({
       matches: [
         {
@@ -407,7 +415,10 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(result).toEqual(
-      expect.objectContaining({ newlyAlertedMatches: 0, statusEmailOutcome: "sent" })
+      expect.objectContaining({
+        newlyAlertedMatches: 0,
+        statusEmailOutcome: "sent"
+      })
     );
   });
 
@@ -427,9 +438,7 @@ describe("runSearchCheck email cadence", () => {
     expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "SETUP",
-        groupKey: expect.stringMatching(
-          /^setup-[a-f0-9]+-replacement-[a-f0-9]+$/
-        ),
+        groupKey: expect.stringMatching(/^setup-[a-f0-9]+-replacement-[a-f0-9]+$/),
         supersededStatusGroups: [
           { kind: "SETUP", groupKey: "stale-setup-group" },
           { kind: "DAILY", groupKey: "stale-daily-group" }
@@ -438,9 +447,7 @@ describe("runSearchCheck email cadence", () => {
     );
     expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
-    expect(result).toEqual(
-      expect.objectContaining({ statusEmailOutcome: "sent" })
-    );
+    expect(result).toEqual(expect.objectContaining({ statusEmailOutcome: "sent" }));
   });
 
   it("flows the persisted pending state into setup-report NEW rows", async () => {
@@ -788,8 +795,7 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     const preparedPayload =
-      deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mock.calls[0]?.[0]
-        .payload;
+      deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mock.calls[0]?.[0].payload;
     expect(preparedPayload.matchReport.matches).toHaveLength(9);
     expect(preparedPayload.matchIds).toContain("match-9");
     expect(result).toEqual(
@@ -837,37 +843,34 @@ describe("runSearchCheck email cadence", () => {
       id: "match-1",
       alertStatus: "PENDING"
     });
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        if (input.kind === "MATCH") {
-          return [{ id: "delivery-1", status: "SUPPRESSED" }];
-        }
-        await input.send({
-          recipient: "player@resend.dev",
-          idempotencyKey: "tee-search-delivery-daily",
-          payload: deliveryOutboxMocks.preparedPayload,
-          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
-        });
-        return [{ id: "daily-delivery", status: "SENT" }];
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      if (input.kind === "MATCH") {
+        return [{ id: "delivery-1", status: "SUPPRESSED" }];
       }
-    );
-    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(
-      async (input) =>
-        input.kind === "MATCH"
-          ? {
-              finalized: true,
-              status: "SUPPRESSED",
-              ownerSent: false,
-              retainedMatchCount: 0,
-              sentMatchCount: 0
-            }
-          : {
-              finalized: true,
-              status: "SENT",
-              ownerSent: true,
-              retainedMatchCount: 0,
-              sentMatchCount: 0
-            }
+      await input.send({
+        recipient: "player@resend.dev",
+        idempotencyKey: "tee-search-delivery-daily",
+        payload: deliveryOutboxMocks.preparedPayload,
+        assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+      });
+      return [{ id: "daily-delivery", status: "SENT" }];
+    });
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(async (input) =>
+      input.kind === "MATCH"
+        ? {
+            finalized: true,
+            status: "SUPPRESSED",
+            ownerSent: false,
+            retainedMatchCount: 0,
+            sentMatchCount: 0
+          }
+        : {
+            finalized: true,
+            status: "SENT",
+            ownerSent: true,
+            retainedMatchCount: 0,
+            sentMatchCount: 0
+          }
     );
 
     const result = await runSearchCheck("search-1", "test");
@@ -916,33 +919,29 @@ describe("runSearchCheck email cadence", () => {
       targetDateStatus: "OPEN",
       bookingWindowEvidence: null
     });
-    deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mockImplementation(
-      async (input) => {
-        deliveryOutboxMocks.preparedPayload = input.payload;
-        return {
-          prepared: true,
-          hasExistingObligation: false,
-          groups: [
-            { groupKey: "owner-match", recipient: "player@resend.dev" },
-            { groupKey: "friend-match", recipient: "friend@resend.dev" }
-          ]
-        };
+    deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups.mockImplementation(async (input) => {
+      deliveryOutboxMocks.preparedPayload = input.payload;
+      return {
+        prepared: true,
+        hasExistingObligation: false,
+        groups: [
+          { groupKey: "owner-match", recipient: "player@resend.dev" },
+          { groupKey: "friend-match", recipient: "friend@resend.dev" }
+        ]
+      };
+    });
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      if (input.groupKey === "owner-match") {
+        throw new Error("owner delivery pending");
       }
-    );
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        if (input.groupKey === "owner-match") {
-          throw new Error("owner delivery pending");
-        }
-        await input.send({
-          recipient: "friend@resend.dev",
-          idempotencyKey: "friend-match-key",
-          payload: deliveryOutboxMocks.preparedPayload,
-          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
-        });
-        return [{ id: "friend-delivery", status: "SENT" }];
-      }
-    );
+      await input.send({
+        recipient: "friend@resend.dev",
+        idempotencyKey: "friend-match-key",
+        payload: deliveryOutboxMocks.preparedPayload,
+        assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+      });
+      return [{ id: "friend-delivery", status: "SENT" }];
+    });
     deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockResolvedValue({
       finalized: true,
       status: "SENT",
@@ -985,17 +984,15 @@ describe("runSearchCheck email cadence", () => {
         }
       ])
       .mockResolvedValue([]);
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        await input.send({
-          recipient: "player@resend.dev",
-          idempotencyKey: "owner-retry-key",
-          payload: { schemaVersion: 2, checkedAt: "2026-07-11T12:10:00.000Z" },
-          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
-        });
-        return [{ id: "owner-retry", status: "SENT" }];
-      }
-    );
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      await input.send({
+        recipient: "player@resend.dev",
+        idempotencyKey: "owner-retry-key",
+        payload: { schemaVersion: 2, checkedAt: "2026-07-11T12:10:00.000Z" },
+        assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+      });
+      return [{ id: "owner-retry", status: "SENT" }];
+    });
     deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockResolvedValue({
       finalized: true,
       status: "SENT",
@@ -1023,9 +1020,7 @@ describe("runSearchCheck email cadence", () => {
         snapshot: expect.any(Array)
       })
     );
-    expect(
-      deliveryOutboxMocks.satisfyPendingDailyStatusReplacementWithMatch
-    ).toHaveBeenCalledWith(
+    expect(deliveryOutboxMocks.satisfyPendingDailyStatusReplacementWithMatch).toHaveBeenCalledWith(
       expect.objectContaining({
         groups: [{ kind: "DAILY", groupKey: "stale-daily" }]
       })
@@ -1055,40 +1050,34 @@ describe("runSearchCheck email cadence", () => {
         }
       ])
       .mockResolvedValue([]);
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        await input.send({
-          recipient:
-            input.kind === "MATCH"
-              ? "friend@resend.dev"
-              : "player@resend.dev",
-          idempotencyKey: `${input.kind.toLowerCase()}-retry-key`,
-          payload:
-            input.kind === "MATCH"
-              ? { schemaVersion: 2, checkedAt: "2026-07-11T12:10:00.000Z" }
-              : deliveryOutboxMocks.preparedPayload,
-          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
-        });
-        return [{ id: `${input.kind.toLowerCase()}-delivery`, status: "SENT" }];
-      }
-    );
-    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(
-      async (input) =>
-        input.kind === "MATCH"
-          ? {
-              finalized: true,
-              status: "SENT",
-              ownerSent: true,
-              retainedMatchCount: 1,
-              sentMatchCount: 1
-            }
-          : {
-              finalized: true,
-              status: "SENT",
-              ownerSent: true,
-              retainedMatchCount: 0,
-              sentMatchCount: 0
-            }
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      await input.send({
+        recipient: input.kind === "MATCH" ? "friend@resend.dev" : "player@resend.dev",
+        idempotencyKey: `${input.kind.toLowerCase()}-retry-key`,
+        payload:
+          input.kind === "MATCH"
+            ? { schemaVersion: 2, checkedAt: "2026-07-11T12:10:00.000Z" }
+            : deliveryOutboxMocks.preparedPayload,
+        assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+      });
+      return [{ id: `${input.kind.toLowerCase()}-delivery`, status: "SENT" }];
+    });
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(async (input) =>
+      input.kind === "MATCH"
+        ? {
+            finalized: true,
+            status: "SENT",
+            ownerSent: true,
+            retainedMatchCount: 1,
+            sentMatchCount: 1
+          }
+        : {
+            finalized: true,
+            status: "SENT",
+            ownerSent: true,
+            retainedMatchCount: 0,
+            sentMatchCount: 0
+          }
     );
 
     const result = await runSearchCheck("search-1", "test");
@@ -1149,11 +1138,8 @@ describe("runSearchCheck email cadence", () => {
         }
       ]
     });
-    deliveryOutboxMocks.getSafeOfficialBookingUrl.mockImplementation(
-      (value: unknown) =>
-        typeof value === "string" && value !== restrictedBookingUrl
-          ? value
-          : undefined
+    deliveryOutboxMocks.getSafeOfficialBookingUrl.mockImplementation((value: unknown) =>
+      typeof value === "string" && value !== restrictedBookingUrl ? value : undefined
     );
 
     const result = await runSearchCheck("search-1", "test");
@@ -1167,9 +1153,7 @@ describe("runSearchCheck email cadence", () => {
     expect(deliveryOutboxMocks.getSafeOfficialBookingUrl).toHaveBeenCalledWith(
       restrictedBookingUrl
     );
-    expect(deliveryOutboxMocks.getSafeOfficialBookingUrl).toHaveBeenCalledWith(
-      officialHomepage
-    );
+    expect(deliveryOutboxMocks.getSafeOfficialBookingUrl).toHaveBeenCalledWith(officialHomepage);
   });
 
   it("defers for provider capacity without suppressing a pending available match", async () => {
@@ -1202,9 +1186,7 @@ describe("runSearchCheck email cadence", () => {
     expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
     expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
-    expect(
-      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
-    ).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches).not.toHaveBeenCalled();
     expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalled();
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
@@ -1246,9 +1228,7 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "FETCH_FAILED" })
     );
-    expect(
-      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
-    ).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches).not.toHaveBeenCalled();
     expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalled();
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
@@ -1279,9 +1259,7 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
-    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(
-      new Error("CPS configuration returned 403")
-    );
+    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(new Error("CPS configuration returned 403"));
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -1313,9 +1291,154 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
+  it("checks five mixed courses independently in one alert cycle", async () => {
+    const baseCourse = {
+      ...search.preferences[0].course,
+      isPublic: true,
+      phone: null,
+      bookingPhone: null,
+      policyNotes: null,
+      monitoringStatus: null
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...baseCourse,
+            id: "course-success",
+            name: "Working ForeUP Course",
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/1/1#/teetimes",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            bookingAccessMode: "PUBLIC_SIGNED_OUT",
+            bookingMetadata: {
+              scheduleId: 1,
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/1/1#/teetimes"
+            }
+          }
+        },
+        {
+          rank: 2,
+          course: {
+            ...baseCourse,
+            id: "course-captcha",
+            name: "Challenge Course",
+            detectedPlatform: "CHRONOGOLF",
+            providerFamilyKey: "CHRONOGOLF",
+            detectedBookingUrl: "https://www.chronogolf.com/club/challenge-course",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            bookingAccessMode: "PUBLIC_SIGNED_OUT",
+            bookingMetadata: {
+              provider: "CHRONOGOLF",
+              clubSlug: "challenge-course"
+            }
+          }
+        },
+        {
+          rank: 3,
+          course: {
+            ...baseCourse,
+            id: "course-phone",
+            name: "Phone Booking Course",
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "MANUAL",
+            detectedBookingUrl: null,
+            bookingMethod: "PHONE_ONLY",
+            bookingPhone: "203-555-0100",
+            automationEligibility: "BLOCKED",
+            automationReason: "NO_ONLINE_BOOKING",
+            bookingAccessMode: "PHONE_ONLY",
+            intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            bookingMetadata: null
+          }
+        },
+        {
+          rank: 4,
+          course: {
+            ...baseCourse,
+            id: "course-reader",
+            name: "Reader Candidate Course",
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+            automationEligibility: "NEEDS_REVIEW",
+            automationReason: "OTHER",
+            bookingAccessMode: "UNKNOWN",
+            bookingMetadata: null
+          }
+        },
+        {
+          rank: 5,
+          course: {
+            ...baseCourse,
+            id: "course-technical",
+            name: "Unverified Technical Course",
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "SOURCE_MISSING",
+            detectedBookingUrl: "https://technical.example/book",
+            automationEligibility: "NEEDS_REVIEW",
+            automationReason: "OTHER",
+            bookingAccessMode: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(true);
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+    adapterMocks.fetchChronogolfSlots.mockRejectedValue(new Error("Public captcha challenge"));
+    localReaderMocks.getLocalReaderCourseKey.mockImplementation((bookingUrl: string | null) =>
+      bookingUrl?.includes("grassyhill") ? "grassy-hill" : null
+    );
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "reader-job-1"
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+    const outcomes = Object.fromEntries(
+      result.courseResults.map((courseResult) => [courseResult.courseId, courseResult.outcome])
+    );
+
+    expect(outcomes).toMatchObject({
+      "course-success": "NO_MATCH",
+      "course-captcha": "FETCH_FAILED",
+      "course-phone": "MANUAL_DIRECT",
+      "course-reader": "FETCH_FAILED",
+      "course-technical": "NEEDS_ADAPTER"
+    });
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith(
+      expect.objectContaining({ courseId: "course-reader" })
+    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        course: expect.objectContaining({ id: "course-reader" }),
+        kind: "READER_CANDIDATE"
+      })
+    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        course: expect.objectContaining({ id: "course-captcha" }),
+        kind: "FETCH_FAILED"
+      })
+    );
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledOnce();
+  });
+
   it("does not queue Grassy Hill for the local reader after a generic CPS 403", async () => {
-    const bookingUrl =
-      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -1342,11 +1465,11 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
-    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(
-      new Error("CPS configuration returned 403")
-    );
+    adapterMocks.fetchCpsTeeSheet.mockRejectedValue(new Error("CPS configuration returned 403"));
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
-    localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-1"
+    });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -1366,8 +1489,7 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("queues Grassy Hill for the local reader after a verified challenge", async () => {
-    const bookingUrl =
-      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -1400,7 +1522,9 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
-    localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-1"
+    });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -1425,12 +1549,16 @@ describe("runSearchCheck email cadence", () => {
         }
       })
     );
-    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "READER_CANDIDATE",
+        readPath: "LOCAL_READER_ALLOWLIST"
+      })
+    );
   });
 
   it("lets the exact Grassy Hill local reader override a stored technical block", async () => {
-    const bookingUrl =
-      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -1455,7 +1583,9 @@ describe("runSearchCheck email cadence", () => {
       ]
     });
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
-    localReaderMocks.queueLocalReaderJob.mockResolvedValue({ id: "local-job-1" });
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-1"
+    });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -1483,7 +1613,12 @@ describe("runSearchCheck email cadence", () => {
     expect(dbMocks.recordCourseProbeIfChanged).not.toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "BLOCKED_AUTH" })
     );
-    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "READER_CANDIDATE",
+        readPath: "LOCAL_READER_ALLOWLIST"
+      })
+    );
   });
 
   it("prefers the normal server adapter over a fresh local-reader result", async () => {
@@ -1499,8 +1634,7 @@ describe("runSearchCheck email cadence", () => {
             policyNotes: null,
             detectedPlatform: "CUSTOM",
             providerFamilyKey: "CPS",
-            detectedBookingUrl:
-              "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+            detectedBookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
             bookingMetadata: {
               provider: "CPS",
               siteName: "grassyhill",
@@ -1521,8 +1655,7 @@ describe("runSearchCheck email cadence", () => {
           courseId: "course-1",
           startsAt: "2026-07-12T08:10:00",
           availableSpots: 4,
-          bookingUrl:
-            "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          bookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
           priceCents: 8200,
           holes: 18,
           bookableHoleCounts: [9, 18]
@@ -1588,38 +1721,35 @@ describe("runSearchCheck email cadence", () => {
         createdAt: new Date("2026-07-11T11:30:00.000Z")
       }
     ]);
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        if (input.groupKey === "old-match-group") {
-          throw new Error("additional recipient delivery failed");
-        }
-        if (input.groupKey === "old-daily-group") {
-          return [{ id: "old-daily-delivery", status: "SENT" }];
-        }
-        await input.send({
-          recipient: "player@resend.dev",
-          idempotencyKey: "tee-search-delivery-delivery-1",
-          payload: deliveryOutboxMocks.preparedPayload,
-          assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
-        });
-        return [{ id: "delivery-1", status: "SENT" }];
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      if (input.groupKey === "old-match-group") {
+        throw new Error("additional recipient delivery failed");
       }
-    );
-    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(
-      async (input) =>
-        input.groupKey === "old-match-group"
-          ? {
-              finalized: false,
-              reason: "not_terminal",
-              ownerFinalized: true
-            }
-          : {
-              finalized: true,
-              status: "SENT",
-              ownerSent: true,
-              retainedMatchCount: 0,
-              sentMatchCount: 0
-            }
+      if (input.groupKey === "old-daily-group") {
+        return [{ id: "old-daily-delivery", status: "SENT" }];
+      }
+      await input.send({
+        recipient: "player@resend.dev",
+        idempotencyKey: "tee-search-delivery-delivery-1",
+        payload: deliveryOutboxMocks.preparedPayload,
+        assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+      });
+      return [{ id: "delivery-1", status: "SENT" }];
+    });
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(async (input) =>
+      input.groupKey === "old-match-group"
+        ? {
+            finalized: false,
+            reason: "not_terminal",
+            ownerFinalized: true
+          }
+        : {
+            finalized: true,
+            status: "SENT",
+            ownerSent: true,
+            retainedMatchCount: 0,
+            sentMatchCount: 0
+          }
     );
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
@@ -1630,14 +1760,13 @@ describe("runSearchCheck email cadence", () => {
         deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mock.calls.map(
           ([input]) => input.groupKey
         )
-      ).toEqual([
-        "old-match-group",
-        "old-daily-group",
-        expect.stringMatching(/^setup-/)
-      ]);
+      ).toEqual(["old-match-group", "old-daily-group", expect.stringMatching(/^setup-/)]);
       expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
       expect(result).toEqual(
-        expect.objectContaining({ newlyAlertedMatches: 0, statusEmailOutcome: "sent" })
+        expect.objectContaining({
+          newlyAlertedMatches: 0,
+          statusEmailOutcome: "sent"
+        })
       );
       expect(warning).toHaveBeenCalledWith(
         "[email:additional-recipient-retry-pending]",
@@ -1661,44 +1790,42 @@ describe("runSearchCheck email cadence", () => {
         createdAt: new Date("2026-07-11T11:30:00.000Z")
       }
     ]);
-    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(
-      async (input) => {
-        if (input.groupKey === "unresolved-owner-group") {
-          throw new Error("owner delivery failed");
-        }
-        return [{ id: "delivery-1", status: "SENT" }];
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementation(async (input) => {
+      if (input.groupKey === "unresolved-owner-group") {
+        throw new Error("owner delivery failed");
       }
-    );
-    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(
-      async (input) =>
-        input.groupKey === "unresolved-owner-group"
-          ? {
-              finalized: false,
-              reason: "not_terminal",
-              ownerFinalized: false
-            }
-          : {
-              finalized: true,
-              status: "SENT",
-              ownerSent: true,
-              retainedMatchCount: 0,
-              sentMatchCount: 0
-            }
+      return [{ id: "delivery-1", status: "SENT" }];
+    });
+    deliveryOutboxMocks.finalizeSearchEmailDeliveryGroup.mockImplementation(async (input) =>
+      input.groupKey === "unresolved-owner-group"
+        ? {
+            finalized: false,
+            reason: "not_terminal",
+            ownerFinalized: false
+          }
+        : {
+            finalized: true,
+            status: "SENT",
+            ownerSent: true,
+            retainedMatchCount: 0,
+            sentMatchCount: 0
+          }
     );
 
     const result = await runSearchCheck("search-1", "test");
 
     expect(
-      deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mock.calls.map(
-        ([input]) => input.groupKey
-      )
+      deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mock.calls.map(([input]) => input.groupKey)
     ).toEqual([
       "unresolved-owner-group",
       "independent-retry-group",
       expect.stringMatching(/^setup-/)
     ]);
     expect(result).toEqual(
-      expect.objectContaining({ outcome: "success", statusEmailOutcome: "sent" })
+      expect.objectContaining({
+        outcome: "success",
+        statusEmailOutcome: "sent"
+      })
     );
   });
 
@@ -1804,14 +1931,12 @@ describe("runSearchCheck email cadence", () => {
             isPublic: true,
             detectedPlatform: "FOREUP",
             providerFamilyKey: "FOREUP",
-            detectedBookingUrl:
-              "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+            detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
             automationEligibility: "BLOCKED",
             automationReason: "AUTOMATION_PROHIBITED",
             bookingMetadata: {
               scheduleId: 6123,
-              bookingBaseUrl:
-                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
             }
           }
         }
@@ -1841,10 +1966,14 @@ describe("runSearchCheck email cadence", () => {
             intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
             intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
             intelligenceConfidence: 0.95,
+            monitoringStatus: {
+              state: "FINAL_TECHNICAL",
+              nextAutomaticAttemptAt: null,
+              revalidationRequestedAt: null
+            },
             bookingMetadata: {
               scheduleId: 6123,
-              bookingBaseUrl:
-                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
             }
           }
         }
@@ -1989,8 +2118,7 @@ describe("runSearchCheck email cadence", () => {
             intelligenceConfidence: 0.95,
             bookingMetadata: {
               scheduleId: 6123,
-              bookingBaseUrl:
-                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
             }
           }
         }
@@ -2025,8 +2153,7 @@ describe("runSearchCheck email cadence", () => {
             intelligenceConfidence: 0.95,
             bookingMetadata: {
               scheduleId: 6123,
-              bookingBaseUrl:
-                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
             }
           }
         }
@@ -2072,8 +2199,7 @@ describe("runSearchCheck email cadence", () => {
             intelligenceConfidence: 0.95,
             bookingMetadata: {
               scheduleId: 6123,
-              bookingBaseUrl:
-                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
             }
           }
         }
@@ -2118,9 +2244,9 @@ describe("runSearchCheck email cadence", () => {
     expect(monitoringDiscoveryMocks.prepareSearchMonitoring).toHaveBeenCalledWith(
       unsupportedSearch
     );
-    expect(monitoringDiscoveryMocks.prepareSearchMonitoring.mock.invocationCallOrder[0]).toBeLessThan(
-      supportIncidentMocks.reportCourseSupportIssue.mock.invocationCallOrder[0]
-    );
+    expect(
+      monitoringDiscoveryMocks.prepareSearchMonitoring.mock.invocationCallOrder[0]
+    ).toBeLessThan(supportIncidentMocks.reportCourseSupportIssue.mock.invocationCallOrder[0]);
     expect(result.supportRetryNeeded).toBe(true);
   });
 
@@ -2199,22 +2325,19 @@ describe("runSearchCheck email cadence", () => {
             name: "Weekend Golf Course",
             detectedPlatform: "FOREUP",
             providerFamilyKey: "FOREUP",
-            detectedBookingUrl:
-              "https://foreupsoftware.com/index.php/booking/123#/teetimes",
+            detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/123#/teetimes",
             automationEligibility: "ALLOWED",
             automationReason: "NONE",
             policyNotes: null,
             bookingMetadata: {
               scheduleId: 123,
-              bookingBaseUrl:
-                "https://foreupsoftware.com/index.php/booking/123#/teetimes"
+              bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/123#/teetimes"
             },
             bookingWindowDaysAhead: 14,
             bookingReleaseTimeLocal: "05:00",
             bookingWindowSource: "PROVIDER_CONFIG",
             bookingWindowConfidence: 1,
-            bookingWindowEvidenceUrl:
-              "https://foreupsoftware.com/index.php/booking/123#/teetimes",
+            bookingWindowEvidenceUrl: "https://foreupsoftware.com/index.php/booking/123#/teetimes",
             bookingWindowCheckedAt: new Date("2026-07-10T12:00:00.000Z"),
             bookingWindowObservedAt: new Date("2026-07-10T12:00:00.000Z")
           }
@@ -2277,7 +2400,9 @@ describe("runSearchCheck email cadence", () => {
     expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledWith(
       expect.objectContaining({
         discoverBookingWindow: true,
-        metadata: expect.objectContaining({ bookingWindowEvidenceUrl: evidenceUrl })
+        metadata: expect.objectContaining({
+          bookingWindowEvidenceUrl: evidenceUrl
+        })
       })
     );
   });
@@ -2305,13 +2430,15 @@ describe("runSearchCheck email cadence", () => {
         }
       ]
     });
-    adapterMocks.fetchChronogolfSlots.mockResolvedValueOnce([{
-      sourceId: "blue-rock-2026-07-12-0800",
-      startsAt: "2026-07-12T08:00",
-      availableSpots: 4,
-      bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
-      bookableHoleCounts: [9, 18]
-    }]);
+    adapterMocks.fetchChronogolfSlots.mockResolvedValueOnce([
+      {
+        sourceId: "blue-rock-2026-07-12-0800",
+        startsAt: "2026-07-12T08:00",
+        availableSpots: 4,
+        bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
+        bookableHoleCounts: [9, 18]
+      }
+    ]);
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
 
@@ -2423,28 +2550,29 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("dispatches reusable GolfBack metadata to the public adapter", async () => {
-    const bookingBaseUrl =
-      "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";
+    const bookingBaseUrl = "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
-      preferences: [{
-        rank: 1,
-        course: {
-          ...search.preferences[0].course,
-          id: "windsor-parke",
-          name: "Windsor Parke Golf Club",
-          detectedPlatform: "CUSTOM",
-          detectedBookingUrl: bookingBaseUrl,
-          automationEligibility: "ALLOWED",
-          automationReason: "NONE",
-          policyNotes: "Public availability is exposed without login; booking stays on GolfBack.",
-          bookingMetadata: {
-            provider: "GOLFBACK",
-            courseId: "5a90fb0c-b928-43f0-9486-d5d43c03d25d",
-            bookingBaseUrl
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            id: "windsor-parke",
+            name: "Windsor Parke Golf Club",
+            detectedPlatform: "CUSTOM",
+            detectedBookingUrl: bookingBaseUrl,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: "Public availability is exposed without login; booking stays on GolfBack.",
+            bookingMetadata: {
+              provider: "GOLFBACK",
+              courseId: "5a90fb0c-b928-43f0-9486-d5d43c03d25d",
+              bookingBaseUrl
+            }
           }
         }
-      }]
+      ]
     });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
@@ -2460,7 +2588,10 @@ describe("runSearchCheck email cadence", () => {
         courseId: "windsor-parke",
         players: 2,
         timeZone: "America/New_York",
-        metadata: expect.objectContaining({ provider: "GOLFBACK", bookingBaseUrl })
+        metadata: expect.objectContaining({
+          provider: "GOLFBACK",
+          bookingBaseUrl
+        })
       })
     );
   });
@@ -2470,24 +2601,26 @@ describe("runSearchCheck email cadence", () => {
       "https://myffr.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
-      preferences: [{
-        rank: 1,
-        course: {
-          ...search.preferences[0].course,
-          id: "casa-linda",
-          name: "Casa Linda Oaks Golf Club",
-          detectedPlatform: "CUSTOM",
-          detectedBookingUrl: bookingBaseUrl,
-          automationEligibility: "ALLOWED",
-          automationReason: "NONE",
-          policyNotes: "Read-only signed-out search; booking remains on WebTrac.",
-          bookingMetadata: {
-            provider: "WEBTRAC",
-            courseCode: "25",
-            bookingBaseUrl
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            id: "casa-linda",
+            name: "Casa Linda Oaks Golf Club",
+            detectedPlatform: "CUSTOM",
+            detectedBookingUrl: bookingBaseUrl,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: "Read-only signed-out search; booking remains on WebTrac.",
+            bookingMetadata: {
+              provider: "WEBTRAC",
+              courseCode: "25",
+              bookingBaseUrl
+            }
           }
         }
-      }]
+      ]
     });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
@@ -2503,33 +2636,37 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({
         courseId: "casa-linda",
         players: 2,
-        metadata: expect.objectContaining({ provider: "WEBTRAC", courseCode: "25" })
+        metadata: expect.objectContaining({
+          provider: "WEBTRAC",
+          courseCode: "25"
+        })
       })
     );
   });
 
   it("dispatches reusable Club Caddie metadata to the anonymous public adapter", async () => {
-    const bookingBaseUrl =
-      "https://apimanager-cc28.clubcaddie.com/webapi/view/public-course/slots";
+    const bookingBaseUrl = "https://apimanager-cc28.clubcaddie.com/webapi/view/public-course/slots";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
-      preferences: [{
-        rank: 1,
-        course: {
-          ...search.preferences[0].course,
-          id: "ponemah",
-          name: "Ponemah Green Family Golf Center",
-          detectedPlatform: "CLUB_CADDIE",
-          detectedBookingUrl: bookingBaseUrl,
-          automationEligibility: "ALLOWED",
-          automationReason: "NONE",
-          policyNotes: "Read-only signed-out availability; booking remains on Club Caddie.",
-          bookingMetadata: {
-            provider: "CLUB_CADDIE",
-            bookingBaseUrl
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            id: "ponemah",
+            name: "Ponemah Green Family Golf Center",
+            detectedPlatform: "CLUB_CADDIE",
+            detectedBookingUrl: bookingBaseUrl,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: "Read-only signed-out availability; booking remains on Club Caddie.",
+            bookingMetadata: {
+              provider: "CLUB_CADDIE",
+              bookingBaseUrl
+            }
           }
         }
-      }]
+      ]
     });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);

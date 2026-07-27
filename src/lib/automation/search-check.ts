@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import type { CourseMonitoringState } from "@prisma/client";
+
 import {
   finishAutomationRun,
   getActiveSearchForAutomation,
@@ -20,9 +22,12 @@ import {
   type SearchCheckLease
 } from "@/lib/automation/db-service";
 import {
-  getBestProbeUrl,
-  shouldQueueBrowserProbe
-} from "@/lib/automation/browser-discovery";
+  FIRST_FAILURE_RETRY_MS,
+  getCourseMonitoringRetryAt,
+  recordCourseMonitoringFinalClassification,
+  recordCourseMonitoringSuccess
+} from "@/lib/automation/course-monitoring";
+import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import {
   classifyProviderFailure,
   resolveProviderCapability
@@ -35,11 +40,13 @@ import {
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
   getFreshLocalReaderTeeSheet,
   getLocalReaderCourseKey,
   queueLocalReaderJob
 } from "@/lib/local-reader/service";
+import { isLocalReaderCandidateUrl } from "@/lib/local-reader/course-key";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { prepareSearchMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import {
@@ -60,14 +67,8 @@ import type {
   BookingAccessMode,
   BookingMethod
 } from "@/lib/courses/intelligence";
-import {
-  getCourseLayoutCompatibility,
-  getCourseLayoutLabel
-} from "@/lib/courses/course-layout";
-import {
-  sendSearchStatusEmail,
-  sendTeeTimeAlert
-} from "@/lib/email/alerts";
+import { getCourseLayoutCompatibility, getCourseLayoutLabel } from "@/lib/courses/course-layout";
+import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
 import {
   drainSearchEmailDeliveryGroup,
   finalizeSearchEmailDeliveryGroup,
@@ -103,12 +104,7 @@ import {
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
 const FIRST_TIME_LOOKUP_CREATION_WINDOW_MS = 2 * 60 * 1000;
-const SHORT_SEARCH_RETRY_FAILURES = new Set([
-  "HTTP_5XX",
-  "TIMEOUT",
-  "NETWORK",
-  "UNKNOWN"
-]);
+const SHORT_SEARCH_RETRY_FAILURES = new Set(["HTTP_5XX", "TIMEOUT", "NETWORK", "UNKNOWN"]);
 
 type AutomationCourse = AutomationCourseProviderRead & {
   name: string;
@@ -132,6 +128,11 @@ type AutomationCourse = AutomationCourseProviderRead & {
   bookingWindowObservedAt: Date | null;
   layoutHoleCounts: number[];
   layoutHolesVerifiedAt: Date | null;
+  monitoringStatus: {
+    state: CourseMonitoringState;
+    nextAutomaticAttemptAt: Date | null;
+    revalidationRequestedAt: Date | null;
+  } | null;
 };
 
 export type SearchCheckCourseResult = SearchStatusCourseReport;
@@ -143,6 +144,7 @@ export type SearchCheckResult = {
   availableMatches: number;
   newlyAlertedMatches: number;
   supportRetryNeeded: boolean;
+  supportRetryAt: Date | null;
   statusEmailOutcome?: "sent" | "dry_run" | "skipped" | "covered_by_match_alert" | "failed";
 };
 
@@ -175,10 +177,11 @@ export async function runSearchCheck(
 
   try {
     const execution = existingLease
-      ? { acquired: true as const, value: await checkSearch(searchId, run.id, existingLease) }
-      : await runWithSearchCheckLease(searchId, (lease) =>
-          checkSearch(searchId, run.id, lease)
-        );
+      ? {
+          acquired: true as const,
+          value: await checkSearch(searchId, run.id, existingLease)
+        }
+      : await runWithSearchCheckLease(searchId, (lease) => checkSearch(searchId, run.id, lease));
     if (!execution.acquired) {
       const result: SearchCheckResult = {
         searchId,
@@ -186,7 +189,8 @@ export async function runSearchCheck(
         courseResults: [],
         availableMatches: 0,
         newlyAlertedMatches: 0,
-        supportRetryNeeded: false
+        supportRetryNeeded: false,
+        supportRetryAt: null
       };
       await finishAutomationRun(run.id, {
         outcome: "no_op",
@@ -232,7 +236,8 @@ async function checkSearch(
       courseResults: [],
       availableMatches: 0,
       newlyAlertedMatches: 0,
-      supportRetryNeeded: false
+      supportRetryNeeded: false,
+      supportRetryAt: null
     };
   }
   let search = loadedSearch;
@@ -290,127 +295,180 @@ async function checkSearch(
   await runProviderFamilyTasks(
     search.preferences,
     (preference) =>
-      resolveProviderCapability(preference.course as AutomationCourse)
-        .providerFamilyKey,
+      resolveProviderCapability(preference.course as AutomationCourse).providerFamilyKey,
     async (preference) => {
-    await maintainSearchCheckLease(lease);
-    const course = preference.course as AutomationCourse;
-    const customerBookingUrl = getCustomerBookingUrl(course);
-    const localReaderEligible =
-      getLocalReaderCourseKey(customerBookingUrl) !== null;
+      await maintainSearchCheckLease(lease);
+      const course = preference.course as AutomationCourse;
+      const customerBookingUrl = getCustomerBookingUrl(course);
+      const localReaderEligible = getLocalReaderCourseKey(customerBookingUrl) !== null;
+      const supportedAdapterAvailable = hasSupportedAdapter(course);
 
-    const monitoringGate = evaluateMonitoringGate(course);
-    const localReaderCanOverrideGate =
-      localReaderEligible &&
-      monitoringGate.disposition === "TECHNICAL_FINAL" &&
-      course.automationReason === "CAPTCHA_OR_QUEUE";
-    if (
-      monitoringGate.disposition !== "ACTIONABLE" &&
-      !localReaderCanOverrideGate
-    ) {
-      const outcome =
-        monitoringGate.disposition === "TECHNICAL_FINAL"
-          ? "BLOCKED_AUTH"
-          : monitoringGate.disposition === "MANUAL_FINAL"
-            ? "MANUAL_DIRECT"
-            : monitoringGate.disposition === "IDENTITY_FINAL"
-              ? "IDENTITY_FINAL"
-              : "IDENTITY_RECHECK";
-      const identityBlocked =
-        monitoringGate.disposition === "IDENTITY_FINAL" ||
-        monitoringGate.disposition === "IDENTITY_RECHECK";
-      const message = getFinalMonitoringMessage(course, monitoringGate.disposition);
-      await markMissingMatchesUnavailable({
-        searchId: search.id,
-        alertGeneration: search.alertGeneration,
-        checkLeaseToken: lease.token,
-        courseId: course.id,
-        date: searchWindow.date,
-        timeZone: course.timeZone,
-        confirmedMatches: []
-      });
-      await recordCourseProbeIfChanged({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        outcome,
-        message,
-        rawSummary: {
-          monitoringDisposition: monitoringGate.disposition,
-          automationReason: course.automationReason
-        }
-      });
-      if (monitoringGate.disposition !== "IDENTITY_RECHECK") {
-        await resolveCourseSupportIncident({
+      const monitoringGate = evaluateMonitoringGate(course);
+      const engineerApprovedTechnicalFinal = course.monitoringStatus?.state === "FINAL_TECHNICAL";
+      const technicalRevalidationRunning = course.monitoringStatus?.state === "REVALIDATING_FINAL";
+      const automatedTechnicalClassification =
+        monitoringGate.disposition === "TECHNICAL_FINAL" &&
+        !engineerApprovedTechnicalFinal &&
+        !technicalRevalidationRunning;
+      const localReaderCanOverrideGate =
+        localReaderEligible &&
+        monitoringGate.disposition === "TECHNICAL_FINAL" &&
+        course.automationReason === "CAPTCHA_OR_QUEUE";
+      if (
+        monitoringGate.disposition !== "ACTIONABLE" &&
+        !localReaderCanOverrideGate &&
+        !automatedTechnicalClassification &&
+        !technicalRevalidationRunning
+      ) {
+        const outcome =
+          monitoringGate.disposition === "TECHNICAL_FINAL"
+            ? "BLOCKED_AUTH"
+            : monitoringGate.disposition === "MANUAL_FINAL"
+              ? "MANUAL_DIRECT"
+              : monitoringGate.disposition === "IDENTITY_FINAL"
+                ? "IDENTITY_FINAL"
+                : "IDENTITY_RECHECK";
+        const identityBlocked =
+          monitoringGate.disposition === "IDENTITY_FINAL" ||
+          monitoringGate.disposition === "IDENTITY_RECHECK";
+        const message = getFinalMonitoringMessage(course, monitoringGate.disposition);
+        await markMissingMatchesUnavailable({
+          searchId: search.id,
+          alertGeneration: search.alertGeneration,
+          checkLeaseToken: lease.token,
           courseId: course.id,
-          resolution: "DIRECT_BOOKING_CLASSIFIED",
+          date: searchWindow.date,
+          timeZone: course.timeZone,
+          confirmedMatches: []
+        });
+        await recordCourseProbeIfChanged({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          outcome,
+          message,
+          rawSummary: {
+            monitoringDisposition: monitoringGate.disposition,
+            automationReason: course.automationReason
+          }
+        });
+        if (monitoringGate.disposition !== "IDENTITY_RECHECK") {
+          if (monitoringGate.disposition === "MANUAL_FINAL") {
+            await recordCourseMonitoringFinalClassification({
+              courseId: course.id,
+              state: "FINAL_MANUAL",
+              outcome: "MANUAL_DIRECT",
+              message,
+              runtimeVersion: getAutomationRuntimeVersion()
+            });
+          } else if (monitoringGate.disposition === "IDENTITY_FINAL") {
+            await recordCourseMonitoringFinalClassification({
+              courseId: course.id,
+              state: "FINAL_IDENTITY",
+              outcome: "IDENTITY_FINAL",
+              message,
+              runtimeVersion: getAutomationRuntimeVersion()
+            });
+          }
+          await resolveCourseSupportIncident({
+            courseId: course.id,
+            resolution: "DIRECT_BOOKING_CLASSIFIED",
+            message
+          });
+        }
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome,
+          availableMatches: 0,
+          message,
+          bookingUrl: identityBlocked ? undefined : getCustomerBookingUrl(course),
+          phone: identityBlocked ? undefined : (course.bookingPhone ?? course.phone ?? undefined),
+          bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
+          bookingAccess: identityBlocked ? undefined : getCourseBookingAccess(course),
+          automationReason: course.automationReason,
+          monitoringDisposition: monitoringGate.disposition
+        });
+        return;
+      }
+
+      if (
+        requestedLayoutHoles &&
+        course.layoutHolesVerifiedAt &&
+        getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
+          "incompatible"
+      ) {
+        const message = `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
+        await markMissingMatchesUnavailable({
+          searchId: search.id,
+          alertGeneration: search.alertGeneration,
+          checkLeaseToken: lease.token,
+          courseId: course.id,
+          date: searchWindow.date,
+          timeZone: course.timeZone,
+          confirmedMatches: []
+        });
+        await recordCourseProbeIfChanged({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          outcome: "NO_MATCH",
           message
         });
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "NO_MATCH",
+          availableMatches: 0,
+          message,
+          bookingUrl: getCustomerBookingUrl(course),
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
+          bookingAccess: getCourseBookingAccess(course)
+        });
+        return;
       }
-      courseResults.push({
-        courseId: course.id,
-        courseName: course.name,
-        timeZone: course.timeZone,
-        outcome,
-        availableMatches: 0,
-        message,
-        bookingUrl: identityBlocked ? undefined : getCustomerBookingUrl(course),
-        phone: identityBlocked
-          ? undefined
-          : course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: course.bookingMethod,
-        bookingAccessMode: course.bookingAccessMode,
-        bookingAccess: identityBlocked ? undefined : getCourseBookingAccess(course),
-        automationReason: course.automationReason,
-        monitoringDisposition: monitoringGate.disposition
-      });
-      return;
-    }
 
-    if (
-      requestedLayoutHoles &&
-      course.layoutHolesVerifiedAt &&
-      getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
-        "incompatible"
-    ) {
-      const message = `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
-      await markMissingMatchesUnavailable({
-        searchId: search.id,
-        alertGeneration: search.alertGeneration,
-        checkLeaseToken: lease.token,
-        courseId: course.id,
-        date: searchWindow.date,
-        timeZone: course.timeZone,
-        confirmedMatches: []
-      });
-      await recordCourseProbeIfChanged({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        outcome: "NO_MATCH",
-        message
-      });
-      courseResults.push({
-        courseId: course.id,
-        courseName: course.name,
-        timeZone: course.timeZone,
-        outcome: "NO_MATCH",
-        availableMatches: 0,
-        message,
-        bookingUrl: getCustomerBookingUrl(course),
-        phone: course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: course.bookingMethod,
-        bookingAccessMode: course.bookingAccessMode,
-        bookingAccess: getCourseBookingAccess(course)
-      });
-      return;
-    }
-
-    if (!hasSupportedAdapter(course) && !localReaderEligible) {
-      if (monitoringPreparationFailed || monitoringDeferredCourseIds.has(course.id)) {
-        monitoringRetryCourseIds.add(course.id);
-        const message =
-          "Official booking-source review is queued and will retry shortly before monitoring support is classified.";
+      if (!supportedAdapterAvailable && !localReaderEligible) {
+        if (monitoringPreparationFailed || monitoringDeferredCourseIds.has(course.id)) {
+          monitoringRetryCourseIds.add(course.id);
+          const message =
+            "Official booking-source review is queued and will retry shortly before monitoring support is classified.";
+          await recordCourseProbeIfChanged({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId,
+            outcome: "NEEDS_ADAPTER",
+            message,
+            rawSummary: {
+              nextAction: "official-source-discovery-retry"
+            }
+          });
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome: "NEEDS_ADAPTER",
+            availableMatches: 0,
+            message,
+            bookingUrl: getCustomerBookingUrl(course),
+            phone: course.bookingPhone ?? course.phone ?? undefined,
+            bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
+            bookingAccess: getCourseBookingAccess(course)
+          });
+          return;
+        }
+        const browserProbeUrl = getBestProbeUrl(course);
+        const browserProbeQueued = shouldQueueBrowserProbe(course);
+        const localReaderCandidate = isLocalReaderCandidateUrl(customerBookingUrl);
+        const message = browserProbeQueued
+          ? "Official booking surface inspected; no reusable public read-only monitoring connection was confirmed."
+          : "No public booking surface is currently available for automated monitoring.";
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
@@ -418,9 +476,27 @@ async function checkSearch(
           outcome: "NEEDS_ADAPTER",
           message,
           rawSummary: {
-            nextAction: "official-source-discovery-retry"
+            nextAction: "automation:adapter-remediation",
+            browserProbeUrl
           }
         });
+        const supportIssue = await reportCourseSupportIssue({
+          course,
+          searchId: search.id,
+          kind: localReaderCandidate ? "READER_CANDIDATE" : "NEEDS_ADAPTER",
+          message,
+          readPath: localReaderCandidate
+            ? "LOCAL_READER_ALLOWLIST"
+            : browserProbeQueued
+              ? "SIGNED_OUT_BROWSER_DISCOVERY"
+              : "OFFICIAL_LINK_VERIFICATION",
+          nextAction: localReaderCandidate
+            ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
+            : browserProbeQueued
+              ? `Build or extend a reusable public read-only adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
+              : "Autonomously classify the official booking method, find a public read-only retrieval path if one exists, and verify this search."
+        });
+        supportIssues.push({ courseId: course.id, ...supportIssue });
         courseResults.push({
           courseId: course.id,
           courseName: course.name,
@@ -432,244 +508,325 @@ async function checkSearch(
           phone: course.bookingPhone ?? course.phone ?? undefined,
           bookingMethod: course.bookingMethod,
           bookingAccessMode: course.bookingAccessMode,
-          bookingAccess: getCourseBookingAccess(course)
+          bookingAccess: getCourseBookingAccess(course),
+          supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
         });
         return;
       }
-      const browserProbeUrl = getBestProbeUrl(course);
-      const browserProbeQueued = shouldQueueBrowserProbe(course);
-      const message = browserProbeQueued
-        ? "Official booking surface inspected; no reusable public read-only monitoring connection was confirmed."
-        : "No public booking surface is currently available for automated monitoring.";
-      await recordCourseProbeIfChanged({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        outcome: "NEEDS_ADAPTER",
-        message,
-        rawSummary: {
-          nextAction: "automation:adapter-remediation",
-          browserProbeUrl
-        }
-      });
-      const supportIssue = await reportCourseSupportIssue({
-        course,
-        searchId: search.id,
-        kind: "NEEDS_ADAPTER",
-        message,
-        nextAction: browserProbeQueued
-          ? `Build or extend a reusable public read-only adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
-          : "Autonomously classify the official booking method, find a public read-only retrieval path if one exists, and verify this search."
-      });
-      supportIssues.push({ courseId: course.id, ...supportIssue });
-      courseResults.push({
-        courseId: course.id,
-        courseName: course.name,
-        timeZone: course.timeZone,
-        outcome: "NEEDS_ADAPTER",
-        availableMatches: 0,
-        message,
-        bookingUrl: getCustomerBookingUrl(course),
-        phone: course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: course.bookingMethod,
-        bookingAccessMode: course.bookingAccessMode,
-        bookingAccess: getCourseBookingAccess(course),
-        supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
-      });
-      return;
-    }
 
-    const checkStartedAt = new Date();
-    const storedBookingWindow = getBookingWindowForTargetDate(search.date, course);
-    const refreshBookingWindow =
-      shouldRefreshBookingWindow(course.bookingWindowObservedAt, checkStartedAt) &&
-      shouldRetryBookingWindowDiscovery(course.bookingWindowCheckedAt, checkStartedAt);
-    if (
-      storedBookingWindow &&
-      storedBookingWindow.opensAt > checkStartedAt &&
-      !refreshBookingWindow
-    ) {
-      await recordBookingWindowWaitingProbe({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        targetDate: searchWindow.date,
-        bookingWindow: storedBookingWindow
-      });
-      courseResults.push(buildBookingWindowCourseReport(course, storedBookingWindow));
-      return;
-    }
-
-    let providerRequestStarted = false;
-    try {
-      const localTeeSheet = localReaderCanOverrideGate
-        ? await getFreshLocalReaderTeeSheet({
-            searchId: search.id,
-            courseId: course.id,
-            scheduleVersion: search.scheduleVersion,
-            targetDate: searchWindow.date,
-            players: search.players
-          })
-        : null;
-      let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
-      let providerExecutionLabel = "LOCAL_BROWSER_READER";
-      if (!teeSheet && !hasSupportedAdapter(course)) {
-        throw new Error("No reusable server adapter is available for this course.");
-      }
-      if (!teeSheet) {
-        const providerExecution = await runWithProviderRequestLease(
-          resolveProviderCapability(course).providerFamilyKey,
-          () => {
-            providerRequestStarted = true;
-            return fetchCourseTeeSheet(
-              course,
-              search.date,
-              search.players,
-              refreshBookingWindow
-            );
-          }
-        );
-        if (!providerExecution.acquired) {
-          monitoringRetryCourseIds.add(course.id);
-          courseResults.push({
-            courseId: course.id,
-            courseName: course.name,
-            timeZone: course.timeZone,
-            outcome: "FETCH_FAILED",
-            availableMatches: 0,
-            message:
-              "This provider check was deferred by the global concurrency guard and will retry.",
-            bookingUrl: getCustomerBookingUrl(course),
-            phone: course.bookingPhone ?? course.phone ?? undefined,
-            bookingMethod: course.bookingMethod,
-            bookingAccessMode: course.bookingAccessMode,
-            bookingAccess: getCourseBookingAccess(course)
-          });
-          return;
-        }
-        teeSheet = providerExecution.value;
-        providerExecutionLabel = "RUNNABLE_PROVIDER_CHECK";
-      }
-      await maintainSearchCheckLease(lease);
-      const rawSlots = teeSheet.slots;
-      let bookingWindow = storedBookingWindow;
-      if (teeSheet.bookingWindowEvidence) {
-        await recordCourseBookingWindowEvidence({
-          courseId: course.id,
-          evidence: teeSheet.bookingWindowEvidence,
-          observedAt: checkStartedAt
-        });
-        bookingWindow = getBookingWindowFromEvidence(
-          search.date,
-          course.timeZone,
-          teeSheet.bookingWindowEvidence
-        );
-      } else if (refreshBookingWindow) {
-        await markCourseBookingWindowChecked(course.id, checkStartedAt);
-      }
-      if (bookingWindow && bookingWindow.opensAt > checkStartedAt) {
+      const checkStartedAt = new Date();
+      const storedBookingWindow = getBookingWindowForTargetDate(search.date, course);
+      const refreshBookingWindow =
+        shouldRefreshBookingWindow(course.bookingWindowObservedAt, checkStartedAt) &&
+        shouldRetryBookingWindowDiscovery(course.bookingWindowCheckedAt, checkStartedAt);
+      if (
+        storedBookingWindow &&
+        storedBookingWindow.opensAt > checkStartedAt &&
+        !refreshBookingWindow
+      ) {
         await recordBookingWindowWaitingProbe({
           searchId: search.id,
           courseId: course.id,
           automationRunId,
           targetDate: searchWindow.date,
-        bookingWindow,
-        providerExecution: true
+          bookingWindow: storedBookingWindow
         });
-        await resolveCourseSupportIncident({
-          courseId: course.id,
-          resolution: "MONITORING_RESTORED",
-          message: `${course.name} returned a verified booking-window release for ${searchWindow.date}.`
-        });
-        courseResults.push(buildBookingWindowCourseReport(course, bookingWindow));
+        courseResults.push(buildBookingWindowCourseReport(course, storedBookingWindow));
         return;
       }
-      const safeRawSlots = rawSlots.flatMap((slot) => {
-        const bookingUrl = getSafeOfficialBookingUrl(slot.bookingUrl);
-        return bookingUrl ? [{ ...slot, bookingUrl }] : [];
-      });
-      const unsafeBookingUrlCount = rawSlots.length - safeRawSlots.length;
-      const availability = summarizeSearchStatusAvailability(searchWindow, safeRawSlots);
-      const bookableHoleCounts = summarizeBookableHoleCounts(safeRawSlots);
-      const pricing = summarizeCourseSlotPrices(safeRawSlots);
-      await recordCourseBookingFacts({
-        courseId: course.id,
-        pricing,
-        bookableHoleCounts,
-        observedAt: checkStartedAt
-      });
-      observedBookingFactsByCourse.set(course.id, {
-        pricing,
-        bookableHoleCounts,
-        observedAt: checkStartedAt
-      });
-      const currentMatches = rankMatches(
-        searchWindow,
-        dedupeMatches(filterSlotsForSearch(searchWindow, safeRawSlots), [])
-      );
-      const normalizedCurrentMatches = currentMatches.map((match) => ({
-        match,
-        startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone)
-      }));
-      const persistedMatchStates: Array<{
-        matchId?: string;
-        isPending: boolean;
-      }> = [];
 
-      for (const { match, startsAt } of normalizedCurrentMatches) {
-        const persistedMatch = await recordTeeTimeMatch({
+      let providerRequestStarted = false;
+      try {
+        const localReaderShouldRun =
+          localReaderEligible && (localReaderCanOverrideGate || !supportedAdapterAvailable);
+        const localTeeSheet = localReaderShouldRun
+          ? await getFreshLocalReaderTeeSheet({
+              searchId: search.id,
+              courseId: course.id,
+              scheduleVersion: search.scheduleVersion,
+              targetDate: searchWindow.date,
+              players: search.players
+            })
+          : null;
+        let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
+        let providerExecutionLabel = "LOCAL_BROWSER_READER";
+        if (!teeSheet && !supportedAdapterAvailable) {
+          throw new Error("No reusable server adapter is available for this course.");
+        }
+        if (!teeSheet) {
+          const providerExecution = await runWithProviderRequestLease(
+            resolveProviderCapability(course).providerFamilyKey,
+            () => {
+              providerRequestStarted = true;
+              return fetchCourseTeeSheet(course, search.date, search.players, refreshBookingWindow);
+            }
+          );
+          if (!providerExecution.acquired) {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push({
+              courseId: course.id,
+              courseName: course.name,
+              timeZone: course.timeZone,
+              outcome: "FETCH_FAILED",
+              availableMatches: 0,
+              message:
+                "This provider check was deferred by the global concurrency guard and will retry.",
+              bookingUrl: getCustomerBookingUrl(course),
+              phone: course.bookingPhone ?? course.phone ?? undefined,
+              bookingMethod: course.bookingMethod,
+              bookingAccessMode: course.bookingAccessMode,
+              bookingAccess: getCourseBookingAccess(course)
+            });
+            return;
+          }
+          teeSheet = providerExecution.value;
+          providerExecutionLabel = "RUNNABLE_PROVIDER_CHECK";
+        }
+        await maintainSearchCheckLease(lease);
+        const rawSlots = teeSheet.slots;
+        let bookingWindow = storedBookingWindow;
+        if (teeSheet.bookingWindowEvidence) {
+          await recordCourseBookingWindowEvidence({
+            courseId: course.id,
+            evidence: teeSheet.bookingWindowEvidence,
+            observedAt: checkStartedAt
+          });
+          bookingWindow = getBookingWindowFromEvidence(
+            search.date,
+            course.timeZone,
+            teeSheet.bookingWindowEvidence
+          );
+        } else if (refreshBookingWindow) {
+          await markCourseBookingWindowChecked(course.id, checkStartedAt);
+        }
+        if (bookingWindow && bookingWindow.opensAt > checkStartedAt) {
+          await recordBookingWindowWaitingProbe({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId,
+            targetDate: searchWindow.date,
+            bookingWindow,
+            providerExecution: true
+          });
+          await resolveCourseSupportIncident({
+            courseId: course.id,
+            resolution: "MONITORING_RESTORED",
+            message: `${course.name} returned a verified booking-window release for ${searchWindow.date}.`
+          });
+          courseResults.push(buildBookingWindowCourseReport(course, bookingWindow));
+          return;
+        }
+        const safeRawSlots = rawSlots.flatMap((slot) => {
+          const bookingUrl = getSafeOfficialBookingUrl(slot.bookingUrl);
+          return bookingUrl ? [{ ...slot, bookingUrl }] : [];
+        });
+        const unsafeBookingUrlCount = rawSlots.length - safeRawSlots.length;
+        const availability = summarizeSearchStatusAvailability(searchWindow, safeRawSlots);
+        const bookableHoleCounts = summarizeBookableHoleCounts(safeRawSlots);
+        const pricing = summarizeCourseSlotPrices(safeRawSlots);
+        await recordCourseBookingFacts({
+          courseId: course.id,
+          pricing,
+          bookableHoleCounts,
+          observedAt: checkStartedAt
+        });
+        observedBookingFactsByCourse.set(course.id, {
+          pricing,
+          bookableHoleCounts,
+          observedAt: checkStartedAt
+        });
+        const currentMatches = rankMatches(
+          searchWindow,
+          dedupeMatches(filterSlotsForSearch(searchWindow, safeRawSlots), [])
+        );
+        const normalizedCurrentMatches = currentMatches.map((match) => ({
+          match,
+          startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone)
+        }));
+        const persistedMatchStates: Array<{
+          matchId?: string;
+          isPending: boolean;
+        }> = [];
+
+        for (const { match, startsAt } of normalizedCurrentMatches) {
+          const persistedMatch = await recordTeeTimeMatch({
+            searchId: search.id,
+            courseId: course.id,
+            sourceId: match.sourceId,
+            startsAt,
+            availableSpots: match.availableSpots,
+            bookingUrl: match.bookingUrl,
+            priceCents: match.priceCents,
+            holes: match.holes,
+            evidenceUrl: match.evidenceUrl
+          });
+          persistedMatchStates.push({
+            matchId: persistedMatch?.id,
+            isPending: persistedMatch?.alertStatus === "PENDING"
+          });
+        }
+
+        await markMissingMatchesUnavailable({
+          searchId: search.id,
+          alertGeneration: search.alertGeneration,
+          checkLeaseToken: lease.token,
+          courseId: course.id,
+          date: searchWindow.date,
+          timeZone: course.timeZone,
+          confirmedMatches: normalizedCurrentMatches.map(({ match, startsAt }) => ({
+            sourceId: match.sourceId,
+            startsAt
+          }))
+        });
+
+        if (unsafeBookingUrlCount > 0) {
+          const unsafeBookingMessage =
+            "The provider returned a non-direct or unsafe booking destination; unsafe rows were excluded.";
+          const supportIssue = await reportCourseSupportIssue({
+            course,
+            searchId: search.id,
+            kind: "FETCH_FAILED",
+            message: unsafeBookingMessage,
+            readPath: "ADAPTER_OUTPUT_VALIDATION",
+            error: new Error(unsafeBookingMessage),
+            nextAction:
+              "Verify the provider adapter returns only direct public booking destinations."
+          });
+          supportIssues.push({ courseId: course.id, ...supportIssue });
+          if (safeRawSlots.length === 0) {
+            await recordCourseProbe({
+              searchId: search.id,
+              courseId: course.id,
+              automationRunId,
+              outcome: "FETCH_FAILED",
+              message: unsafeBookingMessage,
+              rawSummary: {
+                providerExecution: providerExecutionLabel,
+                unsafeBookingUrlCount
+              }
+            });
+            courseResults.push({
+              courseId: course.id,
+              courseName: course.name,
+              timeZone: course.timeZone,
+              outcome: "FETCH_FAILED",
+              availableMatches: 0,
+              message: unsafeBookingMessage,
+              bookingUrl: getCustomerBookingUrl(course),
+              phone: course.bookingPhone ?? course.phone ?? undefined,
+              bookingMethod: course.bookingMethod,
+              bookingAccessMode: course.bookingAccessMode,
+              bookingAccess: getCourseBookingAccess(course)
+            });
+            return;
+          }
+        }
+
+        const outcome = currentMatches.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+        await recordCourseProbe({
           searchId: search.id,
           courseId: course.id,
-          sourceId: match.sourceId,
-          startsAt,
-          availableSpots: match.availableSpots,
-          bookingUrl: match.bookingUrl,
-          priceCents: match.priceCents,
-          holes: match.holes,
-          evidenceUrl: match.evidenceUrl
+          automationRunId,
+          outcome,
+          message:
+            currentMatches.length > 0
+              ? `Confirmed ${currentMatches.length} qualifying tee times.`
+              : "No qualifying tee times in the requested window",
+          rawSummary: {
+            providerExecution: providerExecutionLabel,
+            ...availability,
+            ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
+            ...(pricing ? { pricing } : {}),
+            ...(unsafeBookingUrlCount > 0 ? { unsafeBookingUrlCount } : {})
+          }
         });
-        persistedMatchStates.push({
-          matchId: persistedMatch?.id,
-          isPending: persistedMatch?.alertStatus === "PENDING"
+        if (unsafeBookingUrlCount === 0) {
+          await recordCourseMonitoringSuccess({
+            courseId: course.id,
+            outcome,
+            message:
+              currentMatches.length > 0
+                ? "Fresh public monitoring found matching availability."
+                : "Fresh public monitoring completed with no matching availability.",
+            runtimeVersion: getAutomationRuntimeVersion()
+          });
+          await resolveCourseSupportIncident({
+            courseId: course.id,
+            resolution: "MONITORING_RESTORED",
+            message: `${course.name} completed a public read-only tee-sheet check with outcome ${outcome}.`
+          });
+        }
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome,
+          availableMatches: currentMatches.length,
+          bookingUrl: safeRawSlots[0]?.bookingUrl ?? getCustomerBookingUrl(course),
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: safeRawSlots[0]?.bookingUrl ? "PUBLIC_ONLINE" : course.bookingMethod,
+          bookingAccessMode: safeRawSlots[0]?.bookingUrl
+            ? "PUBLIC_SIGNED_OUT"
+            : course.bookingAccessMode,
+          bookingAccess: safeRawSlots[0]?.bookingUrl
+            ? "BOOKING_PAGE"
+            : getCourseBookingAccess(course),
+          availability,
+          matchingTimes: currentMatches.map((match, index) => ({
+            ...(persistedMatchStates[index]?.matchId
+              ? { matchId: persistedMatchStates[index].matchId }
+              : {}),
+            startsAt: match.startsAt,
+            availableSpots: match.availableSpots,
+            priceCents: match.priceCents,
+            holes: match.holes,
+            bookableHoleCounts: match.bookableHoleCounts,
+            isNew: persistedMatchStates[index]?.isPending === true
+          }))
         });
-      }
-
-      await markMissingMatchesUnavailable({
-        searchId: search.id,
-        alertGeneration: search.alertGeneration,
-        checkLeaseToken: lease.token,
-        courseId: course.id,
-        date: searchWindow.date,
-        timeZone: course.timeZone,
-        confirmedMatches: normalizedCurrentMatches.map(({ match, startsAt }) => ({
-          sourceId: match.sourceId,
-          startsAt
-        }))
-      });
-
-      if (unsafeBookingUrlCount > 0) {
-        const unsafeBookingMessage =
-          "The provider returned a non-direct or unsafe booking destination; unsafe rows were excluded.";
-        const supportIssue = await reportCourseSupportIssue({
-          course,
-          searchId: search.id,
-          kind: "FETCH_FAILED",
-          message: unsafeBookingMessage,
-          error: new Error(unsafeBookingMessage),
-          nextAction:
-            "Verify the provider adapter returns only direct public booking destinations."
-        });
-        supportIssues.push({ courseId: course.id, ...supportIssue });
-        if (safeRawSlots.length === 0) {
+      } catch (error) {
+        await maintainSearchCheckLease(lease);
+        const message = error instanceof Error ? error.message : "Unknown adapter error";
+        const providerFailure = classifyProviderFailure({ error });
+        const localReaderFallbackAllowed =
+          localReaderEligible &&
+          (localReaderCanOverrideGate ||
+            !supportedAdapterAvailable ||
+            providerFailure.failureClass === "CHALLENGE");
+        const localReaderJob =
+          customerBookingUrl && localReaderFallbackAllowed
+            ? await queueLocalReaderJob({
+                searchId: search.id,
+                courseId: course.id,
+                scheduleVersion: search.scheduleVersion,
+                targetDate: searchWindow.date,
+                players: search.players,
+                bookingUrl: customerBookingUrl
+              })
+            : null;
+        if (localReaderJob) {
+          monitoringRetryCourseIds.add(course.id);
+          const waitingMessage =
+            "Waiting for the local public-page reader to complete this tee-time check.";
+          const supportIssue = await reportCourseSupportIssue({
+            course,
+            searchId: search.id,
+            kind: "READER_CANDIDATE",
+            message: waitingMessage,
+            error,
+            readPath: "LOCAL_READER_ALLOWLIST",
+            nextAction:
+              "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
+          });
+          supportIssues.push({ courseId: course.id, ...supportIssue });
           await recordCourseProbe({
             searchId: search.id,
             courseId: course.id,
             automationRunId,
             outcome: "FETCH_FAILED",
-            message: unsafeBookingMessage,
+            message: waitingMessage,
             rawSummary: {
-              providerExecution: providerExecutionLabel,
-              unsafeBookingUrlCount
+              providerExecution: "LOCAL_BROWSER_READER_PENDING"
             }
           });
           courseResults.push({
@@ -678,156 +835,62 @@ async function checkSearch(
             timeZone: course.timeZone,
             outcome: "FETCH_FAILED",
             availableMatches: 0,
-            message: unsafeBookingMessage,
+            message: waitingMessage,
             bookingUrl: getCustomerBookingUrl(course),
             phone: course.bookingPhone ?? course.phone ?? undefined,
             bookingMethod: course.bookingMethod,
             bookingAccessMode: course.bookingAccessMode,
-            bookingAccess: getCourseBookingAccess(course)
+            bookingAccess: getCourseBookingAccess(course),
+            supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
           });
           return;
         }
-      }
-
-      const outcome = currentMatches.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
-      await recordCourseProbe({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        outcome,
-        message:
-          currentMatches.length > 0
-            ? `Confirmed ${currentMatches.length} qualifying tee times.`
-            : "No qualifying tee times in the requested window",
-        rawSummary: {
-          providerExecution: providerExecutionLabel,
-          ...availability,
-          ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
-          ...(pricing ? { pricing } : {}),
-          ...(unsafeBookingUrlCount > 0 ? { unsafeBookingUrlCount } : {})
+        if (SHORT_SEARCH_RETRY_FAILURES.has(providerFailure.failureClass)) {
+          monitoringRetryCourseIds.add(course.id);
         }
-      });
-      if (unsafeBookingUrlCount === 0) {
-        await resolveCourseSupportIncident({
-          courseId: course.id,
-          resolution: "MONITORING_RESTORED",
-          message: `${course.name} completed a public read-only tee-sheet check with outcome ${outcome}.`
-        });
-      }
-      courseResults.push({
-        courseId: course.id,
-        courseName: course.name,
-        timeZone: course.timeZone,
-        outcome,
-        availableMatches: currentMatches.length,
-        bookingUrl:
-          safeRawSlots[0]?.bookingUrl ?? getCustomerBookingUrl(course),
-        phone: course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: safeRawSlots[0]?.bookingUrl
-          ? "PUBLIC_ONLINE"
-          : course.bookingMethod,
-        bookingAccessMode: safeRawSlots[0]?.bookingUrl
-          ? "PUBLIC_SIGNED_OUT"
-          : course.bookingAccessMode,
-        bookingAccess: safeRawSlots[0]?.bookingUrl
-          ? "BOOKING_PAGE"
-          : getCourseBookingAccess(course),
-        availability,
-        matchingTimes: currentMatches.map((match, index) => ({
-          ...(persistedMatchStates[index]?.matchId
-            ? { matchId: persistedMatchStates[index].matchId }
-            : {}),
-          startsAt: match.startsAt,
-          availableSpots: match.availableSpots,
-          priceCents: match.priceCents,
-          holes: match.holes,
-          bookableHoleCounts: match.bookableHoleCounts,
-          isNew: persistedMatchStates[index]?.isPending === true
-        }))
-      });
-    } catch (error) {
-      await maintainSearchCheckLease(lease);
-      const message = error instanceof Error ? error.message : "Unknown adapter error";
-      const providerFailure = classifyProviderFailure({ error });
-      const localReaderFallbackAllowed =
-        localReaderEligible &&
-        (localReaderCanOverrideGate || providerFailure.failureClass === "CHALLENGE");
-      const localReaderJob = customerBookingUrl && localReaderFallbackAllowed
-        ? await queueLocalReaderJob({
-            searchId: search.id,
-            courseId: course.id,
-            scheduleVersion: search.scheduleVersion,
-            targetDate: searchWindow.date,
-            players: search.players,
-            bookingUrl: customerBookingUrl
-          })
-        : null;
-      if (localReaderJob) {
-        monitoringRetryCourseIds.add(course.id);
-        const waitingMessage =
-          "Waiting for the local public-page reader to complete this tee-time check.";
         await recordCourseProbe({
           searchId: search.id,
           courseId: course.id,
           automationRunId,
           outcome: "FETCH_FAILED",
-          message: waitingMessage,
-          rawSummary: {
-            providerExecution: "LOCAL_BROWSER_READER_PENDING"
-          }
+          message,
+          rawSummary: providerRequestStarted
+            ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
+            : undefined
         });
+        const supportIssue = await reportCourseSupportIssue({
+          course,
+          searchId: search.id,
+          kind:
+            localReaderEligible && !supportedAdapterAvailable ? "READER_CANDIDATE" : "FETCH_FAILED",
+          message,
+          error,
+          readPath: providerRequestStarted
+            ? "TYPED_PROVIDER_ADAPTER"
+            : localReaderCanOverrideGate
+              ? "LOCAL_READER"
+              : "PUBLIC_PROVIDER_PRECHECK",
+          nextAction:
+            localReaderEligible && !supportedAdapterAvailable
+              ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
+              : "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
+        });
+        supportIssues.push({ courseId: course.id, ...supportIssue });
         courseResults.push({
           courseId: course.id,
           courseName: course.name,
           timeZone: course.timeZone,
           outcome: "FETCH_FAILED",
           availableMatches: 0,
-          message: waitingMessage,
+          message,
           bookingUrl: getCustomerBookingUrl(course),
           phone: course.bookingPhone ?? course.phone ?? undefined,
           bookingMethod: course.bookingMethod,
           bookingAccessMode: course.bookingAccessMode,
-          bookingAccess: getCourseBookingAccess(course)
+          bookingAccess: getCourseBookingAccess(course),
+          supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
         });
-        return;
       }
-      if (SHORT_SEARCH_RETRY_FAILURES.has(providerFailure.failureClass)) {
-        monitoringRetryCourseIds.add(course.id);
-      }
-      await recordCourseProbe({
-        searchId: search.id,
-        courseId: course.id,
-        automationRunId,
-        outcome: "FETCH_FAILED",
-        message,
-        rawSummary: providerRequestStarted
-          ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
-          : undefined
-      });
-      const supportIssue = await reportCourseSupportIssue({
-        course,
-        searchId: search.id,
-        kind: "FETCH_FAILED",
-        message,
-        error,
-        nextAction: "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
-      });
-      supportIssues.push({ courseId: course.id, ...supportIssue });
-      courseResults.push({
-        courseId: course.id,
-        courseName: course.name,
-        timeZone: course.timeZone,
-        outcome: "FETCH_FAILED",
-        availableMatches: 0,
-        message,
-        bookingUrl: getCustomerBookingUrl(course),
-        phone: course.bookingPhone ?? course.phone ?? undefined,
-        bookingMethod: course.bookingMethod,
-        bookingAccessMode: course.bookingAccessMode,
-        bookingAccess: getCourseBookingAccess(course),
-        supportStatus: supportIssue.ownerAlerted ? "TEAM_ALERTED" : "PENDING_ALERT"
-      });
-    }
     }
   );
 
@@ -847,35 +910,28 @@ async function checkSearch(
       return [
         preference.course.id,
         {
-        rank: preference.rank,
-        distanceMeters:
-          preference.distanceMetersAtSelection ?? undefined,
-        courseAddress: preference.course.address ?? undefined,
-        isPublic: preference.course.isPublic,
-        rating: preference.course.rating ?? undefined,
-        ratingObservedAt:
-          preference.course.ratingObservedAt?.toISOString(),
-        layoutHoleCounts: preference.course.layoutHoleCounts,
-        layoutHolesVerifiedAt:
-          preference.course.layoutHolesVerifiedAt?.toISOString(),
-        priceEstimate: observedFacts?.pricing ?? storedPriceEstimate,
-        bookableHoleSummary:
-          observedFacts && observedFacts.bookableHoleCounts.length > 0
-            ? {
-                holeCounts: observedFacts.bookableHoleCounts,
-                observedAt: observedFacts.observedAt.toISOString()
-              }
-            : storedHoleSummary,
-        courseGuideUrl:
-          preference.course.profile &&
-          ["PUBLISHED", "STALE"].includes(preference.course.profile.status)
-            ? `/courses/${preference.course.profile.canonicalSlug}`
-            : undefined,
-        firstTimeLookup:
-          isFirstTimeCourseLookup(
-            search.createdAt,
-            preference.course.createdAt
-          )
+          rank: preference.rank,
+          distanceMeters: preference.distanceMetersAtSelection ?? undefined,
+          courseAddress: preference.course.address ?? undefined,
+          isPublic: preference.course.isPublic,
+          rating: preference.course.rating ?? undefined,
+          ratingObservedAt: preference.course.ratingObservedAt?.toISOString(),
+          layoutHoleCounts: preference.course.layoutHoleCounts,
+          layoutHolesVerifiedAt: preference.course.layoutHolesVerifiedAt?.toISOString(),
+          priceEstimate: observedFacts?.pricing ?? storedPriceEstimate,
+          bookableHoleSummary:
+            observedFacts && observedFacts.bookableHoleCounts.length > 0
+              ? {
+                  holeCounts: observedFacts.bookableHoleCounts,
+                  observedAt: observedFacts.observedAt.toISOString()
+                }
+              : storedHoleSummary,
+          courseGuideUrl:
+            preference.course.profile &&
+            ["PUBLISHED", "STALE"].includes(preference.course.profile.status)
+              ? `/courses/${preference.course.profile.canonicalSlug}`
+              : undefined,
+          firstTimeLookup: isFirstTimeCourseLookup(search.createdAt, preference.course.createdAt)
         }
       ] as const;
     })
@@ -891,10 +947,8 @@ async function checkSearch(
     courseResult.layoutHoleCounts = context?.layoutHoleCounts;
     courseResult.layoutHolesVerifiedAt = context?.layoutHolesVerifiedAt;
     courseResult.priceEstimate = context?.priceEstimate;
-    courseResult.bookableHoleCounts =
-      context?.bookableHoleSummary.holeCounts;
-    courseResult.bookableHoleCountsObservedAt =
-      context?.bookableHoleSummary.observedAt;
+    courseResult.bookableHoleCounts = context?.bookableHoleSummary.holeCounts;
+    courseResult.bookableHoleCountsObservedAt = context?.bookableHoleSummary.observedAt;
     courseResult.courseGuideUrl = context?.courseGuideUrl;
     courseResult.firstTimeLookup = context?.firstTimeLookup;
     courseResult.factLine = buildCourseFactLine(courseResult);
@@ -923,9 +977,18 @@ async function checkSearch(
       }
     }
   }
+  const persistedSupportRetryAt = await getCourseMonitoringRetryAt(
+    supportIssues.map((issue) => issue.courseId)
+  );
   const supportRetryNeeded =
     monitoringRetryCourseIds.size > 0 ||
-    supportIssues.some((issue) => issue.status === "UNRECORDED");
+    supportIssues.some((issue) => issue.status === "UNRECORDED") ||
+    persistedSupportRetryAt !== null;
+  const supportRetryAt =
+    [
+      ...(persistedSupportRetryAt ? [persistedSupportRetryAt] : []),
+      ...(monitoringRetryCourseIds.size > 0 ? [new Date(Date.now() + FIRST_FAILURE_RETRY_MS)] : [])
+    ].sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
 
   await maintainSearchCheckLease(lease);
   const checkedAt = new Date();
@@ -941,8 +1004,7 @@ async function checkSearch(
     assertCurrent: () => maintainSearchCheckLease(lease)
   });
   const retriedMatchCoveredDaily =
-    statusKindBeforeRetry === "daily" &&
-    retriedDeliveries.ownerSentMatchCount > 0;
+    statusKindBeforeRetry === "daily" && retriedDeliveries.ownerSentMatchCount > 0;
   if (retriedMatchCoveredDaily) {
     const updated = await markSearchStatusEmailSent({
       searchId: search.id,
@@ -960,10 +1022,7 @@ async function checkSearch(
     searchId: search.id,
     alertGeneration: search.alertGeneration
   });
-  if (
-    retriedMatchCoveredDaily &&
-    pendingStatusReplacement?.kind === "DAILY"
-  ) {
+  if (retriedMatchCoveredDaily && pendingStatusReplacement?.kind === "DAILY") {
     const satisfied = await satisfyPendingDailyStatusReplacementWithMatch({
       searchId: search.id,
       alertGeneration: search.alertGeneration,
@@ -982,13 +1041,10 @@ async function checkSearch(
     ? pendingStatusReplacement.kind === "SETUP"
       ? "setup"
       : "daily"
-    : getSearchStatusEmailKind(
-        search.statusEmailSentAt,
-        checkedAt,
-        search.userTimeZone
-      );
-  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
-    retriedMatchCoveredDaily ? "covered_by_match_alert" : "skipped";
+    : getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone);
+  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = retriedMatchCoveredDaily
+    ? "covered_by_match_alert"
+    : "skipped";
 
   if (pendingStatusReplacement) {
     try {
@@ -996,10 +1052,7 @@ async function checkSearch(
         searchId,
         getCurrentMatchIds(courseResults)
       );
-      const coveredPendingMatchIds = getCoveredPendingMatchIds(
-        pendingMatches,
-        courseResults
-      );
+      const coveredPendingMatchIds = getCoveredPendingMatchIds(pendingMatches, courseResults);
       const coveredMatchIds = coveredPendingMatchIds;
       const coveredPendingMatchIdSet = new Set(coveredPendingMatchIds);
       statusEmailOutcome = await deliverSearchStatusReport({
@@ -1037,10 +1090,7 @@ async function checkSearch(
         searchId,
         getCurrentMatchIds(courseResults)
       );
-      const coveredPendingMatchIds = getCoveredPendingMatchIds(
-        setupPendingMatches,
-        courseResults
-      );
+      const coveredPendingMatchIds = getCoveredPendingMatchIds(setupPendingMatches, courseResults);
       const coveredPendingMatchIdSet = new Set(coveredPendingMatchIds);
       statusEmailOutcome = await deliverSearchStatusReport({
         search,
@@ -1114,6 +1164,7 @@ async function checkSearch(
     availableMatches: courseResults.reduce((total, course) => total + course.availableMatches, 0),
     newlyAlertedMatches,
     supportRetryNeeded,
+    supportRetryAt,
     statusEmailOutcome
   };
 }
@@ -1181,12 +1232,7 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
         checkLeaseToken: input.lease.token,
         kind: group.kind,
         groupKey: group.groupKey,
-        send: async ({
-          recipient,
-          idempotencyKey,
-          payload,
-          assertCurrentDelivery
-        }) => {
+        send: async ({ recipient, idempotencyKey, payload, assertCurrentDelivery }) => {
           await input.assertCurrent();
           if (group.kind === "MATCH") {
             const alert = await hydrateMatchAlertPayload({
@@ -1229,8 +1275,7 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
         groupKey: group.groupKey
       });
       const ownerFinalized =
-        finalized.finalized ||
-        ("ownerFinalized" in finalized && finalized.ownerFinalized === true);
+        finalized.finalized || ("ownerFinalized" in finalized && finalized.ownerFinalized === true);
       if (
         group.kind === "MATCH" &&
         group.ownerRetryable === true &&
@@ -1324,18 +1369,14 @@ async function deliverSearchStatusReport(input: {
     endTime: input.searchWindow.endTime,
     players: input.searchWindow.players,
     requestedLayoutHoles:
-      input.search.requestedLayoutHoles === 9 ||
-      input.search.requestedLayoutHoles === 18
+      input.search.requestedLayoutHoles === 9 || input.search.requestedLayoutHoles === 18
         ? input.search.requestedLayoutHoles
         : null,
     userTimeZone: input.search.userTimeZone,
     previousSnapshot: input.search.statusEmailSnapshot,
     courses: input.courseResults
   });
-  const recipients = getAlertRecipients(
-    input.search.user.email,
-    input.search.additionalEmails
-  );
+  const recipients = getAlertRecipients(input.search.user.email, input.search.additionalEmails);
   const availableMatches = await listAvailableMatchAlerts(
     input.search.id,
     getCurrentMatchIds(input.courseResults)
@@ -1355,9 +1396,7 @@ async function deliverSearchStatusReport(input: {
       : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}-${createEmailSnapshotKey(persistedStatusReport)}`;
   const replacementSuffix = input.supersededStatusGroups?.length
     ? `-replacement-${createEmailSnapshotKey(
-        input.supersededStatusGroups
-          .map((group) => `${group.kind}:${group.groupKey}`)
-          .sort()
+        input.supersededStatusGroups.map((group) => `${group.kind}:${group.groupKey}`).sort()
       )}`
     : "";
   const periodKey = `${basePeriodKey}${replacementSuffix}`;
@@ -1393,12 +1432,7 @@ async function deliverSearchStatusReport(input: {
         checkLeaseToken: input.lease.token,
         kind: "MATCH",
         groupKey: continuation.groupKey,
-        send: async ({
-          recipient,
-          idempotencyKey,
-          payload,
-          assertCurrentDelivery
-        }) => {
+        send: async ({ recipient, idempotencyKey, payload, assertCurrentDelivery }) => {
           await input.assertCurrent?.();
           const alert = await hydrateMatchAlertPayload({
             searchId: input.search.id,
@@ -1436,12 +1470,7 @@ async function deliverSearchStatusReport(input: {
     checkLeaseToken: input.lease.token,
     kind: deliveryKind,
     groupKey: periodKey,
-    send: async ({
-      recipient,
-      idempotencyKey,
-      payload,
-      assertCurrentDelivery
-    }) => {
+    send: async ({ recipient, idempotencyKey, payload, assertCurrentDelivery }) => {
       await input.assertCurrent?.();
       const report = await hydrateSearchStatusEmailPayload(payload);
       await input.assertCurrent?.();
@@ -1502,25 +1531,17 @@ async function sendPendingMatchAlerts(
   }
   const search = pendingMatches[0].teeSearch;
 
-  const allAvailableMatches = await listAvailableMatchAlerts(searchId, [
-    ...currentMatchIds
-  ]);
-  const availableMatches = allAvailableMatches.filter((match) =>
-    currentMatchIds.has(match.id)
-  );
+  const allAvailableMatches = await listAvailableMatchAlerts(searchId, [...currentMatchIds]);
+  const availableMatches = allAvailableMatches.filter((match) => currentMatchIds.has(match.id));
   const currentAvailableIds = new Set(availableMatches.map((match) => match.id));
-  const currentPendingMatches = pendingMatches.filter((match) =>
-    currentAvailableIds.has(match.id)
-  );
+  const currentPendingMatches = pendingMatches.filter((match) => currentAvailableIds.has(match.id));
   if (availableMatches.length === 0 || currentPendingMatches.length === 0) {
     return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
 
   const currentPendingIds = new Set(currentPendingMatches.map((match) => match.id));
   const reportMatches = availableMatches.map((match) => {
-    const courseResult = input.courseResults.find(
-      (course) => course.courseId === match.course.id
-    );
+    const courseResult = input.courseResults.find((course) => course.courseId === match.course.id);
     return {
       matchId: match.id,
       courseId: match.course.id,
@@ -1534,9 +1555,8 @@ async function sendPendingMatchAlerts(
       priceCents: match.priceCents,
       holes: match.holes,
       bookableHoleCounts:
-        courseResult?.matchingTimes?.find(
-          (time) => time.matchId === match.id
-        )?.bookableHoleCounts ?? [],
+        courseResult?.matchingTimes?.find((time) => time.matchId === match.id)
+          ?.bookableHoleCounts ?? [],
       factLine: courseResult?.factLine ?? buildCourseFactLine(courseResult ?? {}),
       courseGuideUrl: courseResult?.courseGuideUrl,
       isNew: currentPendingIds.has(match.id)
@@ -1597,12 +1617,7 @@ async function sendPendingMatchAlerts(
         checkLeaseToken: input.lease.token,
         kind: "MATCH",
         groupKey: group.groupKey,
-        send: async ({
-          recipient,
-          idempotencyKey,
-          payload,
-          assertCurrentDelivery
-        }) => {
+        send: async ({ recipient, idempotencyKey, payload, assertCurrentDelivery }) => {
           await input.assertCurrent?.();
           const alert = await hydrateMatchAlertPayload({
             searchId,
@@ -1670,7 +1685,9 @@ export function buildMatchDeliveryGroupKey(
 }
 
 function getAlertRecipients(primaryEmail: string, additionalEmails: string[] = []) {
-  return [...new Set([primaryEmail, ...additionalEmails].map((email) => email.trim().toLowerCase()))];
+  return [
+    ...new Set([primaryEmail, ...additionalEmails].map((email) => email.trim().toLowerCase()))
+  ];
 }
 
 function createEmailSnapshotKey(value: unknown) {
@@ -1695,13 +1712,10 @@ function isFirstTimeCourseLookup(
 }
 
 function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
-  const courseOutcomes = result.courseResults.reduce<Record<string, number>>(
-    (counts, course) => {
-      counts[course.outcome] = (counts[course.outcome] ?? 0) + 1;
-      return counts;
-    },
-    {}
-  );
+  const courseOutcomes = result.courseResults.reduce<Record<string, number>>((counts, course) => {
+    counts[course.outcome] = (counts[course.outcome] ?? 0) + 1;
+    return counts;
+  }, {});
   return {
     trigger: sanitizeResponderText(trigger),
     searchRef: createSearchLogReference(result.searchId),
@@ -1711,6 +1725,7 @@ function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
     availableMatches: result.availableMatches,
     newlyAlertedMatches: result.newlyAlertedMatches,
     supportRetryNeeded: result.supportRetryNeeded,
+    supportRetryAt: result.supportRetryAt?.toISOString() ?? null,
     statusEmailOutcome: result.statusEmailOutcome
   };
 }
@@ -1763,9 +1778,7 @@ async function recordBookingWindowWaitingProbe(input: {
       ? `Booking for ${input.targetDate} opens at ${input.bookingWindow.opensAt.toISOString()}.`
       : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
     rawSummary: {
-      ...(input.providerExecution
-        ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
-        : {}),
+      ...(input.providerExecution ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" } : {}),
       bookingWindow: {
         releaseDate: input.bookingWindow.releaseDate,
         releaseTimeLocal: input.bookingWindow.releaseTimeLocal,
