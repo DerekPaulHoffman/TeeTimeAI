@@ -111,6 +111,8 @@ enum SearchEmailDeliveryKind {
   SETUP
   DAILY
   MATCH
+  MONITORING_OUTAGE
+  MONITORING_RECOVERY
 }
 
 enum SearchEmailDeliveryStatus {

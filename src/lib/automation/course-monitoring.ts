@@ -56,7 +56,7 @@ export function decideMonitoringFailureState(
   const samePathCount = observations.filter(
     (observation) => observation.readPath === current.readPath
   ).length;
-  const confirmed = independentPathCount >= 2 || samePathCount >= 3;
+  const confirmed = independentPathCount >= 2 || samePathCount >= 2;
   return {
     confirmed,
     independentPathCount,

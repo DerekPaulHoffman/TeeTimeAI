@@ -52,19 +52,15 @@ describe("course monitoring lifecycle", () => {
     });
   });
 
-  it("requires three observations when every failure uses the same path", () => {
+  it("confirms two consecutive observations from the same path", () => {
     const observation = {
       readPath: "TYPED_PROVIDER_ADAPTER",
       failureFingerprint: "CPS:CHALLENGE"
     };
     expect(decideMonitoringFailureState([observation], observation)).toMatchObject({
-      confirmed: false,
-      samePathCount: 2
-    });
-    expect(decideMonitoringFailureState([observation, observation], observation)).toMatchObject({
       confirmed: true,
       state: "AUTO_INVESTIGATING",
-      samePathCount: 3
+      samePathCount: 2
     });
   });
 

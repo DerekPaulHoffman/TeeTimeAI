@@ -233,7 +233,7 @@ export function getUnavailableAlertCoverageCopy(input: {
     case "AUTOMATION_PROHIBITED":
       return "We're confirming how this course handles online booking. Please use the official website for current availability.";
     case "TEMPORARILY_UNAVAILABLE":
-      return "We couldn't complete the latest check. We'll try again automatically. Please use the official website for current availability.";
+      return "The course's public tee-time service isn't responding to our checks. Your alert stays active while Tee Time Spot retries, and we'll email you when monitoring is back. Please use the official website for current availability.";
     case "UNSUPPORTED_PLATFORM":
       return "Tee Time Spot cannot check this course automatically yet. Please use the official booking page to view current tee times and book directly.";
     case "NO_ONLINE_BOOKING":

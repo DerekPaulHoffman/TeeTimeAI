@@ -7,6 +7,7 @@ const dbMocks = vi.hoisted(() => ({
   heartbeatSearchCheckLease: vi.fn(),
   isSearchCheckLeaseCurrent: vi.fn(),
   listAvailableMatchAlerts: vi.fn(),
+  listCorroboratedProviderFailureKeys: vi.fn(),
   listPendingMatchAlerts: vi.fn(),
   markCourseBookingWindowChecked: vi.fn(),
   markMatchAlertSent: vi.fn(),
@@ -40,6 +41,7 @@ const deliveryOutboxMocks = vi.hoisted(() => ({
   ),
   hydrateMatchAlertPayload: vi.fn(),
   hydrateSearchStatusEmailPayload: vi.fn(),
+  listReachedMonitoringOutages: vi.fn(),
   listRetryableSearchEmailDeliveryGroups: vi.fn(),
   prepareRecipientMatchDeliveryGroups: vi.fn(),
   prepareSearchEmailDeliveryGroup: vi.fn(),
@@ -108,6 +110,7 @@ vi.mock("@/lib/adapters/clubcaddie", () => adapterMocks);
 vi.mock("@/lib/automation/support-incidents", () => supportIncidentMocks);
 vi.mock("@/lib/automation/search-monitoring-discovery", () => monitoringDiscoveryMocks);
 vi.mock("@/lib/automation/course-monitoring", () => ({
+  FAILURE_CONFIRMATION_WINDOW_MS: 15 * 60 * 1000,
   FIRST_FAILURE_RETRY_MS: 2 * 60 * 1000,
   ...courseMonitoringMocks
 }));
@@ -248,6 +251,7 @@ describe("runSearchCheck email cadence", () => {
     }));
     dbMocks.listPendingMatchAlerts.mockResolvedValue([pendingMatch]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([pendingMatch]);
+    dbMocks.listCorroboratedProviderFailureKeys.mockResolvedValue([]);
     dbMocks.markMatchAlertSent.mockResolvedValue(undefined);
     dbMocks.markMatchAlertSuppressed.mockResolvedValue(undefined);
     dbMocks.markSearchStatusEmailSent.mockResolvedValue(undefined);
@@ -266,6 +270,7 @@ describe("runSearchCheck email cadence", () => {
       typeof value === "string" ? value : undefined
     );
     deliveryOutboxMocks.listRetryableSearchEmailDeliveryGroups.mockResolvedValue([]);
+    deliveryOutboxMocks.listReachedMonitoringOutages.mockResolvedValue([]);
     deliveryOutboxMocks.getPendingStatusEmailReplacement.mockResolvedValue(null);
     deliveryOutboxMocks.satisfyPendingDailyStatusReplacementWithMatch.mockResolvedValue({
       current: true,
@@ -1234,6 +1239,185 @@ describe("runSearchCheck email cadence", () => {
     expect(deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches).not.toHaveBeenCalled();
     expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalled();
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
+  });
+
+  it("sends one confirmed provider outage notice while keeping the alert active", async () => {
+    const firstDegradedAt = new Date("2026-07-11T12:00:00.000Z");
+    const base = {
+      ...search,
+      statusEmailSentAt: new Date("2026-07-11T12:00:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "CHRONOGOLF",
+            providerFamilyKey: "CHRONOGOLF",
+            detectedBookingUrl:
+              "https://www.chronogolf.com/club/blue-rock-golf-course",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              clubId: 7221,
+              courseIds: ["course-1"],
+              bookingBaseUrl:
+                "https://www.chronogolf.com/club/blue-rock-golf-course"
+            },
+            monitoringStatus: {
+              state: "DEGRADED_RETRYING",
+              firstDegradedAt,
+              failureFingerprint: "chronogolf-network",
+              nextAutomaticAttemptAt: firstDegradedAt,
+              revalidationRequestedAt: null
+            }
+          }
+        }
+      ]
+    };
+    const confirmed = {
+      ...base,
+      preferences: [
+        {
+          ...base.preferences[0],
+          course: {
+            ...base.preferences[0].course,
+            monitoringStatus: {
+              ...base.preferences[0].course.monitoringStatus,
+              state: "AUTO_INVESTIGATING"
+            }
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation
+      .mockResolvedValueOnce(base)
+      .mockResolvedValue(confirmed);
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(true);
+    adapterMocks.fetchChronogolfSlots.mockRejectedValue(
+      new Error("Chronogolf tee times returned 503")
+    );
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "MONITORING_OUTAGE",
+        recipients: ["player@resend.dev"],
+        payload: expect.objectContaining({
+          statusSnapshot: [
+            expect.objectContaining({
+              courseId: "course-1",
+              state: expect.stringMatching(/^FETCH_FAILED:/)
+            })
+          ]
+        })
+      })
+    );
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "outage",
+        providerLabel: "Chronogolf"
+      })
+    );
+  });
+
+  it("sends recovery only to recipients reached during the outage", async () => {
+    const firstDegradedAt = new Date("2026-07-11T11:30:00.000Z");
+    const degraded = {
+      ...search,
+      additionalEmails: ["friend@resend.dev", "new@resend.dev"],
+      statusEmailSentAt: new Date("2026-07-11T11:45:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            detectedPlatform: "CHRONOGOLF",
+            providerFamilyKey: "CHRONOGOLF",
+            detectedBookingUrl:
+              "https://www.chronogolf.com/club/blue-rock-golf-course",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              clubId: 7221,
+              courseIds: ["course-1"],
+              bookingBaseUrl:
+                "https://www.chronogolf.com/club/blue-rock-golf-course"
+            },
+            monitoringStatus: {
+              state: "AUTO_INVESTIGATING",
+              firstDegradedAt,
+              failureFingerprint: "chronogolf-network",
+              nextAutomaticAttemptAt: new Date("2026-07-11T12:00:00.000Z"),
+              revalidationRequestedAt: null
+            }
+          }
+        }
+      ]
+    };
+    const healthy = {
+      ...degraded,
+      statusEmailSentAt: new Date("2026-07-11T11:45:00.000Z"),
+      preferences: [
+        {
+          ...degraded.preferences[0],
+          course: {
+            ...degraded.preferences[0].course,
+            monitoringStatus: {
+              state: "HEALTHY",
+              firstDegradedAt: null,
+              failureFingerprint: null,
+              nextAutomaticAttemptAt: null,
+              revalidationRequestedAt: null
+            }
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation
+      .mockResolvedValueOnce(degraded)
+      .mockResolvedValue(healthy);
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(true);
+    adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    deliveryOutboxMocks.listReachedMonitoringOutages.mockResolvedValue([
+      {
+        courseId: "course-1",
+        recipient: "player@resend.dev",
+        sentAt: new Date("2026-07-11T11:46:00.000Z")
+      },
+      {
+        courseId: "course-1",
+        recipient: "friend@resend.dev",
+        sentAt: new Date("2026-07-11T11:47:00.000Z")
+      }
+    ]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "MONITORING_RECOVERY",
+        recipients: ["friend@resend.dev", "player@resend.dev"]
+      })
+    );
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "recovery",
+        providerLabel: "Chronogolf"
+      })
+    );
   });
 
   it("keeps a CPS access failure in engineering instead of creating a policy block", async () => {

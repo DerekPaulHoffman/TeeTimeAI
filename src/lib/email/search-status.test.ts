@@ -92,6 +92,74 @@ describe("search status email cadence", () => {
 });
 
 describe("renderSearchStatusHtml", () => {
+  it("tells golfers a confirmed provider outage will be retried and recovered", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-outage",
+      to: "player@example.com",
+      kind: "outage",
+      providerLabel: "Chronogolf",
+      targetDate: "2026-07-29",
+      startTime: "07:30",
+      endTime: "09:00",
+      players: 4,
+      checkedAt: new Date("2026-07-27T14:15:00.000Z"),
+      courses: [
+        {
+          courseId: "blue-rock",
+          courseName: "Blue Rock Golf Course",
+          outcome: "FETCH_FAILED",
+          availableMatches: 0,
+          bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
+        }
+      ]
+    });
+
+    expect(html).toContain("MONITORING UPDATE");
+    expect(html).toContain("Automatic monitoring is temporarily unavailable");
+    expect(html).toContain(
+      "Chronogolf&#39;s public tee-time service isn&#39;t responding to our checks"
+    );
+    expect(html).toContain("Your alert is still active");
+    expect(html).toContain("email you as soon as automatic monitoring is back");
+    expect(html).toContain("Open official booking page");
+  });
+
+  it("combines a recovery notice with newly available tee times", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-recovery",
+      to: "player@example.com",
+      kind: "recovery",
+      providerLabel: "Chronogolf",
+      targetDate: "2026-07-29",
+      startTime: "07:30",
+      endTime: "09:00",
+      players: 4,
+      checkedAt: new Date("2026-07-27T14:30:00.000Z"),
+      courses: [
+        {
+          courseId: "blue-rock",
+          courseName: "Blue Rock Golf Course",
+          timeZone: "America/New_York",
+          outcome: "MATCH_FOUND",
+          availableMatches: 1,
+          bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
+          matchingTimes: [
+            {
+              startsAt: "2026-07-29T08:10:00-04:00",
+              availableSpots: 4,
+              isNew: true
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(html).toContain("MONITORING IS BACK");
+    expect(html).toContain("Monitoring is back");
+    expect(html).toContain("matching tee times are available below");
+    expect(html).toContain("8:10 AM");
+  });
+
   it("shows the exact provider-confirmed booking release time", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-window",

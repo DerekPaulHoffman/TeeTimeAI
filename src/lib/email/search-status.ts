@@ -22,7 +22,7 @@ import {
   zonedDateTimeToDate
 } from "@/lib/timezones";
 
-export type SearchStatusEmailKind = "setup" | "daily";
+export type SearchStatusEmailKind = "setup" | "daily" | "outage" | "recovery";
 
 export type SearchStatusAvailability = {
   visibleSlotCount: number;
@@ -109,6 +109,7 @@ export type SearchStatusEmailInput = {
   players: number;
   requestedLayoutHoles?: 9 | 18 | null;
   userTimeZone?: string;
+  providerLabel?: string;
   checkedAt: Date;
   courses: SearchStatusCourseReport[];
   previousSnapshot?: unknown;
@@ -232,28 +233,45 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
       course.outcome === "NEEDS_ADAPTER" ||
       course.outcome === "FETCH_FAILED"
   );
-  const heading = input.kind === "setup"
-    ? "Your tee-time alert is active"
-    : "Your morning tee-time update";
-  const intro = hasAvailability
-    ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
-    : input.kind === "setup"
-      ? hasIdentityRecheckCourse
-        ? "Your alert is set. We're confirming the details for one or more courses; we'll keep checking the courses that are ready."
-        : hasDirectOnlyCourse
-          ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
-          : hasUnavailableCourse
-            ? "Your alert is set. Every selected course has a result below. We'll monitor supported courses; use the official site where automatic alerts are unavailable."
-          : hasWorkInProgressCourse
-            ? "Your alert is set. We checked every selected course. Please use the official link for any course Tee Time Spot cannot check automatically yet."
-            : "Your alert is set. We checked every selected course and will keep watching automatically."
-      : changedCourses.length > 0
-        ? `Changed since your last email: ${changedCourses.join(", ")}.`
-        : hasIdentityRecheckCourse
-          ? "No course status changed since your last email. We're still confirming the details for one or more courses."
-          : hasDirectOnlyCourse
-            ? "No course status changed since your last email. We're still checking supported courses."
-            : "No course status changed since your last email. We're still checking.";
+  const heading =
+    input.kind === "setup"
+      ? "Your tee-time alert is active"
+      : input.kind === "daily"
+        ? "Your morning tee-time update"
+        : input.kind === "outage"
+          ? "Automatic monitoring is temporarily unavailable"
+          : hasAvailability
+            ? "Monitoring is back — and tee times are available"
+            : "Automatic monitoring is back";
+  const providerService = input.providerLabel
+    ? `${input.providerLabel}'s public tee-time service`
+    : "The public tee-time service";
+  const intro =
+    input.kind === "outage"
+      ? `${providerService} isn't responding to our checks. Your alert is still active. We'll keep retrying and email you as soon as automatic monitoring is back. Use the official booking page in the meantime.`
+      : input.kind === "recovery"
+        ? hasAvailability
+          ? `A fresh public check${input.providerLabel ? ` through ${input.providerLabel}` : ""} succeeded. Monitoring is back, and matching tee times are available below. Your alert stayed active while we retried.`
+          : `A fresh public check${input.providerLabel ? ` through ${input.providerLabel}` : ""} succeeded. Monitoring is back. Your alert stayed active, and we'll keep checking for a matching tee time.`
+        : hasAvailability
+          ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
+          : input.kind === "setup"
+            ? hasIdentityRecheckCourse
+              ? "Your alert is set. We're confirming the details for one or more courses; we'll keep checking the courses that are ready."
+              : hasDirectOnlyCourse
+                ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
+                : hasUnavailableCourse
+                  ? "Your alert is set. Every selected course has a result below. We'll monitor supported courses; use the official site where automatic alerts are unavailable."
+                  : hasWorkInProgressCourse
+                    ? "Your alert is set. We checked every selected course. Please use the official link for any course Tee Time Spot cannot check automatically yet."
+                    : "Your alert is set. We checked every selected course and will keep watching automatically."
+            : changedCourses.length > 0
+              ? `Changed since your last email: ${changedCourses.join(", ")}.`
+              : hasIdentityRecheckCourse
+                ? "No course status changed since your last email. We're still confirming the details for one or more courses."
+                : hasDirectOnlyCourse
+                  ? "No course status changed since your last email. We're still checking supported courses."
+                  : "No course status changed since your last email. We're still checking.";
   const availabilityCourses = input.courses
     .map((course, index) => ({ course, fallbackRank: index + 1 }))
     .filter(({ course }) => {
@@ -286,12 +304,22 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     );
 
   return renderCustomerEmail({
-    variant: input.kind === "setup" ? "setup" : "morning",
+    variant:
+      input.kind === "setup"
+        ? "setup"
+        : input.kind === "daily"
+          ? "morning"
+          : input.kind,
     heading,
     intro,
-    preheader: input.kind === "setup"
-      ? "Your Tee Time Spot alert is active."
-      : "Your morning Tee Time Spot search update is ready.",
+    preheader:
+      input.kind === "setup"
+        ? "Your Tee Time Spot alert is active."
+        : input.kind === "daily"
+          ? "Your morning Tee Time Spot search update is ready."
+          : input.kind === "outage"
+            ? "Your alert is active while Tee Time Spot retries automatic monitoring."
+            : "Automatic monitoring is back for your Tee Time Spot alert.",
     summary: {
       targetDate: input.targetDate,
       startTime: input.startTime,
@@ -304,7 +332,8 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     checkedAt: input.checkedAt,
     userTimeZone: input.userTimeZone,
     stopUrls: input.stopUrls,
-    assetBaseUrl: input.assetBaseUrl
+    assetBaseUrl: input.assetBaseUrl,
+    showCadenceNote: input.kind === "setup" || input.kind === "daily"
   });
 }
 
@@ -514,7 +543,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBackground: "#fff5f3",
       calloutBorder: "#efc9c4",
       calloutText: "#7f302a",
-      detail: `${firstLookupDetail ? `${firstLookupDetail} ` : ""}The latest availability check did not finish, so Tee Time Spot cannot currently promise automatic alerts. We’ll retry in the background; use the official page in the meantime.`
+      detail: `${firstLookupDetail ? `${firstLookupDetail} ` : ""}The public tee-time service isn't responding to our checks, so Tee Time Spot cannot currently promise automatic alerts. Your alert is still active. We'll retry in the background and email you when automatic monitoring is back; use the official page in the meantime.`
     };
   }
 

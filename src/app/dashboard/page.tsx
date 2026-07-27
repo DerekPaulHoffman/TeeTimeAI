@@ -743,7 +743,7 @@ function getDashboardMonitoringVerdict(input: {
     return {
       label: "Temporarily unavailable",
       detail:
-        "The latest automatic check did not finish. Use the official site while Tee Time Spot retries.",
+        "The course's public tee-time service isn't responding to our checks. Your alert is still active; use the official site while Tee Time Spot retries and we'll email you when monitoring is back.",
       icon: "unavailable" as const,
       className: "is-official-site-only"
     };

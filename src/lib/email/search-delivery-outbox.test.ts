@@ -10,6 +10,7 @@ import {
   getSafeOfficialBookingUrl,
   hydrateMatchAlertPayload,
   hydrateSearchStatusEmailPayload,
+  listReachedMonitoringOutages,
   listRetryableSearchEmailDeliveryGroups,
   lockSearchForAlertMutation,
   lockSearchForEmailReconciliation,
@@ -203,6 +204,66 @@ describe("search email delivery outbox", () => {
     } as never);
     mockedPrisma.teeSearch.update.mockResolvedValue({ id: "search-1" } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("recovers the exact recipients reached by an outage status", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      delivery("outage-owner", "owner@example.com", {
+        kind: "MONITORING_OUTAGE",
+        status: "SENT",
+        sentAt: new Date("2026-07-15T15:01:00.000Z"),
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusSnapshot: [
+            {
+              courseId: "course-1",
+              courseName: "Course",
+              state: "FETCH_FAILED:RETRYING:NONE:PUBLIC_SIGNED_OUT:PUBLIC_ONLINE"
+            },
+            {
+              courseId: "course-2",
+              courseName: "Healthy",
+              state: "NO_MATCH:DATE_NOT_VISIBLE"
+            }
+          ]
+        }
+      }),
+      delivery("outage-friend", "friend@example.com", {
+        kind: "DAILY",
+        status: "SENT",
+        sentAt: new Date("2026-07-15T15:02:00.000Z"),
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusSnapshot: [
+            {
+              courseId: "course-1",
+              courseName: "Course",
+              state: "FETCH_FAILED:RETRYING:NONE:PUBLIC_SIGNED_OUT:PUBLIC_ONLINE"
+            }
+          ]
+        }
+      })
+    ] as never);
+
+    await expect(
+      listReachedMonitoringOutages({
+        searchId: "search-1",
+        alertGeneration: 3
+      })
+    ).resolves.toEqual([
+      {
+        courseId: "course-1",
+        recipient: "owner@example.com",
+        sentAt: new Date("2026-07-15T15:01:00.000Z")
+      },
+      {
+        courseId: "course-1",
+        recipient: "friend@example.com",
+        sentAt: new Date("2026-07-15T15:02:00.000Z")
+      }
+    ]);
   });
 
   it("reads owner authority in a fresh statement after acquiring the search lock", async () => {

@@ -8,6 +8,7 @@ import {
   heartbeatSearchCheckLease,
   isSearchCheckLeaseCurrent,
   listAvailableMatchAlerts,
+  listCorroboratedProviderFailureKeys,
   listPendingMatchAlerts,
   markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
@@ -22,11 +23,19 @@ import {
   type SearchCheckLease
 } from "@/lib/automation/db-service";
 import {
+  FAILURE_CONFIRMATION_WINDOW_MS,
   FIRST_FAILURE_RETRY_MS,
   getCourseMonitoringRetryAt,
   recordCourseMonitoringFinalClassification,
   recordCourseMonitoringSuccess
 } from "@/lib/automation/course-monitoring";
+import {
+  buildMonitoringNoticeGroupKey,
+  getMonitoringFailureCorroborationCandidates,
+  getMonitoringProviderLabel,
+  planMonitoringNotices,
+  type MonitoringNoticeCandidate
+} from "@/lib/automation/monitoring-notices";
 import { getBestProbeUrl, shouldQueueBrowserProbe } from "@/lib/automation/browser-discovery";
 import {
   classifyProviderFailure,
@@ -76,6 +85,7 @@ import {
   getSafeOfficialBookingUrl,
   hydrateMatchAlertPayload,
   hydrateSearchStatusEmailPayload,
+  listReachedMonitoringOutages,
   listRetryableSearchEmailDeliveryGroups,
   prepareRecipientMatchDeliveryGroups,
   prepareSearchEmailDeliveryGroup,
@@ -86,7 +96,8 @@ import {
   buildSearchStatusSnapshot,
   getSearchStatusEmailKind,
   summarizeSearchStatusAvailability,
-  type SearchStatusCourseReport
+  type SearchStatusCourseReport,
+  type SearchStatusEmailKind
 } from "@/lib/email/search-status";
 import { buildCourseFactLine } from "@/lib/email/course-facts";
 import {
@@ -130,6 +141,8 @@ type AutomationCourse = AutomationCourseProviderRead & {
   layoutHolesVerifiedAt: Date | null;
   monitoringStatus: {
     state: CourseMonitoringState;
+    firstDegradedAt: Date | null;
+    failureFingerprint: string | null;
     nextAutomaticAttemptAt: Date | null;
     revalidationRequestedAt: Date | null;
   } | null;
@@ -261,6 +274,19 @@ async function checkSearch(
     });
   }
 
+  const monitoringBeforeCheck = new Map(
+    search.preferences.map((preference) => [
+      preference.course.id,
+      preference.course.monitoringStatus
+        ? {
+            state: preference.course.monitoringStatus.state,
+            firstDegradedAt: preference.course.monitoringStatus.firstDegradedAt,
+            failureFingerprint:
+              preference.course.monitoringStatus.failureFingerprint
+          }
+        : null
+    ])
+  );
   const searchWindow = {
     date: search.date.toISOString().slice(0, 10),
     startTime: search.startTime,
@@ -1048,14 +1074,45 @@ async function checkSearch(
   }
   search = (await getActiveSearchForAutomation(searchId)) ?? search;
   await maintainSearchCheckLease(lease);
+  let monitoringNoticeOutcome: SearchCheckResult["statusEmailOutcome"] = "skipped";
+  if (!pendingStatusReplacement) {
+    try {
+      const delivered = await deliverMonitoringTransitionNotices({
+        search,
+        searchWindow,
+        courseResults,
+        monitoringBeforeCheck,
+        checkedAt,
+        lease,
+        assertCurrent: () => maintainSearchCheckLease(lease)
+      });
+      monitoringNoticeOutcome = delivered.outcome;
+      newlyAlertedMatches += delivered.ownerSentMatchCount;
+      search = (await getActiveSearchForAutomation(searchId)) ?? search;
+    } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
+      monitoringNoticeOutcome = "failed";
+      console.error("[email:monitoring-transition-failed]", {
+        searchRef: createSearchLogReference(search.id),
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown monitoring transition email failure"
+      });
+    }
+  }
+  await maintainSearchCheckLease(lease);
   const statusEmailKind = pendingStatusReplacement
     ? pendingStatusReplacement.kind === "SETUP"
       ? "setup"
       : "daily"
     : getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone);
-  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = retriedMatchCoveredDaily
-    ? "covered_by_match_alert"
-    : "skipped";
+  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
+    retriedMatchCoveredDaily
+      ? "covered_by_match_alert"
+      : monitoringNoticeOutcome;
 
   if (pendingStatusReplacement) {
     try {
@@ -1352,6 +1409,137 @@ function getCustomerBookingUrl(course: AutomationCourse) {
   );
 }
 
+async function deliverMonitoringTransitionNotices(input: {
+  search: NonNullable<Awaited<ReturnType<typeof getActiveSearchForAutomation>>>;
+  searchWindow: {
+    date: string;
+    startTime: string;
+    endTime: string;
+    players: number;
+  };
+  courseResults: SearchCheckCourseResult[];
+  monitoringBeforeCheck: Map<
+    string,
+    {
+      state: CourseMonitoringState;
+      firstDegradedAt: Date | null;
+      failureFingerprint: string | null;
+    } | null
+  >;
+  checkedAt: Date;
+  lease: SearchCheckLease;
+  assertCurrent: () => Promise<void>;
+}) {
+  const resultByCourse = new Map(
+    input.courseResults.map((result) => [result.courseId, result])
+  );
+  const candidates: MonitoringNoticeCandidate[] = input.search.preferences.flatMap(
+    (preference) => {
+      const result = resultByCourse.get(preference.course.id);
+      if (!result) {
+        return [];
+      }
+      const current = preference.course.monitoringStatus
+        ? {
+            state: preference.course.monitoringStatus.state,
+            firstDegradedAt:
+              preference.course.monitoringStatus.firstDegradedAt,
+            failureFingerprint:
+              preference.course.monitoringStatus.failureFingerprint
+          }
+        : null;
+      return [
+        {
+          providerFamilyKey: resolveProviderCapability(
+            preference.course as AutomationCourse
+          ).providerFamilyKey,
+          result,
+          previous: input.monitoringBeforeCheck.get(preference.course.id) ?? null,
+          current
+        }
+      ];
+    }
+  );
+  const reachedOutages = await listReachedMonitoringOutages({
+    searchId: input.search.id,
+    alertGeneration: input.search.alertGeneration
+  });
+  const corroboratedFailureKeys = await listCorroboratedProviderFailureKeys(
+    getMonitoringFailureCorroborationCandidates(candidates),
+    new Date(input.checkedAt.getTime() - FAILURE_CONFIRMATION_WINDOW_MS)
+  );
+  const plan = planMonitoringNotices({
+    candidates,
+    reachedOutages,
+    ownerRecipient: input.search.user.email,
+    corroboratedFailureKeys
+  });
+  let outcome: NonNullable<SearchCheckResult["statusEmailOutcome"]> = "skipped";
+  let ownerSentMatchCount = 0;
+
+  const deliver = async (
+    kind: Extract<SearchStatusEmailKind, "outage" | "recovery">,
+    courses: SearchCheckCourseResult[],
+    recipients: string[]
+  ) => {
+    if (courses.length === 0) {
+      return;
+    }
+    const courseIds = courses.map((course) => course.courseId);
+    const pendingMatches =
+      kind === "recovery"
+        ? await listPendingMatchAlerts(
+            input.search.id,
+            getCurrentMatchIds(courses)
+          )
+        : [];
+    const coveredMatchIds = getCoveredPendingMatchIds(pendingMatches, courses);
+    const coveredMatchIdSet = new Set(coveredMatchIds);
+    const delivered = await deliverSearchStatusReport({
+      search: input.search,
+      searchWindow: input.searchWindow,
+      courseResults: courses,
+      snapshotCourseResults: input.courseResults,
+      checkedAt: input.checkedAt,
+      kind,
+      providerLabel: getMonitoringProviderLabel(candidates, courseIds),
+      periodKey: buildMonitoringNoticeGroupKey(kind, candidates, courseIds),
+      recipients,
+      coveredMatchIds,
+      coveredMatchRefs: pendingMatches
+        .filter((match) => coveredMatchIdSet.has(match.id))
+        .map((match) => ({
+          matchId: match.id,
+          availabilityCycle: match.availabilityCycle
+        })),
+      lease: input.lease,
+      assertCurrent: input.assertCurrent
+    });
+    if (
+      kind === "recovery" &&
+      (delivered === "sent" || delivered === "dry_run")
+    ) {
+      ownerSentMatchCount += coveredMatchIds.length;
+    }
+    if (
+      delivered === "sent" ||
+      (delivered === "dry_run" && outcome !== "sent") ||
+      (delivered === "failed" && outcome === "skipped")
+    ) {
+      outcome = delivered;
+    }
+  };
+
+  await deliver("recovery", plan.recoveryCourses, plan.recoveryRecipients);
+  await deliver(
+    "outage",
+    plan.outageCourses,
+    getAlertRecipients(input.search.user.email, input.search.additionalEmails)
+  );
+
+  return { outcome, ownerSentMatchCount };
+}
+
 async function deliverSearchStatusReport(input: {
   search: NonNullable<Awaited<ReturnType<typeof getActiveSearchForAutomation>>>;
   searchWindow: {
@@ -1361,8 +1549,12 @@ async function deliverSearchStatusReport(input: {
     players: number;
   };
   courseResults: SearchCheckCourseResult[];
+  snapshotCourseResults?: SearchCheckCourseResult[];
   checkedAt: Date;
-  kind: "setup" | "daily";
+  kind: SearchStatusEmailKind;
+  providerLabel?: string;
+  periodKey?: string;
+  recipients?: string[];
   coveredMatchIds?: string[];
   coveredMatchRefs?: Array<{ matchId: string; availabilityCycle: number }>;
   supersededStatusGroups?: Array<{
@@ -1372,9 +1564,12 @@ async function deliverSearchStatusReport(input: {
   lease: SearchCheckLease;
   assertCurrent?: () => Promise<void>;
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
-  const snapshot = buildSearchStatusSnapshot(input.courseResults);
+  const snapshot = buildSearchStatusSnapshot(
+    input.snapshotCourseResults ?? input.courseResults
+  );
   const persistedStatusReport = toSearchEmailJson({
     kind: input.kind,
+    providerLabel: input.providerLabel,
     targetDate: input.searchWindow.date,
     startTime: input.searchWindow.startTime,
     endTime: input.searchWindow.endTime,
@@ -1387,7 +1582,9 @@ async function deliverSearchStatusReport(input: {
     previousSnapshot: input.search.statusEmailSnapshot,
     courses: input.courseResults
   });
-  const recipients = getAlertRecipients(input.search.user.email, input.search.additionalEmails);
+  const recipients =
+    input.recipients ??
+    getAlertRecipients(input.search.user.email, input.search.additionalEmails);
   const availableMatches = await listAvailableMatchAlerts(
     input.search.id,
     getCurrentMatchIds(input.courseResults)
@@ -1402,9 +1599,10 @@ async function deliverSearchStatusReport(input: {
     ])
   ];
   const basePeriodKey =
-    input.kind === "setup"
+    input.periodKey ??
+    (input.kind === "setup"
       ? `setup-${createEmailSnapshotKey(persistedStatusReport)}`
-      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}-${createEmailSnapshotKey(persistedStatusReport)}`;
+      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}-${createEmailSnapshotKey(persistedStatusReport)}`);
   const replacementSuffix = input.supersededStatusGroups?.length
     ? `-replacement-${createEmailSnapshotKey(
         input.supersededStatusGroups.map((group) => `${group.kind}:${group.groupKey}`).sort()
@@ -1412,7 +1610,14 @@ async function deliverSearchStatusReport(input: {
     : "";
   const periodKey = `${basePeriodKey}${replacementSuffix}`;
   await input.assertCurrent?.();
-  const deliveryKind = input.kind === "setup" ? "SETUP" : "DAILY";
+  const deliveryKind =
+    input.kind === "setup"
+      ? "SETUP"
+      : input.kind === "daily"
+        ? "DAILY"
+        : input.kind === "outage"
+          ? "MONITORING_OUTAGE"
+          : "MONITORING_RECOVERY";
   const prepared = await prepareSearchEmailDeliveryGroup({
     searchId: input.search.id,
     alertGeneration: input.search.alertGeneration,

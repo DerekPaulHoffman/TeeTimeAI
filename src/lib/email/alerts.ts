@@ -235,7 +235,11 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
     subject:
       input.kind === "setup"
         ? "Your Tee Time Spot search is active"
-        : "Your morning Tee Time Spot update",
+        : input.kind === "daily"
+          ? "Your morning Tee Time Spot update"
+          : input.kind === "outage"
+            ? `${input.providerLabel ?? "Tee Time Spot"} monitoring is temporarily unavailable`
+            : `${input.providerLabel ?? "Tee Time Spot"} monitoring is back`,
     html: renderSearchStatusHtml({
       ...input,
       stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)

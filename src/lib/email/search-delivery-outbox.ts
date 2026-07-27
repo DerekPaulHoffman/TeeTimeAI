@@ -1100,8 +1100,7 @@ async function applyOwnerDeliveryOutcome(
   }
 
   const satisfiesStatusReport =
-    input.kind === "SETUP" ||
-    input.kind === "DAILY" ||
+    isStatusDeliveryKind(input.kind) ||
     (input.kind === "MATCH" &&
       payload.satisfiesStatusReport === true &&
       terminalMatchRefs.length > 0);
@@ -1120,7 +1119,7 @@ async function applyOwnerDeliveryOutcome(
     });
   } else if (
     ownerDeliveryOutcome === "AMBIGUOUS" &&
-    (input.kind === "SETUP" || input.kind === "DAILY") &&
+    isStatusDeliveryKind(input.kind) &&
     search?.alertGeneration === input.alertGeneration
   ) {
     await transaction.teeSearch.updateMany({
@@ -1250,7 +1249,12 @@ export async function hydrateSearchStatusEmailPayload(
     ? (report.courses as SearchStatusCourseReport[])
     : [];
   return {
-    kind: report.kind === "daily" ? "daily" : "setup",
+    kind:
+      report.kind === "daily" ||
+      report.kind === "outage" ||
+      report.kind === "recovery"
+        ? report.kind
+        : "setup",
     targetDate: requireString(report.targetDate, "target date"),
     startTime: requireString(report.startTime, "start time"),
     endTime: requireString(report.endTime, "end time"),
@@ -1260,10 +1264,59 @@ export async function hydrateSearchStatusEmailPayload(
         ? report.requestedLayoutHoles
         : null,
     userTimeZone: requireString(report.userTimeZone, "user time zone"),
+    providerLabel: optionalString(report.providerLabel),
     checkedAt: new Date(payload.checkedAt),
     courses,
     previousSnapshot: report.previousSnapshot
   };
+}
+
+export async function listReachedMonitoringOutages(input: {
+  searchId: string;
+  alertGeneration: number;
+}) {
+  const deliveries = await prisma.searchEmailDelivery.findMany({
+    where: {
+      teeSearchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      kind: { in: ["SETUP", "DAILY", "MONITORING_OUTAGE"] },
+      status: { in: ["SENT", "SUPPRESSED"] },
+      sentAt: { not: null }
+    },
+    select: {
+      recipient: true,
+      sentAt: true,
+      payload: true
+    }
+  });
+  const reached = new Map<
+    string,
+    { courseId: string; recipient: string; sentAt: Date }
+  >();
+  for (const delivery of deliveries) {
+    if (!delivery.sentAt) {
+      continue;
+    }
+    const payload = parseSearchEmailPayload(delivery.payload);
+    const snapshot = Array.isArray(payload?.statusSnapshot)
+      ? payload.statusSnapshot
+      : [];
+    for (const value of snapshot) {
+      const entry = optionalJsonRecord(value);
+      const courseId = optionalString(entry?.courseId);
+      const state = optionalString(entry?.state);
+      if (!courseId || !state?.startsWith("FETCH_FAILED:")) {
+        continue;
+      }
+      const key = `${courseId}\u0000${delivery.recipient}\u0000${delivery.sentAt.toISOString()}`;
+      reached.set(key, {
+        courseId,
+        recipient: delivery.recipient,
+        sentAt: delivery.sentAt
+      });
+    }
+  }
+  return [...reached.values()];
 }
 
 export async function hydrateMatchAlertPayload(input: {
@@ -3734,6 +3787,15 @@ function groupWhere(input: {
     kind: input.kind,
     groupKey: input.groupKey
   } as const;
+}
+
+function isStatusDeliveryKind(kind: SearchEmailDeliveryKind) {
+  return (
+    kind === "SETUP" ||
+    kind === "DAILY" ||
+    kind === "MONITORING_OUTAGE" ||
+    kind === "MONITORING_RECOVERY"
+  );
 }
 
 function assertIdenticalGroupPayloads(

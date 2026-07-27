@@ -9,7 +9,12 @@ import {
 
 export const MAX_EMAIL_AVAILABILITY_PILLS_PER_COURSE = 16;
 
-export type CustomerEmailVariant = "setup" | "morning" | "instant";
+export type CustomerEmailVariant =
+  | "setup"
+  | "morning"
+  | "instant"
+  | "outage"
+  | "recovery";
 
 export type CustomerEmailSearchSummary = {
   targetDate: string;
@@ -235,11 +240,16 @@ function renderBrandBar() {
 }
 
 function renderHero(input: CustomerEmailRenderInput) {
-  const badge = input.variant === "setup"
-    ? "SEARCH IS ACTIVE"
-    : input.variant === "morning"
-      ? "MORNING UPDATE"
-      : "NEW TEE TIME ALERT";
+  const badge =
+    input.variant === "setup"
+      ? "SEARCH IS ACTIVE"
+      : input.variant === "morning"
+        ? "MORNING UPDATE"
+        : input.variant === "outage"
+          ? "MONITORING UPDATE"
+          : input.variant === "recovery"
+            ? "MONITORING IS BACK"
+            : "NEW TEE TIME ALERT";
 
   return `
     <tr>

@@ -34,7 +34,7 @@ A responder may close a course automatically without runnable monitoring only fo
 
 - `HEALTHY`: the latest public signed-out read returned `MATCH_FOUND` or `NO_MATCH`.
 - `DEGRADED_RETRYING`: the first failure is recorded without erasing the last working time. The search retries within two minutes.
-- `AUTO_INVESTIGATING`: two independent read paths failed within 15 minutes, or the same path failed three times. Active real demand gets a six-hour automation deadline; inactive engineering work gets 24 hours.
+- `AUTO_INVESTIGATING`: two independent read paths failed within 15 minutes, or the same path failed twice. Active real demand gets a six-hour automation deadline; inactive engineering work gets 24 hours.
 - `ENGINEERING_VERIFICATION_NEEDED`: the bounded playbook could not prove recovery or a safe automatic final. Active demand retries every six hours with daily operator reminders. Inactive work retries and reminds weekly.
 - `FINAL_MANUAL` and `FINAL_IDENTITY`: strong official manual-booking or identity evidence may close automatically.
 - `FINAL_TECHNICAL`: an operator approved a precise technical reason with official evidence. It has no timer-based retry. New real demand triggers exactly one revalidation while keeping the prior decision visible.
@@ -67,6 +67,8 @@ Recovery atomically transfers the batch and lease token to the recovering task. 
 Each search check uses a separate 15-minute row-token lease on `TeeSearch`. Network calls happen outside a database transaction. Every provider request, including official-site discovery follow-ups, claims the destination family's distributed slot; multi-request adapter steps run sequentially. Provider work is capped globally at two requests and at one request per provider family. Completion is a compare-and-set on search id, `scheduleVersion`, and lease token, so a stale Workflow cannot overwrite a newer edit, pause, resume, or explicit check.
 
 Email uses a generation-scoped `SearchEmailDelivery` outbox. Recipient/intent changes, pause, stop, and delete serialize on the same search row as delivery claims, suppress unsent older generations, and return a retryable conflict while an irreversible send is finishing. Stable per-delivery idempotency keys and immutable render snapshots close the prior send/mark crash gap. Owner success finalizes the customer-visible match/status immediately; each failed additional recipient retains independent retry state and cannot block a newer owner alert.
+
+A single provider failure stays quiet while the two-minute retry runs. A confirmed outage sends one customer-safe notice saying the provider's public service is not responding, the alert remains active, and Tee Time Spot will keep retrying. Confirmation may come from two failures on the course or a matching provider-family failure on another course. When a fresh public check succeeds, recovery email goes only to recipients reached by the outage notice; if that check also finds matching times, the recovery message includes them and replaces a separate match email.
 
 If work is requested while the row lease is busy, `recheckRequestedAt` persists that fact. The current owner consumes it during compare-and-set completion and schedules the follow-up immediately. Expired `CHECKING` and `QUEUED` states remain eligible for recovery.
 
