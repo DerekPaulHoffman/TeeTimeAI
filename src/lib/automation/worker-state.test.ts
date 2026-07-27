@@ -89,6 +89,33 @@ describe("automation worker state", () => {
     expect(mocks.sendHealthEmail).not.toHaveBeenCalled();
   });
 
+  it("starts a fresh recovery cycle for a newly overdue interval", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        workerKey: "course-support-responder",
+        desiredState: "ACTIVE",
+        monitoringStartedAt: new Date("2026-07-27T10:00:00.000Z"),
+        nextExpectedAt: new Date("2026-07-27T11:00:00.000Z"),
+        graceSeconds: 600,
+        overdueSince: null,
+        overdueNotifiedFor: new Date("2026-07-27T10:00:00.000Z"),
+        recoveredNotifiedAt: new Date("2026-07-27T10:20:00.000Z")
+      }
+    ]);
+
+    await expect(checkAutomationWorkerHealth(now)).resolves.toMatchObject({
+      overdue: 1,
+      notified: 1
+    });
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          recoveredNotifiedAt: null
+        })
+      })
+    );
+  });
+
   it("records and reports recovery independently", async () => {
     mocks.findMany.mockResolvedValue([
       {
@@ -116,6 +143,28 @@ describe("automation worker state", () => {
           overdueNotifiedFor: null
         })
       })
+    );
+  });
+
+  it("records recovery for a newer overdue interval after an earlier recovery", async () => {
+    mocks.findMany.mockResolvedValue([
+      {
+        workerKey: "course-support-responder",
+        desiredState: "ACTIVE",
+        monitoringStartedAt: new Date("2026-07-27T01:00:00.000Z"),
+        nextExpectedAt: new Date("2026-07-27T12:10:00.000Z"),
+        graceSeconds: 600,
+        overdueSince: new Date("2026-07-27T11:40:00.000Z"),
+        overdueNotifiedFor: new Date("2026-07-27T11:30:00.000Z"),
+        recoveredNotifiedAt: new Date("2026-07-27T08:00:00.000Z")
+      }
+    ]);
+
+    await expect(checkAutomationWorkerHealth(now)).resolves.toMatchObject({
+      recovered: 1
+    });
+    expect(mocks.sendHealthEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "recovered" })
     );
   });
 });

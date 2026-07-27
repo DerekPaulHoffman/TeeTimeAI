@@ -187,7 +187,8 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
           data: {
             overdueSince: worker.overdueSince ?? now,
             overdueNotifiedFor: expectedAt,
-            overdueNotifiedAt: now
+            overdueNotifiedAt: now,
+            recoveredNotifiedAt: null
           }
         });
         notified += 1;
@@ -195,7 +196,11 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
       continue;
     }
 
-    if (worker.overdueSince && !worker.recoveredNotifiedAt) {
+    if (
+      worker.overdueSince &&
+      (!worker.recoveredNotifiedAt ||
+        worker.recoveredNotifiedAt.getTime() < worker.overdueSince.getTime())
+    ) {
       await sendAutomationWorkerHealthEmail({
         workerKey: worker.workerKey,
         event: "recovered",
