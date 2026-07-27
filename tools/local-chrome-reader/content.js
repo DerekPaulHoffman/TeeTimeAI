@@ -270,46 +270,53 @@
   }
 
   async function choosePlayers(players) {
-    const button = Array.from(
-      document.querySelectorAll(
-        "button.mat-button-toggle-button[name='fontStyle']",
-      ),
-    ).find(
-      (candidate) =>
-        String(candidate.textContent || "").trim() === String(players),
-    );
-    if (button) {
-      if (button.getAttribute("aria-pressed") !== "true") {
-        button.click();
-        await delay(500);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const button = Array.from(
+        document.querySelectorAll(
+          "button.mat-button-toggle-button[name='fontStyle']",
+        ),
+      ).find(
+        (candidate) =>
+          String(candidate.textContent || "").trim() === String(players),
+      );
+      if (button) {
+        if (button.getAttribute("aria-pressed") !== "true") {
+          button.click();
+          await delay(500);
+        }
+        return;
       }
-      return;
-    }
 
-    const expectedLabel = `${players} ${players === 1 ? "player" : "players"}`;
-    const radio = Array.from(
-      document.querySelectorAll("input[type='radio'], [role='radio']"),
-    ).find((candidate) =>
-      String(
-        candidate.getAttribute("aria-label") ||
-          candidate.closest("label")?.textContent ||
-          document.querySelector(`label[for="${candidate.id}"]`)?.textContent ||
-          "",
-      )
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase()
-        .includes(expectedLabel),
-    );
-    if (!radio)
-      throw new Error(`Group size ${players} did not become selectable.`);
-    if (
-      radio.getAttribute("aria-checked") !== "true" &&
-      radio.checked !== true
-    ) {
-      radio.click();
-      await delay(1_000);
+      const expectedLabel = `${players} ${players === 1 ? "player" : "players"}`;
+      const radio = Array.from(
+        document.querySelectorAll("input[type='radio'], [role='radio']"),
+      ).find((candidate) =>
+        String(
+          candidate.getAttribute("aria-label") ||
+            candidate.closest("label")?.textContent ||
+            document.querySelector(`label[for="${candidate.id}"]`)
+              ?.textContent ||
+            "",
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase()
+          .includes(expectedLabel),
+      );
+      if (radio) {
+        if (
+          radio.getAttribute("aria-checked") !== "true" &&
+          radio.checked !== true
+        ) {
+          radio.click();
+          await delay(1_000);
+        }
+        return;
+      }
+      await delay(100);
     }
+    throw new Error(`Group size ${players} did not become selectable.`);
   }
 
   async function waitForTargetPage(targetDate) {

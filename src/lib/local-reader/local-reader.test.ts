@@ -464,6 +464,8 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).toContain("MONTH_NAMES[targetMonth - 1]");
     expect(contentSource).toContain("async function chooseCourse(job)");
     expect(contentSource).toContain("async function choosePlayers(players)");
+    expect(contentSource).toContain("const deadline = Date.now() + 10_000");
+    expect(contentSource).toContain("await delay(100)");
     expect(contentSource).toContain(
       "const [targetYear, targetMonth, targetDayNumber] = targetDate",
     );
