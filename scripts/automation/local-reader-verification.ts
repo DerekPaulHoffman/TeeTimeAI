@@ -8,7 +8,7 @@ async function main() {
   const args = process.argv.slice(2);
   const apply = args.includes("--apply");
   const targetDate = readRequiredOption(args, "--target-date");
-  const players = Number(readOption(args, "--players") ?? "1");
+  const players = Number(readOption(args, "--players") ?? "2");
   const excludedKeys = new Set(readOptions(args, "--exclude-key"));
   const onlyKeys = new Set(readOptions(args, "--only-key"));
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(targetDate)) {
