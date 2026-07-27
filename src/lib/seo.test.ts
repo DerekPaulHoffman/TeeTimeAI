@@ -4,7 +4,10 @@ import {
   buildPageMetadata,
   buildPageStructuredData,
   getSiteVerification,
-  siteDescription
+  siteDescription,
+  socialImageAlt,
+  socialImagePath,
+  socialTitle
 } from "./seo";
 
 describe("SEO helpers", () => {
@@ -28,7 +31,19 @@ describe("SEO helpers", () => {
     expect(metadata.openGraph).toMatchObject({
       title: "Cancellation alerts | Tee Time Spot",
       url: "https://teetimespot.com/guides/cancellation-alerts",
-      type: "article"
+      type: "article",
+      images: [
+        {
+          url: "https://teetimespot.com/opengraph-image?v=2",
+          width: 1200,
+          height: 630,
+          alt: socialImageAlt
+        }
+      ]
+    });
+    expect(metadata.twitter).toMatchObject({
+      card: "summary_large_image",
+      images: ["https://teetimespot.com/opengraph-image?v=2"]
     });
   });
 
@@ -84,6 +99,13 @@ describe("SEO helpers", () => {
     expect(siteDescription).toMatch(/alert-only/i);
     expect(siteDescription).toMatch(/public golf/i);
     expect(siteDescription).toMatch(/official booking link/i);
+  });
+
+  it("defines concise, versioned link-preview metadata", () => {
+    expect(socialTitle).toBe("Free public golf tee time alerts");
+    expect(socialImagePath).toBe("/opengraph-image?v=2");
+    expect(socialImageAlt).toMatch(/preferred public golf course opening/i);
+    expect(socialImageAlt).toMatch(/official booking link/i);
   });
 });
 

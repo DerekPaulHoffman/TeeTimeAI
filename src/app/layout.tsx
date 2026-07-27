@@ -15,7 +15,10 @@ import {
   getSiteVerification,
   siteDescription,
   siteName,
-  siteUrl
+  siteUrl,
+  socialImageAlt,
+  socialImagePath,
+  socialTitle
 } from "@/lib/seo";
 import "./globals.css";
 import "./shell.css";
@@ -45,16 +48,16 @@ export const metadata: Metadata = {
     canonical: "/"
   },
   openGraph: {
-    title: `${siteName} | Public Golf Tee Time Alerts`,
+    title: socialTitle,
     description: siteDescription,
     url: absoluteUrl("/"),
     siteName,
     images: [
       {
-        url: absoluteUrl("/opengraph-image"),
+        url: absoluteUrl(socialImagePath),
         width: 1200,
         height: 630,
-        alt: "Tee Time Spot public golf tee time alerts"
+        alt: socialImageAlt
       }
     ],
     locale: "en_US",
@@ -62,9 +65,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: `${siteName} | Public Golf Tee Time Alerts`,
+    title: socialTitle,
     description: siteDescription,
-    images: [absoluteUrl("/opengraph-image")]
+    images: [absoluteUrl(socialImagePath)]
   },
   robots: {
     index: true,
