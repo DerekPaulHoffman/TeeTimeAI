@@ -30,6 +30,8 @@ const AUTOMATED_STATES: CourseMonitoringState[] = [
   "ENGINEERING_VERIFICATION_NEEDED",
   "REVALIDATING_FINAL"
 ];
+const COURSE_MONITORING_WRITE_ATTEMPTS = 3;
+const COURSE_MONITORING_WRITE_TIMEOUT_MS = 15_000;
 
 type FailureObservation = {
   readPath: string | null;
@@ -117,160 +119,42 @@ export async function recordCourseMonitoringFailure(input: {
     };
   }
 
-  return prisma.$transaction(
-    async (transaction) => {
-      const current = await ensureMonitoringStatus(transaction, input.courseId, now);
-      const incident = await transaction.courseSupportIncident.findUnique({
-        where: { courseId: input.courseId },
-        select: {
-          id: true,
-          status: true,
-          resolution: true,
-          failureFingerprint: true
-        }
-      });
-
-      const retainingApprovedFinal = Boolean(
-        current.state === "REVALIDATING_FINAL" &&
-        incident?.status === "RESOLVED" &&
-        incident.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION" &&
-        incident.failureFingerprint === failureFingerprint &&
-        !input.materialEvidenceChanged
-      );
-      if (retainingApprovedFinal) {
-        const status = await transaction.courseMonitoringStatus.update({
-          where: {
-            courseId: input.courseId,
-            revision: current.revision
-          },
-          data: {
-            state: "FINAL_TECHNICAL",
-            lastFailureAt: now,
-            consecutiveFailures: { increment: 1 },
-            failureFingerprint,
-            nextAutomaticAttemptAt: null,
-            revalidationRequestedAt: null,
-            stateChangedAt: now,
-            revision: { increment: 1 }
-          }
-        });
-        await appendMonitoringEvent(transaction, {
-          courseId: input.courseId,
-          incidentId: incident?.id,
-          eventType: "CHECK_FAILED",
-          source,
-          fromState: current.state,
-          toState: status.state,
-          outcome: input.outcome,
-          failureFingerprint,
-          readPath,
-          message: safeMessage ?? "The engineer-approved technical limitation was reconfirmed.",
-          runtimeVersion: input.runtimeVersion,
-          occurredAt: now,
-          audit: {
-            retainedEngineerDecision: true,
-            customerDataIncluded: false
-          }
-        });
-        return {
-          status,
-          confirmed: true,
-          retainedHumanFinal: true,
-          independentPathCount: 1,
-          samePathCount: 1,
-          nextAttemptAt: null
-        };
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await ensureMonitoringStatus(transaction, input.courseId, now);
+    const incident = await transaction.courseSupportIncident.findUnique({
+      where: { courseId: input.courseId },
+      select: {
+        id: true,
+        status: true,
+        resolution: true,
+        failureFingerprint: true
       }
+    });
 
-      if (current.state === "ENGINEERING_VERIFICATION_NEEDED" && !input.materialEvidenceChanged) {
-        const nextAttemptAt = getHumanReviewRetryAt(now, input.activeRealSearchCount);
-        const status = await transaction.courseMonitoringStatus.update({
-          where: {
-            courseId: input.courseId,
-            revision: current.revision
-          },
-          data: {
-            lastFailureAt: now,
-            consecutiveFailures:
-              current.failureFingerprint === failureFingerprint ? { increment: 1 } : 1,
-            failureFingerprint,
-            nextAutomaticAttemptAt: nextAttemptAt,
-            revision: { increment: 1 }
-          }
-        });
-        await appendMonitoringEvent(transaction, {
-          courseId: input.courseId,
-          incidentId: incident?.id,
-          eventType: "CHECK_FAILED",
-          source,
-          fromState: current.state,
-          toState: current.state,
-          outcome: input.outcome,
-          failureFingerprint,
-          readPath,
-          message:
-            safeMessage ??
-            "A safe recheck reconfirmed the limitation while human review remains open.",
-          runtimeVersion: input.runtimeVersion,
-          occurredAt: now,
-          audit: {
-            retainedHumanReview: true,
-            activeDemand: input.activeRealSearchCount > 0,
-            customerDataIncluded: false
-          }
-        });
-        return {
-          status,
-          confirmed: true,
-          retainedHumanFinal: false,
-          independentPathCount: 1,
-          samePathCount: Math.max(status.consecutiveFailures, 1),
-          nextAttemptAt
-        };
-      }
-
-      const recentFailures = await transaction.courseMonitoringEvent.findMany({
-        where: {
-          courseId: input.courseId,
-          eventType: "CHECK_FAILED",
-          occurredAt: {
-            gte: new Date(now.getTime() - FAILURE_CONFIRMATION_WINDOW_MS),
-            lte: now
-          }
-        },
-        orderBy: { occurredAt: "desc" },
-        select: {
-          readPath: true,
-          failureFingerprint: true
-        }
-      });
-      const decision = decideMonitoringFailureState(recentFailures, {
-        readPath,
-        failureFingerprint
-      });
-      const nextAttemptAt = decision.confirmed
-        ? now
-        : new Date(now.getTime() + FIRST_FAILURE_RETRY_MS);
-      const stateChanged = current.state !== decision.state;
+    const retainingApprovedFinal = Boolean(
+      current.state === "REVALIDATING_FINAL" &&
+      incident?.status === "RESOLVED" &&
+      incident.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION" &&
+      incident.failureFingerprint === failureFingerprint &&
+      !input.materialEvidenceChanged
+    );
+    if (retainingApprovedFinal) {
       const status = await transaction.courseMonitoringStatus.update({
         where: {
           courseId: input.courseId,
           revision: current.revision
         },
         data: {
-          state: decision.state,
+          state: "FINAL_TECHNICAL",
           lastFailureAt: now,
-          consecutiveFailures:
-            current.failureFingerprint === failureFingerprint ? { increment: 1 } : 1,
+          consecutiveFailures: { increment: 1 },
           failureFingerprint,
-          firstDegradedAt: current.firstDegradedAt ?? now,
-          nextAutomaticAttemptAt: nextAttemptAt,
+          nextAutomaticAttemptAt: null,
           revalidationRequestedAt: null,
-          ...(stateChanged ? { stateChangedAt: now } : {}),
+          stateChangedAt: now,
           revision: { increment: 1 }
         }
       });
-
       await appendMonitoringEvent(transaction, {
         courseId: input.courseId,
         incidentId: incident?.id,
@@ -281,44 +165,159 @@ export async function recordCourseMonitoringFailure(input: {
         outcome: input.outcome,
         failureFingerprint,
         readPath,
-        message: safeMessage,
+        message: safeMessage ?? "The engineer-approved technical limitation was reconfirmed.",
         runtimeVersion: input.runtimeVersion,
         occurredAt: now,
         audit: {
-          confirmationWindowMinutes: 15,
-          independentPathCount: decision.independentPathCount,
-          samePathCount: decision.samePathCount,
-          confirmed: decision.confirmed,
+          retainedEngineerDecision: true,
           customerDataIncluded: false
         }
       });
-      if (stateChanged) {
-        await appendMonitoringEvent(transaction, {
-          courseId: input.courseId,
-          incidentId: incident?.id,
-          eventType: "STATE_CHANGED",
-          source,
-          fromState: current.state,
-          toState: status.state,
-          failureFingerprint,
-          message: decision.confirmed
-            ? "Repeated independent evidence confirmed an automated investigation."
-            : "A failure was recorded and a fresh public retry was scheduled.",
-          occurredAt: now
-        });
-      }
-
       return {
         status,
-        confirmed: decision.confirmed,
+        confirmed: true,
+        retainedHumanFinal: true,
+        independentPathCount: 1,
+        samePathCount: 1,
+        nextAttemptAt: null
+      };
+    }
+
+    if (current.state === "ENGINEERING_VERIFICATION_NEEDED" && !input.materialEvidenceChanged) {
+      const nextAttemptAt = getHumanReviewRetryAt(now, input.activeRealSearchCount);
+      const status = await transaction.courseMonitoringStatus.update({
+        where: {
+          courseId: input.courseId,
+          revision: current.revision
+        },
+        data: {
+          lastFailureAt: now,
+          consecutiveFailures:
+            current.failureFingerprint === failureFingerprint ? { increment: 1 } : 1,
+          failureFingerprint,
+          nextAutomaticAttemptAt: nextAttemptAt,
+          revision: { increment: 1 }
+        }
+      });
+      await appendMonitoringEvent(transaction, {
+        courseId: input.courseId,
+        incidentId: incident?.id,
+        eventType: "CHECK_FAILED",
+        source,
+        fromState: current.state,
+        toState: current.state,
+        outcome: input.outcome,
+        failureFingerprint,
+        readPath,
+        message:
+          safeMessage ??
+          "A safe recheck reconfirmed the limitation while human review remains open.",
+        runtimeVersion: input.runtimeVersion,
+        occurredAt: now,
+        audit: {
+          retainedHumanReview: true,
+          activeDemand: input.activeRealSearchCount > 0,
+          customerDataIncluded: false
+        }
+      });
+      return {
+        status,
+        confirmed: true,
         retainedHumanFinal: false,
-        independentPathCount: decision.independentPathCount,
-        samePathCount: decision.samePathCount,
+        independentPathCount: 1,
+        samePathCount: Math.max(status.consecutiveFailures, 1),
         nextAttemptAt
       };
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-  );
+    }
+
+    const recentFailures = await transaction.courseMonitoringEvent.findMany({
+      where: {
+        courseId: input.courseId,
+        eventType: "CHECK_FAILED",
+        occurredAt: {
+          gte: new Date(now.getTime() - FAILURE_CONFIRMATION_WINDOW_MS),
+          lte: now
+        }
+      },
+      orderBy: { occurredAt: "desc" },
+      select: {
+        readPath: true,
+        failureFingerprint: true
+      }
+    });
+    const decision = decideMonitoringFailureState(recentFailures, {
+      readPath,
+      failureFingerprint
+    });
+    const nextAttemptAt = decision.confirmed
+      ? now
+      : new Date(now.getTime() + FIRST_FAILURE_RETRY_MS);
+    const stateChanged = current.state !== decision.state;
+    const status = await transaction.courseMonitoringStatus.update({
+      where: {
+        courseId: input.courseId,
+        revision: current.revision
+      },
+      data: {
+        state: decision.state,
+        lastFailureAt: now,
+        consecutiveFailures:
+          current.failureFingerprint === failureFingerprint ? { increment: 1 } : 1,
+        failureFingerprint,
+        firstDegradedAt: current.firstDegradedAt ?? now,
+        nextAutomaticAttemptAt: nextAttemptAt,
+        revalidationRequestedAt: null,
+        ...(stateChanged ? { stateChangedAt: now } : {}),
+        revision: { increment: 1 }
+      }
+    });
+
+    await appendMonitoringEvent(transaction, {
+      courseId: input.courseId,
+      incidentId: incident?.id,
+      eventType: "CHECK_FAILED",
+      source,
+      fromState: current.state,
+      toState: status.state,
+      outcome: input.outcome,
+      failureFingerprint,
+      readPath,
+      message: safeMessage,
+      runtimeVersion: input.runtimeVersion,
+      occurredAt: now,
+      audit: {
+        confirmationWindowMinutes: 15,
+        independentPathCount: decision.independentPathCount,
+        samePathCount: decision.samePathCount,
+        confirmed: decision.confirmed,
+        customerDataIncluded: false
+      }
+    });
+    if (stateChanged) {
+      await appendMonitoringEvent(transaction, {
+        courseId: input.courseId,
+        incidentId: incident?.id,
+        eventType: "STATE_CHANGED",
+        source,
+        fromState: current.state,
+        toState: status.state,
+        failureFingerprint,
+        message: decision.confirmed
+          ? "Repeated independent evidence confirmed an automated investigation."
+          : "A failure was recorded and a fresh public retry was scheduled.",
+        occurredAt: now
+      });
+    }
+
+    return {
+      status,
+      confirmed: decision.confirmed,
+      retainedHumanFinal: false,
+      independentPathCount: decision.independentPathCount,
+      samePathCount: decision.samePathCount,
+      nextAttemptAt
+    };
+  });
 }
 
 export async function recordCourseMonitoringSuccess(input: {
@@ -334,61 +333,58 @@ export async function recordCourseMonitoringSuccess(input: {
   if (!hasMonitoringModels(prisma)) {
     return null;
   }
-  return prisma.$transaction(
-    async (transaction) => {
-      const current = await ensureMonitoringStatus(transaction, input.courseId, now);
-      const recovered = current.state !== "HEALTHY";
-      const incident = await transaction.courseSupportIncident.findUnique({
-        where: { courseId: input.courseId },
-        select: { id: true }
-      });
-      const status = await transaction.courseMonitoringStatus.update({
-        where: {
-          courseId: input.courseId,
-          revision: current.revision
-        },
-        data: {
-          state: "HEALTHY",
-          lastSuccessfulAt: now,
-          consecutiveFailures: 0,
-          failureFingerprint: null,
-          firstDegradedAt: null,
-          nextAutomaticAttemptAt: null,
-          revalidationRequestedAt: null,
-          ...(recovered ? { stateChangedAt: now } : {}),
-          revision: { increment: 1 }
-        }
-      });
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await ensureMonitoringStatus(transaction, input.courseId, now);
+    const recovered = current.state !== "HEALTHY";
+    const incident = await transaction.courseSupportIncident.findUnique({
+      where: { courseId: input.courseId },
+      select: { id: true }
+    });
+    const status = await transaction.courseMonitoringStatus.update({
+      where: {
+        courseId: input.courseId,
+        revision: current.revision
+      },
+      data: {
+        state: "HEALTHY",
+        lastSuccessfulAt: now,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        ...(recovered ? { stateChangedAt: now } : {}),
+        revision: { increment: 1 }
+      }
+    });
+    await appendMonitoringEvent(transaction, {
+      courseId: input.courseId,
+      incidentId: incident?.id,
+      eventType: "CHECK_SUCCEEDED",
+      source,
+      fromState: current.state,
+      toState: "HEALTHY",
+      outcome: input.outcome,
+      message: sanitizeMonitoringMessage(input.message),
+      runtimeVersion: input.runtimeVersion,
+      occurredAt: now
+    });
+    if (recovered) {
       await appendMonitoringEvent(transaction, {
         courseId: input.courseId,
         incidentId: incident?.id,
-        eventType: "CHECK_SUCCEEDED",
+        eventType: "RECOVERED",
         source,
         fromState: current.state,
         toState: "HEALTHY",
         outcome: input.outcome,
-        message: sanitizeMonitoringMessage(input.message),
+        message: "Fresh public signed-out monitoring succeeded and restored the course.",
         runtimeVersion: input.runtimeVersion,
         occurredAt: now
       });
-      if (recovered) {
-        await appendMonitoringEvent(transaction, {
-          courseId: input.courseId,
-          incidentId: incident?.id,
-          eventType: "RECOVERED",
-          source,
-          fromState: current.state,
-          toState: "HEALTHY",
-          outcome: input.outcome,
-          message: "Fresh public signed-out monitoring succeeded and restored the course.",
-          runtimeVersion: input.runtimeVersion,
-          occurredAt: now
-        });
-      }
-      return status;
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-  );
+    }
+    return status;
+  });
 }
 
 export async function recordCourseMonitoringFinalClassification(input: {
@@ -405,41 +401,38 @@ export async function recordCourseMonitoringFinalClassification(input: {
   if (!hasMonitoringModels(prisma)) {
     return null;
   }
-  return prisma.$transaction(
-    async (transaction) => {
-      const current = await ensureMonitoringStatus(transaction, input.courseId, now);
-      const status = await transaction.courseMonitoringStatus.update({
-        where: {
-          courseId: input.courseId,
-          revision: current.revision
-        },
-        data: {
-          state: input.state,
-          consecutiveFailures: 0,
-          failureFingerprint: null,
-          firstDegradedAt: null,
-          nextAutomaticAttemptAt: null,
-          revalidationRequestedAt: null,
-          stateChangedAt: now,
-          revision: { increment: 1 }
-        }
-      });
-      await appendMonitoringEvent(transaction, {
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await ensureMonitoringStatus(transaction, input.courseId, now);
+    const status = await transaction.courseMonitoringStatus.update({
+      where: {
         courseId: input.courseId,
-        eventType: "STATE_CHANGED",
-        source: input.source ?? "SEARCH_WORKFLOW",
-        fromState: current.state,
-        toState: input.state,
-        outcome: input.outcome,
-        message: sanitizeMonitoringMessage(input.message),
-        evidenceUrl: sanitizeEvidenceUrl(input.evidenceUrl),
-        runtimeVersion: input.runtimeVersion,
-        occurredAt: now
-      });
-      return status;
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-  );
+        revision: current.revision
+      },
+      data: {
+        state: input.state,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        stateChangedAt: now,
+        revision: { increment: 1 }
+      }
+    });
+    await appendMonitoringEvent(transaction, {
+      courseId: input.courseId,
+      eventType: "STATE_CHANGED",
+      source: input.source ?? "SEARCH_WORKFLOW",
+      fromState: current.state,
+      toState: input.state,
+      outcome: input.outcome,
+      message: sanitizeMonitoringMessage(input.message),
+      evidenceUrl: sanitizeEvidenceUrl(input.evidenceUrl),
+      runtimeVersion: input.runtimeVersion,
+      occurredAt: now
+    });
+    return status;
+  });
 }
 
 export async function requestTechnicalFinalRevalidationForDemand(input: {
@@ -455,50 +448,47 @@ export async function requestTechnicalFinalRevalidationForDemand(input: {
 
   const requestedCourseIds: string[] = [];
   for (const courseId of uniqueCourseIds) {
-    const result = await prisma.$transaction(
-      async (transaction) => {
-        const current = await transaction.courseMonitoringStatus.findUnique({
-          where: { courseId }
-        });
-        if (!current || current.state !== "FINAL_TECHNICAL") {
-          return false;
-        }
-        const updated = await transaction.courseMonitoringStatus.updateMany({
-          where: {
-            courseId,
-            revision: current.revision,
-            state: "FINAL_TECHNICAL"
-          },
-          data: {
-            state: "REVALIDATING_FINAL",
-            revalidationRequestedAt: now,
-            nextAutomaticAttemptAt: now,
-            stateChangedAt: now,
-            revision: { increment: 1 }
-          }
-        });
-        if (updated.count !== 1) {
-          return false;
-        }
-        const incident = await transaction.courseSupportIncident.findUnique({
-          where: { courseId },
-          select: { id: true }
-        });
-        await appendMonitoringEvent(transaction, {
+    const result = await runSerializedCourseMonitoringWrite(courseId, async (transaction) => {
+      const current = await transaction.courseMonitoringStatus.findUnique({
+        where: { courseId }
+      });
+      if (!current || current.state !== "FINAL_TECHNICAL") {
+        return false;
+      }
+      const updated = await transaction.courseMonitoringStatus.updateMany({
+        where: {
           courseId,
-          incidentId: incident?.id,
-          eventType: "REVALIDATION_REQUESTED",
-          source: input.source ?? "SEARCH_WORKFLOW",
-          fromState: "FINAL_TECHNICAL",
-          toState: "REVALIDATING_FINAL",
-          message:
-            "New real demand requested one safe revalidation of the engineer-approved limitation.",
-          occurredAt: now
-        });
-        return true;
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-    );
+          revision: current.revision,
+          state: "FINAL_TECHNICAL"
+        },
+        data: {
+          state: "REVALIDATING_FINAL",
+          revalidationRequestedAt: now,
+          nextAutomaticAttemptAt: now,
+          stateChangedAt: now,
+          revision: { increment: 1 }
+        }
+      });
+      if (updated.count !== 1) {
+        return false;
+      }
+      const incident = await transaction.courseSupportIncident.findUnique({
+        where: { courseId },
+        select: { id: true }
+      });
+      await appendMonitoringEvent(transaction, {
+        courseId,
+        incidentId: incident?.id,
+        eventType: "REVALIDATION_REQUESTED",
+        source: input.source ?? "SEARCH_WORKFLOW",
+        fromState: "FINAL_TECHNICAL",
+        toState: "REVALIDATING_FINAL",
+        message:
+          "New real demand requested one safe revalidation of the engineer-approved limitation.",
+        occurredAt: now
+      });
+      return true;
+    });
     if (result) {
       requestedCourseIds.push(courseId);
     }
@@ -1184,6 +1174,72 @@ async function appendMonitoringEvent(
       audit: input.audit
     }
   });
+}
+
+async function runSerializedCourseMonitoringWrite<T>(
+  courseId: string,
+  worker: (transaction: Prisma.TransactionClient) => Promise<T>
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= COURSE_MONITORING_WRITE_ATTEMPTS; attempt += 1) {
+    try {
+      return await prisma.$transaction(
+        async (transaction) => {
+          await acquireCourseMonitoringWriteLock(transaction, courseId);
+          return worker(transaction);
+        },
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+          timeout: COURSE_MONITORING_WRITE_TIMEOUT_MS
+        }
+      );
+    } catch (error) {
+      lastError = error;
+      if (
+        !isRetryableCourseMonitoringWriteError(error) ||
+        attempt === COURSE_MONITORING_WRITE_ATTEMPTS
+      ) {
+        throw error;
+      }
+      await delayCourseMonitoringRetry(attempt * 20);
+    }
+  }
+  throw lastError;
+}
+
+async function acquireCourseMonitoringWriteLock(
+  transaction: Prisma.TransactionClient,
+  courseId: string
+) {
+  const query = (
+    transaction as Prisma.TransactionClient & {
+      $queryRawUnsafe?: <T = unknown>(sql: string, ...values: unknown[]) => Promise<T>;
+    }
+  ).$queryRawUnsafe;
+  if (!query) {
+    return;
+  }
+  await query.call(
+    transaction,
+    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    `course-monitoring:${courseId}`
+  );
+}
+
+function isRetryableCourseMonitoringWriteError(error: unknown) {
+  const code =
+    typeof error === "object" && error && "code" in error
+      ? String((error as { code?: unknown }).code ?? "")
+      : "";
+  if (["P2025", "P2028", "P2034"].includes(code)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /write conflict|deadlock|transaction.*closed/i.test(message);
+}
+
+function delayCourseMonitoringRetry(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export function createMonitoringReference() {
