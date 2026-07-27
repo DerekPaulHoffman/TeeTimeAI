@@ -567,6 +567,19 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return unavailableOfficialSiteClassification;
   }
 
+  const unscopedProviderAccessBarrierClassification =
+    learnKnownProviderAccessBarrierClassification(
+      unscopedEvidence,
+      unscopedObservedUrls
+    );
+
+  if (unscopedProviderAccessBarrierClassification) {
+    return withCourseIdentityCorroboration(
+      unscopedProviderAccessBarrierClassification,
+      unscopedEvidence
+    );
+  }
+
   const upcomingOnlineBookingClassification =
     learnUpcomingOnlineBookingClassification(
       unscopedEvidence,

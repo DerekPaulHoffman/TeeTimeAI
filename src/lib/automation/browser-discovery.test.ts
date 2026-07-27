@@ -5839,6 +5839,50 @@ describe("buildBrowserDiscovery", () => {
     expect(corroboratedDiscovery.apiMetadata).toBeUndefined();
   });
 
+  it("finalizes a corroborated MyVSCloud barrier before a legacy sibling link changes provider scope", () => {
+    const bookingUrl =
+      "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
+    const legacyBookingUrl =
+      "https://web1.myvscloud.com/wbwsc/ctguilfordwt.wsc/search.html?module=GR";
+    const accessBarrier = {
+      url: "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html",
+      status: 403 as const
+    };
+
+    const discovery = buildBrowserDiscovery({
+      courseId: "single-course-webtrac",
+      courseName: "Guilford Lakes Golf Course",
+      sourceUrl: "https://www.guilfordlakesgolf.com/",
+      finalUrl: bookingUrl,
+      observedUrls: [legacyBookingUrl, bookingUrl],
+      linkCandidates: [
+        { url: legacyBookingUrl, label: "BOOK TEE TIME" },
+        { url: bookingUrl, label: "Book Your Tee Time" }
+      ],
+      officialPage: {
+        url: "https://www.guilfordlakesgolf.com/",
+        courseName: "Guilford Lakes Golf Course",
+        linkCandidates: [
+          { url: legacyBookingUrl, label: "BOOK TEE TIME" },
+          { url: bookingUrl, label: "Book Your Tee Time" }
+        ]
+      },
+      accessBarriers: [accessBarrier],
+      corroboratedAccessBarrier: accessBarrier
+    });
+
+    expect(discovery).toMatchObject({
+      status: "BLOCKED",
+      bookingUrl:
+        "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      evidence: {
+        learnedFrom: "known-provider-public-landing-access-barrier"
+      }
+    });
+  });
+
   it("does not treat an arbitrary WebTrac-shaped host as trusted provider metadata", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "untrusted",
