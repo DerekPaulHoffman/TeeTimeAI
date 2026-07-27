@@ -211,7 +211,10 @@ describe("runSearchCheck email cadence", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-11T12:10:00.000Z"));
-    courseMonitoringMocks.getCourseMonitoringRetryAt.mockResolvedValue(null);
+    courseMonitoringMocks.getCourseMonitoringRetryAt.mockImplementation(
+      async (_courseIds, options) =>
+        options?.transientRetryCourseIds?.length ? new Date(Date.now() + 2 * 60 * 1000) : null
+    );
     courseMonitoringMocks.recordCourseMonitoringFinalClassification.mockResolvedValue(null);
     courseMonitoringMocks.recordCourseMonitoringSuccess.mockResolvedValue(null);
     dbMocks.startAutomationRun.mockResolvedValue({ id: "run-1" });

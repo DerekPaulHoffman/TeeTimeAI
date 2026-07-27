@@ -977,18 +977,23 @@ async function checkSearch(
       }
     }
   }
+  const retryCalculationStartedAt = new Date();
   const persistedSupportRetryAt = await getCourseMonitoringRetryAt(
-    supportIssues.map((issue) => issue.courseId)
+    supportIssues.map((issue) => issue.courseId),
+    {
+      transientRetryCourseIds: [...monitoringRetryCourseIds],
+      now: retryCalculationStartedAt
+    }
   );
-  const supportRetryNeeded =
-    monitoringRetryCourseIds.size > 0 ||
-    supportIssues.some((issue) => issue.status === "UNRECORDED") ||
-    persistedSupportRetryAt !== null;
+  const unrecordedSupportRetryNeeded = supportIssues.some((issue) => issue.status === "UNRECORDED");
   const supportRetryAt =
     [
       ...(persistedSupportRetryAt ? [persistedSupportRetryAt] : []),
-      ...(monitoringRetryCourseIds.size > 0 ? [new Date(Date.now() + FIRST_FAILURE_RETRY_MS)] : [])
+      ...(unrecordedSupportRetryNeeded
+        ? [new Date(retryCalculationStartedAt.getTime() + FIRST_FAILURE_RETRY_MS)]
+        : [])
     ].sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
+  const supportRetryNeeded = supportRetryAt !== null;
 
   await maintainSearchCheckLease(lease);
   const checkedAt = new Date();

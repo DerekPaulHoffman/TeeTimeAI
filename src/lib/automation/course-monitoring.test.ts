@@ -14,6 +14,7 @@ import {
   getHumanReviewRetryAt,
   inferHumanReviewReason,
   sanitizeEvidenceUrl,
+  selectSearchWorkflowMonitoringRetryAt,
   shouldSleepTechnicalFinalSearch
 } from "./course-monitoring";
 
@@ -80,6 +81,42 @@ describe("course monitoring lifecycle", () => {
     expect(getHumanReviewReminderAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_REMINDER_MS);
     expect(getHumanReviewReminderAt(now, 0).getTime() - now.getTime()).toBe(INACTIVE_REMINDER_MS);
     expect(FAILURE_CONFIRMATION_WINDOW_MS).toBe(15 * 60 * 1000);
+  });
+
+  it("keeps customer workflows off the responder's hot investigation loop", () => {
+    const now = new Date("2026-07-27T12:00:00.000Z");
+    expect(
+      selectSearchWorkflowMonitoringRetryAt({
+        statuses: [
+          {
+            courseId: "auto-investigating",
+            state: "AUTO_INVESTIGATING",
+            nextAutomaticAttemptAt: now
+          }
+        ],
+        transientRetryCourseIds: ["auto-investigating"],
+        now
+      })
+    ).toBeNull();
+
+    expect(
+      selectSearchWorkflowMonitoringRetryAt({
+        statuses: [
+          {
+            courseId: "first-failure",
+            state: "DEGRADED_RETRYING",
+            nextAutomaticAttemptAt: new Date(now.getTime() + 2 * 60 * 1000)
+          },
+          {
+            courseId: "human-review",
+            state: "ENGINEERING_VERIFICATION_NEEDED",
+            nextAutomaticAttemptAt: new Date(now.getTime() + ACTIVE_HUMAN_RETRY_MS)
+          }
+        ],
+        transientRetryCourseIds: ["first-failure", "human-review"],
+        now
+      })?.toISOString()
+    ).toBe("2026-07-27T12:02:00.000Z");
   });
 
   it("sleeps only when every course is in a final state without revalidation", () => {

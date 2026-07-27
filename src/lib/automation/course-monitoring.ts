@@ -1315,20 +1315,76 @@ function normalizeDeploymentSha(value: string | null | undefined) {
   return normalized && /^[a-f0-9]{7,40}$/u.test(normalized) ? normalized : null;
 }
 
-export async function getCourseMonitoringRetryAt(courseIds: string[]) {
-  const uniqueCourseIds = [...new Set(courseIds)];
+type SearchWorkflowMonitoringRetryStatus = {
+  courseId: string;
+  state: CourseMonitoringState;
+  nextAutomaticAttemptAt: Date | null;
+};
+
+export function selectSearchWorkflowMonitoringRetryAt(input: {
+  statuses: SearchWorkflowMonitoringRetryStatus[];
+  transientRetryCourseIds: string[];
+  now: Date;
+}) {
+  const statusByCourseId = new Map(
+    input.statuses.map((status) => [status.courseId, status] as const)
+  );
+  const candidates = input.statuses.flatMap((status) => {
+    if (
+      !status.nextAutomaticAttemptAt ||
+      !["DEGRADED_RETRYING", "ENGINEERING_VERIFICATION_NEEDED", "REVALIDATING_FINAL"].includes(
+        status.state
+      )
+    ) {
+      return [];
+    }
+    return [status.nextAutomaticAttemptAt];
+  });
+
+  const needsTransientRetry = input.transientRetryCourseIds.some((courseId) => {
+    const status = statusByCourseId.get(courseId);
+    return (
+      !status ||
+      status.state === "UNKNOWN" ||
+      status.state === "HEALTHY" ||
+      (status.state === "DEGRADED_RETRYING" && !status.nextAutomaticAttemptAt)
+    );
+  });
+  if (needsTransientRetry) {
+    candidates.push(new Date(input.now.getTime() + FIRST_FAILURE_RETRY_MS));
+  }
+
+  candidates.sort((left, right) => left.getTime() - right.getTime());
+  return candidates[0] ?? null;
+}
+
+export async function getCourseMonitoringRetryAt(
+  courseIds: string[],
+  options?: {
+    transientRetryCourseIds?: string[];
+    now?: Date;
+  }
+) {
+  const transientRetryCourseIds = [...new Set(options?.transientRetryCourseIds ?? [])];
+  const uniqueCourseIds = [...new Set([...courseIds, ...transientRetryCourseIds])];
   if (uniqueCourseIds.length === 0 || !hasMonitoringModels(prisma)) {
     return null;
   }
-  const earliest = await prisma.courseMonitoringStatus.findFirst({
+  const statuses = await prisma.courseMonitoringStatus.findMany({
     where: {
-      courseId: { in: uniqueCourseIds },
-      nextAutomaticAttemptAt: { not: null }
+      courseId: { in: uniqueCourseIds }
     },
-    orderBy: { nextAutomaticAttemptAt: "asc" },
-    select: { nextAutomaticAttemptAt: true }
+    select: {
+      courseId: true,
+      state: true,
+      nextAutomaticAttemptAt: true
+    }
   });
-  return earliest?.nextAutomaticAttemptAt ?? null;
+  return selectSearchWorkflowMonitoringRetryAt({
+    statuses,
+    transientRetryCourseIds,
+    now: options?.now ?? new Date()
+  });
 }
 
 function hasMonitoringModels(client: typeof prisma) {
