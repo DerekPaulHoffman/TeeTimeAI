@@ -1,8 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
-import { Bell, LogIn, Search } from "lucide-react";
+import { Bell, Gauge, LogIn, Search } from "lucide-react";
 
 import { DiscordMark } from "@/components/discord-mark";
 import { discordInviteUrl } from "@/lib/community";
@@ -39,7 +40,46 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
 }
 
 function ConfiguredAuthNav() {
-  const { isLoaded, isSignedIn } = useUser();
+  const { isLoaded, isSignedIn, user } = useUser();
+  const [operatorDecision, setOperatorDecision] = useState<{
+    userId: string;
+    allowed: boolean;
+  } | null>(null);
+  const userId = user?.id;
+
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || !userId) return;
+
+    const controller = new AbortController();
+    void fetch("/api/operator/access", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+      signal: controller.signal
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((result: { operator?: boolean } | null) => {
+        if (!controller.signal.aborted) {
+          setOperatorDecision({
+            userId,
+            allowed: result?.operator === true
+          });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setOperatorDecision({ userId, allowed: false });
+        }
+      });
+
+    return () => controller.abort();
+  }, [isLoaded, isSignedIn, userId]);
+
+  const operatorAccess =
+    Boolean(isSignedIn) &&
+    Boolean(userId) &&
+    operatorDecision?.userId === userId &&
+    operatorDecision?.allowed === true;
 
   if (!isLoaded) {
     return <nav aria-label="Primary navigation" className="nav-actions" />;
@@ -49,6 +89,17 @@ function ConfiguredAuthNav() {
     <nav aria-label="Primary navigation" className="nav-actions">
       <InfoNavLinks />
       <DiscordNavLink />
+      {operatorAccess ? (
+        <Link
+          aria-label="Site overview"
+          className="button button-secondary nav-operator"
+          href="/operator"
+          prefetch={false}
+        >
+          <Gauge size={17} />
+          <span className="nav-button-label">Site overview</span>
+        </Link>
+      ) : null}
       <Link
         aria-label="My alerts"
         className="button button-secondary"
