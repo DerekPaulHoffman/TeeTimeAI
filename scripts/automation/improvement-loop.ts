@@ -1217,7 +1217,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       }
     }),
     prisma.websiteEvent.groupBy({
-      by: ["name"],
+      by: ["name", "page"],
       where: {
         trafficClass: "PUBLIC",
         createdAt: { gte: publicFunnelSince }
@@ -1245,6 +1245,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     ...buildFunnelPortfolioCandidates(
       publicFunnelCounts.map((entry) => ({
         name: entry.name,
+        page: entry.page,
         count: entry._count._all
       })),
       observedAt

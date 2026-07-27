@@ -112,6 +112,7 @@ type FeedbackPortfolioInput = {
 
 type FunnelEventCountInput = {
   name: string;
+  page?: string | null;
   count: number;
 };
 
@@ -622,13 +623,20 @@ export function buildFunnelPortfolioCandidates(
   counts: FunnelEventCountInput[],
   observedAt: Date | string
 ): PortfolioCandidateInput[] {
-  const eventCounts = new Map(counts.map((entry) => [entry.name, entry.count]));
-  const pageViews = eventCounts.get("page_viewed") ?? 0;
-  const starts = eventCounts.get("start_search_clicked") ?? 0;
-  const discoveries = eventCounts.get("course_discovery_completed") ?? 0;
-  const selections = eventCounts.get("course_selection_started") ?? 0;
-  const signIns = eventCounts.get("alert_sign_in_clicked") ?? 0;
-  const submissions = eventCounts.get("search_submitted") ?? 0;
+  const sumEvents = (name: string, page?: string) =>
+    counts.reduce(
+      (total, entry) =>
+        entry.name === name && (page === undefined || entry.page === page)
+          ? total + entry.count
+          : total,
+      0
+    );
+  const pageViews = sumEvents("page_viewed", "/");
+  const starts = sumEvents("start_search_clicked", "/");
+  const discoveries = sumEvents("course_discovery_completed");
+  const selections = sumEvents("course_selection_started");
+  const signIns = sumEvents("alert_sign_in_clicked");
+  const submissions = sumEvents("search_submitted");
   const candidates: PortfolioCandidateInput[] = [];
   const createdAt = toIsoString(observedAt);
 

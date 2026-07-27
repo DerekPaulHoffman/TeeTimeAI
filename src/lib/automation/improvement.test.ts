@@ -530,8 +530,8 @@ describe("portfolio evidence collectors", () => {
     expect(
       buildFunnelPortfolioCandidates(
         [
-          { name: "page_viewed", count: 38 },
-          { name: "start_search_clicked", count: 2 }
+          { name: "page_viewed", page: "/", count: 38 },
+          { name: "start_search_clicked", page: "/", count: 2 }
         ],
         "2026-07-15T00:00:00.000Z"
       )
@@ -540,8 +540,8 @@ describe("portfolio evidence collectors", () => {
     expect(
       buildFunnelPortfolioCandidates(
         [
-          { name: "page_viewed", count: 100 },
-          { name: "start_search_clicked", count: 1 }
+          { name: "page_viewed", page: "/", count: 100 },
+          { name: "start_search_clicked", page: "/", count: 1 }
         ],
         "2026-07-15T00:00:00.000Z"
       )
@@ -552,6 +552,19 @@ describe("portfolio evidence collectors", () => {
         source: "funnel"
       }
     ]);
+  });
+
+  it("does not treat non-home page views as homepage funnel entrances", () => {
+    expect(
+      buildFunnelPortfolioCandidates(
+        [
+          { name: "page_viewed", page: "/", count: 12 },
+          { name: "page_viewed", page: "/courses/example-course", count: 88 },
+          { name: "start_search_clicked", page: "/", count: 1 }
+        ],
+        "2026-07-15T00:00:00.000Z"
+      )
+    ).toEqual([]);
   });
 
   it("turns a repeated authenticated coverage gap into a durable blocker candidate", () => {
