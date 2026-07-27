@@ -992,11 +992,20 @@ function learnKnownProviderAccessBarrierClassification(
   const exactBarrierObserved = observedUrls.some(
     matchesBarrierLanding
   );
-  const exactBookingLinkObserved = (evidence.linkCandidates ?? []).some(
-    (candidate) =>
-      matchesBarrierLanding(candidate.url) &&
-      isRecognizedProviderBookingLink(candidate)
-  );
+  const exactBookingLinkObserved =
+    (evidence.linkCandidates ?? []).some(
+      (candidate) =>
+        matchesBarrierLanding(candidate.url) &&
+        isRecognizedProviderBookingLink(candidate)
+    ) ||
+    Boolean(
+      evidence.officialCourseWebsite &&
+        !haveSamePublicWebsiteOrigin(
+          evidence.officialCourseWebsite,
+          evidence.sourceUrl
+        ) &&
+        matchesBarrierLanding(evidence.sourceUrl)
+    );
   if (!exactBarrierObserved || !exactBookingLinkObserved) {
     return null;
   }

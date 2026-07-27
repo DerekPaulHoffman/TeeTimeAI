@@ -5883,6 +5883,35 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("finalizes a corroborated direct provider probe tied to a separate official course site", () => {
+    const bookingUrl =
+      "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
+    const accessBarrier = {
+      url: bookingUrl,
+      status: 403 as const
+    };
+
+    const discovery = buildBrowserDiscovery({
+      courseId: "single-course-webtrac",
+      courseName: "Guilford Lakes Golf Course",
+      sourceUrl: bookingUrl,
+      officialCourseWebsite: "https://www.guilfordlakesgolf.com/",
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl],
+      accessBarriers: [accessBarrier],
+      corroboratedAccessBarrier: accessBarrier
+    });
+
+    expect(discovery).toMatchObject({
+      status: "BLOCKED",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      evidence: {
+        learnedFrom: "known-provider-public-landing-access-barrier"
+      }
+    });
+  });
+
   it("does not treat an arbitrary WebTrac-shaped host as trusted provider metadata", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "untrusted",
