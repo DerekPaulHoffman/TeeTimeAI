@@ -736,23 +736,28 @@ function isProviderFamilyPublicBookingLandingUrl(
           ) &&
           !url.hash
       );
-    case "WEBTRAC":
+    case "WEBTRAC": {
+      const isMyVsCloud =
+        hostname === "myvscloud.com" ||
+        hostname.endsWith(".myvscloud.com");
       return Boolean(
         (
           hostname === "navyaims.com" ||
           hostname.endsWith(".navyaims.com") ||
-          hostname === "myvscloud.com" ||
-          hostname.endsWith(".myvscloud.com")
+          isMyVsCloud
         ) &&
           /^\/(?:[a-z0-9_-]+\/)?webtrac\/web\/search\.html\/?$/iu.test(pathname) &&
-          url.searchParams.get("module")?.toUpperCase() === "GR" &&
           (
-            hostname === "myvscloud.com" ||
-            hostname.endsWith(".myvscloud.com") ||
+            url.searchParams.get("module")?.toUpperCase() === "GR" ||
+            (isMyVsCloud && !url.search)
+          ) &&
+          (
+            isMyVsCloud ||
             Boolean(url.searchParams.get("secondarycode"))
           ) &&
           !url.hash
       );
+    }
     case "EZLINKS": {
       const legacySearchHash = /^#\/search\/?$/iu.test(url.hash);
       return Boolean(

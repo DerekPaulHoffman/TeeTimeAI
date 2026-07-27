@@ -970,12 +970,18 @@ function learnKnownProviderAccessBarrierClassification(
     return null;
   }
 
+  const matchesBarrierLanding = (url: string) =>
+    isProviderPublicBookingLandingUrl(url) &&
+    areSameAccessBarrier(
+      { url, status: accessBarrier.status },
+      accessBarrier
+    );
   const exactBarrierObserved = observedUrls.some(
-    (url) => haveSameExactUrl(url, barrierUrl.toString())
+    matchesBarrierLanding
   );
   const exactBookingLinkObserved = (evidence.linkCandidates ?? []).some(
     (candidate) =>
-      haveSameExactUrl(candidate.url, barrierUrl.toString()) &&
+      matchesBarrierLanding(candidate.url) &&
       isRecognizedProviderBookingLink(candidate)
   );
   if (!exactBarrierObserved || !exactBookingLinkObserved) {
@@ -1730,9 +1736,12 @@ function learnWebTracDiscovery(
   }
   if (
     evidence.corroboratedAccessBarrier &&
-    haveSameExactUrl(
-      evidence.corroboratedAccessBarrier.url,
-      bookingUrl.toString()
+    areSameAccessBarrier(
+      {
+        url: bookingUrl.toString(),
+        status: evidence.corroboratedAccessBarrier.status
+      },
+      evidence.corroboratedAccessBarrier
     )
   ) {
     return null;

@@ -5795,12 +5795,12 @@ describe("buildBrowserDiscovery", () => {
       "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
     const sanitizedBookingUrl =
       "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html";
-    const accessBarrier = { url: bookingUrl, status: 403 as const };
+    const accessBarrier = { url: sanitizedBookingUrl, status: 403 as const };
     const baseEvidence: BrowserDiscoveryEvidence = {
       courseId: "single-course-webtrac",
       courseName: "Guilford Lakes Golf Course",
       sourceUrl: "https://www.guilfordlakesgolf.com/",
-      observedUrls: [bookingUrl],
+      observedUrls: [bookingUrl, sanitizedBookingUrl],
       linkCandidates: [{ url: bookingUrl, label: "Book Your Tee Time" }],
       accessBarriers: [accessBarrier]
     };

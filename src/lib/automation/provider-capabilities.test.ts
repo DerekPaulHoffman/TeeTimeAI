@@ -196,6 +196,7 @@ describe("provider capability registry", () => {
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25&interfaceparameter=webtrac_se",
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=course-code-123456789012",
     "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR",
+    "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html",
     "https://public-course.book.teeitup.golf/?course=24680&date=2026-07-24&max=10"
   ])("keeps an explicit provider-family booking query shape %s", (url) => {
     expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
