@@ -1380,6 +1380,34 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(
         page.getByRole("button", { name: "Open feedback form" }).getByText("Feedback")
       ).toBeVisible();
+
+      const courseRows = page.locator(".watch-course-row");
+      const courseRowCount = await courseRows.count();
+      if (courseRowCount > 0) {
+        const firstCourseRow = courseRows.first();
+        const mobileCourseLayout = await firstCourseRow.evaluate((row) => {
+          const image = row.querySelector<HTMLElement>(".dashboard-course-image");
+          const copy = row.querySelector<HTMLElement>(".watch-course-copy");
+          const rowRect = row.getBoundingClientRect();
+          const imageRect = image?.getBoundingClientRect();
+          const copyRect = copy?.getBoundingClientRect();
+
+          return {
+            copyStartsAfterImage:
+              Boolean(imageRect && copyRect) && copyRect!.top >= imageRect!.bottom - 1,
+            imageAspectRatio:
+              imageRect && imageRect.width > 0 ? imageRect.height / imageRect.width : 0,
+            imageWidth: imageRect?.width ?? 0,
+            rowWidth: rowRect.width
+          };
+        });
+
+        expect(mobileCourseLayout.imageWidth).toBeGreaterThanOrEqual(
+          mobileCourseLayout.rowWidth - 1
+        );
+        expect(mobileCourseLayout.imageAspectRatio).toBeCloseTo(9 / 16, 2);
+        expect(mobileCourseLayout.copyStartsAfterImage).toBe(true);
+      }
     }
 
     const bodyText = await page.locator("body").innerText();
