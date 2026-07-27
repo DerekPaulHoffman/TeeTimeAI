@@ -11,6 +11,7 @@ import {
 } from "@/lib/automation/db-service";
 import {
   assessDirtyWorktreeRecovery,
+  buildCourseProfilePortfolioCandidates,
   buildFeedbackPortfolioCandidates,
   buildFunnelPortfolioCandidates,
   buildImprovementCheckpoints,
@@ -31,6 +32,7 @@ import {
   type ImprovementCandidateInput,
   selectImprovementCandidate
 } from "@/lib/automation/improvement";
+import { listCourseProfileQueue } from "@/lib/course-profiles/service";
 import {
   AUTOMATION_WORKERS,
   completeAutomationWorker,
@@ -1145,7 +1147,8 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     recentRuns,
     recentDiscoveries,
     unresolvedFeedback,
-    publicFunnelCounts
+    publicFunnelCounts,
+    courseProfileQueue
   ] = await Promise.all([
     prisma.teeSearch.count({
       where: {
@@ -1220,18 +1223,31 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         createdAt: { gte: publicFunnelSince }
       },
       _count: { _all: true }
-    })
+    }),
+    listCourseProfileQueue(3)
   ]);
 
   const categoryHistory = buildPortfolioCategoryHistory(recentRuns);
+  const observedAt = new Date();
   const portfolioCandidates = [
     ...buildFeedbackPortfolioCandidates(unresolvedFeedback),
+    ...buildCourseProfilePortfolioCandidates(
+      courseProfileQueue.map((course) => ({
+        name: course.name,
+        queuedAt:
+          course.profile?.reviewDueAt ??
+          course.profile?.createdAt ??
+          course.createdAt
+      })),
+      categoryHistory,
+      observedAt
+    ),
     ...buildFunnelPortfolioCandidates(
       publicFunnelCounts.map((entry) => ({
         name: entry.name,
         count: entry._count._all
       })),
-      new Date()
+      observedAt
     ),
     ...buildRepeatedCoveragePortfolioCandidates(recentRuns)
   ];

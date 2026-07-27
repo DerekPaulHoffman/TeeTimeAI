@@ -115,6 +115,11 @@ type FunnelEventCountInput = {
   count: number;
 };
 
+type CourseProfileQueueInput = {
+  name: string;
+  queuedAt: Date | string;
+};
+
 export type ImprovementCandidateInput = {
   activeSearchCount: number;
   pendingAlerts: PendingAlertInput[];
@@ -562,6 +567,55 @@ export function buildFeedbackPortfolioCandidates(
       }
     ];
   });
+}
+
+export function buildCourseProfilePortfolioCandidates(
+  queue: CourseProfileQueueInput[],
+  categoryHistory: ImprovementCategoryHistoryInput[],
+  observedAt: Date | string
+): PortfolioCandidateInput[] {
+  if (queue.length === 0) {
+    return [];
+  }
+
+  const observedDate = new Date(observedAt);
+  const sortedQueue = [...queue].sort(
+    (left, right) =>
+      new Date(left.queuedAt).getTime() - new Date(right.queuedAt).getTime()
+  );
+  const oldest = sortedQueue[0];
+  const oldestAgeHours =
+    (observedDate.getTime() - new Date(oldest.queuedAt).getTime()) /
+    (60 * 60 * 1000);
+  const recentMetadataCutoff = observedDate.getTime() - 24 * 60 * 60 * 1000;
+  const hasRecentMetadataSelection = categoryHistory.some(
+    (entry) =>
+      entry.category === "metadata_seo" &&
+      new Date(entry.selectedAt).getTime() >= recentMetadataCutoff
+  );
+
+  if (oldestAgeHours < 24 && hasRecentMetadataSelection) {
+    return [];
+  }
+
+  const names = sortedQueue.map((entry) => entry.name).join(", ");
+  return [
+    {
+      id: "metadata:course-profile-maintenance",
+      category: "metadata_seo",
+      source: "metadata",
+      summary: `Publish up to ${sortedQueue.length} source-backed Course Guide${sortedQueue.length === 1 ? "" : "s"} from the maintenance queue.`,
+      observedAt: toIsoString(observedAt),
+      priority: 150,
+      evidence: [
+        `oldest queued profile age=${Math.max(0, oldestAgeHours).toFixed(1)}h`,
+        `queued courses=${names}`,
+        hasRecentMetadataSelection
+          ? "A metadata_seo batch completed within 24 hours, but the oldest profile exceeded the maintenance floor."
+          : "No metadata_seo batch completed within 24 hours."
+      ]
+    }
+  ];
 }
 
 export function buildFunnelPortfolioCandidates(

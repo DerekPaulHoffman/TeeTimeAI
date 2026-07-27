@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assessDirtyWorktreeRecovery,
+  buildCourseProfilePortfolioCandidates,
   buildFeedbackPortfolioCandidates,
   buildFunnelPortfolioCandidates,
   buildHourlyImprovementRunProvenance,
@@ -479,6 +480,52 @@ describe("selectImprovementCandidate", () => {
 });
 
 describe("portfolio evidence collectors", () => {
+  it("enforces the Course Guide maintenance floor ahead of discretionary work", () => {
+    const observedAt = "2026-07-27T13:00:00.000Z";
+    const recentMetadataHistory = [
+      {
+        category: "metadata_seo" as const,
+        selectedAt: "2026-07-27T07:00:00.000Z"
+      }
+    ];
+
+    expect(
+      buildCourseProfilePortfolioCandidates(
+        [{ name: "Fresh Course", queuedAt: "2026-07-27T01:00:00.000Z" }],
+        recentMetadataHistory,
+        observedAt
+      )
+    ).toEqual([]);
+
+    expect(
+      buildCourseProfilePortfolioCandidates(
+        [
+          { name: "Overdue Course", queuedAt: "2026-07-26T12:00:00.000Z" },
+          { name: "Fresh Course", queuedAt: "2026-07-27T01:00:00.000Z" }
+        ],
+        recentMetadataHistory,
+        observedAt
+      )
+    ).toMatchObject([
+      {
+        id: "metadata:course-profile-maintenance",
+        category: "metadata_seo",
+        source: "metadata",
+        priority: 150
+      }
+    ]);
+  });
+
+  it("queues profile maintenance when no metadata batch completed in 24 hours", () => {
+    expect(
+      buildCourseProfilePortfolioCandidates(
+        [{ name: "New Course", queuedAt: "2026-07-27T12:00:00.000Z" }],
+        [],
+        "2026-07-27T13:00:00.000Z"
+      )
+    ).toHaveLength(1);
+  });
+
   it("waits for a meaningful aggregate funnel sample before creating work", () => {
     expect(
       buildFunnelPortfolioCandidates(
