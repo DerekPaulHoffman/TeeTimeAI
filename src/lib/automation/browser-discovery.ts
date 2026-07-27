@@ -239,6 +239,17 @@ export function sanitizeBrowserDiscoveryAccessEvidence(
     return discovery;
   }
 
+  const providerLandingUrls = [
+    discovery.bookingUrl,
+    ...discovery.evidence.observedUrls
+  ].filter(
+    (value): value is string =>
+      Boolean(value) && isProviderPublicBookingLandingUrl(value!)
+  );
+  const relevantBarriers = barriers.filter((barrier) =>
+    providerLandingUrls.some((url) => haveSameExactUrl(url, barrier.url))
+  );
+
   return {
     ...discovery,
     sourceUrl: sanitizeDeniedUrl(discovery.sourceUrl, barriers),
@@ -247,6 +258,9 @@ export function sanitizeBrowserDiscoveryAccessEvidence(
       : discovery.bookingUrl,
     evidence: {
       ...discovery.evidence,
+      ...(relevantBarriers.length > 0
+        ? { accessBarriers: sanitizeAccessBarriers(relevantBarriers) }
+        : {}),
       finalUrl: discovery.evidence.finalUrl
         ? sanitizeDeniedUrl(discovery.evidence.finalUrl, barriers)
         : discovery.evidence.finalUrl,
@@ -1712,6 +1726,15 @@ function learnWebTracDiscovery(
     ));
   const courseCode = bookingUrl?.searchParams.get("secondarycode");
   if (!bookingUrl) {
+    return null;
+  }
+  if (
+    evidence.corroboratedAccessBarrier &&
+    haveSameExactUrl(
+      evidence.corroboratedAccessBarrier.url,
+      bookingUrl.toString()
+    )
+  ) {
     return null;
   }
   const bookingWindowDays = [...(evidence.visibleText ?? "").matchAll(/\b(\d{1,2})\s+DAYS?\s+(?:prior|in advance)\b/gi)]

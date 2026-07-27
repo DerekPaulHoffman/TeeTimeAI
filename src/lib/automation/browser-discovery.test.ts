@@ -5790,6 +5790,55 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.apiMetadata).not.toHaveProperty("courseCode");
   });
 
+  it("keeps one exact MyVSCloud barrier retryable and finalizes only after corroboration", () => {
+    const bookingUrl =
+      "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
+    const sanitizedBookingUrl =
+      "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html";
+    const accessBarrier = { url: bookingUrl, status: 403 as const };
+    const baseEvidence: BrowserDiscoveryEvidence = {
+      courseId: "single-course-webtrac",
+      courseName: "Guilford Lakes Golf Course",
+      sourceUrl: "https://www.guilfordlakesgolf.com/",
+      observedUrls: [bookingUrl],
+      linkCandidates: [{ url: bookingUrl, label: "Book Your Tee Time" }],
+      accessBarriers: [accessBarrier]
+    };
+
+    const firstDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
+      buildBrowserDiscovery(baseEvidence),
+      baseEvidence.accessBarriers
+    );
+    expect(firstDiscovery).toMatchObject({
+      status: "LEARNED",
+      automationEligibility: "ALLOWED",
+      evidence: {
+        accessBarriers: [{ url: sanitizedBookingUrl, status: 403 }]
+      }
+    });
+
+    const corroboratedDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
+      buildBrowserDiscovery({
+        ...baseEvidence,
+        corroboratedAccessBarrier: accessBarrier
+      }),
+      baseEvidence.accessBarriers
+    );
+    expect(corroboratedDiscovery).toMatchObject({
+      status: "BLOCKED",
+      bookingUrl: sanitizedBookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      confidence: 0.95,
+      evidence: {
+        accessBarriers: [{ url: sanitizedBookingUrl, status: 403 }],
+        learnedFrom: "known-provider-public-landing-access-barrier"
+      }
+    });
+    expect(corroboratedDiscovery.apiMetadata).toBeUndefined();
+  });
+
   it("does not treat an arbitrary WebTrac-shaped host as trusted provider metadata", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "untrusted",
