@@ -1405,7 +1405,12 @@ test.describe("Tee Time Spot UI smoke", () => {
   test("private operator overview is concealed while signed out", async ({ page }, testInfo) => {
     const response = await page.goto("/operator");
 
-    expect(response?.status()).toBe(404);
+    if (useMockedSearchProviders) {
+      expect(response?.status()).toBe(404);
+    } else {
+      expect(page.url()).toMatch(/^https:\/\/accounts\.teetimespot\.com\/sign-in(?:\?|$)/);
+      expect(response?.status()).toBe(200);
+    }
     await expect(page.getByRole("link", { name: "Site overview" })).toHaveCount(0);
     expect(
       await page.locator("body").innerText(),
