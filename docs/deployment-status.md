@@ -1,6 +1,6 @@
 # Deployment Status
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 ## Live Vercel Deployment
 
@@ -15,6 +15,8 @@ Last updated: 2026-07-26
 - Vercel team/account ID: `team_qS5jqFYAovuxspGMzno0XtdK`
 
 ## Verified
+
+- 2026-07-27 hourly product loop published source-backed Course Guides for Orange Hills Country Club, Crystal Lake Golf Club, and Crestbrook Park Golf Course. All three protected drafts passed dry-run validation before the production upsert and read back `PUBLISHED`. Orange Hills and Crestbrook now record verified 18-hole layouts; Crystal Lake records a verified 18-hole, par-71 course. The guides describe public access, course character, history, and golfer facilities without changing provider eligibility, alert scheduling, or course-support ownership.
 
 - 2026-07-26 hourly product loop published source-backed Course Guides for RI Children's Golf Course, Roseland Golf Course, and The Golf Club at Oxford Greens. All three protected drafts passed dry-run validation before the production upsert and read back `PUBLISHED`. Roseland now records its verified nine-hole layout and Oxford Greens its verified 18-hole layout; RI Children's remains deliberately unstructured because its official program pages do not directly establish the full facility layout. The guides describe current access, setting, amenities, and playing character without changing provider eligibility, alert scheduling, or course-support ownership.
 
