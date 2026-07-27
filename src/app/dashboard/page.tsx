@@ -31,6 +31,7 @@ import {
 } from "@/lib/courses/booking-window";
 import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
+import { formatObservationDateTime } from "@/lib/dates/observation-date-time";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import {
@@ -319,7 +320,10 @@ function DashboardSearchCard({
           </div>
           <span className="dashboard-alert-summary-checked">
             {search.lastCheckedAt
-              ? `Checked ${formatObservationDateTime(search.lastCheckedAt)}`
+              ? `Checked ${formatObservationDateTime(
+                  search.lastCheckedAt,
+                  search.userTimeZone
+                )}`
               : "Check pending"}
           </span>
           <ChevronDown
@@ -627,7 +631,10 @@ function DashboardSearchCard({
                   <p className="watch-course-release">
                     {monitoringVerdict.detail}
                     {latestProbe
-                      ? ` Last checked ${formatObservationDateTime(latestProbe.observedAt)}.`
+                      ? ` Last checked ${formatObservationDateTime(
+                          latestProbe.observedAt,
+                          search.userTimeZone
+                        )}.`
                       : ""}
                   </p>
                 </div>
@@ -687,17 +694,6 @@ function formatObservationDate(value: Date | string | undefined) {
     month: "short",
     day: "numeric",
     year: "numeric"
-  });
-}
-
-function formatObservationDateTime(value: Date | string) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "recently";
-  return date.toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit"
   });
 }
 
