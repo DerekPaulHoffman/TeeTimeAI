@@ -403,6 +403,16 @@ export async function recordCourseMonitoringFinalClassification(input: {
   }
   return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
     const current = await ensureMonitoringStatus(transaction, input.courseId, now);
+    const stateChanged = current.state !== input.state;
+    const snapshotNeedsRepair =
+      current.consecutiveFailures !== 0 ||
+      current.failureFingerprint !== null ||
+      current.firstDegradedAt !== null ||
+      current.nextAutomaticAttemptAt !== null ||
+      current.revalidationRequestedAt !== null;
+    if (!stateChanged && !snapshotNeedsRepair) {
+      return current;
+    }
     const status = await transaction.courseMonitoringStatus.update({
       where: {
         courseId: input.courseId,
@@ -415,22 +425,24 @@ export async function recordCourseMonitoringFinalClassification(input: {
         firstDegradedAt: null,
         nextAutomaticAttemptAt: null,
         revalidationRequestedAt: null,
-        stateChangedAt: now,
+        ...(stateChanged ? { stateChangedAt: now } : {}),
         revision: { increment: 1 }
       }
     });
-    await appendMonitoringEvent(transaction, {
-      courseId: input.courseId,
-      eventType: "STATE_CHANGED",
-      source: input.source ?? "SEARCH_WORKFLOW",
-      fromState: current.state,
-      toState: input.state,
-      outcome: input.outcome,
-      message: sanitizeMonitoringMessage(input.message),
-      evidenceUrl: sanitizeEvidenceUrl(input.evidenceUrl),
-      runtimeVersion: input.runtimeVersion,
-      occurredAt: now
-    });
+    if (stateChanged) {
+      await appendMonitoringEvent(transaction, {
+        courseId: input.courseId,
+        eventType: "STATE_CHANGED",
+        source: input.source ?? "SEARCH_WORKFLOW",
+        fromState: current.state,
+        toState: input.state,
+        outcome: input.outcome,
+        message: sanitizeMonitoringMessage(input.message),
+        evidenceUrl: sanitizeEvidenceUrl(input.evidenceUrl),
+        runtimeVersion: input.runtimeVersion,
+        occurredAt: now
+      });
+    }
     return status;
   });
 }
