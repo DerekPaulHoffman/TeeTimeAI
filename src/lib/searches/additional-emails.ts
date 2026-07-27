@@ -1,4 +1,4 @@
-import { MAX_ADDITIONAL_ALERT_EMAILS } from "@/lib/validation/search";
+import { MAX_ADDITIONAL_ALERT_EMAILS } from "@/lib/validation/search-constraints";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

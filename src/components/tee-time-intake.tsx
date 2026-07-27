@@ -71,7 +71,7 @@ import {
 import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
   MAX_ADDITIONAL_ALERT_EMAILS
-} from "@/lib/validation/search";
+} from "@/lib/validation/search-constraints";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
 import {
   isAdditionalAlertEmailValid,

@@ -1,14 +1,12 @@
 "use client";
 
 import {
-  lazy,
-  Suspense,
   useState,
   type CSSProperties,
   type ReactNode
 } from "react";
 
-const ClerkSignInDialog = lazy(() => import("./clerk-sign-in-dialog"));
+import { openDeferredClerkSignIn } from "@/lib/auth/deferred-clerk";
 
 export function DeferredSignInButton({
   children,
@@ -25,26 +23,40 @@ export function DeferredSignInButton({
   publishableKey: string;
   style?: CSSProperties;
 }) {
-  const [dialogRequested, setDialogRequested] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  const requestSignIn = () => {
+    onClick?.();
+    setLoading(true);
+    setLoadFailed(false);
+    void openDeferredClerkSignIn(publishableKey)
+      .catch(() => {
+        setLoadFailed(true);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
 
   return (
     <>
       <button
         className={className}
-        disabled={disabled}
+        aria-busy={loading}
+        disabled={disabled || loading}
         onClick={() => {
-          onClick?.();
-          setDialogRequested(true);
+          requestSignIn();
         }}
         style={style}
         type="button"
       >
         {children}
       </button>
-      {dialogRequested ? (
-        <Suspense fallback={null}>
-          <ClerkSignInDialog publishableKey={publishableKey} />
-        </Suspense>
+      {loadFailed ? (
+        <span className="sr-only" role="alert">
+          Sign-in could not load. Try again.
+        </span>
       ) : null}
     </>
   );

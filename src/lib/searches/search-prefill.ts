@@ -3,7 +3,7 @@ import {
   MAX_COURSE_SEARCH_RADIUS_MILES,
   MIN_COURSE_SEARCH_RADIUS_MILES
 } from "@/lib/places/radius";
-import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
+import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
 
 export const SEARCH_PREFILL_STORAGE_KEY = "tee-time-spot:search-prefill";
 

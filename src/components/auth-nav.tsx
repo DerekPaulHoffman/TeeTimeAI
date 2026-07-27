@@ -3,10 +3,6 @@ import { Bell, LogIn, Search } from "lucide-react";
 
 import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
 import { DiscordMark } from "@/components/discord-mark";
-import {
-  SignedInAuthControls,
-  SignedInUserButton
-} from "@/components/signed-in-auth-controls";
 import { discordInviteUrl } from "@/lib/community";
 
 export function AuthNav({
@@ -50,7 +46,7 @@ export function AuthNav({
       <InfoNavLinks />
       <DiscordNavLink />
       {userId && publishableKey ? (
-        <SignedInAuthControls userId={userId} />
+        <SignedInOperatorControl userId={userId} />
       ) : null}
       <Link
         aria-label="My alerts"
@@ -80,10 +76,24 @@ export function AuthNav({
         </DeferredSignInButton>
       ) : null}
       {userId && publishableKey ? (
-        <SignedInUserButton publishableKey={publishableKey} />
+        <SignedInUserControl publishableKey={publishableKey} />
       ) : null}
     </nav>
   );
+}
+
+async function SignedInOperatorControl({ userId }: { userId: string }) {
+  const { SignedInAuthControls } = await import("./signed-in-auth-controls");
+  return <SignedInAuthControls userId={userId} />;
+}
+
+async function SignedInUserControl({
+  publishableKey
+}: {
+  publishableKey: string;
+}) {
+  const { SignedInUserButton } = await import("./signed-in-auth-controls");
+  return <SignedInUserButton publishableKey={publishableKey} />;
 }
 
 function InfoNavLinks() {

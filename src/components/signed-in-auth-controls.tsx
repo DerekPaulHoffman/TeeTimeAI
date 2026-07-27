@@ -1,9 +1,10 @@
 "use client";
 
-import { ClerkProvider, UserButton } from "@clerk/nextjs";
 import { Gauge } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { mountDeferredClerkUserButton } from "@/lib/auth/deferred-clerk";
 
 export function SignedInAuthControls({
   userId
@@ -55,9 +56,31 @@ export function SignedInUserButton({
 }: {
   publishableKey: string;
 }) {
-  return (
-    <ClerkProvider publishableKey={publishableKey} telemetry={false}>
-      <UserButton />
-    </ClerkProvider>
-  );
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) {
+      return;
+    }
+
+    let disposed = false;
+    let unmount: (() => void) | undefined;
+    void mountDeferredClerkUserButton(element, publishableKey)
+      .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+        } else {
+          unmount = cleanup;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unmount?.();
+    };
+  }, [publishableKey]);
+
+  return <div data-testid="user-button" ref={containerRef} />;
 }

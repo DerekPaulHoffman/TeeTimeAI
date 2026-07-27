@@ -1,5 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { openDeferredClerkSignIn } from "@/lib/auth/deferred-clerk";
 
 import { AuthNav } from "./auth-nav";
 import {
@@ -7,13 +9,14 @@ import {
   SignedInUserButton
 } from "./signed-in-auth-controls";
 
-vi.mock("@clerk/nextjs", () => ({
-  ClerkProvider: ({ children }: { children: React.ReactNode }) => children,
-  UserButton: () => <span data-testid="user-button" />
+vi.mock("@/lib/auth/deferred-clerk", () => ({
+  mountDeferredClerkUserButton: vi.fn().mockResolvedValue(() => undefined),
+  openDeferredClerkSignIn: vi.fn().mockResolvedValue(undefined)
 }));
 
 describe("AuthNav", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -39,6 +42,23 @@ describe("AuthNav", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "My alerts" })).toBeTruthy();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("loads Clerk only after the signed-out user requests sign-in", async () => {
+    render(
+      <AuthNav
+        clerkEnabled
+        publishableKey="pk_test_example"
+        userId={null}
+      />
+    );
+
+    expect(openDeferredClerkSignIn).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => {
+      expect(openDeferredClerkSignIn).toHaveBeenCalledWith("pk_test_example");
+    });
   });
 
   it("omits sign-in when Clerk is unavailable", () => {

@@ -9,7 +9,7 @@ import {
   MAX_COURSE_SEARCH_RADIUS_MILES,
   MIN_COURSE_SEARCH_RADIUS_MILES
 } from "@/lib/places/radius";
-import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search";
+import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
 
 export type CourseLayoutFilter = "any" | "9" | "18";
 

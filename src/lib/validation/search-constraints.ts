@@ -1,0 +1,8 @@
+export const MIN_COURSE_PREFERENCES = 1;
+export const MAX_COURSE_PREFERENCES = 5;
+export const MAX_PLAYERS_PER_SEARCH = 4;
+export const MAX_QUEUED_SEARCHES_PER_USER = 3;
+export const MAX_ADDITIONAL_ALERT_EMAILS = 3;
+export const SEARCH_CADENCE_OPTIONS_MINUTES = [5, 15, 30, 60, 120] as const;
+export const DEFAULT_SEARCH_CADENCE_MINUTES = 5;
+export const COURSE_LAYOUT_HOLE_OPTIONS = [9, 18] as const;

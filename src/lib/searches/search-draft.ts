@@ -1,6 +1,6 @@
 import type { CourseAlertSupport, CourseMonitoringSupport } from "@/lib/courses/intelligence";
 import type { CourseCandidate } from "@/lib/places/google";
-import { MAX_COURSE_PREFERENCES } from "@/lib/validation/search";
+import { MAX_COURSE_PREFERENCES } from "@/lib/validation/search-constraints";
 
 import { sanitizeSearchPrefill } from "./search-prefill";
 

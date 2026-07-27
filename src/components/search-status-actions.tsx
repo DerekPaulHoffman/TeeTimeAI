@@ -22,7 +22,7 @@ import {
   MAX_ADDITIONAL_ALERT_EMAILS,
   MAX_PLAYERS_PER_SEARCH,
   SEARCH_CADENCE_OPTIONS_MINUTES
-} from "@/lib/validation/search";
+} from "@/lib/validation/search-constraints";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 type SearchCheckStatus = "IDLE" | "QUEUED" | "CHECKING" | "WAITING" | "FAILED" | "STOPPED";
