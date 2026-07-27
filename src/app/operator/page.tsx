@@ -22,6 +22,7 @@ import {
   Wrench
 } from "lucide-react";
 
+import { OperatorRecentUsers } from "@/components/operator-recent-users";
 import { hasClerkConfig } from "@/lib/env";
 import { getCurrentOperator } from "@/lib/operator/auth";
 import {
@@ -494,6 +495,8 @@ function OperatorDashboard({
           />
         </div>
       </section>
+
+      <OperatorRecentUsers users={overview.recentUsers} />
 
       <section aria-labelledby="workers-heading" className="operator-section">
         <SectionHeading
