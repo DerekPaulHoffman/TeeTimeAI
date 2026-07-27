@@ -6650,16 +6650,10 @@ button {
   padding: 80px max(32px, calc((100vw - 1400px) / 2 + 32px));
 }
 
-.section-tight > .section-heading,
-.home-intake-layout,
+.home-search-cta,
 .how-it-works-section > * {
   margin-inline: auto;
   max-width: 1336px;
-}
-
-.section-tight > .section-heading {
-  margin-left: auto;
-  width: 100%;
 }
 
 .section-heading h2 {
@@ -6668,70 +6662,27 @@ button {
   line-height: 1.08;
 }
 
-.home-intake-layout {
-  align-items: start;
+.home-search-cta {
+  align-items: end;
   display: grid;
-  gap: 24px;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  margin-top: 36px;
-}
-
-.home-search-form {
-  margin-top: 0;
-  padding: 28px;
-}
-
-.home-course-summary {
-  background: #111a22;
-  border-radius: 16px;
-  color: #ffffff;
-  padding: 24px;
-}
-
-.home-course-summary-icon {
-  align-items: center;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  display: flex;
-  height: 40px;
-  justify-content: center;
-  margin-bottom: 16px;
-  width: 40px;
-}
-
-.home-course-summary h3 {
-  color: #ffffff;
-  font-size: 1.38rem;
-  margin: 0 0 8px;
-}
-
-.home-course-summary > p {
-  color: rgba(255, 255, 255, 0.65);
-  font-size: 0.875rem;
-  line-height: 1.55;
-  margin: 0 0 24px;
-}
-
-.home-course-summary > div {
-  border: 1px dashed rgba(255, 255, 255, 0.2);
-  border-radius: 12px;
-  color: #95a0a6;
-  font-size: 0.81rem;
-  margin-bottom: 16px;
-  padding: 12px 14px;
-  text-align: center;
-}
-
-.home-course-summary .button {
+  gap: 48px;
+  grid-template-columns: minmax(0, 720px) auto;
+  justify-content: space-between;
   width: 100%;
 }
 
-.home-course-summary small {
-  color: #95a0a6;
-  display: block;
-  font-size: 0.75rem;
-  line-height: 1.5;
-  margin-top: 16px;
+.home-search-cta .section-heading {
+  margin: 0;
+}
+
+.home-search-cta .home-search-cta-copy {
+  color: #45675d;
+  max-width: 680px;
+}
+
+.home-search-cta-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .how-it-works-section {
@@ -7231,9 +7182,17 @@ button {
   }
 
   .scenario-grid,
-  .home-intake-layout,
+  .home-search-cta,
   .dashboard-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-search-cta {
+    gap: 28px;
+  }
+
+  .home-search-cta-button {
+    justify-self: start;
   }
 
   .dashboard-sidebar {
@@ -7334,8 +7293,7 @@ button {
   }
 
   .scenario-card,
-  .home-search-form,
-  .home-course-summary {
+  .home-search-form {
     padding: 18px;
   }
 
@@ -7782,10 +7740,6 @@ button {
   .how-it-works-section,
   .community-section {
     padding: 48px 16px;
-  }
-
-  .home-intake-layout {
-    margin-top: 32px;
   }
 
   .home-search-form {

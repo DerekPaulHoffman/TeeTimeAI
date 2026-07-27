@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRight, Bell, Check, MapPin, Search } from "lucide-react";
+import { ArrowRight, Bell, Check, Search } from "lucide-react";
 
 import { DiscordMark } from "@/components/discord-mark";
-import { HomeSearchForm } from "@/components/home-search-form";
 import { StructuredData } from "@/components/structured-data";
 import { discordInviteUrl } from "@/lib/community";
 import { absoluteUrl, siteDefinition, siteDescription, siteName } from "@/lib/seo";
@@ -206,33 +205,22 @@ export default function HomePage() {
       </section>
 
       <section className="section section-tight" id="start">
-        <div className="section-heading">
-          <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-            Set up your alert
-          </p>
-          <h2>Tell us where and when you want to play.</h2>
-          <p>
-            Pick your courses, set a future day and time range, and we&apos;ll email when supported
-            public availability matches your group.
-          </p>
-        </div>
-        <div className="home-intake-layout">
-          <HomeSearchForm />
-          <aside className="home-course-summary">
-            <span className="home-course-summary-icon" aria-hidden="true">
-              <MapPin size={18} />
-            </span>
-            <h3>Your courses</h3>
-            <p>
-              Pick up to 5 courses and put your top choice first so your preferences remain clear.
+        <div className="home-search-cta">
+          <div className="section-heading">
+            <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
+              Public golf tee time alerts
             </p>
-            <div>No courses selected yet</div>
-            <a className="button button-primary" href="/search">
-              <Search size={15} />
-              Find my tee time
-            </a>
-            <small>Coverage depends on each course&apos;s public booking setup and access policy.</small>
-          </aside>
+            <h2>Find public golf tee times near you.</h2>
+            <p className="home-search-cta-copy">
+              Choose your preferred courses, date, time, and group size. Tee Time Spot monitors
+              supported public availability and emails you a direct link to the official booking
+              page.
+            </p>
+          </div>
+          <Link className="button button-primary home-search-cta-button" href="/search">
+            <Search size={16} />
+            Find a tee time
+          </Link>
         </div>
       </section>
 

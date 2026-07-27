@@ -149,7 +149,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       const moduleBoxes = await Promise.all(
         [
           ".scenario-inner",
-          ".home-intake-layout",
+          ".home-search-cta",
           ".how-steps-grid",
           ".home-trust-inner",
           ".community-card"
@@ -172,20 +172,19 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(
       page.getByRole("heading", { name: "Built with golfers, not just for them." })
     ).toBeVisible();
-    const homeSearchForm = page.locator(".home-search-form");
-    const homeLocation = homeSearchForm.locator('input[name="location"]');
-    await expect(homeLocation).toHaveValue("");
-    await expect(homeLocation).toHaveAttribute(
-      "placeholder",
-      "City, state, ZIP, or address"
-    );
-    await expect(homeLocation).toHaveAttribute("required", "");
-    await expect(homeSearchForm.locator("select")).toHaveValue("4");
-    await expect(homeSearchForm.locator('input[type="date"]')).toHaveValue(
-      nextSaturdayDateInputValue()
-    );
-    await expect(homeSearchForm.locator('input[type="time"]').nth(0)).toHaveValue("09:00");
-    await expect(homeSearchForm.locator('input[type="time"]').nth(1)).toHaveValue("18:00");
+    await expect(page.locator(".home-search-form")).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: "Find public golf tee times near you." })
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "Choose your preferred courses, date, time, and group size. Tee Time Spot monitors supported public availability and emails you a direct link to the official booking page.",
+        { exact: true }
+      )
+    ).toBeVisible();
+    await expect(
+      page.locator("#start").getByRole("link", { name: "Find a tee time" })
+    ).toHaveAttribute("href", "/search");
     await expect(
       page.getByText(
         "Share feedback, suggest features, swap public-course tips, and help us make Tee Time Spot more useful.",
@@ -211,25 +210,15 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(feedbackDialog).toBeHidden();
     await expect(feedbackLauncher).toBeFocused();
 
-    const homeDistance = homeSearchForm.getByRole("slider", { name: "Distance from me" });
-    await expect(homeDistance).toHaveAttribute("min", "5");
-    await expect(homeDistance).toHaveAttribute("max", "30");
-    await expect(homeDistance).toHaveAttribute("step", "5");
-
     if (testInfo.project.name.includes("mobile")) {
-      const actionMetrics = await homeSearchForm.locator(".home-form-actions .button").evaluateAll(
-        (buttons) =>
-          buttons.map((button) => ({
-            clientWidth: button.clientWidth,
-            right: button.getBoundingClientRect().right,
-            scrollWidth: button.scrollWidth
-          }))
-      );
+      const actionMetrics = await page.locator(".home-search-cta-button").evaluate((button) => ({
+        clientWidth: button.clientWidth,
+        right: button.getBoundingClientRect().right,
+        scrollWidth: button.scrollWidth
+      }));
       const viewportWidth = page.viewportSize()?.width ?? 0;
-      expect(actionMetrics.every((button) => button.scrollWidth <= button.clientWidth + 1)).toBe(
-        true
-      );
-      expect(actionMetrics.every((button) => button.right <= viewportWidth + 1)).toBe(true);
+      expect(actionMetrics.scrollWidth).toBeLessThanOrEqual(actionMetrics.clientWidth + 1);
+      expect(actionMetrics.right).toBeLessThanOrEqual(viewportWidth + 1);
     }
 
     await page.evaluate(() => {
@@ -308,20 +297,16 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
   });
 
-  test("transfers homepage search details without putting them in the URL", async ({ page }) => {
+  test("sends homepage visitors to the dedicated tee time search", async ({ page }) => {
     await page.goto("/");
-    const homeSearchForm = page.locator(".home-search-form");
-    await expect(homeSearchForm.getByLabel("Alert email")).toHaveCount(0);
-    await homeSearchForm.getByLabel("Location").fill("06825");
-    await homeSearchForm.locator("select").selectOption("2");
-    await homeSearchForm.getByRole("button", { name: "Browse courses" }).click();
+    await expect(page.locator(".home-search-form")).toHaveCount(0);
+    await page.locator("#start").getByRole("link", { name: "Find a tee time" }).click();
 
     await expect(page).toHaveURL(/\/search$/);
     expect(new URL(page.url()).search).toBe("");
-    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
-      "06825"
-    );
-    await expect(page.getByLabel("Players")).toHaveValue("2");
+    await expect(
+      page.getByRole("heading", { name: "Tell us where and when you want to play." })
+    ).toBeVisible();
   });
 
   test("restores an unfinished course search after navigation and refresh", async ({ page }) => {
@@ -495,25 +480,9 @@ test.describe("Tee Time Spot UI smoke", () => {
       "color",
       "rgb(109, 191, 156)"
     );
-    await expect(page.locator(".home-form-row-primary label > span")).toHaveCSS(
+    await expect(page.locator(".home-search-cta-copy")).toHaveCSS(
       "color",
-      "rgb(85, 113, 106)"
-    );
-    await expect(page.locator(".home-distance-filter em").first()).toHaveCSS(
-      "color",
-      "rgb(95, 116, 110)"
-    );
-    await expect(page.getByRole("button", { name: "9-hole" })).toHaveCSS(
-      "color",
-      "rgb(95, 116, 110)"
-    );
-    await expect(page.locator(".home-course-summary > div")).toHaveCSS(
-      "color",
-      "rgb(149, 160, 166)"
-    );
-    await expect(page.locator(".home-course-summary > small")).toHaveCSS(
-      "color",
-      "rgb(149, 160, 166)"
+      "rgb(69, 103, 93)"
     );
     await expect(page.locator(".community-eyebrow > p")).toHaveCSS(
       "color",
@@ -555,20 +524,6 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.getByLabel("Players").selectOption("2");
     await page.getByRole("button", { name: /^Search$/i }).click();
     await expect.poll(() => discoveryRequests).toBe(1);
-    expect(geocodeRequests).toBe(0);
-
-    await page.goto("/");
-    await page.getByRole("button", { name: "Use my location" }).click();
-    await expect(page).toHaveURL(/\/search$/);
-    expect(new URL(page.url()).search).toBe("");
-    await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
-      "Current location"
-    );
-    await page.waitForTimeout(200);
-    expect(discoveryRequests).toBe(1);
-
-    await page.getByRole("button", { name: /^Search$/i }).click();
-    await expect.poll(() => discoveryRequests).toBe(2);
     expect(geocodeRequests).toBe(0);
   });
 
