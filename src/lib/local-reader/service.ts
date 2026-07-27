@@ -7,13 +7,16 @@ import { prisma } from "@/lib/prisma";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 import {
-  LOCAL_READER_COURSES,
   localReaderCourseKeySchema,
   localReaderResultSchema,
   validateLocalReaderResultForJob,
   type LocalReaderResult,
 } from "./contracts";
-import { getLocalReaderCourseKey, getLocalReaderJobUrl } from "./course-key";
+import {
+  getLocalReaderCourse,
+  getLocalReaderCourseKey,
+  getLocalReaderJobUrl,
+} from "./course-key";
 
 export { getLocalReaderCourseKey } from "./course-key";
 
@@ -222,6 +225,14 @@ export async function claimNextLocalReaderJob(deviceId: string) {
   });
   if (claimed.count !== 1) return null;
   const courseKey = localReaderCourseKeySchema.parse(candidate.courseKey);
+  const course = await prisma.course.findUnique({
+    where: { id: candidate.courseId },
+    select: { name: true },
+  });
+  const readerCourse = getLocalReaderCourse(courseKey, course?.name);
+  if (!readerCourse) {
+    throw new Error("The local reader course is no longer available");
+  }
   return {
     id: candidate.id,
     courseKey,
@@ -229,9 +240,9 @@ export async function claimNextLocalReaderJob(deviceId: string) {
     players: candidate.players,
     requestedAt: candidate.createdAt.toISOString(),
     expiresAt: candidate.jobExpiresAt.toISOString(),
-    courseName: LOCAL_READER_COURSES[courseKey].courseName,
+    courseName: readerCourse.courseName,
     bookingUrl: candidate.bookingUrl,
-    cardTextIncludes: [...LOCAL_READER_COURSES[courseKey].cardTextIncludes],
+    cardTextIncludes: [...readerCourse.cardTextIncludes],
     leaseToken,
   };
 }
@@ -254,6 +265,14 @@ export async function completeLocalReaderJob(input: {
     throw new Error("The local reader lease is no longer valid");
   }
   const courseKey = localReaderCourseKeySchema.parse(current.courseKey);
+  const course = await prisma.course.findUnique({
+    where: { id: current.courseId },
+    select: { name: true },
+  });
+  const readerCourse = getLocalReaderCourse(courseKey, course?.name);
+  if (!readerCourse) {
+    throw new Error("The local reader course is no longer available");
+  }
   validateLocalReaderResultForJob(
     {
       id: current.id,
@@ -262,9 +281,9 @@ export async function completeLocalReaderJob(input: {
       players: current.players,
       requestedAt: current.createdAt.toISOString(),
       expiresAt: current.jobExpiresAt.toISOString(),
-      courseName: LOCAL_READER_COURSES[courseKey].courseName,
+      courseName: readerCourse.courseName,
       bookingUrl: current.bookingUrl,
-      cardTextIncludes: [...LOCAL_READER_COURSES[courseKey].cardTextIncludes],
+      cardTextIncludes: [...readerCourse.cardTextIncludes],
     },
     input.result,
   );

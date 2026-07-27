@@ -29,10 +29,15 @@ const prismaMocks = vi.hoisted(() => ({
   }
 }));
 
+const localReaderMocks = vi.hoisted(() => ({
+  queueLocalReaderCourseVerification: vi.fn()
+}));
+
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: vi.fn()
 }));
+vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
 import {
   correctOperatorCourseBookingLink,
@@ -54,6 +59,7 @@ function status() {
       detectedBookingUrl: "https://course.example/book",
       website: "https://course.example",
       providerFamilyKey: "SOURCE_MISSING",
+      timeZone: "America/New_York",
       bookingAccessMode: "UNKNOWN",
       automationReason: "OTHER",
       supportIncident: {
@@ -82,6 +88,7 @@ describe("operator course monitoring mutations", () => {
     prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue(status());
     prismaMocks.teeSearch.findMany.mockResolvedValue([]);
+    localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue(null);
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({ revision: 4 });
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
@@ -214,6 +221,53 @@ describe("operator course monitoring mutations", () => {
         eventType: "REVALIDATION_REQUESTED",
         message: safeNote
       })
+    });
+  });
+
+  it("queues an immediate local-reader verification for a CPS course", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        detectedPlatform: "CUSTOM",
+        detectedBookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime",
+        providerFamilyKey: "CPS"
+      }
+    });
+    prismaMocks.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-1",
+        date: new Date("2026-08-02T00:00:00.000Z"),
+        players: 3
+      }
+    ]);
+    localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
+      id: "local-reader-job-1"
+    });
+
+    await expect(
+      requestOperatorCourseRecheck(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          note: "Retry the rendered public CPS tee sheet.",
+          idempotencyKey: "operator-recheck-cps-123456"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "request_recheck",
+      localReaderQueued: true,
+      applied: true
+    });
+
+    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
+      courseId: "course-1",
+      targetDate: "2026-08-02",
+      players: 3,
+      bookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime"
     });
   });
 });

@@ -1440,7 +1440,7 @@ describe("runSearchCheck email cadence", () => {
     expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledOnce();
   });
 
-  it("does not queue Grassy Hill for the local reader after a generic CPS 403", async () => {
+  it("queues Grassy Hill for the local reader after any CPS server failure", async () => {
     const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
@@ -1478,15 +1478,23 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2,
+      bookingUrl
+    });
     expect(result.courseResults[0]).toMatchObject({
       outcome: "FETCH_FAILED",
-      message: "CPS configuration returned 403"
+      message: expect.stringContaining("local public-page reader")
     });
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         course: expect.objectContaining({ id: "course-1" }),
-        kind: "FETCH_FAILED"
+        kind: "READER_CANDIDATE",
+        readPath: "LOCAL_READER_ALLOWLIST"
       })
     );
   });
@@ -1624,7 +1632,7 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("prefers the normal server adapter over a fresh local-reader result", async () => {
+  it("prefers a fresh local-reader result for CPS before the server adapter", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -1670,16 +1678,22 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(localReaderMocks.getFreshLocalReaderTeeSheet).not.toHaveBeenCalled();
-    expect(adapterMocks.fetchCpsTeeSheet).toHaveBeenCalled();
+    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2
+    });
+    expect(adapterMocks.fetchCpsTeeSheet).not.toHaveBeenCalled();
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "NO_MATCH",
-      availableMatches: 0
+      outcome: "MATCH_FOUND",
+      availableMatches: 1
     });
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
         rawSummary: expect.objectContaining({
-          providerExecution: "RUNNABLE_PROVIDER_CHECK"
+          providerExecution: "LOCAL_BROWSER_READER"
         })
       })
     );

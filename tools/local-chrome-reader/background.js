@@ -109,8 +109,37 @@ const ALLOWED_COURSES = Object.freeze({
 });
 let pollInProgress = false;
 
+function isAllowlistedCpsJob(job) {
+  try {
+    if (
+      !/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u.test(
+        job?.courseKey || "",
+      ) ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0
+    ) {
+      return false;
+    }
+    const hostname = job.courseKey.slice("cps:".length);
+    const url = new URL(job.bookingUrl);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === hostname &&
+      /^\/onlineresweb\/search-teetime\/?$/u.test(url.pathname) &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedJob(job) {
   try {
+    if (isAllowlistedCpsJob(job)) return true;
     const allowed = ALLOWED_COURSES[job?.courseKey];
     if (!allowed) return false;
     const [courseName, hostname, pathname, cardTextIncludes] = allowed;

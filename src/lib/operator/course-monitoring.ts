@@ -11,7 +11,9 @@ import {
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
+import { getCourseLocalDateStorageBoundary } from "@/lib/automation/date-boundary";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
+import { queueLocalReaderCourseVerification } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
 
 const referenceSchema = z
@@ -395,11 +397,17 @@ export async function requestOperatorCourseRecheck(
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
   );
+  const localReaderJob = await queueOperatorLocalReaderRecheck(current, now);
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
     context.dispatchSearches
   );
-  return { ...preview, applied: true, replayed: false };
+  return {
+    ...preview,
+    localReaderQueued: localReaderJob !== null,
+    applied: true,
+    replayed: false
+  };
 }
 
 export async function approveOperatorCourseTechnicalFinal(
@@ -684,6 +692,7 @@ async function requireMutationTarget(
           detectedBookingUrl: true,
           website: true,
           providerFamilyKey: true,
+          timeZone: true,
           bookingAccessMode: true,
           automationReason: true,
           supportIncident: true
@@ -712,7 +721,7 @@ async function requireMutationTarget(
       status: "ACTIVE",
       preferences: { some: { courseId: status.courseId } }
     },
-    select: { id: true }
+    select: { id: true, date: true, players: true }
   });
   return {
     status,
@@ -720,6 +729,33 @@ async function requireMutationTarget(
     activeSearches,
     replayed: Boolean(replayed)
   };
+}
+
+async function queueOperatorLocalReaderRecheck(
+  current: Awaited<ReturnType<typeof requireMutationTarget>>,
+  now: Date
+) {
+  const bookingUrl = current.status.course.detectedBookingUrl;
+  if (!bookingUrl) return null;
+  const activeSearch = current.activeSearches[0];
+  const fallbackDate = getCourseLocalDateStorageBoundary(
+    current.status.course.timeZone,
+    now
+  );
+  fallbackDate.setUTCDate(fallbackDate.getUTCDate() + 1);
+  try {
+    return await queueLocalReaderCourseVerification({
+      courseId: current.status.courseId,
+      targetDate: (activeSearch?.date ?? fallbackDate).toISOString().slice(0, 10),
+      players: activeSearch?.players ?? 2,
+      bookingUrl
+    });
+  } catch {
+    console.error("[operator:course-recheck-local-reader]", {
+      category: "local_reader_queue_failed"
+    });
+    return null;
+  }
 }
 
 async function assertMutationStillCurrent(

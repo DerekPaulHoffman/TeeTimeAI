@@ -6,17 +6,19 @@ This worker separates a backend job from a local, rendered-page read:
 signed backend job -> local Chrome page -> normalized slots -> signed backend result
 ```
 
-It reads only exact, allowlisted, signed-out CPS tee-time search routes and
-Chronogolf public club profiles. It normalizes rendered start time, hole
+It reads only signed backend jobs for exact, signed-out CPS tee-time search
+routes and explicitly allowlisted Chronogolf public club profiles. CPS tenants
+are accepted automatically only when the URL is HTTPS, uses one `*.cps.golf`
+tenant host, and stays on `/onlineresweb/search-teetime`. It normalizes rendered start time, hole
 options, public golfer capacity, price, and cart labels from current and legacy
 CPS card layouts plus Chronogolf's public tee-time cards. It does not inspect
 cookies or browser storage, call private provider APIs, click a tee time, sign
 in, enter a cart, or continue to checkout.
 
-The current allowlist includes Grassy Hill, Overpeck, Glen Mills, Bayberry Hills,
-Oak Lane, Candia Woods, Oxford Greens, Shennecossett, Stanley, Colonie,
-Springfield Township, Pine Hollow, and Capital Hills. Fenwick is deliberately
-excluded because its public route redirects to email verification.
+New CPS tenants do not require an extension release or a course-specific
+allowlist entry. Authentication, email verification, CAPTCHA, queue, unexpected
+redirect, and unrecognized page shapes still fail closed and return evidence
+instead of being bypassed.
 
 The Chronogolf allowlist contains only the exact public profiles owned by
 current course-support work, including Lyman Orchards. Those pages are opened

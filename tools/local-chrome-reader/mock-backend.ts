@@ -6,7 +6,6 @@ import {
 import { randomUUID } from "node:crypto";
 
 import {
-  LOCAL_READER_COURSES,
   localReaderCourseKeySchema,
   localReaderJobSchema,
   localReaderResultSchema,
@@ -17,6 +16,7 @@ import {
   type LocalReaderJob,
   type LocalReaderResult,
 } from "../../src/lib/local-reader/contracts";
+import { getLocalReaderCourse } from "../../src/lib/local-reader/course-key";
 
 const host = "127.0.0.1";
 const port = Number(process.env.LOCAL_READER_MOCK_PORT || 4317);
@@ -94,13 +94,18 @@ const server = createServer(async (request, response) => {
       }
       const input = JSON.parse(body) as {
         courseKey?: unknown;
+        courseName?: unknown;
         targetDate?: unknown;
         players?: unknown;
       };
       const courseKey = localReaderCourseKeySchema.parse(
         input.courseKey ?? "grassy-hill",
       );
-      const course = LOCAL_READER_COURSES[courseKey];
+      const course = getLocalReaderCourse(
+        courseKey,
+        typeof input.courseName === "string" ? input.courseName : undefined,
+      );
+      if (!course) throw new Error("The requested local reader course is unavailable");
       const requestedAt = new Date();
       const job = localReaderJobSchema.parse({
         id: randomUUID(),

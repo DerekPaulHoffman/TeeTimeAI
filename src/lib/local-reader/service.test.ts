@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
+  course: {
+    findUnique: vi.fn(),
+  },
   localReaderJob: {
     findFirst: vi.fn(),
     findUnique: vi.fn(),
@@ -34,24 +37,29 @@ describe("local reader job service", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-24T16:00:00.000Z"));
+    prismaMocks.course.findUnique.mockResolvedValue({
+      name: "Grassy Hill Country Club",
+    });
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("allowlists exact supported CPS routes and excludes account-required CPS", () => {
-    expect(getLocalReaderCourseKey(bookingUrl)).toBe("grassy-hill");
+  it("routes every safe CPS tenant through the local reader", () => {
+    expect(getLocalReaderCourseKey(bookingUrl)).toBe(
+      "cps:grassyhill.cps.golf",
+    );
     expect(
       getLocalReaderCourseKey(
         "https://shennecossett.cps.golf/onlineresweb/search-teetime",
       ),
-    ).toBe("shennecossett");
+    ).toBe("cps:shennecossett.cps.golf");
     expect(
       getLocalReaderCourseKey(
         "https://colonie.cps.golf/onlineresweb/search-teetime?date=2026-07-25",
       ),
-    ).toBe("colonie");
+    ).toBe("cps:colonie.cps.golf");
     expect(
       getLocalReaderCourseKey(
         "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout",
@@ -61,7 +69,43 @@ describe("local reader job service", () => {
       getLocalReaderCourseKey(
         "https://fenwick.cps.golf/onlineresweb/search-teetime",
       ),
+    ).toBe("cps:fenwick.cps.golf");
+    expect(
+      getLocalReaderCourseKey(
+        "https://cps.golf/onlineresweb/search-teetime",
+      ),
     ).toBeNull();
+    expect(
+      getLocalReaderCourseKey(
+        "https://nested.future.cps.golf/onlineresweb/search-teetime",
+      ),
+    ).toBeNull();
+  });
+
+  it("queues a future CPS tenant without a course-specific release", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-future" });
+
+    await queueLocalReaderJob({
+      searchId: "search-1",
+      courseId: "course-future",
+      scheduleVersion: 1,
+      targetDate: "2026-07-26",
+      players: 2,
+      bookingUrl:
+        "https://future-public.cps.golf/onlineresweb/search-teetime?CourseId=7",
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "cps:future-public.cps.golf",
+          bookingUrl:
+            "https://future-public.cps.golf/onlineresweb/search-teetime",
+        }),
+      }),
+    );
   });
 
   it("allowlists only the exact supported public Chronogolf profiles", () => {

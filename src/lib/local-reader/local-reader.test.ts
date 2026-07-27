@@ -15,6 +15,7 @@ import {
   type LocalReaderJob,
 } from "./contracts";
 import {
+  getLocalReaderCourseKey,
   isLocalReaderCandidateUrl,
   LOCAL_READER_COURSE_KEYS,
 } from "./course-key";
@@ -44,6 +45,20 @@ function jobFor(
     courseName: course.courseName,
     bookingUrl: course.bookingUrl,
     cardTextIncludes: [...course.cardTextIncludes],
+  };
+}
+
+function dynamicCpsJob(hostname = "future-public.cps.golf"): LocalReaderJob {
+  return {
+    id: "job-future",
+    courseKey: `cps:${hostname}`,
+    targetDate: "2026-07-25",
+    players: 2,
+    requestedAt: "2026-07-24T12:00:00.000Z",
+    expiresAt: "2026-07-24T12:05:00.000Z",
+    courseName: "Future Public Golf Course",
+    bookingUrl: `https://${hostname}/onlineresweb/search-teetime`,
+    cardTextIncludes: [],
   };
 }
 
@@ -118,8 +133,18 @@ describe("local Chrome reader contract", () => {
       (entry) => entry.matches,
     );
 
+    expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
+    expect(contentMatches).toContain(
+      "https://*.cps.golf/onlineresweb/search-teetime*",
+    );
+    expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
+    expect(backgroundSource).toContain(
+      '/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u',
+    );
+
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
       const course = LOCAL_READER_COURSES[courseKey];
+      if (course.provider === "CPS") continue;
       const hostname = new URL(course.bookingUrl).hostname;
       expect(manifest.host_permissions).toContain(`https://${hostname}/*`);
       expect(contentMatches).toContain(`${course.bookingUrl}*`);
@@ -127,8 +152,37 @@ describe("local Chrome reader contract", () => {
       expect(backgroundSource).toContain(`"${course.courseName}"`);
       expect(backgroundSource).toContain(`"${hostname}"`);
     }
-    expect(JSON.stringify(manifest)).not.toContain("fenwick.cps.golf");
-    expect(backgroundSource).not.toContain("fenwick.cps.golf");
+  });
+
+  it("accepts future signed CPS jobs while rejecting unsafe hosts and routes", () => {
+    const job = dynamicCpsJob();
+
+    expect(getLocalReaderCourseKey(job.bookingUrl)).toBe(
+      "cps:future-public.cps.golf",
+    );
+    expect(localReaderJobSchema.parse(job)).toMatchObject({
+      courseKey: "cps:future-public.cps.golf",
+      courseName: "Future Public Golf Course",
+    });
+    expect(
+      loadReader().isAllowedPageUrl(
+        job,
+        `${job.bookingUrl}?TeeOffTimeMin=0`,
+      ),
+    ).toBe(true);
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl: "https://evil.example/onlineresweb/search-teetime",
+      }),
+    ).toThrow(/not allowlisted/u);
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl: `${job.bookingUrl}/checkout`,
+      }),
+    ).toThrow(/not allowlisted/u);
+    expect(getLocalReaderCourseKey("https://nested.future.cps.golf/onlineresweb/search-teetime")).toBeNull();
   });
 
   it("recognizes only the exact reader-candidate public booking surfaces", () => {

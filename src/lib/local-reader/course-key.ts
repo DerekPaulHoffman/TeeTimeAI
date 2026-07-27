@@ -18,14 +18,24 @@ export const LOCAL_READER_COURSE_KEYS = [
   "lyman-orchards",
 ] as const;
 
-export type LocalReaderCourseKey = (typeof LOCAL_READER_COURSE_KEYS)[number];
+export type StaticLocalReaderCourseKey =
+  (typeof LOCAL_READER_COURSE_KEYS)[number];
+export type DynamicCpsCourseKey = `cps:${string}.cps.golf`;
+export type LocalReaderCourseKey =
+  | StaticLocalReaderCourseKey
+  | DynamicCpsCourseKey;
 
-type LocalReaderCourse = {
+export type LocalReaderCourse = {
   courseName: string;
   bookingUrl: string;
   cardTextIncludes: readonly string[];
   provider: "CPS" | "CHRONOGOLF";
 };
+
+const CPS_TENANT_HOSTNAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u;
+const CPS_SEARCH_PATH = /^\/onlineresweb\/search-teetime\/?$/u;
+const CPS_DISCOVERY_PATH = /^\/(?:onlineresweb(?:\/search-teetime)?\/?)?$/u;
 
 export const LOCAL_READER_COURSES = {
   "grassy-hill": course("Grassy Hill Country Club", "grassyhill.cps.golf"),
@@ -72,7 +82,7 @@ export const LOCAL_READER_COURSES = {
     "Lyman Orchards Golf Club",
     "lyman-orchards-golf-club",
   ),
-} as const satisfies Record<LocalReaderCourseKey, LocalReaderCourse>;
+} as const satisfies Record<StaticLocalReaderCourseKey, LocalReaderCourse>;
 
 export function getLocalReaderCourseKey(
   bookingUrl: string | null | undefined,
@@ -86,16 +96,21 @@ export function getLocalReaderCourseKey(
     ) {
       return null;
     }
+    const hostname = url.hostname.toLowerCase();
+    if (
+      CPS_TENANT_HOSTNAME.test(hostname) &&
+      CPS_DISCOVERY_PATH.test(url.pathname)
+    ) {
+      return `cps:${hostname}` as DynamicCpsCourseKey;
+    }
     return (
       LOCAL_READER_COURSE_KEYS.find((courseKey) => {
         const course = LOCAL_READER_COURSES[courseKey];
         const expected = new URL(course.bookingUrl);
-        if (course.provider === "CHRONOGOLF") {
-          return isAllowedLocalReaderUrl(courseKey, url.toString());
-        }
         return (
+          course.provider === "CHRONOGOLF" &&
           url.hostname === expected.hostname &&
-          /^\/(?:onlineresweb(?:\/search-teetime)?\/?)?$/u.test(url.pathname)
+          isAllowedLocalReaderUrl(courseKey, url.toString())
         );
       }) ?? null
     );
@@ -134,6 +149,17 @@ export function isAllowedLocalReaderUrl(
   value: string,
 ) {
   try {
+    if (isDynamicCpsCourseKey(courseKey)) {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.hostname === courseKey.slice("cps:".length) &&
+        CPS_TENANT_HOSTNAME.test(url.hostname) &&
+        CPS_SEARCH_PATH.test(url.pathname) &&
+        url.username === "" &&
+        url.password === ""
+      );
+    }
     const course = LOCAL_READER_COURSES[courseKey];
     const expected = new URL(course.bookingUrl);
     const url = new URL(value);
@@ -202,10 +228,39 @@ export function getLocalReaderJobUrl(
   courseKey: LocalReaderCourseKey,
   targetDate: string,
 ) {
+  if (isDynamicCpsCourseKey(courseKey)) {
+    return `https://${courseKey.slice("cps:".length)}/onlineresweb/search-teetime`;
+  }
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   const url = new URL(course.bookingUrl);
   url.searchParams.set("date", targetDate);
   url.searchParams.set("step", "teetimes");
   return url.toString();
+}
+
+export function isDynamicCpsCourseKey(
+  value: string,
+): value is DynamicCpsCourseKey {
+  return (
+    value.startsWith("cps:") &&
+    CPS_TENANT_HOSTNAME.test(value.slice("cps:".length))
+  );
+}
+
+export function getLocalReaderCourse(
+  courseKey: LocalReaderCourseKey,
+  courseName?: string,
+): LocalReaderCourse | null {
+  if (isDynamicCpsCourseKey(courseKey)) {
+    const normalizedCourseName = courseName?.trim();
+    if (!normalizedCourseName) return null;
+    return {
+      courseName: normalizedCourseName,
+      bookingUrl: getLocalReaderJobUrl(courseKey, ""),
+      cardTextIncludes: [],
+      provider: "CPS",
+    };
+  }
+  return LOCAL_READER_COURSES[courseKey];
 }

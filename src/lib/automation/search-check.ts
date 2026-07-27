@@ -301,6 +301,8 @@ async function checkSearch(
       const course = preference.course as AutomationCourse;
       const customerBookingUrl = getCustomerBookingUrl(course);
       const localReaderEligible = getLocalReaderCourseKey(customerBookingUrl) !== null;
+      const providerFamilyKey = resolveProviderCapability(course).providerFamilyKey;
+      const cpsLocalReaderPreferred = localReaderEligible && providerFamilyKey === "CPS";
       const supportedAdapterAvailable = hasSupportedAdapter(course);
 
       const monitoringGate = evaluateMonitoringGate(course);
@@ -313,7 +315,7 @@ async function checkSearch(
       const localReaderCanOverrideGate =
         localReaderEligible &&
         monitoringGate.disposition === "TECHNICAL_FINAL" &&
-        course.automationReason === "CAPTCHA_OR_QUEUE";
+        (cpsLocalReaderPreferred || course.automationReason === "CAPTCHA_OR_QUEUE");
       if (
         monitoringGate.disposition !== "ACTIONABLE" &&
         !localReaderCanOverrideGate &&
@@ -538,7 +540,8 @@ async function checkSearch(
       let providerRequestStarted = false;
       try {
         const localReaderShouldRun =
-          localReaderEligible && (localReaderCanOverrideGate || !supportedAdapterAvailable);
+          localReaderEligible &&
+          (cpsLocalReaderPreferred || localReaderCanOverrideGate || !supportedAdapterAvailable);
         const localTeeSheet = localReaderShouldRun
           ? await getFreshLocalReaderTeeSheet({
               searchId: search.id,
@@ -555,7 +558,7 @@ async function checkSearch(
         }
         if (!teeSheet) {
           const providerExecution = await runWithProviderRequestLease(
-            resolveProviderCapability(course).providerFamilyKey,
+            providerFamilyKey,
             () => {
               providerRequestStarted = true;
               return fetchCourseTeeSheet(course, search.date, search.players, refreshBookingWindow);
@@ -790,7 +793,8 @@ async function checkSearch(
         const providerFailure = classifyProviderFailure({ error });
         const localReaderFallbackAllowed =
           localReaderEligible &&
-          (localReaderCanOverrideGate ||
+          (cpsLocalReaderPreferred ||
+            localReaderCanOverrideGate ||
             !supportedAdapterAvailable ||
             providerFailure.failureClass === "CHALLENGE");
         const localReaderJob =
@@ -816,7 +820,7 @@ async function checkSearch(
             error,
             readPath: "LOCAL_READER_ALLOWLIST",
             nextAction:
-              "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
+              "Keep the Local Reader enabled. Safe CPS tenants are accepted automatically, and this signed rendered-page check is queued for local verification."
           });
           supportIssues.push({ courseId: course.id, ...supportIssue });
           await recordCourseProbe({
@@ -871,8 +875,10 @@ async function checkSearch(
               ? "LOCAL_READER"
               : "PUBLIC_PROVIDER_PRECHECK",
           nextAction:
-            localReaderEligible && !supportedAdapterAvailable
-              ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
+            cpsLocalReaderPreferred
+              ? "Keep the Local Reader enabled. Safe CPS tenants are accepted automatically, and failures are queued for local verification."
+              : localReaderEligible && !supportedAdapterAvailable
+                ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
               : "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
         });
         supportIssues.push({ courseId: course.id, ...supportIssue });

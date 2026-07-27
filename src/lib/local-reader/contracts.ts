@@ -3,14 +3,25 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 import {
-  LOCAL_READER_COURSES,
   LOCAL_READER_COURSE_KEYS,
+  getLocalReaderCourse,
   isAllowedLocalReaderUrl,
+  type DynamicCpsCourseKey,
 } from "./course-key";
 
 export { LOCAL_READER_COURSES, isAllowedLocalReaderUrl } from "./course-key";
 
-export const localReaderCourseKeySchema = z.enum(LOCAL_READER_COURSE_KEYS);
+const dynamicCpsCourseKeySchema = z.custom<DynamicCpsCourseKey>(
+  (value) =>
+    typeof value === "string" &&
+    /^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u.test(value),
+  "Expected a safe CPS tenant key",
+);
+
+export const localReaderCourseKeySchema = z.union([
+  z.enum(LOCAL_READER_COURSE_KEYS),
+  dynamicCpsCourseKeySchema,
+]);
 
 const localDateSchema = z
   .string()
@@ -30,6 +41,15 @@ export const localReaderJobSchema = z
   })
   .strict()
   .superRefine((job, context) => {
+    const course = getLocalReaderCourse(job.courseKey, job.courseName);
+    if (!course) {
+      context.addIssue({
+        code: "custom",
+        message: "The course is not available to the local reader",
+        path: ["courseKey"],
+      });
+      return;
+    }
     if (!isAllowedLocalReaderUrl(job.courseKey, job.bookingUrl)) {
       context.addIssue({
         code: "custom",
@@ -37,7 +57,7 @@ export const localReaderJobSchema = z
         path: ["bookingUrl"],
       });
     }
-    if (job.courseName !== LOCAL_READER_COURSES[job.courseKey].courseName) {
+    if (job.courseName !== course.courseName) {
       context.addIssue({
         code: "custom",
         message: "The course name is not allowlisted for this course",
@@ -46,7 +66,7 @@ export const localReaderJobSchema = z
     }
     if (
       JSON.stringify(job.cardTextIncludes) !==
-      JSON.stringify(LOCAL_READER_COURSES[job.courseKey].cardTextIncludes)
+      JSON.stringify(course.cardTextIncludes)
     ) {
       context.addIssue({
         code: "custom",

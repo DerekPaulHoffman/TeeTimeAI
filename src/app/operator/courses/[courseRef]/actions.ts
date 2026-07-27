@@ -49,8 +49,8 @@ export async function requestRecheckAction(
   formData: FormData
 ): Promise<OperatorRecheckActionState> {
   void previousState;
-  const operator = await requireOperatorMutation();
   try {
+    const operator = await requireOperatorMutation();
     const reference = readField(formData, "reference");
     await requestOperatorCourseRecheck(
       {
