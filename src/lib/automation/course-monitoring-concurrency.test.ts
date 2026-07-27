@@ -73,7 +73,10 @@ describe("course monitoring write serialization", () => {
       })
     );
     expect(transactionMocks.$queryRawUnsafe).toHaveBeenCalledWith(
-      "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+      `WITH acquired AS MATERIALIZED (
+       SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+     )
+     SELECT true AS locked FROM acquired`,
       "course-monitoring:course-1"
     );
   });

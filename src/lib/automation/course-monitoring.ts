@@ -1221,7 +1221,10 @@ async function acquireCourseMonitoringWriteLock(
   }
   await query.call(
     transaction,
-    "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+    `WITH acquired AS MATERIALIZED (
+       SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+     )
+     SELECT true AS locked FROM acquired`,
     `course-monitoring:${courseId}`
   );
 }
