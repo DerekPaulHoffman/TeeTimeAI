@@ -12,7 +12,6 @@ import {
   ExternalLink,
   History,
   Link2,
-  RefreshCw,
   ShieldAlert,
   Wrench
 } from "lucide-react";
@@ -24,9 +23,9 @@ import { loadOperatorCourseMonitoringDetail } from "@/lib/operator/course-monito
 import {
   approveTechnicalFinalAction,
   correctBookingLinkAction,
-  reopenTechnicalFinalAction,
-  requestRecheckAction
+  reopenTechnicalFinalAction
 } from "./actions";
+import { OperatorRecheckForm } from "./operator-recheck-form";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -224,19 +223,13 @@ export default async function OperatorCoursePage({
             </label>
           </OperatorForm>
 
-          <OperatorForm
-            action={requestRecheckAction}
-            icon={<RefreshCw size={17} />}
-            title="Request immediate safe recheck"
-            submitLabel="Queue recheck"
-          >
-            {hidden}
-            <input name="idempotencyKey" type="hidden" value={`recheck:${randomUUID()}`} />
-            <label>
-              Reason
-              <textarea maxLength={500} name="note" required rows={3} />
-            </label>
-          </OperatorForm>
+          <OperatorRecheckForm
+            idempotencyKey={`recheck:${randomUUID()}`}
+            incidentCycle={detail.incident?.cycle ?? null}
+            incidentRevision={detail.incident?.revision ?? null}
+            reference={detail.reference}
+            statusRevision={detail.revision}
+          />
 
           {detail.incident && detail.state !== "FINAL_TECHNICAL" ? (
             <OperatorForm

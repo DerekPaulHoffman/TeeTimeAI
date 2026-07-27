@@ -3,6 +3,7 @@
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { ZodError } from "zod";
 
 import { getCurrentOperator } from "@/lib/operator/auth";
 import {
@@ -38,26 +39,49 @@ export async function correctBookingLinkAction(formData: FormData) {
   revalidateOperatorCourse(reference);
 }
 
-export async function requestRecheckAction(formData: FormData) {
+export type OperatorRecheckActionState = {
+  status: "idle" | "error" | "success";
+  message: string;
+};
+
+export async function requestRecheckAction(
+  previousState: OperatorRecheckActionState,
+  formData: FormData
+): Promise<OperatorRecheckActionState> {
+  void previousState;
   const operator = await requireOperatorMutation();
-  const reference = readField(formData, "reference");
-  await requestOperatorCourseRecheck(
-    {
-      reference,
-      statusRevision: readInteger(formData, "statusRevision"),
-      incidentCycle: readOptionalInteger(formData, "incidentCycle"),
-      incidentRevision: readOptionalRevision(formData, "incidentRevision"),
-      note: readField(formData, "note"),
-      idempotencyKey: readField(formData, "idempotencyKey")
-    },
-    {
-      actorId: operator.clerkUserId,
-      source: "OPERATOR_DASHBOARD",
-      apply: true,
-      dispatchSearches: true
-    }
-  );
-  revalidateOperatorCourse(reference);
+  try {
+    const reference = readField(formData, "reference");
+    await requestOperatorCourseRecheck(
+      {
+        reference,
+        statusRevision: readInteger(formData, "statusRevision"),
+        incidentCycle: readOptionalInteger(formData, "incidentCycle"),
+        incidentRevision: readOptionalRevision(formData, "incidentRevision"),
+        note: readField(formData, "note"),
+        idempotencyKey: readField(formData, "idempotencyKey")
+      },
+      {
+        actorId: operator.clerkUserId,
+        source: "OPERATOR_DASHBOARD",
+        apply: true,
+        dispatchSearches: true
+      }
+    );
+    revalidateOperatorCourse(reference);
+    return {
+      status: "success",
+      message: "The AI recheck was queued with your note."
+    };
+  } catch (error) {
+    console.error("[operator:request-recheck]", {
+      category: getRecheckErrorCategory(error)
+    });
+    return {
+      status: "error",
+      message: getRecheckErrorMessage(error)
+    };
+  }
 }
 
 export async function approveTechnicalFinalAction(formData: FormData) {
@@ -158,4 +182,28 @@ function readOptionalRevision(formData: FormData, name: string) {
     throw new Error(`${name} must be a non-negative integer.`);
   }
   return parsed;
+}
+
+function getRecheckErrorMessage(error: unknown) {
+  if (error instanceof ZodError) {
+    return "Enter a note between 3 and 500 characters. Sensitive details will be redacted.";
+  }
+  if (error instanceof Error && error.message.includes("changed while")) {
+    return "Course monitoring changed while this form was open. Refresh and review the newest evidence.";
+  }
+  if (error instanceof Error && error.message.includes("already been applied")) {
+    return "This recheck was already queued. Refresh to see the newest course state.";
+  }
+  if (error instanceof Error && error.message.includes("not found")) {
+    return "This course monitoring record is no longer available.";
+  }
+  return "The recheck could not be queued. Nothing was changed; please try again.";
+}
+
+function getRecheckErrorCategory(error: unknown) {
+  if (error instanceof ZodError) return "VALIDATION";
+  if (error instanceof Error && error.message.includes("changed while")) return "STALE_STATE";
+  if (error instanceof Error && error.message.includes("already been applied")) return "REPLAY";
+  if (error instanceof Error && error.message.includes("not found")) return "NOT_FOUND";
+  return "UNKNOWN";
 }

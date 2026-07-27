@@ -25,9 +25,8 @@ const idempotencyKeySchema = z
   .max(100)
   .regex(/^[a-zA-Z0-9:_-]+$/u);
 const boundedNoteSchema = z.string().trim().min(3).max(500);
-const safeOperatorNoteSchema = boundedNoteSchema.refine(
-  (value) => sanitizeResponderText(value) === value,
-  "Operator notes must not contain emails, identifiers, credentials, tokens, or raw URLs."
+const safeOperatorNoteSchema = boundedNoteSchema.transform((value) =>
+  sanitizeResponderText(value)
 );
 const revisionSchema = z.number().int().nonnegative();
 const cycleSchema = z.number().int().positive().nullable();
@@ -367,6 +366,7 @@ export async function requestOperatorCourseRecheck(
           data: {
             nextAttemptAt: now,
             lastSeenAt: now,
+            nextAction: input.note,
             revision: { increment: 1 }
           }
         });

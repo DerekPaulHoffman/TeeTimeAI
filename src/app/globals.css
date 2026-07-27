@@ -2767,6 +2767,32 @@ button {
   margin-bottom: 2px;
 }
 
+.operator-form-help,
+.operator-form-message {
+  font-size: 0.72rem;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.operator-form-help {
+  color: #66736c;
+}
+
+.operator-form-message {
+  border-radius: 8px;
+  padding: 10px 11px;
+}
+
+.operator-form-message-error {
+  background: #fff1ef;
+  color: #9c2f25;
+}
+
+.operator-form-message-success {
+  background: #edf8f0;
+  color: #21643b;
+}
+
 .operator-action-card label {
   color: #405047;
   display: grid;
@@ -2801,6 +2827,11 @@ button {
   font-weight: 850;
   justify-self: start;
   padding: 10px 14px;
+}
+
+.operator-action-card button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .operator-timeline {

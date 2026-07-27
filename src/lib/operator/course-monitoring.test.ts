@@ -1,5 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const transactionMocks = vi.hoisted(() => ({
+  courseMonitoringEvent: {
+    create: vi.fn(),
+    findUnique: vi.fn()
+  },
+  courseMonitoringStatus: {
+    findUnique: vi.fn(),
+    update: vi.fn()
+  },
+  courseSupportIncident: {
+    findUnique: vi.fn(),
+    update: vi.fn()
+  }
+}));
+
 const prismaMocks = vi.hoisted(() => ({
   $transaction: vi.fn(),
   courseMonitoringEvent: {
@@ -9,7 +24,8 @@ const prismaMocks = vi.hoisted(() => ({
     findFirst: vi.fn()
   },
   teeSearch: {
-    findMany: vi.fn()
+    findMany: vi.fn(),
+    updateMany: vi.fn()
   }
 }));
 
@@ -66,6 +82,16 @@ describe("operator course monitoring mutations", () => {
     prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue(status());
     prismaMocks.teeSearch.findMany.mockResolvedValue([]);
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({ revision: 4 });
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      cycle: 2,
+      revision: 7
+    });
+    prismaMocks.$transaction.mockImplementation(
+      async (callback: (transaction: typeof transactionMocks) => Promise<unknown>) =>
+        callback(transactionMocks)
+    );
   });
 
   it("rejects unsafe official links before reading course state", async () => {
@@ -147,5 +173,47 @@ describe("operator course monitoring mutations", () => {
         context
       )
     ).rejects.toThrow("another course");
+  });
+
+  it("redacts sensitive note fragments and puts the guidance in the responder incident", async () => {
+    await expect(
+      requestOperatorCourseRecheck(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          note:
+            "Verify https://course.example/book?id=customer-1 and reply to golfer@example.com.",
+          idempotencyKey: "operator-recheck-123456"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "request_recheck",
+      applied: true,
+      replayed: false
+    });
+
+    const safeNote = "Verify https://course.example and reply to [redacted-email].";
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        revision: 7
+      },
+      data: {
+        nextAttemptAt: expect.any(Date),
+        lastSeenAt: expect.any(Date),
+        nextAction: safeNote,
+        revision: { increment: 1 }
+      }
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "REVALIDATION_REQUESTED",
+        message: safeNote
+      })
+    });
   });
 });
