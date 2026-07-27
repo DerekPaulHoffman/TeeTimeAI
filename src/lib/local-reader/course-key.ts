@@ -15,6 +15,7 @@ export const LOCAL_READER_COURSE_KEYS = [
   "crestbrook",
   "crystal-lake",
   "chanticlair",
+  "lyman-orchards",
 ] as const;
 
 export type LocalReaderCourseKey = (typeof LOCAL_READER_COURSE_KEYS)[number];
@@ -67,6 +68,10 @@ export const LOCAL_READER_COURSES = {
     "Chanticlair Golf Course",
     "chanticlair-golf-club",
   ),
+  "lyman-orchards": chronogolfCourse(
+    "Lyman Orchards Golf Club",
+    "lyman-orchards-golf-club",
+  ),
 } as const satisfies Record<LocalReaderCourseKey, LocalReaderCourse>;
 
 export function getLocalReaderCourseKey(
@@ -96,6 +101,31 @@ export function getLocalReaderCourseKey(
     );
   } catch {
     return null;
+  }
+}
+
+export function isLocalReaderCandidateUrl(
+  bookingUrl: string | null | undefined
+) {
+  try {
+    const url = new URL(bookingUrl || "");
+    if (
+      url.protocol !== "https:" ||
+      url.username !== "" ||
+      url.password !== ""
+    ) {
+      return false;
+    }
+    return (
+      (url.hostname === "secure.east.prophetservices.com" &&
+        url.pathname.startsWith("/FrearParkV3")) ||
+      (url.hostname === "www.simsburyfarms.com" &&
+        url.pathname === "/book-a-tee-time") ||
+      (url.hostname === "ctguilfordweb.myvscloud.com" &&
+        url.pathname === "/webtrac/web/search.html")
+    );
+  } catch {
+    return false;
   }
 }
 

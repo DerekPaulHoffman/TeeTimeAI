@@ -271,6 +271,47 @@ describe("operator course inventory", () => {
       priorityGroup: "WORKING"
     });
   });
+
+  it("separates reader-ready, reader-verified, and reader-candidate courses", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "ready",
+          coverageCategory: "TECHNICAL_CONSTRAINT",
+          bookingAccessMode: "CAPTCHA_OR_QUEUE",
+          localReaderSupported: true
+        }),
+        course({
+          id: "verified",
+          coverageCategory: "TECHNICAL_CONSTRAINT",
+          bookingAccessMode: "CAPTCHA_OR_QUEUE",
+          localReaderSupported: true,
+          localReaderVerifiedAt: new Date("2026-07-24T17:45:00.000Z"),
+          localReaderVersion: "chronogolf-rendered-v1"
+        }),
+        course({
+          id: "candidate",
+          coverageCategory: "TECHNICAL_CONSTRAINT",
+          bookingAccessMode: "CAPTCHA_OR_QUEUE",
+          localReaderCandidate: true
+        })
+      ],
+      NOW
+    );
+
+    expect(inventory.find((item) => item.id === "ready")).toMatchObject({
+      statusKey: "LOCAL_READER_READY",
+      priorityGroup: "UNCHECKED"
+    });
+    expect(inventory.find((item) => item.id === "verified")).toMatchObject({
+      statusKey: "LOCAL_READER_VERIFIED",
+      priorityGroup: "WORKING"
+    });
+    expect(inventory.find((item) => item.id === "candidate")).toMatchObject({
+      statusKey: "READER_CANDIDATE",
+      priorityGroup: "WATCH"
+    });
+  });
 });
 
 function course(
@@ -289,6 +330,10 @@ function course(
     bookingMethod: "PUBLIC_ONLINE",
     detectedBookingUrl: "https://book.example.com/",
     website: "https://example.com/",
+    localReaderSupported: false,
+    localReaderCandidate: false,
+    localReaderVerifiedAt: null,
+    localReaderVersion: null,
     activeAlertCount: 0,
     selectionCount: 0,
     incident: null,

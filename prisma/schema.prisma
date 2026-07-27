@@ -200,6 +200,11 @@ enum LocalReaderJobStatus {
   EXPIRED
 }
 
+enum LocalReaderJobPurpose {
+  ALERT_CHECK
+  COURSE_VERIFICATION
+}
+
 enum CourseProfileStatus {
   PENDING
   PUBLISHED
@@ -452,9 +457,11 @@ model TeeSearch {
 
 model LocalReaderJob {
   id              String               @id @default(cuid())
-  teeSearchId     String
+  teeSearchId     String?
   courseId        String
-  scheduleVersion Int
+  scheduleVersion Int?
+  purpose         LocalReaderJobPurpose @default(ALERT_CHECK)
+  verificationKey String?              @unique
   courseKey       String
   targetDate      String
   players         Int
@@ -471,11 +478,12 @@ model LocalReaderJob {
   completedAt     DateTime?
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
-  teeSearch       TeeSearch            @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  teeSearch       TeeSearch?           @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
   course          Course               @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([teeSearchId, courseId, scheduleVersion, targetDate, players])
   @@index([status, jobExpiresAt, createdAt])
+  @@index([purpose, status, jobExpiresAt])
   @@index([teeSearchId, courseId, resultExpiresAt])
   @@index([leaseExpiresAt])
 }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tee Time Spot Local Reader",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Reads allowlisted public tee-time pages for Tee Time Spot alerts.",
   "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": [
@@ -53,7 +53,8 @@
       "matches": [
         "https://www.chronogolf.com/club/crestbrook-park-golf-course*",
         "https://www.chronogolf.com/club/crystal-lake-golf-club-rhode-island-mapleville*",
-        "https://www.chronogolf.com/club/chanticlair-golf-club*"
+        "https://www.chronogolf.com/club/chanticlair-golf-club*",
+        "https://www.chronogolf.com/club/lyman-orchards-golf-club*"
       ],
       "js": ["chronogolf-reader.js", "content.js"],
       "run_at": "document_idle"

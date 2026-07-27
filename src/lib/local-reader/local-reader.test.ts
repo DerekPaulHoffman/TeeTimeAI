@@ -14,7 +14,10 @@ import {
   verifyLocalReaderSignature,
   type LocalReaderJob,
 } from "./contracts";
-import { LOCAL_READER_COURSE_KEYS } from "./course-key";
+import {
+  isLocalReaderCandidateUrl,
+  LOCAL_READER_COURSE_KEYS,
+} from "./course-key";
 
 type Reader = {
   readSnapshot: (
@@ -126,6 +129,32 @@ describe("local Chrome reader contract", () => {
     }
     expect(JSON.stringify(manifest)).not.toContain("fenwick.cps.golf");
     expect(backgroundSource).not.toContain("fenwick.cps.golf");
+  });
+
+  it("recognizes only the exact reader-candidate public booking surfaces", () => {
+    expect(
+      isLocalReaderCandidateUrl(
+        "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex",
+      ),
+    ).toBe(true);
+    expect(
+      isLocalReaderCandidateUrl(
+        "https://www.simsburyfarms.com/book-a-tee-time",
+      ),
+    ).toBe(true);
+    expect(
+      isLocalReaderCandidateUrl(
+        "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html",
+      ),
+    ).toBe(true);
+    expect(
+      isLocalReaderCandidateUrl(
+        "https://secure.east.prophetservices.com/OtherCourse/Home/NIndex",
+      ),
+    ).toBe(false);
+    expect(
+      isLocalReaderCandidateUrl("https://example.com/book-a-tee-time"),
+    ).toBe(false);
   });
 
   it("shows the installed manifest version on the extension options page", () => {

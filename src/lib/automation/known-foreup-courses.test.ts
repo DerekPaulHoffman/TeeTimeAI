@@ -27,17 +27,21 @@ describe("known ForeUP course evidence", () => {
     }
   });
 
-  it("records Westwoods as an official ForeUP identity without guessing schedule metadata", () => {
+  it("records Westwoods with current signed-out ForeUP schedule metadata", () => {
     const [westwoods] = selectKnownForeupCourses(" westwoods golf course ");
 
     expect(westwoods).toMatchObject({
       name: "Westwoods Golf Course",
       officialWebsite: "https://westwoodsgc.com/",
-      layoutHoleCounts: [18]
+      layoutHoleCounts: [18],
+      bookingMetadata: {
+        scheduleId: 11055,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/11055#/teetimes"
+      }
     });
-    expect(westwoods).not.toHaveProperty("bookingMetadata");
     expect(westwoods?.detectedBookingUrl).toContain(
-      "foreupsoftware.com/index.php/booking/22518"
+      "foreupsoftware.com/index.php/booking/22518/11055"
     );
   });
 
@@ -65,7 +69,7 @@ describe("known ForeUP course evidence", () => {
     ).toBe(true);
   });
 
-  it("never overwrites a newer access-control disposition with static source evidence", () => {
+  it("recovers the exact Westwoods access block with current configured metadata", () => {
     const [westwoods] = selectKnownForeupCourses("Westwoods Golf Course");
 
     const monitoring = reconcileKnownForeupMonitoring(westwoods!, {
@@ -77,11 +81,14 @@ describe("known ForeUP course evidence", () => {
     });
 
     expect(monitoring).toMatchObject({
-      automationEligibility: "BLOCKED",
-      automationReason: "CAPTCHA_OR_QUEUE",
-      bookingMetadata: undefined,
-      policyNotes: "Current provider access-control evidence.",
-      confidence: 0.95
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingMetadata: {
+        scheduleId: 11055
+      },
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/11055#/teetimes",
+      confidence: 1
     });
   });
 
@@ -139,9 +146,9 @@ describe("known ForeUP course evidence", () => {
   });
 
   it("does not preserve a legacy policy-only block as monitoring authority", () => {
-    const [westwoods] = selectKnownForeupCourses("Westwoods Golf Course");
+    const [longshore] = selectKnownForeupCourses("Longshore Golf Course");
 
-    const monitoring = reconcileKnownForeupMonitoring(westwoods!, {
+    const monitoring = reconcileKnownForeupMonitoring(longshore!, {
       automationEligibility: "BLOCKED",
       automationReason: "AUTOMATION_PROHIBITED",
       bookingMetadata: null,
@@ -150,9 +157,9 @@ describe("known ForeUP course evidence", () => {
     });
 
     expect(monitoring).toMatchObject({
-      automationEligibility: "NEEDS_REVIEW",
+      automationEligibility: "ALLOWED",
       automationReason: "NONE",
-      bookingMetadata: undefined
+      bookingMetadata: longshore?.bookingMetadata
     });
   });
 });

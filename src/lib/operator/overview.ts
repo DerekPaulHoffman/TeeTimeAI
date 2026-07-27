@@ -7,6 +7,11 @@ import type {
 
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { classifyProviderCoverage } from "@/lib/automation/provider-coverage";
+import {
+  getLocalReaderCourseKey,
+  isLocalReaderCandidateUrl
+} from "@/lib/local-reader/course-key";
+import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
 
 import {
@@ -24,6 +29,7 @@ const NON_SYNTHETIC_TRAFFIC: { notIn: WebsiteTrafficClass[] } = {
 };
 const OVERDUE_SEARCH_GRACE_MS = 10 * 60 * 1000;
 const RECENT_PROBE_HOURS = 24;
+const RECENT_LOCAL_READER_DAYS = 30;
 const EVENT_NAMES = [
   "page_viewed",
   "start_search_clicked",
@@ -48,6 +54,9 @@ export async function loadOperatorOverview(input: {
     now.getTime() - RECENT_PROBE_HOURS * 60 * 60 * 1000
   );
   const overdueBefore = new Date(now.getTime() - OVERDUE_SEARCH_GRACE_MS);
+  const recentLocalReaderSince = new Date(
+    now.getTime() - RECENT_LOCAL_READER_DAYS * 24 * 60 * 60 * 1000
+  );
 
   const [
     events,
@@ -384,6 +393,19 @@ export async function loadOperatorOverview(input: {
             failureClass: true,
             attemptCount: true
           }
+        },
+        localReaderJobs: {
+          where: {
+            status: "COMPLETED",
+            completedAt: { gte: recentLocalReaderSince }
+          },
+          orderBy: { completedAt: "desc" },
+          take: 1,
+          select: {
+            completedAt: true,
+            readerVersion: true,
+            result: true
+          }
         }
       }
     })
@@ -466,6 +488,14 @@ export async function loadOperatorOverview(input: {
   const courseInventory = buildCourseInventory(
     allCourses.map((course) => {
       const latestProbe = allLatestProbeByCourse.get(course.id);
+      const latestLocalReaderJob = course.localReaderJobs[0];
+      const latestLocalReaderResult = localReaderResultSchema.safeParse(
+        latestLocalReaderJob?.result
+      );
+      const localReaderVerified =
+        latestLocalReaderResult.success &&
+        (latestLocalReaderResult.data.status === "AVAILABLE" ||
+          latestLocalReaderResult.data.status === "NO_AVAILABILITY");
       const coverageCategory = classifyProviderCoverage(
         {
           isPublic: course.isPublic,
@@ -505,6 +535,17 @@ export async function loadOperatorOverview(input: {
         bookingMethod: course.bookingMethod,
         detectedBookingUrl: sanitizeOperatorUrl(course.detectedBookingUrl),
         website: sanitizeOperatorUrl(course.website),
+        localReaderSupported:
+          getLocalReaderCourseKey(course.detectedBookingUrl) !== null,
+        localReaderCandidate: isLocalReaderCandidateUrl(
+          course.detectedBookingUrl
+        ),
+        localReaderVerifiedAt: localReaderVerified
+          ? (latestLocalReaderJob?.completedAt ?? null)
+          : null,
+        localReaderVersion: localReaderVerified
+          ? (latestLocalReaderJob?.readerVersion ?? null)
+          : null,
         activeAlertCount: activeAlertCountByCourse.get(course.id) ?? 0,
         selectionCount: selectionCountByCourse.get(course.id) ?? 0,
         incident: course.supportIncident,

@@ -21,6 +21,7 @@ import {
   completeLocalReaderJob,
   getFreshLocalReaderTeeSheet,
   getLocalReaderCourseKey,
+  queueLocalReaderCourseVerification,
   queueLocalReaderJob,
 } from "./service";
 
@@ -131,6 +132,37 @@ describe("local reader job service", () => {
         }),
       }),
     );
+  });
+
+  it("queues a detached verification job without customer demand", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({
+      id: "job-verification",
+    });
+
+    await queueLocalReaderCourseVerification({
+      courseId: "course-lyman",
+      targetDate: "2026-07-26",
+      players: 2,
+      bookingUrl: "https://www.chronogolf.com/club/lyman-orchards-golf-club",
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith({
+      where: { verificationKey: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      create: expect.objectContaining({
+        teeSearchId: null,
+        scheduleVersion: null,
+        purpose: "COURSE_VERIFICATION",
+        verificationKey: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        courseKey: "lyman-orchards",
+        bookingUrl:
+          "https://www.chronogolf.com/club/lyman-orchards-golf-club?date=2026-07-26&step=teetimes",
+      }),
+      update: expect.objectContaining({
+        purpose: "COURSE_VERIFICATION",
+        status: "PENDING",
+      }),
+    });
   });
 
   it("reuses a pending job from an earlier schedule version", async () => {
@@ -286,6 +318,46 @@ describe("local reader job service", () => {
         leaseExpiresAt: null,
       },
     });
+  });
+
+  it("stores detached verification evidence without scheduling a search", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-verification",
+      teeSearchId: null,
+      courseId: "course-1",
+      courseKey: "grassy-hill",
+      targetDate: "2026-07-25",
+      players: 2,
+      createdAt: new Date("2026-07-24T15:59:00.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+      status: "LEASED",
+      leaseToken: "lease-verification",
+      leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
+      bookingUrl,
+    });
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      completeLocalReaderJob({
+        jobId: "job-verification",
+        leaseToken: "lease-verification",
+        result: {
+          jobId: "job-verification",
+          courseKey: "grassy-hill",
+          status: "NO_AVAILABILITY",
+          observedAt: "2026-07-24T16:00:00.000Z",
+          pageUrl: bookingUrl,
+          pageTitle: "Grassy Hill Country Club",
+          slots: [],
+          readerVersion: "1.3.2",
+        },
+      }),
+    ).resolves.toMatchObject({
+      searchId: null,
+      completedAt: new Date("2026-07-24T16:00:00.000Z"),
+    });
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledTimes(1);
+    expect(schedulerMocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
   it("turns only availability results into provider-compatible slots", async () => {

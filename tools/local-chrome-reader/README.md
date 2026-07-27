@@ -19,9 +19,9 @@ Springfield Township, Pine Hollow, and Capital Hills. Fenwick is deliberately
 excluded because its public route redirects to email verification.
 
 The Chronogolf allowlist contains only the exact public profiles owned by
-current course-support work. Those pages are opened with a date, tee-time step,
-and public player-count selection; unrelated club paths and unexpected page
-shapes fail closed.
+current course-support work, including Lyman Orchards. Those pages are opened
+with a date, tee-time step, and public player-count selection; unrelated club
+paths and unexpected page shapes fail closed.
 
 ## Run the local proof backend
 

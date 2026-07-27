@@ -15,6 +15,7 @@ export type KnownForeupCourse = {
   officialWebsite?: string;
   layoutHoleCounts?: number[];
   layoutEvidenceUrl?: string;
+  recoverBlockedWithConfiguredMetadata?: boolean;
 };
 
 export const KNOWN_FOREUP_COURSES: readonly KnownForeupCourse[] = [
@@ -61,13 +62,19 @@ export const KNOWN_FOREUP_COURSES: readonly KnownForeupCourse[] = [
   {
     name: "Westwoods Golf Course",
     detectedBookingUrl:
-      "https://foreupsoftware.com/index.php/booking/22518#/teetimes",
+      "https://foreupsoftware.com/index.php/booking/22518/11055#/teetimes",
     policyNotes:
-      "The official Westwoods site links public online tee-time reservations to ForeUP. Provider schedule metadata must be learned from the signed-out public booking surface before monitoring is enabled.",
+      "The official Westwoods site links public online tee-time reservations to ForeUP. A current signed-out public booking-page redirect exposes schedule 11055 and rendered tee-time availability for alert-only monitoring.",
+    bookingMetadata: {
+      scheduleId: 11055,
+      bookingBaseUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/11055#/teetimes"
+    },
     officialSourceUrl: "https://westwoodsgc.com/",
     officialWebsite: "https://westwoodsgc.com/",
     layoutHoleCounts: [18],
-    layoutEvidenceUrl: "https://westwoodsgc.com/course-information/"
+    layoutEvidenceUrl: "https://westwoodsgc.com/course-information/",
+    recoverBlockedWithConfiguredMetadata: true
   }
 ] as const;
 
@@ -96,7 +103,11 @@ export function reconcileKnownForeupMonitoring(
     : undefined;
   const preserveBlockedState =
     existing.automationEligibility === "BLOCKED" &&
-    existing.automationReason !== "AUTOMATION_PROHIBITED";
+    existing.automationReason !== "AUTOMATION_PROHIBITED" &&
+    !(
+      course.recoverBlockedWithConfiguredMetadata === true &&
+      Boolean(course.bookingMetadata)
+    );
   const preserveLearnedEvidence = Boolean(existingMetadata);
   const preserveExistingEvidence = preserveBlockedState || preserveLearnedEvidence;
   const bookingMetadata = existingMetadata ?? course.bookingMetadata;

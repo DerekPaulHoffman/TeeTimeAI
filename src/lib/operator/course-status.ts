@@ -74,6 +74,29 @@ export const COURSE_STATUS_GUIDE = [
       "Verify it when demand arrives, or run a bounded engineering check when the course is a current priority."
   },
   {
+    key: "LOCAL_READER_READY",
+    label: "Local reader ready",
+    meaning:
+      "The installed Chrome reader supports this exact public booking page, but no recent reader result is available.",
+    action:
+      "Keep the Local Reader enabled and run a detached verification or wait for an active alert to request a read."
+  },
+  {
+    key: "LOCAL_READER_VERIFIED",
+    label: "Working · local reader verified",
+    meaning:
+      "A recent signed local-reader result successfully read this exact public booking page without customer email or checkout activity.",
+    action: "No course repair is needed while the reader remains enabled."
+  },
+  {
+    key: "READER_CANDIDATE",
+    label: "Reader candidate",
+    meaning:
+      "The exact public page rendered in Chrome, but it does not yet have a production reader parser and allowlist contract.",
+    action:
+      "Add a focused fail-closed parser only after the exact date, player, course identity, and empty-result states are verified."
+  },
+  {
     key: "MONITORING_RESTORED",
     label: "Working · monitoring restored",
     meaning:
@@ -135,6 +158,10 @@ export type CourseStatusInput = {
   bookingMethod: string;
   detectedBookingUrl: string | null;
   website: string | null;
+  localReaderSupported: boolean;
+  localReaderCandidate: boolean;
+  localReaderVerifiedAt: Date | null;
+  localReaderVersion: string | null;
   activeAlertCount: number;
   selectionCount: number;
   incident: {
@@ -396,6 +423,33 @@ function classifyCourseStatus(
   }
 
   if (course.coverageCategory === "TECHNICAL_CONSTRAINT") {
+    if (course.localReaderSupported) {
+      return withStatus(
+        course,
+        course.localReaderVerifiedAt
+          ? "LOCAL_READER_VERIFIED"
+          : "LOCAL_READER_READY",
+        course.localReaderVerifiedAt
+          ? {
+              priorityGroup: "WORKING",
+              priorityScore: 5,
+              tone: "positive"
+            }
+          : {
+              priorityGroup:
+                course.activeAlertCount > 0 ? "ACTION" : "UNCHECKED",
+              priorityScore: course.activeAlertCount > 0 ? 1 : 4,
+              tone: course.activeAlertCount > 0 ? "critical" : "neutral"
+            }
+      );
+    }
+    if (course.localReaderCandidate) {
+      return withStatus(course, "READER_CANDIDATE", {
+        priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
+        priorityScore: course.activeAlertCount > 0 ? 1 : 2,
+        tone: course.activeAlertCount > 0 ? "critical" : "warning"
+      });
+    }
     const statusKey =
       course.bookingAccessMode === "CAPTCHA_OR_QUEUE"
         ? "CAPTCHA_OR_QUEUE"

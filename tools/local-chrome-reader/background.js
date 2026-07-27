@@ -100,6 +100,12 @@ const ALLOWED_COURSES = Object.freeze({
     "/club/chanticlair-golf-club",
     [],
   ],
+  "lyman-orchards": [
+    "Lyman Orchards Golf Club",
+    "www.chronogolf.com",
+    "/club/lyman-orchards-golf-club",
+    [],
+  ],
 });
 let pollInProgress = false;
 
