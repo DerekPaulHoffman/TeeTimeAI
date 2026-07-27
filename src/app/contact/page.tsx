@@ -1,4 +1,5 @@
 import { ArrowUpRight } from "lucide-react";
+import "../editorial.css";
 
 import {
   EditorialNote,

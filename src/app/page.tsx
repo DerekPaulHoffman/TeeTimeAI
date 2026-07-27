@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import "./editorial.css";
 import Link from "next/link";
 import { ArrowRight, Bell, Check, Search } from "lucide-react";
 

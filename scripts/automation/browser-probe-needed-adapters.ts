@@ -1,6 +1,6 @@
 import "./load-local-env";
 
-import { chromium, type Page } from "playwright";
+import { chromium, type Page } from "@playwright/test";
 
 import {
   buildBrowserDiscovery,

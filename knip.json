@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "scripts/ci/preview-smoke-global-setup.ts",
+    "tools/local-chrome-reader/background.js",
+    "tools/local-chrome-reader/chronogolf-reader.js",
+    "tools/local-chrome-reader/content.js",
+    "tools/local-chrome-reader/cps-reader.js",
+    "tools/local-chrome-reader/options.js",
+    "tools/public-tee-time-reader/devtools.js",
+    "tools/public-tee-time-reader/panel.js"
+  ]
+}

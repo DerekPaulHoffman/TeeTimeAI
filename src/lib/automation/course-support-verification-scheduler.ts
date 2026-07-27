@@ -8,9 +8,9 @@ import {
 } from "@/lib/automation/course-support-verification";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
-  courseSupportVerificationWorkflow,
-  type CourseSupportVerificationWorkflowInput
+  courseSupportVerificationWorkflow
 } from "@/workflows/course-support-verification";
+import type { CourseSupportVerificationWorkflowInput } from "@/workflows/course-support-verification-contracts";
 
 const COURSE_SUPPORT_VERIFICATION_START_RETRY_MS = 2 * 60 * 1000;
 

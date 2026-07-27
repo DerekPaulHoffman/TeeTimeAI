@@ -6,6 +6,7 @@ const localSmokePort = process.env.UI_SMOKE_PORT ?? "3100";
 const baseURL = process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${localSmokePort}`;
 const shouldStartLocalServer = !process.env.UI_SMOKE_BASE_URL;
 const protectionBypassSecret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+const chromiumExecutablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 
 export default defineConfig({
   globalSetup: protectionBypassSecret
@@ -24,6 +25,9 @@ export default defineConfig({
   outputDir: "test-results/playwright",
   use: {
     baseURL,
+    launchOptions: chromiumExecutablePath
+      ? { executablePath: chromiumExecutablePath }
+      : undefined,
     screenshot: "only-on-failure",
     storageState: protectionBypassSecret ? VERCEL_PREVIEW_STORAGE_STATE : undefined,
     trace: "retain-on-failure",

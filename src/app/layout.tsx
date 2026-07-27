@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
+import { auth } from "@clerk/nextjs/server";
 import { Inter } from "next/font/google";
 import Image from "next/image";
 import Link from "next/link";
 
-import { OptionalClerkProvider } from "@/components/optional-clerk-provider";
 import { AuthNav } from "@/components/auth-nav";
 import { EngagementTracker } from "@/components/engagement-tracker";
 import { FeedbackWidget } from "@/components/feedback-widget";
@@ -17,11 +17,8 @@ import {
   siteName,
   siteUrl
 } from "@/lib/seo";
-import "leaflet/dist/leaflet.css";
 import "./globals.css";
-import "./pricing.css";
-import "./editorial.css";
-import "./knowledge.css";
+import "./shell.css";
 
 const inter = Inter({
   display: "swap",
@@ -84,15 +81,17 @@ export const metadata: Metadata = {
   category: "sports"
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({
+  children
+}: Readonly<{ children: React.ReactNode }>) {
   const clerkPublishableKey = getClerkPublishableKey();
   const clerkEnabled = Boolean(clerkPublishableKey);
+  const { userId } = clerkEnabled ? await auth() : { userId: null };
 
   return (
     <html data-scroll-behavior="smooth" lang="en">
       <body className={inter.variable}>
-        <OptionalClerkProvider publishableKey={clerkPublishableKey}>
-          <div className="site-shell">
+        <div className="site-shell">
             <header className="topbar">
               <Link className="brand" href="/" aria-label="Tee Time Spot home">
                 <span className="brand-mark" aria-hidden="true">
@@ -100,14 +99,17 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 </span>
                 <span className="brand-text">Tee Time Spot</span>
               </Link>
-              <AuthNav clerkEnabled={clerkEnabled} />
+              <AuthNav
+                clerkEnabled={clerkEnabled}
+                publishableKey={clerkPublishableKey}
+                userId={userId}
+              />
             </header>
             <EngagementTracker />
             {children}
             <FeedbackWidget />
             <SiteFooter />
-          </div>
-        </OptionalClerkProvider>
+        </div>
         <SiteObservability enabled={Boolean(process.env.VERCEL_URL)} />
       </body>
     </html>

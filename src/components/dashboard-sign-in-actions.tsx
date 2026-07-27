@@ -1,18 +1,24 @@
 "use client";
 
-import { SignInButton } from "@clerk/nextjs";
 import { ArrowLeft, LogIn } from "lucide-react";
 import Link from "next/link";
 
-export function DashboardSignInActions() {
+import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
+
+export function DashboardSignInActions({
+  publishableKey
+}: {
+  publishableKey: string;
+}) {
   return (
     <div className="dashboard-auth-actions">
-      <SignInButton mode="modal">
-        <button className="button button-dark" type="button">
-          <LogIn size={17} />
-          Sign in
-        </button>
-      </SignInButton>
+      <DeferredSignInButton
+        className="button button-dark"
+        publishableKey={publishableKey}
+      >
+        <LogIn size={17} />
+        Sign in
+      </DeferredSignInButton>
       <Link className="button button-ghost" href="/search">
         <ArrowLeft size={17} />
         Back to search

@@ -1,14 +1,23 @@
-"use client";
-
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
-import { Bell, Gauge, LogIn, Search } from "lucide-react";
+import { Bell, LogIn, Search } from "lucide-react";
 
+import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
 import { DiscordMark } from "@/components/discord-mark";
+import {
+  SignedInAuthControls,
+  SignedInUserButton
+} from "@/components/signed-in-auth-controls";
 import { discordInviteUrl } from "@/lib/community";
 
-export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
+export function AuthNav({
+  clerkEnabled,
+  publishableKey,
+  userId
+}: {
+  clerkEnabled: boolean;
+  publishableKey?: string;
+  userId: string | null;
+}) {
   if (!clerkEnabled) {
     return (
       <nav aria-label="Primary navigation" className="nav-actions">
@@ -36,69 +45,12 @@ export function AuthNav({ clerkEnabled }: { clerkEnabled: boolean }) {
     );
   }
 
-  return <ConfiguredAuthNav />;
-}
-
-function ConfiguredAuthNav() {
-  const { isLoaded, isSignedIn, user } = useUser();
-  const [operatorDecision, setOperatorDecision] = useState<{
-    userId: string;
-    allowed: boolean;
-  } | null>(null);
-  const userId = user?.id;
-
-  useEffect(() => {
-    if (!isLoaded || !isSignedIn || !userId) return;
-
-    const controller = new AbortController();
-    void fetch("/api/operator/access", {
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: { Accept: "application/json" },
-      signal: controller.signal
-    })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((result: { operator?: boolean } | null) => {
-        if (!controller.signal.aborted) {
-          setOperatorDecision({
-            userId,
-            allowed: result?.operator === true
-          });
-        }
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setOperatorDecision({ userId, allowed: false });
-        }
-      });
-
-    return () => controller.abort();
-  }, [isLoaded, isSignedIn, userId]);
-
-  const operatorAccess =
-    Boolean(isSignedIn) &&
-    Boolean(userId) &&
-    operatorDecision?.userId === userId &&
-    operatorDecision?.allowed === true;
-
-  if (!isLoaded) {
-    return <nav aria-label="Primary navigation" className="nav-actions" />;
-  }
-
   return (
     <nav aria-label="Primary navigation" className="nav-actions">
       <InfoNavLinks />
       <DiscordNavLink />
-      {operatorAccess ? (
-        <Link
-          aria-label="Site overview"
-          className="button button-secondary nav-operator"
-          href="/operator"
-          prefetch={false}
-        >
-          <Gauge size={17} />
-          <span className="nav-button-label">Site overview</span>
-        </Link>
+      {userId && publishableKey ? (
+        <SignedInAuthControls userId={userId} />
       ) : null}
       <Link
         aria-label="My alerts"
@@ -118,16 +70,18 @@ function ConfiguredAuthNav() {
         <Search size={15} />
         <span className="nav-button-label">Find a tee time</span>
       </Link>
-      {isSignedIn ? (
-        <UserButton />
-      ) : (
-        <SignInButton mode="modal">
-          <button className="button button-ghost nav-sign-in" type="button">
-            <LogIn size={17} />
-            Sign in
-          </button>
-        </SignInButton>
-      )}
+      {!userId && publishableKey ? (
+        <DeferredSignInButton
+          className="button button-ghost nav-sign-in"
+          publishableKey={publishableKey}
+        >
+          <LogIn size={17} />
+          Sign in
+        </DeferredSignInButton>
+      ) : null}
+      {userId && publishableKey ? (
+        <SignedInUserButton publishableKey={publishableKey} />
+      ) : null}
     </nav>
   );
 }

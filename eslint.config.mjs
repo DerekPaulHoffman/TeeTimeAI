@@ -12,6 +12,7 @@ const eslintConfig = [
       "node_modules/**",
       "out/**",
       "playwright-report/**",
+      "src/app/.well-known/workflow/**",
       "test-results/**"
     ]
   },

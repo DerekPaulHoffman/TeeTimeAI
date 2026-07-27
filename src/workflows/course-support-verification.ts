@@ -1,11 +1,7 @@
 import { executeCourseSupportVerificationStep } from "./course-support-verification-steps";
+import type { CourseSupportVerificationWorkflowInput } from "./course-support-verification-contracts";
 
-export type CourseSupportVerificationWorkflowInput = {
-  requestId: string;
-  expectedRevision: number;
-  leaseToken: string;
-  runtimeVersion: string;
-};
+export type { CourseSupportVerificationWorkflowInput } from "./course-support-verification-contracts";
 
 export async function courseSupportVerificationWorkflow(
   input: CourseSupportVerificationWorkflowInput

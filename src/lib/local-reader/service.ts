@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 
 import { recordCourseMonitoringSuccess } from "@/lib/automation/course-monitoring";
-import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { prisma } from "@/lib/prisma";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
@@ -357,14 +356,6 @@ export async function completeLocalReaderJob(input: {
         leaseExpiresAt: null,
       },
     });
-    try {
-      await startSearchSchedule(current.teeSearchId);
-    } catch (error) {
-      console.error("[local-reader:search-schedule-start-failed]", {
-        message:
-          error instanceof Error ? error.message : "Unknown scheduling error"
-      });
-    }
   }
   return { searchId: current.teeSearchId, completedAt };
 }

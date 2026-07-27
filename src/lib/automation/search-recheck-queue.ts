@@ -2,11 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { send } from "@vercel/queue";
 import { z } from "zod";
-import { start } from "workflow/api";
 
 import {
-  attachSearchWorkflowRun,
-  getSearchScheduleState,
   queueSearchCheck
 } from "@/lib/automation/db-service";
 import {
@@ -37,7 +34,7 @@ type SearchScheduleQueueState = {
   checkStatus?: string;
 };
 
-type SearchScheduleQueueDependencies = {
+export type SearchScheduleQueueDependencies = {
   getScheduleState: (
     searchId: string,
     scheduleVersion: number
@@ -98,30 +95,6 @@ export function selectCurrentRemediatedSearchIds(
   }
   return [...searchIds];
 }
-
-const defaultConsumerDependencies: SearchScheduleQueueDependencies = {
-  getScheduleState: async (searchId, scheduleVersion) =>
-    getSearchScheduleState(searchId, scheduleVersion),
-  startWorkflow: async (searchId, scheduleVersion) => {
-    const { searchScheduleWorkflow } = await import("@/workflows/search-schedule");
-    const run = await start(searchScheduleWorkflow, [searchId, scheduleVersion], {
-      deploymentId: "latest"
-    });
-    return { runId: run.runId };
-  },
-  attachWorkflowRun: async (
-    searchId,
-    scheduleVersion,
-    runId,
-    expectedWorkflowRunId
-  ) =>
-    attachSearchWorkflowRun(
-      searchId,
-      scheduleVersion,
-      runId,
-      expectedWorkflowRunId
-    )
-};
 
 const defaultProducerDependencies: SearchScheduleQueueProducerDependencies = {
   sendMessage: async (topic, message, options) => {
@@ -281,7 +254,7 @@ export async function enqueueRemediatedCourseRechecks(
 
 export async function consumeSearchScheduleMessage(
   input: unknown,
-  dependencies: SearchScheduleQueueDependencies = defaultConsumerDependencies
+  dependencies: SearchScheduleQueueDependencies
 ) {
   const message = parseSearchScheduleQueueMessage(input);
   const state = await dependencies.getScheduleState(

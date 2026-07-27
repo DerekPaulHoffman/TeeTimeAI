@@ -2,35 +2,18 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AuthNav } from "./auth-nav";
-
-const clerkState = vi.hoisted(() => ({
-  isLoaded: true,
-  isSignedIn: true,
-  email: "derekpaulhoffman@gmail.com"
-}));
+import {
+  SignedInAuthControls,
+  SignedInUserButton
+} from "./signed-in-auth-controls";
 
 vi.mock("@clerk/nextjs", () => ({
-  useUser: () => ({
-    isLoaded: clerkState.isLoaded,
-    isSignedIn: clerkState.isSignedIn,
-    user: clerkState.isSignedIn
-      ? {
-          id: `user_${clerkState.email}`,
-          primaryEmailAddress: {
-            emailAddress: clerkState.email
-          }
-        }
-      : null
-  }),
-  SignInButton: ({ children }: { children: React.ReactNode }) => children,
+  ClerkProvider: ({ children }: { children: React.ReactNode }) => children,
   UserButton: () => <span data-testid="user-button" />
 }));
 
-describe("AuthNav operator access", () => {
+describe("AuthNav", () => {
   beforeEach(() => {
-    clerkState.isLoaded = true;
-    clerkState.isSignedIn = true;
-    clerkState.email = "derekpaulhoffman@gmail.com";
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -44,37 +27,57 @@ describe("AuthNav operator access", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows the private overview after the server authorizes the current user", async () => {
+  it("keeps signed-out navigation available without initializing Clerk", () => {
+    render(
+      <AuthNav
+        clerkEnabled
+        publishableKey="pk_test_example"
+        userId={null}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "My alerts" })).toBeTruthy();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("omits sign-in when Clerk is unavailable", () => {
+    render(<AuthNav clerkEnabled={false} userId={null} />);
+
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(screen.getByRole("link", { name: "My alerts" })).toBeTruthy();
+  });
+
+  it("shows the private overview after the server authorizes the signed-in user", async () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,
       json: async () => ({ operator: true })
     } as Response);
 
-    render(<AuthNav clerkEnabled />);
+    render(
+      <>
+        <SignedInAuthControls userId="user_123" />
+        <SignedInUserButton publishableKey="pk_test_example" />
+      </>
+    );
 
     expect(
-      (await screen.findByRole("link", { name: "Site overview" })).getAttribute("href")
+      (await screen.findByRole("link", { name: "Site overview" })).getAttribute(
+        "href"
+      )
     ).toBe("/operator");
+    expect(screen.getByTestId("user-button")).toBeTruthy();
   });
 
-  it("hides the private overview when the server denies access", async () => {
-    clerkState.email = "someone@example.com";
-    render(<AuthNav clerkEnabled />);
+  it("hides the private overview when access is denied", async () => {
+    render(
+      <SignedInAuthControls userId="user_123" />
+    );
 
     expect(screen.queryByRole("link", { name: "Site overview" })).toBeNull();
     expect(fetch).toHaveBeenCalledWith(
       "/api/operator/access",
       expect.objectContaining({ cache: "no-store" })
     );
-  });
-
-  it("hides the private overview while signed out or Clerk is unavailable", () => {
-    clerkState.isSignedIn = false;
-    const { rerender } = render(<AuthNav clerkEnabled />);
-    expect(screen.queryByRole("link", { name: "Site overview" })).toBeNull();
-    expect(fetch).not.toHaveBeenCalled();
-
-    rerender(<AuthNav clerkEnabled={false} />);
-    expect(screen.queryByRole("link", { name: "Site overview" })).toBeNull();
   });
 });

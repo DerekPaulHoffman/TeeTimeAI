@@ -1,5 +1,3 @@
-import { start } from "workflow/api";
-
 import {
   attachSearchWorkflowRun,
   failScheduledSearchCheck,
@@ -10,8 +8,7 @@ import {
   recoverSearchScheduleStartFailure
 } from "@/lib/automation/search-recheck-queue";
 import { executeScheduledSearchCheck } from "@/lib/automation/search-schedule-execution";
-
-import { searchScheduleWorkflow } from "./search-schedule";
+import { launchSearchScheduleWorkflow } from "@/lib/automation/search-schedule-launcher";
 
 export async function executeSearchCheckStep(
   searchId: string,
@@ -49,11 +46,7 @@ export async function startNextSearchCheckStep(
   }
 
   try {
-    const run: { runId: string } = await start(
-      searchScheduleWorkflow,
-      [searchId, scheduleVersion],
-      { deploymentId: "latest" }
-    );
+    const run = await launchSearchScheduleWorkflow(searchId, scheduleVersion);
     await attachSearchWorkflowRun(
       searchId,
       scheduleVersion,

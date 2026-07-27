@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import "../../knowledge.css";
 import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
 import { ArrowRight, Bell, CalendarClock, CheckCircle2, ExternalLink, MapPin } from "lucide-react";

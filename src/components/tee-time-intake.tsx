@@ -1,6 +1,5 @@
 "use client";
 
-import { SignInButton, useUser } from "@clerk/nextjs";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -26,7 +25,6 @@ import {
   ExternalLink,
   Flag,
   GripVertical,
-  LocateFixed,
   LogIn,
   MapPin,
   MapPinned,
@@ -58,15 +56,11 @@ import {
   WEBSITE_TRAFFIC_CLASS_HEADER
 } from "@/lib/engagement/traffic-class";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
-import {
-  CURRENT_LOCATION_LABEL,
-  LOCATION_INPUT_PLACEHOLDER
-} from "@/lib/places/location-input";
+import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
   MAX_COURSE_SEARCH_RADIUS_MILES,
-  MIN_COURSE_SEARCH_RADIUS_MILES,
   milesToMeters
 } from "@/lib/places/radius";
 import {
@@ -76,8 +70,7 @@ import {
 } from "@/lib/pricing/course-prices";
 import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
-  MAX_ADDITIONAL_ALERT_EMAILS,
-  MAX_PLAYERS_PER_SEARCH
+  MAX_ADDITIONAL_ALERT_EMAILS
 } from "@/lib/validation/search";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
 import {
@@ -93,6 +86,12 @@ import {
   consumeSearchPrefill,
   readSearchPrefillFromUrl
 } from "@/lib/searches/search-prefill";
+import {
+  TeeTimeSearchControls,
+  formatCompactTimeWindow,
+  type CourseLayoutFilter
+} from "@/components/tee-time-search-controls";
+import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -186,28 +185,6 @@ const tomorrow = () => {
   return formatDateInputValue(addLocalDays(new Date(), 1));
 };
 
-function formatCompactTimeWindow(startTime: string, endTime: string) {
-  const parseTime = (value: string) => {
-    const [hoursText = "0", minutes = "00"] = value.split(":");
-    const hours = Number(hoursText);
-    return {
-      hours: hours % 12 || 12,
-      minutes,
-      period: hours >= 12 ? "PM" : "AM"
-    };
-  };
-  const start = parseTime(startTime);
-  const end = parseTime(endTime);
-
-  if (start.period === end.period) {
-    return `${start.hours}:${start.minutes} – ${end.hours}:${end.minutes} ${end.period}`;
-  }
-
-  const startLabel = start.minutes === "00" ? `${start.hours}` : `${start.hours}:${start.minutes}`;
-  const endLabel = end.minutes === "00" ? `${end.hours}` : `${end.hours}:${end.minutes}`;
-  return `${startLabel} ${start.period} – ${endLabel} ${end.period}`;
-}
-
 function formatAlertDate(value: string) {
   const [year, month, day] = value.split("-").map(Number);
   if (!year || !month || !day) {
@@ -228,7 +205,6 @@ const LOCATION_SEARCH_ERROR_ID = "location-search-error";
 let googleMapsLoaderPromise: Promise<GoogleMapsNamespace> | null = null;
 
 type SearchCoordinates = { latitude: number; longitude: number };
-type CourseLayoutFilter = "any" | "9" | "18";
 type AdditionalEmailField = { id: string; value: string };
 
 export type TeeTimeIntakeInitialValues = {
@@ -248,48 +224,42 @@ type IntakeAccountState =
 
 export function TeeTimeIntake({
   initialValues = {},
-  accountEnabled
+  accountEnabled,
+  accountEmail,
+  accountSignedIn = false,
+  clerkPublishableKey
 }: {
   initialValues?: TeeTimeIntakeInitialValues;
   accountEnabled: boolean;
+  accountEmail?: string;
+  accountSignedIn?: boolean;
+  clerkPublishableKey?: string;
 }) {
-  if (!accountEnabled) {
-    return <TeeTimeIntakeContent initialValues={initialValues} accountState={{ status: "unavailable" }} />;
-  }
-
-  return <AuthenticatedTeeTimeIntake initialValues={initialValues} />;
-}
-
-function AuthenticatedTeeTimeIntake({
-  initialValues
-}: {
-  initialValues: TeeTimeIntakeInitialValues;
-}) {
-  const { isLoaded, isSignedIn, user } = useUser();
-
-  if (!isLoaded) {
-    return <TeeTimeIntakeContent initialValues={initialValues} accountState={{ status: "loading" }} />;
-  }
-
-  if (!isSignedIn) {
-    return <TeeTimeIntakeContent initialValues={initialValues} accountState={{ status: "signed-out" }} />;
-  }
-
-  const email = user.primaryEmailAddress?.emailAddress;
   return (
     <TeeTimeIntakeContent
       initialValues={initialValues}
-      accountState={email ? { status: "signed-in", email } : { status: "missing-email" }}
+      accountState={
+        !accountEnabled
+          ? { status: "unavailable" }
+          : !accountSignedIn
+            ? { status: "signed-out" }
+            : accountEmail
+              ? { status: "signed-in", email: accountEmail }
+              : { status: "missing-email" }
+      }
+      clerkPublishableKey={clerkPublishableKey}
     />
   );
 }
 
 function TeeTimeIntakeContent({
   initialValues,
-  accountState
+  accountState,
+  clerkPublishableKey
 }: {
   initialValues: TeeTimeIntakeInitialValues;
   accountState: IntakeAccountState;
+  clerkPublishableKey?: string;
 }) {
   const router = useRouter();
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
@@ -1094,210 +1064,40 @@ function TeeTimeIntakeContent({
 
   return (
     <div className="figma-search-experience">
-      <form
-        aria-label="Course search filters"
-        className="figma-search-toolbar"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void discoverFromSearchControls();
+      <TeeTimeSearchControls
+        date={date}
+        endTime={endTime}
+        holeFilter={holeFilter}
+        isDateFuture={isDateFuture}
+        isTimeWindowValid={isTimeWindowValid}
+        loading={loading}
+        locationErrorId={LOCATION_SEARCH_ERROR_ID}
+        locationInputInvalid={locationInputInvalid}
+        locationText={locationText}
+        minSearchDate={minSearchDate}
+        mobileTimeEditorOpen={mobileTimeEditorOpen}
+        onDateInput={reconcileDateFromControl}
+        onEndTimeInput={reconcileEndTimeFromControl}
+        onHoleFilterChange={setHoleFilter}
+        onLocationChange={(value) => {
+          setLocationText(value);
+          setSearchCoordinates(null);
+          setLocationInputInvalid(false);
         }}
-      >
-        <div className="figma-search-primary">
-          <div className="figma-search-field figma-location-field">
-            <label htmlFor="location">Location</label>
-            <div className="figma-search-value">
-              <span className="figma-search-value-icon" aria-hidden="true">📍</span>
-              <input
-                aria-describedby={locationInputInvalid ? LOCATION_SEARCH_ERROR_ID : undefined}
-                aria-invalid={locationInputInvalid}
-                id="location"
-                value={locationText}
-                onChange={(event) => {
-                  setLocationText(event.target.value);
-                  setSearchCoordinates(null);
-                  setLocationInputInvalid(false);
-                }}
-                placeholder={LOCATION_INPUT_PLACEHOLDER}
-              />
-            </div>
-            <button
-              aria-label="Use current location"
-              className="figma-use-location"
-              disabled={loading}
-              onClick={selectCurrentLocation}
-              title="Use current location"
-              type="button"
-            >
-              <LocateFixed size={15} />
-            </button>
-          </div>
-          <label className="figma-search-field" htmlFor="players">
-            <span>Players</span>
-            <div className="figma-search-value">
-              <span className="figma-search-value-icon" aria-hidden="true">🏌️</span>
-              <select
-                id="players"
-                value={players}
-                onChange={(event) => setPlayers(Number(event.target.value))}
-              >
-                {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
-                  <option key={count} value={count}>
-                    {count} {count === 1 ? "player" : "players"}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </label>
-          <label className="figma-search-field" htmlFor="date">
-            <span>Date</span>
-            <div className="figma-search-value">
-              <span className="figma-search-value-icon" aria-hidden="true">📅</span>
-              <input
-                aria-invalid={!isDateFuture}
-                aria-describedby={!isDateFuture ? "search-form-guidance" : undefined}
-                id="date"
-                min={minSearchDate}
-                type="date"
-                value={date}
-                onBlur={reconcileDateFromControl}
-                onChange={reconcileDateFromControl}
-                onInput={reconcileDateFromControl}
-              />
-            </div>
-          </label>
-        </div>
-        <div className="figma-filter-strip">
-          <div
-            aria-label="Time window"
-            aria-describedby="time-window-help"
-            className="figma-search-field figma-time-field"
-            role="group"
-          >
-            <span className="figma-time-label">Time</span>
-            <div className="figma-search-value">
-              <span className="figma-search-value-icon" aria-hidden="true">⏰</span>
-              <button
-                aria-controls="mobile-time-editor"
-                aria-expanded={mobileTimeEditorOpen}
-                className="figma-time-summary"
-                onClick={() => setMobileTimeEditorOpen((open) => !open)}
-                type="button"
-              >
-                {formatCompactTimeWindow(startTime, endTime)}
-              </button>
-              <div
-                className={`figma-time-inputs${mobileTimeEditorOpen ? " is-mobile-open" : ""}`}
-                id="mobile-time-editor"
-              >
-                <input
-                  aria-label="Start time"
-                  id="startTime"
-                  type="time"
-                  value={startTime}
-                  onBlur={reconcileStartTimeFromControl}
-                  onChange={reconcileStartTimeFromControl}
-                  onInput={reconcileStartTimeFromControl}
-                />
-                <span aria-hidden="true">–</span>
-                <input
-                  aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
-                  aria-invalid={!isTimeWindowValid}
-                  aria-label="End time"
-                  id="endTime"
-                  type="time"
-                  value={endTime}
-                  onBlur={reconcileEndTimeFromControl}
-                  onChange={reconcileEndTimeFromControl}
-                  onInput={reconcileEndTimeFromControl}
-                />
-                <button
-                  className="figma-time-editor-done"
-                  onClick={() => setMobileTimeEditorOpen(false)}
-                  type="button"
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-            <span className="sr-only" id="time-window-help">
-              Times use each course&apos;s local time zone.
-            </span>
-          </div>
-          <div className="figma-hole-filter" aria-label="Course layout" role="group">
-            <strong>
-              <span className="figma-desktop-copy">Course layout</span>
-              <span className="figma-mobile-copy">Holes</span>
-            </strong>
-            <div className="figma-hole-options">
-              {(["any", "9", "18"] as const).map((value) => (
-                <button
-                  aria-label={value === "any" ? "Any" : `${value}-hole`}
-                  aria-pressed={holeFilter === value}
-                  className={holeFilter === value ? "is-active" : ""}
-                  key={value}
-                  onClick={() => setHoleFilter(value)}
-                  type="button"
-                >
-                  {value === "any" ? "Any" : (
-                    <>
-                      <span className="figma-desktop-copy">{value}-hole</span>
-                      <span className="figma-mobile-copy">{value}H</span>
-                    </>
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
-          <span className="figma-filter-divider" aria-hidden="true" />
-          <div className="figma-distance-group">
-            <div className="figma-distance-heading">
-              <strong className="figma-distance-label">Within</strong>
-            </div>
-            <label className="figma-distance-filter" htmlFor="searchRadius">
-              <span>
-                <em>{MIN_COURSE_SEARCH_RADIUS_MILES} mi</em>
-                <b><span className="figma-distance-prefix">within </span>{searchRadiusMiles} mi</b>
-                <em>{MAX_COURSE_SEARCH_RADIUS_MILES} mi</em>
-              </span>
-              <input
-                aria-label="Distance from me"
-                disabled={loading}
-                id="searchRadius"
-                max={MAX_COURSE_SEARCH_RADIUS_MILES}
-                min={MIN_COURSE_SEARCH_RADIUS_MILES}
-                step="5"
-                type="range"
-                value={searchRadiusMiles}
-                onChange={(event) => setSearchRadiusMiles(Number(event.target.value))}
-                style={{
-                  background: `linear-gradient(to right, #18332b 0 ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}%, #d9e4df ${((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) / (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) * 100}% 100%)`
-                }}
-              />
-            </label>
-            {holeFilter !== "any" || searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
-              <button
-                className="figma-reset-filters"
-                onClick={() => {
-                  setHoleFilter("any");
-                  setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
-                }}
-                type="button"
-              >
-                <X size={10} />
-                Clear
-              </button>
-            ) : null}
-          </div>
-          <button
-            className="figma-search-submit"
-            disabled={loading || locationText.trim().length === 0}
-            type="submit"
-          >
-            <Search size={15} />
-            {loading ? "Searching" : "Search"}
-          </button>
-        </div>
-      </form>
+        onPlayersChange={setPlayers}
+        onRadiusChange={setSearchRadiusMiles}
+        onResetFilters={() => {
+          setHoleFilter("any");
+          setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
+        }}
+        onSelectCurrentLocation={selectCurrentLocation}
+        onStartTimeInput={reconcileStartTimeFromControl}
+        onSubmit={() => void discoverFromSearchControls()}
+        onTimeEditorOpenChange={setMobileTimeEditorOpen}
+        players={players}
+        searchRadiusMiles={searchRadiusMiles}
+        startTime={startTime}
+      />
 
       <MissingCourseLookup
         lookupMessage={courseLookupMessage}
@@ -1670,28 +1470,26 @@ function TeeTimeIntakeContent({
             </div>
           </fieldset>
         ) : null}
-        {accountState.status === "signed-out" ? (
-          <SignInButton mode="modal">
-            <button
-              className="button button-primary"
-              disabled={Boolean(saveBlocker) || selected.length === 0}
-              onClick={() => {
-                trackWebsiteEvent({
-                  name: "alert_sign_in_clicked",
-                  metadata: {
-                    selectedCourseCount: selected.length,
-                    players,
-                    requestedLayoutHoles
-                  }
-                });
-              }}
-              style={{ marginTop: 18, width: "100%" }}
-              type="button"
-            >
-              <LogIn size={17} />
-              Sign in to start sending alerts
-            </button>
-          </SignInButton>
+        {accountState.status === "signed-out" && clerkPublishableKey ? (
+          <DeferredSignInButton
+            className="button button-primary"
+            disabled={Boolean(saveBlocker) || selected.length === 0}
+            onClick={() => {
+              trackWebsiteEvent({
+                name: "alert_sign_in_clicked",
+                metadata: {
+                  selectedCourseCount: selected.length,
+                  players,
+                  requestedLayoutHoles
+                }
+              });
+            }}
+            publishableKey={clerkPublishableKey}
+            style={{ marginTop: 18, width: "100%" }}
+          >
+            <LogIn size={17} />
+            Sign in to start sending alerts
+          </DeferredSignInButton>
         ) : (
           <button
             className="button button-primary"

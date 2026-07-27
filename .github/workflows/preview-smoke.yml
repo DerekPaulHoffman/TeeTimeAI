@@ -35,10 +35,7 @@ jobs:
       - name: Validate trusted preview URL
         env:
           UI_SMOKE_BASE_URL: ${{ inputs.preview_url }}
-        run: >-
-          npx tsx -e "import { requireTrustedVercelPreviewUrl } from
-          './src/lib/deployments/vercel-preview-auth';
-          requireTrustedVercelPreviewUrl(process.env.UI_SMOKE_BASE_URL ?? '')"
+        run: npm run preview:validate-url
       - name: Smoke trusted Vercel preview
         env:
           UI_SMOKE_BASE_URL: ${{ inputs.preview_url }}

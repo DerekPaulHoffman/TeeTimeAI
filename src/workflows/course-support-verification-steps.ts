@@ -22,7 +22,7 @@ import { getSafeOfficialBookingUrl } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 import { filterSlotsForSearch } from "@/lib/tee-times/matching";
 
-import type { CourseSupportVerificationWorkflowInput } from "./course-support-verification";
+import type { CourseSupportVerificationWorkflowInput } from "./course-support-verification-contracts";
 
 const TRANSIENT_PROVIDER_FAILURES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",

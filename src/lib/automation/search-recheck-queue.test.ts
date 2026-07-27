@@ -31,6 +31,7 @@ import {
   recoverSearchScheduleStartFailure,
   selectCurrentRemediatedSearchIds
 } from "./search-recheck-queue";
+import { consumeSearchScheduleQueueMessage } from "./search-schedule-consumer";
 
 const message = {
   searchId: "search-1",
@@ -160,7 +161,9 @@ describe("search schedule recovery queue", () => {
     mocks.start.mockResolvedValue({ runId: "new-run" });
     mocks.attachSearchWorkflowRun.mockResolvedValue({ count: 1 });
 
-    await expect(consumeSearchScheduleMessage(message)).resolves.toEqual({ outcome: "started" });
+    await expect(consumeSearchScheduleQueueMessage(message)).resolves.toEqual({
+      outcome: "started"
+    });
 
     expect(mocks.getSearchScheduleState).toHaveBeenCalledWith("search-1", 7);
     expect(mocks.start).toHaveBeenCalledWith(

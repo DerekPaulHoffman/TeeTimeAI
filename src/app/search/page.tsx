@@ -1,8 +1,11 @@
 import Image from "next/image";
+import { currentUser } from "@clerk/nextjs/server";
 
 import { TeeTimeIntake } from "@/components/tee-time-intake";
-import { hasClerkConfig } from "@/lib/env";
+import { getClerkPublishableKey, hasClerkConfig } from "@/lib/env";
 import { buildPageMetadata } from "@/lib/seo";
+import "leaflet/dist/leaflet.css";
+import "../pricing.css";
 
 export const metadata = buildPageMetadata({
   title: "Search Tee Times",
@@ -11,7 +14,11 @@ export const metadata = buildPageMetadata({
   path: "/search"
 });
 
-export default function SearchPage() {
+export default async function SearchPage() {
+  const accountEnabled = hasClerkConfig();
+  const clerkUser = accountEnabled ? await currentUser() : null;
+  const accountEmail = clerkUser?.primaryEmailAddress?.emailAddress;
+
   return (
     <main className="search-page">
       <div className="search-page-header">
@@ -28,7 +35,12 @@ export default function SearchPage() {
         <p className="eyebrow">Set up your alert</p>
         <h1>Tell us where and when you want to play.</h1>
       </div>
-      <TeeTimeIntake accountEnabled={hasClerkConfig()} />
+      <TeeTimeIntake
+        accountEmail={accountEmail}
+        accountEnabled={accountEnabled}
+        accountSignedIn={Boolean(clerkUser)}
+        clerkPublishableKey={getClerkPublishableKey()}
+      />
     </main>
   );
 }

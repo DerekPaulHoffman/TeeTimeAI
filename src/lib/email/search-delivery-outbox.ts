@@ -14,6 +14,20 @@ import {
   type TeeTimeAlertInput
 } from "@/lib/email/alerts";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
+import {
+  canonicalSearchEmailJson as canonicalJson,
+  getStableSearchEmailDeliveryIdempotencyKey as getStableDeliveryIdempotencyKey,
+  normalizeSearchEmailRecipient as normalizeRecipient,
+  normalizeSearchEmailRecipients as normalizeRecipients,
+  optionalJsonRecord,
+  optionalNumber,
+  optionalString,
+  parseSearchEmailPayload,
+  toSearchEmailMatchRefKey as toMatchRefKey,
+  uniqueSearchEmailMatchRefs as uniqueMatchRefs,
+  type SearchEmailDeliveryPayload,
+  type SearchEmailMatchRef as MatchRef
+} from "@/lib/email/search-delivery-payload";
 import type {
   SearchStatusCourseReport,
   SearchStatusEmailInput
@@ -24,6 +38,8 @@ import {
   SearchEmailDeliveryInProgressError
 } from "@/lib/users/pending-email";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
+
+export type { SearchEmailDeliveryPayload } from "@/lib/email/search-delivery-payload";
 
 const DELIVERY_CLAIM_MS = 5 * 60 * 1000;
 const DELIVERY_HEARTBEAT_MS = 60 * 1000;
@@ -70,8 +86,6 @@ type MatchPayloadReconciliation = {
 };
 
 type StatusPayloadState = "current" | "stale" | "transient";
-
-type MatchRef = { matchId: string; availabilityCycle: number };
 
 type DeliveryTransaction = Prisma.TransactionClient;
 
@@ -163,19 +177,6 @@ function getDeliveryMonitoringDisposition(
     ? ("ACTIONABLE" as const)
     : disposition;
 }
-
-export type SearchEmailDeliveryPayload = {
-  schemaVersion: 2;
-  checkedAt: string;
-  matchIds?: string[];
-  matchRefs?: MatchRef[];
-  displayMatchIds?: string[];
-  recipientCatchup?: boolean;
-  satisfiesStatusReport?: boolean;
-  statusSnapshot?: Prisma.InputJsonValue;
-  statusReport?: Prisma.InputJsonValue;
-  matchReport?: Prisma.InputJsonValue;
-};
 
 export { SearchEmailDeliveryInProgressError };
 
@@ -3814,82 +3815,6 @@ function assertIdenticalGroupPayloads(
   return payload;
 }
 
-function parseSearchEmailPayload(value: unknown): SearchEmailDeliveryPayload | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const payload = value as Record<string, unknown>;
-  if (
-    payload.schemaVersion !== 2 ||
-    typeof payload.checkedAt !== "string" ||
-    Number.isNaN(new Date(payload.checkedAt).getTime())
-  ) {
-    return null;
-  }
-  return {
-    schemaVersion: 2,
-    checkedAt: payload.checkedAt,
-    ...(Array.isArray(payload.matchIds)
-      ? { matchIds: payload.matchIds.filter((id): id is string => typeof id === "string") }
-      : {}),
-    ...(Array.isArray(payload.matchRefs)
-      ? {
-          matchRefs: payload.matchRefs
-            .map((value) => optionalJsonRecord(value))
-            .filter((value): value is Record<string, unknown> => Boolean(value))
-            .map((value) => ({
-              matchId: optionalString(value.matchId),
-              availabilityCycle: optionalNumber(value.availabilityCycle)
-            }))
-            .filter(
-              (
-                value
-              ): value is { matchId: string; availabilityCycle: number } =>
-                Boolean(
-                  value.matchId &&
-                    Number.isInteger(value.availabilityCycle) &&
-                    (value.availabilityCycle ?? -1) >= 0
-                )
-            )
-        }
-      : {}),
-    ...(Array.isArray(payload.displayMatchIds)
-      ? {
-          displayMatchIds: payload.displayMatchIds.filter(
-            (id): id is string => typeof id === "string"
-          )
-        }
-      : {}),
-    ...(typeof payload.recipientCatchup === "boolean"
-      ? { recipientCatchup: payload.recipientCatchup }
-      : {}),
-    ...(typeof payload.satisfiesStatusReport === "boolean"
-      ? { satisfiesStatusReport: payload.satisfiesStatusReport }
-      : {}),
-    ...(payload.statusSnapshot !== undefined
-      ? { statusSnapshot: payload.statusSnapshot as Prisma.InputJsonValue }
-      : {}),
-    ...(payload.statusReport !== undefined
-      ? { statusReport: payload.statusReport as Prisma.InputJsonValue }
-      : {}),
-    ...(payload.matchReport !== undefined
-      ? { matchReport: payload.matchReport as Prisma.InputJsonValue }
-      : {})
-  };
-}
-
-function normalizeRecipients(recipients: string[]) {
-  return [...new Set(recipients.map(normalizeRecipient).filter(Boolean))];
-}
-
-function normalizeRecipient(recipient: string) {
-  return recipient.trim().toLowerCase();
-}
-
-function toMatchRefKey(match: { matchId: string; availabilityCycle: number }) {
-  return `${match.matchId}:${match.availabilityCycle}`;
-}
-
 function getLegacyMatchIds(payload: SearchEmailDeliveryPayload | null) {
   if (!payload) {
     return [];
@@ -3902,48 +3827,6 @@ function getLegacyMatchIds(payload: SearchEmailDeliveryPayload | null) {
       (payload.matchIds ?? []).filter((matchId) => !exactMatchIds.has(matchId))
     )
   ];
-}
-
-function uniqueMatchRefs(matchRefs: MatchRef[]) {
-  return [
-    ...new Map(
-      matchRefs.map((match) => [toMatchRefKey(match), match] as const)
-    ).values()
-  ];
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function getStableDeliveryIdempotencyKey(input: {
-  searchId: string;
-  kind: SearchEmailDeliveryKind;
-  groupKey: string;
-  recipient: string;
-  payload: SearchEmailDeliveryPayload;
-}) {
-  return `tee-search-delivery-${createHash("sha256")
-    .update(
-      canonicalJson({
-        searchId: input.searchId,
-        kind: input.kind,
-        groupKey: input.groupKey,
-        recipient: normalizeRecipient(input.recipient),
-        payload: input.payload
-      })
-    )
-    .digest("hex")
-    .slice(0, 32)}`;
 }
 
 function getRejectedDelivery(error: unknown) {
@@ -3967,12 +3850,6 @@ function requireJsonRecord(value: unknown, label: string) {
   return value as Record<string, unknown>;
 }
 
-function optionalJsonRecord(value: unknown) {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 function requireString(value: unknown, label: string) {
   if (typeof value !== "string") {
     throw new Error(`Persisted ${label} is invalid`);
@@ -3985,14 +3862,6 @@ function requireNumber(value: unknown, label: string) {
     throw new Error(`Persisted ${label} is invalid`);
   }
   return value;
-}
-
-function optionalString(value: unknown) {
-  return typeof value === "string" ? value : undefined;
-}
-
-function optionalNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function optionalNullableNumber(value: unknown) {

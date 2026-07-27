@@ -32,7 +32,11 @@ import {
 import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { formatObservationDateTime } from "@/lib/dates/observation-date-time";
-import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
+import {
+  getClerkPublishableKey,
+  hasClerkConfig,
+  hasDatabaseConfig
+} from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import {
   getGooglePlacePhoto,
@@ -920,7 +924,7 @@ function SignedOutState() {
           Your saved tee time searches are tied to your account. Sign in to view, pause, or
           update them.
         </p>
-        <DashboardSignInActions />
+        <DashboardSignInActions publishableKey={getClerkPublishableKey()!} />
       </section>
     </main>
   );

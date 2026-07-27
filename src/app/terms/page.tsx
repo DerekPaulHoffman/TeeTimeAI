@@ -1,4 +1,5 @@
 import Link from "next/link";
+import "../editorial.css";
 
 import {
   EditorialNote,

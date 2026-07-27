@@ -1,5 +1,4 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -15,16 +14,11 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock })
 }));
 
-vi.mock("@clerk/nextjs", () => ({
-  SignInButton: ({ children }: { children: ReactNode }) => children,
-  useUser: () => ({
-    isLoaded: true,
-    isSignedIn: true,
-    user: {
-      primaryEmailAddress: { emailAddress: "golfer@example.com" }
-    }
-  })
-}));
+const signedInAccountProps = {
+  accountEmail: "golfer@example.com",
+  accountEnabled: true,
+  accountSignedIn: true
+} as const;
 
 describe("TeeTimeIntake", () => {
   afterEach(() => {
@@ -80,7 +74,7 @@ describe("TeeTimeIntake", () => {
 
     render(
       <TeeTimeIntake
-        accountEnabled
+        {...signedInAccountProps}
         initialValues={{ location: "Trumbull, CT" }}
       />
     );
@@ -137,7 +131,7 @@ describe("TeeTimeIntake", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
 
-    render(<TeeTimeIntake accountEnabled />);
+    render(<TeeTimeIntake {...signedInAccountProps} />);
 
     await waitFor(() =>
       expect(document.querySelector(".figma-alert-preview")?.textContent).toContain(
@@ -248,7 +242,10 @@ describe("TeeTimeIntake", () => {
     });
 
     const firstRender = render(
-      <TeeTimeIntake accountEnabled initialValues={{ location: "Trumbull, CT" }} />
+      <TeeTimeIntake
+        {...signedInAccountProps}
+        initialValues={{ location: "Trumbull, CT" }}
+      />
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
@@ -272,7 +269,7 @@ describe("TeeTimeIntake", () => {
     firstRender.unmount();
     maximumPriceCents = 4300;
     fetchMock.mockClear();
-    render(<TeeTimeIntake accountEnabled />);
+    render(<TeeTimeIntake {...signedInAccountProps} />);
 
     expect(
       await screen.findAllByRole("heading", { name: "Second Public Golf Course" })
@@ -340,7 +337,7 @@ describe("TeeTimeIntake", () => {
 
     render(
       <TeeTimeIntake
-        accountEnabled
+        {...signedInAccountProps}
         initialValues={{ location: "Wallingford, CT" }}
       />
     );

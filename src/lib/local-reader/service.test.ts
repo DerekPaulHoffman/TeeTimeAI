@@ -12,17 +12,12 @@ const prismaMocks = vi.hoisted(() => ({
   },
 }));
 
-const schedulerMocks = vi.hoisted(() => ({
-  startSearchSchedule: vi.fn(),
-}));
-
 const monitoringMocks = vi.hoisted(() => ({
   recordCourseMonitoringSuccess: vi.fn(),
   resolveCourseSupportIncident: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
-vi.mock("@/lib/automation/search-scheduler", () => schedulerMocks);
 vi.mock("@/lib/automation/course-monitoring", () => ({
   recordCourseMonitoringSuccess: monitoringMocks.recordCourseMonitoringSuccess,
 }));
@@ -310,7 +305,7 @@ describe("local reader job service", () => {
     );
   });
 
-  it("stores a valid result and schedules the normal search workflow", async () => {
+  it("stores a valid result and returns the search that should resume", async () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       teeSearchId: "search-1",
@@ -327,8 +322,6 @@ describe("local reader job service", () => {
       bookingUrl,
     });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
-    schedulerMocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
-
     await expect(
       completeLocalReaderJob({
         jobId: "job-1",
@@ -358,7 +351,6 @@ describe("local reader job service", () => {
       searchId: "search-1",
       completedAt: new Date("2026-07-24T16:00:00.000Z"),
     });
-    expect(schedulerMocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith({
       where: {
         id: { not: "job-1" },
@@ -414,7 +406,6 @@ describe("local reader job service", () => {
       completedAt: new Date("2026-07-24T16:00:00.000Z"),
     });
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledTimes(1);
-    expect(schedulerMocks.startSearchSchedule).not.toHaveBeenCalled();
     expect(monitoringMocks.recordCourseMonitoringSuccess).toHaveBeenCalledWith({
       courseId: "course-1",
       outcome: "NO_MATCH",
@@ -468,7 +459,6 @@ describe("local reader job service", () => {
 
     expect(monitoringMocks.recordCourseMonitoringSuccess).not.toHaveBeenCalled();
     expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
-    expect(schedulerMocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
   it("turns only availability results into provider-compatible slots", async () => {

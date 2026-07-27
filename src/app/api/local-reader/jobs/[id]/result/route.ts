@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { hasDatabaseConfig } from "@/lib/env";
+import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { assertLocalReaderRequest } from "@/lib/local-reader/auth";
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { completeLocalReaderJob } from "@/lib/local-reader/service";
@@ -27,6 +28,16 @@ export async function POST(
       leaseToken,
       result
     });
+    if (completed.searchId) {
+      try {
+        await startSearchSchedule(completed.searchId);
+      } catch (error) {
+        console.error("[local-reader:search-schedule-start-failed]", {
+          message:
+            error instanceof Error ? error.message : "Unknown scheduling error"
+        });
+      }
+    }
     return NextResponse.json({
       status: "COMPLETED",
       completedAt: completed.completedAt.toISOString()

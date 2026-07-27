@@ -1,15 +1,15 @@
 import { handleCallback } from "@vercel/queue";
 
 import {
-  consumeSearchScheduleMessage,
   getSearchScheduleQueueRetryDirective
 } from "@/lib/automation/search-recheck-queue";
+import { consumeSearchScheduleQueueMessage } from "@/lib/automation/search-schedule-consumer";
 
 export const runtime = "nodejs";
 
 export const POST = handleCallback(
   async (message) => {
-    await consumeSearchScheduleMessage(message);
+    await consumeSearchScheduleQueueMessage(message);
   },
   {
     visibilityTimeoutSeconds: 120,

@@ -1,10 +1,15 @@
 # Tee Time Spot Monkey Test - 2026-07-09
 
+> Historical report. The one-off monkey-test script was retired after the
+> covered navigation, feedback, search, validation, dashboard, and responsive
+> scenarios moved into the maintained Playwright suite. Use `npm run ui:smoke`
+> for current browser verification.
+
 ## Commands
 
 ```powershell
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3000/
-node scripts\qa\monkey-test-teetime-spot.mjs
+npm run ui:smoke
 npx vercel env run -- npm run automation:poll
 npx vercel env run -- npm run automation:inspect
 ```
@@ -83,17 +88,11 @@ Observed aborted requests were from navigation/image cleanup and beacon unload b
    - Feedback returned `201`.
    - Analytics returned `201` during normal page interactions.
 
-## Automation Seed
+## Current Browser Coverage
 
-The reusable browser script is:
-
-```powershell
-node scripts\qa\monkey-test-teetime-spot.mjs
-```
-
-Use `MONKEY_BASE_URL` to point it at another deployment:
+The historical script is no longer a supported entrypoint. Run the maintained
+Playwright smoke suite instead:
 
 ```powershell
-$env:MONKEY_BASE_URL = "https://your-preview-or-prod-url"
-node scripts\qa\monkey-test-teetime-spot.mjs
+npm run ui:smoke
 ```
