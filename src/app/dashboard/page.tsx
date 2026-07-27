@@ -8,6 +8,7 @@ import {
   CircleAlert,
   CircleOff,
   CirclePause,
+  ChevronDown,
   Clock3,
   ExternalLink,
   Flag,
@@ -37,6 +38,10 @@ import {
   type GooglePlacePhoto
 } from "@/lib/places/google";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
+import {
+  getDashboardAvailabilityView,
+  readDashboardAvailabilitySnapshot
+} from "@/lib/searches/dashboard-availability";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { formatCourseDistance } from "@/lib/email/course-facts";
@@ -208,11 +213,11 @@ function DashboardView({
         </section>
 
         <aside className="dashboard-panel dashboard-sidebar">
-          <h2>Alert status</h2>
+          <h2>Alerts overview</h2>
           <p className="meta">{alertStatusCopy}</p>
           <dl className="sidebar-stat-list">
             <div>
-              <dt>Matches found</dt>
+              <dt>Matching now</dt>
               <dd>
                 {availableMatches.length === 0
                   ? "0 so far"
@@ -231,29 +236,6 @@ function DashboardView({
           <div className="alert alert-info">
             We watch all your courses and only email you when something new opens up — no repeats.
           </div>
-          {availableMatches.length > 0 ? (
-            <div className="match-list">
-              {availableMatches.slice(0, 3).map((match) => (
-                <div className="match-row" key={match.id}>
-                  <div>
-                    <h3>{match.course.name}</h3>
-                    <p className="meta">
-                      {formatDashboardMatch(match.startsAt, match.course.timeZone)} - {match.availableSpots} spots
-                    </p>
-                  </div>
-                  <a
-                    className="button button-ghost"
-                    href={match.bookingUrl}
-                    rel="noreferrer"
-                    target="_blank"
-                  >
-                    <ExternalLink size={16} />
-                    Official site
-                  </a>
-                </div>
-              ))}
-            </div>
-          ) : null}
           <Link className="button button-dark dashboard-add-search" href="/search">
             <Plus size={16} />
             Add another search
@@ -276,11 +258,45 @@ function DashboardSearchCard({
   showRecipientEmail: boolean;
 }) {
   const now = new Date();
+  const availableSearchMatches = search.matches.filter(
+    (match) =>
+      match.availabilityStatus === "AVAILABLE" &&
+      match.startsAt > now &&
+      evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE"
+  );
+  const latestCourseProbes = search.preferences.flatMap((preference) => {
+    const probe = search.probes.find(
+      (candidate) => candidate.courseId === preference.course.id
+    );
+    return probe ? [probe] : [];
+  });
+  const visibleProviderSlotCount = latestCourseProbes.reduce(
+    (total, probe) =>
+      total +
+      (readDashboardAvailabilitySnapshot(probe.rawSummary)?.visibleSlotCount ?? 0),
+    0
+  );
+  const summaryStatus =
+    availableSearchMatches.length > 0
+      ? `${availableSearchMatches.length} matching ${
+          availableSearchMatches.length === 1 ? "time" : "times"
+        } now`
+      : visibleProviderSlotCount > 0
+        ? `${visibleProviderSlotCount} ${
+            visibleProviderSlotCount === 1 ? "tee time" : "tee times"
+          } found in the latest check`
+        : latestCourseProbes.length > 0
+          ? "No matching times yet"
+          : "Waiting for the first check";
+
   return (
     <article className="dashboard-row">
-      <div className="dashboard-card-main">
-        <div className="dashboard-card-topline">
-          <div className="dashboard-card-title">
+      <details
+        className="dashboard-alert-accordion"
+        open={availableSearchMatches.length > 0}
+      >
+        <summary className="dashboard-alert-summary">
+          <div className="dashboard-alert-summary-heading">
             <span className={`status-pill ${search.status.toLowerCase()}`}>
               {search.status === "ACTIVE" ? <Play size={13} /> : <CirclePause size={13} />}
               {search.status === "ACTIVE" ? "Watching" : search.status}
@@ -289,6 +305,34 @@ function DashboardSearchCard({
               <CalendarDays size={16} />
               {formatDashboardDate(search.date)}
             </h3>
+          </div>
+          <div className="dashboard-alert-summary-copy">
+            <strong>{summaryStatus}</strong>
+            <span>
+              {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)}
+              {" · "}
+              {search.players} {search.players === 1 ? "golfer" : "golfers"}
+              {" · "}
+              {search.preferences.length}{" "}
+              {search.preferences.length === 1 ? "course" : "courses"}
+            </span>
+          </div>
+          <span className="dashboard-alert-summary-checked">
+            {search.lastCheckedAt
+              ? `Checked ${formatObservationDateTime(search.lastCheckedAt)}`
+              : "Check pending"}
+          </span>
+          <ChevronDown
+            aria-hidden="true"
+            className="dashboard-alert-summary-chevron"
+            size={20}
+          />
+        </summary>
+        <div className="dashboard-alert-body">
+          <div className="dashboard-card-main">
+        <div className="dashboard-card-topline">
+          <div className="dashboard-card-title">
+            <h3>Availability and alert details</h3>
           </div>
           {canManage ? (
             <SearchStatusActions
@@ -395,6 +439,24 @@ function DashboardSearchCard({
             const latestProbe = search.probes.find(
               (probe) => probe.courseId === preference.course.id
             );
+            const courseMatches = availableSearchMatches.filter(
+              (match) => match.courseId === preference.course.id
+            );
+            const availabilityView = getDashboardAvailabilityView({
+              outcome: latestProbe?.outcome,
+              rawSummary: latestProbe?.rawSummary,
+              qualifyingMatchCount: courseMatches.length,
+              players: search.players,
+              startTime: search.startTime,
+              endTime: search.endTime,
+              bookingOpensLabel: upcomingBookingWindow
+                ? upcomingBookingWindow.exactTime
+                  ? `when booking opens ${formatBookingWindowRelease(
+                      upcomingBookingWindow
+                    )}`
+                  : `around ${formatBookingWindowRelease(upcomingBookingWindow)}`
+                : null
+            });
             const monitoringVerdict = getDashboardMonitoringVerdict({
               alertSupport,
               automationEligibility: preference.course.automationEligibility,
@@ -520,14 +582,48 @@ function DashboardSearchCard({
                     <MapPin size={12} />
                     {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
                   </p>
-                  {upcomingBookingWindow ? (
-                    <p className="watch-course-release">
-                      <CalendarClock size={13} />
-                      {upcomingBookingWindow.exactTime ? "Booking opens" : "Expected to open"}{" "}
-                      {formatBookingWindowRelease(upcomingBookingWindow)}
-                      {!upcomingBookingWindow.exactTime ? " (time not published)" : ""}
-                    </p>
-                  ) : null}
+                  <div
+                    className={`watch-course-availability is-${availabilityView.tone}`}
+                  >
+                    <div className="watch-course-availability-heading">
+                      <span aria-hidden="true" />
+                      <strong>{availabilityView.label}</strong>
+                    </div>
+                    <p>{availabilityView.detail}</p>
+                    {courseMatches.length > 0 ? (
+                      <details className="watch-course-match-details">
+                        <summary>
+                          View{" "}
+                          {courseMatches.length === 1
+                            ? "matching time"
+                            : `all ${courseMatches.length} matching times`}
+                        </summary>
+                        <div className="watch-course-match-list">
+                          {courseMatches.map((match) => (
+                            <a
+                              href={match.bookingUrl}
+                              key={match.id}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              <strong>
+                                {formatDashboardMatch(
+                                  match.startsAt,
+                                  match.course.timeZone
+                                )}
+                              </strong>
+                              <span>
+                                {match.availableSpots}{" "}
+                                {match.availableSpots === 1 ? "spot" : "spots"}
+                                {match.holes ? ` · ${match.holes} holes` : ""}
+                              </span>
+                              <ExternalLink aria-hidden="true" size={12} />
+                            </a>
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
                   <p className="watch-course-release">
                     {monitoringVerdict.detail}
                     {latestProbe
@@ -568,7 +664,9 @@ function DashboardSearchCard({
             );
           })}
         </div>
-      </div>
+          </div>
+        </div>
+      </details>
     </article>
   );
 }
@@ -634,10 +732,7 @@ function getDashboardMonitoringVerdict(input: {
   ) {
     return {
       label: "Automatic monitoring confirmed",
-      detail:
-        input.latestProbe.outcome === "MATCH_FOUND"
-          ? "Matching openings were found and covered by the alert delivery."
-          : "The latest automatic check completed without a matching opening.",
+      detail: "The latest automatic check completed successfully.",
       icon: "watching" as const,
       className: "is-public"
     };
