@@ -540,7 +540,10 @@ type CourseProbeInput = {
     | "BLOCKED_AUTH"
     | "BLOCKED_TOOLING"
     | "FETCH_FAILED"
-    | "NEEDS_ADAPTER";
+    | "NEEDS_ADAPTER"
+    | "MANUAL_DIRECT"
+    | "IDENTITY_FINAL"
+    | "IDENTITY_RECHECK";
   message?: string;
   evidenceUrl?: string;
   rawSummary?: Prisma.InputJsonValue;
@@ -2123,9 +2126,53 @@ export async function listAvailableMatchAlerts(
   });
 }
 
-export async function startAutomationRun(promptVersion: string) {
+export function classifyAutomationRunKind(promptVersion: string) {
+  if (
+    promptVersion.includes("event-driven-check") ||
+    promptVersion.includes("search-check")
+  ) {
+    return "SEARCH_CHECK" as const;
+  }
+  if (promptVersion.includes("course-support")) return "COURSE_SUPPORT" as const;
+  if (
+    promptVersion.includes("improvement") ||
+    promptVersion.includes("local-codex-loop")
+  ) {
+    return "IMPROVEMENT" as const;
+  }
+  if (promptVersion.includes("browser")) return "BROWSER_PROBE" as const;
+  if (promptVersion.includes("maintenance") || promptVersion.includes("backfill")) {
+    return "MAINTENANCE" as const;
+  }
+  return "OTHER" as const;
+}
+
+export function parseAutomationRunAudit(notes?: string | null) {
+  if (!notes?.trim()) return null;
+  try {
+    const parsed = JSON.parse(notes) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Prisma.InputJsonValue)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function startAutomationRun(
+  promptVersion: string,
+  input: { ownerThreadId?: string | null } = {}
+) {
+  const now = new Date();
   return prisma.automationRun.create({
-    data: { promptVersion }
+    data: {
+      promptVersion,
+      kind: classifyAutomationRunKind(promptVersion),
+      status: "RUNNING",
+      runtimeVersion: getAutomationRuntimeVersion(),
+      ownerThreadId: input.ownerThreadId ?? process.env.CODEX_THREAD_ID?.trim() ?? null,
+      heartbeatAt: now
+    }
   });
 }
 
@@ -2211,6 +2258,11 @@ export async function updateHourlyImprovementRunState(
       completedAt: null
     },
     data: {
+      kind: "IMPROVEMENT",
+      status: "RUNNING",
+      heartbeatAt: new Date(),
+      auditSchemaVersion: 1,
+      audit: record as unknown as Prisma.InputJsonValue,
       notes: JSON.stringify(record)
     }
   });
@@ -2247,8 +2299,12 @@ export async function closeHourlyImprovementRun(
     data: {
       completedAt: new Date(),
       outcome: input.outcome,
+      status: input.errors ? "FAILED" : "COMPLETED",
       errors: input.errors,
       changedFiles: input.changedFiles,
+      heartbeatAt: new Date(),
+      auditSchemaVersion: 1,
+      audit: closeoutRecord as unknown as Prisma.InputJsonValue,
       notes: JSON.stringify(closeoutRecord)
     }
   });
@@ -2270,8 +2326,12 @@ export async function finishAutomationRun(
     data: {
       completedAt: new Date(),
       outcome: input.outcome,
+      status: input.errors ? "FAILED" : "COMPLETED",
       errors: input.errors,
       changedFiles: input.changedFiles,
+      heartbeatAt: new Date(),
+      auditSchemaVersion: parseAutomationRunAudit(input.notes) ? 1 : undefined,
+      audit: parseAutomationRunAudit(input.notes) ?? undefined,
       notes: input.notes
     }
   });

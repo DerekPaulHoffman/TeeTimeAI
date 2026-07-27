@@ -1953,7 +1953,7 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
     expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
       expect.objectContaining({
-        outcome: "BLOCKED_POLICY",
+        outcome: "IDENTITY_RECHECK",
         message: expect.stringContaining("identity review is due"),
         rawSummary: expect.objectContaining({
           monitoringDisposition: "IDENTITY_RECHECK"
@@ -1961,7 +1961,7 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "BLOCKED_POLICY",
+      outcome: "IDENTITY_RECHECK",
       monitoringDisposition: "IDENTITY_RECHECK",
       availableMatches: 0,
       bookingUrl: undefined,
@@ -2046,7 +2046,7 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "BLOCKED_POLICY",
+      outcome: "MANUAL_DIRECT",
       automationReason: "NO_ONLINE_BOOKING",
       bookingAccess: "PHONE_ONLY",
       monitoringDisposition: "MANUAL_FINAL"

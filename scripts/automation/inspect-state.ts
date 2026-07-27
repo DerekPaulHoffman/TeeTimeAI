@@ -183,6 +183,7 @@ async function main() {
           startedAt: true,
           completedAt: true,
           outcome: true,
+          audit: true,
           notes: true,
           changedFiles: true
         }
@@ -498,6 +499,8 @@ async function main() {
         recentRuns: runs.map((run) => ({
           id: run.id,
           promptVersion: run.promptVersion,
+          kind: run.kind,
+          status: run.status,
           startedAt: run.startedAt,
           completedAt: run.completedAt,
           outcome: run.outcome,
@@ -512,7 +515,7 @@ async function main() {
             completedAt: run.completedAt,
             outcome: run.outcome,
             changedFiles: run.changedFiles,
-            memory: extractImprovementRunMemory(run.notes)
+            memory: extractImprovementRunMemory(run.audit, run.notes)
           }))
         },
         improvementPortfolio: {
@@ -751,7 +754,18 @@ function summarize(notes: string | null) {
   return notes?.replace(/\s+/g, " ").trim().slice(0, 300) ?? null;
 }
 
-function extractImprovementRunMemory(notes: string | null) {
+function extractImprovementRunMemory(
+  structuredAuditOrNotes: unknown,
+  notesArgument?: string | null
+) {
+  const legacyNotesCall =
+    notesArgument === undefined &&
+    (typeof structuredAuditOrNotes === "string" ||
+      structuredAuditOrNotes === null);
+  const structuredAudit = legacyNotesCall ? null : structuredAuditOrNotes;
+  const notes = legacyNotesCall
+    ? (structuredAuditOrNotes as string | null)
+    : (notesArgument ?? null);
   const fallback = {
     lifecycle: null,
     branch: null,
@@ -770,6 +784,10 @@ function extractImprovementRunMemory(notes: string | null) {
     fallbackSummary: summarize(notes)
   };
 
+  if (isRecord(structuredAudit)) {
+    return extractImprovementRunMemoryRecord(structuredAudit);
+  }
+
   if (!notes) {
     return fallback;
   }
@@ -779,31 +797,35 @@ function extractImprovementRunMemory(notes: string | null) {
     if (!isRecord(record)) {
       return fallback;
     }
-
-    const audit = isRecord(record.audit) ? record.audit : {};
-    const provenance = isRecord(record.provenance) ? record.provenance : {};
-    const candidate = isRecord(record.candidate) ? record.candidate : {};
-
-    return {
-      lifecycle: boundedString(record.lifecycle),
-      branch: boundedString(provenance.branch),
-      candidateSummary: boundedString(candidate.summary),
-      selectedCategory: boundedString(audit.selectedCategory),
-      candidateRanking: boundedStringArray(audit.candidateRanking),
-      evidenceTrackResults: boundedStringRecord(audit.evidenceTrackResults),
-      coverageBlockers: boundedStringArray(audit.coverageBlockers),
-      commitSha: boundedString(audit.commitSha),
-      deploymentId: boundedString(audit.deploymentId),
-      changedBehavior: boundedString(audit.changedBehavior),
-      measuredResult: boundedString(audit.measuredResult),
-      learning: boundedStringArray(audit.learning),
-      blockers: boundedStringArray(audit.blockers),
-      nextRotationTargets: boundedStringArray(audit.nextRotationTargets),
-      fallbackSummary: null
-    };
+    return extractImprovementRunMemoryRecord(record);
   } catch {
     return fallback;
   }
+}
+
+function extractImprovementRunMemoryRecord(
+  record: Record<string, unknown>
+) {
+  const audit = isRecord(record.audit) ? record.audit : {};
+  const provenance = isRecord(record.provenance) ? record.provenance : {};
+  const candidate = isRecord(record.candidate) ? record.candidate : {};
+  return {
+    lifecycle: boundedString(record.lifecycle),
+    branch: boundedString(provenance.branch),
+    candidateSummary: boundedString(candidate.summary),
+    selectedCategory: boundedString(audit.selectedCategory),
+    candidateRanking: boundedStringArray(audit.candidateRanking),
+    evidenceTrackResults: boundedStringRecord(audit.evidenceTrackResults),
+    coverageBlockers: boundedStringArray(audit.coverageBlockers),
+    commitSha: boundedString(audit.commitSha),
+    deploymentId: boundedString(audit.deploymentId),
+    changedBehavior: boundedString(audit.changedBehavior),
+    measuredResult: boundedString(audit.measuredResult),
+    learning: boundedStringArray(audit.learning),
+    blockers: boundedStringArray(audit.blockers),
+    nextRotationTargets: boundedStringArray(audit.nextRotationTargets),
+    fallbackSummary: null
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

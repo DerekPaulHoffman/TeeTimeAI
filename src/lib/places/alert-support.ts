@@ -37,7 +37,10 @@ type KnownCourseRecord = CourseIdentity & {
       | "BLOCKED_AUTH"
       | "BLOCKED_TOOLING"
       | "FETCH_FAILED"
-      | "NEEDS_ADAPTER";
+      | "NEEDS_ADAPTER"
+      | "MANUAL_DIRECT"
+      | "IDENTITY_FINAL"
+      | "IDENTITY_RECHECK";
     observedAt: Date;
   }>;
 };
@@ -158,7 +161,14 @@ function getMonitoringReadiness(course: KnownCourseRecord) {
   }
   if (
     latestProbe &&
-    ["NEEDS_ADAPTER", "BLOCKED_POLICY", "BLOCKED_AUTH"].includes(latestProbe.outcome)
+    [
+      "NEEDS_ADAPTER",
+      "BLOCKED_POLICY",
+      "BLOCKED_AUTH",
+      "MANUAL_DIRECT",
+      "IDENTITY_FINAL",
+      "IDENTITY_RECHECK"
+    ].includes(latestProbe.outcome)
   ) {
     return {
       monitoringReadiness: "UNAVAILABLE" as const,

@@ -1,6 +1,7 @@
 import type { Metadata, Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
 import {
   Activity,
   AlertTriangle,
@@ -21,10 +22,7 @@ import {
   Wrench
 } from "lucide-react";
 
-import {
-  ResolveFeedbackControl,
-  RetryIncidentControl
-} from "@/components/operator-action-controls";
+import { hasClerkConfig } from "@/lib/env";
 import { getCurrentOperator } from "@/lib/operator/auth";
 import {
   COURSE_STATUS_GUIDE,
@@ -69,6 +67,13 @@ type OperatorPageProps = {
 export default async function OperatorPage({
   searchParams
 }: OperatorPageProps) {
+  if (!hasClerkConfig()) {
+    notFound();
+  }
+  const clerkAuth = await auth();
+  if (!clerkAuth.userId) {
+    return clerkAuth.redirectToSignIn({ returnBackUrl: "/operator" });
+  }
   const operator = await getCurrentOperator();
   if (!operator) {
     notFound();
@@ -264,12 +269,6 @@ function OperatorDashboard({
             label="broken reports"
           />
         </div>
-        <div className="operator-attention-lists">
-          <AttentionSearches searches={overview.attention.problemSearches} />
-          <AttentionDeliveries
-            deliveries={overview.attention.problemDeliveries}
-          />
-        </div>
       </section>
 
       <section aria-labelledby="activity-heading" className="operator-section">
@@ -277,7 +276,7 @@ function OperatorDashboard({
           eyebrow={`${overview.range.days}-day view`}
           id="activity-heading"
           title="Activity and conversion"
-          supporting="Anonymous browsing is reported as event counts. Named users appear only after a persisted account exists."
+          supporting="Browsing and saved demand are shown only as aggregate event and alert counts."
         />
         <div className="operator-activity-layout">
           <div className="operator-trend" aria-label="Daily activity trend">
@@ -444,19 +443,6 @@ function OperatorDashboard({
                       <dd>{formatRelativeAge(incident.firstSeenAt)}</dd>
                     </div>
                   </dl>
-                  {(incident.latestMessage || incident.nextAction) && (
-                    <details className="operator-details">
-                      <summary>Evidence and next action</summary>
-                      {incident.latestMessage ? (
-                        <p>{incident.latestMessage}</p>
-                      ) : null}
-                      {incident.nextAction ? (
-                        <p>
-                          <strong>Next:</strong> {incident.nextAction}
-                        </p>
-                      ) : null}
-                    </details>
-                  )}
                 </div>
                 <div className="operator-incident-action">
                   <IncidentQueueState
@@ -509,93 +495,58 @@ function OperatorDashboard({
         </div>
       </section>
 
-      <section aria-labelledby="users-heading" className="operator-section">
+      <section aria-labelledby="workers-heading" className="operator-section">
         <SectionHeading
-          eyebrow="Registered accounts"
-          id="users-heading"
-          title="Recent users"
-          supporting="This is account and saved-alert activity, not anonymous visitor identity or a last-visited timestamp."
+          eyebrow="Durable control plane"
+          id="workers-heading"
+          title="Automation workers"
+          supporting="Engineering worker health is tracked independently from golfer search scheduling."
         />
-        {overview.recentUsers.length > 0 ? (
-          <div className="operator-table-wrap">
-            <table className="operator-table operator-user-table">
-              <thead>
-                <tr>
-                  <th>Email</th>
-                  <th>Joined</th>
-                  <th>Total alerts</th>
-                  <th>Active</th>
-                  <th>Latest alert</th>
-                </tr>
-              </thead>
-              <tbody>
-                {overview.recentUsers.map((user) => (
-                  <tr key={user.id}>
-                    <td data-label="Email">
-                      <details className="operator-user-details">
-                        <summary>{user.email}</summary>
-                        <p>
-                          {user.courseNames.length > 0
-                            ? user.courseNames.join(", ")
-                            : "No saved courses"}
-                        </p>
-                      </details>
-                    </td>
-                    <td data-label="Joined">{formatDate(user.createdAt)}</td>
-                    <td data-label="Total alerts">{user.totalAlerts}</td>
-                    <td data-label="Active">{user.activeAlerts}</td>
-                    <td data-label="Latest alert">
-                      {user.latestAlertAt
-                        ? formatDateTime(user.latestAlertAt)
-                        : "No alert yet"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState>No registered users yet.</EmptyState>
-        )}
-      </section>
-
-      <section aria-labelledby="feedback-heading" className="operator-section">
-        <SectionHeading
-          eyebrow="Product feedback"
-          id="feedback-heading"
-          title="Unresolved feedback"
-        />
-        {overview.unresolvedFeedback.length > 0 ? (
-          <div className="operator-feedback-list">
-            {overview.unresolvedFeedback.map((feedback) => (
-              <article className="operator-feedback-row" key={feedback.id}>
-                <div>
-                  <span
-                    className={`status-pill operator-feedback-${feedback.sentiment.toLowerCase()}`}
-                  >
-                    {formatEnum(feedback.sentiment)}
-                  </span>
-                  <strong>{feedback.page || "Unknown page"}</strong>
-                  <small>{formatDateTime(feedback.createdAt)}</small>
-                  {feedback.contactEmail ? (
-                    <a href={`mailto:${feedback.contactEmail}`}>
-                      {feedback.contactEmail}
-                    </a>
-                  ) : null}
-                  {feedback.message ? (
-                    <details className="operator-details">
-                      <summary>Read feedback</summary>
-                      <p>{feedback.message}</p>
-                    </details>
-                  ) : null}
-                </div>
-                <ResolveFeedbackControl feedbackId={feedback.id} />
-              </article>
-            ))}
-          </div>
-        ) : (
-          <EmptyState>No unresolved feedback.</EmptyState>
-        )}
+        <div className="operator-health-strip">
+          {overview.operations.workers.map((worker) => (
+            <HealthItem
+              key={worker.workerKey}
+              label={formatEnum(worker.workerKey)}
+              value={worker.overdueSince ? "Overdue" : worker.desiredState}
+              detail={
+                worker.lastCompletedAt
+                  ? `Last completed ${formatDateTime(worker.lastCompletedAt)}`
+                  : "Waiting for first worker heartbeat"
+              }
+              warning={Boolean(worker.overdueSince)}
+            />
+          ))}
+          <HealthItem
+            label="Recent automation runs"
+            value={overview.operations.recentRuns.length}
+            detail={`${overview.operations.recentRuns.filter((run) => run.status === "FAILED").length} failed in the latest sample`}
+            warning={overview.operations.recentRuns.some(
+              (run) => run.status === "FAILED"
+            )}
+          />
+          <HealthItem
+            label="Active public alerts"
+            value={overview.operations.activeSearches.public}
+            detail="Current real customer demand"
+          />
+          <HealthItem
+            label="Active test alerts"
+            value={overview.operations.activeSearches.test}
+            detail="Traffic-classed test demand"
+          />
+          <HealthItem
+            label="Pending deliveries"
+            value={overview.operations.pendingDeliveries}
+            detail="Pending or currently sending outbox rows"
+            warning={overview.operations.pendingDeliveries > 0}
+          />
+          <HealthItem
+            label="Unresolved feedback"
+            value={overview.health.unresolvedFeedbackCount}
+            detail="Aggregate public, non-synthetic reports"
+            warning={overview.health.unresolvedFeedbackCount > 0}
+          />
+        </div>
       </section>
     </main>
   );
@@ -765,8 +716,6 @@ function CourseWorkQueue({
   return (
     <div className="operator-course-work-list">
       {work.map((course) => {
-        const evidence =
-          course.incident?.latestMessage ?? course.latestProbe?.message;
         return (
           <article
             className={`operator-course-work-row is-${course.tone}`}
@@ -802,12 +751,6 @@ function CourseWorkQueue({
               <p className="operator-course-next-action">
                 <strong>Next:</strong> {course.recommendedAction}
               </p>
-              {evidence ? (
-                <details className="operator-details">
-                  <summary>Latest evidence</summary>
-                  <p>{evidence}</p>
-                </details>
-              ) : null}
             </div>
             <CourseDeepLinks course={course} />
           </article>
@@ -1207,81 +1150,6 @@ function AttentionCount({ count, label }: { count: number; label: string }) {
   );
 }
 
-function AttentionSearches({
-  searches
-}: {
-  searches: OperatorOverview["attention"]["problemSearches"];
-}) {
-  return (
-    <details className="operator-attention-group" open={searches.length > 0}>
-      <summary>
-        <Search size={16} />
-        Search scheduler
-        <span>{searches.length}</span>
-      </summary>
-      {searches.length > 0 ? (
-        <div>
-          {searches.map((search) => (
-            <p key={search.id}>
-              <strong>{search.user.email}</strong>
-              <span>
-                {search.checkStatus} ·{" "}
-                {search.preferences
-                  .map((preference) => preference.course.name)
-                  .join(", ")}
-              </span>
-              <small>
-                Next check{" "}
-                {search.nextCheckAt
-                  ? formatDateTime(search.nextCheckAt)
-                  : "not scheduled"}
-              </small>
-            </p>
-          ))}
-        </div>
-      ) : (
-        <p className="operator-clear-copy">No failed or overdue real searches.</p>
-      )}
-    </details>
-  );
-}
-
-function AttentionDeliveries({
-  deliveries
-}: {
-  deliveries: OperatorOverview["attention"]["problemDeliveries"];
-}) {
-  return (
-    <details className="operator-attention-group" open={deliveries.length > 0}>
-      <summary>
-        <MailCheck size={16} />
-        Email delivery
-        <span>{deliveries.length}</span>
-      </summary>
-      {deliveries.length > 0 ? (
-        <div>
-          {deliveries.map((delivery) => (
-            <p key={delivery.id}>
-              <strong>{delivery.teeSearch.user.email}</strong>
-              <span>
-                {delivery.kind} · {delivery.status} · attempt{" "}
-                {delivery.attemptCount}
-              </span>
-              <small>
-                {delivery.nextAttemptAt
-                  ? `Retry ${formatDateTime(delivery.nextAttemptAt)}`
-                  : delivery.lastError || "Retry not scheduled"}
-              </small>
-            </p>
-          ))}
-        </div>
-      ) : (
-        <p className="operator-clear-copy">No failed or retry-due deliveries.</p>
-      )}
-    </details>
-  );
-}
-
 function FunnelStep({
   emphasized,
   label,
@@ -1342,9 +1210,6 @@ function IncidentQueueState({
       <span className="operator-queue-label is-active">
         <Activity size={14} />
         In progress
-        {incident.activeBatch?.reference ? (
-          <small>{incident.activeBatch.reference}</small>
-        ) : null}
       </span>
     );
   }
@@ -1368,13 +1233,10 @@ function IncidentQueueState({
     );
   }
   return (
-    <>
-      <span className="operator-queue-label">
-        <Clock3 size={14} />
-        {formatDateTime(incident.nextAttemptAt)}
-      </span>
-      <RetryIncidentControl incidentId={incident.id} />
-    </>
+    <span className="operator-queue-label">
+      <Clock3 size={14} />
+      {formatDateTime(incident.nextAttemptAt)}
+    </span>
   );
 }
 

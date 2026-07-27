@@ -13,7 +13,7 @@ Tee Time Spot does not book, hold, reserve, pay for, bypass controls, or enter a
 - Product name: `Tee Time Spot`
 - Domain: `https://teetimespot.com`
 - Vercel project: `teetimeai`
-- Production release record: see `docs/deployment-status.md`; deployment IDs there are point-in-time audit evidence, while the current alias must be verified against the intended Git commit with `npm run deployment:wait -- --sha <commit-sha>`
+- Production release and recovery guide: see `docs/deployment-status.md`; Git, Vercel, migrations, and structured automation audits hold per-run evidence.
 - Production aliases: `https://teetimespot.com`, `https://www.teetimespot.com`, `https://teetimeai.vercel.app`
 - App runtime: Next.js on Vercel with Neon Postgres
 - Worker runtime: local or scheduled Codex automation using repo scripts and Postgres state
@@ -314,6 +314,7 @@ Required for live email sending:
 - `ALERT_EMAIL_FROM`
 - `RESEND_EMAIL_DOMAIN`
 - `OPERATOR_ALERT_EMAIL` (receives deduplicated course-monitoring incident, escalation, and resolution emails)
+- `OPERATOR_DASHBOARD_EMAILS` (server-only comma-separated allowlist for the read-only operator dashboard)
 - `EMAIL_ACTION_SECRET` (signs bounded email alert-control links; keep separate from automation API access)
 
 Required for automation endpoints/scripts:
@@ -391,7 +392,7 @@ Main commands:
 npm run automation:poll
 npm run automation:inspect
 npm run automation:improve
-npm run automation:configure-known-foreup
+npm run automation:durable-operations -- upsert-course-evidence --file <validated-evidence.json>
 ```
 
 In this workspace, the reliable environment-loaded command shape is:
@@ -511,7 +512,7 @@ Clerk, Google Places, Resend, automation, and email-action credentials are not e
 Preview. The trusted Preview Smoke substitutes deterministic discovery responses while still
 exercising the deployed application, isolated database connection, and protected Vercel URL.
 
-Keep `docs/deployment-status.md` current after provider, deployment, auth, domain, or migration changes.
+Keep `docs/deployment-status.md` focused on the current release and recovery process; record per-run evidence in Git, Vercel, migrations, and structured automation audits.
 
 ## Known Provider State
 
@@ -540,7 +541,7 @@ Treat it as reference material only. The active application is the TypeScript/Ne
 - `README.md`: product and engineering handbook.
 - `AGENTS.md`: operating instructions for Codex/agent work.
 - `docs/codex-automation-loop.md`: loop engineering contract.
-- `docs/deployment-status.md`: provider and deploy status log.
+- `docs/deployment-status.md`: current release and recovery guide.
 - `docs/ux-research-notes.md`: UX principles and design-tool guidance.
 - `docs/ai-discovery-baseline.md`: fixed AI/search prompt set, measurement scorecard, and webmaster setup.
 

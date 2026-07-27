@@ -54,7 +54,10 @@ export type SearchStatusCourseReport = {
     | "BLOCKED_POLICY"
     | "BLOCKED_AUTH"
     | "NEEDS_ADAPTER"
-    | "FETCH_FAILED";
+    | "FETCH_FAILED"
+    | "MANUAL_DIRECT"
+    | "IDENTITY_FINAL"
+    | "IDENTITY_RECHECK";
   availableMatches: number;
   message?: string;
   bookingUrl?: string;
@@ -655,10 +658,16 @@ function getBookingAccess(course: SearchStatusCourseReport) {
 }
 
 function getBlockedMonitoringCategory(course: SearchStatusCourseReport) {
-  if (course.monitoringDisposition === "IDENTITY_RECHECK") {
+  if (
+    course.monitoringDisposition === "IDENTITY_RECHECK" ||
+    course.outcome === "IDENTITY_RECHECK"
+  ) {
     return "IDENTITY_RECHECK" as const;
   }
-  if (course.monitoringDisposition === "IDENTITY_FINAL") {
+  if (
+    course.monitoringDisposition === "IDENTITY_FINAL" ||
+    course.outcome === "IDENTITY_FINAL"
+  ) {
     return "IDENTITY_FINAL" as const;
   }
   if (
@@ -668,6 +677,9 @@ function getBlockedMonitoringCategory(course: SearchStatusCourseReport) {
     course.automationReason === "CAPTCHA_OR_QUEUE"
   ) {
     return "TECHNICAL_FINAL" as const;
+  }
+  if (course.outcome === "MANUAL_DIRECT") {
+    return "MANUAL_FINAL" as const;
   }
   if (course.outcome !== "BLOCKED_POLICY") {
     return null;

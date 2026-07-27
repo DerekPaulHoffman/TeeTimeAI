@@ -712,7 +712,10 @@ function getDashboardMonitoringVerdict(input: {
       | "BLOCKED_AUTH"
       | "BLOCKED_TOOLING"
       | "FETCH_FAILED"
-      | "NEEDS_ADAPTER";
+      | "NEEDS_ADAPTER"
+      | "MANUAL_DIRECT"
+      | "IDENTITY_FINAL"
+      | "IDENTITY_RECHECK";
     observedAt: Date;
   };
   upcomingBookingWindow: ReturnType<typeof getBookingWindowForTargetDate>;
@@ -753,7 +756,10 @@ function getDashboardMonitoringVerdict(input: {
     input.alertSupport ||
     input.latestProbe?.outcome === "NEEDS_ADAPTER" ||
     input.latestProbe?.outcome === "BLOCKED_POLICY" ||
-    input.latestProbe?.outcome === "BLOCKED_AUTH"
+    input.latestProbe?.outcome === "BLOCKED_AUTH" ||
+    input.latestProbe?.outcome === "MANUAL_DIRECT" ||
+    input.latestProbe?.outcome === "IDENTITY_FINAL" ||
+    input.latestProbe?.outcome === "IDENTITY_RECHECK"
   ) {
     return {
       label: "Automatic alerts unavailable",

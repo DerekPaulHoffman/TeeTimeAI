@@ -16,7 +16,10 @@ const probeSchema = z.object({
     "BLOCKED_AUTH",
     "BLOCKED_TOOLING",
     "FETCH_FAILED",
-    "NEEDS_ADAPTER"
+    "NEEDS_ADAPTER",
+    "MANUAL_DIRECT",
+    "IDENTITY_FINAL",
+    "IDENTITY_RECHECK"
   ]),
   message: z.string().optional(),
   evidenceUrl: z.string().url().optional(),

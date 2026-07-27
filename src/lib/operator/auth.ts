@@ -20,8 +20,12 @@ export async function getCurrentOperator(): Promise<CurrentOperator | null> {
   }
 
   const user = await currentUser();
-  const primaryEmail = user?.primaryEmailAddress?.emailAddress;
-  if (!isOperatorEmail(primaryEmail)) {
+  const primaryEmailAddress = user?.primaryEmailAddress;
+  const primaryEmail = primaryEmailAddress?.emailAddress;
+  if (
+    primaryEmailAddress?.verification?.status !== "verified" ||
+    !isOperatorEmail(primaryEmail)
+  ) {
     return null;
   }
 

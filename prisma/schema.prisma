@@ -76,6 +76,29 @@ enum ProbeOutcome {
   BLOCKED_TOOLING
   FETCH_FAILED
   NEEDS_ADAPTER
+  MANUAL_DIRECT
+  IDENTITY_FINAL
+  IDENTITY_RECHECK
+}
+
+enum AutomationRunKind {
+  SEARCH_CHECK
+  COURSE_SUPPORT
+  IMPROVEMENT
+  BROWSER_PROBE
+  MAINTENANCE
+  OTHER
+}
+
+enum AutomationRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum AutomationWorkerDesiredState {
+  ACTIVE
+  PAUSED
 }
 
 enum AlertStatus {
@@ -578,19 +601,52 @@ model TeeTimeMatch {
 }
 
 model AutomationRun {
-  id             String               @id @default(cuid())
-  promptVersion  String
-  startedAt      DateTime             @default(now())
-  completedAt    DateTime?
-  outcome        String?
-  errors         Json?
-  changedFiles   Json?
-  notes          String?
-  probes         CourseProbe[]
-  supportBatches CourseSupportBatch[] @relation("SupportBatchOwner")
+  id                 String               @id @default(cuid())
+  promptVersion      String
+  kind               AutomationRunKind    @default(OTHER)
+  status             AutomationRunStatus  @default(RUNNING)
+  runtimeVersion     String?
+  ownerThreadId      String?
+  heartbeatAt        DateTime?
+  auditSchemaVersion Int?
+  audit              Json?
+  startedAt          DateTime             @default(now())
+  completedAt        DateTime?
+  outcome            String?
+  errors             Json?
+  changedFiles       Json?
+  notes              String?
+  probes             CourseProbe[]
+  supportBatches     CourseSupportBatch[] @relation("SupportBatchOwner")
 
   @@index([startedAt])
   @@index([promptVersion, startedAt])
+  @@index([kind, startedAt])
+  @@index([status, startedAt])
+}
+
+model AutomationWorkerState {
+  workerKey                  String                       @id
+  desiredState              AutomationWorkerDesiredState @default(ACTIVE)
+  cadenceSeconds            Int
+  graceSeconds              Int
+  runnerVersion             String?
+  runtimeVersion            String?
+  lastStartedAt             DateTime?
+  lastHeartbeatAt           DateTime?
+  lastCompletedAt           DateTime?
+  lastOutcome               String?
+  nextExpectedAt            DateTime?
+  monitoringStartedAt       DateTime?
+  overdueSince              DateTime?
+  overdueNotifiedFor        DateTime?
+  overdueNotifiedAt         DateTime?
+  recoveredNotifiedAt       DateTime?
+  createdAt                 DateTime                     @default(now())
+  updatedAt                 DateTime                     @updatedAt
+
+  @@index([desiredState, nextExpectedAt])
+  @@index([lastHeartbeatAt])
 }
 
 model CourseAutomationDiscovery {

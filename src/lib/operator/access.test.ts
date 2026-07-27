@@ -1,18 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  OPERATOR_EMAIL,
+  getOperatorDashboardEmails,
   isOperatorEmail,
   normalizeOperatorEmail
 } from "./access";
 
 describe("operator access", () => {
-  it("allows only the normalized primary operator email", () => {
-    expect(isOperatorEmail(OPERATOR_EMAIL)).toBe(true);
-    expect(isOperatorEmail("  DerekPaulHoffman@GMAIL.COM ")).toBe(true);
-    expect(isOperatorEmail("derekpaulhoffman+test@gmail.com")).toBe(false);
-    expect(isOperatorEmail("someone@example.com")).toBe(false);
-    expect(isOperatorEmail(null)).toBe(false);
+  it("allows only normalized configured emails", () => {
+    const configured = "owner@example.com, SECOND@example.com";
+    expect(isOperatorEmail(" OWNER@example.com ", configured)).toBe(true);
+    expect(isOperatorEmail("second@example.com", configured)).toBe(true);
+    expect(isOperatorEmail("owner+test@example.com", configured)).toBe(false);
+    expect(isOperatorEmail("someone@example.com", configured)).toBe(false);
+    expect(isOperatorEmail(null, configured)).toBe(false);
+    expect(isOperatorEmail("owner@example.com", "")).toBe(false);
   });
 
   it("normalizes an email without treating missing values as authorized", () => {
@@ -20,5 +22,17 @@ describe("operator access", () => {
       "person@example.com"
     );
     expect(normalizeOperatorEmail(undefined)).toBe("");
+    expect(getOperatorDashboardEmails(" A@example.com, a@example.com ")).toEqual(
+      new Set(["a@example.com"])
+    );
+  });
+
+  it("fails closed when any allowlist entry is malformed", () => {
+    expect(
+      isOperatorEmail(
+        "operator@example.com",
+        "operator@example.com,not-an-email"
+      )
+    ).toBe(false);
   });
 });

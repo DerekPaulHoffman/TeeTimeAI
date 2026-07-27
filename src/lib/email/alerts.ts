@@ -146,6 +146,13 @@ export type OperatorEmailDelivery = EmailDelivery | {
   deliveryStatus: "not_configured";
 };
 
+export type AutomationWorkerHealthEmailInput = {
+  workerKey: string;
+  event: "overdue" | "recovered";
+  expectedAt: Date;
+  observedAt: Date;
+};
+
 export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailDelivery> {
   const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
   const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
@@ -356,6 +363,37 @@ export async function sendCourseSupportOperatorSummaryEmail(
     throw new Error(result.error.message);
   }
 
+  return { ...result.data, deliveryStatus: "sent" };
+}
+
+export async function sendAutomationWorkerHealthEmail(
+  input: AutomationWorkerHealthEmailInput
+): Promise<OperatorEmailDelivery> {
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
+  if (!to) return { deliveryStatus: "not_configured" };
+  if (!apiKey || !from || shouldDryRunRecipient(to)) {
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+
+  const recovered = input.event === "recovered";
+  const subject = recovered
+    ? `Automation worker recovered: ${input.workerKey}`
+    : `Automation worker overdue: ${input.workerKey}`;
+  const html = [
+    "<h1>Tee Time Spot automation health</h1>",
+    `<p><strong>${escapeHtml(input.workerKey)}</strong> is ${recovered ? "reporting normally again" : "past its expected cadence"}.</p>`,
+    `<p>Expected checkpoint: ${escapeHtml(input.expectedAt.toISOString())}<br>Observed: ${escapeHtml(input.observedAt.toISOString())}</p>`,
+    "<p>Golfer search scheduling remains independently owned by Vercel Workflow and the recovery cron.</p>"
+  ].join("");
+  const result = await new Resend(apiKey).emails.send(
+    { from, to, subject, html },
+    {
+      idempotencyKey: `automation-worker/${input.workerKey}/${input.event}/${input.expectedAt.toISOString()}`
+    }
+  );
+  if (result.error) throw new Error(result.error.message);
   return { ...result.data, deliveryStatus: "sent" };
 }
 

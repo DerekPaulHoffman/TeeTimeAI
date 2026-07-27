@@ -34,6 +34,22 @@ export const COURSE_STATUS_GUIDE = [
       "Confirm the exact course flow. Keep it as a direct-booking limitation unless a public read-only source exists."
   },
   {
+    key: "DIRECT_SITE_ONLY",
+    label: "Direct booking only",
+    meaning:
+      "The course currently uses a manual or direct booking path rather than a public tee sheet Tee Time Spot can monitor.",
+    action:
+      "Keep the official booking details available to golfers and re-check only when the course publishes a monitorable surface."
+  },
+  {
+    key: "PRIVATE_OR_INVALID",
+    label: "Private or invalid identity",
+    meaning:
+      "Current evidence identifies the record as private, non-course, closed, or otherwise not a valid public monitoring target.",
+    action:
+      "No adapter work is needed. Reopen identity review only when stronger current evidence appears."
+  },
+  {
     key: "SOURCE_MISSING",
     label: "Source missing",
     meaning:
@@ -684,6 +700,9 @@ function statusKeyForFailure(
     return "CAPTCHA_OR_QUEUE";
   }
   if (value === "BLOCKED_AUTH") return "ACCOUNT_REQUIRED";
+  if (value === "MANUAL_DIRECT") return "DIRECT_SITE_ONLY";
+  if (value === "IDENTITY_FINAL") return "PRIVATE_OR_INVALID";
+  if (value === "IDENTITY_RECHECK") return "REVIEW_REQUIRED";
   if (value === "BLOCKED_POLICY") return "REVIEW_REQUIRED";
   return "REVIEW_REQUIRED";
 }

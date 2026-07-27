@@ -31,6 +31,11 @@ import {
   type ImprovementCandidateInput,
   selectImprovementCandidate
 } from "@/lib/automation/improvement";
+import {
+  AUTOMATION_WORKERS,
+  completeAutomationWorker,
+  startAutomationWorker
+} from "@/lib/automation/worker-state";
 import { startOfUtcCalendarDay } from "@/lib/automation/date-boundary";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
@@ -106,6 +111,31 @@ Hard boundaries:
 `;
 
 async function main() {
+  const command = process.argv[2] ?? "prepare";
+  const automationWorker = await startAutomationWorker(
+    AUTOMATION_WORKERS.IMPROVEMENT,
+    { runnerVersion: "improvement-v2" }
+  );
+  if (!automationWorker.allowed) {
+    console.warn(JSON.stringify({ outcome: "paused_by_control_plane" }, null, 2));
+    return;
+  }
+  try {
+    await runCommand();
+    await completeAutomationWorker(
+      AUTOMATION_WORKERS.IMPROVEMENT,
+      `${command}_completed`
+    );
+  } catch (error) {
+    await completeAutomationWorker(
+      AUTOMATION_WORKERS.IMPROVEMENT,
+      `${command}_failed`
+    );
+    throw error;
+  }
+}
+
+async function runCommand() {
   const command = process.argv[2] ?? "prepare";
   const worker =
     command === "claim"

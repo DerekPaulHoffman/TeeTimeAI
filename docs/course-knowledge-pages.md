@@ -2,7 +2,7 @@
 
 Course profiles are fail-closed editorial records layered over the current operational `Course` facts. Saving an alert never waits for profile research, and an unpublished or blocked profile never disables the underlying alert.
 
-## Initial Connecticut release
+## Durable profile verification
 
 Apply the additive migration before running profile commands against an environment:
 
@@ -10,22 +10,17 @@ Apply the additive migration before running profile commands against an environm
 npx vercel env run -e production -- npx prisma migrate deploy
 ```
 
-Then validate the researched data and confirm that the live `ALLOWED` cohort has not grown beyond it:
+Confirm that every live `ALLOWED` course in a state has a current profile and at
+least one durable source:
 
 ```powershell
-npm run automation:course-profile -- validate-seeds
-npx vercel env run -e production -- npm run automation:course-profile -- cohort
-npx vercel env run -e production -- npm run automation:course-profile -- backfill-connecticut
+npx vercel env run -e production -- npm run automation:course-profile -- verify-profiles --state CT
 ```
 
-`backfill-connecticut` is a dry run unless `--apply` is present. A full dry run fails when the current Connecticut cohort includes a course without a researched seed. After a successful full dry run, publishing can be split into reviewable county batches:
-
-```powershell
-npx vercel env run -e production -- npm run automation:course-profile -- backfill-connecticut --county Fairfield --apply
-npx vercel env run -e production -- npm run automation:course-profile -- backfill-connecticut --county "New Haven" --apply
-```
-
-The researched snapshot contains 26 supported Connecticut courses as of July 15, 2026. Always trust the live cohort check over this count.
+The verification command is read-only and reports aggregate profile/source
+gaps. Research and publish individual records through the generic workflow
+below. The historical Connecticut seed ledger was retired once Postgres became
+the complete source of truth.
 
 ## Ongoing queue
 

@@ -52,7 +52,8 @@ const TRANSIENT_MATCH_PROBE_OUTCOMES = new Set([
   "NEEDS_ADAPTER",
   "BLOCKED_TOOLING",
   "BLOCKED_AUTH",
-  "BLOCKED_POLICY"
+  "BLOCKED_POLICY",
+  "IDENTITY_RECHECK"
 ]);
 
 type MatchPayloadReconciliation = {
@@ -3051,7 +3052,13 @@ async function validateCurrentStatusDeliveryPayload(
           course.monitoringDisposition === undefined
             ? outcome === "BLOCKED_POLICY" || outcome === "BLOCKED_AUTH"
               ? null
-              : "ACTIONABLE"
+              : outcome === "MANUAL_DIRECT"
+                ? "MANUAL_FINAL"
+                : outcome === "IDENTITY_FINAL"
+                  ? "IDENTITY_FINAL"
+                  : outcome === "IDENTITY_RECHECK"
+                    ? "IDENTITY_RECHECK"
+                    : "ACTIONABLE"
             : isMonitoringDisposition(course.monitoringDisposition)
               ? course.monitoringDisposition
               : null

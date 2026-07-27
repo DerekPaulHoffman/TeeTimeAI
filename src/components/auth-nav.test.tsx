@@ -32,12 +32,10 @@ describe("AuthNav operator access", () => {
     clerkState.email = "derekpaulhoffman@gmail.com";
   });
 
-  it("shows the private overview only to the authorized primary email", () => {
+  it("keeps the server-only operator allowlist out of client navigation", () => {
     render(<AuthNav clerkEnabled />);
 
-    expect(
-      screen.getByRole("link", { name: "Site overview" }).getAttribute("href")
-    ).toBe("/operator");
+    expect(screen.queryByRole("link", { name: "Site overview" })).toBeNull();
   });
 
   it("hides the private overview from other signed-in accounts", () => {

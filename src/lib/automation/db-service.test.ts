@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   attachSearchWorkflowRun,
+  classifyAutomationRunKind,
   claimScheduledSearchCheck,
   closeHourlyImprovementRun,
   completeScheduledSearchCheck,
@@ -12,6 +13,7 @@ import {
   markMatchAlertSent,
   markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
+  parseAutomationRunAudit,
   listSearchesNeedingScheduleRecovery,
   queueSearchCheck,
   recordCourseProbeIfChanged,
@@ -1011,5 +1013,25 @@ describe("recordCourseProbeIfChanged", () => {
     });
 
     expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
+  });
+
+  it("classifies legacy automation runs without relying on free-form notes", () => {
+    expect(classifyAutomationRunKind("hourly-improvement-v2")).toBe("IMPROVEMENT");
+    expect(classifyAutomationRunKind("tee-time-spot-local-codex-loop-v1")).toBe(
+      "IMPROVEMENT"
+    );
+    expect(classifyAutomationRunKind("course-support-v3")).toBe("COURSE_SUPPORT");
+    expect(classifyAutomationRunKind("search-check-v2")).toBe("SEARCH_CHECK");
+    expect(classifyAutomationRunKind("browser-probe-v1")).toBe("BROWSER_PROBE");
+    expect(classifyAutomationRunKind("legacy")).toBe("OTHER");
+  });
+
+  it("copies parseable object notes into structured audit data", () => {
+    expect(parseAutomationRunAudit('{"phase":"inspect","count":2}')).toEqual({
+      phase: "inspect",
+      count: 2
+    });
+    expect(parseAutomationRunAudit("not json")).toBeNull();
+    expect(parseAutomationRunAudit("[1,2]")).toBeNull();
   });
 });

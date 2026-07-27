@@ -157,7 +157,7 @@ async function main() {
               outcome: accessControlVerified
                 ? "BLOCKED_AUTH"
                 : directBookingVerified
-                  ? "BLOCKED_POLICY"
+                  ? "MANUAL_DIRECT"
                   : "NEEDS_ADAPTER",
               message:
                 finalDispositionVerified

@@ -10,7 +10,10 @@ export type ProbeInput = {
     | "BLOCKED_AUTH"
     | "BLOCKED_TOOLING"
     | "FETCH_FAILED"
-    | "NEEDS_ADAPTER";
+    | "NEEDS_ADAPTER"
+    | "MANUAL_DIRECT"
+    | "IDENTITY_FINAL"
+    | "IDENTITY_RECHECK";
   observedAt?: Date;
   message?: string;
   evidenceUrl?: string;

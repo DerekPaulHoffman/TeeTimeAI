@@ -11,7 +11,8 @@ type ActionableProbeInput = {
     | "BLOCKED_AUTH"
     | "BLOCKED_TOOLING"
     | "FETCH_FAILED"
-    | "NEEDS_ADAPTER";
+    | "NEEDS_ADAPTER"
+    | "IDENTITY_RECHECK";
   courseName: string;
   platform: string;
   observedAt: string;
@@ -187,7 +188,8 @@ const ACTIONABLE_PROBE_OUTCOMES = new Set<ActionableProbeInput["outcome"]>([
   "BLOCKED_AUTH",
   "BLOCKED_TOOLING",
   "FETCH_FAILED",
-  "NEEDS_ADAPTER"
+  "NEEDS_ADAPTER",
+  "IDENTITY_RECHECK"
 ]);
 
 const SENSITIVE_QUERY_PARAMETER_NAMES = new Set([
@@ -1154,10 +1156,14 @@ function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
           "Inspect current official booking surface and policy evidence before implementing; if unsupported after repeated inspection, record a blocked or stale learning instead of repeating the same probe."
       };
     case "BLOCKED_POLICY":
+    case "IDENTITY_RECHECK":
       return {
         outcome: "needs_adapter",
         kind: "adapter_gap",
-        summary: `${probe.courseName} has a legacy policy block that requires a fresh public read-only access check.`,
+        summary:
+          probe.outcome === "IDENTITY_RECHECK"
+            ? `${probe.courseName} needs a fresh official identity check before monitoring can be classified.`
+            : `${probe.courseName} has a legacy policy block that requires a fresh public read-only access check.`,
         referenceId: probe.id,
         category: "search_discovery",
         priority: 90,

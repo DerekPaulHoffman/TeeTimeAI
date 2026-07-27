@@ -17,23 +17,25 @@ describe("getCurrentOperator", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     clerkMocks.configEnabled = true;
+    process.env.OPERATOR_DASHBOARD_EMAILS = "operator@example.com";
   });
 
   it("returns the authorized Clerk account using its primary email", async () => {
     clerkMocks.auth.mockResolvedValue({ userId: "clerk-operator" });
     clerkMocks.currentUser.mockResolvedValue({
       primaryEmailAddress: {
-        emailAddress: "DerekPaulHoffman@gmail.com"
+        emailAddress: "operator@example.com",
+        verification: { status: "verified" }
       },
       emailAddresses: [
         { emailAddress: "other@example.com" },
-        { emailAddress: "DerekPaulHoffman@gmail.com" }
+        { emailAddress: "operator@example.com" }
       ]
     });
 
     await expect(getCurrentOperator()).resolves.toEqual({
       clerkUserId: "clerk-operator",
-      email: "derekpaulhoffman@gmail.com"
+      email: "operator@example.com"
     });
   });
 
@@ -41,12 +43,25 @@ describe("getCurrentOperator", () => {
     clerkMocks.auth.mockResolvedValue({ userId: "clerk-other" });
     clerkMocks.currentUser.mockResolvedValue({
       primaryEmailAddress: {
-        emailAddress: "other@example.com"
+        emailAddress: "other@example.com",
+        verification: { status: "verified" }
       },
       emailAddresses: [
         { emailAddress: "other@example.com" },
-        { emailAddress: "derekpaulhoffman@gmail.com" }
+        { emailAddress: "operator@example.com" }
       ]
+    });
+
+    await expect(getCurrentOperator()).resolves.toBeNull();
+  });
+
+  it("fails closed when the configured primary email is unverified", async () => {
+    clerkMocks.auth.mockResolvedValue({ userId: "clerk-operator" });
+    clerkMocks.currentUser.mockResolvedValue({
+      primaryEmailAddress: {
+        emailAddress: "operator@example.com",
+        verification: { status: "unverified" }
+      }
     });
 
     await expect(getCurrentOperator()).resolves.toBeNull();

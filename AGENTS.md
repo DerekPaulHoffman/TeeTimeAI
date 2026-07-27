@@ -177,6 +177,8 @@ Core data:
 - `CourseProbe`: per-course automation observation.
 - `TeeTimeMatch`: normalized matching slot.
 - `AutomationRun`: durable poll/improvement run record.
+- `AutomationWorkerState`: durable desired state, cadence, heartbeat, completion,
+  and overdue/recovery notification state for engineering automation workers.
 - `CourseAutomationDiscovery`: append-only provider/booking discovery evidence; an accepted finding can update the reusable `Course` snapshot.
 - `CourseSupportIncident`: one deduplicated unresolved monitoring incident per course, including provider family/fingerprint, retry schedule, and demand priority.
 - `CourseSupportBatch` / `CourseSupportBatchIncident`: durable ownership, provenance, lease, release verification, and per-course results for one responder provider-family/fingerprint batch.
@@ -255,6 +257,7 @@ Expected env names:
 - `RESEND_EMAIL_DOMAIN`
 - `ALERT_EMAIL_FROM`
 - `OPERATOR_ALERT_EMAIL`
+- `OPERATOR_DASHBOARD_EMAILS`
 - `AUTOMATION_API_KEY`
 - `CRON_SECRET`
 - `EMAIL_ACTION_SECRET`
@@ -693,7 +696,8 @@ After deploy:
 - Smoke production with `UI_SMOKE_BASE_URL`.
 - Check main routes return 200.
 - Check Vercel error logs.
-- Update `docs/deployment-status.md` when provider/deploy state changes.
+- Keep `docs/deployment-status.md` as the current release/recovery guide; use Git,
+  Vercel, migrations, and `AutomationRun.audit` for per-run evidence.
 
 Use Vercel CLI guidance for current command behavior. The CLI version can change.
 
@@ -704,7 +708,7 @@ Keep docs source-backed:
 - README is the project handbook.
 - AGENTS.md is the agent operating contract.
 - `docs/codex-automation-loop.md` is the detailed loop contract.
-- `docs/deployment-status.md` is the provider/deployment status log.
+- `docs/deployment-status.md` is the current release/recovery guide.
 - `docs/ux-research-notes.md` is design/product research guidance.
 
 Update docs when decisions change. Do not let old TeeTimeAI branding creep back into user-facing docs except when referring to repo/provider names.

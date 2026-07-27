@@ -28,6 +28,11 @@ import {
   verifyCourseSupportBatch,
   type CourseSupportReleaseAdvanceProof
 } from "@/lib/automation/course-support-batches";
+import {
+  AUTOMATION_WORKERS,
+  completeAutomationWorker,
+  startAutomationWorker
+} from "@/lib/automation/worker-state";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import {
   getResponderThreadPolicy,
@@ -70,6 +75,30 @@ const FAILURE_DOMAINS = new Set<ResponderFailureDomain>([
 ]);
 
 async function main() {
+  const command = process.argv[2] ?? "inspect";
+  const worker = await startAutomationWorker(AUTOMATION_WORKERS.COURSE_SUPPORT, {
+    runnerVersion: "course-support-v3"
+  });
+  if (!worker.allowed) {
+    writeResult({ outcome: "paused_by_control_plane" });
+    return;
+  }
+  try {
+    await runCommand();
+    await completeAutomationWorker(
+      AUTOMATION_WORKERS.COURSE_SUPPORT,
+      `${command}_completed`
+    );
+  } catch (error) {
+    await completeAutomationWorker(
+      AUTOMATION_WORKERS.COURSE_SUPPORT,
+      `${command}_failed`
+    );
+    throw error;
+  }
+}
+
+async function runCommand() {
   const [command = "inspect", ...args] = process.argv.slice(2);
   switch (command) {
     case "inspect":

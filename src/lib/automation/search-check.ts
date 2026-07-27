@@ -308,11 +308,17 @@ async function checkSearch(
       monitoringGate.disposition !== "ACTIONABLE" &&
       !localReaderCanOverrideGate
     ) {
-      const technicalFinal = monitoringGate.disposition === "TECHNICAL_FINAL";
+      const outcome =
+        monitoringGate.disposition === "TECHNICAL_FINAL"
+          ? "BLOCKED_AUTH"
+          : monitoringGate.disposition === "MANUAL_FINAL"
+            ? "MANUAL_DIRECT"
+            : monitoringGate.disposition === "IDENTITY_FINAL"
+              ? "IDENTITY_FINAL"
+              : "IDENTITY_RECHECK";
       const identityBlocked =
         monitoringGate.disposition === "IDENTITY_FINAL" ||
         monitoringGate.disposition === "IDENTITY_RECHECK";
-      const outcome = technicalFinal ? "BLOCKED_AUTH" : "BLOCKED_POLICY";
       const message = getFinalMonitoringMessage(course, monitoringGate.disposition);
       await markMissingMatchesUnavailable({
         searchId: search.id,

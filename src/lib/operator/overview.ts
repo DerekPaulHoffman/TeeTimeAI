@@ -577,6 +577,48 @@ export async function loadOperatorOverview(input: {
     (feedback) => feedback.sentiment === "BROKEN"
   ).length;
   const probeHealth = summarizeProbeHealth(probeCounts);
+  const [
+    workerStates,
+    recentAutomationRuns,
+    activePublicSearches,
+    activeTestSearches,
+    pendingDeliveries
+  ] = await Promise.all([
+    prisma.automationWorkerState.findMany({
+      orderBy: { workerKey: "asc" },
+      select: {
+        workerKey: true,
+        desiredState: true,
+        lastHeartbeatAt: true,
+        lastCompletedAt: true,
+        lastOutcome: true,
+        nextExpectedAt: true,
+        overdueSince: true,
+        runtimeVersion: true
+      }
+    }),
+    prisma.automationRun.findMany({
+      orderBy: { startedAt: "desc" },
+      take: 12,
+      select: {
+        kind: true,
+        status: true,
+        outcome: true,
+        startedAt: true,
+        completedAt: true,
+        runtimeVersion: true
+      }
+    }),
+    prisma.teeSearch.count({
+      where: { status: "ACTIVE", trafficClass: "PUBLIC" }
+    }),
+    prisma.teeSearch.count({
+      where: { status: "ACTIVE", trafficClass: "TEST" }
+    }),
+    prisma.searchEmailDelivery.count({
+      where: { status: { in: ["PENDING", "SENDING"] } }
+    })
+  ]);
 
   return {
     generatedAt: now,
@@ -606,8 +648,15 @@ export async function loadOperatorOverview(input: {
       realDemandIncidents: openIncidents.filter(
         (incident) => incident.activeRealSearchCount > 0
       ).length,
-      problemSearches,
-      problemDeliveries,
+      problemSearches: problemSearches.map((search) => ({
+        ...search,
+        user: { email: "[redacted]" }
+      })),
+      problemDeliveries: problemDeliveries.map((delivery) => ({
+        ...delivery,
+        lastError: delivery.lastError ? "Retry pending" : null,
+        teeSearch: { user: { email: "[redacted]" } }
+      })),
       brokenFeedback: unresolvedFeedback.filter(
         (feedback) => feedback.sentiment === "BROKEN"
       )
@@ -639,6 +688,15 @@ export async function loadOperatorOverview(input: {
       ]
     })),
     unresolvedFeedback,
+    operations: {
+      workers: workerStates,
+      recentRuns: recentAutomationRuns,
+      activeSearches: {
+        public: activePublicSearches,
+        test: activeTestSearches
+      },
+      pendingDeliveries
+    },
     health: {
       probeHours: RECENT_PROBE_HOURS,
       ...probeHealth,

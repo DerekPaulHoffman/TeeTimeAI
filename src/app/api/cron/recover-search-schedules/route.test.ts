@@ -8,6 +8,7 @@ import { GET } from "./route";
 const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
   listSearchesNeedingScheduleRecovery: vi.fn(),
+  checkAutomationWorkerHealth: vi.fn(),
   recoverDueCourseSupportVerificationRequests: vi.fn(),
   recoverPendingClerkEmailUpdates: vi.fn(),
   startSearchSchedule: vi.fn()
@@ -19,6 +20,10 @@ vi.mock("@/lib/automation/db-service", () => ({
 
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: mocks.startSearchSchedule
+}));
+
+vi.mock("@/lib/automation/worker-state", () => ({
+  checkAutomationWorkerHealth: mocks.checkAutomationWorkerHealth
 }));
 
 vi.mock("@/lib/automation/course-support-verification-scheduler", () => ({
@@ -52,6 +57,12 @@ describe("GET /api/cron/recover-search-schedules", () => {
       started: 0,
       skipped: 0,
       failed: 0
+    });
+    mocks.checkAutomationWorkerHealth.mockResolvedValue({
+      considered: 2,
+      overdue: 0,
+      notified: 0,
+      recovered: 0
     });
   });
 
@@ -120,6 +131,13 @@ describe("GET /api/cron/recover-search-schedules", () => {
         skipped: 0,
         failed: 0
       },
+      automationWorkerHealth: {
+        considered: 2,
+        overdue: 0,
+        notified: 0,
+        recovered: 0,
+        failed: 0
+      },
       considered: 3,
       restarted: 2,
       failed: 1
@@ -161,6 +179,43 @@ describe("GET /api/cron/recover-search-schedules", () => {
       considered: 1,
       restarted: 1,
       failed: 0
+    });
+  });
+
+  it("continues every customer recovery path when worker health fails", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.checkAutomationWorkerHealth.mockRejectedValue(
+      new Error("worker health unavailable")
+    );
+    mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
+      considered: 1,
+      applied: 1,
+      deferred: 0,
+      failed: 0
+    });
+    mocks.recoverDueCourseSupportVerificationRequests.mockResolvedValue({
+      considered: 1,
+      started: 1,
+      skipped: 0,
+      failed: 0
+    });
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      { id: "search-1" }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      pendingEmailRecovery: { applied: 1 },
+      courseSupportVerification: { started: 1 },
+      automationWorkerHealth: { failed: 1 },
+      restarted: 1
     });
   });
 
