@@ -347,6 +347,9 @@ export async function loadOperatorOverview(input: {
       select: {
         id: true,
         name: true,
+        address: true,
+        city: true,
+        stateCode: true,
         isPublic: true,
         detectedPlatform: true,
         providerFamilyKey: true,
@@ -492,6 +495,9 @@ export async function loadOperatorOverview(input: {
       return {
         id: course.id,
         name: course.name,
+        address: course.address,
+        city: course.city,
+        stateCode: course.stateCode,
         providerFamilyKey: course.providerFamilyKey,
         automationEligibility: course.automationEligibility,
         automationReason: course.automationReason,

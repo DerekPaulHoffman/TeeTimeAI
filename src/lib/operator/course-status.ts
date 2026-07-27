@@ -106,9 +106,16 @@ export type CoursePriorityGroup =
 export type CourseInventoryView =
   | "all"
   | "attention"
+  | "fix-now"
+  | "investigate"
   | "limitations"
   | "unchecked"
   | "working";
+export type CourseDiagnosticKey =
+  | CourseStatusKey
+  | "TECHNICAL_ACCESS"
+  | "NO_PUBLIC_ONLINE"
+  | "PRIVATE_OR_INVALID";
 export type CourseStatusTone =
   | "critical"
   | "warning"
@@ -118,6 +125,9 @@ export type CourseStatusTone =
 export type CourseStatusInput = {
   id: string;
   name: string;
+  address: string | null;
+  city: string | null;
+  stateCode: string | null;
   providerFamilyKey: string;
   automationEligibility: string;
   automationReason: string;
@@ -152,6 +162,7 @@ export type CourseInventoryItem = CourseStatusInput & {
   statusLabel: string;
   statusMeaning: string;
   recommendedAction: string;
+  diagnosticKey: CourseDiagnosticKey;
   priorityGroup: CoursePriorityGroup;
   priorityScore: number;
   tone: CourseStatusTone;
@@ -175,34 +186,47 @@ export function buildCourseInventory(
 
 export function filterCourseInventory(
   courses: CourseInventoryItem[],
-  input: { query?: string; view?: string }
+  input: {
+    diagnostic?: string;
+    query?: string;
+    state?: string;
+    view?: string;
+  }
 ) {
+  const diagnostic = parseCourseDiagnosticFilter(input.diagnostic);
   const query = input.query?.trim().toLocaleLowerCase("en-US") ?? "";
+  const state = parseCourseStateFilter(input.state);
   const view = parseCourseInventoryView(input.view);
 
   return courses.filter((course) => {
-    if (
-      view !== "all" &&
-      !(
-        (view === "attention" &&
-          (course.priorityGroup === "ACTION" ||
-            course.priorityGroup === "WATCH")) ||
-        (view === "limitations" && course.priorityGroup === "LIMITATION") ||
-        (view === "unchecked" && course.priorityGroup === "UNCHECKED") ||
-        (view === "working" && course.priorityGroup === "WORKING")
-      )
-    ) {
+    const matchesView =
+      view === "all" ||
+      (view === "attention" &&
+        (course.priorityGroup === "ACTION" ||
+          course.priorityGroup === "WATCH")) ||
+      (view === "fix-now" && course.priorityGroup === "ACTION") ||
+      (view === "investigate" && course.priorityGroup === "WATCH") ||
+      (view === "limitations" && course.priorityGroup === "LIMITATION") ||
+      (view === "unchecked" && course.priorityGroup === "UNCHECKED") ||
+      (view === "working" && course.priorityGroup === "WORKING");
+    if (!matchesView) return false;
+
+    if (state !== "all" && course.stateCode !== state) return false;
+    if (diagnostic !== "all" && course.diagnosticKey !== diagnostic) {
       return false;
     }
 
     if (!query) return true;
     return [
       course.name,
+      course.address,
+      course.city,
+      course.stateCode,
       course.providerFamilyKey,
       course.statusLabel,
       course.statusMeaning,
       course.recommendedAction
-    ].some((value) => value.toLocaleLowerCase("en-US").includes(query));
+    ].some((value) => value?.toLocaleLowerCase("en-US").includes(query));
   });
 }
 
@@ -222,11 +246,62 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
   };
 }
 
+export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
+  const groups = [
+    { key: "ACTION", label: "Fix now" },
+    { key: "WATCH", label: "Investigate" },
+    { key: "LIMITATION", label: "Known limitations" },
+    { key: "UNCHECKED", label: "Not checked" },
+    { key: "WORKING", label: "Working" }
+  ] as const;
+
+  return groups.map((group) => {
+    const matchingCourses = courses.filter(
+      (course) => course.priorityGroup === group.key
+    );
+    const subcategoryCounts = new Map<
+      CourseDiagnosticKey,
+      { count: number; label: string }
+    >();
+    for (const course of matchingCourses) {
+      const current = subcategoryCounts.get(course.diagnosticKey);
+      subcategoryCounts.set(course.diagnosticKey, {
+        count: (current?.count ?? 0) + 1,
+        label: current?.label ?? course.statusLabel
+      });
+    }
+
+    return {
+      ...group,
+      count: matchingCourses.length,
+      subcategories: [...subcategoryCounts.entries()]
+        .map(([key, value]) => ({ key, ...value }))
+        .sort(
+          (left, right) =>
+            right.count - left.count || left.label.localeCompare(right.label)
+        )
+    };
+  });
+}
+
+export function listCourseStates(courses: CourseInventoryItem[]) {
+  const counts = new Map<string, number>();
+  for (const course of courses) {
+    if (!course.stateCode) continue;
+    counts.set(course.stateCode, (counts.get(course.stateCode) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([stateCode, count]) => ({ stateCode, count }))
+    .sort((left, right) => left.stateCode.localeCompare(right.stateCode));
+}
+
 export function parseCourseInventoryView(
   value: string | undefined
 ): CourseInventoryView {
   if (
     value === "attention" ||
+    value === "fix-now" ||
+    value === "investigate" ||
     value === "limitations" ||
     value === "unchecked" ||
     value === "working"
@@ -234,6 +309,26 @@ export function parseCourseInventoryView(
     return value;
   }
   return "all";
+}
+
+export function parseCourseDiagnosticFilter(
+  value: string | undefined
+): CourseDiagnosticKey | "all" {
+  const normalized = value?.trim().toLocaleUpperCase("en-US");
+  const keys = new Set<CourseDiagnosticKey>([
+    ...COURSE_STATUS_GUIDE.map((status) => status.key),
+    "TECHNICAL_ACCESS",
+    "NO_PUBLIC_ONLINE",
+    "PRIVATE_OR_INVALID"
+  ]);
+  return normalized && keys.has(normalized as CourseDiagnosticKey)
+    ? (normalized as CourseDiagnosticKey)
+    : "all";
+}
+
+export function parseCourseStateFilter(value: string | undefined) {
+  const normalized = value?.trim().toLocaleUpperCase("en-US") ?? "";
+  return /^[A-Z]{2}$/u.test(normalized) ? normalized : "all";
 }
 
 function classifyCourseStatus(
@@ -309,6 +404,8 @@ function classifyCourseStatus(
       priorityGroup: "LIMITATION",
       priorityScore: 3,
       tone: "neutral",
+      diagnosticKeyOverride:
+        statusKey === "ACCOUNT_REQUIRED" ? "TECHNICAL_ACCESS" : undefined,
       labelOverride:
         statusKey === "ACCOUNT_REQUIRED"
           ? "Technical access limitation"
@@ -321,6 +418,7 @@ function classifyCourseStatus(
       priorityGroup: "LIMITATION",
       priorityScore: 3,
       tone: "neutral",
+      diagnosticKeyOverride: "NO_PUBLIC_ONLINE",
       labelOverride: "No public online tee sheet",
       meaningOverride:
         "Current official evidence points to phone, walk-in, contact-only, or another non-public booking path.",
@@ -334,6 +432,7 @@ function classifyCourseStatus(
       priorityGroup: "LIMITATION",
       priorityScore: 3,
       tone: "neutral",
+      diagnosticKeyOverride: "PRIVATE_OR_INVALID",
       labelOverride: "Private or invalid course record",
       meaningOverride:
         "Current exact identity evidence shows that this is private, not a playable public course, or no longer a valid course record.",
@@ -470,6 +569,7 @@ function classifyCourseStatus(
       priorityGroup: "LIMITATION",
       priorityScore: 3,
       tone: "neutral",
+      diagnosticKeyOverride: "NO_PUBLIC_ONLINE",
       labelOverride: "No public online tee sheet",
       meaningOverride:
         "The saved course facts currently point to phone, walk-in, contact-only, or another non-public booking path.",
@@ -541,6 +641,7 @@ function withStatus(
     priorityGroup: CoursePriorityGroup;
     priorityScore: number;
     tone: CourseStatusTone;
+    diagnosticKeyOverride?: CourseDiagnosticKey;
     labelOverride?: string;
     meaningOverride?: string;
     actionOverride?: string | null;
@@ -556,6 +657,7 @@ function withStatus(
     statusLabel: options.labelOverride ?? guide.label,
     statusMeaning: options.meaningOverride ?? guide.meaning,
     recommendedAction: options.actionOverride ?? guide.action,
+    diagnosticKey: options.diagnosticKeyOverride ?? statusKey,
     priorityGroup: options.priorityGroup,
     priorityScore: options.priorityScore,
     tone: options.tone

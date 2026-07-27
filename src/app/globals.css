@@ -2209,6 +2209,123 @@ button {
   color: #187143;
 }
 
+.operator-diagnostic-section {
+  margin-top: 28px;
+}
+
+.operator-diagnostic-heading {
+  align-items: end;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.operator-diagnostic-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.operator-diagnostic-heading strong {
+  font-size: 0.82rem;
+}
+
+.operator-diagnostic-heading span {
+  color: #748078;
+  font-size: 0.69rem;
+}
+
+.operator-diagnostic-heading > a {
+  color: var(--fairway-dark);
+  font-size: 0.7rem;
+  font-weight: 750;
+}
+
+.operator-diagnostic-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.operator-diagnostic-grid > article {
+  background: #f8faf8;
+  border: 1px solid #dce5df;
+  border-radius: 10px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.operator-diagnostic-grid > article.is-action {
+  border-top: 3px solid #b54d3e;
+}
+
+.operator-diagnostic-grid > article.is-watch {
+  border-top: 3px solid #c07a18;
+}
+
+.operator-diagnostic-grid > article.is-limitation {
+  border-top: 3px solid #738078;
+}
+
+.operator-diagnostic-grid > article.is-unchecked {
+  border-top: 3px solid #95a49b;
+}
+
+.operator-diagnostic-card-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.operator-diagnostic-card-header a {
+  color: var(--ink);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.operator-diagnostic-card-header > strong {
+  font-size: 1.16rem;
+}
+
+.operator-diagnostic-grid ul {
+  border-top: 1px solid #e1e8e3;
+  display: grid;
+  gap: 0;
+  list-style: none;
+  margin: 11px 0 0;
+  padding: 8px 0 0;
+}
+
+.operator-diagnostic-grid li a {
+  align-items: center;
+  color: #58665e;
+  display: flex;
+  font-size: 0.67rem;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 5px 0;
+  text-decoration: none;
+}
+
+.operator-diagnostic-grid li a:hover,
+.operator-diagnostic-card-header a:hover,
+.operator-diagnostic-heading > a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.operator-diagnostic-grid li strong {
+  color: #33443a;
+}
+
+.operator-diagnostic-grid article > p {
+  color: #7a857e;
+  font-size: 0.67rem;
+  margin: 12px 0 0;
+}
+
 .operator-course-work-list {
   border-top: 1px solid #dce5df;
   margin-top: 30px;
@@ -2369,7 +2486,11 @@ button {
   border-top: 1px solid #dce5df;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(240px, 1fr) minmax(180px, 0.45fr) auto auto;
+  grid-template-columns:
+    minmax(220px, 1.2fr)
+    repeat(3, minmax(150px, 0.55fr))
+    auto
+    auto;
   padding: 16px;
 }
 
@@ -2418,7 +2539,7 @@ button {
 }
 
 .operator-course-table {
-  min-width: 1180px;
+  min-width: 1360px;
 }
 
 .operator-course-table thead {
@@ -2441,10 +2562,14 @@ button {
 }
 
 .operator-course-table td:nth-child(2) {
-  min-width: 160px;
+  min-width: 230px;
 }
 
 .operator-course-table td:nth-child(3) {
+  min-width: 160px;
+}
+
+.operator-course-table td:nth-child(4) {
   min-width: 340px;
 }
 
@@ -3152,6 +3277,10 @@ button {
 }
 
 @media (max-width: 1000px) {
+  .operator-diagnostic-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .operator-course-summary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -3235,6 +3364,16 @@ button {
 
   .operator-course-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .operator-diagnostic-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .operator-diagnostic-grid {
+    grid-template-columns: 1fr;
   }
 
   .operator-course-count:nth-child(n) {

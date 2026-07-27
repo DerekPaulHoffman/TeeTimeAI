@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildCourseInventory,
   filterCourseInventory,
+  listCourseStates,
+  parseCourseDiagnosticFilter,
+  parseCourseStateFilter,
+  summarizeCourseDiagnostics,
   summarizeCourseInventory,
   type CourseStatusInput
 } from "./course-status";
@@ -134,6 +138,109 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("filters fix-now and investigate separately by state, address, and issue", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "urgent",
+          name: "Urgent Municipal",
+          address: "10 Main Street, Hartford, CT 06103",
+          city: "Hartford",
+          stateCode: "CT",
+          activeAlertCount: 2,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null
+        }),
+        course({
+          id: "investigate",
+          name: "Research Links",
+          address: "20 Ocean Avenue, Warwick, RI 02889",
+          city: "Warwick",
+          stateCode: "RI",
+          coverageCategory: "UNSUPPORTED_FAMILY",
+          automationReason: "UNSUPPORTED_PLATFORM"
+        }),
+        course({
+          id: "limitation",
+          name: "Phone Only Golf",
+          address: "30 Shore Road, Warwick, RI 02889",
+          city: "Warwick",
+          stateCode: "RI",
+          coverageCategory: "PHONE_OR_WALK_IN",
+          bookingMethod: "PHONE_ONLY",
+          detectedBookingUrl: null
+        })
+      ],
+      NOW
+    );
+
+    expect(
+      filterCourseInventory(inventory, {
+        view: "fix-now",
+        state: "ct",
+        diagnostic: "source_missing",
+        query: "main street"
+      }).map((item) => item.id)
+    ).toEqual(["urgent"]);
+    expect(
+      filterCourseInventory(inventory, {
+        view: "investigate",
+        state: "RI"
+      }).map((item) => item.id)
+    ).toEqual(["investigate"]);
+    expect(
+      filterCourseInventory(inventory, {
+        view: "limitations",
+        diagnostic: "NO_PUBLIC_ONLINE"
+      }).map((item) => item.id)
+    ).toEqual(["limitation"]);
+  });
+
+  it("ranks issue subcategories by size and lists state totals", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "missing-1",
+          stateCode: "CT",
+          coverageCategory: "SOURCE_UNVERIFIED",
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null
+        }),
+        course({
+          id: "missing-2",
+          stateCode: "CT",
+          coverageCategory: "SOURCE_UNVERIFIED",
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null
+        }),
+        course({
+          id: "adapter",
+          stateCode: "RI",
+          coverageCategory: "UNSUPPORTED_FAMILY"
+        })
+      ],
+      NOW
+    );
+
+    const investigate = summarizeCourseDiagnostics(inventory).find(
+      (group) => group.key === "WATCH"
+    );
+    expect(investigate).toMatchObject({
+      count: 3,
+      subcategories: [
+        { key: "SOURCE_MISSING", count: 2 },
+        { key: "NEEDS_ADAPTER", count: 1 }
+      ]
+    });
+    expect(listCourseStates(inventory)).toEqual([
+      { stateCode: "CT", count: 2 },
+      { stateCode: "RI", count: 1 }
+    ]);
+    expect(parseCourseStateFilter("Connecticut")).toBe("all");
+    expect(parseCourseDiagnosticFilter("not-a-status")).toBe("all");
+  });
+
   it("uses canonical coverage evidence for restored and final courses", () => {
     const inventory = buildCourseInventory(
       [
@@ -172,6 +279,9 @@ function course(
   return {
     id: "course-1",
     name: "Example Golf Course",
+    address: "1 Fairway Drive, Example, CT 06000",
+    city: "Example",
+    stateCode: "CT",
     providerFamilyKey: "FOREUP",
     automationEligibility: "ALLOWED",
     automationReason: "NONE",

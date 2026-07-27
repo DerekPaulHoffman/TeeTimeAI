@@ -29,7 +29,12 @@ import { getCurrentOperator } from "@/lib/operator/auth";
 import {
   COURSE_STATUS_GUIDE,
   filterCourseInventory,
+  listCourseStates,
+  parseCourseDiagnosticFilter,
   parseCourseInventoryView,
+  parseCourseStateFilter,
+  summarizeCourseDiagnostics,
+  type CourseDiagnosticKey,
   type CourseInventoryItem
 } from "@/lib/operator/course-status";
 import {
@@ -54,8 +59,10 @@ export const metadata: Metadata = {
 type OperatorPageProps = {
   searchParams: Promise<{
     courseView?: string;
+    issue?: string;
     q?: string;
     range?: string;
+    state?: string;
   }>;
 };
 
@@ -71,7 +78,9 @@ export default async function OperatorPage({
   const days = parseOperatorRange(params.range);
   const overview = await loadOperatorOverview({ days });
   const filters = {
+    diagnostic: parseCourseDiagnosticFilter(params.issue),
     query: params.q?.trim().slice(0, 80) ?? "",
+    state: parseCourseStateFilter(params.state),
     view: parseCourseInventoryView(params.courseView)
   };
 
@@ -83,7 +92,9 @@ function OperatorDashboard({
   overview
 }: {
   filters: {
+    diagnostic: ReturnType<typeof parseCourseDiagnosticFilter>;
     query: string;
+    state: ReturnType<typeof parseCourseStateFilter>;
     view: ReturnType<typeof parseCourseInventoryView>;
   };
   overview: OperatorOverview;
@@ -93,7 +104,9 @@ function OperatorDashboard({
     1
   );
   const filteredCourses = filterCourseInventory(overview.courseFleet.courses, {
+    diagnostic: filters.diagnostic,
     query: filters.query,
+    state: filters.state,
     view: filters.view
   });
 
@@ -130,6 +143,11 @@ function OperatorDashboard({
           supporting="Active customer demand is first. Then come broken monitoring, provider work, stale checks, and records that still need a reliable source."
         />
         <CourseFleetSummary overview={overview} />
+        <CourseDiagnosticBreakdown
+          courses={overview.courseFleet.courses}
+          days={overview.range.days}
+          state={filters.state}
+        />
         <CourseWorkQueue courses={overview.courseFleet.courses} />
       </section>
 
@@ -146,6 +164,7 @@ function OperatorDashboard({
         <CourseFilters
           days={overview.range.days}
           filters={filters}
+          courses={overview.courseFleet.courses}
           resultCount={filteredCourses.length}
           totalCount={overview.courseFleet.courses.length}
         />
@@ -640,6 +659,92 @@ function CourseFleetCount({
   );
 }
 
+function CourseDiagnosticBreakdown({
+  courses,
+  days,
+  state
+}: {
+  courses: CourseInventoryItem[];
+  days: 7 | 30;
+  state: ReturnType<typeof parseCourseStateFilter>;
+}) {
+  const scopedCourses =
+    state === "all"
+      ? courses
+      : courses.filter((course) => course.stateCode === state);
+  const groups = summarizeCourseDiagnostics(scopedCourses).filter(
+    (group) => group.key !== "WORKING"
+  );
+
+  return (
+    <div className="operator-diagnostic-section">
+      <div className="operator-diagnostic-heading">
+        <div>
+          <strong>Largest issue groups</strong>
+          <span>
+            Counts are grouped by the next operational decision
+            {state === "all" ? "." : ` in ${state}.`}
+          </span>
+        </div>
+        <Link
+          href={buildCourseFilterHref({
+            days,
+            state,
+            view: "all"
+          })}
+        >
+          Open full inventory
+        </Link>
+      </div>
+      <div className="operator-diagnostic-grid">
+        {groups.map((group) => {
+          const view = viewForPriorityGroup(group.key);
+          return (
+            <article
+              className={`is-${group.key.toLowerCase()}`}
+              key={group.key}
+            >
+              <div className="operator-diagnostic-card-header">
+                <Link
+                  href={buildCourseFilterHref({
+                    days,
+                    state,
+                    view
+                  })}
+                >
+                  {group.label}
+                </Link>
+                <strong>{group.count}</strong>
+              </div>
+              {group.subcategories.length > 0 ? (
+                <ul>
+                  {group.subcategories.map((subcategory) => (
+                    <li key={subcategory.key}>
+                      <Link
+                        href={buildCourseFilterHref({
+                          days,
+                          diagnostic: subcategory.key,
+                          state,
+                          view
+                        })}
+                      >
+                        <span>{subcategory.label}</span>
+                        <strong>{subcategory.count}</strong>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No courses in this group.</p>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CourseWorkQueue({
   courses
 }: {
@@ -683,6 +788,12 @@ function CourseWorkQueue({
               </div>
               <p className="operator-course-work-context">
                 {formatProvider(course.providerFamilyKey)}
+                {course.address ? (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    {course.address}
+                  </>
+                ) : null}
                 <span aria-hidden="true">·</span>
                 {course.latestProbe
                   ? `Last checked ${formatDateTime(course.latestProbe.observedAt)}`
@@ -707,46 +818,101 @@ function CourseWorkQueue({
 }
 
 function CourseFilters({
+  courses,
   days,
   filters,
   resultCount,
   totalCount
 }: {
+  courses: CourseInventoryItem[];
   days: 7 | 30;
   filters: {
+    diagnostic: ReturnType<typeof parseCourseDiagnosticFilter>;
     query: string;
+    state: ReturnType<typeof parseCourseStateFilter>;
     view: ReturnType<typeof parseCourseInventoryView>;
   };
   resultCount: number;
   totalCount: number;
 }) {
+  const diagnostics = summarizeCourseDiagnostics(courses);
+  const states = listCourseStates(courses);
+
   return (
     <form className="operator-course-filters" method="get">
       <input name="range" type="hidden" value={`${days}d`} />
       <label>
-        <span>Find a course or provider</span>
+        <span>Course, address, or provider</span>
         <input
           defaultValue={filters.query}
           maxLength={80}
           name="q"
-          placeholder="Course, provider, or status"
+          placeholder="Name, street, city, state, provider…"
           type="search"
         />
       </label>
       <label>
-        <span>Show</span>
+        <span>Priority</span>
         <select defaultValue={filters.view} name="courseView">
           <option value="all">All courses</option>
-          <option value="attention">Fix now and investigate</option>
-          <option value="limitations">Known limitations</option>
-          <option value="unchecked">Not checked</option>
-          <option value="working">Working</option>
+          <option value="fix-now">
+            Fix now (
+            {diagnostics.find((group) => group.key === "ACTION")?.count ?? 0})
+          </option>
+          <option value="investigate">
+            Investigate (
+            {diagnostics.find((group) => group.key === "WATCH")?.count ?? 0})
+          </option>
+          <option value="limitations">
+            Known limitations (
+            {diagnostics.find((group) => group.key === "LIMITATION")?.count ??
+              0}
+            )
+          </option>
+          <option value="unchecked">
+            Not checked (
+            {diagnostics.find((group) => group.key === "UNCHECKED")?.count ?? 0}
+            )
+          </option>
+          <option value="working">
+            Working (
+            {diagnostics.find((group) => group.key === "WORKING")?.count ?? 0})
+          </option>
+        </select>
+      </label>
+      <label>
+        <span>Issue subtype</span>
+        <select defaultValue={filters.diagnostic} name="issue">
+          <option value="all">All issue subtypes</option>
+          {diagnostics.map((group) => (
+            <optgroup key={group.key} label={group.label}>
+              {group.subcategories.map((subcategory) => (
+                <option key={subcategory.key} value={subcategory.key}>
+                  {subcategory.label} ({subcategory.count})
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>State</span>
+        <select defaultValue={filters.state} name="state">
+          <option value="all">All states</option>
+          {states.map((state) => (
+            <option key={state.stateCode} value={state.stateCode}>
+              {state.stateCode} ({state.count})
+            </option>
+          ))}
         </select>
       </label>
       <button className="button button-secondary" type="submit">
         Apply
       </button>
-      {filters.query || filters.view !== "all" ? (
+      {filters.query ||
+      filters.view !== "all" ||
+      filters.diagnostic !== "all" ||
+      filters.state !== "all" ? (
         <Link href={`/operator?range=${days}d`}>Clear</Link>
       ) : null}
       <small aria-live="polite">
@@ -767,6 +933,7 @@ function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
         <thead>
           <tr>
             <th>Course</th>
+            <th>Location</th>
             <th>Status</th>
             <th>Meaning and next action</th>
             <th>Demand</th>
@@ -782,6 +949,22 @@ function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
                   <strong>{course.name}</strong>
                   <small>{formatProvider(course.providerFamilyKey)}</small>
                 </span>
+              </td>
+              <td data-label="Location">
+                {course.address ? (
+                  <>
+                    <span>{course.address}</span>
+                    {course.city || course.stateCode ? (
+                      <small>
+                        {[course.city, course.stateCode]
+                          .filter(Boolean)
+                          .join(", ")}
+                      </small>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="operator-no-links">No saved address</span>
+                )}
               </td>
               <td data-label="Status">
                 <StatusPill course={course} />
@@ -920,6 +1103,33 @@ function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
   if (value === "LIMITATION") return "Known limitation";
   if (value === "UNCHECKED") return "Verify when needed";
   return "Healthy";
+}
+
+function viewForPriorityGroup(
+  value: CourseInventoryItem["priorityGroup"]
+): ReturnType<typeof parseCourseInventoryView> {
+  if (value === "ACTION") return "fix-now";
+  if (value === "WATCH") return "investigate";
+  if (value === "LIMITATION") return "limitations";
+  if (value === "UNCHECKED") return "unchecked";
+  return "working";
+}
+
+function buildCourseFilterHref(input: {
+  days: 7 | 30;
+  diagnostic?: CourseDiagnosticKey;
+  state?: ReturnType<typeof parseCourseStateFilter>;
+  view: ReturnType<typeof parseCourseInventoryView>;
+}): Route {
+  const params = new URLSearchParams({
+    range: `${input.days}d`,
+    courseView: input.view
+  });
+  if (input.diagnostic) params.set("issue", input.diagnostic);
+  if (input.state && input.state !== "all") {
+    params.set("state", input.state);
+  }
+  return `/operator?${params.toString()}#all-courses-heading` as Route;
 }
 
 function RangeTabs({ days }: { days: 7 | 30 }) {
