@@ -8,6 +8,7 @@ import {
   buildHourlyImprovementRunProvenance,
   buildImprovementCheckpoints,
   buildRepeatedCoveragePortfolioCandidates,
+  filterFutureDeferredPendingAlerts,
   hasCompletePreEditProvenance,
   isHourlyImprovementClaimWindowOpen,
   markImprovementOutcomeRecorded,
@@ -155,6 +156,72 @@ describe("buildImprovementCheckpoints", () => {
 });
 
 describe("selectImprovementCandidate", () => {
+  it("defers pending matches whose owner delivery is scheduled for a future retry", () => {
+    const pendingAlerts = [
+      {
+        id: "deferred-match",
+        courseName: "Quota Limited Golf",
+        firstSeenAt: "2026-07-28T12:00:00.000Z"
+      },
+      {
+        id: "due-match",
+        courseName: "Ready Golf",
+        firstSeenAt: "2026-07-28T12:05:00.000Z"
+      },
+      {
+        id: "unprepared-match",
+        courseName: "New Golf",
+        firstSeenAt: "2026-07-28T12:10:00.000Z"
+      }
+    ];
+
+    expect(
+      filterFutureDeferredPendingAlerts(
+        pendingAlerts,
+        [
+          {
+            status: "FAILED",
+            nextAttemptAt: "2026-07-29T12:00:00.000Z",
+            matchIds: ["deferred-match"]
+          },
+          {
+            status: "FAILED",
+            nextAttemptAt: "2026-07-28T11:59:00.000Z",
+            matchIds: ["due-match"]
+          }
+        ],
+        new Date("2026-07-28T12:30:00.000Z")
+      )
+    ).toEqual([pendingAlerts[1], pendingAlerts[2]]);
+  });
+
+  it("keeps a pending match actionable when any owner obligation is due", () => {
+    const pendingAlert = {
+      id: "match-1",
+      courseName: "Ready Golf",
+      firstSeenAt: "2026-07-28T12:00:00.000Z"
+    };
+
+    expect(
+      filterFutureDeferredPendingAlerts(
+        [pendingAlert],
+        [
+          {
+            status: "FAILED",
+            nextAttemptAt: "2026-07-29T12:00:00.000Z",
+            matchIds: ["match-1"]
+          },
+          {
+            status: "PENDING",
+            nextAttemptAt: null,
+            matchIds: ["match-1"]
+          }
+        ],
+        new Date("2026-07-28T12:30:00.000Z")
+      )
+    ).toEqual([pendingAlert]);
+  });
+
   it("selects pending alerts before broader improvement work", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 3,

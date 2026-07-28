@@ -1,7 +1,13 @@
-type PendingAlertInput = {
+export type PendingAlertInput = {
   id: string;
   courseName: string;
   firstSeenAt: string;
+};
+
+export type PendingAlertOwnerDeliveryInput = {
+  status: "PENDING" | "SENDING" | "SENT" | "FAILED" | "SUPPRESSED";
+  nextAttemptAt: Date | string | null;
+  matchIds: string[];
 };
 
 type ActionableProbeInput = {
@@ -171,6 +177,42 @@ export type AdapterRemediationCloseoutEvidence = {
   result: string;
   requiredExternalAction: string;
 };
+
+export function filterFutureDeferredPendingAlerts(
+  pendingAlerts: PendingAlertInput[],
+  ownerDeliveries: PendingAlertOwnerDeliveryInput[],
+  now = new Date()
+) {
+  const deliveryStatesByMatchId = new Map<
+    string,
+    Array<Pick<PendingAlertOwnerDeliveryInput, "status" | "nextAttemptAt">>
+  >();
+
+  for (const delivery of ownerDeliveries) {
+    for (const matchId of delivery.matchIds) {
+      const states = deliveryStatesByMatchId.get(matchId) ?? [];
+      states.push({
+        status: delivery.status,
+        nextAttemptAt: delivery.nextAttemptAt
+      });
+      deliveryStatesByMatchId.set(matchId, states);
+    }
+  }
+
+  return pendingAlerts.filter((alert) => {
+    const states = deliveryStatesByMatchId.get(alert.id);
+    if (!states?.length) {
+      return true;
+    }
+
+    return states.some((state) => {
+      if (state.status !== "FAILED" || !state.nextAttemptAt) {
+        return true;
+      }
+      return new Date(state.nextAttemptAt).getTime() <= now.getTime();
+    });
+  });
+}
 
 export type ImprovementCheckpoints = {
   queue_confirmed: boolean;

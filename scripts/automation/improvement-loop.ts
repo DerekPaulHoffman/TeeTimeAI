@@ -18,6 +18,7 @@ import {
   buildHourlyImprovementRunProvenance,
   buildPortfolioCategoryHistory,
   buildRepeatedCoveragePortfolioCandidates,
+  filterFutureDeferredPendingAlerts,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
   IMPROVEMENT_CATEGORIES,
   isHourlyImprovementClaimWindowOpen,
@@ -33,6 +34,7 @@ import {
   selectImprovementCandidate
 } from "@/lib/automation/improvement";
 import { listCourseProfileQueue } from "@/lib/course-profiles/service";
+import { parseSearchEmailPayload } from "@/lib/email/search-delivery-payload";
 import {
   AUTOMATION_WORKERS,
   completeAutomationWorker,
@@ -1148,7 +1150,8 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     recentDiscoveries,
     unresolvedFeedback,
     publicFunnelCounts,
-    courseProfileQueue
+    courseProfileQueue,
+    ownerMatchDeliveries
   ] = await Promise.all([
     prisma.teeSearch.count({
       where: {
@@ -1224,7 +1227,23 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       },
       _count: { _all: true }
     }),
-    listCourseProfileQueue(3)
+    listCourseProfileQueue(3),
+    prisma.searchEmailDelivery.findMany({
+      where: {
+        kind: "MATCH",
+        isOwnerRecipient: true,
+        status: { in: ["PENDING", "SENDING", "FAILED"] },
+        teeSearch: {
+          status: "ACTIVE",
+          trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
+        }
+      },
+      select: {
+        status: true,
+        nextAttemptAt: true,
+        payload: true
+      }
+    })
   ]);
 
   const categoryHistory = buildPortfolioCategoryHistory(recentRuns);
@@ -1255,11 +1274,25 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
 
   return {
     activeSearchCount,
-    pendingAlerts: pendingAlerts.map((alert) => ({
-      id: alert.id,
-      courseName: alert.course.name,
-      firstSeenAt: alert.firstSeenAt.toISOString()
-    })),
+    pendingAlerts: filterFutureDeferredPendingAlerts(
+      pendingAlerts.map((alert) => ({
+        id: alert.id,
+        courseName: alert.course.name,
+        firstSeenAt: alert.firstSeenAt.toISOString()
+      })),
+      ownerMatchDeliveries.map((delivery) => {
+        const payload = parseSearchEmailPayload(delivery.payload);
+        return {
+          status: delivery.status,
+          nextAttemptAt: delivery.nextAttemptAt,
+          matchIds: [
+            ...(payload?.matchRefs?.map((match) => match.matchId) ?? []),
+            ...(payload?.matchIds ?? [])
+          ]
+        };
+      }),
+      observedAt
+    ),
     supportIncidents: [],
     actionableProbes: [],
     learningSignals: buildLearningSignals(recentRuns, recentDiscoveries),
