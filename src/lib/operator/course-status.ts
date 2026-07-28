@@ -285,6 +285,18 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
   };
 }
 
+export function getCourseSummaryCopy(counts: { action: number; watch: number }) {
+  const actionableCount = counts.action + counts.watch;
+
+  return {
+    lifecycle:
+      "Every course appears once, based on its latest monitoring outcome.",
+    execution:
+      `The same ${actionableCount} Fix now and Investigate courses are regrouped here by next owner. ` +
+      "If automation reaches its safety limit, an Auto investigating course appears under Needs human."
+  };
+}
+
 export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
   const groups = [
     { key: "ACTION", label: "Fix now" },

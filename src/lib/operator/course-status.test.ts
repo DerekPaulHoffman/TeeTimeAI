@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCourseInventory,
   filterCourseInventory,
+  getCourseSummaryCopy,
   listCourseStates,
   parseCourseDiagnosticFilter,
   parseCourseStateFilter,
@@ -427,6 +428,15 @@ describe("operator course inventory", () => {
       inProgress: 1,
       scheduledRetry: 1,
       needsHuman: 1
+    });
+  });
+
+  it("explains that lifecycle courses are regrouped by next owner", () => {
+    expect(getCourseSummaryCopy({ action: 17, watch: 5 })).toEqual({
+      lifecycle: "Every course appears once, based on its latest monitoring outcome.",
+      execution:
+        "The same 22 Fix now and Investigate courses are regrouped here by next owner. " +
+        "If automation reaches its safety limit, an Auto investigating course appears under Needs human."
     });
   });
 });

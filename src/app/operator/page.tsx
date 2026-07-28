@@ -28,6 +28,7 @@ import { getCurrentOperator } from "@/lib/operator/auth";
 import {
   COURSE_STATUS_GUIDE,
   filterCourseInventory,
+  getCourseSummaryCopy,
   listCourseStates,
   parseCourseDiagnosticFilter,
   parseCourseInventoryView,
@@ -569,9 +570,14 @@ function OperatorDashboard({
 
 function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
   const { counts } = overview.courseFleet;
+  const summaryCopy = getCourseSummaryCopy(counts);
   return (
     <>
-      <div className="operator-course-summary" aria-label="Course status totals">
+      <div className="operator-automation-summary-heading">
+        <strong>Monitoring lifecycle</strong>
+        <span>{summaryCopy.lifecycle}</span>
+      </div>
+      <div className="operator-course-summary" aria-label="Monitoring lifecycle totals">
         <CourseFleetCount
           count={counts.action}
           icon={<ShieldAlert size={17} />}
@@ -604,12 +610,12 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
         />
       </div>
       <div className="operator-automation-summary-heading">
-        <strong>Automation queue</strong>
-        <span>Current work only; scheduled retries are not overdue.</span>
+        <strong>Next owner</strong>
+        <span>{summaryCopy.execution}</span>
       </div>
       <div
         className="operator-course-summary operator-course-summary-automation"
-        aria-label="Automation queue totals"
+        aria-label="Next owner totals"
       >
         <CourseFleetCount
           count={counts.dueNow}
