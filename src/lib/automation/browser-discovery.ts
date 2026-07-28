@@ -116,7 +116,7 @@ export function extractStructuredPhoneBookingEvidence(
         continue;
       }
 
-      evidence.add(`${label.replace(/\s+/g, " ")} ${phone}`);
+      evidence.add(`${label.replace(/\s+/g, " ")} ${phone}.`);
     }
   }
 

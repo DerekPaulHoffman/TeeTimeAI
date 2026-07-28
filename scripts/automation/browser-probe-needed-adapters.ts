@@ -91,8 +91,9 @@ async function main() {
               providerExecution.value.accessBarriers
             ) ?? undefined
           };
+          const initialDiscovery = buildBrowserDiscovery(evidence);
           const enrichment = await enrichBrowserDiscoveryWithProviderLease(
-            buildBrowserDiscovery(evidence),
+            initialDiscovery,
             target.course.name,
             runWithProviderRequestLease
           );
@@ -246,7 +247,10 @@ async function collectBrowserEvidence(
   });
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const landingPageUrl = page.url();
-  const landingPageEvidence = await collectPageEvidence(page);
+  const landingPageEvidence = await collectPageEvidence(
+    page,
+    input.courseName
+  );
   if (
     shouldStopBrowserDiscovery({
       accessBarrierCount: accessBarriers.size,
@@ -271,7 +275,12 @@ async function collectBrowserEvidence(
   await clickLikelyBookingLink(page);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const firstDestinationPageUrl = page.url();
-  const firstDestinationPageEvidence = await collectPageEvidence(page);
+  const firstDestinationPageEvidence = await collectPageEvidence(
+    page,
+    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
+      ? input.courseName
+      : undefined
+  );
 
   if (
     !shouldStopBrowserDiscovery({
@@ -283,7 +292,12 @@ async function collectBrowserEvidence(
     await clickLikelyBookingLink(page);
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   }
-  const preDatePageEvidence = await collectPageEvidence(page);
+  const preDatePageEvidence = await collectPageEvidence(
+    page,
+    haveSamePublicWebsiteOrigin(landingPageUrl, page.url())
+      ? input.courseName
+      : undefined
+  );
   if (
     !shouldStopBrowserDiscovery({
       accessBarrierCount: accessBarriers.size,
@@ -294,7 +308,12 @@ async function collectBrowserEvidence(
   }
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const destinationPageUrl = page.url();
-  const destinationPageEvidence = await collectPageEvidence(page);
+  const destinationPageEvidence = await collectPageEvidence(
+    page,
+    haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
+      ? input.courseName
+      : undefined
+  );
 
   return finalizeBrowserEvidence({
     input,
@@ -356,6 +375,35 @@ function finalizeBrowserEvidence(input: {
         url: landingPageUrl,
         evidence: landingPageEvidence
       };
+  const officialStructuredPhoneBookingText = [
+    landingPageEvidence.structuredPhoneBookingEvidence,
+    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
+      ? firstDestinationPageEvidence.structuredPhoneBookingEvidence
+      : "",
+    haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
+      ? destinationPageEvidence.structuredPhoneBookingEvidence
+      : ""
+  ].filter(
+    (text, index, values) => Boolean(text) && values.indexOf(text) === index
+  );
+  const officialFullPageVisibleText = [
+    landingPageEvidence.visibleText,
+    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
+      ? firstDestinationPageEvidence.visibleText
+      : "",
+    haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
+      ? destinationPageEvidence.visibleText
+      : ""
+  ]
+    .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
+    .join("\n");
+  const officialPageVisibleText = (
+    officialStructuredPhoneBookingText.length > 0
+      ? officialStructuredPhoneBookingText
+          .map((text) => `${input.input.courseName}. ${text}`)
+          .join("\n")
+      : officialFullPageVisibleText
+  ).slice(0, 12_000);
 
   for (const url of [
     ...landingPageEvidence.anchors,
@@ -382,7 +430,7 @@ function finalizeBrowserEvidence(input: {
       url: officialPageEvidence.url,
       linkCandidates: officialPageEvidence.evidence.linkCandidates,
       courseName: input.input.courseName,
-      visibleText: officialPageEvidence.evidence.visibleText.slice(0, 12_000)
+      visibleText: officialPageVisibleText
     },
     accessBarrierUrls: [...accessBarrierUrls],
     accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),
@@ -396,7 +444,10 @@ function finalizeBrowserEvidence(input: {
   };
 }
 
-async function collectPageEvidence(page: Page) {
+async function collectPageEvidence(
+  page: Page,
+  officialCourseName?: string
+) {
   const evidence = await page.evaluate(() => {
     const anchorCandidates = Array.from(
       document.querySelectorAll<HTMLAnchorElement>("a[href]")
@@ -491,10 +542,12 @@ async function collectPageEvidence(page: Page) {
     ...evidence,
     anchors: linkCandidates.map(({ url }) => url),
     linkCandidates,
+    structuredPhoneBookingEvidence,
     structuredActionScripts: undefined,
     visibleText: [
-      evidence.visibleText,
-      structuredPhoneBookingEvidence
+      structuredPhoneBookingEvidence ? officialCourseName : undefined,
+      structuredPhoneBookingEvidence,
+      evidence.visibleText
     ]
       .filter(Boolean)
       .join("\n")

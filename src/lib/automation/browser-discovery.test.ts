@@ -27,7 +27,7 @@ describe("structured phone-booking evidence", () => {
       String.raw`{\"actionButton\":{\"link\":{\"link\":{\"phone\":\"8607497740\"},\"type\":\"phone\"},\"label\":\"Call to Book a Tee Time\\n\",\"hidden\":false}}`
     ]);
 
-    expect(evidence).toBe("Call to Book a Tee Time 8607497740");
+    expect(evidence).toBe("Call to Book a Tee Time 8607497740.");
     expect(
       buildBrowserDiscovery({
         courseId: "structured-phone-course",
