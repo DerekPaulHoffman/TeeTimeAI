@@ -210,6 +210,9 @@ describe("operator course monitoring mutations", () => {
         revision: 7
       },
       data: {
+        status: "AUTO_INVESTIGATING",
+        humanReviewReason: null,
+        nextReminderAt: null,
         nextAttemptAt: expect.any(Date),
         lastSeenAt: expect.any(Date),
         nextAction: safeNote,
@@ -221,6 +224,46 @@ describe("operator course monitoring mutations", () => {
         eventType: "REVALIDATION_REQUESTED",
         message: safeNote
       })
+    });
+  });
+
+  it("preserves a resolved final incident while requesting its bounded revalidation", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      state: "FINAL_TECHNICAL",
+      course: {
+        ...status().course,
+        supportIncident: {
+          ...status().course.supportIncident,
+          status: "RESOLVED"
+        }
+      }
+    });
+
+    await requestOperatorCourseRecheck(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        note: "Revalidate the prior technical decision against the public surface.",
+        idempotencyKey: "operator-final-recheck-123456"
+      },
+      context
+    );
+
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        revision: 7
+      },
+      data: {
+        nextAttemptAt: expect.any(Date),
+        lastSeenAt: expect.any(Date),
+        nextAction: "Revalidate the prior technical decision against the public surface.",
+        revision: { increment: 1 }
+      }
     });
   });
 

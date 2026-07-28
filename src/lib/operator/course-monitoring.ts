@@ -366,6 +366,13 @@ export async function requestOperatorCourseRecheck(
             revision: current.incident.revision
           },
           data: {
+            ...(current.incident.status === "NEEDS_HUMAN"
+              ? {
+                  status: "AUTO_INVESTIGATING" as const,
+                  humanReviewReason: null,
+                  nextReminderAt: null
+                }
+              : {}),
             nextAttemptAt: now,
             lastSeenAt: now,
             nextAction: input.note,
