@@ -16,6 +16,7 @@ export const LOCAL_READER_COURSE_KEYS = [
   "crystal-lake",
   "chanticlair",
   "lyman-orchards",
+  "hyde-park",
 ] as const;
 
 export type StaticLocalReaderCourseKey =
@@ -81,6 +82,10 @@ export const LOCAL_READER_COURSES = {
   "lyman-orchards": chronogolfCourse(
     "Lyman Orchards Golf Club",
     "lyman-orchards-golf-club",
+  ),
+  "hyde-park": chronogolfCourse(
+    "Hyde Park Golf Club",
+    "hyde-park-golf-club",
   ),
 } as const satisfies Record<StaticLocalReaderCourseKey, LocalReaderCourse>;
 

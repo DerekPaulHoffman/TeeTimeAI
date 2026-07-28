@@ -374,6 +374,26 @@ describe("local Chrome reader contract", () => {
     ).toBe(true);
   });
 
+  it("recognizes the official Hyde Park Chronogolf profile", () => {
+    const job = jobFor("hyde-park");
+
+    expect(job).toMatchObject({
+      courseName: "Hyde Park Golf Club",
+      bookingUrl: "https://www.chronogolf.com/club/hyde-park-golf-club",
+    });
+    expect(
+      getLocalReaderCourseKey(
+        `${job.bookingUrl}?date=2026-07-29&step=teetimes`,
+      ),
+    ).toBe("hyde-park");
+    expect(
+      loadChronogolfReader().isAllowedPageUrl(
+        job,
+        `${job.bookingUrl}?date=2026-07-29&step=teetimes`,
+      ),
+    ).toBe(true);
+  });
+
   it("parses the legacy CPS material-card layout", () => {
     document.title = "Overpeck Golf Course";
     document.body.innerHTML = `

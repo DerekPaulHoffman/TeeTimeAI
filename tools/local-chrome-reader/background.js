@@ -106,6 +106,12 @@ const ALLOWED_COURSES = Object.freeze({
     "/club/lyman-orchards-golf-club",
     [],
   ],
+  "hyde-park": [
+    "Hyde Park Golf Club",
+    "www.chronogolf.com",
+    "/club/hyde-park-golf-club",
+    [],
+  ],
 });
 let pollInProgress = false;
 
