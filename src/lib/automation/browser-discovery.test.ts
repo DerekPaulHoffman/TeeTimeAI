@@ -8,6 +8,7 @@ import {
   enrichTeeItUpDiscovery,
   enrichTeesnapDiscovery,
   evaluateBrowserDiscoveryMonitoringGate,
+  extractStructuredPhoneBookingEvidence,
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
   getBestProbeUrl,
@@ -19,6 +20,43 @@ import {
   shouldQueueBrowserProbe,
   type BrowserDiscoveryEvidence
 } from "./browser-discovery";
+
+describe("structured phone-booking evidence", () => {
+  it("extracts a visible Square or Weebly phone-booking action", () => {
+    const evidence = extractStructuredPhoneBookingEvidence([
+      String.raw`{\"actionButton\":{\"link\":{\"link\":{\"phone\":\"8607497740\"},\"type\":\"phone\"},\"label\":\"Call to Book a Tee Time\\n\",\"hidden\":false}}`
+    ]);
+
+    expect(evidence).toBe("Call to Book a Tee Time 8607497740");
+    expect(
+      buildBrowserDiscovery({
+        courseId: "structured-phone-course",
+        courseName: "Structured Phone Golf Course",
+        sourceUrl: "https://course.example/",
+        finalUrl: "https://course.example/",
+        observedUrls: ["https://course.example/"],
+        visibleText: `Structured Phone Golf Course. ${evidence}`
+      })
+    ).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "8607497740",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.92
+    });
+  });
+
+  it("ignores hidden, non-phone, and generic contact actions", () => {
+    expect(
+      extractStructuredPhoneBookingEvidence([
+        String.raw`{"actionButton":{"link":{"phone":"8607497740"},"type":"phone","label":"Call to Book a Tee Time","hidden":true}}`,
+        String.raw`{"actionButton":{"link":{"url":"/golf"},"type":"url","label":"Book a Tee Time","hidden":false}}`,
+        String.raw`{"actionButton":{"link":{"phone":"8607497740"},"type":"phone","label":"Call Us","hidden":false}}`
+      ])
+    ).toBe("");
+  });
+});
 
 describe("booking-link selection", () => {
   it("retains late official booking links inside the bounded evidence set", () => {

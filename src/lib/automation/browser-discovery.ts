@@ -70,6 +70,59 @@ export type BrowserAccessBarrier = {
   status: 401 | 403;
 };
 
+export function extractStructuredPhoneBookingEvidence(
+  inlineScripts: string[]
+) {
+  const evidence = new Set<string>();
+
+  for (const source of inlineScripts) {
+    const normalized = source
+      .replace(/\\"/g, "\"")
+      .replace(/\\+n/g, " ")
+      .replace(/\s+/g, " ");
+    let offset = 0;
+
+    while (offset < normalized.length) {
+      const actionIndex = normalized.indexOf("\"actionButton\"", offset);
+      if (actionIndex < 0) {
+        break;
+      }
+      offset = actionIndex + 14;
+      const nextActionIndex = normalized.indexOf("\"actionButton\"", offset);
+      const action = normalized.slice(
+        actionIndex,
+        nextActionIndex < 0
+          ? Math.min(normalized.length, actionIndex + 1_200)
+          : Math.min(nextActionIndex, actionIndex + 1_200)
+      );
+      if (
+        !/"type":"phone"/i.test(action) ||
+        !/"hidden":false/i.test(action)
+      ) {
+        continue;
+      }
+
+      const phone = action.match(/"phone":"([^"]{7,40})"/i)?.[1]?.trim();
+      const label = action.match(/"label":"([^"]{1,160})"/i)?.[1]?.trim();
+      if (
+        !phone ||
+        !label ||
+        !/\b(?:call|phone)\b/i.test(label) ||
+        !/\b(?:book|reserve|schedule)\b/i.test(label) ||
+        !/\btee\s*time\b/i.test(label) ||
+        phone.replace(/\D/g, "").length < 7 ||
+        phone.replace(/\D/g, "").length > 15
+      ) {
+        continue;
+      }
+
+      evidence.add(`${label.replace(/\s+/g, " ")} ${phone}`);
+    }
+  }
+
+  return [...evidence].join("\n").slice(0, 1_000);
+}
+
 export type BrowserDiscovery = {
   courseId: string;
   isPublic?: boolean;

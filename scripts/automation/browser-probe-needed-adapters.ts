@@ -6,6 +6,7 @@ import {
   buildBrowserDiscovery,
   enrichBrowserDiscoveryWithProviderLease,
   evaluateBrowserDiscoveryMonitoringGate,
+  extractStructuredPhoneBookingEvidence,
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
   keepPolicyOnlyDiscoveryActionable,
@@ -445,6 +446,17 @@ async function collectPageEvidence(page: Page) {
       .map((text) => text.slice(0, 5000))
       .join("\n")
       .slice(0, 8000);
+    const structuredActionScripts = Array.from(
+      document.querySelectorAll<HTMLScriptElement>("script:not([src])")
+    )
+      .map((script) => script.textContent ?? "")
+      .filter(
+        (text) =>
+          text.includes("actionButton") &&
+          /(?:\\?"type\\?":\\?"phone\\?")/i.test(text)
+      )
+      .map((text) => text.slice(0, 100_000))
+      .slice(0, 3);
     const widgetConfigs = Array.from(document.querySelectorAll<HTMLElement>("[data-widget-config]"))
       .map((element) => element.getAttribute("data-widget-config"))
       .filter((value): value is string => Boolean(value))
@@ -461,6 +473,7 @@ async function collectPageEvidence(page: Page) {
     return {
       anchors,
       accessControlDetected,
+      structuredActionScripts,
       linkCandidates,
       scripts,
       visibleText: [
@@ -476,10 +489,19 @@ async function collectPageEvidence(page: Page) {
     evidence.linkCandidates,
     100
   );
+  const structuredPhoneBookingEvidence =
+    extractStructuredPhoneBookingEvidence(evidence.structuredActionScripts);
   return {
     ...evidence,
     anchors: linkCandidates.map(({ url }) => url),
-    linkCandidates
+    linkCandidates,
+    structuredActionScripts: undefined,
+    visibleText: [
+      evidence.visibleText,
+      structuredPhoneBookingEvidence
+    ]
+      .filter(Boolean)
+      .join("\n")
   };
 }
 
