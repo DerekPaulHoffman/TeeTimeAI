@@ -807,7 +807,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator("#time-window-help")).toHaveText(
       "Times use each course's local time zone."
     );
-    const alertActionButton = page.locator(".summary-panel > .button-primary");
+    const alertActionButton = page.locator(
+      ".summary-panel .figma-alert-action > .button-primary"
+    );
     await expect(alertActionButton).toContainText(
       /Start getting alerts|Sign in to start sending alerts|Account access unavailable|Checking your account/i
     );
@@ -1201,6 +1203,25 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator(".alert-error[role='alert']")).toContainText(
       "You can prioritize up to 5 courses."
     );
+    if (!usesSelectionDrawer) {
+      const selectedPanel = page.locator(".figma-selected-panel");
+      const panelLayout = await selectedPanel.evaluate((panel) => {
+        const styles = window.getComputedStyle(panel);
+        const action = panel.querySelector(".figma-alert-action > .button-primary");
+        const actionRect = action?.getBoundingClientRect();
+
+        return {
+          actionBottom: actionRect?.bottom ?? Number.POSITIVE_INFINITY,
+          overflowY: styles.overflowY,
+          panelBottom: panel.getBoundingClientRect().bottom,
+          viewportHeight: window.innerHeight
+        };
+      });
+      expect(panelLayout.overflowY).toBe("visible");
+      expect(panelLayout.actionBottom).toBeLessThanOrEqual(panelLayout.viewportHeight);
+      expect(panelLayout.panelBottom).toBeLessThanOrEqual(panelLayout.viewportHeight);
+      await expect(alertActionButton).toBeVisible();
+    }
 
     await captureUiScreenshot(page, testInfo, "search-five-selected");
     if (usesSelectionDrawer) {
@@ -1217,6 +1238,10 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(alertPreview).toContainText("for 4 players");
     await expect(alertPreview).toContainText("You book direct");
 
+    const recipientDisclosure = page.locator(".figma-recipient-disclosure > summary");
+    await expect(recipientDisclosure).toContainText("Alert your group too");
+    await expect(recipientDisclosure).toContainText("Optional");
+    await recipientDisclosure.click();
     const groupRecipients = page.getByRole("group", { name: "Alert your group too" });
     await expect(groupRecipients).toContainText(
       "Everyone gets the same opening, but only you manage the alert."
@@ -1314,8 +1339,14 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(lastSaveTrafficClass).toBe("AUTOMATION");
     } else {
       await expect(alertActionButton).toBeDisabled();
+      const unavailableGuidance = page.getByText(
+        "Account access is temporarily unavailable, so alerts cannot be created."
+      );
+      if (usesSelectionDrawer && !(await unavailableGuidance.isVisible())) {
+        await page.getByRole("button", { name: "Review alert" }).click();
+      }
       await expect(
-        page.getByText("Account access is temporarily unavailable, so alerts cannot be created.")
+        unavailableGuidance
       ).toBeVisible();
       expect(saveRequestCount, "alerts must stay blocked while account access is unavailable").toBe(0);
     }
