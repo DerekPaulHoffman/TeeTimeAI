@@ -52,7 +52,9 @@ import {
 } from "@/lib/courses/course-layout";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
 import {
+  detectSyntheticMultiCycle,
   detectWebsiteTrafficClass,
+  WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER,
   WEBSITE_TRAFFIC_CLASS_HEADER
 } from "@/lib/engagement/traffic-class";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
@@ -990,11 +992,16 @@ function TeeTimeIntakeContent({
     try {
       const userTimeZone =
         Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York";
+      const trafficClass = detectWebsiteTrafficClass();
+      const syntheticMultiCycle = detectSyntheticMultiCycle(trafficClass);
       const response = await fetch("/api/searches", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          [WEBSITE_TRAFFIC_CLASS_HEADER]: detectWebsiteTrafficClass()
+          [WEBSITE_TRAFFIC_CLASS_HEADER]: trafficClass,
+          ...(syntheticMultiCycle
+            ? { [WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER]: "true" }
+            : {})
         },
         body: JSON.stringify({
           date,

@@ -261,6 +261,7 @@ Expected env names:
 - `AUTOMATION_API_KEY`
 - `CRON_SECRET`
 - `EMAIL_ACTION_SECRET`
+- `EMAIL_ACTION_SECRET_PREVIOUS` (optional, temporary verification fallback during rotation)
 - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
 - `CLERK_SECRET_KEY`
 - `CLERK_AUTH_READY`

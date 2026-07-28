@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  detectSyntheticMultiCycle,
   detectWebsiteTrafficClass,
   isEngineeringRemediationSearch,
   isSyntheticWebsiteTrafficClass,
   parseSyntheticMultiCycle,
   parseWebsiteTrafficClass,
+  WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY,
   WEBSITE_TRAFFIC_CLASS_STORAGE_KEY
 } from "./traffic-class";
 
@@ -30,6 +32,18 @@ describe("detectWebsiteTrafficClass", () => {
     setWebdriver(true);
     window.sessionStorage.setItem(WEBSITE_TRAFFIC_CLASS_STORAGE_KEY, "TEST");
     expect(detectWebsiteTrafficClass()).toBe("TEST");
+  });
+
+  it("keeps the multi-cycle marker bounded to synthetic traffic", () => {
+    window.sessionStorage.setItem(
+      WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY,
+      "true"
+    );
+
+    expect(detectSyntheticMultiCycle("TEST")).toBe(true);
+    expect(detectSyntheticMultiCycle("AUTOMATION")).toBe(true);
+    expect(detectSyntheticMultiCycle("PUBLIC")).toBe(false);
+    expect(detectSyntheticMultiCycle("UNCLASSIFIED")).toBe(false);
   });
 });
 

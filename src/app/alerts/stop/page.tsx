@@ -1,10 +1,17 @@
 import type { Metadata } from "next";
+import { auth } from "@clerk/nextjs/server";
 import Link from "next/link";
 import { CalendarDays, Check, CircleOff, Flag, Users } from "lucide-react";
 
 import { confirmEmailAlertStop } from "./actions";
-import { verifyEmailStopToken } from "@/lib/email/search-actions";
-import { getEmailStopSearchSummary } from "@/lib/searches/email-actions";
+import {
+  readEmailStopTokenForOwnerRecovery,
+  verifyEmailStopToken
+} from "@/lib/email/search-actions";
+import {
+  getEmailStopSearchSummary,
+  getOwnerEmailStopSearchSummary
+} from "@/lib/searches/email-actions";
 
 export const dynamic = "force-dynamic";
 
@@ -39,17 +46,28 @@ export default async function StopAlertPage({ searchParams }: StopAlertPageProps
   }
 
   const action = params.token ? safelyVerifyToken(params.token) : null;
-  if (!action || params.invalid) {
+  const recoveryAction =
+    !action && params.token
+      ? readEmailStopTokenForOwnerRecovery(params.token)
+      : null;
+  const clerkUserId = recoveryAction ? await getSignedInClerkUserId() : null;
+  const selectedAction = action ?? recoveryAction;
+  if (!selectedAction || params.invalid || (recoveryAction && !clerkUserId)) {
     return <InvalidState />;
   }
 
-  const search = await getEmailStopSearchSummary(action.searchId);
+  const search = action
+    ? await getEmailStopSearchSummary(action.searchId)
+    : await getOwnerEmailStopSearchSummary(
+        selectedAction.searchId,
+        clerkUserId as string
+      );
   if (!search) {
     return <InvalidState />;
   }
 
   const alreadyStopped = search.status !== "ACTIVE" && search.status !== "PAUSED";
-  const booked = action.reason === "booked";
+  const booked = selectedAction.reason === "booked";
   const courseNames = search.preferences.map((preference) => preference.course.name);
 
   return (
@@ -73,6 +91,12 @@ export default async function StopAlertPage({ searchParams }: StopAlertPageProps
               ? "Confirm below and we’ll mark this search complete, stop checking, and stop every email for it."
               : "Confirm below and we’ll stop checking these courses and stop every email for this search."}
         </p>
+        {recoveryAction ? (
+          <p className="email-action-copy">
+            This older email link can no longer stop the alert by itself. Because you are signed
+            in as the alert owner, you can still confirm the change below.
+          </p>
+        ) : null}
 
         <div className="email-action-summary">
           <div>
@@ -198,6 +222,14 @@ function InvalidState() {
 function safelyVerifyToken(token: string) {
   try {
     return verifyEmailStopToken(token);
+  } catch {
+    return null;
+  }
+}
+
+async function getSignedInClerkUserId() {
+  try {
+    return (await auth()).userId;
   } catch {
     return null;
   }

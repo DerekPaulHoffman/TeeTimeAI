@@ -25,10 +25,59 @@ export async function getEmailStopSearchSummary(searchId: string) {
   });
 }
 
-export async function stopTeeSearchFromEmail(searchId: string, reason: EmailStopReason) {
+export async function getOwnerEmailStopSearchSummary(
+  searchId: string,
+  clerkUserId: string
+) {
+  return prisma.teeSearch.findFirst({
+    where: {
+      id: searchId,
+      user: { clerkUserId }
+    },
+    select: {
+      id: true,
+      date: true,
+      startTime: true,
+      endTime: true,
+      players: true,
+      status: true,
+      preferences: {
+        orderBy: { rank: "asc" },
+        select: {
+          rank: true,
+          course: { select: { name: true, timeZone: true } }
+        }
+      }
+    }
+  });
+}
+
+export async function stopTeeSearchFromEmail(
+  searchId: string,
+  reason: EmailStopReason
+) {
+  return stopTeeSearch(searchId, reason);
+}
+
+export async function stopOwnedTeeSearchFromEmail(
+  searchId: string,
+  reason: EmailStopReason,
+  clerkUserId: string
+) {
+  return stopTeeSearch(searchId, reason, clerkUserId);
+}
+
+async function stopTeeSearch(
+  searchId: string,
+  reason: EmailStopReason,
+  clerkUserId?: string
+) {
   return prisma.$transaction(async (transaction) => {
-    const search = await transaction.teeSearch.findUnique({
-      where: { id: searchId },
+    const search = await transaction.teeSearch.findFirst({
+      where: {
+        id: searchId,
+        ...(clerkUserId ? { user: { clerkUserId } } : {})
+      },
       select: { id: true, status: true }
     });
 

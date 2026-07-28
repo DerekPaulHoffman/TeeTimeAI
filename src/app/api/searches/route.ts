@@ -5,6 +5,7 @@ import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { queuePendingCourseProfiles } from "@/lib/course-profiles/service";
 import {
+  isSyntheticWebsiteTrafficClass,
   parseSyntheticMultiCycle,
   parseWebsiteTrafficClass,
   WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER,
@@ -72,11 +73,27 @@ export async function POST(request: NextRequest) {
     const user = await getRequiredAppUser();
     const submittedInput = teeSearchInputSchema.parse(await request.json());
     const input = { ...submittedInput, alertEmail: user.email };
-    const trafficClass = parseWebsiteTrafficClass(
-      request.headers.get(WEBSITE_TRAFFIC_CLASS_HEADER)
+    const trafficClassHeader = request.headers.get(
+      WEBSITE_TRAFFIC_CLASS_HEADER
     );
+    const syntheticMultiCycleHeader = request.headers.get(
+      WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER
+    );
+    const trafficClass = parseWebsiteTrafficClass(trafficClassHeader);
+    if (
+      syntheticMultiCycleHeader === "true" &&
+      !isSyntheticWebsiteTrafficClass(trafficClass)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Recurring synthetic checks require an explicit TEST or AUTOMATION traffic marker."
+        },
+        { status: 400 }
+      );
+    }
     const syntheticMultiCycle = parseSyntheticMultiCycle(
-      request.headers.get(WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER),
+      syntheticMultiCycleHeader,
       trafficClass
     );
     const search = await createTeeSearchForUser(

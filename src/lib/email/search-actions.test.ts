@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildEmailStopUrls,
   createEmailStopToken,
+  readEmailStopTokenForOwnerRecovery,
   verifyEmailStopToken
 } from "./search-actions";
 
@@ -29,6 +30,23 @@ describe("email alert stop tokens", () => {
     expect(
       verifyEmailStopToken(token, { now, secret: process.env.AUTOMATION_API_KEY })
     ).toBeNull();
+  });
+
+  it("keeps previously issued links valid during a dedicated secret rotation", () => {
+    process.env.EMAIL_ACTION_SECRET = "new-email-action-secret";
+    process.env.EMAIL_ACTION_SECRET_PREVIOUS = "old-email-action-secret";
+    const now = new Date("2026-07-10T12:00:00.000Z");
+    const token = createEmailStopToken("search-1", "cancelled", {
+      now,
+      secret: "old-email-action-secret"
+    });
+
+    expect(verifyEmailStopToken(token, { now })).toMatchObject({
+      searchId: "search-1",
+      reason: "cancelled"
+    });
+
+    delete process.env.EMAIL_ACTION_SECRET_PREVIOUS;
   });
 
   it("supports a search-bound expiration with a seven-day grace period", () => {
@@ -77,5 +95,22 @@ describe("email alert stop tokens", () => {
         secret
       })
     ).toBeNull();
+  });
+
+  it("reads only a bounded action for signed-in owner recovery", () => {
+    const createdAt = new Date("2026-01-01T00:00:00.000Z");
+    const token = createEmailStopToken("search-1", "cancelled", {
+      now: createdAt,
+      secret
+    });
+    const [payload] = token.split(".");
+
+    expect(
+      readEmailStopTokenForOwnerRecovery(`${payload}.obsolete-signature`)
+    ).toMatchObject({
+      searchId: "search-1",
+      reason: "cancelled"
+    });
+    expect(readEmailStopTokenForOwnerRecovery("not-a-token")).toBeNull();
   });
 });

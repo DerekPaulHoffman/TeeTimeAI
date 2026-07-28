@@ -124,23 +124,38 @@ describe("POST /api/searches", () => {
     mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1", preferences: [] });
     mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
 
-    await POST(searchRequest("owner@example.com", "TEST", true));
-    await POST(searchRequest("owner@example.com", "PUBLIC", true));
+    const syntheticResponse = await POST(
+      searchRequest("owner@example.com", "TEST", true)
+    );
+    const publicResponse = await POST(
+      searchRequest("owner@example.com", "PUBLIC", true)
+    );
 
-    expect(mocks.createTeeSearchForUser).toHaveBeenNthCalledWith(
-      1,
+    expect(syntheticResponse.status).toBe(201);
+    expect(publicResponse.status).toBe(400);
+    expect(mocks.createTeeSearchForUser).toHaveBeenCalledOnce();
+    expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
       "app-user-1",
       expect.any(Object),
       "TEST",
       true
     );
-    expect(mocks.createTeeSearchForUser).toHaveBeenNthCalledWith(
-      2,
-      "app-user-1",
-      expect.any(Object),
-      "PUBLIC",
-      false
+  });
+
+  it("rejects an orphaned multi-cycle marker before creating demand", async () => {
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({
+      id: "app-user-1",
+      email: "owner@example.com"
+    });
+
+    const response = await POST(
+      searchRequest("owner@example.com", undefined, true)
     );
+
+    expect(response.status).toBe(400);
+    expect(mocks.createTeeSearchForUser).not.toHaveBeenCalled();
+    expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 });
 

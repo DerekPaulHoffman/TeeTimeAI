@@ -316,6 +316,7 @@ Required for live email sending:
 - `OPERATOR_ALERT_EMAIL` (receives deduplicated course-monitoring incident, escalation, and resolution emails)
 - `OPERATOR_DASHBOARD_EMAILS` (server-only comma-separated allowlist for the read-only operator dashboard)
 - `EMAIL_ACTION_SECRET` (signs bounded email alert-control links; keep separate from automation API access)
+- `EMAIL_ACTION_SECRET_PREVIOUS` (optional, temporary verification fallback during rotation)
 
 Required for automation endpoints/scripts:
 

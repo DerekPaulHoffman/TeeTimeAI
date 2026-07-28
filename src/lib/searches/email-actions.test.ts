@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
-import { stopTeeSearchFromEmail } from "./email-actions";
+import {
+  stopOwnedTeeSearchFromEmail,
+  stopTeeSearchFromEmail
+} from "./email-actions";
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
   lockSearchForAlertMutation: vi.fn()
@@ -12,6 +15,7 @@ vi.mock("@/lib/prisma", () => ({
     $transaction: vi.fn(),
     teeSearch: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       update: vi.fn()
     },
     teeTimeMatch: {
@@ -39,7 +43,7 @@ describe("stopTeeSearchFromEmail", () => {
   });
 
   it("marks a booked search complete and stops every future notification path", async () => {
-    mockedPrisma.teeSearch.findUnique.mockResolvedValue({
+    mockedPrisma.teeSearch.findFirst.mockResolvedValue({
       id: "search-1",
       status: "ACTIVE"
     } as never);
@@ -86,7 +90,7 @@ describe("stopTeeSearchFromEmail", () => {
   });
 
   it("leaves an already-cancelled search unchanged", async () => {
-    mockedPrisma.teeSearch.findUnique.mockResolvedValue({
+    mockedPrisma.teeSearch.findFirst.mockResolvedValue({
       id: "search-1",
       status: "CANCELLED"
     } as never);
@@ -98,5 +102,21 @@ describe("stopTeeSearchFromEmail", () => {
     });
     expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not let an invalid legacy link act on another owner's search", async () => {
+    mockedPrisma.teeSearch.findFirst.mockResolvedValue(null);
+
+    await expect(
+      stopOwnedTeeSearchFromEmail("search-1", "cancelled", "owner-1")
+    ).resolves.toBeNull();
+    expect(mockedPrisma.teeSearch.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "search-1",
+        user: { clerkUserId: "owner-1" }
+      },
+      select: { id: true, status: true }
+    });
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
   });
 });

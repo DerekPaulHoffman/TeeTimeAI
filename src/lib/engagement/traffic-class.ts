@@ -2,6 +2,8 @@ export const WEBSITE_TRAFFIC_CLASS_STORAGE_KEY = "tee-time-spot:traffic-class";
 export const WEBSITE_TRAFFIC_CLASS_HEADER = "x-tee-time-spot-traffic-class";
 export const WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER =
   "x-tee-time-spot-synthetic-multi-cycle";
+export const WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY =
+  "tee-time-spot:synthetic-multi-cycle";
 
 export const websiteTrafficClasses = [
   "UNCLASSIFIED",
@@ -62,4 +64,22 @@ export function detectWebsiteTrafficClass(): WebsiteTrafficClassValue {
   }
 
   return navigator.webdriver ? "AUTOMATION" : "PUBLIC";
+}
+
+export function detectSyntheticMultiCycle(
+  trafficClass: WebsiteTrafficClassValue
+): boolean {
+  if (!isSyntheticWebsiteTrafficClass(trafficClass)) {
+    return false;
+  }
+
+  try {
+    return (
+      window.sessionStorage.getItem(
+        WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY
+      ) === "true"
+    );
+  } catch {
+    return false;
+  }
 }

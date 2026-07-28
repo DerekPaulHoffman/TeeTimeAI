@@ -60,16 +60,39 @@ export function verifyEmailStopToken(
     return null;
   }
 
-  const expectedSignature = sign(encodedPayload, options.secret ?? getEmailActionSecret());
   const suppliedBuffer = Buffer.from(suppliedSignature);
-  const expectedBuffer = Buffer.from(expectedSignature);
+  const secrets = options.secret
+    ? [options.secret]
+    : getEmailActionVerificationSecrets();
   if (
-    suppliedBuffer.length !== expectedBuffer.length ||
-    !timingSafeEqual(suppliedBuffer, expectedBuffer)
+    !secrets.some((secret) =>
+      signatureMatches(encodedPayload, suppliedBuffer, secret)
+    )
   ) {
     return null;
   }
 
+  return parsePayload(encodedPayload, {
+    now: options.now,
+    allowExpired: false
+  });
+}
+
+export function readEmailStopTokenForOwnerRecovery(
+  token: string
+): EmailStopTokenPayload | null {
+  const [encodedPayload, suppliedSignature, extraPart] = token.split(".");
+  if (!encodedPayload || !suppliedSignature || extraPart) {
+    return null;
+  }
+
+  return parsePayload(encodedPayload, { allowExpired: true });
+}
+
+function parsePayload(
+  encodedPayload: string,
+  options: { now?: Date; allowExpired: boolean }
+) {
   try {
     const payload = JSON.parse(
       Buffer.from(encodedPayload, "base64url").toString("utf8")
@@ -83,7 +106,7 @@ export function verifyEmailStopToken(
       payload.searchId.length > 200 ||
       (payload.reason !== "booked" && payload.reason !== "cancelled") ||
       typeof payload.expiresAt !== "number" ||
-      payload.expiresAt <= now.getTime()
+      (!options.allowExpired && payload.expiresAt <= now.getTime())
     ) {
       return null;
     }
@@ -107,10 +130,32 @@ function sign(payload: string, secret: string) {
   return createHmac("sha256", secret).update(payload).digest("base64url");
 }
 
+function signatureMatches(
+  payload: string,
+  suppliedBuffer: Buffer,
+  secret: string
+) {
+  const expectedBuffer = Buffer.from(sign(payload, secret));
+  return (
+    suppliedBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(suppliedBuffer, expectedBuffer)
+  );
+}
+
 function getEmailActionSecret() {
-  const secret = process.env.EMAIL_ACTION_SECRET?.replace(/\uFEFF/g, "").trim();
+  const secret = normalizeSecret(process.env.EMAIL_ACTION_SECRET);
   if (!secret) {
     throw new Error("EMAIL_ACTION_SECRET is required for email alert controls");
   }
   return secret;
+}
+
+function getEmailActionVerificationSecrets() {
+  const current = getEmailActionSecret();
+  const previous = normalizeSecret(process.env.EMAIL_ACTION_SECRET_PREVIOUS);
+  return previous && previous !== current ? [current, previous] : [current];
+}
+
+function normalizeSecret(value?: string) {
+  return value?.replace(/\uFEFF/g, "").trim();
 }

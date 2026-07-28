@@ -5,6 +5,12 @@ import {
   clearSearchDraft,
   SEARCH_DRAFT_STORAGE_KEY
 } from "@/lib/searches/search-draft";
+import {
+  WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER,
+  WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY,
+  WEBSITE_TRAFFIC_CLASS_HEADER,
+  WEBSITE_TRAFFIC_CLASS_STORAGE_KEY
+} from "@/lib/engagement/traffic-class";
 
 import { TeeTimeIntake } from "./tee-time-intake";
 
@@ -31,6 +37,11 @@ describe("TeeTimeIntake", () => {
   });
 
   it("opens My Alerts after saving a new alert", async () => {
+    window.sessionStorage.setItem(WEBSITE_TRAFFIC_CLASS_STORAGE_KEY, "TEST");
+    window.sessionStorage.setItem(
+      WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY,
+      "true"
+    );
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
 
@@ -91,6 +102,13 @@ describe("TeeTimeIntake", () => {
       expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-123")
     );
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
+    const searchCall = fetchMock.mock.calls.find(
+      ([input]) => String(input) === "/api/searches"
+    );
+    expect(searchCall?.[1]?.headers).toMatchObject({
+      [WEBSITE_TRAFFIC_CLASS_HEADER]: "TEST",
+      [WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER]: "true"
+    });
   });
 
   it("reconciles browser date and time values before previewing and saving the alert", async () => {
