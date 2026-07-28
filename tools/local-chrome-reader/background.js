@@ -247,6 +247,16 @@ async function savePendingJobs(jobs) {
   await chrome.storage.local.set({ pendingJobs: jobs });
 }
 
+async function wakePendingTab(tabId) {
+  const jobs = await pendingJobs();
+  if (!jobs[String(tabId)]) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "LOCAL_READER_WAKE" });
+  } catch {
+    // The content script also retries while the tab-to-job mapping settles.
+  }
+}
+
 async function cleanStalePendingJobs(jobs) {
   const now = Date.now();
   let changed = false;
@@ -361,11 +371,7 @@ async function poll() {
       "READING",
       `${payload.job.courseKey} ${payload.job.targetDate}`,
     );
-    try {
-      await chrome.tabs.sendMessage(tab.id, { type: "LOCAL_READER_WAKE" });
-    } catch {
-      // The content script also starts itself when the page finishes loading.
-    }
+    await wakePendingTab(tab.id);
   } catch (error) {
     await setLastStatus(
       "POLL_FAILED",
@@ -404,6 +410,10 @@ chrome.runtime.onStartup.addListener(async () => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM) void poll();
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "complete") void wakePendingTab(tabId);
 });
 
 chrome.runtime.onMessage.addListener((message, sender) => {

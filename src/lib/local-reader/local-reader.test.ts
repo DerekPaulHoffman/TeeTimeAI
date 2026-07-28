@@ -570,6 +570,26 @@ describe("local Chrome reader contract", () => {
     expect(backgroundSource).not.toContain("localStorage");
   });
 
+  it("retries fast page loads after the tab-to-job mapping settles", () => {
+    const contentSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
+      "utf8",
+    );
+    const backgroundSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
+      "utf8",
+    );
+
+    expect(contentSource).toContain("PENDING_JOB_LOOKUP_LIMIT = 20");
+    expect(contentSource).toContain(
+      "setTimeout(() => void readPendingJob(), 250)",
+    );
+    expect(backgroundSource).toContain(
+      'if (changeInfo.status === "complete") void wakePendingTab(tabId)',
+    );
+    expect(backgroundSource).toContain("await wakePendingTab(tab.id)");
+  });
+
   it("rejects slots for the wrong date or an unsupported player count", () => {
     const job = localReaderJobSchema.parse(jobFor());
     const result = localReaderResultSchema.parse({

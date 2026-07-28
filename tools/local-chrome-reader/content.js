@@ -2,6 +2,8 @@
 
 (function startLocalReader() {
   let running = false;
+  let pendingJobLookupAttempts = 0;
+  const PENDING_JOB_LOOKUP_LIMIT = 20;
   const MONTH_NAMES = [
     "January",
     "February",
@@ -384,7 +386,15 @@
     ].find((candidate) =>
       candidate?.isAllowedPageUrl(pending?.job, location.href),
     );
-    if (!pending?.job || !reader) {
+    if (!pending?.job) {
+      if (pendingJobLookupAttempts < PENDING_JOB_LOOKUP_LIMIT) {
+        pendingJobLookupAttempts += 1;
+        setTimeout(() => void readPendingJob(), 250);
+      }
+      return;
+    }
+    pendingJobLookupAttempts = 0;
+    if (!reader) {
       return;
     }
 
