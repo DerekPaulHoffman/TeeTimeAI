@@ -340,6 +340,35 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("keeps healthy reader-verified courses working ahead of stale provider coverage", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          coverageCategory: "UNSUPPORTED_FAMILY",
+          activeAlertCount: 1,
+          localReaderSupported: true,
+          localReaderVerifiedAt: new Date("2026-07-24T17:45:00.000Z"),
+          localReaderVersion: "cps-rendered-v1",
+          monitoringStatus: {
+            reference: "MON-1",
+            state: "HEALTHY",
+            lastSuccessfulAt: new Date("2026-07-24T17:45:00.000Z"),
+            lastFailureAt: new Date("2026-07-24T17:30:00.000Z"),
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "LOCAL_READER_VERIFIED",
+      priorityGroup: "WORKING",
+      automationQueueState: null
+    });
+  });
+
   it("keeps a newer failure actionable after an older successful reader result", () => {
     const [result] = buildCourseInventory(
       [

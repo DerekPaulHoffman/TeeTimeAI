@@ -367,7 +367,8 @@ function classifyCourseStatus(
   const latestSuccessfulEvidence = getLatestSuccessfulEvidence(course);
   if (
     latestSuccessfulEvidence &&
-    isRecoverableMonitoringState(course.monitoringStatus?.state) &&
+    (course.monitoringStatus?.state === "HEALTHY" ||
+      isRecoverableMonitoringState(course.monitoringStatus?.state)) &&
     (!course.monitoringStatus?.lastFailureAt ||
       latestSuccessfulEvidence.observedAt > course.monitoringStatus.lastFailureAt)
   ) {
