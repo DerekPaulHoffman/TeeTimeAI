@@ -1,8 +1,11 @@
+const FAVICON_ICO_BASE64 =
+  "AAABAAEAQEAAAAEAIAC/BAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAABAAAAAQAgGAAAAqmlx3gAABHRJREFUeJzsm19sFEUcx78zt9dyXts729CWWmMTkUiFBKJy18aYGnxQjKm9IqVGMRKlwQcUX63xz6NPiAkvJo2JiaLAtSUpGhMQfSh3RaGERJAUg9Er5YyXW/qP0rsdf3vQS6EHLbd76c5uPw93szOzyf6+85uZ38zuKFgAvs1PbhTCtYkLsUEANYyhCmBeWAoxLgSuMGCYnjFK/33JcPSn+e5idyxpalJ8FRNvMsE/oFo1kBGhiyE+VhOeLhw/nspVJZcAvKwlsIVxfMLAHoENEEJcoJ9OtXvgoH45u2yOAL7W4BbK/JKSHtgJISbSYO2j4cjh2dm3COBvCYYEFweo5TlsCHUHjUxuVw9FvpvJywrgbW5Y61ZEFHZr+blMIp1uTPacHNQvZlqauxVtP+xvvI4H3PUVbtqe+fG1bthBzlAPp8Cw5obNevLl+hKfVvYn9YXlcBAUM8TVlGul4k+XbSYZHGW8DgVzlX4l3aqQ8U1wKDQrBBX6rbtLPGgYf0kZXgw0ZdJ9Az8jMarCKtB0/yjzh4KXKPUQCsD9ZHxkzzfka+WZ63gygYbdr1hGBPKAPzjFhdUoEC81bswar6On255+DlaBHL9aocGgGAWiyl8xJ8/nLYV1YD5bhrz3goJFIPr4JMwmqnLsGrp3Z14UAQrBZ/+4kQ+2EODIfxwXr+XXm6UXYJoWuPtiRcgX6QX4Nu7Cv9P5R3JSCzBGu3xdl42ZILUAXSMKxjVjM7m0AsSvM3J/448vrQD7YgpSwvgqTkoBhiaA7xPmPLqUAuw1MO3djpQC0IsOmIWUi6F3aqdhFlIKsPI+4PnyFMxA2uXw2w+koDDjXUFaASqLBNoqjXuB1Bsi26tT8HINRpBagBKaw7avMOYF0m+JtVWmsdyd/1ggvQBurg+I15EvttgU3VSh4eFl+Y0FttkV3vVgfsHRooTCgd+s8xmC498LLAkAh7MkABzOkgBwOEuvx2Eyz65vQGd7B+qqarCsqGDfXpiGaQJwzvH+1h3Y3bINjBXwqyuTMU2AxtXr8F7odcgGpx3mKZjAuy2vQT6EyslZR2ACa+tWQTZoG2WECyZMEWChqOOjsApMsBFOMgzCBM5eujBvHf2Nzo+n+mEZmBikMUDrgQl83vv1Xct149/a8yEuXv4bVkET2O+aOj88VFxf20xjwQoY4K/4MPzeUjyxak3O8k8PdOGLHw7CMghxRg1HO1162lNfc4X8YSsMcnQwgp7+oyh2F6G81IerE2M4HDmGjr0foffEMVgKJnZeOxc7n41YfK3BU3SxHk6AWj8Zjq7Tk9m1ANO0N6AfKLI/k9Npng1asgIkuwfO0EC1DTYmc2xOw6vjvSfOzuS5ZleYOhf73b269jTNjc0U0Of37al1maQGDqnd0VsOTs5ZDmdOVrL0U5njpjYhY4umNVwND/TdXpZzPyB56NfTasLzGN3YoR9AhqxkDk9rO3Vb9C6eq8qC1q3+UOAZiptfoMoByx+fZ4hRw/WnIY6MhU/+Mt9d/wMAAP//FuctXQAAAAZJREFUAwBN8mcbyYV4vAAAAABJRU5ErkJggg==";
+
 export function GET() {
-  return new Response("Redirecting to /icon.svg", {
-    status: 308,
+  return new Response(Buffer.from(FAVICON_ICO_BASE64, "base64"), {
     headers: {
-      location: "/icon.svg"
+      "cache-control": "public, max-age=0, must-revalidate",
+      "content-type": "image/x-icon"
     }
   });
 }
