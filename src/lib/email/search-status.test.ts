@@ -612,6 +612,33 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Open official booking page");
   });
 
+  it("presents a queued local-reader check as active work instead of an outage", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-reader-pending",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-07-26",
+      startTime: "09:00",
+      endTime: "13:00",
+      players: 2,
+      checkedAt: new Date("2026-07-23T14:15:00.000Z"),
+      courses: [
+        {
+          courseId: "oxford-greens",
+          courseName: "The Golf Club at Oxford Greens",
+          outcome: "CHECK_PENDING",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/book"
+        }
+      ]
+    });
+
+    expect(html).toContain("CHECKING NOW");
+    expect(html).toContain("fresh public-page check is in progress");
+    expect(html).not.toContain("TEMPORARILY UNAVAILABLE");
+    expect(html).not.toContain("automatic alerts are unavailable");
+  });
+
   it("uses the Figma shell, alternating course imagery, and availability-first order", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-figma",

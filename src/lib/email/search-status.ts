@@ -51,6 +51,7 @@ export type SearchStatusCourseReport = {
   outcome:
     | "MATCH_FOUND"
     | "NO_MATCH"
+    | "CHECK_PENDING"
     | "BLOCKED_POLICY"
     | "BLOCKED_AUTH"
     | "NEEDS_ADAPTER"
@@ -348,6 +349,12 @@ function toMonitoringCourse(
             tone: "monitored" as const,
             detail: `${description.stateLabel}. ${description.detail}`
           }
+        : course.outcome === "CHECK_PENDING"
+          ? {
+              badgeLabel: "CHECKING NOW",
+              tone: "scheduled" as const,
+              detail: `${description.stateLabel}. ${description.detail}`
+            }
         : course.outcome === "NEEDS_ADAPTER"
           ? {
               badgeLabel: "AUTOMATIC ALERTS UNAVAILABLE",
@@ -475,6 +482,22 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       detail: course.bookingWindow.exactTime
         ? "The course has not released tee times for your date yet. We’ll start checking at that time and email you when a matching spot appears."
         : "The course has not published an exact release time. We’ll begin checking that day and email you when a matching spot appears."
+    };
+  }
+
+  if (course.outcome === "CHECK_PENDING") {
+    return {
+      monitoringLabel: "Checking now",
+      stateLabel: "A fresh public-page check is in progress",
+      icon: "â—·",
+      color: "#17647a",
+      badgeBackground: "#e6f3f7",
+      borderColor: "#b8dbe5",
+      calloutBackground: "#eef8fb",
+      calloutBorder: "#c5e2ea",
+      calloutText: "#174152",
+      detail:
+        "Tee Time Spot is waiting for the current public-page check to finish. Your alert remains active."
     };
   }
 

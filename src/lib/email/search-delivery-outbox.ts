@@ -3202,6 +3202,12 @@ async function validateCurrentStatusDeliveryPayload(
     }
     const latestProbe = latestProbeByCourse.get(courseId);
     const latestOutcome = latestProbe?.outcome;
+    if (course.outcome === "CHECK_PENDING") {
+      if (latestProbe && latestProbe.observedAt > payloadCheckedAt) {
+        return "stale";
+      }
+      continue;
+    }
     if (!latestOutcome) {
       return "transient";
     }

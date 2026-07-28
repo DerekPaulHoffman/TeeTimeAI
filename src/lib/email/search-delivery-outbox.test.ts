@@ -2575,6 +2575,62 @@ describe("search email delivery outbox", () => {
     }
   );
 
+  it("sends a pending reader status when the latest durable probe predates it", async () => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      displayMatchIds: [],
+      statusSnapshot: [{ courseId: "course-1", state: "CHECK_PENDING" }],
+      statusReport: {
+        kind: "setup",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Course",
+            timeZone: "America/New_York",
+            outcome: "CHECK_PENDING",
+            availableMatches: 0
+          }
+        ]
+      }
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "status-group",
+      payload: statusPayload
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        observedAt: new Date(now.getTime() - 60_000)
+      }
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "status-group",
+      send,
+      now: () => now
+    });
+
+    expect(send).toHaveBeenCalledOnce();
+  });
+
   it("retires an ambiguously attempted stale status without issuing a new status key", async () => {
     const statusPayload = {
       schemaVersion: 2 as const,

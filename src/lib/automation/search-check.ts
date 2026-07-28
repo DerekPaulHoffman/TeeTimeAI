@@ -791,7 +791,7 @@ async function checkSearch(
         });
       } catch (error) {
         await maintainSearchCheckLease(lease);
-        const message = error instanceof Error ? error.message : "Unknown adapter error";
+        let message = error instanceof Error ? error.message : "Unknown adapter error";
         const providerFailure = classifyProviderFailure({ error });
         const localReaderFallbackAllowed =
           localReaderEligible &&
@@ -810,46 +810,30 @@ async function checkSearch(
                 bookingUrl: customerBookingUrl
               })
             : null;
+        const localReaderTerminalFailure =
+          localReaderJob?.queueDisposition ===
+          "RETRYING_AFTER_TERMINAL_FAILURE";
         if (localReaderJob) {
           monitoringRetryCourseIds.add(course.id);
-          const waitingMessage =
-            "Waiting for the local public-page reader to complete this tee-time check.";
-          const supportIssue = await reportCourseSupportIssue({
-            course,
-            searchId: search.id,
-            kind: "READER_CANDIDATE",
-            message: waitingMessage,
-            error,
-            readPath: "LOCAL_READER_ALLOWLIST",
-            nextAction:
-              "Keep the Local Reader enabled. Safe CPS tenants are accepted automatically, and this signed rendered-page check is queued for local verification."
-          });
-          supportIssues.push({ courseId: course.id, ...supportIssue });
-          await recordCourseProbe({
-            searchId: search.id,
-            courseId: course.id,
-            automationRunId,
-            outcome: "FETCH_FAILED",
-            message: waitingMessage,
-            rawSummary: {
-              providerExecution: "LOCAL_BROWSER_READER_PENDING"
-            }
-          });
-          courseResults.push({
-            courseId: course.id,
-            courseName: course.name,
-            timeZone: course.timeZone,
-            outcome: "FETCH_FAILED",
-            availableMatches: 0,
-            message: waitingMessage,
-            bookingUrl: getCustomerBookingUrl(course),
-            phone: course.bookingPhone ?? course.phone ?? undefined,
-            bookingMethod: course.bookingMethod,
-            bookingAccessMode: course.bookingAccessMode,
-            bookingAccess: getCourseBookingAccess(course),
-            supportStatus: supportIssue.incidentId ? "IN_OPERATOR_QUEUE" : undefined
-          });
-          return;
+          if (localReaderTerminalFailure) {
+            message =
+              "The local public-page reader did not complete within its bounded check window. A fresh reader check has been queued.";
+          } else {
+            courseResults.push({
+              courseId: course.id,
+              courseName: course.name,
+              timeZone: course.timeZone,
+              outcome: "CHECK_PENDING",
+              availableMatches: 0,
+              message: "A fresh public-page tee-time check is in progress.",
+              bookingUrl: getCustomerBookingUrl(course),
+              phone: course.bookingPhone ?? course.phone ?? undefined,
+              bookingMethod: course.bookingMethod,
+              bookingAccessMode: course.bookingAccessMode,
+              bookingAccess: getCourseBookingAccess(course)
+            });
+            return;
+          }
         }
         if (SHORT_SEARCH_RETRY_FAILURES.has(providerFailure.failureClass)) {
           monitoringRetryCourseIds.add(course.id);
@@ -868,14 +852,19 @@ async function checkSearch(
           course,
           searchId: search.id,
           kind:
-            localReaderEligible && !supportedAdapterAvailable ? "READER_CANDIDATE" : "FETCH_FAILED",
+            localReaderTerminalFailure ||
+            (localReaderEligible && !supportedAdapterAvailable)
+              ? "READER_CANDIDATE"
+              : "FETCH_FAILED",
           message,
           error,
-          readPath: providerRequestStarted
-            ? "TYPED_PROVIDER_ADAPTER"
-            : localReaderCanOverrideGate
-              ? "LOCAL_READER"
-              : "PUBLIC_PROVIDER_PRECHECK",
+          readPath: localReaderTerminalFailure
+            ? "LOCAL_READER_ALLOWLIST"
+            : providerRequestStarted
+              ? "TYPED_PROVIDER_ADAPTER"
+              : localReaderCanOverrideGate
+                ? "LOCAL_READER"
+                : "PUBLIC_PROVIDER_PRECHECK",
           nextAction:
             cpsLocalReaderPreferred
               ? "Keep the Local Reader enabled. Safe CPS tenants are accepted automatically, and failures are queued for local verification."

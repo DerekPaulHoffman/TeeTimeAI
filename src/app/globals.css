@@ -2165,6 +2165,22 @@ button {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
+.operator-course-summary-automation {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.operator-automation-summary-heading {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.operator-automation-summary-heading span {
+  color: #6b7871;
+  font-size: 0.78rem;
+}
+
 .operator-course-count {
   align-items: center;
   display: grid;
@@ -3551,6 +3567,19 @@ button {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .operator-course-summary-automation {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .operator-course-summary-automation .operator-course-count:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid #dce5df;
+  }
+
+  .operator-course-summary-automation .operator-course-count:nth-child(4) {
+    border-left: 1px solid #dce5df;
+  }
+
   .operator-course-count:nth-child(4) {
     border-left: 0;
   }
@@ -3645,6 +3674,16 @@ button {
 
   .operator-course-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .operator-course-summary-automation {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .operator-automation-summary-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
   }
 
   .operator-diagnostic-heading {

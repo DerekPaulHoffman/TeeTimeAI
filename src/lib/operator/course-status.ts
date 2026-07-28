@@ -133,6 +133,11 @@ export type CourseInventoryView =
 export type CourseDiagnosticKey =
   CourseStatusKey | "TECHNICAL_ACCESS" | "NO_PUBLIC_ONLINE" | "PRIVATE_OR_INVALID";
 export type CourseStatusTone = "critical" | "warning" | "neutral" | "positive";
+export type CourseAutomationQueueState =
+  | "DUE_NOW"
+  | "IN_PROGRESS"
+  | "SCHEDULED_RETRY"
+  | "NEEDS_HUMAN";
 
 export type CourseStatusInput = {
   id: string;
@@ -170,6 +175,8 @@ export type CourseStatusInput = {
     latestMessage: string | null;
     nextAction: string | null;
     failureClass: string | null;
+    nextAttemptAt?: Date | null;
+    activeBatchId?: string | null;
   } | null;
   latestProbe: {
     outcome: string;
@@ -190,6 +197,7 @@ export type CourseInventoryItem = CourseStatusInput & {
   priorityGroup: CoursePriorityGroup;
   priorityScore: number;
   tone: CourseStatusTone;
+  automationQueueState: CourseAutomationQueueState | null;
 };
 
 const STALE_WITH_DEMAND_MS = 24 * 60 * 60 * 1000;
@@ -199,7 +207,13 @@ export function buildCourseInventory(
   now = new Date()
 ): CourseInventoryItem[] {
   return courses
-    .map((course) => classifyCourseStatus(course, now))
+    .map((course) => {
+      const classified = classifyCourseStatus(course, now);
+      return {
+        ...classified,
+        automationQueueState: deriveAutomationQueueState(classified, now)
+      };
+    })
     .sort(
       (left, right) =>
         left.priorityScore - right.priorityScore ||
@@ -259,7 +273,15 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
     watch: courses.filter((course) => course.priorityGroup === "WATCH").length,
     limitations: courses.filter((course) => course.priorityGroup === "LIMITATION").length,
     unchecked: courses.filter((course) => course.priorityGroup === "UNCHECKED").length,
-    working: courses.filter((course) => course.priorityGroup === "WORKING").length
+    working: courses.filter((course) => course.priorityGroup === "WORKING").length,
+    dueNow: courses.filter((course) => course.automationQueueState === "DUE_NOW").length,
+    inProgress: courses.filter((course) => course.automationQueueState === "IN_PROGRESS").length,
+    scheduledRetry: courses.filter(
+      (course) => course.automationQueueState === "SCHEDULED_RETRY"
+    ).length,
+    needsHuman: courses.filter(
+      (course) => course.automationQueueState === "NEEDS_HUMAN"
+    ).length
   };
 }
 
@@ -338,7 +360,35 @@ export function parseCourseStateFilter(value: string | undefined) {
   return /^[A-Z]{2}$/u.test(normalized) ? normalized : "all";
 }
 
-function classifyCourseStatus(course: CourseStatusInput, now: Date): CourseInventoryItem {
+function classifyCourseStatus(
+  course: CourseStatusInput,
+  now: Date
+): Omit<CourseInventoryItem, "automationQueueState"> {
+  const latestSuccessfulEvidence = getLatestSuccessfulEvidence(course);
+  if (
+    latestSuccessfulEvidence &&
+    isRecoverableMonitoringState(course.monitoringStatus?.state) &&
+    (!course.monitoringStatus?.lastFailureAt ||
+      latestSuccessfulEvidence.observedAt > course.monitoringStatus.lastFailureAt)
+  ) {
+    if (
+      course.activeAlertCount > 0 &&
+      now.getTime() - latestSuccessfulEvidence.observedAt.getTime() >
+        STALE_WITH_DEMAND_MS
+    ) {
+      return withStatus(course, "STALE", {
+        priorityGroup: "ACTION",
+        priorityScore: 1,
+        tone: "critical"
+      });
+    }
+    return withStatus(course, latestSuccessfulEvidence.statusKey, {
+      priorityGroup: "WORKING",
+      priorityScore: 5,
+      tone: "positive"
+    });
+  }
+
   if (course.monitoringStatus?.state === "DEGRADED_RETRYING") {
     return withStatus(course, "SITE_FAILED", {
       priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
@@ -695,7 +745,7 @@ function withStatus(
     meaningOverride?: string;
     actionOverride?: string | null;
   }
-): CourseInventoryItem {
+): Omit<CourseInventoryItem, "automationQueueState"> {
   const guide = COURSE_STATUS_GUIDE.find((item) => item.key === statusKey);
   if (!guide) {
     throw new Error(`Missing operator course status guide for ${statusKey}`);
@@ -711,4 +761,80 @@ function withStatus(
     priorityScore: options.priorityScore,
     tone: options.tone
   };
+}
+
+function getLatestSuccessfulEvidence(course: CourseStatusInput) {
+  const candidates: Array<{
+    observedAt: Date;
+    statusKey: CourseStatusKey;
+  }> = [];
+  if (
+    course.latestProbe?.outcome === "MATCH_FOUND" ||
+    course.latestProbe?.outcome === "NO_MATCH"
+  ) {
+    candidates.push({
+      observedAt: course.latestProbe.observedAt,
+      statusKey:
+        course.latestProbe.outcome === "MATCH_FOUND"
+          ? "WORKING_MATCH"
+          : "WORKING_NO_MATCH"
+    });
+  }
+  if (course.localReaderVerifiedAt) {
+    candidates.push({
+      observedAt: course.localReaderVerifiedAt,
+      statusKey: "LOCAL_READER_VERIFIED"
+    });
+  }
+  return candidates.sort(
+    (left, right) => right.observedAt.getTime() - left.observedAt.getTime()
+  )[0];
+}
+
+function isRecoverableMonitoringState(state: string | undefined) {
+  return (
+    state === "DEGRADED_RETRYING" ||
+    state === "AUTO_INVESTIGATING" ||
+    state === "ENGINEERING_VERIFICATION_NEEDED" ||
+    state === "REVALIDATING_FINAL"
+  );
+}
+
+function deriveAutomationQueueState(
+  course: Omit<CourseInventoryItem, "automationQueueState">,
+  now: Date
+): CourseAutomationQueueState | null {
+  if (
+    course.priorityGroup === "WORKING" ||
+    course.priorityGroup === "LIMITATION" ||
+    course.priorityGroup === "UNCHECKED"
+  ) {
+    return null;
+  }
+  if (
+    course.incident?.status === "NEEDS_HUMAN" ||
+    course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED"
+  ) {
+    return "NEEDS_HUMAN";
+  }
+  if (
+    course.incident?.activeBatchId ||
+    course.monitoringStatus?.state === "DEGRADED_RETRYING" ||
+    course.monitoringStatus?.state === "REVALIDATING_FINAL"
+  ) {
+    return "IN_PROGRESS";
+  }
+  if (
+    course.incident?.status === "AUTO_INVESTIGATING" ||
+    course.monitoringStatus?.state === "AUTO_INVESTIGATING"
+  ) {
+    const nextAttemptAt =
+      course.incident?.nextAttemptAt ??
+      course.monitoringStatus?.nextAutomaticAttemptAt ??
+      null;
+    return nextAttemptAt && nextAttemptAt > now
+      ? "SCHEDULED_RETRY"
+      : "DUE_NOW";
+  }
+  return course.priorityGroup === "ACTION" ? "NEEDS_HUMAN" : null;
 }

@@ -312,6 +312,94 @@ describe("operator course inventory", () => {
       priorityGroup: "WATCH"
     });
   });
+
+  it("lets newer successful reader evidence supersede stale investigating state", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          coverageCategory: "TECHNICAL_CONSTRAINT",
+          localReaderSupported: true,
+          localReaderVerifiedAt: new Date("2026-07-24T17:45:00.000Z"),
+          monitoringStatus: {
+            reference: "MON-1",
+            state: "AUTO_INVESTIGATING",
+            lastSuccessfulAt: null,
+            lastFailureAt: new Date("2026-07-24T17:30:00.000Z"),
+            nextAutomaticAttemptAt: new Date("2026-07-24T18:15:00.000Z"),
+            revalidationRequestedAt: null
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "LOCAL_READER_VERIFIED",
+      priorityGroup: "WORKING",
+      automationQueueState: null
+    });
+  });
+
+  it("keeps a newer failure actionable after an older successful reader result", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          coverageCategory: "TECHNICAL_CONSTRAINT",
+          localReaderSupported: true,
+          localReaderVerifiedAt: new Date("2026-07-24T17:30:00.000Z"),
+          monitoringStatus: {
+            reference: "MON-1",
+            state: "AUTO_INVESTIGATING",
+            lastSuccessfulAt: new Date("2026-07-24T17:30:00.000Z"),
+            lastFailureAt: new Date("2026-07-24T17:45:00.000Z"),
+            nextAutomaticAttemptAt: new Date("2026-07-24T18:15:00.000Z"),
+            revalidationRequestedAt: null
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      priorityGroup: "WATCH",
+      automationQueueState: "SCHEDULED_RETRY"
+    });
+  });
+
+  it("separates current automation work from scheduled and human work", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "due",
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING", {
+            nextAutomaticAttemptAt: new Date("2026-07-24T17:55:00.000Z")
+          })
+        }),
+        course({
+          id: "progress",
+          monitoringStatus: monitoringStatus("DEGRADED_RETRYING")
+        }),
+        course({
+          id: "scheduled",
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING", {
+            nextAutomaticAttemptAt: new Date("2026-07-24T18:30:00.000Z")
+          })
+        }),
+        course({
+          id: "human",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED")
+        })
+      ],
+      NOW
+    );
+
+    expect(summarizeCourseInventory(inventory)).toMatchObject({
+      dueNow: 1,
+      inProgress: 1,
+      scheduledRetry: 1,
+      needsHuman: 1
+    });
+  });
 });
 
 function course(
@@ -350,5 +438,20 @@ function probe(outcome: string, observedAt: string) {
     observedAt: new Date(observedAt),
     message: null,
     evidenceUrl: null
+  };
+}
+
+function monitoringStatus(
+  state: string,
+  overrides: Partial<NonNullable<CourseStatusInput["monitoringStatus"]>> = {}
+) {
+  return {
+    reference: "MON-1",
+    state,
+    lastSuccessfulAt: null,
+    lastFailureAt: new Date("2026-07-24T17:45:00.000Z"),
+    nextAutomaticAttemptAt: null,
+    revalidationRequestedAt: null,
+    ...overrides
   };
 }

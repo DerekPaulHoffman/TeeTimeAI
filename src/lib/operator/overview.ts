@@ -402,6 +402,8 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
             latestMessage: true,
             nextAction: true,
             failureClass: true,
+            nextAttemptAt: true,
+            activeBatchId: true,
             attemptCount: true
           }
         },

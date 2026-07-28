@@ -25,6 +25,10 @@ const JOB_LIFETIME_MS = 30 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
 
+export type LocalReaderQueueDisposition =
+  | "PENDING"
+  | "RETRYING_AFTER_TERMINAL_FAILURE";
+
 export async function queueLocalReaderCourseVerification(input: {
   courseId: string;
   targetDate: string;
@@ -126,7 +130,10 @@ export async function queueLocalReaderJob(input: {
     orderBy: { createdAt: "asc" },
   });
   if (reusableAcrossScheduleVersions) {
-    return reusableAcrossScheduleVersions;
+    return {
+      ...reusableAcrossScheduleVersions,
+      queueDisposition: "PENDING" as const,
+    };
   }
   const unique = {
     teeSearchId: input.searchId,
@@ -151,9 +158,18 @@ export async function queueLocalReaderJob(input: {
         existing.resultExpiresAt !== null &&
         existing.resultExpiresAt > now))
   ) {
-    return existing;
+    return {
+      ...existing,
+      queueDisposition: "PENDING" as const,
+    };
   }
-  return prisma.localReaderJob.upsert({
+  const retryingAfterTerminalFailure =
+    existing !== null &&
+    (existing.status === "FAILED" ||
+      existing.status === "EXPIRED" ||
+      ((existing.status === "PENDING" || existing.status === "LEASED") &&
+        existing.jobExpiresAt <= now));
+  const job = await prisma.localReaderJob.upsert({
     where: {
       teeSearchId_courseId_scheduleVersion_targetDate_players: unique,
     },
@@ -182,6 +198,12 @@ export async function queueLocalReaderJob(input: {
       completedAt: null,
     },
   });
+  return {
+    ...job,
+    queueDisposition: retryingAfterTerminalFailure
+      ? ("RETRYING_AFTER_TERMINAL_FAILURE" as const)
+      : ("PENDING" as const),
+  };
 }
 
 export async function claimNextLocalReaderJob(deviceId: string) {

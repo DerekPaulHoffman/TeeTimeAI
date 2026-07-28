@@ -570,38 +570,73 @@ function OperatorDashboard({
 function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
   const { counts } = overview.courseFleet;
   return (
-    <div className="operator-course-summary" aria-label="Course status totals">
-      <CourseFleetCount
-        count={counts.action}
-        icon={<ShieldAlert size={17} />}
-        label="Fix now"
-        tone="critical"
-      />
-      <CourseFleetCount
-        count={counts.watch}
-        icon={<Wrench size={17} />}
-        label="Investigate"
-        tone="warning"
-      />
-      <CourseFleetCount
-        count={counts.limitations}
-        icon={<AlertTriangle size={17} />}
-        label="Known limitations"
-        tone="neutral"
-      />
-      <CourseFleetCount
-        count={counts.unchecked}
-        icon={<Search size={17} />}
-        label="Not checked"
-        tone="neutral"
-      />
-      <CourseFleetCount
-        count={counts.working}
-        icon={<CheckCircle2 size={17} />}
-        label="Working"
-        tone="positive"
-      />
-    </div>
+    <>
+      <div className="operator-course-summary" aria-label="Course status totals">
+        <CourseFleetCount
+          count={counts.action}
+          icon={<ShieldAlert size={17} />}
+          label="Fix now"
+          tone="critical"
+        />
+        <CourseFleetCount
+          count={counts.watch}
+          icon={<Wrench size={17} />}
+          label="Investigate"
+          tone="warning"
+        />
+        <CourseFleetCount
+          count={counts.limitations}
+          icon={<AlertTriangle size={17} />}
+          label="Known limitations"
+          tone="neutral"
+        />
+        <CourseFleetCount
+          count={counts.unchecked}
+          icon={<Search size={17} />}
+          label="Not checked"
+          tone="neutral"
+        />
+        <CourseFleetCount
+          count={counts.working}
+          icon={<CheckCircle2 size={17} />}
+          label="Working"
+          tone="positive"
+        />
+      </div>
+      <div className="operator-automation-summary-heading">
+        <strong>Automation queue</strong>
+        <span>Current work only; scheduled retries are not overdue.</span>
+      </div>
+      <div
+        className="operator-course-summary operator-course-summary-automation"
+        aria-label="Automation queue totals"
+      >
+        <CourseFleetCount
+          count={counts.dueNow}
+          icon={<ShieldAlert size={17} />}
+          label="Due now"
+          tone="critical"
+        />
+        <CourseFleetCount
+          count={counts.inProgress}
+          icon={<Activity size={17} />}
+          label="In progress"
+          tone="warning"
+        />
+        <CourseFleetCount
+          count={counts.scheduledRetry}
+          icon={<Clock3 size={17} />}
+          label="Scheduled retry"
+          tone="neutral"
+        />
+        <CourseFleetCount
+          count={counts.needsHuman}
+          icon={<Wrench size={17} />}
+          label="Needs human"
+          tone="critical"
+        />
+      </div>
+    </>
   );
 }
 
@@ -721,7 +756,10 @@ function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]
         return (
           <article className={`operator-course-work-row is-${course.tone}`} key={course.id}>
             <div className="operator-course-work-priority">
-              <span>{formatPriority(course.priorityGroup)}</span>
+              <span>
+                {formatAutomationQueueState(course.automationQueueState) ??
+                  formatPriority(course.priorityGroup)}
+              </span>
               {course.activeAlertCount > 0 ? (
                 <strong>
                   {course.activeAlertCount} active{" "}
@@ -900,7 +938,8 @@ function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
               <td data-label="Status">
                 <StatusPill course={course} />
                 <small className="operator-priority-label">
-                  {formatPriority(course.priorityGroup)}
+                  {formatAutomationQueueState(course.automationQueueState) ??
+                    formatPriority(course.priorityGroup)}
                 </small>
               </td>
               <td data-label="Meaning and next action">
@@ -1038,6 +1077,16 @@ function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
   if (value === "LIMITATION") return "Known limitation";
   if (value === "UNCHECKED") return "Verify when needed";
   return "Healthy";
+}
+
+function formatAutomationQueueState(
+  value: CourseInventoryItem["automationQueueState"]
+) {
+  if (value === "DUE_NOW") return "Due now";
+  if (value === "IN_PROGRESS") return "In progress";
+  if (value === "SCHEDULED_RETRY") return "Scheduled retry";
+  if (value === "NEEDS_HUMAN") return "Needs human";
+  return null;
 }
 
 function viewForPriorityGroup(

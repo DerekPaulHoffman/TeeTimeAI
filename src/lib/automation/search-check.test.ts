@@ -1557,16 +1557,15 @@ describe("runSearchCheck email cadence", () => {
       "course-success": "NO_MATCH",
       "course-captcha": "FETCH_FAILED",
       "course-phone": "MANUAL_DIRECT",
-      "course-reader": "FETCH_FAILED",
+      "course-reader": "CHECK_PENDING",
       "course-technical": "NEEDS_ADAPTER"
     });
     expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith(
       expect.objectContaining({ courseId: "course-reader" })
     );
-    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalledWith(
       expect.objectContaining({
-        course: expect.objectContaining({ id: "course-reader" }),
-        kind: "READER_CANDIDATE"
+        course: expect.objectContaining({ id: "course-reader" })
       })
     );
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
@@ -1625,14 +1624,35 @@ describe("runSearchCheck email cadence", () => {
       bookingUrl
     });
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "FETCH_FAILED",
-      message: expect.stringContaining("local public-page reader")
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("in progress")
     });
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
+
+    supportIncidentMocks.reportCourseSupportIssue.mockClear();
+    dbMocks.recordCourseProbe.mockClear();
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-2",
+      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE"
+    });
+
+    const timedOutResult = await runSearchCheck("search-1", "test");
+
+    expect(timedOutResult.courseResults[0]).toMatchObject({
+      outcome: "FETCH_FAILED",
+      message: expect.stringContaining("did not complete")
+    });
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "FETCH_FAILED",
+        message: expect.stringContaining("did not complete")
+      })
+    );
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         course: expect.objectContaining({ id: "course-1" }),
-        kind: "READER_CANDIDATE",
-        readPath: "LOCAL_READER_ALLOWLIST"
+        kind: "READER_CANDIDATE"
       })
     );
   });
@@ -1688,22 +1708,11 @@ describe("runSearchCheck email cadence", () => {
       bookingUrl
     });
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "FETCH_FAILED",
-      message: expect.stringContaining("local public-page reader")
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("in progress")
     });
-    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
-      expect.objectContaining({
-        rawSummary: {
-          providerExecution: "LOCAL_BROWSER_READER_PENDING"
-        }
-      })
-    );
-    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "READER_CANDIDATE",
-        readPath: "LOCAL_READER_ALLOWLIST"
-      })
-    );
+    expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
   });
 
   it("lets the exact Grassy Hill local reader override a stored technical block", async () => {
@@ -1756,18 +1765,13 @@ describe("runSearchCheck email cadence", () => {
       bookingUrl
     });
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "FETCH_FAILED",
-      message: expect.stringContaining("local public-page reader")
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("in progress")
     });
     expect(dbMocks.recordCourseProbeIfChanged).not.toHaveBeenCalledWith(
       expect.objectContaining({ outcome: "BLOCKED_AUTH" })
     );
-    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "READER_CANDIDATE",
-        readPath: "LOCAL_READER_ALLOWLIST"
-      })
-    );
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
   });
 
   it("prefers a fresh local-reader result for CPS before the server adapter", async () => {

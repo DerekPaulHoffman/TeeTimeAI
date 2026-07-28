@@ -159,6 +159,44 @@ describe("local reader job service", () => {
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
   });
 
+  it("requeues an expired reader job and reports the terminal attempt", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-expired",
+      status: "EXPIRED",
+      leaseExpiresAt: null,
+      jobExpiresAt: new Date("2026-07-24T15:59:00.000Z"),
+      resultExpiresAt: null,
+    });
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({
+      id: "job-expired",
+      status: "PENDING",
+    });
+
+    await expect(
+      queueLocalReaderJob({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 3,
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+      }),
+    ).resolves.toMatchObject({
+      id: "job-expired",
+      status: "PENDING",
+      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE",
+    });
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          status: "PENDING",
+          jobExpiresAt: new Date("2026-07-24T16:30:00.000Z"),
+        }),
+      }),
+    );
+  });
+
   it("queues a dated public Chronogolf profile for the rendered reader", async () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
     prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
