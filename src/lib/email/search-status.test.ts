@@ -92,74 +92,6 @@ describe("search status email cadence", () => {
 });
 
 describe("renderSearchStatusHtml", () => {
-  it("tells golfers a confirmed provider outage will be retried and recovered", () => {
-    const html = renderSearchStatusHtml({
-      searchId: "search-outage",
-      to: "player@example.com",
-      kind: "outage",
-      providerLabel: "Chronogolf",
-      targetDate: "2026-07-29",
-      startTime: "07:30",
-      endTime: "09:00",
-      players: 4,
-      checkedAt: new Date("2026-07-27T14:15:00.000Z"),
-      courses: [
-        {
-          courseId: "blue-rock",
-          courseName: "Blue Rock Golf Course",
-          outcome: "FETCH_FAILED",
-          availableMatches: 0,
-          bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
-        }
-      ]
-    });
-
-    expect(html).toContain("MONITORING UPDATE");
-    expect(html).toContain("Automatic monitoring is temporarily unavailable");
-    expect(html).toContain(
-      "Chronogolf&#39;s public tee-time service isn&#39;t responding to our checks"
-    );
-    expect(html).toContain("Your alert is still active");
-    expect(html).toContain("email you as soon as automatic monitoring is back");
-    expect(html).toContain("Open official booking page");
-  });
-
-  it("combines a recovery notice with newly available tee times", () => {
-    const html = renderSearchStatusHtml({
-      searchId: "search-recovery",
-      to: "player@example.com",
-      kind: "recovery",
-      providerLabel: "Chronogolf",
-      targetDate: "2026-07-29",
-      startTime: "07:30",
-      endTime: "09:00",
-      players: 4,
-      checkedAt: new Date("2026-07-27T14:30:00.000Z"),
-      courses: [
-        {
-          courseId: "blue-rock",
-          courseName: "Blue Rock Golf Course",
-          timeZone: "America/New_York",
-          outcome: "MATCH_FOUND",
-          availableMatches: 1,
-          bookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course",
-          matchingTimes: [
-            {
-              startsAt: "2026-07-29T08:10:00-04:00",
-              availableSpots: 4,
-              isNew: true
-            }
-          ]
-        }
-      ]
-    });
-
-    expect(html).toContain("MONITORING IS BACK");
-    expect(html).toContain("Monitoring is back");
-    expect(html).toContain("matching tee times are available below");
-    expect(html).toContain("8:10 AM");
-  });
-
   it("shows the exact provider-confirmed booking release time", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-window",
@@ -622,7 +554,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("Please check directly with the course");
   });
 
-  it("only tells a first-time lookup golfer that the team was alerted after confirmed delivery", () => {
+  it("tells a first-time lookup golfer that the monitoring gap is in the operator queue", () => {
     const baseInput = {
       searchId: "search-1",
       to: "player@example.com",
@@ -633,7 +565,7 @@ describe("renderSearchStatusHtml", () => {
       players: 3,
       checkedAt: new Date("2026-07-12T12:15:00.000Z")
     };
-    const pendingHtml = renderSearchStatusHtml({
+    const html = renderSearchStatusHtml({
       ...baseInput,
       courses: [
         {
@@ -641,33 +573,17 @@ describe("renderSearchStatusHtml", () => {
           courseName: "Pequabuck Golf Club",
           outcome: "NEEDS_ADAPTER",
           availableMatches: 0,
-          supportStatus: "PENDING_ALERT",
-          firstTimeLookup: true
-        }
-      ]
-    });
-    const alertedHtml = renderSearchStatusHtml({
-      ...baseInput,
-      courses: [
-        {
-          courseId: "pequabuck",
-          courseName: "Pequabuck Golf Club",
-          outcome: "NEEDS_ADAPTER",
-          availableMatches: 0,
-          supportStatus: "TEAM_ALERTED",
+          supportStatus: "IN_OPERATOR_QUEUE",
           firstTimeLookup: true
         }
       ]
     });
 
-    expect(pendingHtml).toContain("AUTOMATIC ALERTS UNAVAILABLE");
-    expect(alertedHtml).toContain("AUTOMATIC ALERTS UNAVAILABLE");
-    expect(pendingHtml).toContain("Use the official site for this course");
-    expect(alertedHtml).toContain("Use the official site for this course");
-    expect(pendingHtml).toContain("first time Tee Time Spot has checked this course");
-    expect(alertedHtml).toContain("first time Tee Time Spot has checked this course");
-    expect(pendingHtml).not.toContain("alerted our course coverage team");
-    expect(alertedHtml).toContain("alerted our course coverage team");
+    expect(html).toContain("AUTOMATIC ALERTS UNAVAILABLE");
+    expect(html).toContain("Use the official site for this course");
+    expect(html).toContain("first time Tee Time Spot has checked this course");
+    expect(html).toContain("course coverage queue");
+    expect(html).not.toContain("alerted our course coverage team");
   });
 
   it("treats an incomplete provider check as an immediate golfer-facing verdict", () => {

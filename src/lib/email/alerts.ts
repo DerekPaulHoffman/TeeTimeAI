@@ -96,41 +96,6 @@ export class EmailDeliveryNotAcceptedError extends Error {
   }
 }
 
-export type CourseSupportOperatorEmailInput = {
-  event: "opened" | "escalated" | "resolved";
-  incidentId: string;
-  cycle: number;
-  courseId: string;
-  courseName: string;
-  platform: string;
-  bookingUrl?: string | null;
-  firstAffectedSearchId?: string | null;
-  affectedSearchCount: number;
-  kind: string;
-  message?: string | null;
-  nextAction?: string | null;
-  firstSeenAt: Date;
-  resolution?: string | null;
-  resolutionMessage?: string | null;
-};
-
-export type CourseSupportOperatorSummaryInput = {
-  incidents: Array<{
-    incidentId: string;
-    cycle: number;
-    courseId: string;
-    courseName: string;
-    platform: string;
-    bookingUrl?: string | null;
-    firstAffectedSearchId?: string | null;
-    affectedSearchCount: number;
-    kind: string;
-    message?: string | null;
-    nextAction?: string | null;
-    firstSeenAt: Date;
-  }>;
-};
-
 export type OperatorEmailDelivery =
   | EmailDelivery
   | {
@@ -235,11 +200,7 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
     subject:
       input.kind === "setup"
         ? "Your Tee Time Spot search is active"
-        : input.kind === "daily"
-          ? "Your morning Tee Time Spot update"
-          : input.kind === "outage"
-            ? `${input.providerLabel ?? "Tee Time Spot"} monitoring is temporarily unavailable`
-            : `${input.providerLabel ?? "Tee Time Spot"} monitoring is back`,
+        : "Your morning Tee Time Spot update",
     html: renderSearchStatusHtml({
       ...input,
       stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)
@@ -260,97 +221,6 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
 
   if (result.error) {
     throw new EmailDeliveryNotAcceptedError(result.error.message);
-  }
-
-  return { ...result.data, deliveryStatus: "sent" };
-}
-
-export async function sendCourseSupportOperatorEmail(
-  input: CourseSupportOperatorEmailInput
-): Promise<OperatorEmailDelivery> {
-  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
-  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
-  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
-
-  if (!to) {
-    console.error("[email:operator-not-configured]", {
-      incidentRef: createLogReference(input.incidentId),
-      courseRef: createLogReference(input.courseId),
-      event: input.event
-    });
-    return { deliveryStatus: "not_configured" };
-  }
-
-  if (!apiKey || !from || shouldDryRunRecipient(to)) {
-    console.warn("[email:operator-dry-run]", {
-      recipientRef: createLogReference(to),
-      incidentRef: createLogReference(input.incidentId),
-      courseRef: createLogReference(input.courseId),
-      event: input.event
-    });
-    return { id: "dry-run", deliveryStatus: "dry_run" };
-  }
-
-  const email = {
-    from,
-    to,
-    subject: getCourseSupportOperatorSubject(input),
-    html: renderCourseSupportOperatorHtml(input)
-  };
-  const result = await new Resend(apiKey).emails.send(email, {
-    idempotencyKey: `course-support/${input.incidentId}/${input.cycle}/${input.event}`
-  });
-
-  if (result.error) {
-    throw new Error(result.error.message);
-  }
-
-  return { ...result.data, deliveryStatus: "sent" };
-}
-
-export async function sendCourseSupportOperatorSummaryEmail(
-  input: CourseSupportOperatorSummaryInput
-): Promise<OperatorEmailDelivery> {
-  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
-  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
-  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
-
-  if (!to) {
-    console.error("[email:operator-summary-not-configured]", {
-      incidentRefs: input.incidents.map((incident) => createLogReference(incident.incidentId))
-    });
-    return { deliveryStatus: "not_configured" };
-  }
-
-  if (!apiKey || !from || shouldDryRunRecipient(to)) {
-    console.warn("[email:operator-summary-dry-run]", {
-      recipientRef: createLogReference(to),
-      incidents: input.incidents.length
-    });
-    return { id: "dry-run", deliveryStatus: "dry_run" };
-  }
-
-  const sortedIncidents = [...input.incidents].sort((left, right) =>
-    left.incidentId.localeCompare(right.incidentId)
-  );
-  const scope = createHash("sha256")
-    .update(sortedIncidents.map((incident) => `${incident.incidentId}:${incident.cycle}`).join("|"))
-    .digest("hex")
-    .slice(0, 24);
-  const email = {
-    from,
-    to,
-    subject: `${sortedIncidents.length} concrete course blocker${sortedIncidents.length === 1 ? "" : "s"} need your input`,
-    html: renderCourseSupportOperatorSummaryHtml({
-      incidents: sortedIncidents
-    })
-  };
-  const result = await new Resend(apiKey).emails.send(email, {
-    idempotencyKey: `course-support-summary/${scope}`
-  });
-
-  if (result.error) {
-    throw new Error(result.error.message);
   }
 
   return { ...result.data, deliveryStatus: "sent" };
@@ -415,123 +285,6 @@ export function shouldDryRunRecipient(email: string) {
     domain.endsWith(".invalid") ||
     domain.endsWith(".test")
   );
-}
-
-export function renderCourseSupportOperatorHtml(input: CourseSupportOperatorEmailInput) {
-  const eventLabel =
-    input.event === "opened"
-      ? "New course monitoring incident"
-      : input.event === "escalated"
-        ? "Course monitoring needs human review"
-        : "Course monitoring incident resolved";
-  const resolution = input.resolution
-    ? `<p><strong>Resolution:</strong> ${escapeHtml(input.resolution.replaceAll("_", " ").toLowerCase())}</p>`
-    : "";
-  const resolutionMessage = input.resolutionMessage
-    ? `<p><strong>Resolution notes:</strong> ${escapeHtml(input.resolutionMessage)}</p>`
-    : "";
-  const bookingLink = input.bookingUrl
-    ? `<p><a href="${escapeHtml(input.bookingUrl)}" style="color:#087746;font-weight:800">Inspect official course surface →</a></p>`
-    : "";
-
-  return `
-    <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
-      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
-        <div style="background:#111d18;color:#ffffff;padding:18px 22px">
-          <div style="font-weight:800;font-size:18px">Tee Time Spot operations</div>
-          <div style="color:rgba(255,255,255,.68);font-size:13px">${escapeHtml(eventLabel)}</div>
-        </div>
-        <div style="padding:22px">
-          <h1 style="font-size:24px;line-height:1.15;margin:0 0 16px">${escapeHtml(input.courseName)}</h1>
-          <p><strong>Status event:</strong> ${escapeHtml(input.event)}</p>
-          <p><strong>Incident:</strong> ${escapeHtml(input.incidentId)} · cycle ${input.cycle}</p>
-          <p><strong>Course reference:</strong> ${escapeHtml(input.courseId)}</p>
-          <p><strong>Detected platform:</strong> ${escapeHtml(input.platform)}</p>
-          <p><strong>Issue:</strong> ${escapeHtml(input.kind.replaceAll("_", " ").toLowerCase())}</p>
-          <p><strong>Affected active searches when opened:</strong> ${input.affectedSearchCount}</p>
-          <p><strong>First seen:</strong> ${escapeHtml(input.firstSeenAt.toISOString())}</p>
-          ${input.message ? `<p><strong>Evidence:</strong> ${escapeHtml(input.message)}</p>` : ""}
-          ${input.nextAction ? `<p><strong>Next action:</strong> ${escapeHtml(input.nextAction)}</p>` : ""}
-          ${resolution}
-          ${resolutionMessage}
-          ${bookingLink}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-export function renderCourseSupportOperatorSummaryHtml(input: CourseSupportOperatorSummaryInput) {
-  const groups = new Map<string, CourseSupportOperatorSummaryInput["incidents"]>();
-  for (const incident of input.incidents) {
-    const provider = getSupportProviderLabel(incident.platform, incident.bookingUrl);
-    const group = groups.get(provider) ?? [];
-    group.push(incident);
-    groups.set(provider, group);
-  }
-  const sections = [...groups.entries()]
-    .map(([provider, incidents]) => {
-      const rows = incidents
-        .map((incident) => {
-          const bookingLink = incident.bookingUrl
-            ? `<p style="margin:8px 0 0"><a href="${escapeHtml(incident.bookingUrl)}" style="color:#087746;font-weight:800">Inspect official course surface &rarr;</a></p>`
-            : "";
-          return `
-            <div style="border-top:1px solid #e5ebe7;padding:14px 0">
-              <p style="font-size:16px;font-weight:800;margin:0">${escapeHtml(incident.courseName)}</p>
-              <p style="color:#53645c;font-size:13px;margin:4px 0 0">${escapeHtml(incident.kind.replaceAll("_", " ").toLowerCase())} &middot; first seen ${escapeHtml(incident.firstSeenAt.toISOString())}</p>
-              ${incident.message ? `<p style="margin:8px 0 0"><strong>Evidence:</strong> ${escapeHtml(incident.message)}</p>` : ""}
-              ${incident.nextAction ? `<p style="margin:8px 0 0"><strong>Next action:</strong> ${escapeHtml(incident.nextAction)}</p>` : ""}
-              ${bookingLink}
-            </div>
-          `;
-        })
-        .join("");
-      return `
-        <div style="margin-top:18px">
-          <h2 style="font-size:18px;margin:0 0 4px">${escapeHtml(provider)} &middot; ${incidents.length} course${incidents.length === 1 ? "" : "s"}</h2>
-          ${rows}
-        </div>
-      `;
-    })
-    .join("");
-
-  return `
-    <div style="background:#f4efe5;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
-      <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
-        <div style="background:#111d18;color:#ffffff;padding:18px 22px">
-          <div style="font-weight:800;font-size:18px">Tee Time Spot operations</div>
-          <div style="color:rgba(255,255,255,.68);font-size:13px">Automated adapter remediation reached an external blocker</div>
-        </div>
-        <div style="padding:22px">
-          <h1 style="font-size:24px;line-height:1.15;margin:0 0 10px">A concrete blocker needs your input</h1>
-          <p style="margin:0;color:#53645c">The autonomous remediation run inspected the official provider, attempted the safe public paths available to it, and could not continue without the specific external action below.</p>
-          ${sections}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function getSupportProviderLabel(platform: string, bookingUrl?: string | null) {
-  if (platform !== "UNKNOWN") {
-    return platform;
-  }
-  try {
-    return bookingUrl ? new URL(bookingUrl).hostname : "Unknown provider";
-  } catch {
-    return "Unknown provider";
-  }
-}
-
-function getCourseSupportOperatorSubject(input: CourseSupportOperatorEmailInput) {
-  if (input.event === "opened") {
-    return `Action needed: monitoring gap at ${input.courseName}`;
-  }
-  if (input.event === "escalated") {
-    return `Human review needed: ${input.courseName}`;
-  }
-  return `Resolved: ${input.courseName} monitoring incident`;
 }
 
 export function renderAlertHtml(input: TeeTimeAlertInput) {

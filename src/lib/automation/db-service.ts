@@ -209,57 +209,6 @@ export async function getActiveSearchForAutomation(
   });
 }
 
-export async function listCorroboratedProviderFailureKeys(
-  candidates: Array<{
-    providerFamilyKey: string;
-    failureFingerprint: string;
-  }>,
-  since: Date
-) {
-  const unique = [
-    ...new Map(
-      candidates.map((candidate) => [
-        `${candidate.providerFamilyKey}:${candidate.failureFingerprint}`,
-        candidate
-      ])
-    ).values()
-  ];
-  if (unique.length === 0) {
-    return [];
-  }
-  const statuses = await prisma.courseMonitoringStatus.findMany({
-    where: {
-      lastFailureAt: { gte: since },
-      OR: unique.map((candidate) => ({
-        failureFingerprint: candidate.failureFingerprint,
-        course: {
-          is: { providerFamilyKey: candidate.providerFamilyKey }
-        }
-      }))
-    },
-    select: {
-      courseId: true,
-      failureFingerprint: true,
-      course: {
-        select: { providerFamilyKey: true }
-      }
-    }
-  });
-  const coursesByFailure = new Map<string, Set<string>>();
-  for (const status of statuses) {
-    if (!status.failureFingerprint) {
-      continue;
-    }
-    const key = `${status.course.providerFamilyKey}:${status.failureFingerprint}`;
-    const courseIds = coursesByFailure.get(key) ?? new Set<string>();
-    courseIds.add(status.courseId);
-    coursesByFailure.set(key, courseIds);
-  }
-  return [...coursesByFailure.entries()]
-    .filter(([, courseIds]) => courseIds.size >= 2)
-    .map(([key]) => key);
-}
-
 export async function listBrowserProbeTargets(
   limit = 5,
   courseName?: string
@@ -1973,6 +1922,7 @@ export async function listSearchesNeedingScheduleRecovery() {
                 {
                   emailDeliveries: {
                     some: {
+                      kind: { in: ["SETUP", "DAILY", "MATCH"] },
                       OR: [
                         {
                           status: "PENDING",

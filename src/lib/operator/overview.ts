@@ -52,6 +52,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
     matchesFoundToday,
     matchEmailsSentToday,
     openIncidents,
+    recentResolvedIncidents,
     unresolvedFeedback,
     recentUsers,
     problemSearches,
@@ -198,6 +199,29 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
         }
       }
     }),
+    prisma.courseSupportIncident.findMany({
+      where: {
+        status: "RESOLVED",
+        resolvedAt: { gte: range.start, lt: range.end }
+      },
+      orderBy: [{ resolvedAt: "desc" }, { lastSeenAt: "desc" }],
+      take: 20,
+      select: {
+        id: true,
+        reference: true,
+        kind: true,
+        providerFamilyKey: true,
+        resolution: true,
+        resolutionMessage: true,
+        firstSeenAt: true,
+        resolvedAt: true,
+        course: {
+          select: {
+            name: true
+          }
+        }
+      }
+    }),
     prisma.websiteFeedback.findMany({
       where: {
         resolvedAt: null,
@@ -292,6 +316,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
     }),
     prisma.searchEmailDelivery.findMany({
       where: {
+        kind: { in: ["SETUP", "DAILY", "MATCH"] },
         teeSearch: {
           trafficClass: NON_SYNTHETIC_TRAFFIC
         },
@@ -653,6 +678,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
       counts: summarizeCourseInventory(courseInventory)
     },
     incidents: openIncidents,
+    resolvedIncidents: recentResolvedIncidents,
     recentUsers: recentUsers.map((user) => ({
       id: user.id,
       email: user.email,

@@ -12,17 +12,10 @@ const prismaMocks = vi.hoisted(() => ({
   }
 }));
 
-const emailMocks = vi.hoisted(() => ({
-  sendCourseSupportOperatorEmail: vi.fn(),
-  sendCourseSupportOperatorSummaryEmail: vi.fn()
-}));
-
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
-vi.mock("@/lib/email/alerts", () => emailMocks);
 
 import {
   escalateCourseSupportIncident,
-  notifyCourseSupportIssueBatch,
   reportCourseSupportIssue,
   resolveCourseSupportIncident
 } from "./support-incidents";
@@ -121,14 +114,6 @@ describe("course support incidents", () => {
       trafficClass: "UNCLASSIFIED",
       syntheticMultiCycle: false
     });
-    emailMocks.sendCourseSupportOperatorEmail.mockResolvedValue({
-      id: "email-1",
-      deliveryStatus: "sent"
-    });
-    emailMocks.sendCourseSupportOperatorSummaryEmail.mockResolvedValue({
-      id: "email-summary-1",
-      deliveryStatus: "sent"
-    });
   });
 
   it("opens a durable incident without alerting the operator before a retry", async () => {
@@ -151,8 +136,6 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(emailMocks.sendCourseSupportOperatorEmail).not.toHaveBeenCalled();
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
     expect(result).toEqual({
       incidentId: "incident-1",
       status: "AUTO_INVESTIGATING",
@@ -252,8 +235,6 @@ describe("course support incidents", () => {
         engineeringOnly: true
       })
     });
-    expect(emailMocks.sendCourseSupportOperatorEmail).not.toHaveBeenCalled();
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
   });
 
   it("opens a synthetic-sourced incident as real demand when a real alert already exists", async () => {
@@ -463,8 +444,6 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(emailMocks.sendCourseSupportOperatorEmail).not.toHaveBeenCalled();
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
     expect(result.status).toBe("AUTO_INVESTIGATING");
     expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
   });
@@ -827,7 +806,7 @@ describe("course support incidents", () => {
     });
   });
 
-  it("escalates only after an automated remediation records a concrete blocker", async () => {
+  it("escalates a concrete blocker into the durable operator queue", async () => {
     const blocked = incident({
       status: "NEEDS_HUMAN",
       latestMessage: "The provider requires a signed contract before public API access.",
@@ -838,10 +817,6 @@ describe("course support incidents", () => {
       .mockResolvedValueOnce(incident())
       .mockResolvedValueOnce(incident());
     prismaMocks.courseSupportIncident.update.mockResolvedValue(blocked);
-    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([blocked]);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
-      count: 1
-    });
 
     const result = await escalateCourseSupportIncident({
       incidentId: "incident-1",
@@ -858,16 +833,10 @@ describe("course support incidents", () => {
         lastSeenAt: now
       })
     });
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).toHaveBeenCalledOnce();
-    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ engineeringOnly: false })
-      })
-    );
     expect(result).toEqual(blocked);
   });
 
-  it("persists human review for an engineering-only incident without emailing", async () => {
+  it("persists human review for an engineering-only incident", async () => {
     const engineeringIncident = incident({ engineeringOnly: true });
     const escalated = incident({
       engineeringOnly: true,
@@ -880,7 +849,6 @@ describe("course support incidents", () => {
       .mockResolvedValueOnce(engineeringIncident)
       .mockResolvedValueOnce(engineeringIncident);
     prismaMocks.courseSupportIncident.update.mockResolvedValue(escalated);
-    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
 
     const result = await escalateCourseSupportIncident({
       incidentId: "incident-1",
@@ -891,80 +859,9 @@ describe("course support incidents", () => {
 
     expect(result).toEqual(escalated);
     expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
   });
 
-  it("consolidates human-review incidents into one operator email", async () => {
-    const first = incident({ status: "NEEDS_HUMAN", escalatedAt: now });
-    const second = incident({
-      id: "incident-2",
-      reference: "csi_abcdef1234567890abcdef12",
-      courseId: "course-2",
-      courseNameSnapshot: "Dennis Pines",
-      status: "NEEDS_HUMAN",
-      escalatedAt: now
-    });
-    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([first, second]);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
-      count: 2
-    });
-
-    const result = await notifyCourseSupportIssueBatch(["incident-1", "incident-2"], now);
-
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).toHaveBeenCalledOnce();
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).toHaveBeenCalledWith({
-      incidents: [
-        expect.objectContaining({
-          incidentId: "csi_1234567890abcdef12345678"
-        }),
-        expect.objectContaining({
-          incidentId: "csi_abcdef1234567890abcdef12"
-        })
-      ]
-    });
-    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["incident-1", "incident-2"] } },
-      data: { escalationNotifiedAt: now }
-    });
-    expect(result).toEqual({
-      notifiedIncidentIds: ["incident-1", "incident-2"],
-      pendingIncidentIds: []
-    });
-  });
-
-  it("alerts the operator immediately when real demand opens an automated investigation", async () => {
-    const opened = incident({ status: "AUTO_INVESTIGATING" });
-    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([opened]);
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(incident({ ownerNotifiedAt: now }));
-
-    const result = await notifyCourseSupportIssueBatch(["incident-1"], now);
-
-    expect(emailMocks.sendCourseSupportOperatorEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        event: "opened",
-        incidentId: "csi_1234567890abcdef12345678"
-      })
-    );
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).not.toHaveBeenCalled();
-    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] },
-          engineeringOnly: false
-        })
-      })
-    );
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
-      data: { ownerNotifiedAt: now }
-    });
-    expect(result).toEqual({
-      notifiedIncidentIds: ["incident-1"],
-      pendingIncidentIds: []
-    });
-  });
-
-  it("records resolution and sends a resolution email", async () => {
+  it("records resolution for the operator history without sending email", async () => {
     const existing = incident({ ownerNotifiedAt: now });
     const resolved = incident({
       status: "RESOLVED",
@@ -980,21 +877,19 @@ describe("course support incidents", () => {
     prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
       count: 1
     });
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({ ...resolved, resolutionNotifiedAt: now })
-    );
-
-    await resolveCourseSupportIncident({
+    await expect(resolveCourseSupportIncident({
       courseId: "course-1",
       resolution: "DIRECT_BOOKING_CLASSIFIED",
       message: "Chronogolf reports online booking disabled.",
       now
-    });
-
-    expect(emailMocks.sendCourseSupportOperatorEmail).toHaveBeenCalledWith(
+    })).resolves.toEqual(resolved);
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        event: "resolved",
-        resolution: "DIRECT_BOOKING_CLASSIFIED"
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolution: "DIRECT_BOOKING_CLASSIFIED",
+          resolutionMessage: "Chronogolf reports online booking disabled."
+        })
       })
     );
   });
@@ -1014,7 +909,6 @@ describe("course support incidents", () => {
 
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
-    expect(emailMocks.sendCourseSupportOperatorEmail).not.toHaveBeenCalled();
   });
 
   it("fences a resolution when responder ownership wins after the first read", async () => {

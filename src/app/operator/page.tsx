@@ -408,6 +408,73 @@ function OperatorDashboard({
         )}
       </section>
 
+      <section aria-labelledby="resolved-incidents-heading" className="operator-section">
+        <SectionHeading
+          eyebrow={`${overview.range.days}-day history`}
+          id="resolved-incidents-heading"
+          title="Recently resolved incidents"
+          supporting="Monitoring recoveries and final course dispositions stay here instead of generating operator email."
+        />
+        {overview.resolvedIncidents.length > 0 ? (
+          <div className="operator-incident-list">
+            {overview.resolvedIncidents.map((incident) => (
+              <article className="operator-incident-row" key={incident.id}>
+                <div className="operator-incident-main">
+                  <div className="operator-incident-title">
+                    <span className="status-pill operator-status-resolved">
+                      <CheckCircle2 size={13} />
+                      Resolved
+                    </span>
+                    <h3>{incident.course.name}</h3>
+                  </div>
+                  <dl className="operator-incident-facts">
+                    <div>
+                      <dt>Resolution</dt>
+                      <dd>{formatEnum(incident.resolution ?? "RESOLVED")}</dd>
+                    </div>
+                    <div>
+                      <dt>Issue</dt>
+                      <dd>{formatEnum(incident.kind)}</dd>
+                    </div>
+                    <div>
+                      <dt>Provider</dt>
+                      <dd>{formatProvider(incident.providerFamilyKey)}</dd>
+                    </div>
+                    <div>
+                      <dt>Open duration</dt>
+                      <dd>
+                        {incident.resolvedAt
+                          ? formatDuration(incident.firstSeenAt, incident.resolvedAt)
+                          : "Recorded"}
+                      </dd>
+                    </div>
+                  </dl>
+                  {incident.resolutionMessage ? (
+                    <details className="operator-details">
+                      <summary>Resolution notes</summary>
+                      <p>{incident.resolutionMessage}</p>
+                    </details>
+                  ) : null}
+                </div>
+                <div className="operator-incident-action">
+                  <span className="operator-queue-label">
+                    <CheckCircle2 size={14} />
+                    {incident.resolvedAt
+                      ? `Resolved ${formatRelativeAge(incident.resolvedAt)}`
+                      : "Resolved"}
+                  </span>
+                  <Link href={`/operator/courses/${incident.reference}` as Route}>
+                    View course history
+                  </Link>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState>No incidents resolved in this range.</EmptyState>
+        )}
+      </section>
+
       <section aria-labelledby="health-heading" className="operator-section">
         <SectionHeading
           eyebrow="Last 24 hours"
@@ -1227,4 +1294,10 @@ function formatRelativeAge(value: Date) {
   const hours = Math.max(0, Math.floor((Date.now() - value.getTime()) / (60 * 60 * 1000)));
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function formatDuration(start: Date, end: Date) {
+  const hours = Math.max(0, Math.round((end.getTime() - start.getTime()) / (60 * 60 * 1000)));
+  if (hours < 24) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
 }

@@ -45,7 +45,7 @@ import {
   type ResponderFailureDomain,
   type ResponderOutcome
 } from "./course-support-responder-policy";
-import { notifyCourseSupportIssueBatch, resolveCourseSupportIncident } from "./support-incidents";
+import { resolveCourseSupportIncident } from "./support-incidents";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 import {
@@ -3708,11 +3708,10 @@ export async function closeoutCourseSupportBatch(input: {
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
   );
 
-  let notificationPendingCount = 0;
   for (const entry of normalizedEntries.filter((candidate) =>
     ["RESTORED", "FINAL_DISPOSITION"].includes(candidate.normalizedResult)
   )) {
-    const resolved = await resolveCourseSupportIncident({
+    await resolveCourseSupportIncident({
       courseId: entry.courseId,
       resolution:
         entry.normalizedResult === "RESTORED"
@@ -3723,62 +3722,15 @@ export async function closeoutCourseSupportBatch(input: {
       ),
       now
     });
-    if (
-      resolved &&
-      (resolved.ownerNotifiedAt || resolved.escalationNotifiedAt) &&
-      !resolved.resolutionNotifiedAt
-    ) {
-      notificationPendingCount += 1;
-    }
-  }
-  const humanIncidentIds = normalizedEntries
-    .filter((entry) => entry.normalizedResult === "NEEDS_HUMAN")
-    .map((entry) => entry.incidentId);
-  if (humanIncidentIds.length > 0) {
-    const notification = await notifyCourseSupportIssueBatch(humanIncidentIds, now);
-    notificationPendingCount += notification.pendingIncidentIds.length;
   }
 
-  let finalOutcome = outcome;
-  let finalBatchStatus = batchStatus;
-  if (notificationPendingCount > 0) {
-    finalOutcome = "delivery_incident";
-    finalBatchStatus = "PARTIAL";
-    await prisma.$transaction([
-      prisma.courseSupportBatch.update({
-        where: { id: batch.id },
-        data: {
-          status: "PARTIAL",
-          summary: {
-            ...asJsonObject(batch.summary),
-            closeout: {
-              outcome: finalOutcome,
-              derivedOutcome,
-              failureDomain: "DELIVERY",
-              terminalCount,
-              retryCount,
-              needsHumanCount,
-              notificationPendingCount,
-              summary: safeSummary
-            }
-          } as Prisma.InputJsonValue
-        }
-      }),
-      ...(batch.ownerAutomationRunId
-        ? [
-            prisma.automationRun.update({
-              where: { id: batch.ownerAutomationRunId },
-              data: { outcome: finalOutcome }
-            })
-          ]
-        : [])
-    ]);
-  }
+  const finalOutcome = outcome;
+  const finalBatchStatus = batchStatus;
 
   const nextAttemptAt = retryTimes.sort((left, right) => left.getTime() - right.getTime())[0];
   const policy = getResponderThreadPolicy({
     outcome: finalOutcome,
-    failureDomain: notificationPendingCount > 0 ? "DELIVERY" : input.failureDomain,
+    failureDomain: input.failureDomain,
     nextAttemptAt,
     requiresHuman: hasHuman,
     durableCloseoutRecorded: true
@@ -3790,7 +3742,7 @@ export async function closeoutCourseSupportBatch(input: {
     durableCloseoutRecorded: true,
     terminalCount,
     retryCount,
-    notificationPendingCount,
+    notificationPendingCount: 0,
     leverage: {
       providerGroupResolvedCount: retryCount === 0 && needsHumanCount === 0 ? 1 : 0,
       claimedCourseCount: normalizedEntries.length,

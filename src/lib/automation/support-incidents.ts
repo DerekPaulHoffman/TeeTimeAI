@@ -6,10 +6,6 @@ import type {
 } from "@prisma/client";
 
 import {
-  sendCourseSupportOperatorEmail,
-  sendCourseSupportOperatorSummaryEmail
-} from "@/lib/email/alerts";
-import {
   isSyntheticWebsiteTrafficClass,
   syntheticWebsiteTrafficClasses
 } from "@/lib/engagement/traffic-class";
@@ -18,12 +14,10 @@ import { prisma } from "@/lib/prisma";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
-  createCourseMonitoringSafeReference,
   createIncidentReference,
   getCourseMonitoringEscalationDeadline,
   inferHumanReviewReason,
-  recordCourseMonitoringFailure,
-  sanitizeEvidenceUrl
+  recordCourseMonitoringFailure
 } from "./course-monitoring";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
@@ -57,11 +51,6 @@ export type CourseSupportIssueState = {
   incidentId: string | null;
   status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "UNRECORDED";
   ownerAlerted: boolean;
-};
-
-export type CourseSupportBatchNotificationState = {
-  notifiedIncidentIds: string[];
-  pendingIncidentIds: string[];
 };
 
 export async function reportCourseSupportIssue(
@@ -103,9 +92,7 @@ export async function resolveCourseSupportIncident(input: {
   if (
     !current ||
     current.activeBatchId ||
-    (current.status === "RESOLVED" &&
-      (Boolean(current.resolutionNotifiedAt) ||
-        (!current.ownerNotifiedAt && !current.escalationNotifiedAt)))
+    current.status === "RESOLVED"
   ) {
     return current;
   }
@@ -117,23 +104,6 @@ export async function resolveCourseSupportIncident(input: {
   );
 
   return lease.acquired ? lease.value : null;
-}
-
-export async function notifyCourseSupportIssueBatch(
-  incidentIds: string[],
-  now = new Date()
-): Promise<CourseSupportBatchNotificationState> {
-  const uniqueIncidentIds = [...new Set(incidentIds.filter(Boolean))];
-  if (uniqueIncidentIds.length === 0) {
-    return { notifiedIncidentIds: [], pendingIncidentIds: [] };
-  }
-
-  const lease = await withPostgresAdvisoryTextLease(prisma, "course-support:operator-summary", () =>
-    notifyCourseSupportIssueBatchWithLease(uniqueIncidentIds, now)
-  );
-  return lease.acquired
-    ? lease.value
-    : { notifiedIncidentIds: [], pendingIncidentIds: uniqueIncidentIds };
 }
 
 export async function escalateCourseSupportIncident(input: {
@@ -184,7 +154,6 @@ export async function escalateCourseSupportIncident(input: {
     return lease.acquired ? lease.value : null;
   }
 
-  await notifyCourseSupportIssueBatch([lease.value.id], now);
   return lease.value;
 }
 
@@ -545,88 +514,6 @@ function getInitialCourseSupportAttemptAt(
   return new Date(now.getTime() + retrySeconds * 1000);
 }
 
-async function notifyCourseSupportIssueBatchWithLease(
-  incidentIds: string[],
-  now: Date
-): Promise<CourseSupportBatchNotificationState> {
-  const incidents = await prisma.courseSupportIncident.findMany({
-    where: {
-      id: { in: incidentIds },
-      status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] },
-      engineeringOnly: false,
-      confirmedAt: { not: null },
-      ownerNotifiedAt: null,
-      escalationNotifiedAt: null
-    },
-    orderBy: [{ platformSnapshot: "asc" }, { courseNameSnapshot: "asc" }]
-  });
-  if (incidents.length === 0) {
-    return { notifiedIncidentIds: [], pendingIncidentIds: [] };
-  }
-
-  try {
-    const openedIncidents = incidents.filter(
-      (incident) => incident.status === "AUTO_INVESTIGATING"
-    );
-    const escalatedIncidents = incidents.filter((incident) => incident.status === "NEEDS_HUMAN");
-    const notifiedIncidentIds: string[] = [];
-
-    for (const incident of openedIncidents) {
-      const notified = await notifyIncidentEvent(incident, "opened", now);
-      if (notified.ownerNotifiedAt) {
-        notifiedIncidentIds.push(incident.id);
-      }
-    }
-
-    if (escalatedIncidents.length > 0) {
-      const delivery = await sendCourseSupportOperatorSummaryEmail({
-        incidents: escalatedIncidents.map((incident) => ({
-          incidentId: incident.reference,
-          cycle: incident.cycle,
-          courseId: createCourseMonitoringSafeReference(incident.courseId),
-          courseName: incident.courseNameSnapshot,
-          platform: incident.platformSnapshot,
-          bookingUrl: sanitizeEvidenceUrl(incident.bookingUrlSnapshot),
-          affectedSearchCount: incident.affectedSearchCount,
-          kind: incident.kind,
-          message: incident.latestMessage
-            ? sanitizeResponderText(incident.latestMessage).slice(0, 500)
-            : null,
-          nextAction: incident.nextAction
-            ? sanitizeResponderText(incident.nextAction).slice(0, 500)
-            : null,
-          firstSeenAt: incident.firstSeenAt
-        }))
-      });
-      if (delivery.deliveryStatus === "sent") {
-        const escalatedIncidentIds = escalatedIncidents.map((incident) => incident.id);
-        await prisma.courseSupportIncident.updateMany({
-          where: { id: { in: escalatedIncidentIds } },
-          data: { escalationNotifiedAt: now }
-        });
-        notifiedIncidentIds.push(...escalatedIncidentIds);
-      }
-    }
-
-    const notifiedIncidentIdSet = new Set(notifiedIncidentIds);
-    return {
-      notifiedIncidentIds,
-      pendingIncidentIds: incidents
-        .filter((incident) => !notifiedIncidentIdSet.has(incident.id))
-        .map((incident) => incident.id)
-    };
-  } catch (error) {
-    console.error("[email:operator-summary-failed]", {
-      incidents: incidents.map((incident) => incident.id),
-      message: error instanceof Error ? error.message : "Unknown operator summary failure"
-    });
-    return {
-      notifiedIncidentIds: [],
-      pendingIncidentIds: incidents.map((incident) => incident.id)
-    };
-  }
-}
-
 async function resolveCourseSupportIncidentWithLease(input: {
   courseId: string;
   resolution: CourseSupportResolution;
@@ -642,7 +529,6 @@ async function resolveCourseSupportIncidentWithLease(input: {
     return null;
   }
 
-  let incident = existing;
   if (existing.status !== "RESOLVED") {
     const updated = await prisma.courseSupportIncident.updateMany({
       where: {
@@ -673,78 +559,7 @@ async function resolveCourseSupportIncidentWithLease(input: {
     if (!resolved) {
       return null;
     }
-    incident = resolved;
+    return resolved;
   }
-
-  if (
-    (incident.ownerNotifiedAt || incident.escalationNotifiedAt) &&
-    !incident.resolutionNotifiedAt
-  ) {
-    incident = await notifyIncidentEvent(incident, "resolved", now);
-  }
-
-  return incident;
-}
-
-async function notifyIncidentEvent(
-  incident: CourseSupportIncident,
-  event: "opened" | "escalated" | "resolved",
-  now: Date
-) {
-  const sentAtField =
-    event === "opened"
-      ? "ownerNotifiedAt"
-      : event === "escalated"
-        ? "escalationNotifiedAt"
-        : "resolutionNotifiedAt";
-
-  if (event === "opened" && incident.escalationNotifiedAt) {
-    return incident;
-  }
-
-  if (incident[sentAtField]) {
-    return incident;
-  }
-
-  try {
-    const delivery = await sendCourseSupportOperatorEmail({
-      event,
-      incidentId: incident.reference,
-      cycle: incident.cycle,
-      courseId: createCourseMonitoringSafeReference(incident.courseId),
-      courseName: incident.courseNameSnapshot,
-      platform: incident.platformSnapshot,
-      bookingUrl: sanitizeEvidenceUrl(incident.bookingUrlSnapshot),
-      affectedSearchCount: incident.affectedSearchCount,
-      kind: incident.kind,
-      message: incident.initialMessage
-        ? sanitizeResponderText(incident.initialMessage).slice(0, 500)
-        : null,
-      nextAction: incident.nextAction
-        ? sanitizeResponderText(incident.nextAction).slice(0, 500)
-        : null,
-      firstSeenAt: incident.firstSeenAt,
-      resolution: incident.resolution,
-      resolutionMessage: incident.resolutionMessage
-        ? sanitizeResponderText(incident.resolutionMessage).slice(0, 500)
-        : null
-    });
-
-    if (delivery.deliveryStatus !== "sent") {
-      return incident;
-    }
-
-    return prisma.courseSupportIncident.update({
-      where: { id: incident.id },
-      data: { [sentAtField]: now }
-    });
-  } catch (error) {
-    console.error("[email:operator-failed]", {
-      incidentRef: incident.reference,
-      courseRef: createCourseMonitoringSafeReference(incident.courseId),
-      event,
-      message: error instanceof Error ? error.message : "Unknown operator email failure"
-    });
-    return incident;
-  }
+  return existing;
 }

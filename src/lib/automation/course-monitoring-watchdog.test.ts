@@ -19,12 +19,7 @@ const prismaMocks = vi.hoisted(() => ({
   }
 }));
 
-const emailMocks = vi.hoisted(() => ({
-  sendCourseSupportOperatorSummaryEmail: vi.fn()
-}));
-
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
-vi.mock("@/lib/email/alerts", () => emailMocks);
 
 import { FAILURE_CONFIRMATION_WINDOW_MS, runCourseMonitoringWatchdog } from "./course-monitoring";
 
@@ -190,7 +185,7 @@ describe("course monitoring watchdog", () => {
     );
   });
 
-  it("sends a deduplicated reminder before requeueing a due review", async () => {
+  it("keeps a due review visible without sending an operator reminder", async () => {
     const humanIncident = incident({
       status: "NEEDS_HUMAN",
       confirmedAt: new Date("2026-07-27T10:00:00.000Z"),
@@ -210,22 +205,23 @@ describe("course monitoring watchdog", () => {
       }
     ]);
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([humanIncident]);
-    emailMocks.sendCourseSupportOperatorSummaryEmail.mockResolvedValue({
-      deliveryStatus: "sent"
-    });
 
     await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
       checked: 1,
       scheduled: 0,
-      remindersSent: 1
+      remindersSent: 0
     });
-    expect(emailMocks.sendCourseSupportOperatorSummaryEmail).toHaveBeenCalledOnce();
-    expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({
-          eventType: "REMINDER_SENT",
-          toState: "ENGINEERING_VERIFICATION_NEEDED"
-        })
+        data: {
+          nextReminderAt: new Date("2026-08-03T16:00:00.000Z"),
+          revision: { increment: 1 }
+        }
+      })
+    );
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ eventType: "REMINDER_SENT" })
       })
     );
   });

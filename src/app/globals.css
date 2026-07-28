@@ -3306,6 +3306,14 @@ button {
   color: #5e6b64;
 }
 
+.operator-status-resolved {
+  align-items: center;
+  background: #e4f4ea;
+  color: #176b42;
+  display: inline-flex;
+  gap: 5px;
+}
+
 .operator-incident-facts {
   display: flex;
   flex-wrap: wrap;

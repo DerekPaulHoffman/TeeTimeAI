@@ -7,7 +7,6 @@ const dbMocks = vi.hoisted(() => ({
   heartbeatSearchCheckLease: vi.fn(),
   isSearchCheckLeaseCurrent: vi.fn(),
   listAvailableMatchAlerts: vi.fn(),
-  listCorroboratedProviderFailureKeys: vi.fn(),
   listPendingMatchAlerts: vi.fn(),
   markCourseBookingWindowChecked: vi.fn(),
   markMatchAlertSent: vi.fn(),
@@ -41,7 +40,6 @@ const deliveryOutboxMocks = vi.hoisted(() => ({
   ),
   hydrateMatchAlertPayload: vi.fn(),
   hydrateSearchStatusEmailPayload: vi.fn(),
-  listReachedMonitoringOutages: vi.fn(),
   listRetryableSearchEmailDeliveryGroups: vi.fn(),
   prepareRecipientMatchDeliveryGroups: vi.fn(),
   prepareSearchEmailDeliveryGroup: vi.fn(),
@@ -69,7 +67,6 @@ const adapterMocks = vi.hoisted(() => ({
 }));
 
 const supportIncidentMocks = vi.hoisted(() => ({
-  notifyCourseSupportIssueBatch: vi.fn(),
   reportCourseSupportIssue: vi.fn(),
   resolveCourseSupportIncident: vi.fn()
 }));
@@ -251,7 +248,6 @@ describe("runSearchCheck email cadence", () => {
     }));
     dbMocks.listPendingMatchAlerts.mockResolvedValue([pendingMatch]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([pendingMatch]);
-    dbMocks.listCorroboratedProviderFailureKeys.mockResolvedValue([]);
     dbMocks.markMatchAlertSent.mockResolvedValue(undefined);
     dbMocks.markMatchAlertSuppressed.mockResolvedValue(undefined);
     dbMocks.markSearchStatusEmailSent.mockResolvedValue(undefined);
@@ -270,7 +266,6 @@ describe("runSearchCheck email cadence", () => {
       typeof value === "string" ? value : undefined
     );
     deliveryOutboxMocks.listRetryableSearchEmailDeliveryGroups.mockResolvedValue([]);
-    deliveryOutboxMocks.listReachedMonitoringOutages.mockResolvedValue([]);
     deliveryOutboxMocks.getPendingStatusEmailReplacement.mockResolvedValue(null);
     deliveryOutboxMocks.satisfyPendingDailyStatusReplacementWithMatch.mockResolvedValue({
       current: true,
@@ -382,10 +377,6 @@ describe("runSearchCheck email cadence", () => {
       incidentId: "incident-1",
       status: "AUTO_INVESTIGATING",
       ownerAlerted: true
-    });
-    supportIncidentMocks.notifyCourseSupportIssueBatch.mockResolvedValue({
-      notifiedIncidentIds: [],
-      pendingIncidentIds: []
     });
     supportIncidentMocks.resolveCourseSupportIncident.mockResolvedValue(null);
     monitoringDiscoveryMocks.prepareSearchMonitoring.mockResolvedValue({
@@ -1241,7 +1232,7 @@ describe("runSearchCheck email cadence", () => {
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
 
-  it("sends one confirmed provider outage notice while keeping the alert active", async () => {
+  it("keeps a confirmed provider outage in the operator queue without email", async () => {
     const firstDegradedAt = new Date("2026-07-11T12:00:00.000Z");
     const base = {
       ...search,
@@ -1303,31 +1294,15 @@ describe("runSearchCheck email cadence", () => {
 
     await runSearchCheck("search-1", "test");
 
-    expect(
-      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "MONITORING_OUTAGE",
-        recipients: ["player@resend.dev"],
-        payload: expect.objectContaining({
-          statusSnapshot: [
-            expect.objectContaining({
-              courseId: "course-1",
-              state: expect.stringMatching(/^FETCH_FAILED:/)
-            })
-          ]
-        })
-      })
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "MONITORING_OUTAGE" })
     );
-    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "outage",
-        providerLabel: "Chronogolf"
-      })
+    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "outage" })
     );
   });
 
-  it("sends recovery only to recipients reached during the outage", async () => {
+  it("records monitoring recovery without sending a recovery email", async () => {
     const firstDegradedAt = new Date("2026-07-11T11:30:00.000Z");
     const degraded = {
       ...search,
@@ -1389,34 +1364,13 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
-    deliveryOutboxMocks.listReachedMonitoringOutages.mockResolvedValue([
-      {
-        courseId: "course-1",
-        recipient: "player@resend.dev",
-        sentAt: new Date("2026-07-11T11:46:00.000Z")
-      },
-      {
-        courseId: "course-1",
-        recipient: "friend@resend.dev",
-        sentAt: new Date("2026-07-11T11:47:00.000Z")
-      }
-    ]);
-
     await runSearchCheck("search-1", "test");
 
-    expect(
-      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "MONITORING_RECOVERY",
-        recipients: ["friend@resend.dev", "player@resend.dev"]
-      })
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "MONITORING_RECOVERY" })
     );
-    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "recovery",
-        providerLabel: "Chronogolf"
-      })
+    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "recovery" })
     );
   });
 
@@ -2114,7 +2068,7 @@ describe("runSearchCheck email cadence", () => {
     expect(result.courseResults[0]).toEqual(
       expect.objectContaining({
         outcome: "NEEDS_ADAPTER",
-        supportStatus: "TEAM_ALERTED",
+        supportStatus: "IN_OPERATOR_QUEUE",
         firstTimeLookup: true
       })
     );

@@ -8,7 +8,6 @@ import {
   type ProbeOutcome
 } from "@prisma/client";
 
-import { sendCourseSupportOperatorSummaryEmail } from "@/lib/email/alerts";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
@@ -1008,19 +1007,19 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     }
   }
 
-  const reminderResult = await sendHumanReviewReminders(reminderIds, now);
+  await advanceHumanReviewVisibility(reminderIds, now);
   return {
     checked: statuses.length,
     scheduled,
     escalated,
-    remindersSent: reminderResult.sent
+    remindersSent: 0
   };
 }
 
-async function sendHumanReviewReminders(incidentIds: string[], now: Date) {
+async function advanceHumanReviewVisibility(incidentIds: string[], now: Date) {
   const uniqueIds = [...new Set(incidentIds)];
   if (uniqueIds.length === 0) {
-    return { sent: 0 };
+    return;
   }
   const incidents = await prisma.courseSupportIncident.findMany({
     where: {
@@ -1030,67 +1029,23 @@ async function sendHumanReviewReminders(incidentIds: string[], now: Date) {
     orderBy: [{ activeRealSearchCount: "desc" }, { firstSeenAt: "asc" }]
   });
   if (incidents.length === 0) {
-    return { sent: 0 };
-  }
-  const delivery = await sendCourseSupportOperatorSummaryEmail({
-    incidents: incidents.map((incident) => ({
-      incidentId: incident.reference,
-      cycle: incident.cycle,
-      courseId: createCourseMonitoringSafeReference(incident.courseId),
-      courseName: incident.courseNameSnapshot,
-      platform: incident.platformSnapshot,
-      bookingUrl: sanitizeEvidenceUrl(incident.bookingUrlSnapshot),
-      affectedSearchCount: incident.activeRealSearchCount,
-      kind: incident.kind,
-      message: incident.latestMessage,
-      nextAction:
-        incident.nextAction ??
-        "Review the public booking surface and record an evidence-backed operator decision.",
-      firstSeenAt: incident.firstSeenAt
-    }))
-  });
-  if (delivery.deliveryStatus !== "sent") {
-    return { sent: 0 };
+    return;
   }
 
   for (const incident of incidents) {
     const nextReminderAt = getHumanReviewReminderAt(now, incident.activeRealSearchCount);
-    await prisma.$transaction([
-      prisma.courseSupportIncident.updateMany({
-        where: {
-          id: incident.id,
-          status: "NEEDS_HUMAN",
-          revision: incident.revision
-        },
-        data: {
-          escalationNotifiedAt: incident.escalationNotifiedAt ?? now,
-          nextReminderAt,
-          revision: { increment: 1 }
-        }
-      }),
-      prisma.courseMonitoringEvent.create({
-        data: {
-          courseId: incident.courseId,
-          incidentId: incident.id,
-          eventType: "REMINDER_SENT",
-          source: "RECOVERY_CRON",
-          fromState: "ENGINEERING_VERIFICATION_NEEDED",
-          toState: "ENGINEERING_VERIFICATION_NEEDED",
-          failureFingerprint: incident.failureFingerprint,
-          message:
-            incident.activeRealSearchCount > 0
-              ? "A daily operator reminder was sent for active customer demand."
-              : "A weekly operator reminder was sent for inactive course work.",
-          occurredAt: now,
-          audit: {
-            cadence: incident.activeRealSearchCount > 0 ? "daily" : "weekly",
-            customerDataIncluded: false
-          }
-        }
-      })
-    ]);
+    await prisma.courseSupportIncident.updateMany({
+      where: {
+        id: incident.id,
+        status: "NEEDS_HUMAN",
+        revision: incident.revision
+      },
+      data: {
+        nextReminderAt,
+        revision: { increment: 1 }
+      }
+    });
   }
-  return { sent: incidents.length };
 }
 
 export function inferHumanReviewReason(input: {
