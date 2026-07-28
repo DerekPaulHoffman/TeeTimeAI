@@ -56,7 +56,7 @@ When a durably closed `RETRYABLE_FAILED` batch is due and coordination requires 
 
 For a multi-course source batch whose entries have different retry times, coordination may select exactly one immutable source-entry ordinal with `claim --retry-batch-ref <private-ref> --retry-ordinal <NN> --max-courses 1`. Source-entry ordinals use the persisted batch-entry order (`createdAt`, then the private row id as a tie-breaker); they are not course-name order and must never be accompanied by a row id or course name in task output. Exact-entry mode still requires the whole source batch to be a durably closed retryable batch with unique, latest `RETRY_SCHEDULED` entries, then revalidates the selected entry's current cycle, provider provenance, due time, demand, ownership, and source-entry relation inside the ordinary serializable claim fence. Unselected siblings need not be due. Any invalid ordinal or mismatch aborts without falling back to the normal queue.
 
-The responder uses the transaction-scoped Postgres advisory lease `tee-time-spot:course-support-writer` for inspect/claim/recovery state transitions. The hourly loop uses its own `tee-time-spot:hourly-improvement-writer` lease. The durable responder batch and unfinished responder `AutomationRun` own the longer responder implementation interval. A responder lease lasts 15 minutes and must be heartbeated while work continues.
+The responder uses the transaction-scoped Postgres advisory lease `tee-time-spot:course-support-writer` for inspect/claim/recovery state transitions. The hourly loop uses its own `tee-time-spot:hourly-improvement-writer` lease. The durable responder batch and unfinished responder `AutomationRun` own the longer responder implementation interval. A responder lease lasts 15 minutes and must be heartbeated while work continues. For an investigation expected to outlast one lease, start the bounded `heartbeat --watch` command in a separate process. It renews every four minutes by default, stops after 45 minutes by default, fails immediately if ownership is lost, and never changes the release fence.
 
 An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder writer, an active responder lease, or mismatched provenance require owner attention.
 
@@ -147,7 +147,17 @@ npm run automation:course-support -- claim-path --batch-ref <batch-ref> --path s
 
 # Keep a claimed batch alive. Immediately fence the candidate commit before deploy.
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status IMPLEMENTING
+npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status IMPLEMENTING --watch --max-minutes 45
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING --release-sha <git-sha>
+
+# Diagnose browser classification before recording evidence or releasing code.
+# The trace contains only target ordinals, coarse booleans, and reason codes.
+# Provider concurrency coordination remains active, but the dry-run does not
+# create an AutomationRun or persist discovery, course, incident, or probe data.
+npm run automation:browser-probe -- --dry-run --trace-json --course-name "<exact course name>" --limit 1
+
+# Gate a classification-only release on the expected pre-mutation result.
+npm run automation:browser-probe -- --dry-run --trace-json --course-name "<exact course name>" --limit 1 --expect-disposition MANUAL_FINAL
 
 # When investigation justifies no code change, verify the shared adapter on the
 # exact production deployment of the clean claimed base SHA. This is permitted

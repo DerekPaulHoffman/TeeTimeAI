@@ -6,15 +6,21 @@ import {
   buildBrowserDiscovery,
   enrichBrowserDiscoveryWithProviderLease,
   evaluateBrowserDiscoveryMonitoringGate,
-  extractStructuredPhoneBookingEvidence,
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
-  prioritizeBrowserDiscoveryLinks,
   sanitizeBrowserDiscoveryAccessEvidence,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
+import {
+  assertBrowserProbeExpectedDisposition,
+  buildBrowserProbeDecisionTrace,
+  finalizeBrowserEvidenceSnapshots,
+  prepareBrowserPageEvidence,
+  type BrowserProbeDecisionTrace,
+  type BrowserProbeExpectedDisposition
+} from "@/lib/automation/browser-probe-evidence";
 import {
   applyBrowserDiscoveryToCourse,
   finishAutomationRun,
@@ -25,6 +31,7 @@ import {
 } from "@/lib/automation/db-service";
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { shouldStopBrowserDiscovery } from "@/lib/automation/monitoring-strategy";
 import { prisma } from "@/lib/prisma";
@@ -34,10 +41,12 @@ const DEFAULT_LIMIT = 5;
 const NAVIGATION_TIMEOUT_MS = 20_000;
 
 async function main() {
-  const limit = Number(process.env.BROWSER_PROBE_LIMIT ?? DEFAULT_LIMIT);
-  const requestedCourseName = process.env.BROWSER_PROBE_COURSE_NAME?.trim();
-  const run = await startAutomationRun(PROMPT_VERSION);
+  const options = parseOptions(process.argv.slice(2));
+  const limit = options.limit;
+  const requestedCourseName = options.courseName;
+  const run = options.dryRun ? null : await startAutomationRun(PROMPT_VERSION);
   const notes: string[] = [];
+  const traces: BrowserProbeDecisionTrace[] = [];
 
   try {
     const targets = await listBrowserProbeTargets(limit, requestedCourseName);
@@ -47,7 +56,13 @@ async function main() {
       if (requestedCourseName) {
         throw new Error("The requested browser-probe course was not eligible.");
       }
-      await finishAutomationRun(run.id, { outcome: "no_op", notes: notes.join("\n") });
+      if (run) {
+        await finishAutomationRun(run.id, {
+          outcome: "no_op",
+          notes: notes.join("\n")
+        });
+      }
+      writeDryRunTrace(options, traces);
       return;
     }
 
@@ -79,6 +94,9 @@ async function main() {
               })
           );
           if (!providerExecution.acquired) {
+            if (options.dryRun) {
+              throw new Error("Provider concurrency guard deferred a dry-run target.");
+            }
             notes.push(
               `${target.course.name}: deferred by the provider concurrency guard.`
             );
@@ -98,6 +116,11 @@ async function main() {
             runWithProviderRequestLease
           );
           if (!enrichment.acquired) {
+            if (options.dryRun) {
+              throw new Error(
+                "Provider concurrency guard deferred dry-run enrichment."
+              );
+            }
             notes.push(
               `${target.course.name}: enrichment deferred by the provider concurrency guard.`
             );
@@ -107,6 +130,11 @@ async function main() {
             keepPolicyOnlyDiscoveryActionable(enrichment.discovery),
             evidence.accessBarriers
           );
+
+          if (options.dryRun) {
+            traces.push(buildBrowserProbeDecisionTrace(evidence, discovery));
+            continue;
+          }
 
           await recordBrowserDiscovery(discovery);
           const appliedCourse = await applyBrowserDiscoveryToCourse(discovery);
@@ -155,7 +183,7 @@ async function main() {
             await recordCourseProbe({
               searchId: target.searchId,
               courseId: target.course.id,
-              automationRunId: run.id,
+              automationRunId: run!.id,
               outcome: accessControlVerified
                 ? "BLOCKED_AUTH"
                 : directBookingVerified
@@ -185,11 +213,11 @@ async function main() {
             `${target.course.name}: ${discovery.status} ${discovery.detectedPlatform} confidence=${discovery.confidence}`
           );
         } catch (error) {
-          if (target.searchId) {
+          if (!options.dryRun && target.searchId) {
             await recordCourseProbe({
               searchId: target.searchId,
               courseId: target.course.id,
-              automationRunId: run.id,
+              automationRunId: run!.id,
               outcome: "FETCH_FAILED",
               message: error instanceof Error ? error.message : "Browser probe failed"
             });
@@ -197,6 +225,9 @@ async function main() {
           notes.push(
             `${target.course.name}: failed - ${error instanceof Error ? error.message : "unknown error"}`
           );
+          if (options.dryRun) {
+            throw error;
+          }
         } finally {
           await page.close().catch(() => undefined);
         }
@@ -205,18 +236,100 @@ async function main() {
       await browser.close();
     }
 
-    await finishAutomationRun(run.id, { outcome: "success", notes: notes.join("\n") });
+    if (options.dryRun) {
+      assertBrowserProbeExpectedDisposition(options.expectedDisposition, traces);
+      writeDryRunTrace(options, traces);
+    } else {
+      await finishAutomationRun(run!.id, {
+        outcome: "success",
+        notes: notes.join("\n")
+      });
+    }
   } catch (error) {
-    await finishAutomationRun(run.id, {
-      outcome: "failed",
-      errors:
-        error instanceof Error
-          ? { name: error.name, message: error.message }
-          : { message: "Unknown browser probe failure" },
-      notes: error instanceof Error ? error.stack ?? error.message : "Unknown browser probe failure"
-    });
+    if (run) {
+      await finishAutomationRun(run.id, {
+        outcome: "failed",
+        errors:
+          error instanceof Error
+            ? { name: error.name, message: error.message }
+            : { message: "Unknown browser probe failure" },
+        notes:
+          error instanceof Error
+            ? error.stack ?? error.message
+            : "Unknown browser probe failure"
+      });
+    }
     throw error;
   }
+}
+
+function parseOptions(args: string[]) {
+  const dryRun = args.includes("--dry-run");
+  const traceJson = args.includes("--trace-json");
+  const limitValue = readOption(args, "--limit");
+  const limit = Number(
+    limitValue ?? process.env.BROWSER_PROBE_LIMIT ?? DEFAULT_LIMIT
+  );
+  if (!Number.isInteger(limit) || limit < 1 || limit > 5) {
+    throw new Error("--limit must be an integer from 1 through 5.");
+  }
+  const courseName =
+    readOption(args, "--course-name") ??
+    process.env.BROWSER_PROBE_COURSE_NAME?.trim();
+  const expectedDisposition = readOption(
+    args,
+    "--expect-disposition"
+  ) as BrowserProbeExpectedDisposition | undefined;
+  if (
+    expectedDisposition &&
+    ![
+      "ACTIONABLE",
+      "MANUAL_FINAL",
+      "IDENTITY_FINAL",
+      "TECHNICAL_FINAL"
+    ].includes(expectedDisposition)
+  ) {
+    throw new Error("--expect-disposition is not supported.");
+  }
+  if ((traceJson || expectedDisposition) && !dryRun) {
+    throw new Error(
+      "--trace-json and --expect-disposition require --dry-run."
+    );
+  }
+
+  return { courseName, dryRun, expectedDisposition, limit, traceJson };
+}
+
+function readOption(args: string[], name: string) {
+  const index = args.indexOf(name);
+  if (index < 0) {
+    return undefined;
+  }
+  const value = args[index + 1]?.trim();
+  if (!value || value.startsWith("--")) {
+    throw new Error(`${name} requires a value.`);
+  }
+  return value;
+}
+
+function writeDryRunTrace(
+  options: ReturnType<typeof parseOptions>,
+  traces: BrowserProbeDecisionTrace[]
+) {
+  if (!options.traceJson) {
+    return;
+  }
+  console.log(
+    JSON.stringify({
+      outcome: traces.length > 0 ? "dry_run_complete" : "no_due_targets",
+      targetCount: traces.length,
+      expectedDisposition: options.expectedDisposition ?? null,
+      targets: traces.map((trace, index) => ({
+        ordinal: index + 1,
+        ...trace
+      }))
+    })
+  );
 }
 
 async function collectBrowserEvidence(
@@ -346,102 +459,22 @@ function finalizeBrowserEvidence(input: {
   destinationPageUrl: string;
   destinationPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
 }): BrowserDiscoveryEvidence {
-  const {
-    page,
-    observedUrls,
-    accessBarrierUrls,
-    accessBarriers,
-    landingPageUrl,
-    landingPageEvidence,
-    firstDestinationPageUrl,
-    firstDestinationPageEvidence,
-    destinationPageUrl,
-    destinationPageEvidence
-  } = input;
-  const officialPageEvidence = haveSamePublicWebsiteOrigin(
-    landingPageUrl,
-    destinationPageUrl
-  )
-    ? {
-        url: destinationPageUrl,
-        evidence: destinationPageEvidence
-      }
-    : haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
-      ? {
-          url: firstDestinationPageUrl,
-          evidence: firstDestinationPageEvidence
-        }
-    : {
-        url: landingPageUrl,
-        evidence: landingPageEvidence
-      };
-  const officialStructuredPhoneBookingText = [
-    landingPageEvidence.structuredPhoneBookingEvidence,
-    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
-      ? firstDestinationPageEvidence.structuredPhoneBookingEvidence
-      : "",
-    haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
-      ? destinationPageEvidence.structuredPhoneBookingEvidence
-      : ""
-  ].filter(
-    (text, index, values) => Boolean(text) && values.indexOf(text) === index
-  );
-  const officialFullPageVisibleText = [
-    landingPageEvidence.visibleText,
-    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
-      ? firstDestinationPageEvidence.visibleText
-      : "",
-    haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
-      ? destinationPageEvidence.visibleText
-      : ""
-  ]
-    .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
-    .join("\n");
-  const officialPageVisibleText = (
-    officialStructuredPhoneBookingText.length > 0
-      ? officialStructuredPhoneBookingText
-          .map((text) => `${input.input.courseName}. ${text}`)
-          .join("\n")
-      : officialFullPageVisibleText
-  ).slice(0, 12_000);
-
-  for (const url of [
-    ...landingPageEvidence.anchors,
-    ...landingPageEvidence.scripts,
-    ...firstDestinationPageEvidence.anchors,
-    ...firstDestinationPageEvidence.scripts,
-    ...destinationPageEvidence.anchors,
-    ...destinationPageEvidence.scripts
-  ]) {
-    observedUrls.add(url);
-  }
-
-  return {
-    ...input.input,
-    sourceUrl: officialPageEvidence.url,
-    finalUrl: page.url(),
-    observedUrls: [...observedUrls],
-    linkCandidates: [
-      ...landingPageEvidence.linkCandidates,
-      ...firstDestinationPageEvidence.linkCandidates,
-      ...destinationPageEvidence.linkCandidates
-    ],
-    officialPage: {
-      url: officialPageEvidence.url,
-      linkCandidates: officialPageEvidence.evidence.linkCandidates,
-      courseName: input.input.courseName,
-      visibleText: officialPageVisibleText
-    },
-    accessBarrierUrls: [...accessBarrierUrls],
-    accessBarriers: [...accessBarriers].map(([url, status]) => ({ url, status })),
-    visibleText: [
-      landingPageEvidence.visibleText,
-      firstDestinationPageEvidence.visibleText,
-      destinationPageEvidence.visibleText
-    ]
-      .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
-      .join("\n")
-  };
+  return finalizeBrowserEvidenceSnapshots({
+    course: input.input,
+    finalUrl: input.page.url(),
+    observedUrls: [...input.observedUrls],
+    accessBarrierUrls: [...input.accessBarrierUrls],
+    accessBarriers: [...input.accessBarriers].map(([url, status]) => ({
+      url,
+      status
+    })),
+    landingPageUrl: input.landingPageUrl,
+    landingPageEvidence: input.landingPageEvidence,
+    firstDestinationPageUrl: input.firstDestinationPageUrl,
+    firstDestinationPageEvidence: input.firstDestinationPageEvidence,
+    destinationPageUrl: input.destinationPageUrl,
+    destinationPageEvidence: input.destinationPageEvidence
+  });
 }
 
 async function collectPageEvidence(
@@ -532,26 +565,7 @@ async function collectPageEvidence(
         .join("\n")
     };
   });
-  const linkCandidates = prioritizeBrowserDiscoveryLinks(
-    evidence.linkCandidates,
-    100
-  );
-  const structuredPhoneBookingEvidence =
-    extractStructuredPhoneBookingEvidence(evidence.structuredActionScripts);
-  return {
-    ...evidence,
-    anchors: linkCandidates.map(({ url }) => url),
-    linkCandidates,
-    structuredPhoneBookingEvidence,
-    structuredActionScripts: undefined,
-    visibleText: [
-      structuredPhoneBookingEvidence ? officialCourseName : undefined,
-      structuredPhoneBookingEvidence,
-      evidence.visibleText
-    ]
-      .filter(Boolean)
-      .join("\n")
-  };
+  return prepareBrowserPageEvidence(evidence, officialCourseName);
 }
 
 async function clickLikelyBookingLink(page: Page) {
@@ -592,7 +606,11 @@ async function trySelectSearchDate(page: Page) {
 
 main()
   .catch((error) => {
-    console.error(error);
+    console.error(
+      sanitizeResponderText(
+        error instanceof Error ? error.message : "Browser probe failed."
+      )
+    );
     process.exitCode = 1;
   })
   .finally(async () => {

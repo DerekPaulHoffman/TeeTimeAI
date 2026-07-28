@@ -33,6 +33,7 @@ import {
   completeAutomationWorker,
   startAutomationWorker
 } from "@/lib/automation/worker-state";
+import { runCourseSupportLeaseWatch } from "@/lib/automation/course-support-lease-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import {
   getResponderThreadPolicy,
@@ -230,6 +231,12 @@ async function heartbeat(args: string[]) {
   const ownerThreadId = requireOwnerThread(args);
   const currentRuntime = args.includes("--current-runtime");
   const requestedReleaseSha = readOption(args, "--release-sha");
+  const watch = args.includes("--watch");
+  if (watch && (currentRuntime || requestedReleaseSha)) {
+    throw new Error(
+      "--watch cannot be combined with --current-runtime or --release-sha."
+    );
+  }
   if (currentRuntime && requestedReleaseSha) {
     throw new Error("--current-runtime cannot be combined with --release-sha.");
   }
@@ -245,13 +252,34 @@ async function heartbeat(args: string[]) {
       { allowUnchangedRuntime: currentRuntime }
     ));
   }
-  return heartbeatCourseSupportBatch({
-    batchId,
-    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
-    ownerThreadId,
-    status: requestedStatus as "IMPLEMENTING" | "VERIFYING" | undefined,
-    releaseSha,
-    releaseAdvanceProof
+  const renew = async () =>
+    heartbeatCourseSupportBatch({
+      batchId,
+      leaseToken: await getOwnedCourseSupportLeaseToken({
+        batchId,
+        ownerThreadId
+      }),
+      ownerThreadId,
+      status: requestedStatus as "IMPLEMENTING" | "VERIFYING" | undefined,
+      releaseSha,
+      releaseAdvanceProof
+    });
+  if (!watch) {
+    return renew();
+  }
+
+  const intervalSeconds =
+    readIntegerOption(args, "--interval-seconds") ?? 4 * 60;
+  return runCourseSupportLeaseWatch({
+    maxMinutes: readIntegerOption(args, "--max-minutes"),
+    intervalMs: intervalSeconds * 1_000,
+    renew,
+    onRenewed: ({ renewalCount, leaseExpiresAt }) =>
+      writeResult({
+        outcome: "lease_watch_heartbeat",
+        renewalCount,
+        leaseExpiresAt
+      })
   });
 }
 
