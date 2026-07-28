@@ -68,6 +68,7 @@ const RECHECK_HEALTH_FRESHNESS_MS = 2 * 60 * 1000;
 const DETACHED_FAILURE_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT = 4;
+const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
 const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
@@ -824,6 +825,33 @@ export function assessCourseSupportRecovery(input: {
   return reasons.length === 0
     ? { action: "RECOVER" as const, reasons: [] }
     : { action: "BLOCK" as const, reasons };
+}
+
+export function canSafelyRequeueExpiredCourseSupportBatch(input: {
+  leaseExpiresAt: Date;
+  releaseSha: string | null;
+  deployedAt: Date | null;
+  recheckDispatchKey: string | null;
+  recheckDispatchStartedAt: Date | null;
+  recheckDispatchedAt: Date | null;
+  dirtyPaths: string[];
+  incidentResults: CourseSupportBatchIncidentResult[];
+  now?: Date;
+}) {
+  const now = input.now ?? new Date();
+  return Boolean(
+    input.leaseExpiresAt.getTime() <= now.getTime() &&
+    !input.releaseSha &&
+    !input.deployedAt &&
+    !input.recheckDispatchKey &&
+    !input.recheckDispatchStartedAt &&
+    !input.recheckDispatchedAt &&
+    input.dirtyPaths.length === 0 &&
+    input.incidentResults.length > 0 &&
+    input.incidentResults.every(
+      (result) => result === "PENDING" || result === "STALE_EVIDENCE"
+    )
+  );
 }
 
 export type CourseSupportReleaseAdvanceProof = {
@@ -3796,10 +3824,30 @@ export async function recoverCourseSupportBatch(input: {
         status: true,
         leaseExpiresAt: true,
         ownerThreadId: true,
+        ownerAutomationRunId: true,
         baseSha: true,
         releaseSha: true,
+        deployedAt: true,
+        recheckDispatchKey: true,
+        recheckDispatchStartedAt: true,
+        recheckDispatchedAt: true,
         revision: true,
-        summary: true
+        summary: true,
+        incidents: {
+          select: {
+            id: true,
+            incidentId: true,
+            courseId: true,
+            cycle: true,
+            result: true,
+            updatedAt: true,
+            incident: {
+              select: {
+                updatedAt: true
+              }
+            }
+          }
+        }
       }
     });
     if (!batch || !ACTIVE_BATCH_STATUSES.includes(batch.status)) {
@@ -3852,6 +3900,165 @@ export async function recoverCourseSupportBatch(input: {
       now
     });
     if (recovery.action === "BLOCK") {
+      const normalizedDirtyPaths = normalizeCourseSupportObservedGitPaths(input.dirtyPaths);
+      if (
+        canSafelyRequeueExpiredCourseSupportBatch({
+          leaseExpiresAt: batch.leaseExpiresAt,
+          releaseSha: batch.releaseSha,
+          deployedAt: batch.deployedAt,
+          recheckDispatchKey: batch.recheckDispatchKey,
+          recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+          recheckDispatchedAt: batch.recheckDispatchedAt,
+          dirtyPaths: normalizedDirtyPaths,
+          incidentResults: batch.incidents.map((entry) => entry.result),
+          now
+        })
+      ) {
+        const nextAttemptAt = new Date(
+          now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS
+        );
+        const message =
+          "Expired unreleased responder work was safely requeued without adopting local changes.";
+        const summary = asJsonObject(batch.summary);
+        await prisma.$transaction(
+          async (tx) => {
+            const batchUpdated = await tx.courseSupportBatch.updateMany({
+              where: {
+                id: batch.id,
+                status: batch.status,
+                revision: batch.revision,
+                leaseExpiresAt: { lte: now },
+                releaseSha: null,
+                deployedAt: null,
+                recheckDispatchKey: null,
+                recheckDispatchStartedAt: null,
+                recheckDispatchedAt: null,
+                completedAt: null
+              },
+              data: {
+                status: "RETRYABLE_FAILED",
+                completedAt: now,
+                heartbeatAt: now,
+                leaseExpiresAt: now,
+                summary: {
+                  ...summary,
+                  closeout: {
+                    outcome: "retryable_failed",
+                    derivedOutcome: "retryable_failed",
+                    failureDomain: "GIT",
+                    terminalCount: 0,
+                    retryCount: batch.incidents.length,
+                    needsHumanCount: 0,
+                    reason: "expired_unreleased_provenance_mismatch"
+                  }
+                } as Prisma.InputJsonValue,
+                revision: { increment: 1 }
+              }
+            });
+            if (batchUpdated.count !== 1) {
+              throw new Error("Expired responder ownership changed during safe requeue.");
+            }
+
+            for (const entry of batch.incidents) {
+              const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
+                where: {
+                  id: entry.id,
+                  result: entry.result,
+                  updatedAt: entry.updatedAt
+                },
+                data: {
+                  result: "RETRY_SCHEDULED",
+                  message
+                }
+              });
+              if (batchEntryUpdated.count !== 1) {
+                throw new Error("Expired responder evidence changed during safe requeue.");
+              }
+              const incidentUpdated = await tx.courseSupportIncident.updateMany({
+                where: {
+                  id: entry.incidentId,
+                  cycle: entry.cycle,
+                  activeBatchId: batch.id,
+                  status: "AUTO_INVESTIGATING",
+                  updatedAt: entry.incident.updatedAt
+                },
+                data: {
+                  activeBatchId: null,
+                  nextAttemptAt,
+                  latestMessage: message,
+                  lastSeenAt: now,
+                  revision: { increment: 1 }
+                }
+              });
+              if (incidentUpdated.count !== 1) {
+                throw new Error("Expired responder incident changed during safe requeue.");
+              }
+              await tx.courseMonitoringStatus.updateMany({
+                where: { courseId: entry.courseId },
+                data: {
+                  state: "AUTO_INVESTIGATING",
+                  nextAutomaticAttemptAt: nextAttemptAt,
+                  stateChangedAt: now,
+                  revision: { increment: 1 }
+                }
+              });
+            }
+
+            await tx.courseSupportVerificationRequest.updateMany({
+              where: {
+                batchIncident: { batchId: batch.id },
+                status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
+              },
+              data: {
+                status: "STALE",
+                revision: { increment: 1 },
+                leaseToken: null,
+                leaseExpiresAt: null,
+                nextAttemptAt: null,
+                completedAt: now,
+                lastError: "batch_requeued",
+                updatedAt: now
+              }
+            });
+
+            if (batch.ownerAutomationRunId) {
+              await tx.automationRun.updateMany({
+                where: { id: batch.ownerAutomationRunId, completedAt: null },
+                data: {
+                  completedAt: now,
+                  outcome: "retryable_failed",
+                  notes: JSON.stringify({
+                    schemaVersion: 1,
+                    lifecycle: "closeout",
+                    status: "RETRYABLE_FAILED",
+                    outcome: "retryable_failed",
+                    derivedOutcome: "retryable_failed",
+                    terminalCount: 0,
+                    retryCount: batch.incidents.length,
+                    failureDomain: "GIT",
+                    reason: "expired_unreleased_provenance_mismatch"
+                  })
+                }
+              });
+            }
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+        );
+        return {
+          outcome: "retryable_failed" as const,
+          recovered: false,
+          safelyRequeued: true,
+          durableCloseoutRecorded: true,
+          nextAttemptAt: nextAttemptAt.toISOString(),
+          reasons: [message],
+          ...getResponderThreadPolicy({
+            outcome: "retryable_failed",
+            nextAttemptAt,
+            durableCloseoutRecorded: true,
+            now
+          })
+        };
+      }
       return {
         outcome: "command_failed" as const,
         recovered: false,
