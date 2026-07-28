@@ -111,6 +111,7 @@ const pendingAlertSelect = {
   teeSearch: {
     select: {
       alertGeneration: true,
+      alertEmail: true,
       additionalEmails: true,
       userTimeZone: true,
       user: {

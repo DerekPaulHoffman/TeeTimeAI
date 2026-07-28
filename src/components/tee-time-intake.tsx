@@ -269,7 +269,8 @@ function TeeTimeIntakeContent({
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
-  const alertEmail = accountState.status === "signed-in" ? accountState.email : "";
+  const accountEmail = accountState.status === "signed-in" ? accountState.email : "";
+  const [alertEmail, setAlertEmail] = useState(accountEmail);
   const [date, setDate] = useState(
     () => initialValues.date ?? getNextSaturdayDateInputValue()
   );
@@ -417,6 +418,9 @@ function TeeTimeIntakeContent({
   const hasInvalidAdditionalEmail = additionalEmailFields.some(
     (field) => !isAdditionalAlertEmailValid(field.value)
   );
+  const hasInvalidAlertEmail =
+    accountState.status === "signed-in" &&
+    (!alertEmail.trim() || !isAdditionalAlertEmailValid(alertEmail));
   const requestedLayoutHoles: CourseLayoutHoleCount | null =
     holeFilter === "9" ? 9 : holeFilter === "18" ? 18 : null;
   const { filteredCourses, incompatibleCourseCount } = useMemo(() => {
@@ -511,6 +515,8 @@ function TeeTimeIntakeContent({
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
       ? "Choose an end time after the start time."
+      : hasInvalidAlertEmail
+        ? "Enter a valid email for this alert."
       : hasInvalidAdditionalEmail
         ? "Enter a valid email for each additional recipient."
       : incompatibleSelectedCourse && requestedLayoutHoles
@@ -1024,6 +1030,7 @@ function TeeTimeIntakeContent({
           endTime,
           userTimeZone,
           players,
+          alertEmail: alertEmail.trim().toLowerCase(),
           additionalEmails: normalizedAdditionalEmails,
           requestedLayoutHoles,
           cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES,
@@ -1423,9 +1430,11 @@ function TeeTimeIntakeContent({
               {players} {players === 1 ? "player" : "players"}.
             </p>
             <span className="figma-alert-preview-recipients">
-              {normalizedAdditionalEmails.length > 0
-                ? `Your account email + ${normalizedAdditionalEmails.length} ${normalizedAdditionalEmails.length === 1 ? "other" : "others"}`
-                : "Your account email"}
+              {`${alertEmail || "Your account email"}${
+                normalizedAdditionalEmails.length > 0
+                  ? ` + ${normalizedAdditionalEmails.length} ${normalizedAdditionalEmails.length === 1 ? "other" : "others"}`
+                  : ""
+              }`}
             </span>
             <small>Matching openings link to the official site. You book direct.</small>
             {selected.some(
@@ -1440,25 +1449,87 @@ function TeeTimeIntakeContent({
             ) : null}
           </section>
         ) : null}
+        {selected.length > 0 ? (
+          <label className="figma-alert-email" htmlFor="alertEmail">
+            <span>Where should we send this alert?</span>
+            <input
+              aria-describedby="alert-email-help search-form-guidance"
+              aria-invalid={hasInvalidAlertEmail}
+              autoComplete="email"
+              disabled={accountState.status !== "signed-in"}
+              id="alertEmail"
+              onChange={(event) => setAlertEmail(event.target.value)}
+              type="email"
+              value={alertEmail}
+              placeholder={
+                accountState.status === "signed-out"
+                  ? "Sign in to use your account email"
+                  : "Account email unavailable"
+              }
+            />
+            <small id="alert-email-help">
+              Starts with your account email. Change it to send this alert somewhere else.
+            </small>
+          </label>
+        ) : null}
+        {selected.length > 0 ? (
+          <fieldset className="figma-group-recipients">
+            <legend className="sr-only">Alert your group too</legend>
+            <div className="figma-group-recipients-heading" aria-hidden="true">
+              <strong>Alert your group too</strong>
+              <span>
+                {normalizedAdditionalEmails.length > 0
+                  ? `${normalizedAdditionalEmails.length} added`
+                  : "Optional"}
+              </span>
+            </div>
+            <p id="additional-recipient-help">
+              Add up to 3 people. Everyone gets the same opening, but your signed-in account
+              manages the alert.
+            </p>
+            <div className="figma-recipient-fields">
+              {additionalEmailFields.map((field, index) => (
+                <div className="figma-recipient-row" key={field.id}>
+                  <input
+                    aria-describedby="additional-recipient-help"
+                    aria-invalid={!isAdditionalAlertEmailValid(field.value)}
+                    aria-label={`Additional recipient ${index + 1}`}
+                    autoComplete="email"
+                    onChange={(event) => updateAdditionalEmail(field.id, event.target.value)}
+                    placeholder="friend@example.com"
+                    type="email"
+                    value={field.value}
+                  />
+                  {(additionalEmailFields.length > 1 || field.value.trim()) ? (
+                    <button
+                      aria-label={`Remove additional recipient ${index + 1}`}
+                      onClick={() => removeAdditionalEmailField(field.id)}
+                      type="button"
+                    >
+                      <X size={15} />
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <div className="figma-recipient-footer">
+              {additionalEmailFields.length < MAX_ADDITIONAL_ALERT_EMAILS ? (
+                <button
+                  className="figma-add-recipient"
+                  onClick={addAdditionalEmailField}
+                  type="button"
+                >
+                  <Plus size={14} />
+                  Add another recipient
+                </button>
+              ) : null}
+              <span>
+                {normalizedAdditionalEmails.length}/{MAX_ADDITIONAL_ALERT_EMAILS} added
+              </span>
+            </div>
+          </fieldset>
+        ) : null}
         <div className="figma-alert-action">
-          {selected.length > 0 ? (
-            <label className="figma-alert-email" htmlFor="alertEmail">
-              <span>Alert email from your account</span>
-              <input
-                aria-describedby="search-form-guidance"
-                disabled={accountState.status !== "signed-in"}
-                id="alertEmail"
-                readOnly
-                type="email"
-                value={alertEmail}
-                placeholder={
-                  accountState.status === "signed-out"
-                    ? "Sign in to use your account email"
-                    : "Account email unavailable"
-                }
-              />
-            </label>
-          ) : null}
           {accountState.status === "signed-out" && clerkPublishableKey ? (
             <DeferredSignInButton
               className="button button-primary"
@@ -1524,68 +1595,9 @@ function TeeTimeIntakeContent({
                     ? "Add a primary email to your account before creating alerts."
                     : accountState.status === "unavailable"
                       ? "Account access is temporarily unavailable, so alerts cannot be created."
-                      : `Alerts will be sent to ${alertEmail} and stay manageable from your account.`)}
+                      : `You’ll manage this alert from your signed-in account (${accountEmail}), even if you change where its emails are sent.`)}
           </p>
         </div>
-        {selected.length > 0 ? (
-          <details className="figma-recipient-disclosure">
-            <summary>
-              <span>Alert your group too</span>
-              <span>
-                {normalizedAdditionalEmails.length > 0
-                  ? `${normalizedAdditionalEmails.length} added`
-                  : "Optional"}
-                <ChevronDown aria-hidden="true" size={15} />
-              </span>
-            </summary>
-            <fieldset className="figma-group-recipients">
-              <legend className="sr-only">Alert your group too</legend>
-              <p id="additional-recipient-help">
-                Add up to 3 people. Everyone gets the same opening, but only you manage the alert.
-              </p>
-              <div className="figma-recipient-fields">
-                {additionalEmailFields.map((field, index) => (
-                  <div className="figma-recipient-row" key={field.id}>
-                    <input
-                      aria-describedby="additional-recipient-help"
-                      aria-invalid={!isAdditionalAlertEmailValid(field.value)}
-                      aria-label={`Additional recipient ${index + 1}`}
-                      autoComplete="email"
-                      onChange={(event) => updateAdditionalEmail(field.id, event.target.value)}
-                      placeholder="friend@example.com"
-                      type="email"
-                      value={field.value}
-                    />
-                    {(additionalEmailFields.length > 1 || field.value.trim()) ? (
-                      <button
-                        aria-label={`Remove additional recipient ${index + 1}`}
-                        onClick={() => removeAdditionalEmailField(field.id)}
-                        type="button"
-                      >
-                        <X size={15} />
-                      </button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-              <div className="figma-recipient-footer">
-                {additionalEmailFields.length < MAX_ADDITIONAL_ALERT_EMAILS ? (
-                  <button
-                    className="figma-add-recipient"
-                    onClick={addAdditionalEmailField}
-                    type="button"
-                  >
-                    <Plus size={14} />
-                    Add another recipient
-                  </button>
-                ) : null}
-                <span>
-                  {normalizedAdditionalEmails.length}/{MAX_ADDITIONAL_ALERT_EMAILS} added
-                </span>
-              </div>
-            </fieldset>
-          </details>
-        ) : null}
       </aside>
       </div>
       <CourseResultsMap courses={[]} origin={searchCoordinates} />

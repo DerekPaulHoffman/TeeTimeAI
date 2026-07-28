@@ -91,6 +91,7 @@ export async function createTeeSearchForUser(
         players: input.players,
         requestedLayoutHoles: input.requestedLayoutHoles ?? null,
         cadenceMinutes: input.cadenceMinutes,
+        alertEmail: normalizeAlertEmail(input.alertEmail),
         additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
         trafficClass,
         syntheticMultiCycle,
@@ -559,6 +560,7 @@ export async function updateTeeSearchForUser(
       ? { requestedLayoutHoles: input.requestedLayoutHoles }
       : {}),
     ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
+    ...(input.alertEmail ? { alertEmail: normalizeAlertEmail(input.alertEmail) } : {}),
     ...(input.additionalEmails
       ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) }
       : {}),
@@ -684,6 +686,10 @@ async function assertQueueCapacity(userId: string, excludeSearchId?: string) {
 
 function normalizeAdditionalEmails(emails: string[] = []) {
   return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean))];
+}
+
+function normalizeAlertEmail(email: string | undefined) {
+  return email?.trim().toLowerCase() || null;
 }
 
 function assertCourseLayoutsCompatible(

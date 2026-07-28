@@ -76,6 +76,7 @@ export const teeSearchDetailsSchema = z
       .min(SEARCH_CADENCE_OPTIONS_MINUTES[0])
       .max(SEARCH_CADENCE_OPTIONS_MINUTES.at(-1) ?? 120)
       .default(DEFAULT_SEARCH_CADENCE_MINUTES),
+    alertEmail: z.string().trim().toLowerCase().email("Use a valid alert email").optional(),
     additionalEmails: z
       .array(z.string().trim().toLowerCase().email("Use a valid email"))
       .max(MAX_ADDITIONAL_ALERT_EMAILS, `Add up to ${MAX_ADDITIONAL_ALERT_EMAILS} extra emails`)
@@ -104,7 +105,6 @@ export const teeSearchDetailsSchema = z
 
 export const teeSearchInputSchema = teeSearchDetailsSchema
   .extend({
-    alertEmail: z.string().email("Use a valid alert email").optional(),
     courses: z
       .array(selectedCourseSchema)
       .min(MIN_COURSE_PREFERENCES, "Select at least 1 course")

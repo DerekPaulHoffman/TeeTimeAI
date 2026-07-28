@@ -1373,7 +1373,10 @@ async function deliverSearchStatusReport(input: {
   });
   const recipients =
     input.recipients ??
-    getAlertRecipients(input.search.user.email, input.search.additionalEmails);
+    getAlertRecipients(
+      input.search.alertEmail ?? input.search.user.email,
+      input.search.additionalEmails
+    );
   const availableMatches = await listAvailableMatchAlerts(
     input.search.id,
     getCurrentMatchIds(input.courseResults)
@@ -1407,7 +1410,7 @@ async function deliverSearchStatusReport(input: {
     kind: deliveryKind,
     groupKey: periodKey,
     recipients,
-    ownerRecipient: input.search.user.email,
+    ownerRecipient: input.search.alertEmail ?? input.search.user.email,
     supersededStatusGroups: input.supersededStatusGroups,
     payload: {
       schemaVersion: 2,
@@ -1566,7 +1569,8 @@ async function sendPendingMatchAlerts(
     return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
 
-  const recipients = getAlertRecipients(search.user.email, search.additionalEmails);
+  const primaryAlertEmail = search.alertEmail ?? search.user.email;
+  const recipients = getAlertRecipients(primaryAlertEmail, search.additionalEmails);
   const batchKey = buildMatchDeliveryGroupKey(coveredPendingMatches);
   await input.assertCurrent?.();
   const prepared = await prepareRecipientMatchDeliveryGroups({
@@ -1575,7 +1579,7 @@ async function sendPendingMatchAlerts(
     checkLeaseToken: input.lease.token,
     sourceGroupKey: batchKey,
     recipients,
-    ownerRecipient: search.user.email,
+    ownerRecipient: primaryAlertEmail,
     payload: {
       schemaVersion: 2,
       checkedAt: input.checkedAt.toISOString(),
@@ -1606,7 +1610,7 @@ async function sendPendingMatchAlerts(
   }
   let ownerSentMatchCount = 0;
   let hasDurableMatchObligation = prepared.hasExistingObligation;
-  const ownerRecipient = search.user.email.trim().toLowerCase();
+  const ownerRecipient = primaryAlertEmail.trim().toLowerCase();
   for (const group of prepared.groups) {
     try {
       const deliveries = await drainSearchEmailDeliveryGroup({

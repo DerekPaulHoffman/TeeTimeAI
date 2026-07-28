@@ -497,6 +497,7 @@ model TeeSearch {
   players                    Int
   requestedLayoutHoles       Int?
   cadenceMinutes             Int                        @default(5)
+  alertEmail                 String?
   additionalEmails           String[]                   @default([])
   trafficClass               WebsiteTrafficClass        @default(UNCLASSIFIED)
   syntheticMultiCycle        Boolean                    @default(false)

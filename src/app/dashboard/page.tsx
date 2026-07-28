@@ -397,7 +397,7 @@ function DashboardSearchCard({
             <strong className="watch-stat-email">
               <span className="watch-stat-email-full">
                 {showRecipientEmail
-                  ? `${search.user.email}${
+                  ? `${search.alertEmail ?? search.user.email}${
                       search.additionalEmails.length > 0
                         ? ` +${search.additionalEmails.length} extra`
                         : ""

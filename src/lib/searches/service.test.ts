@@ -238,7 +238,7 @@ describe("createTeeSearchForUser", () => {
       userTimeZone: "America/Los_Angeles",
       players: 2,
       cadenceMinutes: 15,
-      alertEmail: "golfer@example.com",
+      alertEmail: "GOLFER@example.com",
       additionalEmails: ["FRIEND@example.com", "friend@example.com"],
       courses: [
         {
@@ -270,6 +270,7 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
+          alertEmail: "golfer@example.com",
           additionalEmails: ["friend@example.com"],
           userTimeZone: "America/Los_Angeles",
           preferences: {

@@ -72,7 +72,10 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getRequiredAppUser();
     const submittedInput = teeSearchInputSchema.parse(await request.json());
-    const input = { ...submittedInput, alertEmail: user.email };
+    const input = {
+      ...submittedInput,
+      alertEmail: submittedInput.alertEmail ?? user.email
+    };
     const trafficClassHeader = request.headers.get(
       WEBSITE_TRAFFIC_CLASS_HEADER
     );

@@ -97,6 +97,7 @@ type LockedSearch = {
   alertGeneration: number;
   checkLeaseToken: string | null;
   checkLeaseExpiresAt: Date | null;
+  alertEmail: string | null;
   ownerEmail: string;
   ownerPendingEmail: string | null;
   additionalEmails: string[];
@@ -3590,6 +3591,7 @@ async function lockSearchRow(
       search."alertGeneration",
       search."checkLeaseToken",
       search."checkLeaseExpiresAt",
+      search."alertEmail",
       search."additionalEmails"
     FROM "TeeSearch" AS search
     WHERE search."id" = ${searchId}
@@ -3623,7 +3625,7 @@ function getLockedRecipientAuthority(search: LockedSearch) {
   ) {
     return null;
   }
-  const ownerRecipient = normalizeRecipient(search.ownerEmail);
+  const ownerRecipient = normalizeRecipient(search.alertEmail ?? search.ownerEmail);
   if (!ownerRecipient) {
     return null;
   }

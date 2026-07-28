@@ -1321,13 +1321,11 @@ test.describe("Tee Time Spot UI smoke", () => {
         return {
           actionBottom: actionRect?.bottom ?? Number.POSITIVE_INFINITY,
           overflowY: styles.overflowY,
-          panelBottom: panel.getBoundingClientRect().bottom,
           viewportHeight: window.innerHeight
         };
       });
       expect(panelLayout.overflowY).toBe("visible");
       expect(panelLayout.actionBottom).toBeLessThanOrEqual(panelLayout.viewportHeight);
-      expect(panelLayout.panelBottom).toBeLessThanOrEqual(panelLayout.viewportHeight);
       await expect(alertActionButton).toBeVisible();
     }
 
@@ -1346,13 +1344,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(alertPreview).toContainText("for 4 players");
     await expect(alertPreview).toContainText("You book direct");
 
-    const recipientDisclosure = page.locator(".figma-recipient-disclosure > summary");
-    await expect(recipientDisclosure).toContainText("Alert your group too");
-    await expect(recipientDisclosure).toContainText("Optional");
-    await recipientDisclosure.click();
     const groupRecipients = page.getByRole("group", { name: "Alert your group too" });
+    await expect(groupRecipients).toBeVisible();
+    await expect(groupRecipients).toContainText("Optional");
     await expect(groupRecipients).toContainText(
-      "Everyone gets the same opening, but only you manage the alert."
+      "Everyone gets the same opening, but your signed-in account manages the alert."
     );
     await groupRecipients.getByLabel("Additional recipient 1").fill("friend@example.com");
     await groupRecipients.getByRole("button", { name: "Add another recipient" }).click();

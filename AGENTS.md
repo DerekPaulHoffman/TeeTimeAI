@@ -86,7 +86,7 @@ discover public courses -> save ranked demand -> check official availability
 ### 2. Create An Alert
 
 1. The golfer chooses a future date, start/end window, 1 to 4 players, and an optional verified course-layout preference.
-2. Signed-out golfers are asked to sign in. The server derives the owner and primary email from Clerk; never trust a client-supplied owner ID or primary email. The owner may later add up to 3 normalized additional recipients from the dashboard.
+2. Signed-out golfers are asked to sign in. The server derives the owner from Clerk; never trust a client-supplied owner ID. The alert email defaults to the signed-in account email but may be changed per alert. The owner may also add up to 3 normalized additional recipients.
 3. A user may have at most 3 `ACTIVE` plus `PAUSED` searches. Search creation resolves selected provider candidates into reusable `Course` rows, persists `TeeSearch` plus ranked `CoursePreference` rows, and then requests that search's durable workflow immediately.
 4. Persisted demand and scheduler launch are separate facts: the API can keep the saved search when the initial Workflow start fails so recovery can restart it. Never delete or duplicate customer demand merely because `workflowRunId` is temporarily absent.
 5. The first check evaluates every selected course, records evidence, and sends the appropriate setup/status communication. A search beyond a provider's booking window should explain when booking is expected to open and sleep until the next useful course-local check rather than busy-polling.
@@ -130,7 +130,7 @@ discover public courses -> save ranked demand -> check official availability
 - No payments or marketplace checkout in the POC.
 - Clerk is the account system, but `CLERK_AUTH_READY` gates production account mode.
 - Signed-out visitors may browse courses, but creating, changing, pausing, or stopping alerts requires a Clerk account.
-- The authenticated Clerk account email is always the primary recipient; a search may add up to 3 deduplicated additional recipients.
+- The authenticated Clerk account owns and manages every alert. Each alert defaults to the account email for delivery, may use a different valid primary alert email, and may add up to 3 deduplicated additional recipients.
 - Google Places is used for course discovery and photos.
 - Course discovery defaults to a 15-mile radius and offers 5 to 30 mile choices.
 - Discovery should prefer public golf courses and filter stores, simulators, private clubs, and likely non-course results.

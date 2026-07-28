@@ -97,10 +97,20 @@ describe("TeeTimeIntake", () => {
     await waitFor(() =>
       expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toContain("course-1")
     );
+    const alertEmail = screen.getByLabelText(/Where should we send this alert?/);
+    expect((alertEmail as HTMLInputElement).value).toBe("golfer@example.com");
+    fireEvent.change(alertEmail, { target: { value: "alternate@example.com" } });
+    expect(screen.getByRole("group", { name: "Alert your group too" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
 
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-123")
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/searches",
+      expect.objectContaining({
+        body: expect.stringContaining('"alertEmail":"alternate@example.com"')
+      })
     );
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
     const searchCall = fetchMock.mock.calls.find(
@@ -394,7 +404,7 @@ describe("TeeTimeIntake", () => {
     ).toBe(false);
     expect(
       screen.getByText(
-        "Alerts will be sent to golfer@example.com and stay manageable from your account."
+        "You’ll manage this alert from your signed-in account (golfer@example.com), even if you change where its emails are sent."
       )
     ).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(
