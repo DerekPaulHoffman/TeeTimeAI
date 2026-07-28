@@ -1,6 +1,5 @@
 import type { AutomationWorkerState } from "@prisma/client";
 
-import { sendAutomationWorkerHealthEmail } from "@/lib/email/alerts";
 import { prisma } from "@/lib/prisma";
 
 import { getAutomationRuntimeVersion } from "./runtime-version";
@@ -165,7 +164,7 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
     orderBy: { workerKey: "asc" }
   });
   let overdue = 0;
-  let notified = 0;
+  const notified = 0;
   let recovered = 0;
 
   for (const worker of workers) {
@@ -176,12 +175,6 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
         !worker.overdueNotifiedFor ||
         worker.overdueNotifiedFor.getTime() !== expectedAt.getTime()
       ) {
-        await sendAutomationWorkerHealthEmail({
-          workerKey: worker.workerKey,
-          event: "overdue",
-          expectedAt,
-          observedAt: now
-        });
         await prisma.automationWorkerState.update({
           where: { workerKey: worker.workerKey },
           data: {
@@ -191,7 +184,6 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
             recoveredNotifiedAt: null
           }
         });
-        notified += 1;
       }
       continue;
     }
@@ -201,12 +193,6 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
       (!worker.recoveredNotifiedAt ||
         worker.recoveredNotifiedAt.getTime() < worker.overdueSince.getTime())
     ) {
-      await sendAutomationWorkerHealthEmail({
-        workerKey: worker.workerKey,
-        event: "recovered",
-        expectedAt: worker.nextExpectedAt ?? now,
-        observedAt: now
-      });
       await prisma.automationWorkerState.update({
         where: { workerKey: worker.workerKey },
         data: {

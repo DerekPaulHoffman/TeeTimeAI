@@ -6,6 +6,7 @@ import {
   getMatchAlertSubject,
   normalizeEmailEnvValue,
   renderAlertHtml,
+  sendAutomationWorkerHealthEmail,
   sendSearchStatusEmail,
   sendTeeTimeAlert,
   shouldDryRunRecipient
@@ -276,7 +277,7 @@ describe("email alert delivery helpers", () => {
     });
   });
 
-  it("fails retryably for real recipients when production email configuration is missing", async () => {
+  it("fails retryably only for match alerts when production email configuration is missing", async () => {
     await withMissingProductionEmailConfiguration(async () => {
       const expectedError = {
         name: "EmailDeliveryConfigurationError",
@@ -311,11 +312,11 @@ describe("email alert delivery helpers", () => {
           checkedAt: new Date("2026-07-10T12:00:00.000Z"),
           courses: []
         })
-      ).rejects.toMatchObject(expectedError);
+      ).resolves.toEqual({ id: "suppressed", deliveryStatus: "dry_run" });
     });
   });
 
-  it("dry-runs setup status reports for reserved test recipients", async () => {
+  it("suppresses setup status reports for every recipient", async () => {
     await withMissingProductionEmailConfiguration(async () => {
       const result = await sendSearchStatusEmail({
         searchId: "search-1",
@@ -338,8 +339,19 @@ describe("email alert delivery helpers", () => {
         idempotencyKey: "tee-search-status-test-setup"
       });
 
-      expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+      expect(result).toEqual({ id: "suppressed", deliveryStatus: "dry_run" });
     });
+  });
+
+  it("suppresses automation worker health email", async () => {
+    await expect(
+      sendAutomationWorkerHealthEmail({
+        workerKey: "course-support-responder",
+        event: "overdue",
+        expectedAt: new Date("2026-07-27T12:00:00.000Z"),
+        observedAt: new Date("2026-07-27T12:10:00.000Z")
+      })
+    ).resolves.toEqual({ deliveryStatus: "not_configured" });
   });
 });
 

@@ -2,8 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   findMany: vi.fn(),
-  update: vi.fn(),
-  sendHealthEmail: vi.fn()
+  update: vi.fn()
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -13,10 +12,6 @@ vi.mock("@/lib/prisma", () => ({
       update: mocks.update
     }
   }
-}));
-
-vi.mock("@/lib/email/alerts", () => ({
-  sendAutomationWorkerHealthEmail: mocks.sendHealthEmail
 }));
 
 import {
@@ -31,7 +26,6 @@ describe("automation worker state", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.sendHealthEmail.mockResolvedValue({ status: "sent" });
     mocks.update.mockResolvedValue({});
   });
 
@@ -86,10 +80,9 @@ describe("automation worker state", () => {
       overdue: 1,
       notified: 0
     });
-    expect(mocks.sendHealthEmail).not.toHaveBeenCalled();
   });
 
-  it("starts a fresh recovery cycle for a newly overdue interval", async () => {
+  it("records a newly overdue interval without sending email", async () => {
     mocks.findMany.mockResolvedValue([
       {
         workerKey: "course-support-responder",
@@ -105,7 +98,7 @@ describe("automation worker state", () => {
 
     await expect(checkAutomationWorkerHealth(now)).resolves.toMatchObject({
       overdue: 1,
-      notified: 1
+      notified: 0
     });
     expect(mocks.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -116,7 +109,7 @@ describe("automation worker state", () => {
     );
   });
 
-  it("records and reports recovery independently", async () => {
+  it("records recovery without sending email", async () => {
     mocks.findMany.mockResolvedValue([
       {
         workerKey: "product-improvement",
@@ -133,9 +126,6 @@ describe("automation worker state", () => {
     await expect(checkAutomationWorkerHealth(now)).resolves.toMatchObject({
       recovered: 1
     });
-    expect(mocks.sendHealthEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "recovered" })
-    );
     expect(mocks.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -163,8 +153,5 @@ describe("automation worker state", () => {
     await expect(checkAutomationWorkerHealth(now)).resolves.toMatchObject({
       recovered: 1
     });
-    expect(mocks.sendHealthEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ event: "recovered" })
-    );
   });
 });

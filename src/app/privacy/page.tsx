@@ -92,7 +92,7 @@ export default function PrivacyPage() {
           <li>Find likely-public courses near the location you request.</li>
           <li>Create, run, pause, resume, edit, and stop your saved alerts.</li>
           <li>Match public tee-time observations to your date, time, player, and course preferences.</li>
-          <li>Send alert and status emails to you and the recipients you choose.</li>
+          <li>Send tee-time match alerts to you and the recipients you choose.</li>
           <li>Protect account access and keep each dashboard scoped to its owner.</li>
           <li>Investigate broken experiences, missing courses, provider changes, and abuse.</li>
           <li>Understand aggregate product usage and improve the service.</li>

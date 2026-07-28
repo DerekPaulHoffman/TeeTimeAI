@@ -1503,51 +1503,11 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/email-preview");
 
-    await expect(page.getByRole("heading", { name: "Morning update" })).toBeVisible();
-    await expect(page.getByTitle("Rendered morning update email")).toBeVisible();
-
-    const morningFrame = page.frameLocator("iframe[title='Rendered morning update email']");
-    await expect(morningFrame.locator("body")).toContainText("MORNING UPDATE");
-    await expect(morningFrame.locator("body")).toContainText("Pinebrook Golf Club");
-    await expect(morningFrame.locator("body")).toContainText("Ridgecrest Links");
-    await expect(morningFrame.getByText("Pinebrook Golf Club", { exact: true })).toHaveCount(1);
-    await expect(morningFrame.getByText("Ridgecrest Links", { exact: true })).toHaveCount(1);
-    await expect(morningFrame.locator("body")).toContainText("18 holes");
-    await expect(morningFrame.locator("body")).toContainText("NEW");
-    await expect(morningFrame.locator("body")).toContainText("What we're watching for you");
-    await expect(morningFrame.locator("body")).toContainText("PRIORITY 5");
-    await expect(morningFrame.locator("body")).not.toContainText(/PRIORITY [6-9]/);
-    await expect(morningFrame.locator("body")).toContainText(
-      /at most one morning status update per day/i
+    await expect(page.getByRole("heading", { name: "Instant alert" })).toBeVisible();
+    await expect(page.locator("body")).toContainText("Match alerts only");
+    await expect(page.locator("body")).toContainText(
+      /Setup, morning, monitoring, operator/
     );
-    await expect(morningFrame.locator("body")).toContainText(/first come,\s+first served/i);
-    await expect(morningFrame.locator("body")).not.toContainText(/we book/i);
-
-    const morningMetrics = await page
-      .locator("iframe[title='Rendered morning update email']")
-      .evaluate((element) => {
-        const frame = element as HTMLIFrameElement;
-        const document = frame.contentDocument;
-        return {
-          contentHeight: Math.max(
-            document?.documentElement.scrollHeight ?? 0,
-            document?.body?.scrollHeight ?? 0
-          ),
-          contentWidth: document?.documentElement.scrollWidth ?? 0,
-          frameHeight: frame.getBoundingClientRect().height,
-          viewportWidth: document?.documentElement.clientWidth ?? 0
-        };
-      });
-    expect(morningMetrics.frameHeight).toBeGreaterThanOrEqual(morningMetrics.contentHeight - 2);
-    expect(morningMetrics.contentWidth).toBeLessThanOrEqual(morningMetrics.viewportWidth + 2);
-    await captureUiElementScreenshot(
-      page.locator("iframe[title='Rendered morning update email']"),
-      testInfo,
-      "email-preview-morning"
-    );
-
-    await page.getByRole("link", { name: "Instant" }).click();
-    await expect(page).toHaveURL(/\/email-preview\?variant=instant$/);
     const instantFrame = page.frameLocator("iframe[title='Rendered instant alert email']");
     await expect(instantFrame.locator("body")).toContainText("NEW TEE TIME ALERT");
     await expect(instantFrame.locator("body")).toContainText("Pinebrook Golf Club");
@@ -1590,6 +1550,11 @@ test.describe("Tee Time Spot UI smoke", () => {
       testInfo,
       "email-preview-instant"
     );
+
+    await page.getByRole("link", { name: "Retired morning" }).click();
+    await expect(page).toHaveURL(/\/email-preview\?variant=morning$/);
+    await expect(page.getByRole("heading", { name: "Retired morning update" })).toBeVisible();
+    await expect(page.getByText(/historical status template.*not sent/i)).toBeVisible();
 
     await captureUiScreenshot(page, testInfo, "email-preview");
 

@@ -4,7 +4,7 @@ import { Resend, type ErrorResponse } from "resend";
 
 import { getRenderedAvailabilityTimes, renderCustomerEmail } from "@/lib/email/customer-email";
 import { isVercelProduction } from "@/lib/env";
-import { renderSearchStatusHtml, type SearchStatusEmailInput } from "@/lib/email/search-status";
+import type { SearchStatusEmailInput } from "@/lib/email/search-status";
 import { buildEmailStopUrls, type EmailStopUrls } from "@/lib/email/search-actions";
 import { DEFAULT_TIME_ZONE, normalizeTimeZone } from "@/lib/timezones";
 
@@ -170,93 +170,22 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
 }
 
 export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Promise<EmailDelivery> {
-  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
-  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
-
-  if (shouldDryRunRecipient(input.to)) {
-    console.warn("[email:status-dry-run]", {
-      recipientRef: createLogReference(input.to),
-      searchRef: createLogReference(input.searchId),
-      kind: input.kind,
-      targetDate: input.targetDate,
-      courses: input.courses.length
-    });
-    return { id: "dry-run", deliveryStatus: "dry_run" };
-  }
-  if (!apiKey || !from) {
-    if (isVercelProduction()) {
-      throw new EmailDeliveryConfigurationError();
-    }
-    console.warn("[email:status-not-configured-dry-run]", {
-      recipientRef: createLogReference(input.to),
-      searchRef: createLogReference(input.searchId),
-      kind: input.kind,
-      targetDate: input.targetDate
-    });
-    return { id: "dry-run", deliveryStatus: "dry_run" };
-  }
-
-  const email = {
-    from,
-    to: input.to,
-    subject:
-      input.kind === "setup"
-        ? "Your Tee Time Spot search is active"
-        : "Your morning Tee Time Spot update",
-    html: renderSearchStatusHtml({
-      ...input,
-      stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)
-    })
-  };
-  const result = await new Resend(apiKey).emails.send(
-    email,
-    input.stableIdempotencyKey || input.idempotencyKey
-      ? {
-          headers: {
-            "Idempotency-Key":
-              input.stableIdempotencyKey ??
-              buildContentScopedEmailIdempotencyKey(input.idempotencyKey!, email)
-          }
-        }
-      : undefined
-  );
-
-  if (result.error) {
-    throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
-  }
-
-  return { ...result.data, deliveryStatus: "sent" };
+  console.info("[email:status-disabled]", {
+    recipientRef: createLogReference(input.to),
+    searchRef: createLogReference(input.searchId),
+    kind: input.kind
+  });
+  return { id: "suppressed", deliveryStatus: "dry_run" };
 }
 
 export async function sendAutomationWorkerHealthEmail(
   input: AutomationWorkerHealthEmailInput
 ): Promise<OperatorEmailDelivery> {
-  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
-  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
-  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
-  if (!to) return { deliveryStatus: "not_configured" };
-  if (!apiKey || !from || shouldDryRunRecipient(to)) {
-    return { id: "dry-run", deliveryStatus: "dry_run" };
-  }
-
-  const recovered = input.event === "recovered";
-  const subject = recovered
-    ? `Automation worker recovered: ${input.workerKey}`
-    : `Automation worker overdue: ${input.workerKey}`;
-  const html = [
-    "<h1>Tee Time Spot automation health</h1>",
-    `<p><strong>${escapeHtml(input.workerKey)}</strong> is ${recovered ? "reporting normally again" : "past its expected cadence"}.</p>`,
-    `<p>Expected checkpoint: ${escapeHtml(input.expectedAt.toISOString())}<br>Observed: ${escapeHtml(input.observedAt.toISOString())}</p>`,
-    "<p>Golfer search scheduling remains independently owned by Vercel Workflow and the recovery cron.</p>"
-  ].join("");
-  const result = await new Resend(apiKey).emails.send(
-    { from, to, subject, html },
-    {
-      idempotencyKey: `automation-worker/${input.workerKey}/${input.event}/${input.expectedAt.toISOString()}`
-    }
-  );
-  if (result.error) throw new Error(result.error.message);
-  return { ...result.data, deliveryStatus: "sent" };
+  console.info("[email:automation-health-disabled]", {
+    workerKey: input.workerKey,
+    event: input.event
+  });
+  return { deliveryStatus: "not_configured" };
 }
 
 export function normalizeEmailEnvValue(value?: string) {
@@ -447,23 +376,4 @@ function buildStableEmailStopUrls(searchId: string, targetDate?: string) {
 
 function createLogReference(value: string) {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => {
-    switch (character) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case '"':
-        return "&quot;";
-      case "'":
-        return "&#39;";
-      default:
-        return character;
-    }
-  });
 }

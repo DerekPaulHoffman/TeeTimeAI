@@ -68,6 +68,7 @@ import type {
 } from "@/lib/courses/intelligence";
 import { getCourseLayoutCompatibility, getCourseLayoutLabel } from "@/lib/courses/course-layout";
 import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
+import { areSearchStatusEmailsEnabled } from "@/lib/email/delivery-policy";
 import {
   drainSearchEmailDeliveryGroup,
   finalizeSearchEmailDeliveryGroup,
@@ -972,11 +973,14 @@ async function checkSearch(
 
   await maintainSearchCheckLease(lease);
   const checkedAt = new Date();
-  const statusKindBeforeRetry = getSearchStatusEmailKind(
-    search.statusEmailSentAt,
-    checkedAt,
-    search.userTimeZone
-  );
+  const statusEmailsEnabled = areSearchStatusEmailsEnabled();
+  const statusKindBeforeRetry = statusEmailsEnabled
+    ? getSearchStatusEmailKind(
+        search.statusEmailSentAt,
+        checkedAt,
+        search.userTimeZone
+      )
+    : null;
   const retriedDeliveries = await retryExistingSearchEmailDeliveryGroups({
     searchId: search.id,
     alertGeneration: search.alertGeneration,
@@ -998,10 +1002,12 @@ async function checkSearch(
     }
     newlyAlertedMatches += retriedDeliveries.ownerSentMatchCount;
   }
-  let pendingStatusReplacement = await getPendingStatusEmailReplacement({
-    searchId: search.id,
-    alertGeneration: search.alertGeneration
-  });
+  let pendingStatusReplacement = statusEmailsEnabled
+    ? await getPendingStatusEmailReplacement({
+        searchId: search.id,
+        alertGeneration: search.alertGeneration
+      })
+    : null;
   if (retriedMatchCoveredDaily && pendingStatusReplacement?.kind === "DAILY") {
     const satisfied = await satisfyPendingDailyStatusReplacementWithMatch({
       searchId: search.id,
@@ -1018,11 +1024,13 @@ async function checkSearch(
   search = (await getActiveSearchForAutomation(searchId)) ?? search;
   await maintainSearchCheckLease(lease);
   await maintainSearchCheckLease(lease);
-  const statusEmailKind = pendingStatusReplacement
-    ? pendingStatusReplacement.kind === "SETUP"
-      ? "setup"
-      : "daily"
-    : getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone);
+  const statusEmailKind = statusEmailsEnabled
+    ? pendingStatusReplacement
+      ? pendingStatusReplacement.kind === "SETUP"
+        ? "setup"
+        : "daily"
+      : getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone)
+    : null;
   let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
     retriedMatchCoveredDaily
       ? "covered_by_match_alert"

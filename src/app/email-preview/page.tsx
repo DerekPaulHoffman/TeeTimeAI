@@ -250,9 +250,9 @@ export default async function EmailPreviewPage({
 }: EmailPreviewPageProps) {
   const requestedVariant = (await searchParams).variant;
   const variant: PreviewVariant =
-    requestedVariant === "setup" || requestedVariant === "instant"
+    requestedVariant === "setup" || requestedVariant === "morning"
       ? requestedVariant
-      : "morning";
+      : "instant";
   const isInstant = variant === "instant";
   const statusPreview: SearchStatusEmailInput = {
     ...baseStatusPreview,
@@ -262,10 +262,10 @@ export default async function EmailPreviewPage({
     ? renderAlertHtml(previewAlert)
     : renderSearchStatusHtml(statusPreview);
   const title = variant === "setup"
-    ? "Setup report"
+    ? "Retired setup report"
     : variant === "instant"
       ? "Instant alert"
-      : "Morning update";
+      : "Retired morning update";
   const subject = variant === "setup"
     ? "Your Tee Time Spot search is active"
     : variant === "instant"
@@ -281,8 +281,9 @@ export default async function EmailPreviewPage({
           </p>
           <h1>{title}</h1>
           <p className="meta">
-            This is the complete email body, rendered with the same HTML and data shape used for
-            production delivery.
+            {isInstant
+              ? "This is the complete match-alert email used for production delivery."
+              : "This historical status template is retained for reference and is not sent."}
           </p>
         </div>
         <a className="button button-secondary" href={previewAlert.matches[0]?.bookingUrl}>
@@ -296,10 +297,14 @@ export default async function EmailPreviewPage({
           <a
             aria-current={variant === option ? "page" : undefined}
             className={variant === option ? "button button-dark" : "button button-secondary"}
-            href={option === "morning" ? "/email-preview" : `/email-preview?variant=${option}`}
+            href={option === "instant" ? "/email-preview" : `/email-preview?variant=${option}`}
             key={option}
           >
-            {option === "morning" ? "Morning" : option === "setup" ? "Setup" : "Instant"}
+            {option === "morning"
+              ? "Retired morning"
+              : option === "setup"
+                ? "Retired setup"
+                : "Match alert"}
           </a>
         ))}
       </nav>
@@ -326,9 +331,9 @@ export default async function EmailPreviewPage({
           <div className="delivery-step">
             <Mail size={18} />
             <div>
-              <strong>One real template at a time</strong>
+              <strong>Match alerts only</strong>
               <p className="meta">
-                Switch variants above without stacking or cutting off another email.
+                Resend is used only when a matching tee time is ready for a golfer.
               </p>
             </div>
           </div>
@@ -343,8 +348,8 @@ export default async function EmailPreviewPage({
             </div>
           </div>
           <div className="alert alert-info">
-            Setup and morning updates include every selected course&apos;s monitoring state.
-            Instant alerts stay focused on matching availability.
+            Setup, morning, monitoring, operator, and worker-health email are disabled. Their
+            state stays in the dashboard and operator view.
           </div>
         </aside>
       </section>

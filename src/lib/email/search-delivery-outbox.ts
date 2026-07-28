@@ -756,7 +756,7 @@ export async function listRetryableSearchEmailDeliveryGroups(input: {
     where: {
       teeSearchId: input.searchId,
       alertGeneration: input.alertGeneration,
-      kind: { in: ["SETUP", "DAILY", "MATCH"] },
+      kind: "MATCH",
       status: { in: ["PENDING", "FAILED", "SENDING"] }
     },
     select: {

@@ -31,6 +31,10 @@ const emailMocks = vi.hoisted(() => ({
   sendTeeTimeAlert: vi.fn()
 }));
 
+const deliveryPolicyMocks = vi.hoisted(() => ({
+  areSearchStatusEmailsEnabled: vi.fn()
+}));
+
 const deliveryOutboxMocks = vi.hoisted(() => ({
   drainSearchEmailDeliveryGroup: vi.fn(),
   finalizeSearchEmailDeliveryGroup: vi.fn(),
@@ -93,6 +97,7 @@ const localReaderMocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/email/alerts", () => emailMocks);
+vi.mock("@/lib/email/delivery-policy", () => deliveryPolicyMocks);
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 vi.mock("@/lib/adapters/foreup", () => adapterMocks);
 vi.mock("@/lib/adapters/cps", () => ({
@@ -211,6 +216,7 @@ describe("runSearchCheck email cadence", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-11T12:10:00.000Z"));
+    deliveryPolicyMocks.areSearchStatusEmailsEnabled.mockReturnValue(true);
     courseMonitoringMocks.getCourseMonitoringRetryAt.mockImplementation(
       async (_courseIds, options) =>
         options?.transientRetryCourseIds?.length ? new Date(Date.now() + 2 * 60 * 1000) : null
@@ -581,7 +587,8 @@ describe("runSearchCheck email cadence", () => {
     expect(result.newlyAlertedMatches).toBe(17);
   });
 
-  it("lets a new-opening email satisfy the morning update instead of sending twice", async () => {
+  it("sends only a new-opening alert when status emails are disabled", async () => {
+    deliveryPolicyMocks.areSearchStatusEmailsEnabled.mockReturnValue(false);
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       statusEmailSentAt: new Date("2026-07-10T13:00:00.000Z"),
@@ -640,7 +647,7 @@ describe("runSearchCheck email cadence", () => {
     expect(deliveryOutboxMocks.prepareRecipientMatchDeliveryGroups).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
-          satisfiesStatusReport: true,
+          satisfiesStatusReport: false,
           statusSnapshot: expect.any(Array)
         })
       })
@@ -651,7 +658,7 @@ describe("runSearchCheck email cadence", () => {
     expect(result).toEqual(
       expect.objectContaining({
         newlyAlertedMatches: 1,
-        statusEmailOutcome: "covered_by_match_alert"
+        statusEmailOutcome: "skipped"
       })
     );
   });
