@@ -450,11 +450,7 @@ async function collectPageEvidence(page: Page) {
       document.querySelectorAll<HTMLScriptElement>("script:not([src])")
     )
       .map((script) => script.textContent ?? "")
-      .filter(
-        (text) =>
-          text.includes("actionButton") &&
-          /(?:\\?"type\\?":\\?"phone\\?")/i.test(text)
-      )
+      .filter((text) => text.includes("actionButton"))
       .map((text) => text.slice(0, 100_000))
       .slice(0, 3);
     const widgetConfigs = Array.from(document.querySelectorAll<HTMLElement>("[data-widget-config]"))
