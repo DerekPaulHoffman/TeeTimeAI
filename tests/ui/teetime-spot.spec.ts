@@ -976,6 +976,37 @@ test.describe("Tee Time Spot UI smoke", () => {
         .evaluateAll((actions) => actions.map((action) => action.getBoundingClientRect().height));
       expect(courseActionHeights.length).toBeGreaterThan(0);
       expect(courseActionHeights.every((height) => height >= 44)).toBe(true);
+
+      const utilityIconLayout = await courseRows
+        .first()
+        .locator(".course-actions .button-ghost")
+        .evaluateAll((actions) =>
+          actions.map((action) => {
+            const actionBox = action.getBoundingClientRect();
+            const iconBox = action.querySelector("svg")?.getBoundingClientRect();
+            return {
+              centerOffsetX: iconBox
+                ? Math.abs(
+                    iconBox.left + iconBox.width / 2 - (actionBox.left + actionBox.width / 2)
+                  )
+                : Number.POSITIVE_INFINITY,
+              centerOffsetY: iconBox
+                ? Math.abs(
+                    iconBox.top + iconBox.height / 2 - (actionBox.top + actionBox.height / 2)
+                  )
+                : Number.POSITIVE_INFINITY,
+              iconHeight: iconBox?.height ?? 0,
+              iconWidth: iconBox?.width ?? 0
+            };
+          })
+      );
+      expect(utilityIconLayout.length).toBeGreaterThan(0);
+      for (const { centerOffsetX, centerOffsetY, iconHeight, iconWidth } of utilityIconLayout) {
+        expect(iconHeight).toBeCloseTo(18, 1);
+        expect(iconWidth).toBeCloseTo(18, 1);
+        expect(centerOffsetX).toBeLessThanOrEqual(1);
+        expect(centerOffsetY).toBeLessThanOrEqual(1);
+      }
     }
     const seeMoreLocations = page.getByRole("button", { name: /See more locations/i });
     if ((await seeMoreLocations.count()) > 0) {
