@@ -1664,6 +1664,62 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
+  it("queues an exact Chronogolf reader course after an authentication failure", async () => {
+    const bookingUrl = "https://www.chronogolf.com/club/hyde-park-golf-club";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Hyde Park Golf Club",
+            detectedPlatform: "CHRONOGOLF",
+            providerFamilyKey: "CHRONOGOLF",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            bookingMetadata: {
+              provider: "CHRONOGOLF",
+              clubId: 4006,
+              courseIds: ["5d8f129e-e7b8-4855-970c-bd3bc39879a3"],
+              bookingBaseUrl: bookingUrl
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(true);
+    adapterMocks.fetchChronogolfSlots.mockRejectedValue(
+      new Error("Chronogolf tee times returned 403")
+    );
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("hyde-park");
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-hyde-park"
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2,
+      bookingUrl
+    });
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("in progress")
+    });
+    expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+  });
+
   it("queues Grassy Hill for the local reader after a verified challenge", async () => {
     const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({

@@ -794,12 +794,17 @@ async function checkSearch(
         await maintainSearchCheckLease(lease);
         let message = error instanceof Error ? error.message : "Unknown adapter error";
         const providerFailure = classifyProviderFailure({ error });
+        const chronogolfAuthReaderFallback =
+          localReaderEligible &&
+          providerFamilyKey === "CHRONOGOLF" &&
+          providerFailure.failureClass === "AUTH";
         const localReaderFallbackAllowed =
           localReaderEligible &&
           (cpsLocalReaderPreferred ||
             localReaderCanOverrideGate ||
             !supportedAdapterAvailable ||
-            providerFailure.failureClass === "CHALLENGE");
+            providerFailure.failureClass === "CHALLENGE" ||
+            chronogolfAuthReaderFallback);
         const localReaderJob =
           customerBookingUrl && localReaderFallbackAllowed
             ? await queueLocalReaderJob({
