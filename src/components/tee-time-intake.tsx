@@ -1318,6 +1318,7 @@ function TeeTimeIntakeContent({
         }
         id="mobile-watchlist-panel"
       >
+        <div className="figma-selected-scroll-content">
         <div className="figma-selected-header">
           <span className="figma-selected-icon">
             <MapPinned size={18} />
@@ -1529,6 +1530,7 @@ function TeeTimeIntakeContent({
             </div>
           </fieldset>
         ) : null}
+        </div>
         <div className="figma-alert-action">
           {accountState.status === "signed-out" && clerkPublishableKey ? (
             <DeferredSignInButton

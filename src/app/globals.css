@@ -5585,12 +5585,23 @@ button {
   border: 0;
   border-radius: 16px;
   color: #ffffff;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  max-height: calc(100dvh - 100px);
   min-height: 0;
+  overflow: hidden;
   padding: 18px;
   position: sticky;
-  max-height: none;
-  overflow: visible;
   top: 84px;
+}
+
+.figma-selected-scroll-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-color: #52636e transparent;
+  scrollbar-width: thin;
 }
 
 .search-page .figma-selected-panel > p {
@@ -5699,11 +5710,8 @@ button {
 .figma-alert-action {
   background: #121e27;
   border-top: 1px solid #34454f;
-  bottom: -1px;
   margin-top: 12px;
   padding-top: 12px;
-  position: sticky;
-  z-index: 3;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -7535,7 +7543,7 @@ button {
 @media (max-width: 920px) {
   .dashboard-sidebar,
   .preview-sidebar,
-  .search-page .figma-selected-panel {
+  .search-page .figma-results-layout .figma-selected-panel {
     display: none;
   }
 
@@ -7546,11 +7554,11 @@ button {
   .search-page .figma-selected-panel.is-mobile-open {
     bottom: 72px;
     box-shadow: 0 -8px 32px rgba(17, 26, 34, 0.3);
-    display: block;
+    display: grid;
     left: 12px;
     margin: 0;
     max-height: calc(100svh - 96px);
-    overflow-y: auto;
+    overflow: hidden;
     position: fixed;
     right: 12px;
     top: auto;

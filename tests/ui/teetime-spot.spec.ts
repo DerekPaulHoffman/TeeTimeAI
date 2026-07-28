@@ -1312,21 +1312,46 @@ test.describe("Tee Time Spot UI smoke", () => {
       "You can prioritize up to 5 courses."
     );
     if (!usesSelectionDrawer) {
+      const originalViewport = page.viewportSize();
+      await page.setViewportSize({
+        height: 674,
+        width: originalViewport?.width ?? 1440
+      });
       const selectedPanel = page.locator(".figma-selected-panel");
       const panelLayout = await selectedPanel.evaluate((panel) => {
         const styles = window.getComputedStyle(panel);
+        const scrollContent = panel.querySelector<HTMLElement>(".figma-selected-scroll-content");
         const action = panel.querySelector(".figma-alert-action > .button-primary");
+        const scrollContentRect = scrollContent?.getBoundingClientRect();
         const actionRect = action?.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
 
         return {
           actionBottom: actionRect?.bottom ?? Number.POSITIVE_INFINITY,
-          overflowY: styles.overflowY,
+          actionTop: actionRect?.top ?? Number.NEGATIVE_INFINITY,
+          panelBottom: panelRect.bottom,
+          panelOverflowY: styles.overflowY,
+          scrollContentBottom: scrollContentRect?.bottom ?? Number.POSITIVE_INFINITY,
+          scrollContentClientHeight: scrollContent?.clientHeight ?? 0,
+          scrollContentOverflowY: scrollContent
+            ? window.getComputedStyle(scrollContent).overflowY
+            : "",
+          scrollContentScrollHeight: scrollContent?.scrollHeight ?? 0,
           viewportHeight: window.innerHeight
         };
       });
-      expect(panelLayout.overflowY).toBe("visible");
+      expect(panelLayout.panelOverflowY).toBe("hidden");
+      expect(panelLayout.scrollContentOverflowY).toBe("auto");
+      expect(panelLayout.scrollContentScrollHeight).toBeGreaterThan(
+        panelLayout.scrollContentClientHeight
+      );
+      expect(panelLayout.actionTop).toBeGreaterThanOrEqual(panelLayout.scrollContentBottom);
+      expect(panelLayout.actionBottom).toBeLessThanOrEqual(panelLayout.panelBottom);
       expect(panelLayout.actionBottom).toBeLessThanOrEqual(panelLayout.viewportHeight);
       await expect(alertActionButton).toBeVisible();
+      if (originalViewport) {
+        await page.setViewportSize(originalViewport);
+      }
     }
 
     await captureUiScreenshot(page, testInfo, "search-five-selected");
