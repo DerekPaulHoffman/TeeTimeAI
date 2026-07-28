@@ -11,6 +11,35 @@ const mockedPrisma = vi.mocked(prisma, { deep: true });
 describe("course alert support enrichment", () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("marks a known non-public course for review before selection", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-access-review",
+        googlePlaceId: "course-access-review-place",
+        name: "Access Review Golf Course",
+        isPublic: false,
+        latitude: 41.815,
+        longitude: -73.071,
+        bookingMethod: "OFFICIAL_SITE",
+        automationEligibility: "BLOCKED"
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "course-access-review-place",
+        name: "Access Review Golf Course",
+        latitude: 41.815,
+        longitude: -73.071,
+        publicAccessStatus: "PUBLIC",
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.courseId).toBe("course-access-review");
+    expect(course.publicAccessStatus).toBe("REVIEW_REQUIRED");
+  });
+
   it("marks a known phone-only course unavailable for alerts", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

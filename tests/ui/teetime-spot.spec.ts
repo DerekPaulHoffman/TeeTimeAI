@@ -744,6 +744,77 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expectNoPageIssues(issues, testInfo);
   });
 
+  test("routes a course access inaccuracy to feedback instead of the shortlist", async ({
+    page
+  }, testInfo) => {
+    test.skip(!useMockedSearchProviders, "This interaction uses deterministic course fixtures.");
+    const issues = collectPageIssues(page);
+
+    await page.route("**/api/location/geocode?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({ latitude: 41.24, longitude: -73.2 }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+    await page.route("**/api/courses/discover?**", async (route) => {
+      await route.fulfill({
+        body: JSON.stringify({
+          courses: [
+            {
+              address: "1 Review Rd, Trumbull, CT",
+              googlePlaceId: "ui-smoke-access-review",
+              latitude: 41.24,
+              longitude: -73.2,
+              monitoringSupport: "MANUAL_ONLY",
+              name: "Review This Golf Course",
+              publicAccessStatus: "REVIEW_REQUIRED",
+              timeZone: "America/New_York"
+            }
+          ]
+        }),
+        contentType: "application/json",
+        status: 200
+      });
+    });
+
+    await page.goto("/search");
+    const locationInput = page.getByRole("textbox", { name: "Location", exact: true });
+    await locationInput.fill("Trumbull, CT");
+    await locationInput.press("Enter");
+
+    const courseCard = page.locator(".course-row").filter({
+      hasText: "Review This Golf Course"
+    });
+    await expect(courseCard).toBeVisible();
+    await expect(courseCard.getByText("Needs review", { exact: true })).toBeVisible();
+    await expect(
+      courseCard.getByRole("button", { name: "Add Review This Golf Course" })
+    ).toHaveCount(0);
+    await expect(courseCard.getByText("Private or invalid course record")).toBeVisible();
+    await expect(
+      courseCard.getByText(
+        "Current exact identity evidence shows that this is private, not a playable public course, or no longer a valid course record."
+      )
+    ).toBeVisible();
+    await expect(
+      courseCard.getByText(/cannot check this course automatically yet/i)
+    ).toHaveCount(0);
+
+    await courseCard
+      .getByRole("button", {
+        name: "Report inaccuracy for Review This Golf Course"
+      })
+      .click();
+
+    const feedbackDialog = page.getByRole("dialog", { name: "Send feedback" });
+    await expect(feedbackDialog).toBeVisible();
+    await expect(feedbackDialog.getByLabel("Details")).toHaveValue(
+      /I think Review This Golf Course at 1 Review Rd, Trumbull, CT is a public golf course/
+    );
+    await expectNoPageIssues(issues, testInfo);
+  });
+
   test("onboarding discovery, ranking limit, and controls are usable", async ({
     page
   }, testInfo) => {

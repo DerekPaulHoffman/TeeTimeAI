@@ -75,7 +75,7 @@ export type CourseCandidate = {
   courseId?: string;
   googlePlaceId: string;
   name: string;
-  publicAccessStatus?: "PUBLIC" | "UNVERIFIED";
+  publicAccessStatus?: "PUBLIC" | "UNVERIFIED" | "REVIEW_REQUIRED";
   address?: string;
   city?: string;
   stateCode?: string;

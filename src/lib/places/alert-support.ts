@@ -21,6 +21,7 @@ const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
 type KnownCourseRecord = CourseIdentity & {
   id: string;
+  isPublic: boolean | null;
   rating?: number | null;
   ratingObservedAt?: Date | null;
   bookingMethod: BookingMethod;
@@ -66,6 +67,7 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
     take: 500,
     select: {
       id: true,
+      isPublic: true,
       googlePlaceId: true,
       name: true,
       address: true,
@@ -131,6 +133,9 @@ function mapCourseAlertSupport(
   const candidateWithProfile = {
     ...candidateWithRating,
     courseId: course.id,
+    ...(course.isPublic === false
+      ? { publicAccessStatus: "REVIEW_REQUIRED" as const }
+      : {}),
     ...getMonitoringReadiness(course),
     ...(course.profile && ["PUBLISHED", "STALE"].includes(course.profile.status)
       ? { profileUrl: `/courses/${course.profile.canonicalSlug}` }

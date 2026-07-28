@@ -153,7 +153,8 @@ function sanitizeCourseCandidate(value: unknown): CourseCandidate | undefined {
     ? value.layoutHolesStatus
     : undefined;
   const publicAccessStatus = value.publicAccessStatus === "PUBLIC" ||
-    value.publicAccessStatus === "UNVERIFIED"
+    value.publicAccessStatus === "UNVERIFIED" ||
+    value.publicAccessStatus === "REVIEW_REQUIRED"
     ? value.publicAccessStatus
     : undefined;
 

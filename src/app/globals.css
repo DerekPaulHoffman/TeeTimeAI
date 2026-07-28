@@ -945,6 +945,96 @@ button {
   color: var(--fairway-dark);
 }
 
+.alert-failure-toast {
+  align-items: flex-start;
+  animation: alert-toast-enter 180ms ease-out both;
+  background: #14231d;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(9, 24, 18, 0.24);
+  color: #ffffff;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  max-width: min(430px, calc(100vw - 32px));
+  padding: 16px;
+  position: fixed;
+  right: 24px;
+  top: 88px;
+  z-index: 80;
+}
+
+.alert-failure-toast > svg {
+  color: #f1bd68;
+  margin-top: 2px;
+}
+
+.alert-failure-toast strong {
+  display: block;
+  font-size: 0.95rem;
+  line-height: 1.25;
+}
+
+.alert-failure-toast p {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 5px 0 12px;
+}
+
+.alert-failure-toast div > button {
+  align-items: center;
+  background: #f5efe3;
+  border: 0;
+  border-radius: 999px;
+  color: #17382d;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 800;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 13px;
+}
+
+.alert-failure-toast div > button:hover,
+.alert-failure-toast div > button:focus-visible {
+  background: #ffffff;
+}
+
+.alert-failure-toast-close {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.68);
+  cursor: pointer;
+  display: inline-flex;
+  height: 32px;
+  justify-content: center;
+  margin: -6px -6px 0 0;
+  padding: 0;
+  width: 32px;
+}
+
+.alert-failure-toast-close:hover,
+.alert-failure-toast-close:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+@keyframes alert-toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .summary-panel {
   align-self: start;
   background: var(--night);
@@ -5100,6 +5190,14 @@ button {
   padding: 2px 7px;
 }
 
+.figma-course-pill.is-review-required {
+  background: #f8dfdb;
+  border-radius: 999px;
+  color: #8a3027;
+  font-weight: 700;
+  padding: 2px 7px;
+}
+
 .figma-course-pill.is-rating {
   color: #9a6400;
   font-weight: 600;
@@ -5163,6 +5261,14 @@ button {
   color: #8a4f19;
   font-size: 0.7rem;
   font-weight: 700;
+  margin: 5px 0 0;
+}
+
+.search-page .figma-course-list .course-access-review-note {
+  color: #8a3027;
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 1.3;
   margin: 5px 0 0;
 }
 
@@ -5280,6 +5386,57 @@ button {
   background: #e5f7ec;
   border-color: #b9e8cc;
   color: #087446;
+}
+
+.search-page .figma-course-list .figma-report-button {
+  align-items: center;
+  background: #fff7f1;
+  border: 1px solid #e8b9aa;
+  border-radius: 999px;
+  color: #8a3027;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  gap: 5px;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 12px;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    transform 140ms ease;
+  white-space: nowrap;
+}
+
+.search-page .figma-course-list .figma-report-button:hover,
+.search-page .figma-course-list .figma-report-button:focus-visible {
+  background: #ffffff;
+  border-color: #d99580;
+  transform: translateY(-1px);
+}
+
+@media (max-width: 640px) {
+  .alert-failure-toast {
+    left: 16px;
+    max-width: none;
+    right: 16px;
+    top: 76px;
+  }
+
+  .search-page .figma-course-list .figma-report-button {
+    font-size: 0.65rem;
+    min-height: 44px;
+    padding: 0 8px;
+    white-space: normal;
+    width: 72px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .alert-failure-toast {
+    animation: none;
+  }
 }
 
 .search-page .figma-course-list .course-rank-overlay {

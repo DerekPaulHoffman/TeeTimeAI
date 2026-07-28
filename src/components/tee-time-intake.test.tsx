@@ -11,6 +11,7 @@ import {
   WEBSITE_TRAFFIC_CLASS_HEADER,
   WEBSITE_TRAFFIC_CLASS_STORAGE_KEY
 } from "@/lib/engagement/traffic-class";
+import { OPEN_FEEDBACK_EVENT } from "@/components/open-feedback-button";
 
 import { TeeTimeIntake } from "./tee-time-intake";
 
@@ -417,5 +418,155 @@ describe("TeeTimeIntake", () => {
         })
       )
     );
+  });
+
+  it("replaces Add with Report inaccuracy for a course that needs access review", async () => {
+    const feedbackEvents: CustomEvent[] = [];
+    const handleFeedback = (event: Event) => {
+      feedbackEvents.push(event as CustomEvent);
+    };
+    window.addEventListener(OPEN_FEEDBACK_EVENT, handleFeedback);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.startsWith("/api/location/geocode")) {
+        return Response.json({ latitude: 41.24, longitude: -73.2 });
+      }
+
+      if (url.startsWith("/api/courses/discover")) {
+        return Response.json({
+          courses: [
+            {
+              address: "1 Review Rd, Trumbull, CT",
+              googlePlaceId: "course-review",
+              latitude: 41.24,
+              longitude: -73.2,
+              monitoringSupport: "MANUAL_ONLY",
+              name: "Review This Golf Course",
+              publicAccessStatus: "REVIEW_REQUIRED",
+              timeZone: "America/New_York"
+            }
+          ]
+        });
+      }
+
+      if (url === "/api/analytics/events") {
+        return Response.json({ event: { id: "event-1" } }, { status: 201 });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn()
+    });
+
+    render(
+      <TeeTimeIntake
+        {...signedInAccountProps}
+        initialValues={{ location: "Trumbull, CT" }}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByRole("heading", { name: "Review This Golf Course" });
+
+    expect(screen.getByText("Needs review")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Add Review This Golf Course" })
+    ).toBeNull();
+    expect(screen.getByText("Private or invalid course record")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Current exact identity evidence shows that this is private, not a playable public course, or no longer a valid course record."
+      )
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/cannot check this course automatically yet/i)
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Report inaccuracy for Review This Golf Course"
+      })
+    );
+
+    expect(feedbackEvents).toHaveLength(1);
+    expect(feedbackEvents[0].detail).toMatchObject({
+      sentiment: "broken",
+      message: expect.stringContaining(
+        "I think Review This Golf Course at 1 Review Rd, Trumbull, CT is a public golf course"
+      )
+    });
+
+    window.removeEventListener(OPEN_FEEDBACK_EVENT, handleFeedback);
+  });
+
+  it("shows a styled recovery toast with feedback when alert creation fails", async () => {
+    const course = {
+      address: "100 Public Links Rd, Trumbull, CT",
+      googlePlaceId: "course-1",
+      latitude: 41.24,
+      longitude: -73.2,
+      monitoringSupport: "AUTOMATIC",
+      name: "Test Public Golf Course",
+      timeZone: "America/New_York"
+    };
+    window.sessionStorage.setItem(
+      SEARCH_DRAFT_STORAGE_KEY,
+      JSON.stringify({
+        date: "2099-01-01",
+        courses: [course],
+        selectedCourses: [course]
+      })
+    );
+
+    const feedbackEvents: CustomEvent[] = [];
+    const handleFeedback = (event: Event) => {
+      feedbackEvents.push(event as CustomEvent);
+    };
+    window.addEventListener(OPEN_FEEDBACK_EVENT, handleFeedback);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/searches") {
+        return Response.json({ error: "Internal course classification mismatch" }, { status: 400 });
+      }
+      if (url === "/api/analytics/events") {
+        return Response.json({ event: { id: "event-1" } }, { status: 201 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+
+    const saveButton = screen.getByRole("button", { name: "Start getting alerts" });
+    await waitFor(() =>
+      expect((saveButton as HTMLButtonElement).disabled).toBe(false)
+    );
+    fireEvent.click(saveButton);
+
+    const toastTitle = await screen.findByText("We couldn't start your alert");
+    expect(toastTitle.closest('[role="alert"]')?.textContent).toContain(
+      "Something went wrong, and we're working on it."
+    );
+    expect(screen.queryByText("Internal course classification mismatch")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));
+    expect(feedbackEvents).toHaveLength(1);
+    expect(feedbackEvents[0].detail).toMatchObject({
+      sentiment: "broken",
+      message: expect.stringContaining("Test Public Golf Course")
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss alert error" }));
+    expect(screen.queryByText("We couldn't start your alert")).toBeNull();
+
+    window.removeEventListener(OPEN_FEEDBACK_EVENT, handleFeedback);
   });
 });

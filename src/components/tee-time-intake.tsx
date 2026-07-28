@@ -94,6 +94,7 @@ import {
   type CourseLayoutFilter
 } from "@/components/tee-time-search-controls";
 import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
+import { openFeedback } from "@/components/open-feedback-button";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -301,6 +302,7 @@ function TeeTimeIntakeContent({
   const [locationInputInvalid, setLocationInputInvalid] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveFailureVisible, setSaveFailureVisible] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
   const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
@@ -502,6 +504,9 @@ function TeeTimeIntakeContent({
       getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
       "incompatible"
   );
+  const accessReviewSelectedCourse = selected.find(
+    (course) => course.publicAccessStatus === "REVIEW_REQUIRED"
+  );
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
@@ -510,6 +515,8 @@ function TeeTimeIntakeContent({
         ? "Enter a valid email for each additional recipient."
       : incompatibleSelectedCourse && requestedLayoutHoles
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
+      : accessReviewSelectedCourse
+        ? `${accessReviewSelectedCourse.name} needs a course-access review before it can be added to an alert.`
       : selected.length > 0 && !hasMonitorableCourse
         ? "Choose at least one course Tee Time Spot can check automatically."
         : null;
@@ -632,9 +639,11 @@ function TeeTimeIntakeContent({
       );
       setCourses(freshCourses);
       setSelected((current) =>
-        current.map(
-          (course) => freshCourseByPlaceId.get(course.googlePlaceId) ?? course
-        )
+        current
+          .map(
+            (course) => freshCourseByPlaceId.get(course.googlePlaceId) ?? course
+          )
+          .filter((course) => course.publicAccessStatus !== "REVIEW_REQUIRED")
       );
       setCourseLookupResults((current) =>
         current.map(
@@ -847,6 +856,11 @@ function TeeTimeIntakeContent({
   }
 
   function addCourse(course: CourseCandidate) {
+    if (course.publicAccessStatus === "REVIEW_REQUIRED") {
+      reportCourseInaccuracy(course);
+      return false;
+    }
+
     if (
       getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
       "incompatible"
@@ -988,6 +1002,7 @@ function TeeTimeIntakeContent({
       return;
     }
 
+    setSaveFailureVisible(false);
     setSaving(true);
     try {
       const userTimeZone =
@@ -1056,21 +1071,34 @@ function TeeTimeIntakeContent({
           ? `/dashboard?created=${encodeURIComponent(createdSearchId)}`
           : "/dashboard"
       );
-    } catch (error) {
-      setNotice({
-        type: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Could not save this search. Try again in a moment."
-      });
+    } catch {
+      setSaveFailureVisible(true);
     } finally {
       setSaving(false);
     }
   }
 
+  function reportCourseInaccuracy(course: CourseCandidate) {
+    const location = course.address ? ` at ${course.address}` : "";
+    openFeedback({
+      sentiment: "broken",
+      message: `I think ${course.name}${location} is a public golf course because:\n\n`
+    });
+  }
+
   return (
     <div className="figma-search-experience">
+      {saveFailureVisible ? (
+        <AlertFailureToast
+          onClose={() => setSaveFailureVisible(false)}
+          onSendFeedback={() =>
+            openFeedback({
+              sentiment: "broken",
+              message: `I tried to start an alert for ${selected.map((course) => course.name).join(", ")}, but it did not save.\n\nWhat looked incorrect:\n\n`
+            })
+          }
+        />
+      ) : null}
       <TeeTimeSearchControls
         date={date}
         endTime={endTime}
@@ -1204,6 +1232,7 @@ function TeeTimeIntakeContent({
                   <CourseResultCard
                     course={course}
                     key={course.googlePlaceId}
+                    onReportInaccuracy={reportCourseInaccuracy}
                     onToggle={(lookupCourseResult) => {
                       if (selectedIds.has(lookupCourseResult.googlePlaceId)) {
                         removeCourse(lookupCourseResult.googlePlaceId);
@@ -1232,6 +1261,7 @@ function TeeTimeIntakeContent({
                 <CourseResultCard
                   course={course}
                   key={course.googlePlaceId}
+                  onReportInaccuracy={reportCourseInaccuracy}
                   onToggle={toggleCourse}
                   requestedLayoutHoles={requestedLayoutHoles}
                   selectedIndex={selected.findIndex(
@@ -1598,6 +1628,39 @@ function TeeTimeIntakeContent({
   );
 }
 
+function AlertFailureToast({
+  onClose,
+  onSendFeedback
+}: {
+  onClose: () => void;
+  onSendFeedback: () => void;
+}) {
+  return (
+    <div className="alert-failure-toast" role="alert" aria-live="assertive">
+      <CircleAlert aria-hidden="true" size={20} />
+      <div>
+        <strong>We couldn&apos;t start your alert</strong>
+        <p>
+          Something went wrong, and we&apos;re working on it. If anything here
+          looks incorrect, send us feedback.
+        </p>
+        <button type="button" onClick={onSendFeedback}>
+          <Flag aria-hidden="true" size={14} />
+          Send feedback
+        </button>
+      </div>
+      <button
+        aria-label="Dismiss alert error"
+        className="alert-failure-toast-close"
+        onClick={onClose}
+        type="button"
+      >
+        <X aria-hidden="true" size={16} />
+      </button>
+    </div>
+  );
+}
+
 function CourseResultsDivider({ children }: { children: ReactNode }) {
   return (
     <div className="course-results-divider">
@@ -1610,11 +1673,13 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
 
 function CourseResultCard({
   course,
+  onReportInaccuracy,
   onToggle,
   requestedLayoutHoles,
   selectedIndex
 }: {
   course: CourseCandidate;
+  onReportInaccuracy: (course: CourseCandidate) => void;
   onToggle: (course: CourseCandidate) => void;
   requestedLayoutHoles: CourseLayoutHoleCount | null;
   selectedIndex: number;
@@ -1630,6 +1695,8 @@ function CourseResultCard({
     course.bookableHoleCounts
   );
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
+  const requiresPublicAccessReview =
+    course.publicAccessStatus === "REVIEW_REQUIRED";
 
   return (
     <div
@@ -1642,12 +1709,18 @@ function CourseResultCard({
         <div className="figma-course-badges">
           <span
             className={
-              isPublicAccessUnverified
-                ? "figma-course-pill is-unverified"
-                : "figma-course-pill is-public"
+              requiresPublicAccessReview
+                ? "figma-course-pill is-review-required"
+                : isPublicAccessUnverified
+                  ? "figma-course-pill is-unverified"
+                  : "figma-course-pill is-public"
             }
           >
-            {isPublicAccessUnverified ? "Possible course" : "Public"}
+            {requiresPublicAccessReview
+              ? "Needs review"
+              : isPublicAccessUnverified
+                ? "Possible course"
+                : "Public"}
           </span>
           {course.rating ? (
             <span
@@ -1705,6 +1778,11 @@ function CourseResultCard({
         </h3>
         <CourseAddressLink course={course} />
         <CourseMonitoringStatus course={course} />
+        {requiresPublicAccessReview ? (
+          <p className="course-access-review-note">
+            Our current information says this course may not be public.
+          </p>
+        ) : null}
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
             Does not match an {requestedLayoutHoles}-hole course search
@@ -1734,7 +1812,18 @@ function CourseResultCard({
             Official site
           </a>
         ) : null}
-        <button
+        {requiresPublicAccessReview && !isSelected ? (
+          <button
+            aria-label={`Report inaccuracy for ${course.name}`}
+            className="figma-report-button"
+            onClick={() => onReportInaccuracy(course)}
+            type="button"
+          >
+            <Flag aria-hidden="true" size={12} />
+            Report inaccuracy
+          </button>
+        ) : (
+          <button
           aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
           className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
           disabled={isIncompatible && !isSelected}
@@ -1758,7 +1847,8 @@ function CourseResultCard({
           ) : (
             "+ Add to my list"
           )}
-        </button>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1902,6 +1992,8 @@ function CourseMonitoringStatus({
   course: CourseCandidate;
   compact?: boolean;
 }) {
+  const isIdentityReviewRequired =
+    course.publicAccessStatus === "REVIEW_REQUIRED";
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const isManualOnly = isManualOnlyAlertSupport(course.alertSupport);
   const isTemporarilyUnavailable =
@@ -1912,12 +2004,17 @@ function CourseMonitoringStatus({
     !isTemporarilyUnavailable &&
     !isUnavailable;
   const isUnconfirmed =
-    isPublicAccessUnverified ||
-    (!isManualOnly &&
-      !isAutomatic &&
-      !isTemporarilyUnavailable &&
-      !isUnavailable);
-  const isDirectOnly = isManualOnly || isTemporarilyUnavailable || isUnavailable;
+    !isIdentityReviewRequired &&
+    (isPublicAccessUnverified ||
+      (!isManualOnly &&
+        !isAutomatic &&
+        !isTemporarilyUnavailable &&
+        !isUnavailable));
+  const isDirectOnly =
+    isIdentityReviewRequired ||
+    isManualOnly ||
+    isTemporarilyUnavailable ||
+    isUnavailable;
 
   return (
     <p
@@ -1930,7 +2027,9 @@ function CourseMonitoringStatus({
       )}
       <span>
         <strong>
-          {isPublicAccessUnverified
+          {isIdentityReviewRequired
+            ? "Private or invalid course record"
+            : isPublicAccessUnverified
             ? "Verified after the alert starts"
             : isManualOnly && course.alertSupport
             ? getAlertSupportLabel(course.alertSupport)
@@ -1944,7 +2043,9 @@ function CourseMonitoringStatus({
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
-            {isPublicAccessUnverified
+            {isIdentityReviewRequired
+              ? "Current exact identity evidence shows that this is private, not a playable public course, or no longer a valid course record."
+              : isPublicAccessUnverified
               ? "Start an alert and we'll verify the official course before treating any tee times as real."
               : isManualOnly && course.alertSupport
               ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
