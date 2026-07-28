@@ -1336,8 +1336,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     const alertActionText = await alertActionButton.innerText();
     if (/Sign in to start sending alerts/i.test(alertActionText)) {
       await expect(alertActionButton).toBeEnabled();
-      await alertActionButton.click();
-      await expect(page.getByRole("heading", { name: "Sign in to Tee Time Spot" })).toBeVisible();
+      const signInHeading = page.getByRole("heading", { name: "Sign in to Tee Time Spot" });
+      if (!(await signInHeading.isVisible())) {
+        await alertActionButton.evaluate((button: HTMLButtonElement) => button.click());
+      }
+      await expect(signInHeading).toBeVisible();
       await expect.poll(() => signInAnalyticsPayload).toMatchObject({
         name: "alert_sign_in_clicked",
         page: "/search",

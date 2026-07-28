@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Resend } from "resend";
+import { Resend, type ErrorResponse } from "resend";
 
 import { getRenderedAvailabilityTimes, renderCustomerEmail } from "@/lib/email/customer-email";
 import { isVercelProduction } from "@/lib/env";
@@ -89,10 +89,12 @@ export class EmailDeliveryConfigurationError extends Error {
 export class EmailDeliveryNotAcceptedError extends Error {
   readonly code = "EMAIL_DELIVERY_NOT_ACCEPTED";
   readonly retryable = true;
+  readonly providerCode: ErrorResponse["name"] | null;
 
-  constructor(message: string) {
+  constructor(message: string, providerCode: ErrorResponse["name"] | null = null) {
     super(message);
     this.name = "EmailDeliveryNotAcceptedError";
+    this.providerCode = providerCode;
   }
 }
 
@@ -161,7 +163,7 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   );
 
   if (result.error) {
-    throw new EmailDeliveryNotAcceptedError(result.error.message);
+    throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
   }
 
   return { ...result.data, deliveryStatus: "sent" };
@@ -220,7 +222,7 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
   );
 
   if (result.error) {
-    throw new EmailDeliveryNotAcceptedError(result.error.message);
+    throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
   }
 
   return { ...result.data, deliveryStatus: "sent" };

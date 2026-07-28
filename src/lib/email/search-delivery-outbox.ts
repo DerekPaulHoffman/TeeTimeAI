@@ -45,6 +45,7 @@ const DELIVERY_CLAIM_MS = 5 * 60 * 1000;
 const DELIVERY_HEARTBEAT_MS = 60 * 1000;
 const DELIVERY_RETRY_BASE_MS = 60 * 1000;
 const DELIVERY_RETRY_MAX_MS = 10 * 60 * 1000;
+const DELIVERY_DAILY_QUOTA_RETRY_MS = 24 * 60 * 60 * 1000;
 const STALE_STATUS_REPLACEMENT_PENDING = "STATUS_CONTENT_STALE_REPLACEMENT_PENDING";
 const STALE_STATUS_REPLACEMENT_PENDING_AMBIGUOUS =
   "STATUS_CONTENT_STALE_REPLACEMENT_PENDING_AMBIGUOUS";
@@ -1979,10 +1980,7 @@ async function settleClaimedSearchEmailGroup(input: {
         result.status === "rejected" ? getRejectedError(result.reason) : null;
       const failureMarker =
         status === "FAILED" ? getDeliveryFailureMarker(rejectedError) : null;
-      const retryDelay = Math.min(
-        DELIVERY_RETRY_MAX_MS,
-        DELIVERY_RETRY_BASE_MS * 2 ** Math.max(0, delivery.attemptCount - 1)
-      );
+      const retryDelay = getDeliveryRetryDelay(rejectedError, delivery.attemptCount);
       const updated = await transaction.searchEmailDelivery.updateMany({
         where: {
           id: delivery.id,
@@ -2019,9 +2017,9 @@ async function settleClaimedSearchEmailGroup(input: {
       if (!delivery) {
         return earliest;
       }
-      const retryDelay = Math.min(
-        DELIVERY_RETRY_MAX_MS,
-        DELIVERY_RETRY_BASE_MS * 2 ** Math.max(0, delivery.attemptCount - 1)
+      const retryDelay = getDeliveryRetryDelay(
+        getRejectedError(result.reason),
+        delivery.attemptCount
       );
       const retryAt = new Date(input.now.getTime() + retryDelay);
       return !earliest || retryAt < earliest ? retryAt : earliest;
@@ -3788,6 +3786,19 @@ function getRejectedError(error: unknown) {
     return error;
   }
   return (error as { error: unknown }).error;
+}
+
+function getDeliveryRetryDelay(error: unknown, attemptCount: number) {
+  if (
+    error instanceof EmailDeliveryNotAcceptedError &&
+    error.providerCode === "daily_quota_exceeded"
+  ) {
+    return DELIVERY_DAILY_QUOTA_RETRY_MS;
+  }
+  return Math.min(
+    DELIVERY_RETRY_MAX_MS,
+    DELIVERY_RETRY_BASE_MS * 2 ** Math.max(0, attemptCount - 1)
+  );
 }
 
 function requireJsonRecord(value: unknown, label: string) {

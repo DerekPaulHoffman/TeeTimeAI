@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { applyPendingClerkEmailForSearch } from "@/lib/users/pending-email";
+import { EmailDeliveryNotAcceptedError } from "./alerts";
 import {
   assertSafeSearchEmailPayload,
   drainSearchEmailDeliveryGroup,
@@ -3294,6 +3295,40 @@ describe("search email delivery outbox", () => {
         data: expect.objectContaining({
           status: "FAILED",
           nextAttemptAt: new Date(now.getTime() + 10 * 60_000)
+        })
+      })
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("backs off a typed daily quota failure for 24 hours", async () => {
+    const owner = delivery("delivery-1", "owner@example.com", { attemptCount: 12 });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    const sendError = new EmailDeliveryNotAcceptedError(
+      "You have reached your daily email sending quota.",
+      "daily_quota_exceeded"
+    );
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send: vi.fn().mockRejectedValue(sendError),
+        now: () => now
+      })
+    ).rejects.toBe(sendError);
+
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          nextAttemptAt: new Date(now.getTime() + 24 * 60 * 60_000),
+          lastError:
+            "DELIVERY_NOT_ACCEPTED:You have reached your daily email sending quota."
         })
       })
     );
