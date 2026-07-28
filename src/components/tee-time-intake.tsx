@@ -1707,21 +1707,17 @@ function CourseResultCard({
       {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
       <div className="course-copy">
         <div className="figma-course-badges">
-          <span
-            className={
-              requiresPublicAccessReview
-                ? "figma-course-pill is-review-required"
-                : isPublicAccessUnverified
+          {!requiresPublicAccessReview ? (
+            <span
+              className={
+                isPublicAccessUnverified
                   ? "figma-course-pill is-unverified"
                   : "figma-course-pill is-public"
-            }
-          >
-            {requiresPublicAccessReview
-              ? "Needs review"
-              : isPublicAccessUnverified
-                ? "Possible course"
-                : "Public"}
-          </span>
+              }
+            >
+              {isPublicAccessUnverified ? "Possible course" : "Public"}
+            </span>
+          ) : null}
           {course.rating ? (
             <span
               className="figma-course-pill is-rating"
@@ -1778,11 +1774,6 @@ function CourseResultCard({
         </h3>
         <CourseAddressLink course={course} />
         <CourseMonitoringStatus course={course} />
-        {requiresPublicAccessReview ? (
-          <p className="course-access-review-note">
-            Our current information says this course may not be public.
-          </p>
-        ) : null}
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
             Does not match an {requestedLayoutHoles}-hole course search

@@ -474,7 +474,12 @@ describe("TeeTimeIntake", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await screen.findByRole("heading", { name: "Review This Golf Course" });
 
-    expect(screen.getByText("Needs review")).toBeTruthy();
+    expect(screen.queryByText("Needs review")).toBeNull();
+    expect(
+      screen.queryByText(
+        "Our current information says this course may not be public."
+      )
+    ).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Add Review This Golf Course" })
     ).toBeNull();

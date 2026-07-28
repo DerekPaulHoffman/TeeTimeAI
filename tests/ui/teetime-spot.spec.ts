@@ -787,7 +787,13 @@ test.describe("Tee Time Spot UI smoke", () => {
       hasText: "Review This Golf Course"
     });
     await expect(courseCard).toBeVisible();
-    await expect(courseCard.getByText("Needs review", { exact: true })).toBeVisible();
+    await expect(courseCard.getByText("Needs review", { exact: true })).toHaveCount(0);
+    await expect(
+      courseCard.getByText(
+        "Our current information says this course may not be public.",
+        { exact: true }
+      )
+    ).toHaveCount(0);
     await expect(
       courseCard.getByRole("button", { name: "Add Review This Golf Course" })
     ).toHaveCount(0);
