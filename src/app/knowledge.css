@@ -33,6 +33,14 @@
     url("https://images.unsplash.com/photo-1587174486073-ae5e5cff23aa?auto=format&fit=crop&w=2400&q=82") center / cover;
 }
 
+.course-alerts-hero {
+  min-height: 590px;
+}
+
+.course-alerts-hero .knowledge-hero-copy {
+  grid-column: 1 / -1;
+}
+
 .knowledge-hero-inner {
   display: grid;
   gap: 38px clamp(42px, 7vw, 100px);
@@ -208,6 +216,10 @@
 .knowledge-callout p, .knowledge-boundary p { margin: 0; }
 .knowledge-callout a { align-items: center; display: inline-flex; gap: 5px; margin-top: 12px; }
 .knowledge-date { font-size: 0.78rem !important; }
+.knowledge-faq-list { border-top: 1px solid #d4dfd8; }
+.knowledge-faq-list > div { border-bottom: 1px solid #d4dfd8; padding: 24px 0; }
+.knowledge-faq-list h3 { color: #14231d; font-size: 1.12rem; line-height: 1.35; margin: 0 0 8px; }
+.knowledge-faq-list p { margin: 0; }
 
 .knowledge-references h2 { font-size: clamp(1.55rem, 3vw, 2.15rem); margin-bottom: 20px; }
 .knowledge-reference-list { border-top: 1px solid #d4dfd8; display: grid; gap: 0; list-style: none; margin: 0 0 20px; padding: 0; }
@@ -271,7 +283,7 @@
 .location-course-list small { color: var(--knowledge-muted); display: block; font-size: 0.72rem; font-weight: 800; margin-bottom: 7px; text-transform: uppercase; }
 .location-course-list strong { display: block; font-size: clamp(1.15rem, 2vw, 1.55rem); }
 .location-course-list p { color: #5c6c64; font-size: 0.84rem; line-height: 1.5; margin: 8px 0 0; max-width: 700px; }
-.location-course-status { background: #e0eee6; border-radius: 999px; color: #105338; font-size: 0.72rem; font-weight: 850; padding: 8px 11px; white-space: nowrap; }
+.location-course-status { align-items: center; background: #e0eee6; border-radius: 999px; color: #105338; display: inline-flex; font-size: 0.72rem; font-weight: 850; gap: 5px; padding: 8px 11px; white-space: nowrap; }
 .location-considerations { border-top: 1px solid #cbd8d0; padding-top: 80px; }
 .location-consideration-list { display: grid; gap: 0; }
 .location-consideration-list p { align-items: start; border-top: 1px solid #cbd8d0; display: grid; gap: 14px; grid-template-columns: 26px 1fr; margin: 0; padding: 20px 0; }

@@ -13,6 +13,7 @@ const STATIC_ROUTES = [
   "/how-it-works",
   "/about",
   "/methodology",
+  "/courses",
   "/guides",
   "/guides/tee-time-cancellation-alerts",
   "/guides/public-golf-booking-windows",

@@ -38,6 +38,7 @@ describe("sitemap", () => {
       { url: "https://teetimespot.com/how-it-works" },
       { url: "https://teetimespot.com/about" },
       { url: "https://teetimespot.com/methodology" },
+      { url: "https://teetimespot.com/courses" },
       { url: "https://teetimespot.com/guides" },
       { url: "https://teetimespot.com/guides/tee-time-cancellation-alerts" },
       { url: "https://teetimespot.com/guides/public-golf-booking-windows" },

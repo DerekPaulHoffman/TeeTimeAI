@@ -312,6 +312,35 @@ export async function getPublishedCourseProfile(slug: string) {
   return { profile: alias.courseProfile, redirectSlug: alias.courseProfile.canonicalSlug };
 }
 
+export async function listPublishedCourseAlertProfiles() {
+  return prisma.courseProfile.findMany({
+    where: {
+      status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] },
+      course: {
+        isPublic: true,
+        automationEligibility: "ALLOWED"
+      }
+    },
+    orderBy: [
+      { course: { stateCode: "asc" } },
+      { course: { city: "asc" } },
+      { course: { name: "asc" } }
+    ],
+    select: {
+      canonicalSlug: true,
+      accessSummary: true,
+      updatedAt: true,
+      course: {
+        select: {
+          name: true,
+          city: true,
+          stateCode: true
+        }
+      }
+    }
+  });
+}
+
 export async function createCourseProfileSlugAlias(courseId: string, slug: string, apply = false) {
   const normalizedSlug = slug.trim().toLowerCase();
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalizedSlug) || normalizedSlug.length > 120) {

@@ -30,7 +30,9 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const place = [course.city, course.stateCode].filter(Boolean).join(", ");
   return buildPageMetadata({
     title: `${course.name} Tee Time Alerts${place ? ` in ${place}` : ""}`,
-    description: overview?.slice(0, 155) ?? `Public-access and tee-time alert details for ${course.name}.`,
+    description: course.automationEligibility === "ALLOWED"
+      ? `Get free email alerts when public tee times open at ${course.name}${place ? ` in ${place}` : ""}. Choose your time window, then book on the official course site.`
+      : overview?.slice(0, 155) ?? `Public-access and tee-time details for ${course.name}.`,
     path: `/courses/${result.profile.canonicalSlug}`
   });
 }
@@ -52,6 +54,22 @@ export default async function CourseProfilePage({ params }: PageProps) {
   const bookingWindow = getBookingWindowPresentation(course);
   const courseType = formatCourseType(profile.courseType);
   const publicNotableFacts = getPublicFacilityFacts(profile.notableFacts);
+  const alertFaqs = [
+    {
+      question: `How do tee time alerts for ${course.name} work?`,
+      answer: supported
+        ? `Choose ${course.name}, a future date, your preferred time window, and group size. Tee Time Spot checks public, signed-out availability and emails you when a matching opening appears.`
+        : getUnsupportedAlertCopy(course.automationReason, course.bookingAccessMode, course.bookingMethod)
+    },
+    {
+      question: `Does Tee Time Spot book ${course.name} for me?`,
+      answer: "No. Tee Time Spot sends an alert with the official booking link. You confirm current availability and complete the booking directly with the course."
+    },
+    {
+      question: `When can I book a tee time at ${course.name}?`,
+      answer: `Tee Time Spot currently lists "${bookingWindow.title}" for ${course.name}. Confirm the exact release timing, access rules, and live inventory on the official booking page.`
+    }
+  ];
   const bookingEvidence = {
     bookingFacts: course.bookingFacts,
     probes: [],
@@ -142,9 +160,22 @@ export default async function CourseProfilePage({ params }: PageProps) {
         "@id": `${absoluteUrl(path)}#breadcrumbs`,
         itemListElement: [
           { "@type": "ListItem", position: 1, name: "Home", item: absoluteUrl("/") },
-          ...(hasConnecticutHub ? [{ "@type": "ListItem", position: 2, name: "Connecticut courses", item: absoluteUrl("/locations/connecticut") }] : []),
-          { "@type": "ListItem", position: hasConnecticutHub ? 3 : 2, name: course.name, item: absoluteUrl(path) }
+          { "@type": "ListItem", position: 2, name: "Course tee time alerts", item: absoluteUrl("/courses") },
+          ...(hasConnecticutHub ? [{ "@type": "ListItem", position: 3, name: "Connecticut courses", item: absoluteUrl("/locations/connecticut") }] : []),
+          { "@type": "ListItem", position: hasConnecticutHub ? 4 : 3, name: course.name, item: absoluteUrl(path) }
         ]
+      },
+      {
+        "@type": "FAQPage",
+        "@id": `${absoluteUrl(path)}#faqs`,
+        mainEntity: alertFaqs.map((faq) => ({
+          "@type": "Question",
+          name: faq.question,
+          acceptedAnswer: {
+            "@type": "Answer",
+            text: faq.answer
+          }
+        }))
       }
     ]
   };
@@ -156,13 +187,15 @@ export default async function CourseProfilePage({ params }: PageProps) {
       <section className="knowledge-hero course-hero">
         <div className="knowledge-hero-inner">
           <nav aria-label="Breadcrumb" className="knowledge-breadcrumbs">
-            <Link href="/">Home</Link><span>/</span>{hasConnecticutHub ? <><Link href="/locations/connecticut">Connecticut</Link><span>/</span></> : null}<span>{course.name}</span>
+            <Link href="/">Home</Link><span>/</span><Link href="/courses">Course alerts</Link><span>/</span>{hasConnecticutHub ? <><Link href="/locations/connecticut">Connecticut</Link><span>/</span></> : null}<span>{course.name}</span>
           </nav>
           <div className="knowledge-hero-copy">
-            <p className="eyebrow">Course Guide</p>
-            <h1>{course.name}</h1>
+            <p className="eyebrow">Public golf tee time alerts</p>
+            <h1>{course.name} tee time alerts</h1>
             <p className="knowledge-location"><MapPin aria-hidden="true" size={17} />{location}</p>
-            <p className="knowledge-lede">{profile.accessSummary}</p>
+            <p className="knowledge-lede">{supported
+              ? `Get a free email when a public tee time matches your date, time window, and group size. You book directly with ${course.name}.`
+              : profile.accessSummary}</p>
             <div className="knowledge-pills">
               <span>{courseType}</span>
               <span>{course.isPublic ? "Public" : "Access restricted"}</span>
@@ -228,6 +261,19 @@ export default async function CourseProfilePage({ params }: PageProps) {
             <div className="knowledge-boundary">
               <Bell aria-hidden="true" size={22} />
               <div><strong>You book directly with the course.</strong><p>Tee Time Spot sends you to the official booking page; it does not reserve or book the tee time.</p></div>
+            </div>
+          </section>
+
+          <section>
+            <p className="knowledge-kicker">Common questions</p>
+            <h2>{course.name} tee time alert FAQs</h2>
+            <div className="knowledge-faq-list">
+              {alertFaqs.map((faq) => (
+                <div key={faq.question}>
+                  <h3>{faq.question}</h3>
+                  <p>{faq.answer}</p>
+                </div>
+              ))}
             </div>
           </section>
 
