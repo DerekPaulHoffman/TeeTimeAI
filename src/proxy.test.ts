@@ -71,6 +71,26 @@ describe("proxy Clerk configuration", () => {
     expect(await proxy.default({} as never, {} as never)).toBe("passthrough");
     expect(mocks.next).toHaveBeenCalledOnce();
   });
+
+  it("keeps missing asset-like paths in Clerk context for global not-found rendering", async () => {
+    mocks.getClerkConfig.mockReturnValue({
+      publishableKey: "pk_test_normalized",
+      secretKey: "sk_test_normalized"
+    });
+
+    const { config } = await import("./proxy");
+    const matcher = new RegExp(`^${config.matcher[0]}$`);
+
+    expect([
+      "/_not-found",
+      "/ads.txt",
+      "/apple-touch-icon.png",
+      "/apple-touch-icon-precomposed.png",
+      "/unknown-scanner-path.json"
+    ].every((pathname) => matcher.test(pathname))).toBe(true);
+    expect(matcher.test("/_next/static/chunks/app.js")).toBe(false);
+    expect(matcher.test("/_next/image")).toBe(false);
+  });
 });
 
 function restoreEnv(key: keyof typeof originalEnv, value: string | undefined) {

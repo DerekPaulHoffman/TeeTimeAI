@@ -25,5 +25,9 @@ export default async function proxy(request: NextRequest, event: NextFetchEvent)
 }
 
 export const config = {
-  matcher: ["/((?!_next|.*\\..*).*)"]
+  // The root layout reads Clerk auth state, including when Next renders its global
+  // not-found response. Keep unknown asset-like paths in Clerk's request context
+  // so scanner and browser icon misses cannot turn an ordinary 404 into an auth
+  // runtime error. Next-owned build assets remain excluded.
+  matcher: ["/((?!_next).*)"]
 };
