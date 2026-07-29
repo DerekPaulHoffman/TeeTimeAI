@@ -205,6 +205,8 @@ function isAllowlistedProphetJob(job) {
       url.protocol === "https:" &&
       url.hostname === "secure.east.prophetservices.com" &&
       url.pathname === "/FrearParkV3/Home/NIndex" &&
+      url.searchParams.size === allowedKeys.size &&
+      Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
       Array.from(url.searchParams.keys()).every((key) =>
         allowedKeys.has(key),
       ) &&

@@ -215,19 +215,22 @@ export function isAllowedLocalReaderUrl(
       ]);
       const date = url.searchParams.get("Date");
       const player = url.searchParams.get("Player");
+      const hasNoQuery = url.searchParams.size === 0;
+      const hasExactJobQuery =
+        url.searchParams.size === allowedKeys.size &&
+        Array.from(allowedKeys).every((key) => url.searchParams.has(key));
       return (
         safePath &&
         Array.from(url.searchParams.keys()).every((key) =>
           allowedKeys.has(key),
         ) &&
-        (!date || /^\d{4}-\d{2}-\d{2}$/u.test(date)) &&
-        (!player || /^[1-4]$/u.test(player)) &&
-        (!url.searchParams.has("CourseId") ||
-          url.searchParams.get("CourseId") === "1,2") &&
-        (!url.searchParams.has("Time") ||
-          url.searchParams.get("Time") === "AnyTime") &&
-        (!url.searchParams.has("Hole") ||
-          url.searchParams.get("Hole") === "18") &&
+        (hasNoQuery ||
+          (hasExactJobQuery &&
+            /^\d{4}-\d{2}-\d{2}$/u.test(date || "") &&
+            /^[1-4]$/u.test(player || "") &&
+            url.searchParams.get("CourseId") === "1,2" &&
+            url.searchParams.get("Time") === "AnyTime" &&
+            url.searchParams.get("Hole") === "18")) &&
         url.hash === ""
       );
     }

@@ -26,6 +26,8 @@
       "Hole",
     ]);
     return (
+      url.searchParams.size === allowedKeys.size &&
+      Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
       Array.from(url.searchParams.keys()).every((key) =>
         allowedKeys.has(key),
       ) &&

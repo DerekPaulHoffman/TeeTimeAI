@@ -576,6 +576,19 @@ describe("local Chrome reader contract", () => {
         job,
       ),
     ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
+    expect(
+      reader.readSnapshot(
+        document,
+        `${pageUrl}&Date=2026-07-31`,
+        job,
+      ),
+    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
+    expect(
+      isAllowedLocalReaderUrl(
+        "frear-park",
+        "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?Date=2026-07-30",
+      ),
+    ).toBe(false);
   });
 
   it("parses the legacy CPS material-card layout", () => {
