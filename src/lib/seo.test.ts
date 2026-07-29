@@ -94,11 +94,12 @@ describe("SEO helpers", () => {
     });
   });
 
-  it("defines the product as free, public-golf focused, and alert-only", () => {
+  it("defines the product in direct customer language", () => {
     expect(siteDescription).toMatch(/free/i);
-    expect(siteDescription).toMatch(/alert-only/i);
+    expect(siteDescription).toMatch(/email alerts/i);
     expect(siteDescription).toMatch(/public golf/i);
-    expect(siteDescription).toMatch(/official booking link/i);
+    expect(siteDescription).toMatch(/official course site/i);
+    expect(siteDescription).not.toMatch(/signed-out|supported availability|monitoring path/i);
   });
 
   it("defines concise, versioned link-preview metadata", () => {

@@ -23,7 +23,7 @@ const structuredData = buildPageStructuredData({
   path,
   type: "Article",
   datePublished: "2026-07-13",
-  dateModified: "2026-07-13",
+  dateModified: "2026-07-29",
   breadcrumbs: [
     { name: "Home", path: "/" },
     { name: "Guides", path: "/guides" },
@@ -38,7 +38,7 @@ export default function BookingWindowsGuide() {
       title="The release clock matters before the cancellation watch begins."
       intro="A public golf booking window determines how far in advance a golfer can reserve a tee time. Knowing the course's exact rule gives you the best first chance at a high-demand round."
       summary="Booking windows vary by course, player status, season, and booking channel. Confirm the official rule, calculate the release moment in the course's local time, and use alerts as a second chance after the initial inventory is gone."
-      updated="July 13, 2026"
+      updated="July 29, 2026"
       breadcrumbs={[
         { href: "/", label: "Home" },
         { href: "/guides", label: "Guides" }
@@ -146,7 +146,7 @@ export default function BookingWindowsGuide() {
         <p>
           Expand only the preferences you can genuinely use: a wider time range, another ranked
           public course, a smaller group when the plans truly changed, or a different day. Then use a
-          cancellation alert to reduce repeated checking of supported public availability.
+          cancellation alert to reduce repeated checking of public booking pages.
         </p>
         <p>
           Alerts complement the release-day attempt; they do not replace learning the official

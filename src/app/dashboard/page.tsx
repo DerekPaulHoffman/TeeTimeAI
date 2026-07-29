@@ -139,10 +139,10 @@ function DashboardView({
   const totalAlerts = searches.length;
   const alertStatusCopy = `${activeCount} ${
     activeCount === 1 ? "alert" : "alerts"
-  } running. We'll email you when a spot opens at a supported course.`;
+  } running. We'll email you when a matching spot opens.`;
   const readyMessage =
     activeCount > 0
-      ? "You’re all set — we’re checking supported courses and will email you when a matching spot opens."
+      ? "You’re all set — we’re checking your courses and will email you when a matching spot opens."
       : searches.length > 0
         ? "You don’t have an active alert right now. Resume a previous search or start a new one."
         : "No alerts yet. Find a tee time to start watching your preferred public courses.";
@@ -723,8 +723,8 @@ function getDashboardMonitoringVerdict(input: {
 }) {
   if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
     return {
-      label: "Monitoring scheduled",
-      detail: "Automatic checks will begin at the useful booking release time.",
+      label: "Checks start when booking opens",
+      detail: "We will begin checking at the course's useful booking release time.",
       icon: "scheduled" as const,
       className: "is-detail"
     };
@@ -734,8 +734,8 @@ function getDashboardMonitoringVerdict(input: {
     input.latestProbe?.outcome === "NO_MATCH"
   ) {
     return {
-      label: "Automatic monitoring confirmed",
-      detail: "The latest automatic check completed successfully.",
+      label: "Tee-time alerts available",
+      detail: "The latest check completed successfully.",
       icon: "watching" as const,
       className: "is-public"
     };
@@ -747,7 +747,7 @@ function getDashboardMonitoringVerdict(input: {
     return {
       label: "Temporarily unavailable",
       detail:
-        "The course's public tee-time service isn't responding to our checks. Your alert is still active; use the official site while Tee Time Spot retries and we'll email you when monitoring is back.",
+        "The course's public tee-time service isn't responding to our checks. Your alert is still active; use the official site while Tee Time Spot retries and we'll email you when checks resume.",
       icon: "unavailable" as const,
       className: "is-official-site-only"
     };
@@ -762,21 +762,21 @@ function getDashboardMonitoringVerdict(input: {
     input.latestProbe?.outcome === "IDENTITY_RECHECK"
   ) {
     return {
-      label: "Automatic alerts unavailable",
+      label: "Tee-time alerts unavailable",
       detail:
-        "Use the official course site for current availability. Coverage work may continue in the background.",
+        "Use the official course site for current availability. Tee Time Spot may continue working to add alerts in the background.",
       icon: "unavailable" as const,
       className: "is-official-site-only"
     };
   }
   return {
-    label: input.firstTimeLookup ? "First-time course lookup" : "First verdict pending",
+    label: input.firstTimeLookup ? "Checking this course for the first time" : "Alert availability pending",
     detail:
       input.automationEligibility === "ALLOWED"
         ? "The first check is starting now and will confirm the current result."
         : input.firstTimeLookup
-          ? "Tee Time Spot hasn't checked this course before. We'll email the verdict after the first check, usually within 10 minutes. If coverage takes longer, we'll alert our course coverage team."
-          : "We’ll email the monitoring verdict after the first check, usually within 10 minutes.",
+          ? "Tee Time Spot hasn't checked this course before. We'll email whether alerts are available after the first check, usually within 10 minutes."
+          : "We’ll email whether tee-time alerts are available after the first check, usually within 10 minutes.",
     icon: "scheduled" as const,
     className: "is-detail"
   };

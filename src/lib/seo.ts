@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 
 export const siteName = "Tee Time Spot";
 export const siteDescription =
-  "Tee Time Spot is a free, alert-only service that watches ranked public golf courses and emails the official booking link when a matching tee time opens.";
+  "Tee Time Spot sends free email alerts when tee times open at public golf courses you choose. Set your time window, then book on the official course site.";
 export const siteDefinition =
-  "Rank up to five public golf courses, choose when you can play, and receive an email with the official booking link when a matching tee time opens. Tee Time Spot never books or pays for you.";
+  "Choose up to five public golf courses and a time window. Tee Time Spot emails you when a matching tee time opens, then you book directly with the course.";
 export const socialTitle = "Free public golf tee time alerts";
 export const socialImagePath = "/opengraph-image?v=2";
 export const socialImageAlt =

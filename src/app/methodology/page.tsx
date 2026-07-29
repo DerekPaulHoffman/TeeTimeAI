@@ -13,7 +13,7 @@ import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
 const title = "Course Discovery and Monitoring Methodology";
 const description =
-  "See how Tee Time Spot identifies likely-public golf courses, evaluates booking access, monitors supported tee sheets, and handles limitations.";
+  "See how Tee Time Spot identifies public golf courses, checks official booking pages, and explains when tee-time alerts are not yet available.";
 const path = "/methodology";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -22,17 +22,17 @@ const structuredData = buildPageStructuredData({
   name: title,
   description,
   path,
-  dateModified: "2026-07-13"
+  dateModified: "2026-07-29"
 });
 
 export default function MethodologyPage() {
   return (
     <EditorialPage
       eyebrow="Methodology"
-      title="How Tee Time Spot decides what it can responsibly watch."
-      intro="Reliable alerts begin before a tee sheet is checked. We first need a credible course identity, an official public booking surface, and a signed-out read-only way to observe availability."
-      summary="Course discovery and active monitoring are separate. A course can appear in discovery without being monitorable. Tee Time Spot labels unsupported or blocked access instead of presenting it as active coverage."
-      updated="July 13, 2026"
+      title="How Tee Time Spot decides where alerts are available."
+      intro="Reliable alerts begin before a tee sheet is checked. We first confirm the course, its official booking page, and whether public availability can be viewed without an account or access barrier."
+      summary="Course discovery and active alerts are separate. A course can appear in discovery before its public booking page is available to our alerts. Tee Time Spot shows that limitation instead of presenting it as active coverage."
+      updated="July 29, 2026"
       toc={[
         { id: "discovery", label: "Course discovery" },
         { id: "identity", label: "Identity checks" },
@@ -79,25 +79,25 @@ export default function MethodologyPage() {
 
       <EditorialSection id="eligibility" eyebrow="Stage three" title="Classify access before retrieving a tee sheet.">
         <p>
-          Each course is evaluated for booking method, provider, public access, and policy. A public
-          online tee sheet may still be unsupported technically; an understandable provider does not
-          automatically mean retrieval is allowed.
+          Each course is evaluated for booking method, provider, public access, and technical access
+          requirements. A public online tee sheet may still need product support before alerts are
+          available; recognizing the booking provider does not automatically make the page readable.
         </p>
         <EditorialChecklist>
           <EditorialCheck>
-            <strong>Allowed and supported:</strong> a public surface can be observed without entering
-            checkout, using an account, or bypassing a control.
+            <strong>Alerts available:</strong> a public booking page can be checked without entering
+            checkout, using a private account, or bypassing an access control.
           </EditorialCheck>
           <EditorialCheck>
-            <strong>Needs support:</strong> the course has public online booking, but Tee Time Spot
-            does not yet have a verified adapter for the provider or configuration.
+            <strong>Alerts not yet available:</strong> the course has public online booking, but Tee
+            Time Spot does not yet support that booking setup.
           </EditorialCheck>
           <EditorialCheck>
             <strong>Manual or phone booking:</strong> there is no suitable public tee sheet to monitor.
           </EditorialCheck>
           <EditorialCheck>
-            <strong>Blocked:</strong> published policy prohibits automation or the surface requires an
-            account, captcha, verification code, queue, or other restricted flow.
+            <strong>Technical access required:</strong> reading availability requires an account,
+            captcha, verification code, queue, or another restricted flow.
           </EditorialCheck>
         </EditorialChecklist>
         <EditorialNote label="No bypass policy">
@@ -110,9 +110,9 @@ export default function MethodologyPage() {
 
       <EditorialSection id="matching" eyebrow="Stage four" title="Compare observed openings with the saved alert.">
         <p>
-          Supported observations are normalized into a course, start time, available spot count,
-          official booking link, and any available price or hole information. The start time is
-          interpreted in the selected course&apos;s local time zone.
+          Available tee times are recorded with the course, start time, open spot count, official
+          booking link, and any available price or hole information. The start time is interpreted
+          in the selected course&apos;s local time zone.
         </p>
         <p>
           A match must fall on the requested date, within the requested time window, and provide
@@ -124,10 +124,10 @@ export default function MethodologyPage() {
 
       <EditorialSection id="quality" eyebrow="Ongoing review" title="Correct the real shape, not just the visible symptom.">
         <p>
-          Course data, booking systems, and policies change. Tee Time Spot records evidence about
-          observed outcomes and uses focused tests when a false course, duplicate, unsupported
-          provider, or broken booking link is reported. Corrections aim for stable identity evidence
-          rather than broad name rules that could hide legitimate courses.
+          Course data, booking systems, and access requirements change. Tee Time Spot records evidence about
+          observed outcomes and uses focused tests when a false course, duplicate, unavailable
+          booking setup, or broken booking link is reported. Corrections aim for stable identity
+          evidence rather than broad name rules that could hide legitimate courses.
         </p>
         <p>
           Golfers can report a missing course or broken experience from the search and feedback
@@ -138,12 +138,12 @@ export default function MethodologyPage() {
       <EditorialSection id="limits" eyebrow="Interpretation" title="What an alert can and cannot prove.">
         <ul>
           <li>An alert proves that a matching opening was observed, not that it remains available.</li>
-          <li>A course appearing in discovery does not prove that its booking page is supported.</li>
+          <li>A course appearing in discovery does not prove that tee-time alerts are available for it.</li>
           <li>Prices, fees, hole counts, cart rules, and cancellation terms remain controlled by the course.</li>
           <li>Temporary provider failures can delay or prevent observations.</li>
           <li>No alert can guarantee that a cancellation will happen or that another golfer will not book first.</li>
         </ul>
-        <EditorialCta copy="Choose the public courses that matter to you. Tee Time Spot will show what can be watched and send an official link when a supported opening matches." />
+        <EditorialCta copy="Choose the public courses that matter to you. Tee Time Spot will show where alerts are available and send an official link when a matching opening appears." />
       </EditorialSection>
     </EditorialPage>
   );

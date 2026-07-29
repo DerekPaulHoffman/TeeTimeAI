@@ -12,7 +12,7 @@ export const LOCATION_HUBS = {
     stateCode: "CT",
     county: null,
     municipalities: null,
-    description: "Public golf courses in Connecticut where Tee Time Spot can currently watch public, signed-out online tee-time availability.",
+    description: "Get free email alerts when tee times open at public golf courses in Connecticut. Choose your courses and time window, then book directly on the course's official site.",
     considerations: [
       "Booking windows vary by operator, and resident or pass-holder access may open before general public inventory.",
       "Course-local Eastern Time controls release times and the tee times shown on official booking pages."
@@ -31,7 +31,7 @@ export const LOCATION_HUBS = {
       "Newtown", "Norwalk", "Redding", "Ridgefield", "Shelton", "Sherman",
       "Stamford", "Stratford", "Trumbull", "Weston", "Westport", "Wilton"
     ],
-    description: "Supported public golf alert coverage across Fairfield County, from municipal courses near the coast to inland daily-fee options.",
+    description: "Get free email alerts when tee times open at public golf courses across Fairfield County, from coastal municipal courses to inland daily-fee options.",
     considerations: [
       "Municipal courses may publish separate resident and non-resident access rules, so confirm the official policy before release day.",
       "Weekend and morning inventory can move quickly; alerts point to the official site, where availability remains first come, first served."
@@ -51,10 +51,10 @@ export const LOCATION_HUBS = {
       "Orange", "Oxford", "Prospect", "Seymour", "Southbury", "Wallingford",
       "Waterbury", "West Haven", "Wolcott", "Woodbridge"
     ],
-    description: "Supported public golf alert coverage across New Haven County, including municipal and independently operated courses.",
+    description: "Get free email alerts when tee times open at public golf courses across New Haven County, including municipal and independently operated courses.",
     considerations: [
       "Some operators release inventory on a fixed morning schedule while others use rolling booking windows.",
-      "Tee Time Spot watches supported public booking surfaces only and never enters checkout or books on a golfer’s behalf."
+      "Tee Time Spot checks public booking pages only and never enters checkout or books on a golfer’s behalf."
     ]
   }
 } as const;

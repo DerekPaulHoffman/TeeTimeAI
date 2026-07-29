@@ -19,7 +19,7 @@ const structuredData = buildPageStructuredData({
   name: title,
   description,
   path,
-  dateModified: "2026-07-13"
+  dateModified: "2026-07-29"
 });
 
 export default function TermsPage() {
@@ -29,7 +29,7 @@ export default function TermsPage() {
       title="Terms for an alert service—not a booking transaction."
       intro="These Terms of Use govern access to Tee Time Spot's website, public course discovery, saved alerts, emails, dashboard, feedback, and related features."
       summary="Tee Time Spot provides informational alerts and official links. It does not sell, hold, reserve, or book tee times and is not responsible for a transaction you make with a course or booking provider."
-      updated="July 13, 2026"
+      updated="July 29, 2026"
       toc={[
         { id: "acceptance", label: "Acceptance" },
         { id: "service", label: "The service" },
@@ -53,8 +53,8 @@ export default function TermsPage() {
       <EditorialSection id="service" eyebrow="Product scope" title="Tee Time Spot provides course discovery and alerts.">
         <p>
           You can search for likely-public golf courses, rank preferred courses, save a future date,
-          time window, and group size, and receive an email when supported public availability appears
-          to match. Links lead to an official course or booking-provider surface.
+          time window, and group size, and receive an email when a matching public tee time appears.
+          Links lead to an official course or booking-provider surface.
         </p>
         <EditorialNote label="No booking agency">
           <p>
@@ -65,8 +65,8 @@ export default function TermsPage() {
         </EditorialNote>
         <p>
           The service may add, change, suspend, or remove features or course support. Monitoring may
-          pause when a provider changes, access is restricted, policy prohibits retrieval, or a
-          technical issue occurs.
+          pause when a provider changes, reading availability requires an account or another access
+          control, or a technical issue occurs.
         </p>
       </EditorialSection>
 

@@ -530,7 +530,7 @@
 .home-trust-links {
   border-top: 1px solid #cbd8d0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 48px;
 }
 
@@ -672,6 +672,20 @@
   .editorial-hero-grid,
   .home-trust-heading {
     grid-template-columns: 1fr;
+  }
+
+  .home-trust-links {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-trust-links a:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid #cbd8d0;
+    padding-left: 0;
+  }
+
+  .home-trust-links a:nth-child(4) {
+    border-top: 1px solid #cbd8d0;
   }
 
   .editorial-summary {

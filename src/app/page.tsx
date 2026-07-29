@@ -73,7 +73,7 @@ const homeStructuredData = {
       featureList: [
         "Rank one to five preferred public golf courses",
         "Choose a future date, time window, and group size",
-        "Receive email alerts for matching supported availability",
+        "Receive email alerts when matching tee times open",
         "Open the official course booking link and book directly"
       ],
       audience: {
@@ -95,14 +95,14 @@ export default function HomePage() {
       <StructuredData data={homeStructuredData} />
       <section className="hero">
         <div className="hero-content">
-          <p className="eyebrow">Free, alert-only public golf service</p>
+          <p className="eyebrow">Free public golf tee-time alerts</p>
           <h1>
             Tee Time Spot finds the opening. <br className="mobile-hero-break" />You book direct.
           </h1>
           <p className="hero-copy">
-            Rank up to five public golf courses and tell us when your group can play. When a
-            matching tee time appears on a supported public booking page, we email the official
-            link. We never book or pay for you.
+            Choose up to five public golf courses and a time window. When a matching tee time
+            opens, we email the official booking link. You review the details and book directly
+            with the course.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
@@ -141,8 +141,8 @@ export default function HomePage() {
           >
             <strong>We&apos;ll alert you when a priority opens</strong>
             <span>
-              If your top picks are full, we watch them around the clock and notify you the
-              moment a spot becomes available.
+              If your top picks are full, we check their public booking pages and email you when a
+              matching spot opens.
             </span>
             <ArrowRight aria-hidden="true" className="hero-strip-arrow" size={18} />
           </Link>
@@ -213,9 +213,8 @@ export default function HomePage() {
             </p>
             <h2>Find public golf tee times near you.</h2>
             <p className="home-search-cta-copy">
-              Choose your preferred courses, date, time, and group size. Tee Time Spot monitors
-              supported public availability and emails you a direct link to the official booking
-              page.
+              Choose your preferred courses, date, time, and group size. Tee Time Spot checks
+              public booking pages and emails you a direct link to the official booking page.
             </p>
           </div>
           <Link className="button button-primary home-search-cta-button" href="/search">
@@ -253,10 +252,10 @@ export default function HomePage() {
           <div className="flow-step">
             <span>03</span>
             <div>
-              <h3>We watch supported availability</h3>
+              <h3>We check public booking pages</h3>
               <p>
-                Policy-safe public booking surfaces are checked on your alert&apos;s schedule. Blocked
-                access is never bypassed.
+                Available public booking pages are checked on your alert&apos;s schedule. We never
+                bypass accounts, captchas, queues, or other access controls.
               </p>
             </div>
           </div>
@@ -292,7 +291,12 @@ export default function HomePage() {
             </Link>
             <Link href="/methodology">
               <strong>Monitoring methodology</strong>
-              <span>See how courses, policies, support, and match quality are evaluated.</span>
+              <span>See how we identify public courses, check availability, and handle access limits.</span>
+              <ArrowRight aria-hidden="true" size={18} />
+            </Link>
+            <Link href="/locations/connecticut">
+              <strong>Connecticut tee-time alerts</strong>
+              <span>Browse public courses where Tee Time Spot can check for matching openings.</span>
               <ArrowRight aria-hidden="true" size={18} />
             </Link>
             <Link href="/guides">
