@@ -344,6 +344,7 @@ async function closeout(args: string[]) {
 }
 
 async function recover(args: string[]) {
+  runGit(["fetch", "origin", "main"]);
   const git = readGitState();
   const batchId = await resolveBatchId(args);
   const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
@@ -354,6 +355,9 @@ async function recover(args: string[]) {
   const releaseIsAncestor = provenance.releaseSha
     ? isGitAncestor(provenance.releaseSha, git.headSha)
     : undefined;
+  const releaseIsPublished = provenance.releaseSha
+    ? isGitAncestor(provenance.releaseSha, git.originMainSha)
+    : false;
   const releaseCommittedPaths =
     provenance.releaseSha && releaseIsAncestor
       ? readCommittedPaths(provenance.releaseSha, git.headSha)
@@ -364,6 +368,7 @@ async function recover(args: string[]) {
     currentBranch: git.branch,
     currentHeadSha: git.headSha,
     dirtyPaths: git.dirtyPaths,
+    releaseIsPublished,
     baseIsAncestor,
     committedPaths,
     releaseIsAncestor,
@@ -397,14 +402,13 @@ async function assertReleaseGitProvenance(
   if (!isGitAncestor(provenance.baseSha, git.headSha)) {
     throw new Error("The claimed base SHA is not an ancestor of the responder release.");
   }
-  const trustedBaseSha = provenance.releaseSha ?? provenance.baseSha;
   const releaseDiffBase = chooseCourseSupportReleaseDiffBase({
     baseSha: provenance.baseSha,
     persistedReleaseSha: provenance.releaseSha,
     requestedReleaseSha: releaseSha,
     originMainSha: git.originMainSha,
-    trustedBaseIsAncestorOfOriginMain: isGitAncestor(
-      trustedBaseSha,
+    claimedBaseIsAncestorOfOriginMain: isGitAncestor(
+      provenance.baseSha,
       git.originMainSha
     ),
     originMainIsAncestorOfRequestedRelease: isGitAncestor(

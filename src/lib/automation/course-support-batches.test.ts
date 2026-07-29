@@ -2484,10 +2484,11 @@ describe("course-support recovery", () => {
     ).toBe("BLOCK");
   });
 
-  it("requeues only expired clean work that never reached a release or terminal evidence", () => {
+  it("requeues only expired clean work without a published release or terminal evidence", () => {
     const safeInput = {
       leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
       releaseSha: null,
+      releaseIsPublished: false,
       deployedAt: null,
       recheckDispatchKey: null,
       recheckDispatchStartedAt: null,
@@ -2502,6 +2503,13 @@ describe("course-support recovery", () => {
       canSafelyRequeueExpiredCourseSupportBatch({
         ...safeInput,
         releaseSha: "a".repeat(40)
+      })
+    ).toBe(true);
+    expect(
+      canSafelyRequeueExpiredCourseSupportBatch({
+        ...safeInput,
+        releaseSha: "a".repeat(40),
+        releaseIsPublished: true
       })
     ).toBe(false);
     expect(
@@ -2524,18 +2532,19 @@ describe("course-support recovery", () => {
     ).toBe(false);
   });
 
-  it("durably requeues an expired unreleased batch instead of deadlocking on provenance", async () => {
+  it("durably requeues an expired unpublished candidate instead of deadlocking on provenance", async () => {
     const expiredAt = new Date("2026-07-15T19:00:00.000Z");
     const incidentUpdatedAt = new Date("2026-07-15T19:30:00.000Z");
     const batchEntryUpdatedAt = new Date("2026-07-15T19:31:00.000Z");
+    const candidateReleaseSha = "c".repeat(40);
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
-      status: "IMPLEMENTING",
+      status: "VERIFYING",
       leaseExpiresAt: expiredAt,
       ownerThreadId: "old-thread",
       ownerAutomationRunId: "run-1",
       baseSha: "a".repeat(40),
-      releaseSha: null,
+      releaseSha: candidateReleaseSha,
       deployedAt: null,
       recheckDispatchKey: null,
       recheckDispatchStartedAt: null,
@@ -2567,6 +2576,7 @@ describe("course-support recovery", () => {
       currentBranch: "fix/release-expired-responder-work",
       currentHeadSha: "b".repeat(40),
       dirtyPaths: [],
+      releaseIsPublished: false,
       baseIsAncestor: false,
       committedPaths: [],
       now
@@ -2583,8 +2593,8 @@ describe("course-support recovery", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           id: "batch-1",
-          status: "IMPLEMENTING",
-          releaseSha: null,
+          status: "VERIFYING",
+          releaseSha: candidateReleaseSha,
           completedAt: null
         }),
         data: expect.objectContaining({
@@ -3059,7 +3069,20 @@ describe("course-support release Git reconciliation", () => {
         persistedReleaseSha: null,
         requestedReleaseSha,
         originMainSha,
-        trustedBaseIsAncestorOfOriginMain: true,
+        claimedBaseIsAncestorOfOriginMain: true,
+        originMainIsAncestorOfRequestedRelease: true
+      })
+    ).toBe(originMainSha);
+  });
+
+  it("checks a follow-up release after concurrent main from the trusted main tip", () => {
+    expect(
+      chooseCourseSupportReleaseDiffBase({
+        baseSha,
+        persistedReleaseSha,
+        requestedReleaseSha,
+        originMainSha,
+        claimedBaseIsAncestorOfOriginMain: true,
         originMainIsAncestorOfRequestedRelease: true
       })
     ).toBe(originMainSha);
@@ -3072,7 +3095,7 @@ describe("course-support release Git reconciliation", () => {
         persistedReleaseSha,
         requestedReleaseSha,
         originMainSha,
-        trustedBaseIsAncestorOfOriginMain: false,
+        claimedBaseIsAncestorOfOriginMain: false,
         originMainIsAncestorOfRequestedRelease: true
       })
     ).toBe(persistedReleaseSha);
@@ -3085,7 +3108,7 @@ describe("course-support release Git reconciliation", () => {
         persistedReleaseSha: requestedReleaseSha,
         requestedReleaseSha,
         originMainSha: requestedReleaseSha,
-        trustedBaseIsAncestorOfOriginMain: true,
+        claimedBaseIsAncestorOfOriginMain: true,
         originMainIsAncestorOfRequestedRelease: true
       })
     ).toBeNull();

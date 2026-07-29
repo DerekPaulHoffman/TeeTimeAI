@@ -830,6 +830,7 @@ export function assessCourseSupportRecovery(input: {
 export function canSafelyRequeueExpiredCourseSupportBatch(input: {
   leaseExpiresAt: Date;
   releaseSha: string | null;
+  releaseIsPublished: boolean;
   deployedAt: Date | null;
   recheckDispatchKey: string | null;
   recheckDispatchStartedAt: Date | null;
@@ -841,7 +842,7 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
   const now = input.now ?? new Date();
   return Boolean(
     input.leaseExpiresAt.getTime() <= now.getTime() &&
-    !input.releaseSha &&
+    (!input.releaseSha || !input.releaseIsPublished) &&
     !input.deployedAt &&
     !input.recheckDispatchKey &&
     !input.recheckDispatchStartedAt &&
@@ -867,7 +868,7 @@ export function chooseCourseSupportReleaseDiffBase(input: {
   persistedReleaseSha: string | null;
   requestedReleaseSha: string;
   originMainSha: string;
-  trustedBaseIsAncestorOfOriginMain: boolean;
+  claimedBaseIsAncestorOfOriginMain: boolean;
   originMainIsAncestorOfRequestedRelease: boolean;
 }) {
   if (input.persistedReleaseSha === input.requestedReleaseSha) {
@@ -875,7 +876,8 @@ export function chooseCourseSupportReleaseDiffBase(input: {
   }
 
   const trustedBaseSha = input.persistedReleaseSha ?? input.baseSha;
-  return input.trustedBaseIsAncestorOfOriginMain && input.originMainIsAncestorOfRequestedRelease
+  return input.claimedBaseIsAncestorOfOriginMain &&
+    input.originMainIsAncestorOfRequestedRelease
     ? input.originMainSha
     : trustedBaseSha;
 }
@@ -3809,6 +3811,7 @@ export async function recoverCourseSupportBatch(input: {
   currentBranch: string;
   currentHeadSha: string;
   dirtyPaths: string[];
+  releaseIsPublished: boolean;
   baseIsAncestor?: boolean;
   committedPaths?: string[];
   releaseIsAncestor?: boolean;
@@ -3905,6 +3908,7 @@ export async function recoverCourseSupportBatch(input: {
         canSafelyRequeueExpiredCourseSupportBatch({
           leaseExpiresAt: batch.leaseExpiresAt,
           releaseSha: batch.releaseSha,
+          releaseIsPublished: input.releaseIsPublished,
           deployedAt: batch.deployedAt,
           recheckDispatchKey: batch.recheckDispatchKey,
           recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
@@ -3928,7 +3932,7 @@ export async function recoverCourseSupportBatch(input: {
                 status: batch.status,
                 revision: batch.revision,
                 leaseExpiresAt: { lte: now },
-                releaseSha: null,
+                releaseSha: batch.releaseSha,
                 deployedAt: null,
                 recheckDispatchKey: null,
                 recheckDispatchStartedAt: null,
