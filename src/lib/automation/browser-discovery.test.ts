@@ -2609,6 +2609,42 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("prefers a successful public TeeItUp read over booking account guidance", () => {
+    const bookingUrl =
+      "https://public-course.book.teeitup.golf/";
+    const facilitiesUrl =
+      "https://phx-api-be-east-1b.kenna.io/alias/public-course/facilities";
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-teeitup-account-booking",
+      courseName: "Example Public Golf Course",
+      sourceUrl: "https://public-course.example/tee-times",
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl, facilitiesUrl],
+      successfulProviderUrls: [facilitiesUrl],
+      bookingCallToAction: true,
+      officialPage: {
+        url: "https://public-course.example/tee-times",
+        courseName: "Example Public Golf Course",
+        visibleText: "Example Public Golf Course. Book a Tee Time.",
+        linkCandidates: [{ url: bookingUrl, label: "Book a Tee Time" }]
+      },
+      bookingSurfaceText:
+        "Create an account to book tee times. Sign in to view tee-time availability."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl,
+      apiMetadata: {
+        aliases: ["public-course"],
+        bookingBaseUrl: bookingUrl
+      },
+      evidence: { learnedFrom: "teeitup-booking-url" }
+    });
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+  });
+
   it("preserves direct public Whoosh booking while keeping policy evidence non-terminal", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "public-whoosh",

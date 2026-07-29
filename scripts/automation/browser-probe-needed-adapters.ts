@@ -15,8 +15,12 @@ import {
 } from "@/lib/automation/browser-discovery";
 import {
   assertBrowserProbeExpectedDisposition,
+  buildBrowserFrameCandidates,
+  buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
   finalizeBrowserEvidenceSnapshots,
+  hasDistinctProviderBookingCandidate,
+  isRelevantBrowserAccessBarrierUrl,
   prepareBrowserPageEvidence,
   type BrowserProbeDecisionTrace,
   type BrowserProbeExpectedDisposition
@@ -340,6 +344,7 @@ async function collectBrowserEvidence(
   >
 ): Promise<BrowserDiscoveryEvidence> {
   const observedUrls = new Set<string>();
+  const successfulProviderUrls = new Set<string>();
   const accessBarrierUrls = new Set<string>();
   const accessBarriers = new Map<string, 401 | 403>();
 
@@ -348,7 +353,22 @@ async function collectBrowserEvidence(
   });
   page.on("response", (response) => {
     observedUrls.add(response.url());
-    if ([401, 403].includes(response.status())) {
+    if (
+      response.ok() &&
+      /^https:\/\/phx-api-be-east-1b\.kenna\.io\/alias\/[^/]+\/facilities(?:\?|$)/i.test(
+        response.url()
+      )
+    ) {
+      successfulProviderUrls.add(response.url());
+    }
+    if (
+      [401, 403].includes(response.status()) &&
+      isRelevantBrowserAccessBarrierUrl({
+        responseUrl: response.url(),
+        currentPageUrl: page.url(),
+        officialSourceUrl: input.sourceUrl
+      })
+    ) {
       accessBarrierUrls.add(response.url());
       accessBarriers.set(response.url(), response.status() as 401 | 403);
     }
@@ -374,6 +394,7 @@ async function collectBrowserEvidence(
       input,
       page,
       observedUrls,
+      successfulProviderUrls,
       accessBarrierUrls,
       accessBarriers,
       landingPageUrl,
@@ -396,10 +417,17 @@ async function collectBrowserEvidence(
   );
 
   if (
-    !shouldStopBrowserDiscovery({
+    (!shouldStopBrowserDiscovery({
       accessBarrierCount: accessBarriers.size,
       accessControlDetected: firstDestinationPageEvidence.accessControlDetected
-    }) &&
+    }) ||
+      hasDistinctProviderBookingCandidate({
+        linkCandidates: firstDestinationPageEvidence.linkCandidates,
+        accessBarriers: [...accessBarriers].map(([url, status]) => ({
+          url,
+          status
+        }))
+      })) &&
     haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
   ) {
     await clickLikelyBookingLink(page);
@@ -432,6 +460,7 @@ async function collectBrowserEvidence(
     input,
     page,
     observedUrls,
+    successfulProviderUrls,
     accessBarrierUrls,
     accessBarriers,
     landingPageUrl,
@@ -450,6 +479,7 @@ function finalizeBrowserEvidence(input: {
   >;
   page: Page;
   observedUrls: Set<string>;
+  successfulProviderUrls: Set<string>;
   accessBarrierUrls: Set<string>;
   accessBarriers: Map<string, 401 | 403>;
   landingPageUrl: string;
@@ -463,6 +493,7 @@ function finalizeBrowserEvidence(input: {
     course: input.input,
     finalUrl: input.page.url(),
     observedUrls: [...input.observedUrls],
+    successfulProviderUrls: [...input.successfulProviderUrls],
     accessBarrierUrls: [...input.accessBarrierUrls],
     accessBarriers: [...input.accessBarriers].map(([url, status]) => ({
       url,
@@ -506,19 +537,22 @@ async function collectPageEvidence(
         /^(?:just a moment|attention required|security check)$/i.test(pageTitle) ||
         /\b403200\s*client-dependent\s+cps\s+challenge\b/i.test(pageText)
     );
-    const frameCandidates = /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
-      ? Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe[src]"))
+    const frameCandidateInputs = /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
+      ? Array.from(
+          document.querySelectorAll<HTMLIFrameElement>(
+            "iframe[src], iframe[data-src]"
+          )
+        )
           .map((frame) => ({
-            url: frame.src,
-            label:
-              frame.title?.replace(/\s+/g, " ").trim() ||
-              frame.getAttribute("aria-label")?.replace(/\s+/g, " ").trim() ||
-              "Embedded tee-time booking"
+            src: frame.getAttribute("src"),
+            dataSrc: frame.getAttribute("data-src"),
+            title: frame.getAttribute("title"),
+            ariaLabel: frame.getAttribute("aria-label"),
+            baseUrl: document.baseURI
           }))
-          .filter((candidate) => Boolean(candidate.url))
           .slice(0, 20)
       : [];
-    const linkCandidates = [...anchorCandidates, ...frameCandidates];
+    const linkCandidates = [...anchorCandidates];
     const anchors = linkCandidates.map((candidate) => candidate.url);
     const scripts = Array.from(document.querySelectorAll<HTMLScriptElement>("script[src]"))
       .map((script) => script.src)
@@ -553,6 +587,7 @@ async function collectPageEvidence(
     return {
       anchors,
       accessControlDetected,
+      frameCandidateInputs,
       structuredActionScripts,
       linkCandidates,
       scripts,
@@ -565,11 +600,30 @@ async function collectPageEvidence(
         .join("\n")
     };
   });
-  return prepareBrowserPageEvidence(evidence, officialCourseName);
+  const {
+    frameCandidateInputs,
+    ...pageEvidence
+  } = evidence;
+  const frameCandidates = buildBrowserFrameCandidates(frameCandidateInputs);
+  const staticFrameCandidates = await collectStaticPageFrameCandidates(page);
+  return prepareBrowserPageEvidence({
+    ...pageEvidence,
+    anchors: [
+      ...pageEvidence.anchors,
+      ...frameCandidates.map((candidate) => candidate.url),
+      ...staticFrameCandidates.map((candidate) => candidate.url)
+    ],
+    linkCandidates: [
+      ...pageEvidence.linkCandidates,
+      ...frameCandidates,
+      ...staticFrameCandidates
+    ]
+  }, officialCourseName);
 }
 
 async function clickLikelyBookingLink(page: Page) {
-  const candidates = await page.evaluate(() =>
+  const { anchorCandidates, frameCandidateInputs } = await page.evaluate(() => ({
+    anchorCandidates:
     Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
       .map((anchor) => ({
         href: anchor.href,
@@ -579,9 +633,37 @@ async function clickLikelyBookingLink(page: Page) {
         /tee.?time|book|reserve|reservation|foreup|teeitup|golfnow|cps\.golf/i.test(
           `${anchor.text} ${anchor.href}`
         )
+      ),
+    frameCandidateInputs: Array.from(
+      document.querySelectorAll<HTMLIFrameElement>(
+        "iframe[src], iframe[data-src]"
       )
+    ).map((frame) => ({
+      src: frame.getAttribute("src"),
+      dataSrc: frame.getAttribute("data-src"),
+      title: frame.getAttribute("title"),
+      ariaLabel: frame.getAttribute("aria-label"),
+      baseUrl: document.baseURI
+    }))
+  }));
+  const frameCandidates = buildBrowserFrameCandidates(
+    frameCandidateInputs
+  ).map((candidate) => ({
+    href: candidate.url,
+    text: candidate.label
+  }));
+  const staticFrameCandidates = await collectStaticPageFrameCandidates(page);
+  const href = pickLikelyBookingHref(
+    [
+      ...anchorCandidates,
+      ...frameCandidates,
+      ...staticFrameCandidates.map((candidate) => ({
+        href: candidate.url,
+        text: candidate.label
+      }))
+    ],
+    page.url()
   );
-  const href = pickLikelyBookingHref(candidates, page.url());
 
   if (!href) {
     return;
@@ -590,6 +672,26 @@ async function clickLikelyBookingLink(page: Page) {
   await page.goto(href, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(
     () => undefined
   );
+}
+
+async function collectStaticPageFrameCandidates(page: Page) {
+  try {
+    const response = await page.request.get(page.url(), {
+      timeout: NAVIGATION_TIMEOUT_MS
+    });
+    if (
+      !response.ok() ||
+      !/text\/html/i.test(response.headers()["content-type"] ?? "")
+    ) {
+      return [];
+    }
+    return buildBrowserFrameCandidatesFromHtml(
+      await response.text(),
+      page.url()
+    );
+  } catch {
+    return [];
+  }
 }
 
 async function trySelectSearchDate(page: Page) {

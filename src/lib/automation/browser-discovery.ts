@@ -49,6 +49,7 @@ export type BrowserDiscoveryEvidence = {
   };
   visibleText?: string;
   bookingSurfaceText?: string;
+  successfulProviderUrls?: string[];
   providerPolicyText?: string;
   providerPolicyUrl?: string;
   accessBarrierUrls?: string[];
@@ -621,6 +622,21 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   if (unavailableOfficialSiteClassification) {
     return unavailableOfficialSiteClassification;
+  }
+
+  const successfulPublicTeeItUpDiscovery =
+    evidence.successfulProviderUrls?.some(
+      isTeeItUpPublicFacilitiesResponseUrl
+    )
+      ? learnTeeItUpDiscovery(providerEvidence, providerObservedUrls)
+      : null;
+  if (
+    successfulPublicTeeItUpDiscovery?.status === "LEARNED"
+  ) {
+    return withCourseIdentityCorroboration(
+      successfulPublicTeeItUpDiscovery,
+      evidence
+    );
   }
 
   const unscopedProviderAccessBarrierClassification =
@@ -7774,6 +7790,17 @@ function getTeeItUpAlias(value: string) {
   }
 
   return null;
+}
+
+function isTeeItUpPublicFacilitiesResponseUrl(value: string) {
+  const url = parseUrl(value);
+  return Boolean(
+    url &&
+      !url.username &&
+      !url.password &&
+      url.hostname === "phx-api-be-east-1b.kenna.io" &&
+      /^\/alias\/[^/]+\/facilities$/.test(url.pathname)
+  );
 }
 
 function isTeeItUpBookingUrl(value: string) {

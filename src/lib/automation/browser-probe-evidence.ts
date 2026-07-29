@@ -7,6 +7,11 @@ import {
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence
 } from "@/lib/automation/browser-discovery";
+import {
+  getKnownProviderFamilyForHostname,
+  isProviderInfrastructureUrl,
+  isProviderPublicBookingLandingUrl
+} from "@/lib/automation/provider-capabilities";
 
 export type RawBrowserPageEvidence = {
   anchors: string[];
@@ -22,6 +27,14 @@ export type PreparedBrowserPageEvidence = Omit<
   "structuredActionScripts"
 > & {
   structuredPhoneBookingEvidence: string;
+};
+
+export type RawBrowserFrameCandidate = {
+  src: string | null;
+  dataSrc: string | null;
+  title: string | null;
+  ariaLabel: string | null;
+  baseUrl: string;
 };
 
 export type BrowserProbeExpectedDisposition =
@@ -47,11 +60,126 @@ export type BrowserProbeDecisionTrace = {
   structuredPhoneActionFound: boolean;
   officialPageContextPresent: boolean;
   accessBarrierDetected: boolean;
+  publicProviderReadDetected: boolean;
 };
 
 const MAX_RAW_VISIBLE_TEXT_LENGTH = 100_000;
 const MAX_PREPARED_VISIBLE_TEXT_LENGTH = 12_000;
 const LEADING_VISIBLE_TEXT_LENGTH = 4_000;
+
+export function buildBrowserFrameCandidates(
+  candidates: RawBrowserFrameCandidate[]
+) {
+  const seen = new Set<string>();
+
+  return candidates.flatMap((candidate) => {
+    const source = [candidate.src, candidate.dataSrc].find(
+      (value): value is string => Boolean(value?.trim())
+    );
+    if (!source) {
+      return [];
+    }
+
+    try {
+      const url = new URL(source, candidate.baseUrl);
+      if (
+        !["http:", "https:"].includes(url.protocol) ||
+        url.username ||
+        url.password ||
+        seen.has(url.toString())
+      ) {
+        return [];
+      }
+      seen.add(url.toString());
+      return [{
+        url: url.toString(),
+        label:
+          candidate.title?.replace(/\s+/g, " ").trim() ||
+          candidate.ariaLabel?.replace(/\s+/g, " ").trim() ||
+          "Embedded tee-time booking"
+      }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+export function buildBrowserFrameCandidatesFromHtml(
+  html: string,
+  baseUrl: string
+) {
+  const readAttribute = (
+    tag: string,
+    name: "src" | "data-src" | "title" | "aria-label"
+  ) => tag.match(
+    new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`, "i")
+  )?.[2] ?? null;
+  const candidates = (
+    html.slice(0, 1_000_000).match(/<iframe\b[^>]*>/giu) ?? []
+  )
+    .slice(0, 50)
+    .map((tag) => ({
+      src: readAttribute(tag, "src"),
+      dataSrc: readAttribute(tag, "data-src"),
+      title: readAttribute(tag, "title"),
+      ariaLabel: readAttribute(tag, "aria-label"),
+      baseUrl
+    }));
+
+  return buildBrowserFrameCandidates(candidates);
+}
+
+export function isRelevantBrowserAccessBarrierUrl(input: {
+  responseUrl: string;
+  currentPageUrl: string;
+  officialSourceUrl: string;
+}) {
+  let responseHost = "";
+  try {
+    responseHost = new URL(input.responseUrl).hostname;
+  } catch {
+    return true;
+  }
+  return Boolean(
+    haveSamePublicWebsiteOrigin(input.responseUrl, input.currentPageUrl) ||
+    haveSamePublicWebsiteOrigin(input.responseUrl, input.officialSourceUrl) ||
+    responseHost === "phx-api-be-east-1b.kenna.io" ||
+    isProviderInfrastructureUrl(input.responseUrl)
+  );
+}
+
+export function hasDistinctProviderBookingCandidate(input: {
+  linkCandidates: Array<{ url: string; label: string }>;
+  accessBarriers: BrowserAccessBarrier[];
+}) {
+  const candidateFamilies = new Set(
+    input.linkCandidates.flatMap((candidate) => {
+      try {
+        const url = new URL(candidate.url);
+        const family = getKnownProviderFamilyForHostname(url.hostname);
+        return family && isProviderPublicBookingLandingUrl(url)
+          ? [family]
+          : [];
+      } catch {
+        return [];
+      }
+    })
+  );
+  if (candidateFamilies.size === 0 || input.accessBarriers.length === 0) {
+    return false;
+  }
+
+  return input.accessBarriers.every((barrier) => {
+    try {
+      const family = getKnownProviderFamilyForHostname(
+        new URL(barrier.url).hostname
+      );
+      return Boolean(family && !candidateFamilies.has(family));
+    } catch {
+      return false;
+    }
+  });
+}
 
 export function prioritizeBrowserPageVisibleText(value: string) {
   const normalized = value
@@ -120,6 +248,7 @@ export function finalizeBrowserEvidenceSnapshots(input: {
   >;
   finalUrl: string;
   observedUrls: string[];
+  successfulProviderUrls: string[];
   accessBarrierUrls: string[];
   accessBarriers: BrowserAccessBarrier[];
   landingPageUrl: string;
@@ -196,6 +325,7 @@ export function finalizeBrowserEvidenceSnapshots(input: {
     sourceUrl: officialPageEvidence.url,
     finalUrl: input.finalUrl,
     observedUrls: [...observedUrls],
+    successfulProviderUrls: input.successfulProviderUrls,
     linkCandidates: [
       ...landingPageEvidence.linkCandidates,
       ...firstDestinationPageEvidence.linkCandidates,
@@ -267,7 +397,8 @@ export function buildBrowserProbeDecisionTrace(
     officialPageContextPresent: Boolean(
       evidence.officialPage?.courseName && evidence.officialPage.visibleText
     ),
-    accessBarrierDetected: Boolean(evidence.accessBarriers?.length)
+    accessBarrierDetected: Boolean(evidence.accessBarriers?.length),
+    publicProviderReadDetected: Boolean(evidence.successfulProviderUrls?.length)
   };
 }
 

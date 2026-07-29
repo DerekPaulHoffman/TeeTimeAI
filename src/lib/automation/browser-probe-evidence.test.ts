@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertBrowserProbeExpectedDisposition,
+  buildBrowserFrameCandidates,
+  buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
   finalizeBrowserEvidenceSnapshots,
+  hasDistinctProviderBookingCandidate,
+  isRelevantBrowserAccessBarrierUrl,
   prepareBrowserPageEvidence,
   type RawBrowserPageEvidence
 } from "@/lib/automation/browser-probe-evidence";
@@ -26,6 +30,119 @@ const emptyPage: RawBrowserPageEvidence = {
 };
 
 describe("browser probe evidence pipeline", () => {
+  it("collects a public booking URL from a lazy iframe data source", () => {
+    expect(
+      buildBrowserFrameCandidates([
+        {
+          src: "",
+          dataSrc: "/public-tee-times/",
+          title: "",
+          ariaLabel: "Book a tee time",
+          baseUrl: "https://course.example/book/"
+        }
+      ])
+    ).toEqual([
+      {
+        url: "https://course.example/public-tee-times/",
+        label: "Book a tee time"
+      }
+    ]);
+  });
+
+  it("rejects credentialed and non-web lazy iframe sources", () => {
+    expect(
+      buildBrowserFrameCandidates([
+        {
+          src: null,
+          dataSrc: "https://user:secret@booking.example/",
+          title: null,
+          ariaLabel: null,
+          baseUrl: "https://course.example/"
+        },
+        {
+          src: "javascript:alert(1)",
+          dataSrc: null,
+          title: null,
+          ariaLabel: null,
+          baseUrl: "https://course.example/"
+        }
+      ])
+    ).toEqual([]);
+  });
+
+  it("collects a lazy booking frame that client scripts may remove", () => {
+    expect(
+      buildBrowserFrameCandidatesFromHtml(
+        `<main>Book a Tee Time</main>
+         <iframe id="booking" data-src="/public-booking/" src=""
+           aria-label="Public tee times"></iframe>`,
+        "https://course.example/tee-times/"
+      )
+    ).toEqual([{
+      url: "https://course.example/public-booking/",
+      label: "Public tee times"
+    }]);
+  });
+
+  it("ignores unrelated subresource barriers without ignoring provider barriers", () => {
+    expect(
+      isRelevantBrowserAccessBarrierUrl({
+        responseUrl: "https://analytics.example/tracker",
+        currentPageUrl: "https://course.example/tee-times",
+        officialSourceUrl: "https://course.example/"
+      })
+    ).toBe(false);
+    expect(
+      isRelevantBrowserAccessBarrierUrl({
+        responseUrl: "https://course.example/protected-script.js",
+        currentPageUrl: "https://course.example/tee-times",
+        officialSourceUrl: "https://course.example/"
+      })
+    ).toBe(true);
+    expect(
+      isRelevantBrowserAccessBarrierUrl({
+        responseUrl:
+          "https://phx-api-be-east-1b.kenna.io/alias/public-course/facilities",
+        currentPageUrl: "https://course.example/tee-times",
+        officialSourceUrl: "https://course.example/"
+      })
+    ).toBe(true);
+  });
+
+  it("follows only a booking candidate from a distinct provider family", () => {
+    const teeItUpCandidate = [{
+      url: "https://public-course.book.teeitup.golf/",
+      label: "Book a tee time"
+    }];
+    expect(
+      hasDistinctProviderBookingCandidate({
+        linkCandidates: teeItUpCandidate,
+        accessBarriers: [{
+          url: "https://golfwithaccess.com/api/v0/auth/me",
+          status: 401
+        }]
+      })
+    ).toBe(true);
+    expect(
+      hasDistinctProviderBookingCandidate({
+        linkCandidates: teeItUpCandidate,
+        accessBarriers: [{
+          url: "https://phx-api-be-east-1b.kenna.io/v2/tee-times",
+          status: 403
+        }]
+      })
+    ).toBe(false);
+    expect(
+      hasDistinctProviderBookingCandidate({
+        linkCandidates: teeItUpCandidate,
+        accessBarriers: [{
+          url: "https://unknown-provider.example/protected",
+          status: 403
+        }]
+      })
+    ).toBe(false);
+  });
+
   it("retains structured official phone evidence across later empty hydration snapshots", () => {
     const landing = prepareBrowserPageEvidence(
       {
@@ -43,6 +160,7 @@ describe("browser probe evidence pipeline", () => {
       course: fictionalCourse,
       finalUrl: "https://night-golf.example/golf/rates",
       observedUrls: [],
+      successfulProviderUrls: [],
       accessBarrierUrls: [],
       accessBarriers: [],
       landingPageUrl: fictionalCourse.sourceUrl,
@@ -77,6 +195,7 @@ describe("browser probe evidence pipeline", () => {
       course: fictionalCourse,
       finalUrl: fictionalCourse.sourceUrl,
       observedUrls: [fictionalCourse.sourceUrl],
+      successfulProviderUrls: [],
       accessBarrierUrls: [],
       accessBarriers: [],
       landingPageUrl: fictionalCourse.sourceUrl,
@@ -115,6 +234,7 @@ describe("browser probe evidence pipeline", () => {
       course: fictionalCourse,
       finalUrl: "https://booking.invalid/tee-times",
       observedUrls: [],
+      successfulProviderUrls: [],
       accessBarrierUrls: [],
       accessBarriers: [],
       landingPageUrl: fictionalCourse.sourceUrl,
@@ -138,7 +258,8 @@ describe("browser probe evidence pipeline", () => {
       confidenceBand: "LOW" as const,
       structuredPhoneActionFound: false,
       officialPageContextPresent: true,
-      accessBarrierDetected: false
+      accessBarrierDetected: false,
+      publicProviderReadDetected: false
     };
 
     expect(() =>
