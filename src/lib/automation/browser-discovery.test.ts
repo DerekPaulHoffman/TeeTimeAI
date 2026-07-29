@@ -4408,6 +4408,31 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("recognizes a tee-times-available section followed by a clubhouse call", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "example-ridge",
+      courseName: "Example Ridge Golf Course",
+      sourceUrl: "https://example-ridge.example/",
+      finalUrl: "https://example-ridge.example/",
+      observedUrls: ["https://example-ridge.example/"],
+      visibleText:
+        "Example Ridge Golf Course. Tee Times. Tee Times are available Weekends: 6:00 A.M. - 11:00 A.M. Call: 508-555-0142 (The Clubhouse) and ask to speak to the starter."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "508-555-0142",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.92,
+      evidence: {
+        learnedFrom: "official-phone-reservation-contact"
+      }
+    });
+  });
+
   it("preserves phone-only access when the official evidence is explicitly exclusive", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "phone-only-course",

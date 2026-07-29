@@ -3710,6 +3710,7 @@ type DirectReservationPhone =
 function findDirectTeeTimeReservationPhone(visibleText: string): DirectReservationPhone {
   const patterns = [
     /\b(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\s*(?:,|\s)*(?:to|for)\s+(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)/gi,
+    /\btee\s*times?\b(?:\s*[.:;-]?\s*tee\s*times?)?\s+are\s+available\b[\s\S]{0,220}?\bcall\s*:?\s*((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b(?:\s*\([^)]{0,60}\bclubhouse\b[^)]*\))?(?:\s*and\s+ask\s+to\s+speak\s+to\s+[\p{L}'’.-]+(?:\s+[\p{L}'’.-]+){0,3})?/giu,
     /\b(?:please\s+)?call\s+(?:(?:the\s+)?(?:clubhouse|pro\s+shop)\s*)?(?:in\s+advance\s+)?to\s+(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:game|round|tee\s*times?|tee\s*time\s+reservations?)\s+(?:at\s+)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\b(?:book|reserve|schedule|make)\s+(?:a\s+|your\s+|the\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s+(?:by\s+)?call(?:ing)?\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,
     /\b(?:for\s+)?(?:tee\s*times?|tee\s*time\s+reservations?)\s*[:,;-]?\s*(?:please\s+)?call\s+(?:(?:the\s+)?pro\s+shop\s*)?(?:at\s*)?((?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4})\b/gi,

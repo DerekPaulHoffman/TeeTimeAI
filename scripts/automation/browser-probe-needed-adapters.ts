@@ -559,7 +559,7 @@ async function collectPageEvidence(
       visibleText: [
         inlineCourseData,
         widgetConfigs,
-        pageText.slice(0, 4000)
+        pageText.slice(0, 100_000)
       ]
         .filter(Boolean)
         .join("\n")

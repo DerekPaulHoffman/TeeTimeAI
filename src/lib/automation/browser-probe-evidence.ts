@@ -49,6 +49,37 @@ export type BrowserProbeDecisionTrace = {
   accessBarrierDetected: boolean;
 };
 
+const MAX_RAW_VISIBLE_TEXT_LENGTH = 100_000;
+const MAX_PREPARED_VISIBLE_TEXT_LENGTH = 12_000;
+const LEADING_VISIBLE_TEXT_LENGTH = 4_000;
+
+export function prioritizeBrowserPageVisibleText(value: string) {
+  const normalized = value
+    .slice(0, MAX_RAW_VISIBLE_TEXT_LENGTH)
+    .replace(/\s+/g, " ")
+    .trim();
+  const manualInstructionCandidates = [
+    ...normalized.matchAll(
+      /\btee\s*times?\b(?:\s*[.:;-]?\s*tee\s*times?)?\s+are\s+available\b[\s\S]{0,220}?\bcall\s*:?\s*(?:\+?1[\s.-]*)?(?:\(\s*\d{3}\s*\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}\b/giu
+    )
+  ].map((match) => match[0]);
+  const prioritized = [
+    ...new Set(
+      manualInstructionCandidates.length > 0
+        ? manualInstructionCandidates
+        : [normalized.slice(0, LEADING_VISIBLE_TEXT_LENGTH)]
+    )
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, MAX_PREPARED_VISIBLE_TEXT_LENGTH);
+
+  return {
+    manualInstructionCandidateFound: manualInstructionCandidates.length > 0,
+    visibleText: prioritized
+  };
+}
+
 export function prepareBrowserPageEvidence(
   evidence: RawBrowserPageEvidence,
   officialCourseName?: string
@@ -59,6 +90,9 @@ export function prepareBrowserPageEvidence(
   );
   const structuredPhoneBookingEvidence =
     extractStructuredPhoneBookingEvidence(evidence.structuredActionScripts);
+  const prioritizedVisibleText = prioritizeBrowserPageVisibleText(
+    evidence.visibleText
+  );
 
   return {
     anchors: linkCandidates.map(({ url }) => url),
@@ -67,9 +101,12 @@ export function prepareBrowserPageEvidence(
     scripts: evidence.scripts,
     structuredPhoneBookingEvidence,
     visibleText: [
-      structuredPhoneBookingEvidence ? officialCourseName : undefined,
+      structuredPhoneBookingEvidence ||
+      prioritizedVisibleText.manualInstructionCandidateFound
+        ? officialCourseName
+        : undefined,
       structuredPhoneBookingEvidence,
-      evidence.visibleText
+      prioritizedVisibleText.visibleText
     ]
       .filter(Boolean)
       .join("\n")

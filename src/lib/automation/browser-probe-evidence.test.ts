@@ -63,6 +63,40 @@ describe("browser probe evidence pipeline", () => {
     expect(JSON.stringify(trace)).not.toContain("night-golf.example");
   });
 
+  it("preserves a bounded manual tee-time instruction beyond the leading page text", () => {
+    const prepared = prepareBrowserPageEvidence(
+      {
+        ...emptyPage,
+        visibleText: `${"Theme navigation and gallery text. ".repeat(220)}
+          Tee Times. Tee Times are available Weekends: 6:00 A.M. - 11:00 A.M.
+          Call: 508-555-0142 (The Clubhouse) and ask to speak to the starter.`
+      },
+      fictionalCourse.courseName
+    );
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: fictionalCourse,
+      finalUrl: fictionalCourse.sourceUrl,
+      observedUrls: [fictionalCourse.sourceUrl],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: fictionalCourse.sourceUrl,
+      landingPageEvidence: prepared,
+      firstDestinationPageUrl: fictionalCourse.sourceUrl,
+      firstDestinationPageEvidence: prepared,
+      destinationPageUrl: fictionalCourse.sourceUrl,
+      destinationPageEvidence: prepared
+    });
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(prepared.visibleText.length).toBeLessThanOrEqual(12_000);
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-phone-reservation-contact" }
+    });
+  });
+
   it("does not promote structured action evidence from a different website origin", () => {
     const landing = prepareBrowserPageEvidence({
       ...emptyPage,
