@@ -61,4 +61,31 @@ describe("Supreme Golf adapter", () => {
       expect.objectContaining({ redirect: "error" })
     );
   });
+
+  it("uses one provider request when discovery already persisted the course route", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(`
+      <div data-testid="portal-book-grid">
+        <button data-testid="portal-book-tee-time-card-09:12">
+          <span>9:12 AM</span><p>$45.00</p><span>1-4 players</span>
+        </button>
+      </div>
+    `, { status: 200 }));
+
+    const result = await fetchSupremeGolfTeeSheet({
+      courseId: "course-1",
+      date: new Date("2026-07-30T00:00:00.000Z"),
+      players: 4,
+      metadata: {
+        ...metadata,
+        bookingBaseUrl: `${metadata.bookingBaseUrl}/66`
+      }
+    }, fetchMock);
+
+    expect(result.slots).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      new URL("https://sgnavigator.app/portal/gillette-ridge-golf-club/book/66?day=2026-07-30"),
+      expect.objectContaining({ redirect: "error" })
+    );
+  });
 });
