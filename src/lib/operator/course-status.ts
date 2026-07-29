@@ -134,10 +134,7 @@ export type CourseDiagnosticKey =
   CourseStatusKey | "TECHNICAL_ACCESS" | "NO_PUBLIC_ONLINE" | "PRIVATE_OR_INVALID";
 export type CourseStatusTone = "critical" | "warning" | "neutral" | "positive";
 export type CourseAutomationQueueState =
-  | "DUE_NOW"
-  | "IN_PROGRESS"
-  | "SCHEDULED_RETRY"
-  | "NEEDS_HUMAN";
+  "DUE_NOW" | "IN_PROGRESS" | "SCHEDULED_RETRY" | "NEEDS_HUMAN";
 
 export type CourseStatusInput = {
   id: string;
@@ -157,6 +154,7 @@ export type CourseStatusInput = {
   localReaderVerifiedAt: Date | null;
   localReaderVersion: string | null;
   activeAlertCount: number;
+  activeSyntheticAlertCount: number;
   selectionCount: number;
   monitoringStatus?: {
     reference: string;
@@ -171,12 +169,14 @@ export type CourseStatusInput = {
     status: string;
     kind: string;
     activeRealSearchCount: number;
+    engineeringOnly?: boolean;
     firstSeenAt: Date;
     latestMessage: string | null;
     nextAction: string | null;
     failureClass: string | null;
     nextAttemptAt?: Date | null;
     activeBatchId?: string | null;
+    attemptCount?: number;
   } | null;
   latestProbe: {
     outcome: string;
@@ -198,6 +198,7 @@ export type CourseInventoryItem = CourseStatusInput & {
   priorityScore: number;
   tone: CourseStatusTone;
   automationQueueState: CourseAutomationQueueState | null;
+  problemSummary: string | null;
 };
 
 const STALE_WITH_DEMAND_MS = 24 * 60 * 60 * 1000;
@@ -224,10 +225,14 @@ export function buildCourseInventory(
 }
 
 function getActiveIssuePriority(course: CourseInventoryItem) {
-  return course.activeAlertCount > 0 &&
-    (course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH")
-    ? 0
-    : 1;
+  const actionable = course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH";
+  if (actionable && course.activeAlertCount > 0) return 0;
+  if (actionable && course.activeSyntheticAlertCount > 0) return 1;
+  return 2;
+}
+
+function hasActivePriorityAlert(course: CourseStatusInput) {
+  return course.activeAlertCount > 0 || course.activeSyntheticAlertCount > 0;
 }
 
 export function filterCourseInventory(
@@ -284,12 +289,9 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
     working: courses.filter((course) => course.priorityGroup === "WORKING").length,
     dueNow: courses.filter((course) => course.automationQueueState === "DUE_NOW").length,
     inProgress: courses.filter((course) => course.automationQueueState === "IN_PROGRESS").length,
-    scheduledRetry: courses.filter(
-      (course) => course.automationQueueState === "SCHEDULED_RETRY"
-    ).length,
-    needsHuman: courses.filter(
-      (course) => course.automationQueueState === "NEEDS_HUMAN"
-    ).length
+    scheduledRetry: courses.filter((course) => course.automationQueueState === "SCHEDULED_RETRY")
+      .length,
+    needsHuman: courses.filter((course) => course.automationQueueState === "NEEDS_HUMAN").length
   };
 }
 
@@ -297,8 +299,7 @@ export function getCourseSummaryCopy(counts: { action: number; watch: number }) 
   const actionableCount = counts.action + counts.watch;
 
   return {
-    lifecycle:
-      "Every course appears once, based on its latest monitoring outcome.",
+    lifecycle: "Every course appears once, based on its latest monitoring outcome.",
     execution:
       `The same ${actionableCount} Fix now and Investigate courses are regrouped here by next owner. ` +
       "If automation reaches its safety limit, an Auto investigating course appears under Needs human."
@@ -393,9 +394,8 @@ function classifyCourseStatus(
       latestSuccessfulEvidence.observedAt > course.monitoringStatus.lastFailureAt)
   ) {
     if (
-      course.activeAlertCount > 0 &&
-      now.getTime() - latestSuccessfulEvidence.observedAt.getTime() >
-        STALE_WITH_DEMAND_MS
+      hasActivePriorityAlert(course) &&
+      now.getTime() - latestSuccessfulEvidence.observedAt.getTime() > STALE_WITH_DEMAND_MS
     ) {
       return withStatus(course, "STALE", {
         priorityGroup: "ACTION",
@@ -412,9 +412,9 @@ function classifyCourseStatus(
 
   if (course.monitoringStatus?.state === "DEGRADED_RETRYING") {
     return withStatus(course, "SITE_FAILED", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 0 : 1,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning",
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning",
       labelOverride: "Degraded · retrying",
       meaningOverride:
         "One public read failed. The previous working state is preserved while an independent retry runs.",
@@ -425,16 +425,17 @@ function classifyCourseStatus(
   if (course.monitoringStatus?.state === "AUTO_INVESTIGATING") {
     const operatorRecheckQueued = course.monitoringStatus.revalidationRequestedAt !== null;
     return withStatus(course, "NEEDS_ADAPTER", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 0 : 1,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning",
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning",
       labelOverride: operatorRecheckQueued ? "AI recheck queued" : "Auto investigating",
       meaningOverride: operatorRecheckQueued
         ? "Your note is saved and waiting for AI to run a fresh course verification."
         : "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
       actionOverride: operatorRecheckQueued
         ? "No action is needed yet. Wait for AI to finish; this course will move to Engineering verification needed only if you must confirm the result or provide more information."
-        : "Automation owns safe provider, browser, metadata, reader, adapter, and fresh-runtime verification until the deadline."
+        : (course.incident?.nextAction ??
+          "Automation owns safe provider, browser, metadata, reader, adapter, and fresh-runtime verification until the deadline.")
     });
   }
   if (course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED") {
@@ -446,6 +447,7 @@ function classifyCourseStatus(
       meaningOverride:
         "AI finished its bounded checks but still needs you to confirm the course works or provide more course information.",
       actionOverride:
+        course.incident?.nextAction ??
         "Open the redacted course history, check the official course surface again, then confirm the result or add the missing details and request another AI recheck."
     });
   }
@@ -482,10 +484,13 @@ function classifyCourseStatus(
     const statusKey = statusKeyForFailure(openIncident.kind, course.bookingAccessMode);
     return withStatus(course, statusKey, {
       priorityGroup:
-        openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0 ? 0 : 1,
+        openIncident.activeRealSearchCount > 0 || hasActivePriorityAlert(course)
+          ? "ACTION"
+          : "WATCH",
+      priorityScore:
+        openIncident.activeRealSearchCount > 0 || hasActivePriorityAlert(course) ? 0 : 1,
       tone:
-        openIncident.activeRealSearchCount > 0 || course.activeAlertCount > 0
+        openIncident.activeRealSearchCount > 0 || hasActivePriorityAlert(course)
           ? "critical"
           : "warning",
       actionOverride: openIncident.nextAction
@@ -500,7 +505,7 @@ function classifyCourseStatus(
         : null;
     if (
       latestSuccessfulProbe &&
-      course.activeAlertCount > 0 &&
+      hasActivePriorityAlert(course) &&
       now.getTime() - latestSuccessfulProbe.observedAt.getTime() > STALE_WITH_DEMAND_MS
     ) {
       return withStatus(course, "STALE", {
@@ -536,17 +541,17 @@ function classifyCourseStatus(
               tone: "positive"
             }
           : {
-              priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "UNCHECKED",
-              priorityScore: course.activeAlertCount > 0 ? 1 : 4,
-              tone: course.activeAlertCount > 0 ? "critical" : "neutral"
+              priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "UNCHECKED",
+              priorityScore: hasActivePriorityAlert(course) ? 1 : 4,
+              tone: hasActivePriorityAlert(course) ? "critical" : "neutral"
             }
       );
     }
     if (course.localReaderCandidate) {
       return withStatus(course, "READER_CANDIDATE", {
-        priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-        priorityScore: course.activeAlertCount > 0 ? 1 : 2,
-        tone: course.activeAlertCount > 0 ? "critical" : "warning"
+        priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+        priorityScore: hasActivePriorityAlert(course) ? 1 : 2,
+        tone: hasActivePriorityAlert(course) ? "critical" : "warning"
       });
     }
     const statusKey =
@@ -590,17 +595,17 @@ function classifyCourseStatus(
 
   if (course.coverageCategory === "UNSUPPORTED_FAMILY") {
     return withStatus(course, "NEEDS_ADAPTER", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 0 : 2,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 2,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning"
     });
   }
 
   if (course.coverageCategory === "SOURCE_UNVERIFIED") {
     return withStatus(course, "SOURCE_MISSING", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 0 : 2,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 2,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning"
     });
   }
 
@@ -615,7 +620,7 @@ function classifyCourseStatus(
   if (course.latestProbe) {
     if (course.latestProbe.outcome === "MATCH_FOUND" || course.latestProbe.outcome === "NO_MATCH") {
       if (
-        course.activeAlertCount > 0 &&
+        hasActivePriorityAlert(course) &&
         now.getTime() - course.latestProbe.observedAt.getTime() > STALE_WITH_DEMAND_MS
       ) {
         return withStatus(course, "STALE", {
@@ -642,11 +647,11 @@ function classifyCourseStatus(
     return withStatus(course, statusKey, {
       priorityGroup: isKnownLimitation
         ? "LIMITATION"
-        : course.activeAlertCount > 0
+        : hasActivePriorityAlert(course)
           ? "ACTION"
           : "WATCH",
-      priorityScore: isKnownLimitation ? 3 : course.activeAlertCount > 0 ? 1 : 2,
-      tone: isKnownLimitation ? "neutral" : course.activeAlertCount > 0 ? "critical" : "warning"
+      priorityScore: isKnownLimitation ? 3 : hasActivePriorityAlert(course) ? 1 : 2,
+      tone: isKnownLimitation ? "neutral" : hasActivePriorityAlert(course) ? "critical" : "warning"
     });
   }
 
@@ -658,9 +663,9 @@ function classifyCourseStatus(
       course.bookingMethod !== "WALK_IN")
   ) {
     return withStatus(course, "SOURCE_MISSING", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 0 : 2,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 2,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning"
     });
   }
 
@@ -669,9 +674,9 @@ function classifyCourseStatus(
     course.automationReason === "CAPTCHA_OR_QUEUE"
   ) {
     return withStatus(course, "CAPTCHA_OR_QUEUE", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "LIMITATION",
-      priorityScore: course.activeAlertCount > 0 ? 1 : 3,
-      tone: course.activeAlertCount > 0 ? "critical" : "neutral"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "LIMITATION",
+      priorityScore: hasActivePriorityAlert(course) ? 1 : 3,
+      tone: hasActivePriorityAlert(course) ? "critical" : "neutral"
     });
   }
 
@@ -682,9 +687,9 @@ function classifyCourseStatus(
     course.automationReason === "ACCOUNT_REQUIRED"
   ) {
     return withStatus(course, "ACCOUNT_REQUIRED", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "LIMITATION",
-      priorityScore: course.activeAlertCount > 0 ? 1 : 3,
-      tone: course.activeAlertCount > 0 ? "critical" : "neutral"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "LIMITATION",
+      priorityScore: hasActivePriorityAlert(course) ? 1 : 3,
+      tone: hasActivePriorityAlert(course) ? "critical" : "neutral"
     });
   }
 
@@ -709,9 +714,9 @@ function classifyCourseStatus(
 
   if (course.automationReason === "UNSUPPORTED_PLATFORM") {
     return withStatus(course, "NEEDS_ADAPTER", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 0 : 2,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 2,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning"
     });
   }
 
@@ -721,9 +726,9 @@ function classifyCourseStatus(
     course.automationEligibility === "BLOCKED"
   ) {
     return withStatus(course, "REVIEW_REQUIRED", {
-      priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
-      priorityScore: course.activeAlertCount > 0 ? 1 : 2,
-      tone: course.activeAlertCount > 0 ? "critical" : "warning"
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 1 : 2,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning"
     });
   }
 
@@ -774,17 +779,61 @@ function withStatus(
   if (!guide) {
     throw new Error(`Missing operator course status guide for ${statusKey}`);
   }
+  const statusMeaning = options.meaningOverride ?? guide.meaning;
   return {
     ...course,
     statusKey,
     statusLabel: options.labelOverride ?? guide.label,
-    statusMeaning: options.meaningOverride ?? guide.meaning,
+    statusMeaning,
     recommendedAction: options.actionOverride ?? guide.action,
     diagnosticKey: options.diagnosticKeyOverride ?? statusKey,
     priorityGroup: options.priorityGroup,
     priorityScore: options.priorityScore,
-    tone: options.tone
+    tone: options.tone,
+    problemSummary: summarizeCourseProblem(course, statusMeaning)
   };
+}
+
+function summarizeCourseProblem(course: CourseStatusInput, fallback: string) {
+  const message = (course.incident?.latestMessage ?? course.latestProbe?.message ?? "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const failureClass = course.incident?.failureClass;
+
+  if (/verification window ended without enough independent observations/iu.test(message)) {
+    return "The verification run did not collect enough independent checks to confirm whether monitoring works.";
+  }
+  if (/HTTP 403/iu.test(message)) {
+    return "The official booking page returned HTTP 403, and no verified public tee-time feed was found.";
+  }
+  if (/no public booking surface is currently available/iu.test(message)) {
+    return "No verified public read-only tee-time source has been found for this booking provider.";
+  }
+  if (failureClass === "CHALLENGE") {
+    return "The public booking page is behind a CAPTCHA or waiting-room challenge, so monitoring cannot read it safely.";
+  }
+  if (failureClass === "AUTH") {
+    return "The booking page requires an account or authenticated session, so signed-out monitoring cannot read it.";
+  }
+  if (failureClass === "READER_PARSER_MISSING") {
+    return "The local reader can reach this booking page but does not yet understand its tee-time results.";
+  }
+  if (failureClass === "UNSUPPORTED_FAMILY") {
+    return "No verified public read-only tee-time path exists yet for this booking provider.";
+  }
+  if (failureClass === "MISSING_SOURCE") {
+    return "No trustworthy official booking source has been recorded for this course.";
+  }
+  if (failureClass === "NOT_FOUND") {
+    return "The recorded booking page could not be found and needs a corrected official link.";
+  }
+  if (failureClass === "HTTP_5XX") {
+    return "The monitoring or verification path returned a server error before it could confirm a course result.";
+  }
+  if (message) {
+    return message.length > 240 ? `${message.slice(0, 237)}...` : message;
+  }
+  return fallback;
 }
 
 function getLatestSuccessfulEvidence(course: CourseStatusInput) {
@@ -792,16 +841,10 @@ function getLatestSuccessfulEvidence(course: CourseStatusInput) {
     observedAt: Date;
     statusKey: CourseStatusKey;
   }> = [];
-  if (
-    course.latestProbe?.outcome === "MATCH_FOUND" ||
-    course.latestProbe?.outcome === "NO_MATCH"
-  ) {
+  if (course.latestProbe?.outcome === "MATCH_FOUND" || course.latestProbe?.outcome === "NO_MATCH") {
     candidates.push({
       observedAt: course.latestProbe.observedAt,
-      statusKey:
-        course.latestProbe.outcome === "MATCH_FOUND"
-          ? "WORKING_MATCH"
-          : "WORKING_NO_MATCH"
+      statusKey: course.latestProbe.outcome === "MATCH_FOUND" ? "WORKING_MATCH" : "WORKING_NO_MATCH"
     });
   }
   if (course.localReaderVerifiedAt) {
@@ -853,12 +896,8 @@ function deriveAutomationQueueState(
     course.monitoringStatus?.state === "AUTO_INVESTIGATING"
   ) {
     const nextAttemptAt =
-      course.incident?.nextAttemptAt ??
-      course.monitoringStatus?.nextAutomaticAttemptAt ??
-      null;
-    return nextAttemptAt && nextAttemptAt > now
-      ? "SCHEDULED_RETRY"
-      : "DUE_NOW";
+      course.incident?.nextAttemptAt ?? course.monitoringStatus?.nextAutomaticAttemptAt ?? null;
+    return nextAttemptAt && nextAttemptAt > now ? "SCHEDULED_RETRY" : "DUE_NOW";
   }
   return course.priorityGroup === "ACTION" ? "NEEDS_HUMAN" : null;
 }

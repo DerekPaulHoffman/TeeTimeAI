@@ -437,7 +437,13 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
   const topCourses = buildTopCourses(rangePreferences);
   const topCourseIds = topCourses.map((course) => course.id);
   const allCourseIds = allCourses.map((course) => course.id);
-  const [latestProbes, allLatestProbes, selectionCounts, activeAlertCounts] = await Promise.all([
+  const [
+    latestProbes,
+    allLatestProbes,
+    selectionCounts,
+    activeAlertCounts,
+    activeSyntheticAlertCounts
+  ] = await Promise.all([
     topCourseIds.length > 0
       ? prisma.courseProbe.findMany({
           where: {
@@ -493,6 +499,19 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
       _count: {
         _all: true
       }
+    }),
+    prisma.coursePreference.groupBy({
+      by: ["courseId"],
+      where: {
+        teeSearch: {
+          status: "ACTIVE",
+          trafficClass: "TEST",
+          syntheticMultiCycle: true
+        }
+      },
+      _count: {
+        _all: true
+      }
     })
   ]);
   const latestProbeByCourse = new Map(latestProbes.map((probe) => [probe.courseId, probe]));
@@ -502,6 +521,9 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
   );
   const activeAlertCountByCourse = new Map(
     activeAlertCounts.map((group) => [group.courseId, group._count._all])
+  );
+  const activeSyntheticAlertCountByCourse = new Map(
+    activeSyntheticAlertCounts.map((group) => [group.courseId, group._count._all])
   );
   const courseInventory = buildCourseInventory(
     allCourses.map((course) => {
@@ -562,6 +584,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
           ? (latestLocalReaderJob?.readerVersion ?? null)
           : null,
         activeAlertCount: activeAlertCountByCourse.get(course.id) ?? 0,
+        activeSyntheticAlertCount: activeSyntheticAlertCountByCourse.get(course.id) ?? 0,
         selectionCount: selectionCountByCourse.get(course.id) ?? 0,
         monitoringStatus: course.monitoringStatus,
         incident: course.supportIncident,

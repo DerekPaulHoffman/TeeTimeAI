@@ -772,6 +772,12 @@ function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]
                   {course.activeAlertCount === 1 ? "alert" : "alerts"}
                 </strong>
               ) : null}
+              {course.activeSyntheticAlertCount > 0 ? (
+                <strong>
+                  {course.activeSyntheticAlertCount} active TEST{" "}
+                  {course.activeSyntheticAlertCount === 1 ? "alert" : "alerts"}
+                </strong>
+              ) : null}
             </div>
             <div className="operator-course-work-main">
               <div className="operator-course-work-title">
@@ -790,7 +796,21 @@ function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]
                 {course.latestProbe
                   ? `Last checked ${formatDateTime(course.latestProbe.observedAt)}`
                   : "No real-customer check yet"}
+                {course.incident ? (
+                  <>
+                    <span aria-hidden="true">Â·</span>
+                    {formatEnum(course.incident.failureClass ?? "UNKNOWN")}
+                    <span aria-hidden="true">Â·</span>
+                    {course.incident.attemptCount ?? 0}{" "}
+                    {(course.incident.attemptCount ?? 0) === 1 ? "attempt" : "attempts"}
+                  </>
+                ) : null}
               </p>
+              {course.problemSummary ? (
+                <p className="operator-course-problem">
+                  <strong>Problem:</strong> {course.problemSummary}
+                </p>
+              ) : null}
               <p className="operator-course-next-action">
                 <strong>Next:</strong> {course.recommendedAction}
               </p>
@@ -1085,9 +1105,7 @@ function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
   return "Healthy";
 }
 
-function formatAutomationQueueState(
-  value: CourseInventoryItem["automationQueueState"]
-) {
+function formatAutomationQueueState(value: CourseInventoryItem["automationQueueState"]) {
   if (value === "DUE_NOW") return "Due now";
   if (value === "IN_PROGRESS") return "In progress";
   if (value === "SCHEDULED_RETRY") return "Scheduled retry";

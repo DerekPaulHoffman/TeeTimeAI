@@ -73,10 +73,92 @@ describe("operator course inventory", () => {
       NOW
     );
 
+    expect(inventory.map((item) => item.id)).toEqual(["live-investigation", "human-review"]);
+  });
+
+  it("puts real demand first and live synthetic journey failures next", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "inactive-review",
+          name: "A Inactive Review",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED")
+        }),
+        course({
+          id: "synthetic-live",
+          name: "B Synthetic Live",
+          activeSyntheticAlertCount: 1,
+          incident: {
+            id: "incident-synthetic",
+            status: "AUTO_INVESTIGATING",
+            kind: "FETCH_FAILED",
+            activeRealSearchCount: 0,
+            engineeringOnly: true,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage:
+              "The first-failure verification window ended without enough independent observations.",
+            nextAction: "Repair the verification path and retry.",
+            failureClass: "HTTP_5XX"
+          }
+        }),
+        course({
+          id: "real-live",
+          name: "C Real Live",
+          activeAlertCount: 1,
+          incident: {
+            id: "incident-real",
+            status: "AUTO_INVESTIGATING",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 1,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "No public booking surface is currently available.",
+            nextAction: "Find a public read-only source.",
+            failureClass: "UNSUPPORTED_FAMILY"
+          }
+        })
+      ],
+      NOW
+    );
+
     expect(inventory.map((item) => item.id)).toEqual([
-      "live-investigation",
-      "human-review"
+      "real-live",
+      "synthetic-live",
+      "inactive-review"
     ]);
+    expect(inventory[1]).toMatchObject({
+      priorityGroup: "ACTION",
+      problemSummary:
+        "The verification run did not collect enough independent checks to confirm whether monitoring works."
+    });
+  });
+
+  it("turns durable provider evidence into a concise operator problem", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-lake",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            engineeringOnly: true,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage:
+              "A bounded signed-out attempt confirmed the provider landing returned HTTP 403 and exposed no trustworthy public availability contract.",
+            nextAction: "Review a signed-out public capture.",
+            failureClass: "UNSUPPORTED_FAMILY",
+            attemptCount: 3
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result.problemSummary).toBe(
+      "The official booking page returned HTTP 403, and no verified public tee-time feed was found."
+    );
+    expect(result.recommendedAction).toBe("Review a signed-out public capture.");
   });
 
   it("explains that no match is a successful monitor result", () => {
@@ -504,9 +586,7 @@ describe("operator course inventory", () => {
   });
 });
 
-function course(
-  overrides: Partial<CourseStatusInput> = {}
-): CourseStatusInput {
+function course(overrides: Partial<CourseStatusInput> = {}): CourseStatusInput {
   return {
     id: "course-1",
     name: "Example Golf Course",
@@ -525,6 +605,7 @@ function course(
     localReaderVerifiedAt: null,
     localReaderVersion: null,
     activeAlertCount: 0,
+    activeSyntheticAlertCount: 0,
     selectionCount: 0,
     incident: null,
     latestProbe: null,

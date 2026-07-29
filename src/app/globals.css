@@ -2512,12 +2512,22 @@ button {
   margin: 7px 0 0;
 }
 
+.operator-course-problem,
 .operator-course-next-action {
   color: #526159;
   font-size: 0.76rem;
   line-height: 1.5;
-  margin: 12px 0 0;
+  margin: 9px 0 0;
   max-width: 880px;
+}
+
+.operator-course-problem {
+  color: #302f2b;
+  font-size: 0.8rem;
+}
+
+.operator-course-problem + .operator-course-next-action {
+  margin-top: 5px;
 }
 
 .operator-course-status {
