@@ -22,21 +22,24 @@ export const LOCAL_READER_COURSE_KEYS = [
 export type StaticLocalReaderCourseKey =
   (typeof LOCAL_READER_COURSE_KEYS)[number];
 export type DynamicCpsCourseKey = `cps:${string}.cps.golf`;
+export type DynamicTenForeCourseKey = `tenfore:${string}`;
 export type LocalReaderCourseKey =
   | StaticLocalReaderCourseKey
-  | DynamicCpsCourseKey;
+  | DynamicCpsCourseKey
+  | DynamicTenForeCourseKey;
 
 export type LocalReaderCourse = {
   courseName: string;
   bookingUrl: string;
   cardTextIncludes: readonly string[];
-  provider: "CPS" | "CHRONOGOLF";
+  provider: "CPS" | "CHRONOGOLF" | "TENFORE";
 };
 
 const CPS_TENANT_HOSTNAME =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u;
 const CPS_SEARCH_PATH = /^\/onlineresweb\/search-teetime\/?$/u;
 const CPS_DISCOVERY_PATH = /^\/(?:onlineresweb(?:\/search-teetime)?\/?)?$/u;
+const TENFORE_TENANT_PATH = /^\/([a-z0-9][a-z0-9-]{0,127})\/?$/u;
 
 export const LOCAL_READER_COURSES = {
   "grassy-hill": course("Grassy Hill Country Club", "grassyhill.cps.golf"),
@@ -108,6 +111,10 @@ export function getLocalReaderCourseKey(
     ) {
       return `cps:${hostname}` as DynamicCpsCourseKey;
     }
+    const tenForeTenant = getTenForeTenant(url);
+    if (tenForeTenant) {
+      return `tenfore:${tenForeTenant}` as DynamicTenForeCourseKey;
+    }
     return (
       LOCAL_READER_COURSE_KEYS.find((courseKey) => {
         const course = LOCAL_READER_COURSES[courseKey];
@@ -163,6 +170,20 @@ export function isAllowedLocalReaderUrl(
         CPS_SEARCH_PATH.test(url.pathname) &&
         url.username === "" &&
         url.password === ""
+      );
+    }
+    if (isDynamicTenForeCourseKey(courseKey)) {
+      const url = new URL(value);
+      const date = url.searchParams.get("date");
+      return (
+        url.protocol === "https:" &&
+        url.hostname === "fox.tenfore.golf" &&
+        getTenForeTenant(url) === courseKey.slice("tenfore:".length) &&
+        url.username === "" &&
+        url.password === "" &&
+        url.hash === "" &&
+        Array.from(url.searchParams.keys()).every((key) => key === "date") &&
+        (!date || /^\d{4}-\d{2}-\d{2}$/u.test(date))
       );
     }
     const course = LOCAL_READER_COURSES[courseKey];
@@ -236,6 +257,13 @@ export function getLocalReaderJobUrl(
   if (isDynamicCpsCourseKey(courseKey)) {
     return `https://${courseKey.slice("cps:".length)}/onlineresweb/search-teetime`;
   }
+  if (isDynamicTenForeCourseKey(courseKey)) {
+    const url = new URL(
+      `https://fox.tenfore.golf/${courseKey.slice("tenfore:".length)}`,
+    );
+    if (targetDate) url.searchParams.set("date", targetDate);
+    return url.toString();
+  }
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   const url = new URL(course.bookingUrl);
@@ -253,19 +281,44 @@ export function isDynamicCpsCourseKey(
   );
 }
 
+export function isDynamicTenForeCourseKey(
+  value: string,
+): value is DynamicTenForeCourseKey {
+  return (
+    value.startsWith("tenfore:") &&
+    /^[a-z0-9][a-z0-9-]{0,127}$/u.test(value.slice("tenfore:".length))
+  );
+}
+
 export function getLocalReaderCourse(
   courseKey: LocalReaderCourseKey,
   courseName?: string,
 ): LocalReaderCourse | null {
-  if (isDynamicCpsCourseKey(courseKey)) {
+  if (
+    isDynamicCpsCourseKey(courseKey) ||
+    isDynamicTenForeCourseKey(courseKey)
+  ) {
     const normalizedCourseName = courseName?.trim();
     if (!normalizedCourseName) return null;
     return {
       courseName: normalizedCourseName,
       bookingUrl: getLocalReaderJobUrl(courseKey, ""),
       cardTextIncludes: [],
-      provider: "CPS",
+      provider: isDynamicCpsCourseKey(courseKey) ? "CPS" : "TENFORE",
     };
   }
   return LOCAL_READER_COURSES[courseKey];
+}
+
+function getTenForeTenant(url: URL) {
+  if (
+    url.hostname !== "fox.tenfore.golf" ||
+    url.hash !== "" ||
+    !Array.from(url.searchParams.keys()).every((key) => key === "date")
+  ) {
+    return null;
+  }
+  const date = url.searchParams.get("date");
+  if (date && !/^\d{4}-\d{2}-\d{2}$/u.test(date)) return null;
+  return TENFORE_TENANT_PATH.exec(url.pathname)?.[1] ?? null;
 }

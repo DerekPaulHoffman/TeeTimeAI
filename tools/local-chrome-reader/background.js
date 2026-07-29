@@ -143,9 +143,40 @@ function isAllowlistedCpsJob(job) {
   }
 }
 
+function isAllowlistedTenForeJob(job) {
+  try {
+    if (
+      !/^tenfore:[a-z0-9][a-z0-9-]{0,127}$/u.test(job?.courseKey || "") ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "")
+    ) {
+      return false;
+    }
+    const tenant = job.courseKey.slice("tenfore:".length);
+    const url = new URL(job.bookingUrl);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "fox.tenfore.golf" &&
+      url.pathname === `/${tenant}` &&
+      url.searchParams.get("date") === job.targetDate &&
+      Array.from(url.searchParams.keys()).every((key) => key === "date") &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedJob(job) {
   try {
     if (isAllowlistedCpsJob(job)) return true;
+    if (isAllowlistedTenForeJob(job)) return true;
     const allowed = ALLOWED_COURSES[job?.courseKey];
     if (!allowed) return false;
     const [courseName, hostname, pathname, cardTextIncludes] = allowed;

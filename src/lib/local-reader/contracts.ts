@@ -7,6 +7,7 @@ import {
   getLocalReaderCourse,
   isAllowedLocalReaderUrl,
   type DynamicCpsCourseKey,
+  type DynamicTenForeCourseKey,
 } from "./course-key";
 
 export { LOCAL_READER_COURSES, isAllowedLocalReaderUrl } from "./course-key";
@@ -18,9 +19,17 @@ const dynamicCpsCourseKeySchema = z.custom<DynamicCpsCourseKey>(
   "Expected a safe CPS tenant key",
 );
 
+const dynamicTenForeCourseKeySchema = z.custom<DynamicTenForeCourseKey>(
+  (value) =>
+    typeof value === "string" &&
+    /^tenfore:[a-z0-9][a-z0-9-]{0,127}$/u.test(value),
+  "Expected a safe TenFore tenant key",
+);
+
 export const localReaderCourseKeySchema = z.union([
   z.enum(LOCAL_READER_COURSE_KEYS),
   dynamicCpsCourseKeySchema,
+  dynamicTenForeCourseKeySchema,
 ]);
 
 const localDateSchema = z

@@ -7,18 +7,26 @@ signed backend job -> local Chrome page -> normalized slots -> signed backend re
 ```
 
 It reads only signed backend jobs for exact, signed-out CPS tee-time search
-routes and explicitly allowlisted Chronogolf public club profiles. CPS tenants
-are accepted automatically only when the URL is HTTPS, uses one `*.cps.golf`
-tenant host, and stays on `/onlineresweb/search-teetime`. It normalizes rendered start time, hole
-options, public golfer capacity, price, and cart labels from current and legacy
-CPS card layouts plus Chronogolf's public tee-time cards. It does not inspect
-cookies or browser storage, call private provider APIs, click a tee time, sign
-in, enter a cart, or continue to checkout.
+routes, exact TenFore tenant routes, and explicitly allowlisted Chronogolf
+public club profiles. CPS tenants are accepted automatically only when the URL
+is HTTPS, uses one `*.cps.golf` tenant host, and stays on
+`/onlineresweb/search-teetime`. TenFore tenants are accepted only on
+`fox.tenfore.golf/<tenant>` with the signed job's exact tenant and date. It
+normalizes rendered start time, hole options, public golfer capacity, price,
+and cart labels from current and legacy CPS card layouts, TenFore's public
+cards, and Chronogolf's public tee-time cards. It does not inspect cookies or
+browser storage, call private provider APIs, click a tee time, sign in, enter a
+cart, or continue to checkout.
 
 New CPS tenants do not require an extension release or a course-specific
 allowlist entry. Authentication, email verification, CAPTCHA, queue, unexpected
 redirect, and unrecognized page shapes still fail closed and return evidence
 instead of being bypassed.
+
+New TenFore tenants use the same rendered-card parser only when the exact signed
+job URL remains on `fox.tenfore.golf`, contains one safe tenant path, and renders
+the requested date. The local reader never generates, reads, or replays
+TenFore's underlying CAPTCHA token.
 
 The Chronogolf allowlist contains only the exact public profiles owned by
 current course-support work, including Lyman Orchards. Those pages are opened

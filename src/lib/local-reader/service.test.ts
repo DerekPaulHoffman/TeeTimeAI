@@ -37,6 +37,7 @@ import {
 const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
 const chronogolfBookingUrl =
   "https://www.chronogolf.com/club/crestbrook-park-golf-course";
+const tenForeBookingUrl = "https://fox.tenfore.golf/gainfieldfarms";
 
 describe("local reader job service", () => {
   beforeEach(() => {
@@ -217,6 +218,33 @@ describe("local reader job service", () => {
           courseKey: "crestbrook",
           bookingUrl:
             "https://www.chronogolf.com/club/crestbrook-park-golf-course?date=2026-07-26&step=teetimes",
+        }),
+      }),
+    );
+  });
+
+  it("queues an exact dated TenFore tenant for the rendered reader", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({
+      id: "job-tenfore",
+    });
+
+    await queueLocalReaderJob({
+      searchId: "search-1",
+      courseId: "course-gainfield",
+      scheduleVersion: 3,
+      targetDate: "2026-07-29",
+      players: 3,
+      bookingUrl: tenForeBookingUrl,
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "tenfore:gainfieldfarms",
+          bookingUrl:
+            "https://fox.tenfore.golf/gainfieldfarms?date=2026-07-29",
         }),
       }),
     );

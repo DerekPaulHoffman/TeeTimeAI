@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Tee Time Spot Local Reader",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "description": "Reads allowlisted public tee-time pages for Tee Time Spot alerts.",
   "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": [
     "https://teetimespot.com/*",
     "http://127.0.0.1:4317/*",
     "https://*.cps.golf/*",
-    "https://www.chronogolf.com/*"
+    "https://www.chronogolf.com/*",
+    "https://fox.tenfore.golf/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -34,6 +35,13 @@
         "https://www.chronogolf.com/club/hyde-park-golf-club*"
       ],
       "js": ["chronogolf-reader.js", "content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://fox.tenfore.golf/*"
+      ],
+      "js": ["tenfore-reader.js", "content.js"],
       "run_at": "document_idle"
     }
   ]
