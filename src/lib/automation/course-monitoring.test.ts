@@ -72,6 +72,7 @@ describe("course monitoring lifecycle", () => {
     expect(getCourseMonitoringEscalationDeadline(now, 0).getTime() - now.getTime()).toBe(
       INACTIVE_INVESTIGATION_MS
     );
+    expect(INACTIVE_INVESTIGATION_MS).toBe(30 * 60 * 1000);
     expect(getHumanReviewRetryAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_HUMAN_RETRY_MS);
     expect(getHumanReviewRetryAt(now, 0).getTime() - now.getTime()).toBe(INACTIVE_HUMAN_RETRY_MS);
     expect(getHumanReviewReminderAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_REMINDER_MS);

@@ -17,7 +17,7 @@ import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 export const FAILURE_CONFIRMATION_WINDOW_MS = 15 * 60 * 1000;
 export const FIRST_FAILURE_RETRY_MS = 2 * 60 * 1000;
 export const ACTIVE_DEMAND_ESCALATION_MS = 6 * 60 * 60 * 1000;
-export const INACTIVE_INVESTIGATION_MS = 24 * 60 * 60 * 1000;
+export const INACTIVE_INVESTIGATION_MS = 30 * 60 * 1000;
 export const ACTIVE_HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
 export const INACTIVE_HUMAN_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 export const ACTIVE_REMINDER_MS = 24 * 60 * 60 * 1000;

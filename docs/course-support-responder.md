@@ -6,10 +6,11 @@ The course-support responder is the dedicated engineering path for persistent `N
 
 - Vercel Workflows remain the scheduler for golfer searches. The responder does not poll tee sheets on a timer and does not replace a search workflow.
 - The Codex automation `tee-time-spot-course-support-responder` begins every 10-minute task with `npm run automation:course-support -- inspect`.
-- The responder runs from the already-approved dedicated checkout `C:\dev\TeeTimeAi-CourseSupportResponder`; the bounded product-improvement loop remains in `C:\dev\TeeTimeAI-automation`. They must never share one mutable checkout. The database writer lease still serializes release ownership across both checkouts.
+- Every responder launch runs in its own Codex-created worktree. The bounded product-improvement loop remains in `C:\dev\TeeTimeAI-automation`; they never share one mutable checkout.
 - A due batch contains one provider family and one failure fingerprint. The default claim is 5 courses; the command clamps all requests to 1 through 20.
 - Batches prioritize near-date active real-demand fetch failures, then other active real demand, then historical non-engineering incidents whose searches have ended, then engineering-only synthetic coverage. Aged engineering-only evidence receives bounded fairness when no critical real demand is waiting.
-- Each 10-minute inspection may describe up to three read-only provider/fingerprint groups with no more than five courses per group. Read-only provider work retains the global two-request limit and one request per provider family. One serialized writer batch owns code, migration, commit, and deployment changes, ordered by active demand and the nearest escalation deadline.
+- Every 10-minute run may claim one bounded provider/fingerprint group with no more than five courses. Up to three different groups may run concurrently in isolated worktrees. Provider work retains the global two-request limit and one request per provider family; durable group ownership prevents duplicate work.
+- Each task records its provider group and bounded course ordinals at claim time and must end with a durable batch closeout (`success`, `classification_only`, `partial`, `retryable_failed`, or `needs_human`) or one concrete visible blocker. Passing local tests is not a closeout: when production still cannot produce trustworthy evidence, the task records the observed provider failure, performs the best safe reusable fix or terminal classification available, and persists the exact next attempt or engineering action.
 - The broad product-improvement loop uses an independent writer lane and may proceed while a responder batch is active or requires recovery. Responder state remains informational there, and course-support incidents are never portfolio candidates for that loop.
 
 `CourseSupportIncident` is the durable per-course problem. `CourseSupportBatch` is the short-lived provider-family/fingerprint engineering claim. `CourseSupportBatchIncident` preserves the per-course pre-remediation evidence and final batch result.
@@ -34,7 +35,7 @@ A responder may close a course automatically without runnable monitoring only fo
 
 - `HEALTHY`: the latest public signed-out read returned `MATCH_FOUND` or `NO_MATCH`.
 - `DEGRADED_RETRYING`: the first failure is recorded without erasing the last working time. The search retries within two minutes.
-- `AUTO_INVESTIGATING`: two independent read paths failed within 15 minutes, or the same path failed twice. Active real demand gets a six-hour automation deadline; inactive engineering work gets 24 hours.
+- `AUTO_INVESTIGATING`: two independent read paths failed within 15 minutes, or the same path failed twice. Active real demand gets a six-hour automation deadline; inactive engineering work gets 30 minutes.
 - `ENGINEERING_VERIFICATION_NEEDED`: the bounded playbook could not prove recovery or a safe automatic final. Active demand retries every six hours with daily operator reminders. Inactive work retries and reminds weekly.
 - `FINAL_MANUAL` and `FINAL_IDENTITY`: strong official manual-booking or identity evidence may close automatically.
 - `FINAL_TECHNICAL`: an operator approved a precise technical reason with official evidence. It has no timer-based retry. New real demand triggers exactly one revalidation while keeping the prior decision visible.
@@ -48,7 +49,7 @@ Claiming requires all of the following:
 - a clean `automation/course-support-*` task branch;
 - checked-out `HEAD` exactly equal to current `origin/main`;
 - the real Codex task id from `CODEX_THREAD_ID` or `--owner-thread`;
-- no active responder batch in the course-support lane.
+- fewer than three healthy active responder batches, with no active batch for the selected provider-family/failure-fingerprint group.
 
 Claim returns a redacted `batchRef`, then `packet` exposes only bounded course ordinals and safe official roots. Every path must be recorded with `claim-path` before that file is edited. The database lease token and row ids never leave the command implementation.
 
@@ -56,7 +57,7 @@ When a durably closed `RETRYABLE_FAILED` batch is due and coordination requires 
 
 For a multi-course source batch whose entries have different retry times, coordination may select exactly one immutable source-entry ordinal with `claim --retry-batch-ref <private-ref> --retry-ordinal <NN> --max-courses 1`. Source-entry ordinals use the persisted batch-entry order (`createdAt`, then the private row id as a tie-breaker); they are not course-name order and must never be accompanied by a row id or course name in task output. Exact-entry mode still requires the whole source batch to be a durably closed retryable batch with unique, latest `RETRY_SCHEDULED` entries, then revalidates the selected entry's current cycle, provider provenance, due time, demand, ownership, and source-entry relation inside the ordinary serializable claim fence. Unselected siblings need not be due. Any invalid ordinal or mismatch aborts without falling back to the normal queue.
 
-The responder uses the transaction-scoped Postgres advisory lease `tee-time-spot:course-support-writer` for inspect/claim/recovery state transitions. The hourly loop uses its own `tee-time-spot:hourly-improvement-writer` lease. The durable responder batch and unfinished responder `AutomationRun` own the longer responder implementation interval. A responder lease lasts 15 minutes and must be heartbeated while work continues. For an investigation expected to outlast one lease, start the bounded `heartbeat --watch` command in a separate process. It renews every four minutes by default, stops after 45 minutes by default, fails immediately if ownership is lost, and never changes the release fence.
+The responder uses the transaction-scoped Postgres advisory lease `tee-time-spot:course-support-writer` only for short inspect/claim/recovery state transitions. The hourly loop uses its own `tee-time-spot:hourly-improvement-writer` lease. Up to three durable responder batches and unfinished responder `AutomationRun` rows may own different provider groups during their longer implementation intervals. A responder lease lasts 15 minutes and must be heartbeated while work continues. For an investigation expected to outlast one lease, start the bounded `heartbeat --watch` command in a separate process. It renews every four minutes by default, stops after 45 minutes by default, fails immediately if ownership is lost, and never changes the release fence.
 
 An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder writer, an active responder lease, or mismatched provenance require owner attention.
 
@@ -113,6 +114,8 @@ Keep the queue payload minimal. Do not log raw message bodies, database ids, wor
 ## Retry And Closeout
 
 The normal provider retry ladder is approximately 15 minutes, 1 hour, 6 hours, then 24 hours, with deterministic 0.9-to-1.1 jitter. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours. Retries persist `nextAttemptAt`. Repeated `SOURCE_MISSING` or `SOURCE_CONFLICT` evidence does not retry forever: after at least four verified attempts spanning at least 24 hours, it becomes `ENGINEERING_VERIFICATION_NEEDED` with `SOURCE_UNVERIFIED`; automation does not approve that final itself. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day instead of trusting a stale incident snapshot. New real demand promotes priority and makes a missed engineer-approved-final revalidation immediately recoverable by the watchdog.
+
+An engineering-only incident may use the provider retry ladder after its first task closes, but it may remain `AUTO_INVESTIGATING` for at most 30 minutes. At that deadline it must have working monitoring, a verified terminal limitation, or a recorded `ENGINEERING_VERIFICATION_NEEDED` state containing the completed attempts and exact next action.
 
 Closeout independently derives per-course and batch outcomes from persisted evidence:
 

@@ -2671,7 +2671,7 @@ describe("course-support inspection ownership", () => {
         hasActiveBatch: false,
         hasExpiredBatch: true
       })
-    ).toBe("recovery_required");
+    ).toBe("ready");
     expect(
       classifyCourseSupportQueueInspection({
         ...inspection,
@@ -2706,6 +2706,27 @@ describe("course-support inspection ownership", () => {
     ).toBe("ready");
   });
 
+  it("keeps unrelated work ready until three provider groups are active", () => {
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        activeBatchCount: 2,
+        maxActiveBatches: 3,
+        requestingThreadId: "different-thread",
+        dueIncidentCount: 1
+      })
+    ).toBe("ready");
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        activeBatchCount: 3,
+        maxActiveBatches: 3,
+        requestingThreadId: "different-thread",
+        dueIncidentCount: 1
+      })
+    ).toBe("deferred_busy");
+  });
+
   it("finalizes only old repeated source gaps without active real demand", () => {
     const evidence = {
       providerFamilyKey: "SOURCE_MISSING",
@@ -2733,16 +2754,18 @@ describe("course-support inspection ownership", () => {
   });
 
   it("selects the owner internally and resumes only the same task", async () => {
-    prismaMocks.batchFindFirst
-      .mockResolvedValueOnce({
+    prismaMocks.batchFindMany.mockResolvedValueOnce([
+      {
         id: "batch-1",
         reference: "batch-reference",
         status: "VERIFYING",
         leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
         providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: "network",
         ownerThreadId: "owner-thread"
-      })
-      .mockResolvedValueOnce(null);
+      }
+    ]);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(null);
 
     const result = await inspectCourseSupportQueue({
       requestingThreadId: "owner-thread",
@@ -2755,7 +2778,7 @@ describe("course-support inspection ownership", () => {
       durableCloseoutRecorded: false,
       threadDisposition: "KEEP_VISIBLE"
     });
-    expect(prismaMocks.batchFindFirst.mock.calls[0]?.[0]).toEqual(
+    expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
         select: expect.objectContaining({ ownerThreadId: true })
       })
@@ -2817,16 +2840,18 @@ describe("course-support inspection ownership", () => {
   });
 
   it("resumes owned responder work without consulting the hourly lane", async () => {
-    prismaMocks.batchFindFirst
-      .mockResolvedValueOnce({
+    prismaMocks.batchFindMany.mockResolvedValueOnce([
+      {
         id: "batch-1",
         reference: "batch-reference",
         status: "VERIFYING",
         leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
         providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: "network",
         ownerThreadId: "owner-thread"
-      })
-      .mockResolvedValueOnce(null);
+      }
+    ]);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(null);
     const result = await inspectCourseSupportQueue({
       requestingThreadId: "owner-thread",
       now
@@ -2845,16 +2870,18 @@ describe("course-support inspection ownership", () => {
   it.each([undefined, "different-thread"])(
     "keeps inspect fail-closed for an unproven requester (%s)",
     async (requestingThreadId) => {
-      prismaMocks.batchFindFirst
-        .mockResolvedValueOnce({
+      prismaMocks.batchFindMany.mockResolvedValueOnce([
+        {
           id: "batch-1",
           reference: "batch-reference",
           status: "VERIFYING",
           leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
           providerFamilyKey: "CHRONOGOLF",
+          failureFingerprint: "network",
           ownerThreadId: "owner-thread"
-        })
-        .mockResolvedValueOnce(null);
+        }
+      ]);
+      prismaMocks.batchFindFirst.mockResolvedValueOnce(null);
 
       const result = await inspectCourseSupportQueue({
         requestingThreadId,
@@ -2862,7 +2889,7 @@ describe("course-support inspection ownership", () => {
       });
 
       expect(result).toMatchObject({
-        outcome: "deferred_busy",
+        outcome: "no_due_work",
         ownedByCurrentTask: false,
         durableCloseoutRecorded: true,
         threadDisposition: "ARCHIVE"

@@ -1,7 +1,7 @@
 export const COURSE_SUPPORT_RESPONDER_AUTOMATION_ID =
   "tee-time-spot-course-support-responder";
 export const COURSE_SUPPORT_RESPONDER_PROMPT_VERSION =
-  "tee-time-spot-course-support-responder-v2";
+  "tee-time-spot-course-support-responder-v3";
 
 export const COURSE_SUPPORT_BATCH_DEFAULT_SIZE = 5;
 export const COURSE_SUPPORT_BATCH_MAX_SIZE = 20;

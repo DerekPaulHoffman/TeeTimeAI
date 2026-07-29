@@ -70,6 +70,7 @@ const SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 const SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT = 4;
 const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
+const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 3;
 const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
   "HTTP_5XX",
@@ -722,15 +723,27 @@ export function preserveExplicitHumanVerification(input: {
 
 export function classifyCourseSupportQueueInspection(input: {
   hasActiveBatch: boolean;
+  activeBatchCount?: number;
+  maxActiveBatches?: number;
   activeBatchOwnerThreadId?: string | null;
   requestingThreadId?: string | null;
   hasExpiredBatch: boolean;
   dueIncidentCount: number;
 }): ResponderOutcome {
-  if (input.hasActiveBatch) {
-    return input.requestingThreadId && input.activeBatchOwnerThreadId === input.requestingThreadId
-      ? "resume_owned_work"
-      : "deferred_busy";
+  if (
+    input.hasActiveBatch &&
+    input.requestingThreadId &&
+    input.activeBatchOwnerThreadId === input.requestingThreadId
+  ) {
+    return "resume_owned_work";
+  }
+  const activeBatchCount = input.activeBatchCount ?? (input.hasActiveBatch ? 1 : 0);
+  const maxActiveBatches = input.maxActiveBatches ?? 1;
+  if (input.dueIncidentCount > 0 && activeBatchCount < maxActiveBatches) {
+    return "ready";
+  }
+  if (activeBatchCount >= maxActiveBatches) {
+    return "deferred_busy";
   }
   if (input.hasExpiredBatch) {
     return "recovery_required";
@@ -1023,7 +1036,7 @@ export async function inspectCourseSupportQueue(input?: {
     confirmedAt: { not: null },
     OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
   };
-  const [dueIncidents, activeBatch, expiredBatch] = await Promise.all([
+  const [dueIncidents, activeBatches, expiredBatch] = await Promise.all([
     prisma.courseSupportIncident.findMany({
       where: dueWhere,
       select: {
@@ -1050,18 +1063,20 @@ export async function inspectCourseSupportQueue(input?: {
         }
       }
     }),
-    prisma.courseSupportBatch.findFirst({
+    prisma.courseSupportBatch.findMany({
       where: {
         status: { in: ACTIVE_BATCH_STATUSES },
         leaseExpiresAt: { gt: now }
       },
       orderBy: { heartbeatAt: "desc" },
+      take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
       select: {
         id: true,
         reference: true,
         status: true,
         leaseExpiresAt: true,
         providerFamilyKey: true,
+        failureFingerprint: true,
         ownerThreadId: true
       }
     }),
@@ -1079,6 +1094,21 @@ export async function inspectCourseSupportQueue(input?: {
       }
     })
   ]);
+  const activeBatch =
+    activeBatches.find((batch) => batch.ownerThreadId === requestingThreadId) ??
+    activeBatches[0] ??
+    null;
+  const activeProviderGroups = new Set(
+    activeBatches.map(
+      (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`
+    )
+  );
+  const availableDueIncidents = dueIncidents.filter(
+    (incident) =>
+      !activeProviderGroups.has(
+        `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
+      )
+  );
 
   const providerGroups = new Set(
     dueIncidents.map(
@@ -1110,6 +1140,11 @@ export async function inspectCourseSupportQueue(input?: {
   ).length;
   const readOnlyDispatchGroups = [
     ...dueDemand
+      .filter(({ incident }) =>
+        !activeProviderGroups.has(
+          `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
+        )
+      )
       .reduce(
         (groups, item) => {
           const key = `${item.incident.providerFamilyKey}\u0000${item.incident.failureFingerprint}`;
@@ -1149,10 +1184,12 @@ export async function inspectCourseSupportQueue(input?: {
     }));
   const outcome = classifyCourseSupportQueueInspection({
     hasActiveBatch: Boolean(activeBatch),
+    activeBatchCount: activeBatches.length,
+    maxActiveBatches: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
     activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
     requestingThreadId,
     hasExpiredBatch: Boolean(expiredBatch),
-    dueIncidentCount: dueIncidents.length
+    dueIncidentCount: availableDueIncidents.length
   });
   const ownedByCurrentTask = Boolean(
     activeBatch && requestingThreadId && activeBatch.ownerThreadId === requestingThreadId
@@ -1168,7 +1205,7 @@ export async function inspectCourseSupportQueue(input?: {
             dueEngineeringCount,
             dueHistoricalRealCount,
             providerGroupCount: providerGroups.size,
-            activeBatch: Boolean(activeBatch)
+            activeBatchCount: activeBatches.length
           }
         })
       : false;
@@ -1191,6 +1228,11 @@ export async function inspectCourseSupportQueue(input?: {
     dueEngineeringCount,
     dueHistoricalRealCount,
     providerGroupCount: providerGroups.size,
+    activeWriterCount: activeBatches.length,
+    availableWriterSlots: Math.max(
+      0,
+      MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length
+    ),
     readOnlyDispatchPlan: {
       maxProviderGroups: 3,
       maxCoursesPerGroup: 5,
@@ -1208,6 +1250,16 @@ export async function inspectCourseSupportQueue(input?: {
           leaseExpiresAt: activeBatch.leaseExpiresAt.toISOString()
         }
       : null,
+    activeWriters: activeBatches.map((batch) => ({
+      kind: "COURSE_SUPPORT_BATCH" as const,
+      batchRef: batch.reference,
+      status: batch.status,
+      providerFamilyKey: batch.providerFamilyKey,
+      leaseExpiresAt: batch.leaseExpiresAt.toISOString(),
+      ownedByCurrentTask: Boolean(
+        requestingThreadId && batch.ownerThreadId === requestingThreadId
+      )
+    })),
     expiredBatch: expiredBatch
       ? {
           batchRef: expiredBatch.reference,
@@ -1249,27 +1301,27 @@ export async function claimCourseSupportBatch(input: {
     : null;
 
   const lease = await runWithCourseSupportWriterTransitionLease(async () => {
-    const activeBatch = await prisma.courseSupportBatch.findFirst({
+    const activeBatches = await prisma.courseSupportBatch.findMany({
       where: {
-        status: { in: ACTIVE_BATCH_STATUSES }
+        status: { in: ACTIVE_BATCH_STATUSES },
+        leaseExpiresAt: { gt: now }
       },
       orderBy: { heartbeatAt: "desc" },
-      select: { id: true, leaseExpiresAt: true, status: true }
+      take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
+      select: {
+        id: true,
+        leaseExpiresAt: true,
+        status: true,
+        providerFamilyKey: true,
+        failureFingerprint: true
+      }
     });
-    if (activeBatch && activeBatch.leaseExpiresAt.getTime() <= now.getTime()) {
-      return {
-        outcome: "recovery_required" as const,
-        durableCloseoutRecorded: false,
-        threadDisposition: "KEEP_VISIBLE" as const,
-        archiveReason: "An expired responder batch must be recovered before new work is claimed."
-      };
-    }
-    if (activeBatch) {
+    if (activeBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
         now,
         summary: {
-          activeBatch: true
+          activeBatchCount: activeBatches.length
         }
       });
       return {
@@ -1282,7 +1334,7 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    const [candidates, recentBatches, retryBatch] = await Promise.all([
+    const [allCandidates, recentBatches, retryBatch] = await Promise.all([
       listDueCourseSupportCandidates(now),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },
@@ -1336,6 +1388,17 @@ export async function claimCourseSupportBatch(input: {
           })
         : Promise.resolve(null)
     ]);
+    const activeProviderGroups = new Set(
+      activeBatches.map(
+        (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`
+      )
+    );
+    const candidates = allCandidates.filter(
+      (candidate) =>
+        !activeProviderGroups.has(
+          `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`
+        )
+    );
     if (input.retryBatchId && !retryBatch) {
       throw new Error("The targeted responder retry batch was not found.");
     }
