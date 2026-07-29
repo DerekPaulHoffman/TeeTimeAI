@@ -3,6 +3,7 @@
 
   const READER_VERSION = "tenfore-rendered-v1";
   const SKIP_PLAYER_SELECTION = true;
+  const SKIP_DATE_SELECTION = true;
   const TENANT_PATH = /^\/([a-z0-9][a-z0-9-]{0,127})\/?$/;
   const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
   const TIME_PATTERN = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i;
@@ -219,6 +220,7 @@
   root.TeeTimeSpotTenForeReader = {
     READER_VERSION,
     SKIP_PLAYER_SELECTION,
+    SKIP_DATE_SELECTION,
     countRenderedSlots,
     isAllowedPageUrl,
     readSnapshot,

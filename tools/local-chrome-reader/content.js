@@ -415,7 +415,9 @@
       if (reader.SKIP_PLAYER_SELECTION !== true) {
         await choosePlayers(pending.job.players);
       }
-      await chooseTargetDate(pending.job.targetDate);
+      if (reader.SKIP_DATE_SELECTION !== true) {
+        await chooseTargetDate(pending.job.targetDate);
+      }
       await waitForTargetPage(pending.job.targetDate, reader);
       const snapshot = reader.readSnapshot(
         document,

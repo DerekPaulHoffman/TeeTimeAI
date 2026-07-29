@@ -21,6 +21,8 @@ import {
 } from "./course-key";
 
 type Reader = {
+  SKIP_DATE_SELECTION?: boolean;
+  SKIP_PLAYER_SELECTION?: boolean;
   readSnapshot: (
     documentRoot: Document,
     pageUrl: string,
@@ -237,6 +239,10 @@ describe("local Chrome reader contract", () => {
     expect(
       loadTenForeReader().isAllowedPageUrl(job, job.bookingUrl),
     ).toBe(true);
+    expect(loadTenForeReader()).toMatchObject({
+      SKIP_DATE_SELECTION: true,
+      SKIP_PLAYER_SELECTION: true,
+    });
     expect(() =>
       localReaderJobSchema.parse({
         ...job,
@@ -686,6 +692,7 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).toContain("async function chooseCourse(job)");
     expect(contentSource).toContain("async function choosePlayers(players)");
     expect(contentSource).toContain("reader.SKIP_PLAYER_SELECTION !== true");
+    expect(contentSource).toContain("reader.SKIP_DATE_SELECTION !== true");
     expect(contentSource).toContain("const deadline = Date.now() + 10_000");
     expect(contentSource).toContain("await delay(100)");
     expect(contentSource).toContain(
