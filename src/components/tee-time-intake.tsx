@@ -120,6 +120,7 @@ type GoogleMapInstance = {
 };
 
 type GoogleMapsNamespace = {
+  importLibrary?: (libraryName: "maps" | "marker" | "places") => Promise<unknown>;
   LatLngBounds: new () => {
     extend(position: GoogleMapsLatLng): void;
   };
@@ -136,7 +137,14 @@ type GoogleMapsNamespace = {
     }
   ) => GoogleMapInstance;
   Marker: new (options: {
-    label?: string;
+    icon?: {
+      fillColor: string;
+      fillOpacity: number;
+      path: unknown;
+      scale: number;
+      strokeColor: string;
+      strokeWeight: number;
+    };
     map: GoogleMapInstance;
     position: GoogleMapsLatLng;
     title: string;
@@ -153,21 +161,20 @@ type GoogleMapsNamespace = {
       shouldFocus?: boolean;
     }): void;
     setContent(content: Node | string): void;
+    addListener?: (eventName: string, handler: () => void) => { remove?: () => void };
+  };
+  SymbolPath?: {
+    CIRCLE: unknown;
   };
   marker?: {
     AdvancedMarkerElement: new (options: {
+      collisionBehavior?: string;
       gmpClickable?: boolean;
       map: GoogleMapInstance;
       position: GoogleMapsLatLng;
       title: string;
+      zIndex?: number;
     }) => GoogleMapsAdvancedMarker;
-    PinElement: new (options: {
-      background?: string;
-      borderColor?: string;
-      glyphColor?: string;
-      glyphText?: string;
-      scale?: number;
-    }) => Node;
   };
 };
 
@@ -179,6 +186,14 @@ type GoogleMapsAdvancedMarker = {
 
 type GoogleMapsClassicMarker = {
   addListener?: (eventName: string, handler: () => void) => { remove?: () => void };
+  setIcon?: (icon: {
+    fillColor: string;
+    fillOpacity: number;
+    path: unknown;
+    scale: number;
+    strokeColor: string;
+    strokeWeight: number;
+  }) => void;
   setMap(map: GoogleMapInstance | null): void;
 };
 
@@ -465,12 +480,16 @@ function TeeTimeIntakeContent({
     () => filteredCourses.filter((course) => !courseLookupResultIds.has(course.googlePlaceId)),
     [courseLookupResultIds, filteredCourses]
   );
+  const displayedCourses = useMemo(
+    () => [...courseLookupResults, ...nearbyCourses],
+    [courseLookupResults, nearbyCourses]
+  );
   const visibleNearbyCourses = useMemo(
     () => nearbyCourses.slice(0, visibleCourseCount),
     [nearbyCourses, visibleCourseCount]
   );
   const hiddenCourseCount = Math.max(nearbyCourses.length - visibleNearbyCourses.length, 0);
-  const displayedCourseCount = nearbyCourses.length + courseLookupResults.length;
+  const displayedCourseCount = displayedCourses.length;
   const searchSignature = useMemo(
     () =>
       JSON.stringify({
@@ -1165,7 +1184,12 @@ function TeeTimeIntakeContent({
               <strong>
                 {displayedCourseCount} {displayedCourseCount === 1 ? "course" : "courses"}
               </strong>{" "}
-              near {locationText.trim() || "your location"} — tap the ones you want and drag to rank them.
+              near {locationText.trim() || "your location"} — tap the ones you want and drag to rank
+              them.{" "}
+              <a className="figma-results-map-link" href="#course-results-map-section">
+                Scroll to Google Map
+              </a>
+              .
             </div>
           ) : courseLookupResults.length > 0 ? (
             <div className="figma-results-banner" role="status" aria-atomic="true">
@@ -1602,7 +1626,7 @@ function TeeTimeIntakeContent({
         </div>
       </aside>
       </div>
-      <CourseResultsMap courses={[]} origin={searchCoordinates} />
+      <CourseResultsMap courses={displayedCourses} origin={searchCoordinates} />
       {selected.length > 0 ? (
         <div className="mobile-selection-bar">
           <button
@@ -2130,37 +2154,58 @@ function CourseResultsMap({
       const bounds = new googleMaps.LatLngBounds();
       const infoWindow = new googleMaps.InfoWindow({
         ariaLabel: "Course details",
-        maxWidth: 340
+        maxWidth: 320
       });
       const markers: GoogleMapsMarker[] = [];
+      let clearSelectedMarker: (() => void) | undefined;
       const advancedMarkerApi =
-        mapsMapId && advancedMarkers?.AdvancedMarkerElement && advancedMarkers.PinElement
+        mapsMapId && advancedMarkers?.AdvancedMarkerElement
           ? advancedMarkers
           : null;
 
       courses.forEach((course, index) => {
         const position = { lat: course.latitude, lng: course.longitude };
         bounds.extend(position);
-        const marker = advancedMarkerApi
+        const advancedMarker = advancedMarkerApi
           ? createAdvancedCourseMarker(advancedMarkerApi, map, position, course.name, index)
-          : new googleMaps.Marker({
-              label: String(index + 1),
-              map,
-              position,
-              title: `${index + 1}. ${course.name}`
-            });
-
-        marker.addListener?.("click", () => {
-          infoWindow.setContent(createCourseMapInfoWindowContent(course));
-          infoWindow.open({ anchor: marker, map, shouldFocus: false });
-        });
-        if (advancedMarkerApi) {
-          marker.addListener?.("gmp-click", () => {
-            infoWindow.setContent(createCourseMapInfoWindowContent(course));
-            infoWindow.open({ anchor: marker, map, shouldFocus: false });
+          : null;
+        const marker =
+          advancedMarker?.marker ??
+          new googleMaps.Marker({
+            ...(googleMaps.SymbolPath
+              ? { icon: createClassicCourseMarkerIcon(googleMaps.SymbolPath.CIRCLE, false) }
+              : {}),
+            map,
+            position,
+            title: course.name
           });
+        const setSelected = advancedMarker
+          ? advancedMarker.setSelected
+          : (selected: boolean) => {
+              if (googleMaps.SymbolPath) {
+                (marker as GoogleMapsClassicMarker).setIcon?.(
+                  createClassicCourseMarkerIcon(googleMaps.SymbolPath.CIRCLE, selected)
+                );
+              }
+            };
+        const openCourseDetails = () => {
+          clearSelectedMarker?.();
+          setSelected(true);
+          clearSelectedMarker = () => setSelected(false);
+          infoWindow.setContent(createGooglePlaceDetailsContent(course));
+          infoWindow.open({ anchor: marker, map, shouldFocus: false });
+        };
+
+        if (advancedMarkerApi) {
+          marker.addListener?.("gmp-click", openCourseDetails);
+        } else {
+          marker.addListener?.("click", openCourseDetails);
         }
         markers.push(marker);
+      });
+      infoWindow.addListener?.("closeclick", () => {
+        clearSelectedMarker?.();
+        clearSelectedMarker = undefined;
       });
 
       if (courses.length > 1) {
@@ -2169,6 +2214,7 @@ function CourseResultsMap({
 
       cleanupMarkers = () => {
         infoWindow.close();
+        clearSelectedMarker?.();
         markers.forEach((marker) => {
           if ("setMap" in marker) {
             marker.setMap(null);
@@ -2205,7 +2251,7 @@ function CourseResultsMap({
   }
 
   return (
-    <div className="course-results-map-shell">
+    <div className="course-results-map-shell" id="course-results-map-section">
       {mapsApiKey && !mapLoadError ? (
         <div
           aria-label={`${courses.length} nearby course locations on Google Maps`}
@@ -2239,22 +2285,36 @@ function createAdvancedCourseMarker(
   courseName: string,
   index: number
 ) {
-  const pin = new advancedMarkers.PinElement({
-    background: "#d93025",
-    borderColor: "#ffffff",
-    glyphColor: "#ffffff",
-    glyphText: String(index + 1),
-    scale: 1.18
-  });
+  const markerVisual = document.createElement("span");
+  markerVisual.className = "course-map-marker";
+  markerVisual.setAttribute("aria-hidden", "true");
   const marker = new advancedMarkers.AdvancedMarkerElement({
+    collisionBehavior: "OPTIONAL_AND_HIDES_LOWER_PRIORITY",
     gmpClickable: true,
     map,
     position,
-    title: `${index + 1}. ${courseName}`
+    title: courseName,
+    zIndex: 1000 - index
   });
 
-  marker.append?.(pin);
-  return marker;
+  marker.append?.(markerVisual);
+  return {
+    marker,
+    setSelected(selected: boolean) {
+      markerVisual.classList.toggle("is-selected", selected);
+    }
+  };
+}
+
+function createClassicCourseMarkerIcon(path: unknown, selected: boolean) {
+  return {
+    fillColor: "#ea4335",
+    fillOpacity: 1,
+    path,
+    scale: selected ? 9 : 6,
+    strokeColor: "#ffffff",
+    strokeWeight: selected ? 3 : 2
+  };
 }
 
 function CourseFallbackMap({
@@ -2279,6 +2339,7 @@ function CourseFallbackMap({
 
   useEffect(() => {
     let isCancelled = false;
+    let invalidateMapTimer: number | undefined;
 
     async function initializeFallbackMap() {
       const leaflet = await import("leaflet");
@@ -2287,7 +2348,10 @@ function CourseFallbackMap({
         return;
       }
 
-      mapInstanceRef.current?.remove();
+      const previousMap = mapInstanceRef.current;
+      mapInstanceRef.current = null;
+      previousMap?.stop();
+      previousMap?.remove();
       const map = leaflet
         .map(mapElementRef.current, {
           scrollWheelZoom: false,
@@ -2303,29 +2367,35 @@ function CourseFallbackMap({
         .addTo(map);
 
       const bounds = leaflet.latLngBounds([]);
-      courses.forEach((course, index) => {
+      courses.forEach((course) => {
         const position: Leaflet.LatLngTuple = [course.latitude, course.longitude];
         bounds.extend(position);
-        leaflet
+        const marker = leaflet
           .marker(position, {
             icon: leaflet.divIcon({
               className: "fallback-course-marker",
-              html: `<span>${index + 1}</span>`,
+              html: `<span aria-hidden="true"></span>`,
               iconAnchor: [16, 16],
               iconSize: [32, 32]
             }),
-            title: `${index + 1}. ${course.name}`
+            title: course.name
           })
-          .bindPopup(createFallbackMapPopupHtml(course, index))
+          .bindPopup(createFallbackMapPopupHtml(course))
           .addTo(map);
+        marker.on("popupopen", () => marker.getElement()?.classList.add("is-selected"));
+        marker.on("popupclose", () => marker.getElement()?.classList.remove("is-selected"));
       });
 
       if (bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [34, 34] });
+        map.fitBounds(bounds, { animate: false, padding: [34, 34] });
       }
 
       mapInstanceRef.current = map;
-      window.setTimeout(() => map.invalidateSize(), 0);
+      invalidateMapTimer = window.setTimeout(() => {
+        if (!isCancelled && mapInstanceRef.current === map) {
+          map.invalidateSize({ animate: false });
+        }
+      }, 0);
     }
 
     initializeFallbackMap().catch(() => {
@@ -2334,8 +2404,13 @@ function CourseFallbackMap({
 
     return () => {
       isCancelled = true;
-      mapInstanceRef.current?.remove();
+      if (invalidateMapTimer !== undefined) {
+        window.clearTimeout(invalidateMapTimer);
+      }
+      const map = mapInstanceRef.current;
       mapInstanceRef.current = null;
+      map?.stop();
+      map?.remove();
     };
   }, [courses, courseSignature, mapCenter.latitude, mapCenter.longitude]);
 
@@ -2355,20 +2430,34 @@ function CourseFallbackMap({
   );
 }
 
+async function prepareGoogleMapsLibraries(googleMaps: GoogleMapsNamespace) {
+  if (googleMaps.importLibrary) {
+    await Promise.all([
+      googleMaps.importLibrary("maps"),
+      googleMaps.importLibrary("marker"),
+      googleMaps.importLibrary("places")
+    ]);
+  }
+  return googleMaps;
+}
+
 function loadGoogleMapsApi(apiKey: string) {
   if (window.google?.maps?.Map) {
-    return Promise.resolve(window.google.maps);
+    return prepareGoogleMapsLibraries(window.google.maps);
   }
-
   if (googleMapsLoaderPromise) {
     return googleMapsLoaderPromise;
   }
 
   googleMapsLoaderPromise = new Promise<GoogleMapsNamespace>((resolve, reject) => {
-    window.initTeeTimeSpotGoogleMaps = () => {
+    window.initTeeTimeSpotGoogleMaps = async () => {
       const googleMaps = window.google?.maps;
       if (googleMaps?.Map) {
-        resolve(googleMaps);
+        try {
+          resolve(await prepareGoogleMapsLibraries(googleMaps));
+        } catch (error) {
+          reject(error);
+        }
         return;
       }
       reject(new Error("Google Maps JavaScript API loaded without maps support"));
@@ -2379,15 +2468,19 @@ function loadGoogleMapsApi(apiKey: string) {
     );
     if (existingScript) {
       if (window.google?.maps?.Map) {
-        resolve(window.google.maps);
+        prepareGoogleMapsLibraries(window.google.maps).then(resolve, reject);
         return;
       }
       existingScript.addEventListener(
         "load",
-        () => {
+        async () => {
           const googleMaps = window.google?.maps;
           if (googleMaps?.Map) {
-            resolve(googleMaps);
+            try {
+              resolve(await prepareGoogleMapsLibraries(googleMaps));
+            } catch (error) {
+              reject(error);
+            }
             return;
           }
           reject(new Error("Google Maps JavaScript API loaded without maps support"));
@@ -2407,7 +2500,7 @@ function loadGoogleMapsApi(apiKey: string) {
     script.onerror = () => reject(new Error("Google Maps failed to load"));
     script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(
       apiKey
-    )}&v=weekly&libraries=marker&loading=async&callback=${GOOGLE_MAPS_SCRIPT_CALLBACK}`;
+    )}&v=weekly&loading=async&callback=${GOOGLE_MAPS_SCRIPT_CALLBACK}`;
     document.head.appendChild(script);
   });
 
@@ -2481,7 +2574,56 @@ function createCourseMapInfoWindowContent(course: CourseCandidate) {
   return container;
 }
 
-function createFallbackMapPopupHtml(course: CourseCandidate, index: number) {
+function createGooglePlaceDetailsContent(course: CourseCandidate) {
+  if (!customElements.get("gmp-place-details-compact")) {
+    return createCourseMapInfoWindowContent(course);
+  }
+
+  const details = document.createElement("gmp-place-details-compact");
+  details.setAttribute("orientation", "vertical");
+  details.setAttribute("truncation-preferred", "");
+  details.setAttribute(
+    "style",
+    [
+      "width:min(292px, calc(100vw - 72px))",
+      "margin:0",
+      "padding:0",
+      "border:0",
+      "border-radius:16px",
+      "background-color:transparent",
+      "color-scheme:dark",
+      "--gmp-mat-color-surface:#202124",
+      "--gmp-mat-color-on-surface:#f1f3f4",
+      "--gmp-mat-color-on-surface-variant:#bdc1c6",
+      "--gmp-mat-color-primary:#8ab4f8",
+      "--gmp-mat-color-positive:#81c995",
+      "--gmp-mat-color-outline-decorative:#3c4043",
+      "--gmp-thumbnail-border-radius:12px",
+      "--gmp-mat-font-family:Arial,sans-serif"
+    ].join(";")
+  );
+
+  const request = document.createElement("gmp-place-details-place-request");
+  request.setAttribute("place", course.googlePlaceId);
+  const content = document.createElement("gmp-place-content-config");
+  const media = document.createElement("gmp-place-media");
+  media.setAttribute("lightbox-preferred", "");
+  const attribution = document.createElement("gmp-place-attribution");
+  attribution.setAttribute("light-scheme-color", "gray");
+  attribution.setAttribute("dark-scheme-color", "white");
+  content.append(
+    media,
+    document.createElement("gmp-place-rating"),
+    document.createElement("gmp-place-type"),
+    document.createElement("gmp-place-price"),
+    document.createElement("gmp-place-open-now-status"),
+    attribution
+  );
+  details.append(request, content);
+  return details;
+}
+
+function createFallbackMapPopupHtml(course: CourseCandidate) {
   const mapsUrl = getGoogleMapsSearchUrl(course);
   const websiteLink = course.website
     ? `<a class="course-map-info-secondary" href="${escapeHtml(course.website)}" target="_blank" rel="noreferrer">Course site</a>`
@@ -2496,7 +2638,7 @@ function createFallbackMapPopupHtml(course: CourseCandidate, index: number) {
 
   return `
     <div class="course-map-info-window">
-      <span class="course-map-info-eyebrow">Course ${index + 1}</span>
+      <span class="course-map-info-eyebrow">Golf course</span>
       <h3>${escapeHtml(course.name)}</h3>
       ${
         course.address

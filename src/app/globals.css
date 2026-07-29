@@ -637,6 +637,7 @@ button {
   margin-top: 16px;
   overflow: hidden;
   position: relative;
+  scroll-margin-top: 88px;
 }
 
 .course-results-map {
@@ -683,29 +684,108 @@ button {
 }
 
 .course-fallback-map .leaflet-popup-content-wrapper {
-  border-radius: 8px;
+  background: #202124;
+  border-radius: 16px;
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.38);
+  color: #f1f3f4;
+  overflow: hidden;
+  padding: 0;
 }
 
 .course-fallback-map .leaflet-popup-content {
   margin: 0;
-  min-width: 220px;
+  min-width: 250px;
+}
+
+.course-fallback-map .leaflet-popup-tip {
+  background: #202124;
+}
+
+.course-fallback-map .leaflet-popup-close-button {
+  color: #f1f3f4;
+  font-size: 22px;
+  right: 4px;
+  top: 4px;
+  z-index: 2;
 }
 
 .fallback-course-marker {
   align-items: center;
-  background: #d93025;
-  border: 2px solid #ffffff;
-  border-radius: 999px;
-  box-shadow: 0 10px 22px rgba(17, 29, 24, 0.22);
-  color: #ffffff;
-  display: grid;
-  font-size: 0.78rem;
-  font-weight: 900;
-  place-items: center;
+  background: transparent;
+  border: 0;
+  display: flex;
+  justify-content: center;
 }
 
 .fallback-course-marker span {
-  line-height: 1;
+  background: #ea4335;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.42);
+  display: block;
+  height: 12px;
+  transition:
+    height 120ms ease,
+    width 120ms ease;
+  width: 12px;
+}
+
+.fallback-course-marker.is-selected span {
+  border-width: 3px;
+  height: 20px;
+  width: 20px;
+}
+
+.course-map-marker {
+  align-items: center;
+  background: transparent;
+  display: flex;
+  height: 32px;
+  justify-content: center;
+  width: 32px;
+}
+
+.course-map-marker::before {
+  background: #ea4335;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.42);
+  content: "";
+  height: 12px;
+  transition:
+    height 120ms ease,
+    width 120ms ease;
+  width: 12px;
+}
+
+.course-map-marker.is-selected::before {
+  border-width: 3px;
+  height: 20px;
+  width: 20px;
+}
+
+.course-results-map .gm-style-iw-c {
+  background: #202124 !important;
+  border-radius: 16px !important;
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.38) !important;
+  max-height: none !important;
+  padding: 0 !important;
+}
+
+.course-results-map .gm-style-iw-d {
+  max-height: none !important;
+  overflow: hidden !important;
+}
+
+.course-results-map .gm-style-iw-tc::after {
+  background: #202124 !important;
+}
+
+.course-results-map .gm-ui-hover-effect {
+  filter: brightness(0) invert(1);
+  right: 2px !important;
+  top: 2px !important;
+  z-index: 2;
 }
 
 .course-fallback-map-note {
@@ -734,14 +814,14 @@ button {
 }
 
 .course-map-info-window {
-  color: var(--night);
+  color: #f1f3f4;
   font-family: inherit;
   max-width: 300px;
-  padding: 2px 0 0;
+  padding: 18px;
 }
 
 .course-map-info-eyebrow {
-  color: var(--fairway-dark);
+  color: #81c995;
   display: block;
   font-size: 0.68rem;
   font-weight: 900;
@@ -757,7 +837,7 @@ button {
 }
 
 .course-map-info-address {
-  color: var(--muted);
+  color: #bdc1c6;
   display: block;
   font-size: 0.84rem;
   line-height: 1.35;
@@ -774,10 +854,10 @@ button {
 }
 
 .course-map-info-meta span {
-  background: var(--panel-soft);
-  border: 1px solid var(--line);
+  background: #303134;
+  border: 1px solid #3c4043;
   border-radius: 999px;
-  color: var(--fairway-dark);
+  color: #e8eaed;
   display: inline-flex;
   font-size: 0.78rem;
   font-weight: 900;
@@ -805,14 +885,14 @@ button {
 }
 
 .course-map-info-primary {
-  background: var(--night);
-  color: #ffffff;
+  background: #8ab4f8;
+  color: #202124;
 }
 
 .course-map-info-secondary {
-  background: #ffffff;
-  border: 1px solid var(--line);
-  color: var(--night);
+  background: transparent;
+  border: 1px solid #5f6368;
+  color: #e8eaed;
 }
 
 .course-results-map-count {
@@ -5069,6 +5149,26 @@ button {
 
 .figma-results-banner strong {
   color: #153c4c;
+}
+
+.figma-results-map-link {
+  align-items: center;
+  color: #156f96;
+  display: inline-flex;
+  font-weight: 850;
+  min-height: 44px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.figma-results-map-link:hover {
+  color: #0b526f;
+}
+
+.figma-results-map-link:focus-visible {
+  border-radius: 3px;
+  outline: 3px solid rgba(21, 111, 150, 0.28);
+  outline-offset: 2px;
 }
 
 .figma-course-list {

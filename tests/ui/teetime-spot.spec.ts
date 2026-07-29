@@ -939,6 +939,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
     const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });
     await expect(discoveryStatus).toContainText(/\d+ courses near Trumbull/i);
+    const discoveryStatusText = await discoveryStatus.innerText();
+    const displayedCourseCount = Number(discoveryStatusText.match(/^(\d+)\s+courses?/i)?.[1]);
+    expect(displayedCourseCount).toBeGreaterThan(0);
+    const mapLink = discoveryStatus.getByRole("link", { name: "Scroll to Google Map" });
+    await expect(mapLink).toHaveAttribute("href", "#course-results-map-section");
     await expect
       .poll(async () => {
         const statusBox = await discoveryStatus.boundingBox();
@@ -1040,7 +1045,17 @@ test.describe("Tee Time Spot UI smoke", () => {
     const courseRows = page.locator(".course-row");
     const courseCount = await courseRows.count();
     expect(courseCount, "course discovery should return enough rows to exercise ranking limits").toBeGreaterThanOrEqual(6);
-    await expect(page.locator(".course-results-map-shell")).toHaveCount(0);
+    const courseMap = page.locator("#course-results-map-section");
+    await expect(courseMap).toBeVisible();
+    await expect(courseMap).toContainText(`${displayedCourseCount} course locations found`);
+    const pricingNote = page.getByText(/Estimates use last-observed official tee-sheet rates/);
+    const mapBox = await courseMap.boundingBox();
+    const pricingNoteBox = await pricingNote.boundingBox();
+    expect(mapBox).not.toBeNull();
+    expect(pricingNoteBox).not.toBeNull();
+    expect(mapBox!.y).toBeGreaterThan(pricingNoteBox!.y);
+    await mapLink.click();
+    await expect(page).toHaveURL(/#course-results-map-section$/);
     await expect(page.locator(".course-results-map-frame")).toHaveCount(0);
     await expect(page.locator(".course-results-map-overlay")).toHaveCount(0);
     await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
