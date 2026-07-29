@@ -7,8 +7,9 @@ signed backend job -> local Chrome page -> normalized slots -> signed backend re
 ```
 
 It reads only signed backend jobs for exact, signed-out CPS tee-time search
-routes, exact TenFore tenant routes, and explicitly allowlisted Chronogolf
-public club profiles. CPS tenants are accepted automatically only when the URL
+routes, exact TenFore tenant routes, explicitly allowlisted Chronogolf
+public club profiles, and Frear Park's exact legacy Prophet tee sheet. CPS
+tenants are accepted automatically only when the URL
 is HTTPS, uses one `*.cps.golf` tenant host, and stays on
 `/onlineresweb/search-teetime`. TenFore tenants are accepted only on
 `fox.tenfore.golf/<tenant>` with the signed job's exact tenant and date. It
@@ -32,6 +33,11 @@ The Chronogolf allowlist contains only the exact public profiles owned by
 current course-support work, including Lyman Orchards. Those pages are opened
 with a date, tee-time step, and public player-count selection; unrelated club
 paths and unexpected page shapes fail closed.
+
+Frear Park jobs use only the public rendered tee sheet with an exact date,
+player count, both public nines, and 18-hole filter. The reader ignores the
+session-bearing links on individual tee-time cards, returns the stable public
+search URL, and never clicks a tee time or enters the transaction flow.
 
 ## Run the local proof backend
 

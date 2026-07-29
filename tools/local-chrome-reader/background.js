@@ -112,6 +112,12 @@ const ALLOWED_COURSES = Object.freeze({
     "/club/hyde-park-golf-club",
     [],
   ],
+  "frear-park": [
+    "Frear Park Municipal Golf Course",
+    "secure.east.prophetservices.com",
+    "/FrearParkV3/Home/NIndex",
+    [],
+  ],
 });
 let pollInProgress = false;
 
@@ -173,10 +179,54 @@ function isAllowlistedTenForeJob(job) {
   }
 }
 
+function isAllowlistedProphetJob(job) {
+  try {
+    if (
+      job?.courseKey !== "frear-park" ||
+      job.courseName !== "Frear Park Municipal Golf Course" ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "") ||
+      !Number.isInteger(job.players) ||
+      job.players < 1 ||
+      job.players > 4
+    ) {
+      return false;
+    }
+    const url = new URL(job.bookingUrl);
+    const allowedKeys = new Set([
+      "CourseId",
+      "Date",
+      "Time",
+      "Player",
+      "Hole",
+    ]);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "secure.east.prophetservices.com" &&
+      url.pathname === "/FrearParkV3/Home/NIndex" &&
+      Array.from(url.searchParams.keys()).every((key) =>
+        allowedKeys.has(key),
+      ) &&
+      url.searchParams.get("CourseId") === "1,2" &&
+      url.searchParams.get("Date") === job.targetDate &&
+      url.searchParams.get("Time") === "AnyTime" &&
+      url.searchParams.get("Player") === String(job.players) &&
+      url.searchParams.get("Hole") === "18" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedJob(job) {
   try {
     if (isAllowlistedCpsJob(job)) return true;
     if (isAllowlistedTenForeJob(job)) return true;
+    if (isAllowlistedProphetJob(job)) return true;
     const allowed = ALLOWED_COURSES[job?.courseKey];
     if (!allowed) return false;
     const [courseName, hostname, pathname, cardTextIncludes] = allowed;

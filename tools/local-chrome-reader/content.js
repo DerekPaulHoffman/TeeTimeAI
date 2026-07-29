@@ -394,6 +394,7 @@
       globalThis.TeeTimeSpotCpsReader,
       globalThis.TeeTimeSpotChronogolfReader,
       globalThis.TeeTimeSpotTenForeReader,
+      globalThis.TeeTimeSpotProphetReader,
     ].find((candidate) =>
       candidate?.isAllowedPageUrl(pending?.job, location.href),
     );

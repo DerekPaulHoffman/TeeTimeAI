@@ -39,6 +39,8 @@ const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
 const chronogolfBookingUrl =
   "https://www.chronogolf.com/club/crestbrook-park-golf-course";
 const tenForeBookingUrl = "https://fox.tenfore.golf/gainfieldfarms";
+const frearParkBookingUrl =
+  "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex";
 
 describe("local reader job service", () => {
   beforeEach(() => {
@@ -219,6 +221,29 @@ describe("local reader job service", () => {
           courseKey: "crestbrook",
           bookingUrl:
             "https://www.chronogolf.com/club/crestbrook-park-golf-course?date=2026-07-26&step=teetimes",
+        }),
+      }),
+    );
+  });
+
+  it("queues Frear Park with an exact dated rendered-page URL", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-frear" });
+
+    expect(getLocalReaderCourseKey(frearParkBookingUrl)).toBe("frear-park");
+    await queueLocalReaderCourseVerification({
+      courseId: "course-frear",
+      targetDate: "2026-07-30",
+      players: 2,
+      bookingUrl: frearParkBookingUrl,
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "frear-park",
+          bookingUrl:
+            "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18",
         }),
       }),
     );

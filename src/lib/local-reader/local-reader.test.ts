@@ -15,6 +15,7 @@ import {
   type LocalReaderJob,
 } from "./contracts";
 import {
+  getLocalReaderJobUrl,
   getLocalReaderCourseKey,
   isLocalReaderCandidateUrl,
   LOCAL_READER_COURSE_KEYS,
@@ -121,6 +122,22 @@ function loadTenForeReader() {
   return context.TeeTimeSpotTenForeReader as Reader;
 }
 
+function loadProphetReader() {
+  const source = readFileSync(
+    resolve(
+      process.cwd(),
+      "tools",
+      "local-chrome-reader",
+      "prophet-reader.js",
+    ),
+    "utf8",
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotProphetReader as Reader;
+}
+
 describe("local Chrome reader contract", () => {
   it("accepts every exact allowlisted reader route and rejects other routes", () => {
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
@@ -128,6 +145,8 @@ describe("local Chrome reader contract", () => {
       const suffix =
         course.provider === "CPS"
           ? "?TeeOffTimeMin=0"
+          : course.provider === "PROPHET"
+            ? "?CourseId=1,2&Date=2026-07-25&Time=AnyTime&Player=2&Hole=18"
           : "?date=2026-07-25&step=teetimes";
       expect(
         isAllowedLocalReaderUrl(courseKey, `${course.bookingUrl}${suffix}`),
@@ -186,7 +205,11 @@ describe("local Chrome reader contract", () => {
       if (course.provider === "CPS") continue;
       const hostname = new URL(course.bookingUrl).hostname;
       expect(manifest.host_permissions).toContain(`https://${hostname}/*`);
-      expect(contentMatches).toContain(`${course.bookingUrl}*`);
+      expect(contentMatches).toContain(
+        course.provider === "PROPHET"
+          ? "https://secure.east.prophetservices.com/FrearParkV3/*"
+          : `${course.bookingUrl}*`,
+      );
       expect(backgroundSource).toContain(courseKey);
       expect(backgroundSource).toContain(`"${course.courseName}"`);
       expect(backgroundSource).toContain(`"${hostname}"`);
@@ -471,6 +494,88 @@ describe("local Chrome reader contract", () => {
         `${job.bookingUrl}?date=2026-07-29&step=teetimes`,
       ),
     ).toBe(true);
+  });
+
+  it("parses Frear Park's public rendered Prophet tee-time cards", () => {
+    document.title = "Frear Park";
+    document.body.innerHTML = `
+      <input id="txtFromDateLarge" value="07/30/2026" />
+      <div class="teeSheet">
+        <a class="teetime">
+          9:30 AM $62.00 Cart Price Included
+          Frear Park Front/Frear Park Back 2 to 4 Players 18
+        </a>
+        <a class="teetime">
+          12:15 PM $44.00
+          Frear Park Front/Frear Park Back 1 to 1 Players 18
+        </a>
+      </div>
+    `;
+    const baseJob = jobFor("frear-park");
+    const job = {
+      ...baseJob,
+      targetDate: "2026-07-30",
+      bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2),
+    };
+    const pageUrl =
+      "https://secure.east.prophetservices.com/FrearParkV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18";
+
+    expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("frear-park");
+    expect(
+      loadProphetReader().readSnapshot(document, pageUrl, job),
+    ).toMatchObject({
+      status: "AVAILABLE",
+      readerVersion: "legacy-prophet-rendered-v1",
+      pageUrl: job.bookingUrl,
+      slots: [
+        {
+          startsAtLocal: "2026-07-30T09:30:00",
+          timeLabel: "9:30 AM",
+          holes: [18],
+          minimumPlayers: 2,
+          availableSpots: 4,
+          priceCents: 6200,
+          cartIncluded: true,
+        },
+      ],
+    });
+  });
+
+  it("fails Frear Park closed on a changed date, route, or card shape", () => {
+    const baseJob = jobFor("frear-park");
+    const job = {
+      ...baseJob,
+      targetDate: "2026-07-30",
+      bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2),
+    };
+    const reader = loadProphetReader();
+    const pageUrl =
+      "https://secure.east.prophetservices.com/FrearParkV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18";
+
+    document.body.innerHTML = `
+      <input id="txtFromDateLarge" value="07/31/2026" />
+      <div class="teeSheet"><a class="teetime">Loading</a></div>
+    `;
+    expect(reader.readSnapshot(document, pageUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: [],
+    });
+
+    document.body.innerHTML = `
+      <input id="txtFromDateLarge" value="07/30/2026" />
+      <div class="teeSheet"><a class="teetime">Loading</a></div>
+    `;
+    expect(reader.readSnapshot(document, pageUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: [],
+    });
+    expect(
+      reader.readSnapshot(
+        document,
+        pageUrl.replace("/Home/NIndex/Home/nIndex", "/Home/Checkout"),
+        job,
+      ),
+    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
   it("parses the legacy CPS material-card layout", () => {

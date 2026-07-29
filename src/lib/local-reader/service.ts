@@ -73,13 +73,21 @@ export async function queueLocalReaderCourseVerification(input: {
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
-      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate),
+      bookingUrl: getLocalReaderJobUrl(
+        courseKey,
+        input.targetDate,
+        input.players,
+      ),
       jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS)
     },
     update: {
       purpose: "COURSE_VERIFICATION",
       courseKey,
-      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate),
+      bookingUrl: getLocalReaderJobUrl(
+        courseKey,
+        input.targetDate,
+        input.players,
+      ),
       status: "PENDING",
       leaseToken: null,
       leaseExpiresAt: null,
@@ -180,12 +188,20 @@ export async function queueLocalReaderJob(input: {
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
-      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate),
+      bookingUrl: getLocalReaderJobUrl(
+        courseKey,
+        input.targetDate,
+        input.players,
+      ),
       jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
     },
     update: {
       courseKey,
-      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate),
+      bookingUrl: getLocalReaderJobUrl(
+        courseKey,
+        input.targetDate,
+        input.players,
+      ),
       status: "PENDING",
       leaseToken: null,
       leaseExpiresAt: null,

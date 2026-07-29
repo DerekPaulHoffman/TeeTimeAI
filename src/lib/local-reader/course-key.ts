@@ -17,6 +17,7 @@ export const LOCAL_READER_COURSE_KEYS = [
   "chanticlair",
   "lyman-orchards",
   "hyde-park",
+  "frear-park",
 ] as const;
 
 export type StaticLocalReaderCourseKey =
@@ -32,7 +33,7 @@ export type LocalReaderCourse = {
   courseName: string;
   bookingUrl: string;
   cardTextIncludes: readonly string[];
-  provider: "CPS" | "CHRONOGOLF" | "TENFORE";
+  provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "PROPHET";
 };
 
 const CPS_TENANT_HOSTNAME =
@@ -90,6 +91,13 @@ export const LOCAL_READER_COURSES = {
     "Hyde Park Golf Club",
     "hyde-park-golf-club",
   ),
+  "frear-park": {
+    courseName: "Frear Park Municipal Golf Course",
+    bookingUrl:
+      "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex",
+    cardTextIncludes: [],
+    provider: "PROPHET",
+  },
 } as const satisfies Record<StaticLocalReaderCourseKey, LocalReaderCourse>;
 
 export function getLocalReaderCourseKey(
@@ -120,7 +128,7 @@ export function getLocalReaderCourseKey(
         const course = LOCAL_READER_COURSES[courseKey];
         const expected = new URL(course.bookingUrl);
         return (
-          course.provider === "CHRONOGOLF" &&
+          course.provider !== "CPS" &&
           url.hostname === expected.hostname &&
           isAllowedLocalReaderUrl(courseKey, url.toString())
         );
@@ -194,7 +202,36 @@ export function isAllowedLocalReaderUrl(
       url.hostname === expected.hostname &&
       url.username === "" &&
       url.password === "";
-    if (!commonSafeUrl || url.pathname !== expected.pathname) return false;
+    if (!commonSafeUrl) return false;
+    if (course.provider === "PROPHET") {
+      const safePath =
+        /^\/FrearParkV3\/?(?:Home\/NIndex\/?)?$/iu.test(url.pathname);
+      const allowedKeys = new Set([
+        "CourseId",
+        "Date",
+        "Time",
+        "Player",
+        "Hole",
+      ]);
+      const date = url.searchParams.get("Date");
+      const player = url.searchParams.get("Player");
+      return (
+        safePath &&
+        Array.from(url.searchParams.keys()).every((key) =>
+          allowedKeys.has(key),
+        ) &&
+        (!date || /^\d{4}-\d{2}-\d{2}$/u.test(date)) &&
+        (!player || /^[1-4]$/u.test(player)) &&
+        (!url.searchParams.has("CourseId") ||
+          url.searchParams.get("CourseId") === "1,2") &&
+        (!url.searchParams.has("Time") ||
+          url.searchParams.get("Time") === "AnyTime") &&
+        (!url.searchParams.has("Hole") ||
+          url.searchParams.get("Hole") === "18") &&
+        url.hash === ""
+      );
+    }
+    if (url.pathname !== expected.pathname) return false;
     if (course.provider === "CPS") {
       return /^\/onlineresweb\/search-teetime\/?$/u.test(url.pathname);
     }
@@ -253,6 +290,7 @@ function chronogolfCourse(courseName: string, slug: string): LocalReaderCourse {
 export function getLocalReaderJobUrl(
   courseKey: LocalReaderCourseKey,
   targetDate: string,
+  players = 1,
 ) {
   if (isDynamicCpsCourseKey(courseKey)) {
     return `https://${courseKey.slice("cps:".length)}/onlineresweb/search-teetime`;
@@ -266,6 +304,9 @@ export function getLocalReaderJobUrl(
   }
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
+  if (course.provider === "PROPHET") {
+    return `${course.bookingUrl}?CourseId=1,2&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
+  }
   const url = new URL(course.bookingUrl);
   url.searchParams.set("date", targetDate);
   url.searchParams.set("step", "teetimes");
