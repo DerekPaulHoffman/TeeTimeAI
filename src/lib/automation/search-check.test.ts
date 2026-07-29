@@ -1979,6 +1979,7 @@ describe("runSearchCheck email cadence", () => {
             name: "Hyde Park Golf Club",
             automationEligibility: "ALLOWED",
             automationReason: "NONE",
+            monitoringMode: "AUTOMATIC",
             policyNotes: null,
             detectedPlatform: "CHRONOGOLF",
             providerFamilyKey: "CHRONOGOLF",
@@ -2023,6 +2024,7 @@ describe("runSearchCheck email cadence", () => {
       targetDate: "2026-07-12",
       players: 2
     });
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
     expect(adapterMocks.fetchChronogolfSlots).not.toHaveBeenCalled();
     expect(result.courseResults[0]).toMatchObject({
       outcome: "MATCH_FOUND",
