@@ -89,6 +89,7 @@ const course = {
   bookingMethod: "PUBLIC_ONLINE",
   automationEligibility: "ALLOWED",
   automationReason: "PUBLIC_READ_ONLY",
+  monitoringMode: "AUTOMATIC",
   isPublic: true,
   intelligenceVerifiedAt: null,
   intelligenceReviewAt: null,
@@ -814,6 +815,60 @@ describe("executeCourseSupportVerificationStep", () => {
           outcome: "NO_MATCH",
           observedAt: new Date("2026-07-21T12:00:30.000Z"),
           adapterKey: "LOCAL_READER:CHRONOGOLF",
+          providerExecution: true
+        })
+      })
+    );
+  });
+
+  it("bypasses blocked provider and browser paths for local-reader-only verification", async () => {
+    allowOwnedExecution();
+    prismaMocks.courseFindUnique.mockResolvedValue({
+      ...course,
+      providerFamilyKey: "secure.east.prophetservices.com",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      monitoringMode: "LOCAL_READER_ONLY"
+    });
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("frear-park");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      readerVersion: "legacy-prophet-rendered-v1",
+      slots: []
+    });
+    capabilityMocks.resolveProviderCapability.mockReturnValue({
+      providerFamilyKey: "secure.east.prophetservices.com",
+      isRunnable: false,
+      metadataReady: false,
+      evidenceConflict: false
+    });
+    capabilityMocks.getProviderReadinessFailure.mockReturnValue(
+      "UNSUPPORTED_FAMILY"
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH"
+    });
+
+    expect(
+      discoveryMocks.prepareCourseSupportVerificationMonitoring
+    ).toHaveBeenCalledOnce();
+    expect(localReaderMocks.getLocalReaderCourseVerification).toHaveBeenCalledWith({
+      courseId: "course-1",
+      targetDate: "2026-07-24",
+      players: 1,
+      notBefore: discoveryAttemptedAt
+    });
+    expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({
+          outcome: "NO_MATCH",
           providerExecution: true
         })
       })

@@ -150,6 +150,7 @@ export default async function OperatorCoursePage({
             <Detail label="Platform" value={formatEnum(detail.course.detectedPlatform)} />
             <Detail label="Booking method" value={formatEnum(detail.course.bookingMethod)} />
             <Detail label="Access" value={formatEnum(detail.course.bookingAccessMode)} />
+            <Detail label="Monitoring path" value={formatEnum(detail.course.monitoringMode)} />
           </dl>
           <SafeLink label="Official course site" value={detail.course.website} />
           <SafeLink label="Official booking page" value={detail.course.detectedBookingUrl} />

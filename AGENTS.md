@@ -193,6 +193,7 @@ Core data:
 - **Vercel Workflow owns per-search scheduling.** It orchestrates sleep/wake/check behavior; Postgres schedule version, row-token lease, and compare-and-set completion prevent stale workflow work from winning.
 - **Vercel Queue is only a Workflow-start fallback.** Its private, minimal, at-least-once messages recover failed starts and dispatch one post-remediation recheck; Postgres remains authoritative.
 - **Course adapters read public, signed-out availability without transacting.** The official provider remains authoritative for current availability, price, rules, and booking.
+- `Course.monitoringMode=LOCAL_READER_ONLY` is an explicit operational route for an allowlisted rendered-page reader. Search checks and detached verification must skip ordinary HTTP/browser discovery and server adapters for that course; a missing allowlist/parser is a tooling failure, not permission to fall back to other provider paths.
 - **Resend transports email.** A local `SENT` record means the send path completed/provider accepted it; it is not proof of inbox placement or an open.
 - **Vercel Git deployments own production runtime.** A successful local build or database write is not proof that the matching application commit is live.
 - **The course-support Codex responder owns provider coverage incidents.** It runs every 10 minutes and resolves them with reusable support or final evidence-backed dispositions.
@@ -467,6 +468,7 @@ Adapter behavior:
 - Treat recurring unsupported/fetch failures as one durable course incident rather than writing or emailing the same unresolved fact every five minutes.
 - Resolve a course incident only after monitoring succeeds or a source-backed direct-booking classification is verified. Notify resolution only when a prior owner escalation was actually sent.
 - Limit provider retrieval to two concurrent requests and never run two calls for the same provider family concurrently. Lease discovery follow-ups by their actual destination family and keep multi-request adapter steps sequential.
+- Honor `Course.monitoringMode`. `LOCAL_READER_ONLY` means read cached signed local-reader evidence or queue that exact reader job; do not retry the server adapter, ordinary browser probe, or official-site discovery for the course.
 - Use the per-search row-token lease for long checks and transaction-scoped Postgres advisory leases only for short state transitions; session-level locks and network calls inside database transactions are unsafe with pooled Neon connections.
 
 ## Current Adapter Map

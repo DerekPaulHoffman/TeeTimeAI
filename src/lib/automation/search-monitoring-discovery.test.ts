@@ -16,9 +16,13 @@ const prismaMocks = vi.hoisted(() => ({
   courseSupportBatchSearch: { findMany: vi.fn() },
   courseSupportIncident: { findMany: vi.fn() }
 }));
+const localReaderMocks = vi.hoisted(() => ({
+  getLocalReaderCourseKey: vi.fn()
+}));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
+vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import { buildBrowserDiscovery } from "./browser-discovery";
@@ -109,12 +113,79 @@ describe("search monitoring discovery", () => {
     prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([]);
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
     prismaMocks.course.findUnique.mockResolvedValue(null);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
     providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
         acquired: true,
         value: await worker()
       })
     );
+  });
+
+  it("skips provider discovery for a local-reader-only course", async () => {
+    const fetchImpl = vi.fn();
+    const result = await prepareSearchMonitoring(
+      {
+        preferences: [
+          {
+            rank: 1,
+            course: {
+              id: "reader-only-course",
+              name: "Reader Only Golf Course",
+              website: "https://course.example/",
+              detectedBookingUrl: "https://booking.example/tee-times",
+              detectedPlatform: "CUSTOM",
+              providerFamilyKey: "booking.example",
+              monitoringMode: "LOCAL_READER_ONLY",
+              automationEligibility: "BLOCKED",
+              automationReason: "CAPTCHA_OR_QUEUE",
+              bookingMethod: "PUBLIC_ONLINE",
+              bookingMetadata: null
+            }
+          }
+        ]
+      } as never,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(result).toEqual({
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: []
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+  });
+
+  it("validates a detached local-reader-only route without provider I/O", async () => {
+    prismaMocks.course.findUnique.mockResolvedValue({
+      id: "reader-only-course",
+      monitoringMode: "LOCAL_READER_ONLY",
+      detectedBookingUrl: "https://booking.example/tee-times",
+      website: "https://course.example/"
+    });
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("reader-only-course");
+    const fetchImpl = vi.fn();
+
+    await expect(
+      prepareCourseSupportVerificationMonitoring(
+        "reader-only-course",
+        fetchImpl as typeof fetch,
+        now
+      )
+    ).resolves.toEqual({
+      attemptedCourseIds: ["reader-only-course"],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: []
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
   });
 
   it("defers discovery without external I/O when the distributed provider lease is busy", async () => {

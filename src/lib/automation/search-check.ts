@@ -119,6 +119,7 @@ type AutomationCourse = AutomationCourseProviderRead & {
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
+  monitoringMode: "AUTOMATIC" | "LOCAL_READER_ONLY";
   bookingAccessMode: BookingAccessMode;
   intelligenceVerifiedAt: Date | null;
   intelligenceReviewAt: Date | null;
@@ -307,6 +308,7 @@ async function checkSearch(
       const course = preference.course as AutomationCourse;
       const customerBookingUrl = getCustomerBookingUrl(course);
       const localReaderEligible = getLocalReaderCourseKey(customerBookingUrl) !== null;
+      const localReaderOnly = course.monitoringMode === "LOCAL_READER_ONLY";
       const providerFamilyKey = resolveProviderCapability(course).providerFamilyKey;
       const cpsLocalReaderPreferred = localReaderEligible && providerFamilyKey === "CPS";
       const chronogolfLocalReaderPreferred =
@@ -323,7 +325,9 @@ async function checkSearch(
       const localReaderCanOverrideGate =
         localReaderEligible &&
         monitoringGate.disposition === "TECHNICAL_FINAL" &&
-        (cpsLocalReaderPreferred || course.automationReason === "CAPTCHA_OR_QUEUE");
+        (localReaderOnly ||
+          cpsLocalReaderPreferred ||
+          course.automationReason === "CAPTCHA_OR_QUEUE");
       if (
         monitoringGate.disposition !== "ACTIONABLE" &&
         !localReaderCanOverrideGate &&
@@ -443,6 +447,47 @@ async function checkSearch(
         return;
       }
 
+      if (localReaderOnly && !localReaderEligible) {
+        const message =
+          "This course is configured for local-reader-only monitoring, but its booking page is not allowlisted.";
+        await recordCourseProbeIfChanged({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          outcome: "BLOCKED_TOOLING",
+          message,
+          rawSummary: {
+            monitoringMode: course.monitoringMode,
+            nextAction: "repair-local-reader-configuration"
+          }
+        });
+        const supportIssue = await reportCourseSupportIssue({
+          course,
+          searchId: search.id,
+          kind: "BLOCKED_TOOLING",
+          message,
+          readPath: "LOCAL_READER_CONFIGURATION",
+          nextAction:
+            "Correct the exact local-reader allowlist or return the course to automatic monitoring."
+        });
+        supportIssues.push({ courseId: course.id, ...supportIssue });
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          message,
+          bookingUrl: customerBookingUrl,
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
+          bookingAccess: getCourseBookingAccess(course),
+          supportStatus: supportIssue.incidentId ? "IN_OPERATOR_QUEUE" : undefined
+        });
+        return;
+      }
+
       if (!supportedAdapterAvailable && !localReaderEligible) {
         if (monitoringPreparationFailed || monitoringDeferredCourseIds.has(course.id)) {
           monitoringRetryCourseIds.add(course.id);
@@ -549,7 +594,8 @@ async function checkSearch(
       try {
         const localReaderShouldRun =
           localReaderEligible &&
-          (cpsLocalReaderPreferred ||
+          (localReaderOnly ||
+            cpsLocalReaderPreferred ||
             chronogolfLocalReaderPreferred ||
             localReaderCanOverrideGate ||
             !supportedAdapterAvailable);
@@ -564,6 +610,9 @@ async function checkSearch(
           : null;
         let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
         let providerExecutionLabel = "LOCAL_BROWSER_READER";
+        if (!teeSheet && localReaderOnly) {
+          throw new Error("The required local-reader result is not ready.");
+        }
         if (!teeSheet && !supportedAdapterAvailable) {
           throw new Error("No reusable server adapter is available for this course.");
         }
@@ -808,7 +857,8 @@ async function checkSearch(
           providerFailure.failureClass === "AUTH";
         const localReaderFallbackAllowed =
           localReaderEligible &&
-          (cpsLocalReaderPreferred ||
+          (localReaderOnly ||
+            cpsLocalReaderPreferred ||
             localReaderCanOverrideGate ||
             !supportedAdapterAvailable ||
             providerFailure.failureClass === "CHALLENGE" ||
@@ -874,13 +924,17 @@ async function checkSearch(
           error,
           readPath: localReaderTerminalFailure
             ? "LOCAL_READER_ALLOWLIST"
+            : localReaderOnly
+              ? "LOCAL_READER_ONLY"
             : providerRequestStarted
               ? "TYPED_PROVIDER_ADAPTER"
               : localReaderCanOverrideGate
                 ? "LOCAL_READER"
                 : "PUBLIC_PROVIDER_PRECHECK",
           nextAction:
-            cpsLocalReaderPreferred
+            localReaderOnly
+              ? "Keep the local reader enabled; this course intentionally skips server adapters and browser discovery."
+              : cpsLocalReaderPreferred
               ? "Keep the Local Reader enabled. Safe CPS tenants are accepted automatically, and failures are queued for local verification."
               : localReaderEligible && !supportedAdapterAvailable
                 ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."

@@ -84,6 +84,7 @@ function course(overrides: Record<string, unknown> = {}) {
     bookingWindowSource: "PROVIDER_CONFIG",
     automationEligibility: "ALLOWED",
     automationReason: "NONE",
+    monitoringMode: "AUTOMATIC",
     isPublic: true,
     intelligenceVerifiedAt: null,
     intelligenceReviewAt: null,

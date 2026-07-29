@@ -5,6 +5,7 @@ import type {
   AutomationEligibility,
   AutomationReason,
   BookingMethod,
+  CourseMonitoringMode,
   CourseSupportFailureClass,
   DetectedPlatform,
   ProbeOutcome
@@ -49,6 +50,7 @@ const providerCourseSelect = {
   bookingWindowSource: true,
   automationEligibility: true,
   automationReason: true,
+  monitoringMode: true,
   isPublic: true,
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,
@@ -1224,6 +1226,7 @@ export function buildCourseSupportProviderSnapshotFingerprint(input: {
   bookingWindowSource?: string | null;
   automationEligibility: AutomationEligibility;
   automationReason: AutomationReason;
+  monitoringMode?: CourseMonitoringMode;
   isPublic?: boolean | null;
   intelligenceVerifiedAt?: Date | null;
   intelligenceReviewAt?: Date | null;
@@ -1245,6 +1248,7 @@ export function buildCourseSupportProviderSnapshotFingerprint(input: {
         bookingWindowSource: input.bookingWindowSource ?? null,
         automationEligibility: input.automationEligibility,
         automationReason: input.automationReason,
+        monitoringMode: input.monitoringMode,
         isPublic: input.isPublic ?? null,
         intelligenceVerifiedAt: normalizeFingerprintDate(
           input.intelligenceVerifiedAt

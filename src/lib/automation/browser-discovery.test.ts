@@ -6256,6 +6256,20 @@ describe("buildBrowserDiscovery", () => {
 });
 
 describe("browser probe target selection", () => {
+  it("never sends a local-reader-only course to browser discovery", () => {
+    expect(
+      shouldQueueBrowserProbe({
+        detectedPlatform: "CUSTOM",
+        monitoringMode: "LOCAL_READER_ONLY",
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        website: "https://course.example/",
+        detectedBookingUrl: "https://booking.example/tee-times",
+        bookingMetadata: null
+      })
+    ).toBe(false);
+  });
+
   it("queues unknown active courses with a website", () => {
     expect(
       shouldQueueBrowserProbe({

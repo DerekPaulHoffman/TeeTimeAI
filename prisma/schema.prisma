@@ -20,6 +20,11 @@ enum AutomationEligibility {
   NEEDS_REVIEW
 }
 
+enum CourseMonitoringMode {
+  AUTOMATIC
+  LOCAL_READER_ONLY
+}
+
 enum DetectedPlatform {
   UNKNOWN
   FOREUP
@@ -355,6 +360,7 @@ model Course {
   bookingWindowObservedAt     DateTime?
   automationEligibility       AutomationEligibility              @default(UNKNOWN)
   automationReason            AutomationReason                   @default(NONE)
+  monitoringMode              CourseMonitoringMode               @default(AUTOMATIC)
   bookingAccessMode           BookingAccessMode                  @default(UNKNOWN)
   policyNotes                 String?
   bookingMetadata             Json?
@@ -387,6 +393,7 @@ model Course {
   @@index([detectedPlatform, automationEligibility])
   @@index([providerFamilyKey, automationEligibility])
   @@index([bookingMethod, automationEligibility])
+  @@index([monitoringMode])
   @@index([intelligenceReviewAt])
 }
 

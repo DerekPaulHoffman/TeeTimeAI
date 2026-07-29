@@ -59,6 +59,7 @@ const providerCourseSelect = {
   bookingMethod: true,
   automationEligibility: true,
   automationReason: true,
+  monitoringMode: true,
   isPublic: true,
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,
@@ -125,7 +126,24 @@ export async function executeCourseSupportVerificationStep(
     });
   }
   const beforeDiscoveryGate = evaluateMonitoringGate(courseBeforeDiscovery);
-  if (!beforeDiscoveryGate.adapterAllowed) {
+  const beforeDiscoveryBookingUrl =
+    courseBeforeDiscovery.detectedBookingUrl ?? courseBeforeDiscovery.website;
+  const beforeDiscoveryReaderEligible =
+    getLocalReaderCourseKey(beforeDiscoveryBookingUrl) !== null;
+  const localReaderOnly =
+    courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY";
+  if (localReaderOnly && !beforeDiscoveryReaderEligible) {
+    return failVerification({
+      input,
+      revision,
+      runtimeVersion,
+      failureClass: "READER_PARSER_MISSING",
+      providerExecution: false,
+      message:
+        "Local-reader-only monitoring is configured without an allowlisted reader."
+    });
+  }
+  if (!beforeDiscoveryGate.adapterAllowed && !localReaderOnly) {
     return failVerification({
       input,
       revision,
@@ -284,6 +302,17 @@ export async function executeCourseSupportVerificationStep(
       message: "Course-support verification timezone changed during execution."
     });
   }
+  if (course.monitoringMode !== courseBeforeDiscovery.monitoringMode) {
+    return failVerification({
+      input,
+      revision,
+      runtimeVersion,
+      failureClass: "SCHEMA",
+      providerExecution: false,
+      message: "Course monitoring mode changed during verification.",
+      retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+    });
+  }
 
   const afterDiscoveryGate = evaluateMonitoringGate(course);
   if (discoveryCompletedThisRun) {
@@ -324,7 +353,7 @@ export async function executeCourseSupportVerificationStep(
     });
   }
 
-  if (!afterDiscoveryGate.adapterAllowed) {
+  if (!afterDiscoveryGate.adapterAllowed && !localReaderOnly) {
     return failVerification({
       input,
       revision,
@@ -336,18 +365,6 @@ export async function executeCourseSupportVerificationStep(
   }
 
   const capability = resolveProviderCapability(course);
-  if (!capability.isRunnable) {
-    return failVerification({
-      input,
-      revision,
-      runtimeVersion,
-      failureClass:
-        getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
-      providerExecution: false,
-      message: "No reusable public read-only provider adapter is runnable."
-    });
-  }
-
   const bookingUrl = course.detectedBookingUrl ?? course.website;
   const localReaderEligible = getLocalReaderCourseKey(bookingUrl) !== null;
   if (localReaderEligible) {
@@ -397,6 +414,35 @@ export async function executeCourseSupportVerificationStep(
         ? { outcome: "completed" as const, providerOutcome: outcome }
         : { outcome: "stopped" as const, reason: completed.reason };
     }
+    if (localReaderOnly && bookingUrl) {
+      await queueLocalReaderCourseVerification({
+        courseId,
+        targetDate: intent.targetDateLocal,
+        players: intent.players,
+        bookingUrl
+      });
+      return failVerification({
+        input,
+        revision,
+        runtimeVersion,
+        failureClass: "HTTP_5XX",
+        providerExecution: false,
+        message: "The required signed local-reader result is not ready.",
+        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
+      });
+    }
+  }
+
+  if (!capability.isRunnable) {
+    return failVerification({
+      input,
+      revision,
+      runtimeVersion,
+      failureClass:
+        getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
+      providerExecution: false,
+      message: "No reusable public read-only provider adapter is runnable."
+    });
   }
 
   let providerExecutionStarted = false;

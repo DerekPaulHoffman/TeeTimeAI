@@ -39,6 +39,7 @@ import {
   haveCompatibleCourseNames,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
 
 const DISCOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
@@ -337,6 +338,7 @@ export async function prepareSearchMonitoring(
         preference.course.id
       )
     }))
+    .filter((course) => course.monitoringMode !== "LOCAL_READER_ONLY")
     .filter(
       (course) =>
         includeCourseIds.has(course.id) ||
@@ -2861,6 +2863,24 @@ export async function prepareCourseSupportVerificationMonitoring(
   const course = await prisma.course.findUnique({ where: { id: courseId } });
   if (!course) {
     throw new Error("Course-support verification course was not found.");
+  }
+  if (course.monitoringMode === "LOCAL_READER_ONLY") {
+    const bookingUrl = course.detectedBookingUrl ?? course.website;
+    return getLocalReaderCourseKey(bookingUrl)
+      ? {
+          attemptedCourseIds: [courseId],
+          appliedCourseIds: [],
+          failedCourseIds: [],
+          deferredCourseIds: [],
+          retryCourseIds: []
+        }
+      : {
+          attemptedCourseIds: [],
+          appliedCourseIds: [],
+          failedCourseIds: [courseId],
+          deferredCourseIds: [],
+          retryCourseIds: []
+        };
   }
 
   const detachedSearch = {

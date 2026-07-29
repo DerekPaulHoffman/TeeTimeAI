@@ -580,6 +580,7 @@ export type BrowserProbeCourseInput = {
   isPublic?: boolean | null;
   detectedPlatform: string;
   providerFamilyKey?: string | null;
+  monitoringMode?: string | null;
   automationEligibility: string;
   automationReason?: string | null;
   bookingMethod?: string | null;
@@ -5198,6 +5199,9 @@ function findTargetCourseContactEvidence(courseName: string, visibleText: string
 }
 
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
+  if (course.monitoringMode === "LOCAL_READER_ONLY") {
+    return false;
+  }
   // The ordinary browser is a bounded discovery fallback after direct HTTP
   // could not identify reusable provider metadata. It is never a retry
   // transport for a known adapter or a recognized unsupported family.

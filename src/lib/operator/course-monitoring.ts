@@ -142,7 +142,8 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
       bookingMethod: status.course.bookingMethod,
       bookingAccessMode: status.course.bookingAccessMode,
       automationEligibility: status.course.automationEligibility,
-      automationReason: status.course.automationReason
+      automationReason: status.course.automationReason,
+      monitoringMode: status.course.monitoringMode
     },
     incident: status.course.supportIncident
       ? {

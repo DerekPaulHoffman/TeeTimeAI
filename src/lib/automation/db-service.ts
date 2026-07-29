@@ -252,6 +252,7 @@ export async function listBrowserProbeTargets(
             providerFamilyKey: true,
             automationEligibility: true,
             automationReason: true,
+            monitoringMode: true,
             bookingAccessMode: true,
             bookingMethod: true,
             isPublic: true,
@@ -430,6 +431,7 @@ async function listExactIncidentBrowserProbeTarget(
     !course ||
     !probeUrl ||
     !probeCourse ||
+    course.monitoringMode === "LOCAL_READER_ONLY" ||
     (!shouldQueueBrowserProbe(probeCourse) &&
       !hasCurrentTechnicalAccessFailure &&
       !hasCurrentUnsupportedCoverageFailure)

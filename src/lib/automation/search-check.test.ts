@@ -151,6 +151,7 @@ const search = {
         bookingMethod: "PUBLIC_ONLINE",
         automationEligibility: "BLOCKED",
         automationReason: "POLICY_RESTRICTED",
+        monitoringMode: "AUTOMATIC",
         policyNotes: "Automated retrieval is not allowed.",
         detectedPlatform: "UNKNOWN",
         bookingMetadata: null,
@@ -1837,6 +1838,66 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({ outcome: "BLOCKED_AUTH" })
     );
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+  });
+
+  it("uses only the local reader when the persisted monitoring mode requires it", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Reader Only Public Course",
+            isPublic: true,
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "BLOCKED",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            monitoringMode: "LOCAL_READER_ONLY",
+            intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            policyNotes: null,
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "grassyhill",
+              bookingBaseUrl: "https://grassyhill.cps.golf/",
+              courseIds: [1]
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-only"
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledOnce();
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2,
+      bookingUrl
+    });
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(adapterMocks.fetchCpsTeeSheet).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("in progress")
+    });
   });
 
   it("prefers a fresh local-reader result for CPS before the server adapter", async () => {
