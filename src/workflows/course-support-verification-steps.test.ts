@@ -35,6 +35,12 @@ const deliveryMocks = vi.hoisted(() => ({
   getSafeOfficialBookingUrl: vi.fn()
 }));
 
+const localReaderMocks = vi.hoisted(() => ({
+  getLocalReaderCourseKey: vi.fn(),
+  getLocalReaderCourseVerification: vi.fn(),
+  queueLocalReaderCourseVerification: vi.fn()
+}));
+
 const prismaMocks = vi.hoisted(() => ({
   courseFindUnique: vi.fn()
 }));
@@ -48,6 +54,7 @@ vi.mock("@/lib/automation/provider-capabilities", () => capabilityMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 vi.mock("@/lib/automation/runtime-version", () => runtimeMocks);
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryMocks);
+vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/prisma", () => ({
   prisma: { course: { findUnique: prismaMocks.courseFindUnique } }
 }));
@@ -200,6 +207,11 @@ describe("executeCourseSupportVerificationStep", () => {
           ? value
           : undefined
     );
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue(null);
+    localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
+      id: "reader-verification-1"
+    });
   });
 
   afterEach(() => {
@@ -720,6 +732,92 @@ describe("executeCourseSupportVerificationStep", () => {
     expect(
       verificationMocks.completeCourseSupportVerificationRequest
     ).not.toHaveBeenCalled();
+  });
+
+  it("queues an allowlisted local-reader fallback after a server 5xx", async () => {
+    allowOwnedExecution();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("crestbrook");
+    capabilityMocks.resolveProviderCapability.mockReturnValue({
+      providerFamilyKey: "CHRONOGOLF",
+      isRunnable: true,
+      metadataReady: true,
+      evidenceConflict: false
+    });
+    providerReadMocks.fetchCourseTeeSheet.mockRejectedValue(
+      new Error("provider unavailable")
+    );
+    capabilityMocks.classifyProviderFailure.mockReturnValue({
+      failureClass: "HTTP_5XX",
+      httpStatus: 503,
+      retryAfterSeconds: null
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED"
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true
+    });
+
+    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
+      courseId: "course-1",
+      targetDate: "2026-07-24",
+      players: 1,
+      bookingUrl: "https://booking.example/tee-times"
+    });
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "HTTP_5XX",
+        retryAt: new Date("2026-07-21T12:02:00.000Z")
+      })
+    );
+  });
+
+  it("completes detached proof from a fresh signed local-reader result", async () => {
+    allowOwnedExecution();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("crestbrook");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      readerVersion: "reader-v1",
+      slots: []
+    });
+    capabilityMocks.resolveProviderCapability.mockReturnValue({
+      providerFamilyKey: "CHRONOGOLF",
+      isRunnable: true,
+      metadataReady: true,
+      evidenceConflict: false
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH"
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(localReaderMocks.getLocalReaderCourseVerification).toHaveBeenCalledWith({
+      courseId: "course-1",
+      targetDate: "2026-07-24",
+      players: 1,
+      notBefore: discoveryAttemptedAt
+    });
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeVersion,
+        observation: expect.objectContaining({
+          outcome: "NO_MATCH",
+          observedAt: new Date("2026-07-21T12:00:30.000Z"),
+          adapterKey: "LOCAL_READER:CHRONOGOLF",
+          providerExecution: true
+        })
+      })
+    );
   });
 
   it("never retries before a longer provider Retry-After", async () => {

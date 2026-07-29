@@ -405,11 +405,72 @@ export async function getFreshLocalReaderTeeSheet(input: {
   if (result.status !== "AVAILABLE" && result.status !== "NO_AVAILABILITY") {
     return null;
   }
-  const slots: TeeTimeSlot[] = result.slots.map((slot) => {
+  return {
+    slots: buildLocalReaderSlots(input.courseId, result),
+    targetDateStatus:
+      result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
+    bookingWindowEvidence: null,
+    readerVersion: result.readerVersion,
+  };
+}
+
+export async function getLocalReaderCourseVerification(input: {
+  courseId: string;
+  targetDate: string;
+  players: number;
+  notBefore: Date;
+}) {
+  const now = new Date();
+  const row = await prisma.localReaderJob.findFirst({
+    where: {
+      teeSearchId: null,
+      purpose: "COURSE_VERIFICATION",
+      courseId: input.courseId,
+      targetDate: input.targetDate,
+      players: input.players,
+      status: { in: ["PENDING", "LEASED", "COMPLETED"] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!row) return null;
+  if (
+    (row.status === "PENDING" || row.status === "LEASED") &&
+    row.jobExpiresAt > now &&
+    row.createdAt >= input.notBefore
+  ) {
+    return { status: "PENDING" as const };
+  }
+  if (
+    row.status !== "COMPLETED" ||
+    !row.result ||
+    !row.resultExpiresAt ||
+    row.resultExpiresAt <= now
+  ) {
+    return null;
+  }
+  const result = localReaderResultSchema.parse(row.result);
+  if (result.status !== "AVAILABLE" && result.status !== "NO_AVAILABILITY") {
+    return null;
+  }
+  const observedAt = new Date(result.observedAt);
+  if (observedAt < input.notBefore) return null;
+  return {
+    status: "COMPLETED" as const,
+    observedAt,
+    readerVersion: result.readerVersion,
+    slots: buildLocalReaderSlots(input.courseId, result),
+  };
+}
+
+function buildLocalReaderSlots(
+  courseId: string,
+  result: LocalReaderResult,
+): TeeTimeSlot[] {
+  return result.slots.map((slot) => {
     const holes = slot.holes.includes(18) ? 18 : slot.holes[0];
     return {
       sourceId: `local-${result.courseKey}-${slot.startsAtLocal}`,
-      courseId: input.courseId,
+      courseId,
       startsAt: slot.startsAtLocal,
       availableSpots: slot.availableSpots,
       bookingUrl: result.pageUrl,
@@ -418,11 +479,4 @@ export async function getFreshLocalReaderTeeSheet(input: {
       bookableHoleCounts: slot.holes,
     };
   });
-  return {
-    slots,
-    targetDateStatus:
-      result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
-    bookingWindowEvidence: null,
-    readerVersion: result.readerVersion,
-  };
 }

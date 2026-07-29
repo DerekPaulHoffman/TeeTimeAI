@@ -28,6 +28,7 @@ vi.mock("@/lib/automation/support-incidents", () => ({
 import {
   claimNextLocalReaderJob,
   completeLocalReaderJob,
+  getLocalReaderCourseVerification,
   getFreshLocalReaderTeeSheet,
   getLocalReaderCourseKey,
   queueLocalReaderCourseVerification,
@@ -459,6 +460,44 @@ describe("local reader job service", () => {
       message:
         "Fresh signed local public-page verification completed successfully with outcome NO_MATCH.",
       now: new Date("2026-07-24T16:00:00.000Z"),
+    });
+  });
+
+  it("returns fresh detached verification results without a customer search", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      teeSearchId: null,
+      purpose: "COURSE_VERIFICATION",
+      courseId: "course-1",
+      targetDate: "2026-07-25",
+      players: 2,
+      status: "COMPLETED",
+      createdAt: new Date("2026-07-24T16:00:00.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
+      result: {
+        jobId: "job-verification",
+        courseKey: "grassy-hill",
+        status: "NO_AVAILABILITY",
+        observedAt: "2026-07-24T16:01:00.000Z",
+        pageUrl: bookingUrl,
+        pageTitle: "Tee Times",
+        slots: [],
+        readerVersion: "reader-v1"
+      }
+    });
+
+    await expect(
+      getLocalReaderCourseVerification({
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        notBefore: new Date("2026-07-24T16:00:30.000Z")
+      })
+    ).resolves.toEqual({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-24T16:01:00.000Z"),
+      readerVersion: "reader-v1",
+      slots: []
     });
   });
 

@@ -19,6 +19,11 @@ import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { getSafeOfficialBookingUrl } from "@/lib/email/search-delivery-outbox";
+import {
+  getLocalReaderCourseKey,
+  getLocalReaderCourseVerification,
+  queueLocalReaderCourseVerification
+} from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
 import { filterSlotsForSearch } from "@/lib/tee-times/matching";
 
@@ -34,6 +39,13 @@ const TRANSIENT_PROVIDER_FAILURES = new Set<CourseSupportFailureClass>([
 const TRANSIENT_RETRY_MS = 15 * 60 * 1000;
 const LEASE_BUSY_RETRY_MS = 2 * 60 * 1000;
 const VERIFICATION_RETRY_HORIZON_MS = 24 * 60 * 60 * 1000;
+const LOCAL_READER_FALLBACK_FAILURES = new Set<CourseSupportFailureClass>([
+  "AUTH",
+  "CHALLENGE",
+  "HTTP_5XX",
+  "TIMEOUT",
+  "NETWORK"
+]);
 
 const providerCourseSelect = {
   id: true,
@@ -336,6 +348,57 @@ export async function executeCourseSupportVerificationStep(
     });
   }
 
+  const bookingUrl = course.detectedBookingUrl ?? course.website;
+  const localReaderEligible = getLocalReaderCourseKey(bookingUrl) !== null;
+  if (localReaderEligible) {
+    const readerVerification = await getLocalReaderCourseVerification({
+      courseId,
+      targetDate: intent.targetDateLocal,
+      players: intent.players,
+      notBefore: afterDiscovery.discoveryAttemptedAt ?? new Date(0)
+    });
+    if (readerVerification?.status === "PENDING") {
+      return failVerification({
+        input,
+        revision,
+        runtimeVersion,
+        failureClass: "HTTP_5XX",
+        providerExecution: false,
+        message: "Signed local public-page verification is pending.",
+        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
+      });
+    }
+    if (readerVerification?.status === "COMPLETED") {
+      const matchingSlots = filterSlotsForSearch(
+        {
+          date: intent.targetDateLocal,
+          startTime: intent.startTimeLocal,
+          endTime: intent.endTimeLocal,
+          players: intent.players,
+          preferredCourses: [{ courseId, rank: 1 }]
+        },
+        readerVerification.slots
+      );
+      const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+      const completed = await completeCourseSupportVerificationRequest({
+        requestId: input.requestId,
+        expectedRevision: revision,
+        leaseToken: input.leaseToken,
+        runtimeVersion,
+        observation: {
+          outcome,
+          observedAt: readerVerification.observedAt,
+          adapterKey: `LOCAL_READER:${capability.providerFamilyKey}`,
+          availabilityCount: matchingSlots.length,
+          providerExecution: true
+        }
+      });
+      return completed.completed
+        ? { outcome: "completed" as const, providerOutcome: outcome }
+        : { outcome: "stopped" as const, reason: completed.reason };
+    }
+  }
+
   let providerExecutionStarted = false;
   try {
     const execution = await runWithProviderRequestLease(
@@ -406,6 +469,18 @@ export async function executeCourseSupportVerificationStep(
   } catch (error) {
     const failure = classifyProviderFailure({ error });
     const failedAt = new Date();
+    if (
+      bookingUrl &&
+      localReaderEligible &&
+      LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass)
+    ) {
+      await queueLocalReaderCourseVerification({
+        courseId,
+        targetDate: intent.targetDateLocal,
+        players: intent.players,
+        bookingUrl
+      });
+    }
     return failVerification({
       input,
       revision,
@@ -415,9 +490,12 @@ export async function executeCourseSupportVerificationStep(
       httpStatus: failure.httpStatus,
       retryAfterSeconds: failure.retryAfterSeconds,
       message: "Public provider availability verification failed.",
-      retryAt: TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
-        ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
-        : null
+      retryAt: LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass) &&
+          localReaderEligible
+        ? new Date(failedAt.getTime() + LEASE_BUSY_RETRY_MS)
+        : TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
+          ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
+          : null
     });
   }
 }
