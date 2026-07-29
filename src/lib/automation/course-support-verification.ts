@@ -405,7 +405,9 @@ export async function claimCourseSupportVerificationRequest(input: {
         return rejected("batch_release_changed");
       }
       if (runtimeVersion !== request.releaseSha) {
-        await markRequestStale(transaction, request, now, "runtime_mismatch");
+        // A recovery cron from the prior deployment can overlap a newly
+        // promoted release. Leave the exact-release request queued so the
+        // matching immutable runtime can claim it on the next recovery pass.
         return rejected("runtime_mismatch");
       }
       if (!isDueForClaim(request, now)) {

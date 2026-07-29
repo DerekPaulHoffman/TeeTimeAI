@@ -709,7 +709,7 @@ describe("course-support verification execution fencing", () => {
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
   });
 
-  it("stales work from a runtime other than the exact release SHA", async () => {
+  it("leaves work queued for the exact release when an older runtime sees it", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
       request({
         runtimeVersion: null,
@@ -729,14 +729,7 @@ describe("course-support verification execution fencing", () => {
         now
       })
     ).resolves.toEqual({ claimed: false, reason: "runtime_mismatch" });
-    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: "STALE",
-          lastError: "runtime_mismatch"
-        })
-      })
-    );
+    expect(prismaMocks.requestUpdateMany).not.toHaveBeenCalled();
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
   });
 
