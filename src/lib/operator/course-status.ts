@@ -216,10 +216,18 @@ export function buildCourseInventory(
     })
     .sort(
       (left, right) =>
+        getActiveIssuePriority(left) - getActiveIssuePriority(right) ||
         left.priorityScore - right.priorityScore ||
         right.activeAlertCount - left.activeAlertCount ||
         left.name.localeCompare(right.name)
     );
+}
+
+function getActiveIssuePriority(course: CourseInventoryItem) {
+  return course.activeAlertCount > 0 &&
+    (course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH")
+    ? 0
+    : 1;
 }
 
 export function filterCourseInventory(
@@ -415,15 +423,18 @@ function classifyCourseStatus(
     });
   }
   if (course.monitoringStatus?.state === "AUTO_INVESTIGATING") {
+    const operatorRecheckQueued = course.monitoringStatus.revalidationRequestedAt !== null;
     return withStatus(course, "NEEDS_ADAPTER", {
       priorityGroup: course.activeAlertCount > 0 ? "ACTION" : "WATCH",
       priorityScore: course.activeAlertCount > 0 ? 0 : 1,
       tone: course.activeAlertCount > 0 ? "critical" : "warning",
-      labelOverride: "Auto investigating",
-      meaningOverride:
-        "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
-      actionOverride:
-        "Automation owns safe provider, browser, metadata, reader, adapter, and fresh-runtime verification until the deadline."
+      labelOverride: operatorRecheckQueued ? "AI recheck queued" : "Auto investigating",
+      meaningOverride: operatorRecheckQueued
+        ? "Your note is saved and waiting for AI to run a fresh course verification."
+        : "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
+      actionOverride: operatorRecheckQueued
+        ? "No action is needed yet. Wait for AI to finish; this course will move to Engineering verification needed only if you must confirm the result or provide more information."
+        : "Automation owns safe provider, browser, metadata, reader, adapter, and fresh-runtime verification until the deadline."
     });
   }
   if (course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED") {
@@ -433,9 +444,9 @@ function classifyCourseStatus(
       tone: "critical",
       labelOverride: "Engineering verification needed",
       meaningOverride:
-        "Safe automated recovery did not produce conclusive runnable proof or an engineer-approved final limitation.",
+        "AI finished its bounded checks but still needs you to confirm the course works or provide more course information.",
       actionOverride:
-        "Open the redacted course history, inspect the official surface, and record an evidence-backed decision."
+        "Open the redacted course history, check the official course surface again, then confirm the result or add the missing details and request another AI recheck."
     });
   }
   if (course.monitoringStatus?.state === "REVALIDATING_FINAL") {

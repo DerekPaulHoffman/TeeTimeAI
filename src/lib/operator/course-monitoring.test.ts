@@ -214,8 +214,22 @@ describe("operator course monitoring mutations", () => {
         humanReviewReason: null,
         nextReminderAt: null,
         nextAttemptAt: expect.any(Date),
+        escalationDeadlineAt: expect.any(Date),
         lastSeenAt: expect.any(Date),
         nextAction: safeNote,
+        revision: { increment: 1 }
+      }
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 4
+      },
+      data: {
+        state: "AUTO_INVESTIGATING",
+        revalidationRequestedAt: expect.any(Date),
+        nextAutomaticAttemptAt: expect.any(Date),
+        stateChangedAt: expect.any(Date),
         revision: { increment: 1 }
       }
     });

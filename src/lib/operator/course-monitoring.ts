@@ -352,7 +352,7 @@ export async function requestOperatorCourseRecheck(
             current.status.state === "FINAL_TECHNICAL"
               ? "REVALIDATING_FINAL"
               : "AUTO_INVESTIGATING",
-          revalidationRequestedAt: current.status.state === "FINAL_TECHNICAL" ? now : null,
+          revalidationRequestedAt: now,
           nextAutomaticAttemptAt: now,
           stateChangedAt: now,
           revision: { increment: 1 }
@@ -374,6 +374,14 @@ export async function requestOperatorCourseRecheck(
                 }
               : {}),
             nextAttemptAt: now,
+            ...(current.incident.status !== "RESOLVED"
+              ? {
+                  escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+                    now,
+                    current.incident.activeRealSearchCount
+                  )
+                }
+              : {}),
             lastSeenAt: now,
             nextAction: input.note,
             revision: { increment: 1 }

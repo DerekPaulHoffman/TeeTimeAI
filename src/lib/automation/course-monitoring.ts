@@ -926,6 +926,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
             data: {
               state: "ENGINEERING_VERIFICATION_NEEDED",
               nextAutomaticAttemptAt: retryAt,
+              revalidationRequestedAt: null,
               stateChangedAt: now,
               revision: { increment: 1 }
             }

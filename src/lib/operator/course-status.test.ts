@@ -55,6 +55,30 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("puts active-alert investigations before inactive engineering review", () => {
+    const inventory = buildCourseInventory(
+      [
+        course({
+          id: "human-review",
+          name: "A Human Review Course",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED")
+        }),
+        course({
+          id: "live-investigation",
+          name: "Z Live Investigation Course",
+          activeAlertCount: 1,
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING")
+        })
+      ],
+      NOW
+    );
+
+    expect(inventory.map((item) => item.id)).toEqual([
+      "live-investigation",
+      "human-review"
+    ]);
+  });
+
   it("explains that no match is a successful monitor result", () => {
     const [result] = buildCourseInventory(
       [
@@ -429,6 +453,45 @@ describe("operator course inventory", () => {
       scheduledRetry: 1,
       needsHuman: 1
     });
+  });
+
+  it("distinguishes an operator-requested AI recheck from generic investigation", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING", {
+            revalidationRequestedAt: new Date("2026-07-24T17:50:00.000Z"),
+            nextAutomaticAttemptAt: new Date("2026-07-24T17:55:00.000Z")
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusLabel: "AI recheck queued",
+      statusMeaning: "Your note is saved and waiting for AI to run a fresh course verification.",
+      automationQueueState: "DUE_NOW"
+    });
+    expect(result.recommendedAction).toContain(
+      "move to Engineering verification needed only if you must confirm"
+    );
+  });
+
+  it("explains that engineering verification is waiting on the operator", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED")
+        })
+      ],
+      NOW
+    );
+
+    expect(result.statusMeaning).toContain(
+      "needs you to confirm the course works or provide more course information"
+    );
+    expect(result.recommendedAction).toContain("request another AI recheck");
   });
 
   it("explains that lifecycle courses are regrouped by next owner", () => {
