@@ -62,6 +62,20 @@ function dynamicCpsJob(hostname = "future-public.cps.golf"): LocalReaderJob {
   };
 }
 
+function dynamicTenForeJob(tenant = "gainfieldfarms"): LocalReaderJob {
+  return {
+    id: "job-tenfore",
+    courseKey: `tenfore:${tenant}`,
+    targetDate: "2026-07-29",
+    players: 3,
+    requestedAt: "2026-07-28T12:00:00.000Z",
+    expiresAt: "2026-07-28T12:05:00.000Z",
+    courseName: "Gainfield Farms Golf Course",
+    bookingUrl: `https://fox.tenfore.golf/${tenant}?date=2026-07-29`,
+    cardTextIncludes: [],
+  };
+}
+
 function loadReader() {
   const source = readFileSync(
     resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
@@ -87,6 +101,22 @@ function loadChronogolfReader() {
   context.globalThis = context;
   runInNewContext(source, context);
   return context.TeeTimeSpotChronogolfReader as Reader;
+}
+
+function loadTenForeReader() {
+  const source = readFileSync(
+    resolve(
+      process.cwd(),
+      "tools",
+      "local-chrome-reader",
+      "tenfore-reader.js",
+    ),
+    "utf8",
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotTenForeReader as Reader;
 }
 
 describe("local Chrome reader contract", () => {
@@ -137,7 +167,14 @@ describe("local Chrome reader contract", () => {
     expect(contentMatches).toContain(
       "https://*.cps.golf/onlineresweb/search-teetime*",
     );
+    expect(manifest.host_permissions).toContain(
+      "https://fox.tenfore.golf/*",
+    );
+    expect(contentMatches).toContain("https://fox.tenfore.golf/*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
+    expect(backgroundSource).toContain(
+      "function isAllowlistedTenForeJob(job)",
+    );
     expect(backgroundSource).toContain(
       '/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u',
     );
@@ -183,6 +220,42 @@ describe("local Chrome reader contract", () => {
       }),
     ).toThrow(/not allowlisted/u);
     expect(getLocalReaderCourseKey("https://nested.future.cps.golf/onlineresweb/search-teetime")).toBeNull();
+  });
+
+  it("accepts exact TenFore tenant jobs and rejects unsafe paths and query data", () => {
+    const job = dynamicTenForeJob();
+
+    expect(
+      getLocalReaderCourseKey(
+        "https://fox.tenfore.golf/gainfieldfarms",
+      ),
+    ).toBe("tenfore:gainfieldfarms");
+    expect(localReaderJobSchema.parse(job)).toMatchObject({
+      courseKey: "tenfore:gainfieldfarms",
+      courseName: "Gainfield Farms Golf Course",
+    });
+    expect(
+      loadTenForeReader().isAllowedPageUrl(job, job.bookingUrl),
+    ).toBe(true);
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl:
+          "https://fox.tenfore.golf/gainfieldfarms/checkout?date=2026-07-29",
+      }),
+    ).toThrow(/not allowlisted/u);
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl:
+          "https://fox.tenfore.golf/other-course?date=2026-07-29",
+      }),
+    ).toThrow(/not allowlisted/u);
+    expect(
+      getLocalReaderCourseKey(
+        "https://fox.tenfore.golf/gainfieldfarms?token=secret",
+      ),
+    ).toBeNull();
   });
 
   it("recognizes only the exact reader-candidate public booking surfaces", () => {
@@ -462,6 +535,79 @@ describe("local Chrome reader contract", () => {
     ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
+  it("parses rendered TenFore cards without reading challenge-protected requests", () => {
+    document.title = "TenFore | Golf Software";
+    document.body.innerHTML = `
+      <div class="filter-section" data-filter-key="selectedDate">
+        <div class="filter-value">Jul 29, 2026</div>
+      </div>
+      <div class="bg-white text-xl font-medium leading-none rounded-t-lg p-4 pb-2">
+        <div><div class="text-2xl font-bold">1:20 PM</div></div>
+        <div><span>18</span><span>1-4</span></div>
+        <div><span>$42.00</span><span>Online Booking</span></div>
+      </div>
+      <div class="bg-white text-xl font-medium leading-none rounded-t-lg p-4 pb-2">
+        <div><div class="text-2xl font-bold">2:10 PM</div></div>
+        <div><span>9</span><span>1-2</span></div>
+        <div><span>$25.00</span><span>Online Booking</span></div>
+      </div>
+    `;
+    const job = dynamicTenForeJob();
+    const reader = loadTenForeReader() as Reader & {
+      countRenderedSlots: (documentRoot: Document) => number;
+    };
+
+    expect(document.querySelectorAll(".text-2xl.font-bold")).toHaveLength(2);
+    expect(reader.countRenderedSlots(document)).toBe(2);
+    expect(
+      reader.readSnapshot(document, job.bookingUrl, job),
+    ).toMatchObject({
+      status: "AVAILABLE",
+      readerVersion: "tenfore-rendered-v1",
+      slots: [
+        {
+          startsAtLocal: "2026-07-29T13:20:00",
+          holes: [18],
+          minimumPlayers: 1,
+          availableSpots: 4,
+          priceCents: 4200,
+        },
+      ],
+    });
+  });
+
+  it("fails TenFore closed on a challenge, wrong date, or changed card shape", () => {
+    const reader = loadTenForeReader();
+    const job = dynamicTenForeJob();
+
+    document.body.innerHTML = "<main>Verify you are human</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "ACCESS_CHALLENGE",
+      slots: [],
+    });
+
+    document.body.innerHTML = `
+      <div class="filter-section" data-filter-key="selectedDate">
+        <div class="filter-value">Jul 30, 2026</div>
+      </div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: [],
+    });
+
+    document.body.innerHTML = `
+      <div class="filter-section" data-filter-key="selectedDate">
+        <div class="filter-value">Jul 29, 2026</div>
+      </div>
+      <div><div class="text-2xl font-bold">1:20 PM</div>Online Booking</div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: [],
+    });
+  });
+
   it("fails closed when tee cards are visible but cannot be parsed", () => {
     document.title = "Grassy Hill Country Club";
     document.body.innerHTML = `
@@ -536,8 +682,10 @@ describe("local Chrome reader contract", () => {
 
     expect(contentSource).not.toContain("Intl.DateTimeFormat");
     expect(contentSource).toContain("MONTH_NAMES[targetMonth - 1]");
+    expect(contentSource).toContain("MONTH_SHORT_INDEX");
     expect(contentSource).toContain("async function chooseCourse(job)");
     expect(contentSource).toContain("async function choosePlayers(players)");
+    expect(contentSource).toContain("reader.SKIP_PLAYER_SELECTION !== true");
     expect(contentSource).toContain("const deadline = Date.now() + 10_000");
     expect(contentSource).toContain("await delay(100)");
     expect(contentSource).toContain(

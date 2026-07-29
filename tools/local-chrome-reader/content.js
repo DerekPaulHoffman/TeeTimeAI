@@ -21,6 +21,12 @@
   const MONTH_INDEX = Object.fromEntries(
     MONTH_NAMES.map((month, index) => [month.toLowerCase(), index + 1]),
   );
+  const MONTH_SHORT_INDEX = Object.fromEntries(
+    MONTH_NAMES.map((month, index) => [
+      month.slice(0, 3).toLowerCase(),
+      index + 1,
+    ]),
+  );
   const CHALLENGE_TEXT =
     /\b(?:just a moment|verify you are human|checking your browser|captcha|turnstile|waiting room)\b/i;
 
@@ -50,13 +56,14 @@
       return `${year}-${pad(Number(numeric[1]))}-${pad(Number(numeric[2]))}`;
     }
     const written =
-      /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s+(\d{4})\b/iu.exec(
+      /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),\s+(\d{4})\b/iu.exec(
         normalized,
       );
     if (!written) return null;
-    return `${written[3]}-${pad(MONTH_INDEX[written[1].toLowerCase()])}-${pad(
-      Number(written[2]),
-    )}`;
+    const monthName = written[1].toLowerCase();
+    const month =
+      MONTH_INDEX[monthName] || MONTH_SHORT_INDEX[monthName.slice(0, 3)];
+    return `${written[3]}-${pad(month)}-${pad(Number(written[2]))}`;
   }
 
   function getDisplayedDate() {
@@ -321,7 +328,7 @@
     throw new Error(`Group size ${players} did not become selectable.`);
   }
 
-  async function waitForTargetPage(targetDate) {
+  async function waitForTargetPage(targetDate, reader) {
     const expectedLabel = targetDateLabel(targetDate);
     const deadline = Date.now() + 25_000;
     let slotCount = 0;
@@ -329,9 +336,12 @@
     let emptyStableSince = null;
     while (Date.now() < deadline) {
       const now = Date.now();
-      const currentSlotCount = document.querySelectorAll(
-        `time[datetime^="${CSS.escape(targetDate)}T"], [data-testid='teeTimeCard'][role='button']`,
-      ).length;
+      const currentSlotCount =
+        typeof reader?.countRenderedSlots === "function"
+          ? reader.countRenderedSlots(document, targetDate)
+          : document.querySelectorAll(
+              `time[datetime^="${CSS.escape(targetDate)}T"], [data-testid='teeTimeCard'][role='button']`,
+            ).length;
       if (currentSlotCount > 0) {
         if (currentSlotCount !== slotCount) {
           slotCount = currentSlotCount;
@@ -383,6 +393,7 @@
     const reader = [
       globalThis.TeeTimeSpotCpsReader,
       globalThis.TeeTimeSpotChronogolfReader,
+      globalThis.TeeTimeSpotTenForeReader,
     ].find((candidate) =>
       candidate?.isAllowedPageUrl(pending?.job, location.href),
     );
@@ -401,9 +412,11 @@
     running = true;
     try {
       await chooseCourse(pending.job);
-      await choosePlayers(pending.job.players);
+      if (reader.SKIP_PLAYER_SELECTION !== true) {
+        await choosePlayers(pending.job.players);
+      }
       await chooseTargetDate(pending.job.targetDate);
-      await waitForTargetPage(pending.job.targetDate);
+      await waitForTargetPage(pending.job.targetDate, reader);
       const snapshot = reader.readSnapshot(
         document,
         location.href,
