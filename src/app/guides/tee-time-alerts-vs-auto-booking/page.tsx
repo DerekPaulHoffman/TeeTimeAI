@@ -23,7 +23,7 @@ const structuredData = buildPageStructuredData({
   path,
   type: "Article",
   datePublished: "2026-07-13",
-  dateModified: "2026-07-13",
+  dateModified: "2026-07-29",
   breadcrumbs: [
     { name: "Home", path: "/" },
     { name: "Guides", path: "/guides" },
@@ -38,7 +38,7 @@ export default function AlertsVersusAutoBookingGuide() {
       title="Notification and reservation are fundamentally different jobs."
       intro="A tee-time alert tells a golfer that matching public availability was observed. An auto-booking service attempts to take a later step on the golfer's behalf."
       summary="Alerts preserve the final decision, login, policy review, and payment for the golfer. Auto-booking may be faster after detection, but it requires more authority and creates greater account, payment, cancellation, and policy risk."
-      updated="July 13, 2026"
+      updated="July 29, 2026"
       breadcrumbs={[
         { href: "/", label: "Home" },
         { href: "/guides", label: "Guides" }
@@ -154,21 +154,21 @@ export default function AlertsVersusAutoBookingGuide() {
           <li>Which details can I review before a booking is committed?</li>
           <li>Who is responsible for cancellation fees, deposits, or a mistaken booking?</li>
           <li>How are credentials, payment data, and personal information protected and deleted?</li>
-          <li>Can I clearly see which courses are actually supported?</li>
+          <li>Can I clearly see which courses have tee-time alerts available?</li>
         </ol>
       </EditorialSection>
 
       <EditorialSection id="teetime-spot" eyebrow="Our choice" title="Tee Time Spot is deliberately alert-only.">
         <p>
-          Tee Time Spot watches supported public availability, matches it to your ranked courses and
-          playing window, and emails the official booking link. It does not hold, reserve, pay, enter
-          checkout, use verification codes, bypass controls, or use course-specific golfer sessions
-          in the current product.
+          Tee Time Spot checks available public booking pages, matches openings to your ranked
+          courses and playing window, and emails the official booking link. It does not hold,
+          reserve, pay, enter checkout, use verification codes, bypass controls, or use
+          course-specific golfer sessions in the current product.
         </p>
         <p>
           That boundary is documented in <Link href="/how-it-works">how the service works</Link> and
           the <Link href="/methodology">course monitoring methodology</Link>. It favors golfer
-          control and policy-aware access over the promise of an automatic transaction.
+          control and clear access boundaries over the promise of an automatic transaction.
         </p>
         <EditorialCta title="Choose alerts that leave the booking in your hands." />
       </EditorialSection>

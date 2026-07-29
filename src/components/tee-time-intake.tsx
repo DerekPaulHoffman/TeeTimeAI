@@ -1350,7 +1350,7 @@ function TeeTimeIntakeContent({
           <h2>Your courses</h2>
           {selected.length > 0 ? <span className="figma-count-pill">{selected.length}/5</span> : null}
         </div>
-        <p>Pick up to 5. Drag to rank them. Supported courses are checked automatically.</p>
+        <p>Pick up to 5. Drag to rank them. We check courses where tee-time alerts are available.</p>
         <div className="selected-list">
           {selected.length === 0 ? (
             <div className="selected-empty">
@@ -1468,8 +1468,8 @@ function TeeTimeIntakeContent({
                 course.monitoringReadiness === undefined
             ) ? (
               <small>
-                First-time courses get a monitoring verdict after the initial check,
-                usually within 10 minutes.
+                We will email whether alerts are available after the first course check, usually
+                within 10 minutes.
               </small>
             ) : null}
           </section>
@@ -2067,8 +2067,8 @@ function CourseMonitoringStatus({
               : isUnavailable
                 ? "Automatic alerts unavailable"
             : isAutomatic
-              ? "Automatic monitoring confirmed"
-              : "Monitoring verdict after first check"}
+              ? "Tee-time alerts available"
+              : "Alert availability after first check"}
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
@@ -2077,16 +2077,16 @@ function CourseMonitoringStatus({
               : isPublicAccessUnverified
               ? "Start an alert and we'll verify the official course before treating any tee times as real."
               : isManualOnly && course.alertSupport
-              ? `${getAlertSupportDescription(course.alertSupport)} Tee Time Spot does not check this course automatically.`
+              ? `${getAlertSupportDescription(course.alertSupport)} Tee-time alerts are not available for this course yet.`
               : isTemporarilyUnavailable
                 ? "The latest automatic check did not finish. Use the official site while Tee Time Spot retries in the background."
                 : isUnavailable
-                  ? "Tee Time Spot could not confirm reliable automatic monitoring. Use the official site for current availability."
+                  ? "Tee Time Spot could not confirm tee-time alerts for this course. Use the official site for current availability."
               : isAutomatic
-                ? "Tee Time Spot checks public, signed-out booking availability without entering checkout."
+                ? "Tee Time Spot checks the public booking page without entering checkout."
                 : course.firstTimeLookup
-                  ? "Tee Time Spot hasn't checked this course before. We'll email the monitoring verdict after the first check, usually within 10 minutes. If coverage takes longer, we'll alert our course coverage team."
-                  : "We'll email whether automatic monitoring is available after the first check, usually within 10 minutes."}
+                  ? "Tee Time Spot hasn't checked this course's booking page before. We'll email whether alerts are available after the first check, usually within 10 minutes."
+                  : "We'll email whether tee-time alerts are available after the first check, usually within 10 minutes."}
           </small>
         ) : null}
       </span>

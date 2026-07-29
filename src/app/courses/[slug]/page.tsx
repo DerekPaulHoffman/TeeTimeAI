@@ -224,7 +224,7 @@ export default async function CourseProfilePage({ params }: PageProps) {
             <h2>Tee time alerts for {course.name}</h2>
             <p>{supported ? "Get notified when a public tee time matches your date, time, group size, and course preference." : getUnsupportedAlertCopy(course.automationReason, course.bookingAccessMode, course.bookingMethod)}</p>
             <p className="knowledge-date">Alert coverage reviewed {formatDate(course.intelligenceVerifiedAt ?? profile.profileVerifiedAt)}.</p>
-            {supported ? <CourseProfileActions slug={profile.canonicalSlug} supported selectedCourse={selectedCourse} website={null} bookingUrl={null} /> : <Link className="button button-primary knowledge-inline-action" href="/search">Browse supported courses <ArrowRight size={16} /></Link>}
+            {supported ? <CourseProfileActions slug={profile.canonicalSlug} supported selectedCourse={selectedCourse} website={null} bookingUrl={null} /> : <Link className="button button-primary knowledge-inline-action" href="/search">Browse courses with alerts <ArrowRight size={16} /></Link>}
             <div className="knowledge-boundary">
               <Bell aria-hidden="true" size={22} />
               <div><strong>You book directly with the course.</strong><p>Tee Time Spot sends you to the official booking page; it does not reserve or book the tee time.</p></div>
@@ -246,9 +246,9 @@ export default async function CourseProfilePage({ params }: PageProps) {
         </aside>
       </div>
 
-      {related.length > 0 ? <section className="knowledge-related"><div><p className="knowledge-kicker">Nearby coverage</p><h2>Other supported public courses nearby</h2></div><div className="knowledge-related-list">{related.map((item) => <Link href={`/courses/${item.profile?.canonicalSlug}`} key={item.id}><span>{item.city}, {item.stateCode}</span><strong>{item.name}</strong><small>{Math.round(item.distanceMiles)} miles away</small><ArrowRight aria-hidden="true" size={17} /></Link>)}</div></section> : null}
+      {related.length > 0 ? <section className="knowledge-related"><div><p className="knowledge-kicker">Nearby coverage</p><h2>Other public courses with alerts nearby</h2></div><div className="knowledge-related-list">{related.map((item) => <Link href={`/courses/${item.profile?.canonicalSlug}`} key={item.id}><span>{item.city}, {item.stateCode}</span><strong>{item.name}</strong><small>{Math.round(item.distanceMiles)} miles away</small><ArrowRight aria-hidden="true" size={17} /></Link>)}</div></section> : null}
 
-      <section className="knowledge-final-cta"><div><p className="eyebrow">Ready when an opening appears</p><h2>{supported ? `Watch ${course.name}` : "Build an alert around supported nearby courses"}</h2><p>Choose the courses and time window you can actually play. Tee Time Spot will email the official link when a matching opening appears.</p></div>{supported ? <CourseProfileActions slug={profile.canonicalSlug} supported selectedCourse={selectedCourse} website={null} bookingUrl={null} /> : <Link className="button button-primary" href="/search">Browse supported courses <ArrowRight size={16} /></Link>}</section>
+      <section className="knowledge-final-cta"><div><p className="eyebrow">Ready when an opening appears</p><h2>{supported ? `Get alerts for ${course.name}` : "Build an alert around nearby public courses"}</h2><p>Choose the courses and time window you can actually play. Tee Time Spot will email the official link when a matching opening appears.</p></div>{supported ? <CourseProfileActions slug={profile.canonicalSlug} supported selectedCourse={selectedCourse} website={null} bookingUrl={null} /> : <Link className="button button-primary" href="/search">Browse courses with alerts <ArrowRight size={16} /></Link>}</section>
     </main>
   );
 }

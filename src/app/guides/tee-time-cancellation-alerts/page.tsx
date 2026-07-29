@@ -23,7 +23,7 @@ const structuredData = buildPageStructuredData({
   path,
   type: "Article",
   datePublished: "2026-07-13",
-  dateModified: "2026-07-13",
+  dateModified: "2026-07-29",
   breadcrumbs: [
     { name: "Home", path: "/" },
     { name: "Guides", path: "/guides" },
@@ -37,8 +37,8 @@ export default function CancellationAlertsGuide() {
       eyebrow="Cancellation alerts"
       title="How public golf tee times come back—and how alerts help."
       intro="A full tee sheet is a snapshot, not always the final answer. Plans change, groups shrink, and individual openings can return to the public booking page."
-      summary="A cancellation alert watches supported public availability for your date, time, courses, and group size. When a match appears, it sends the official link. It cannot reserve the opening or guarantee you will get it."
-      updated="July 13, 2026"
+      summary="A cancellation alert checks public booking pages for your date, time, courses, and group size. When a match appears, it sends the official link. It cannot reserve the opening or guarantee you will get it."
+      updated="July 29, 2026"
       breadcrumbs={[
         { href: "/", label: "Home" },
         { href: "/guides", label: "Guides" }
@@ -77,7 +77,7 @@ export default function CancellationAlertsGuide() {
           <EditorialCheck>The observed tee time must be on the requested course and date.</EditorialCheck>
           <EditorialCheck>The start time must fall inside the golfer&apos;s chosen window.</EditorialCheck>
           <EditorialCheck>The public inventory must show enough spots for the group.</EditorialCheck>
-          <EditorialCheck>The booking surface must be supported and appropriate to monitor.</EditorialCheck>
+          <EditorialCheck>The public booking page must be available to check without bypassing an access control.</EditorialCheck>
           <EditorialCheck>A previously reported source match should not trigger the same alert repeatedly.</EditorialCheck>
         </EditorialChecklist>
         <p>
@@ -142,8 +142,8 @@ export default function CancellationAlertsGuide() {
       <EditorialSection id="limits" eyebrow="Set expectations" title="What cancellation alerts cannot promise.">
         <ul>
           <li>A cancellation may never happen in your selected window.</li>
-          <li>A course can be discoverable without having a supported public tee sheet.</li>
-          <li>Provider changes, outages, or policy restrictions can interrupt monitoring.</li>
+          <li>A course can appear in search before tee-time alerts are available for it.</li>
+          <li>Booking-system changes, outages, or new access requirements can interrupt alerts.</li>
           <li>Email delivery can be delayed by recipient or provider systems.</li>
           <li>The live price or conditions may differ from the observed details.</li>
           <li>The official page may show the opening as gone when you arrive.</li>

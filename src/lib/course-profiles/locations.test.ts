@@ -17,9 +17,19 @@ describe("location hub registry", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("allows only the three intentionally registered Connecticut routes", () => {
-    expect(getLocationHub(["connecticut"])?.path).toBe("/locations/connecticut");
-    expect(getLocationHub(["connecticut", "fairfield-county"])?.county).toBe("Fairfield");
-    expect(getLocationHub(["connecticut", "new-haven-county"])?.county).toBe("New Haven");
+    const connecticut = getLocationHub(["connecticut"]);
+    const fairfield = getLocationHub(["connecticut", "fairfield-county"]);
+    const newHaven = getLocationHub(["connecticut", "new-haven-county"]);
+
+    expect(connecticut?.path).toBe("/locations/connecticut");
+    expect(connecticut?.description).toMatch(/Get free email alerts when tee times open/i);
+    expect(fairfield?.county).toBe("Fairfield");
+    expect(fairfield?.description).toMatch(/Get free email alerts when tee times open/i);
+    expect(newHaven?.county).toBe("New Haven");
+    expect(newHaven?.description).toMatch(/Get free email alerts when tee times open/i);
+    expect([connecticut, fairfield, newHaven].map((hub) => hub?.description).join(" ")).not.toMatch(
+      /signed-out|supported public golf alert coverage|monitoring path/i
+    );
     expect(getLocationHub(["connecticut", "hartford-county"])).toBeNull();
     expect(getLocationHub(["new-york"])).toBeNull();
   });

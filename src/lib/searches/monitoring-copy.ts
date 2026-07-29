@@ -44,17 +44,17 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
   const details: string[] = [];
   if (firstTimeLookups.length > 0) {
     details.push(
-      `${formatCourseNames(firstTimeLookups)} ${firstTimeLookups.length === 1 ? "is a first-time course lookup" : "are first-time course lookups"}. We'll email the monitoring verdict after the first check, usually within 10 minutes. If coverage takes longer, we'll alert our course coverage team.`
+      `We haven't checked ${formatCourseNames(firstTimeLookups)} before. We'll email whether alerts are available after the first check, usually within 10 minutes.`
     );
   }
   if (otherUnconfirmed.length > 0) {
     details.push(
-      `We'll email a monitoring verdict for ${formatCourseNames(otherUnconfirmed)} after the first check, usually within 10 minutes.`
+      `We'll email whether alerts are available for ${formatCourseNames(otherUnconfirmed)} after the first check, usually within 10 minutes.`
     );
   }
   if (unavailable.length > 0) {
     details.push(
-      `Automatic monitoring is currently unavailable for ${formatCourseNames(unavailable)}. Use the official site while Tee Time Spot continues checking coverage in the background.`
+      `Tee-time alerts are currently unavailable for ${formatCourseNames(unavailable)}. Use the official site while Tee Time Spot works to restore checks.`
     );
   }
   if (manualOnly.length > 0) {
@@ -64,10 +64,10 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
       )
       .join("; ");
     const reference = manualOnly.length === 1 ? "this course" : "these courses";
-    details.push(`${statuses}. Tee Time Spot won't check ${reference} automatically.`);
+    details.push(`${statuses}. Tee Time Spot won't send automatic alerts for ${reference}.`);
   }
 
-  return `Alert saved. We'll check supported courses and email you when a match opens. ${details.join(" ")}`;
+  return `Alert saved. We'll check courses where alerts are available and email you when a match opens. ${details.join(" ")}`;
 }
 
 function formatCourseNames(courses: MonitoringCourse[]) {

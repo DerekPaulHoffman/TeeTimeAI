@@ -23,7 +23,7 @@ const structuredData = buildPageStructuredData({
   description,
   path,
   type: "AboutPage",
-  dateModified: "2026-07-13"
+  dateModified: "2026-07-29"
 });
 
 export default function AboutPage() {
@@ -32,8 +32,8 @@ export default function AboutPage() {
       eyebrow="About"
       title="Public golf openings should not require constant refreshing."
       intro="Tee Time Spot exists for the familiar moment when your preferred courses are full, your group still wants to play, and cancellations may appear later."
-      summary="Tee Time Spot is a free, email-based alert service for public golf. It watches supported availability, sends official booking links, and leaves every booking decision to the golfer."
-      updated="July 13, 2026"
+      summary="Tee Time Spot is a free email alert service for public golf. It checks available public booking pages, sends official links, and leaves every booking decision to the golfer."
+      updated="July 29, 2026"
       toc={[
         { id: "purpose", label: "Why we exist" },
         { id: "principles", label: "Product principles" },
@@ -50,8 +50,8 @@ export default function AboutPage() {
         </p>
         <p>
           Tee Time Spot turns that repeated checking into a saved alert. A golfer ranks up to five
-          courses, chooses a date, time range, and group size, then gets an email when supported
-          public availability matches. The golfer follows the official link and books directly.
+          courses, chooses a date, time range, and group size, then gets an email when a matching
+          public tee time opens. The golfer follows the official link and books directly.
         </p>
       </EditorialSection>
 
@@ -70,12 +70,12 @@ export default function AboutPage() {
             own booking page or official site.
           </EditorialCheck>
           <EditorialCheck>
-            <strong>Policy-aware.</strong> A blocked or prohibited surface is skipped rather than
-            bypassed.
+            <strong>Access-respecting.</strong> Accounts, captchas, queues, and other access controls
+            are never bypassed.
           </EditorialCheck>
           <EditorialCheck>
             <strong>Evidence-led.</strong> Course support and product changes are based on observed
-            behavior, published policy, and golfer feedback.
+            booking access, official course information, and golfer feedback.
           </EditorialCheck>
         </EditorialChecklist>
       </EditorialSection>

@@ -113,10 +113,13 @@ test.describe("Tee Time Spot UI smoke", () => {
     ).toBeVisible();
     await expect(
       page.getByText(
-        "If your top picks are full, we watch them around the clock and notify you the moment a spot becomes available.",
+        "If your top picks are full, we check their public booking pages and email you when a matching spot opens.",
         { exact: true }
       )
     ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /Connecticut tee-time alerts/ })
+    ).toHaveAttribute("href", "/locations/connecticut");
     if (testInfo.project.name.includes("mobile")) {
       const [topbarBox, heroHeadingBox] = await Promise.all([
         page.locator(".topbar").boundingBox(),
@@ -178,7 +181,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     ).toBeVisible();
     await expect(
       page.getByText(
-        "Choose your preferred courses, date, time, and group size. Tee Time Spot monitors supported public availability and emails you a direct link to the official booking page.",
+        "Choose your preferred courses, date, time, and group size. Tee Time Spot checks public booking pages and emails you a direct link to the official booking page.",
         { exact: true }
       )
     ).toBeVisible();
@@ -237,7 +240,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     const publicPages = [
       ["/how-it-works", "A tee-time alert, not another booking marketplace."],
       ["/about", "Public golf openings should not require constant refreshing."],
-      ["/methodology", "How Tee Time Spot decides what it can responsibly watch."],
+      ["/methodology", "How Tee Time Spot decides where alerts are available."],
       ["/guides", "Book smarter. Refresh less."],
       ["/guides/tee-time-cancellation-alerts", "How public golf tee times come back—and how alerts help."],
       ["/guides/public-golf-booking-windows", "The release clock matters before the cancellation watch begins."],
@@ -968,9 +971,9 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(firstCourse.getByText("4.3", { exact: true })).toBeVisible();
       await expect(firstCourse.getByText(/18H/)).toBeVisible();
       await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
-      await expect(firstCourse.getByText("Automatic monitoring confirmed", { exact: true })).toBeVisible();
+      await expect(firstCourse.getByText("Tee-time alerts available", { exact: true })).toBeVisible();
       await expect(
-        page.locator(".course-row").nth(1).getByText("Monitoring verdict after first check", {
+        page.locator(".course-row").nth(1).getByText("Alert availability after first check", {
           exact: true
         })
       ).toBeVisible();

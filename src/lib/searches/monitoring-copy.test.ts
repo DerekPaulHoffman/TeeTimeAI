@@ -16,9 +16,9 @@ describe("buildSearchSavedMessage", () => {
       { name: "Unreviewed Golf Course", firstTimeLookup: true }
     ]);
 
-    expect(message).toContain("Unreviewed Golf Course is a first-time course lookup");
+    expect(message).toContain("We haven't checked Unreviewed Golf Course before");
     expect(message).toContain("usually within 10 minutes");
-    expect(message).toContain("alert our course coverage team");
+    expect(message).toContain("whether alerts are available");
     expect(message).not.toContain("the moment a matching tee time opens up");
   });
 
@@ -26,9 +26,9 @@ describe("buildSearchSavedMessage", () => {
     const message = buildSearchSavedMessage([{ name: "Pending Golf Course" }]);
 
     expect(message).toContain(
-      "We'll email a monitoring verdict for Pending Golf Course after the first check, usually within 10 minutes"
+      "We'll email whether alerts are available for Pending Golf Course after the first check, usually within 10 minutes"
     );
-    expect(message).not.toContain("first-time course lookup");
+    expect(message).not.toContain("haven't checked");
   });
 
   it("names a phone-only course without claiming it is monitored", () => {
@@ -37,11 +37,11 @@ describe("buildSearchSavedMessage", () => {
       { name: "Timberlin Golf Course", monitoringSupport: "AUTOMATIC" }
     ]);
 
-    expect(message).toContain("We'll check supported courses");
+    expect(message).toContain("We'll check courses where alerts are available");
     expect(message).toContain(
       "Call Fairview Farm Golf Course for tee-time availability"
     );
-    expect(message).toContain("Tee Time Spot won't check this course automatically");
+    expect(message).toContain("Tee Time Spot won't send automatic alerts for this course");
   });
 
   it("can describe multiple durable manual booking modes", () => {
@@ -54,7 +54,7 @@ describe("buildSearchSavedMessage", () => {
       "Call Phone Course for tee-time availability"
     );
     expect(message).toContain("Walk-in Course handles tee times in person");
-    expect(message).toContain("Tee Time Spot won't check these courses automatically");
+    expect(message).toContain("Tee Time Spot won't send automatic alerts for these courses");
   });
 
   it("explains staff-provisioned access as setup, not private membership", () => {
@@ -69,7 +69,7 @@ describe("buildSearchSavedMessage", () => {
       "Contact Public Resort Golf Course before booking online"
     );
     expect(message).not.toContain("private");
-    expect(message).toContain("Tee Time Spot won't check this course automatically");
+    expect(message).toContain("Tee Time Spot won't send automatic alerts for this course");
   });
 
   it("tells golfers when online booking remains available without automatic monitoring", () => {
@@ -80,6 +80,6 @@ describe("buildSearchSavedMessage", () => {
     expect(message).toContain(
       "Check and book Yale University Golf Course on its official website"
     );
-    expect(message).toContain("Tee Time Spot won't check this course automatically");
+    expect(message).toContain("Tee Time Spot won't send automatic alerts for this course");
   });
 });

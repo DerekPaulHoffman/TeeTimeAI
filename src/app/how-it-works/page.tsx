@@ -13,7 +13,7 @@ import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
 const title = "How Tee Time Spot Works";
 const description =
-  "Learn how Tee Time Spot watches ranked public golf courses, matches your playing window, and emails official booking links without booking for you.";
+  "Learn how Tee Time Spot checks public golf booking pages, matches your playing window, and emails official booking links without booking for you.";
 const path = "/how-it-works";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -22,7 +22,7 @@ const structuredData = buildPageStructuredData({
   name: title,
   description,
   path,
-  dateModified: "2026-07-13"
+  dateModified: "2026-07-29"
 });
 
 export default function HowItWorksPage() {
@@ -30,9 +30,9 @@ export default function HowItWorksPage() {
     <EditorialPage
       eyebrow="How it works"
       title="A tee-time alert, not another booking marketplace."
-      intro="Tell us which public courses you prefer and when your group can play. Tee Time Spot watches supported public availability and emails you when a matching opening appears."
+      intro="Tell us which public courses you prefer and when your group can play. Tee Time Spot checks available public booking pages and emails you when a matching opening appears."
       summary="You set the preferences once. We send an alert when there is a match. The link opens the course's official booking surface, where you review and complete the booking yourself."
-      updated="July 13, 2026"
+      updated="July 29, 2026"
       toc={[
         { id: "setup", label: "Set up an alert" },
         { id: "monitoring", label: "What we monitor" },
@@ -72,18 +72,21 @@ export default function HowItWorksPage() {
         </p>
       </EditorialSection>
 
-      <EditorialSection id="monitoring" eyebrow="Step two" title="We watch only where access is appropriate.">
+      <EditorialSection
+        id="monitoring"
+        eyebrow="Step two"
+        title="We check public booking pages without crossing access controls."
+      >
         <p>
-          Tee Time Spot checks supported public tee-sheet availability on the schedule attached to
-          your active alert. We evaluate each course separately, so one unsupported or temporarily
-          unavailable source does not erase useful results from another course.
+          Tee Time Spot checks available public tee sheets on the schedule attached to your active
+          alert. We evaluate each course separately, so one unavailable booking page does not erase
+          useful results from another course.
         </p>
         <p>
-          Monitoring depends on the course&apos;s public booking setup. If a course requires a private
-          account, blocks automated retrieval, uses a captcha or queue, or prohibits automation in
-          its published terms, Tee Time Spot does not bypass that control. Unsupported courses can
-          remain in your ranked list while support is investigated, but they are not represented as
-          actively monitored when they are not.
+          Monitoring depends on the course&apos;s public booking setup. If reading the tee sheet
+          requires a private account, captcha, verification step, queue, or another access control,
+          Tee Time Spot does not bypass it. A course can remain in your ranked list while we work on
+          alert coverage, and we will not describe it as actively checked until alerts are available.
         </p>
         <EditorialNote label="Availability changes quickly">
           <p>
@@ -129,11 +132,12 @@ export default function HowItWorksPage() {
           No. The alert links to the official booking surface. You confirm availability and finish
           the booking directly with the course.
         </p>
-        <h3>Can I watch every course?</h3>
+        <h3>Can I get alerts for every course?</h3>
         <p>
-          You can rank nearby likely-public courses, but active monitoring depends on each course&apos;s
-          booking technology and access policy. Read the <Link href="/methodology">methodology</Link>
-          {" "}for the classification process.
+          You can rank nearby likely-public courses, but active alerts depend on each course&apos;s
+          booking technology and whether its public availability can be read without crossing an
+          access control. Read the <Link href="/methodology">methodology</Link> for the classification
+          process.
         </p>
         <h3>What if I already booked a backup?</h3>
         <p>
