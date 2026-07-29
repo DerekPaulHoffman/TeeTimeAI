@@ -158,7 +158,92 @@ describe("operator course inventory", () => {
     expect(result.problemSummary).toBe(
       "The official booking page returned HTTP 403, and no verified public tee-time feed was found."
     );
-    expect(result.recommendedAction).toBe("Review a signed-out public capture.");
+    expect(result.recommendedAction).toContain("check the official course surface again");
+  });
+
+  it("uses a needs-human incident over a stale auto-investigating lifecycle row", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING"),
+          incident: {
+            id: "incident-human",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "The bounded automated investigation finished.",
+            nextAction: "Automation will keep investigating this course.",
+            failureClass: "UNSUPPORTED_FAMILY"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusLabel: "Engineering verification needed",
+      automationQueueState: "NEEDS_HUMAN",
+      priorityGroup: "ACTION"
+    });
+    expect(result.recommendedAction).not.toContain("keep investigating");
+  });
+
+  it("uses a restored incident over a stale auto-investigating lifecycle row", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING"),
+          incident: {
+            id: "incident-restored",
+            status: "RESOLVED",
+            resolution: "MONITORING_RESTORED",
+            kind: "FETCH_FAILED",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "Fresh runtime verification succeeded.",
+            nextAction: null,
+            failureClass: "HTTP_5XX"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "MONITORING_RESTORED",
+      priorityGroup: "WORKING",
+      automationQueueState: null
+    });
+  });
+
+  it("shows a resolved direct-course outcome as a known limitation", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING"),
+          incident: {
+            id: "incident-manual",
+            status: "RESOLVED",
+            resolution: "DIRECT_BOOKING_CLASSIFIED",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "The course accepts direct contact only.",
+            nextAction: null,
+            failureClass: "MISSING_SOURCE"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "DIRECT_SITE_ONLY",
+      statusLabel: "Known direct-booking limitation",
+      priorityGroup: "LIMITATION",
+      automationQueueState: null
+    });
   });
 
   it("explains that no match is a successful monitor result", () => {

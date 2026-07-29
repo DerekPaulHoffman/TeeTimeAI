@@ -1,6 +1,9 @@
 import "./load-local-env";
 
-import { backfillCourseMonitoringLifecycle } from "@/lib/automation/course-monitoring-backfill";
+import {
+  backfillCourseMonitoringLifecycle,
+  reconcileCourseMonitoringLifecycle
+} from "@/lib/automation/course-monitoring-backfill";
 import {
   approveOperatorCourseTechnicalFinal,
   correctOperatorCourseBookingLink,
@@ -28,6 +31,14 @@ async function main() {
     }
     case "backfill":
       writeResult(await backfillCourseMonitoringLifecycle({ apply }));
+      return;
+    case "reconcile":
+      writeResult(
+        await reconcileCourseMonitoringLifecycle({
+          apply,
+          actorId: apply ? requireOption(args, "--actor-id") : "operator-cli-dry-run"
+        })
+      );
       return;
     case "correct-link":
       writeResult(
@@ -80,7 +91,7 @@ async function main() {
       return;
     default:
       throw new Error(
-        "Unknown command. Use inspect, backfill, correct-link, recheck, approve-final, or reopen."
+        "Unknown command. Use inspect, backfill, reconcile, correct-link, recheck, approve-final, or reopen."
       );
   }
 }

@@ -12,10 +12,26 @@ const prismaMocks = vi.hoisted(() => ({
   },
   $transaction: vi.fn()
 }));
+const transactionMocks = vi.hoisted(() => ({
+  courseMonitoringStatus: {
+    findUnique: vi.fn(),
+    updateMany: vi.fn()
+  },
+  courseSupportIncident: {
+    findUnique: vi.fn()
+  },
+  courseMonitoringEvent: {
+    create: vi.fn()
+  }
+}));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
-import { backfillCourseMonitoringLifecycle } from "./course-monitoring-backfill";
+import {
+  backfillCourseMonitoringLifecycle,
+  getIncidentLifecycleState,
+  reconcileCourseMonitoringLifecycle
+} from "./course-monitoring-backfill";
 
 function course(id: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -47,6 +63,14 @@ describe("course monitoring backfill", () => {
       _min: { date: null }
     });
     prismaMocks.courseMonitoringEvent.findMany.mockResolvedValue([]);
+    prismaMocks.$transaction.mockImplementation(
+      async (callback: (transaction: typeof transactionMocks) => Promise<unknown>) =>
+        callback(transactionMocks)
+    );
+    transactionMocks.courseMonitoringStatus.findUnique.mockReset();
+    transactionMocks.courseMonitoringStatus.updateMany.mockReset();
+    transactionMocks.courseSupportIncident.findUnique.mockReset();
+    transactionMocks.courseMonitoringEvent.create.mockReset();
   });
 
   it("reports a dry run without inventing events or reopening human finals", async () => {
@@ -118,5 +142,152 @@ describe("course monitoring backfill", () => {
       incidentsToCreate: 0,
       incidentsToConfirm: 1
     });
+  });
+
+  it("derives lifecycle state from the authoritative incident outcome", () => {
+    expect(
+      getIncidentLifecycleState({
+        incidentStatus: "NEEDS_HUMAN",
+        resolution: null,
+        currentState: "AUTO_INVESTIGATING"
+      })
+    ).toBe("ENGINEERING_VERIFICATION_NEEDED");
+    expect(
+      getIncidentLifecycleState({
+        incidentStatus: "RESOLVED",
+        resolution: "MONITORING_RESTORED",
+        currentState: "AUTO_INVESTIGATING"
+      })
+    ).toBe("HEALTHY");
+    expect(
+      getIncidentLifecycleState({
+        incidentStatus: "RESOLVED",
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        currentState: "AUTO_INVESTIGATING"
+      })
+    ).toBe("FINAL_MANUAL");
+    expect(
+      getIncidentLifecycleState({
+        incidentStatus: "RESOLVED",
+        resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+        currentState: "REVALIDATING_FINAL"
+      })
+    ).toBe("REVALIDATING_FINAL");
+    expect(
+      getIncidentLifecycleState({
+        incidentStatus: "RESOLVED",
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        currentState: "FINAL_IDENTITY"
+      })
+    ).toBeNull();
+  });
+
+  it("reports lifecycle drift without mutating on a reconciliation dry run", async () => {
+    prismaMocks.course.findMany.mockResolvedValue([
+      {
+        id: "needs-human",
+        monitoringStatus: { state: "AUTO_INVESTIGATING" },
+        supportIncident: { status: "NEEDS_HUMAN", resolution: null }
+      },
+      {
+        id: "restored",
+        monitoringStatus: { state: "AUTO_INVESTIGATING" },
+        supportIncident: {
+          status: "RESOLVED",
+          resolution: "MONITORING_RESTORED"
+        }
+      },
+      {
+        id: "aligned",
+        monitoringStatus: { state: "AUTO_INVESTIGATING" },
+        supportIncident: { status: "AUTO_INVESTIGATING", resolution: null }
+      }
+    ]);
+
+    await expect(
+      reconcileCourseMonitoringLifecycle({
+        apply: false,
+        actorId: "operator-cli-dry-run"
+      })
+    ).resolves.toEqual({
+      apply: false,
+      coursesScanned: 3,
+      mismatchesFound: 2,
+      transitions: {
+        "AUTO_INVESTIGATING->ENGINEERING_VERIFICATION_NEEDED": 1,
+        "AUTO_INVESTIGATING->HEALTHY": 1
+      },
+      applied: 0,
+      skippedAfterRefresh: 0
+    });
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("rechecks current revisions and appends an audited event when applying", async () => {
+    prismaMocks.course.findMany.mockResolvedValue([
+      {
+        id: "needs-human",
+        monitoringStatus: { state: "AUTO_INVESTIGATING" },
+        supportIncident: { status: "NEEDS_HUMAN", resolution: null }
+      }
+    ]);
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      courseId: "needs-human",
+      state: "AUTO_INVESTIGATING",
+      revision: 4
+    });
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-human",
+      courseId: "needs-human",
+      cycle: 2,
+      revision: 7,
+      status: "NEEDS_HUMAN",
+      resolution: null,
+      failureFingerprint: "SOURCE_MISSING:MISSING_SOURCE",
+      nextAttemptAt: new Date("2026-07-29T18:00:00.000Z"),
+      resolvedAt: null
+    });
+    transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({
+      count: 1
+    });
+    transactionMocks.courseMonitoringEvent.create.mockResolvedValue({
+      id: "event-1"
+    });
+
+    await expect(
+      reconcileCourseMonitoringLifecycle({
+        apply: true,
+        actorId: "operator-test",
+        now: new Date("2026-07-29T17:45:00.000Z")
+      })
+    ).resolves.toMatchObject({
+      mismatchesFound: 1,
+      applied: 1,
+      skippedAfterRefresh: 0
+    });
+    expect(transactionMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          courseId: "needs-human",
+          revision: 4,
+          state: "AUTO_INVESTIGATING"
+        },
+        data: expect.objectContaining({
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: { increment: 1 }
+        })
+      })
+    );
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: "STATE_CHANGED",
+          source: "OPERATOR_CLI",
+          fromState: "AUTO_INVESTIGATING",
+          toState: "ENGINEERING_VERIFICATION_NEEDED",
+          operatorActorId: "operator-test"
+        })
+      })
+    );
   });
 });

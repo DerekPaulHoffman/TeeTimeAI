@@ -36,6 +36,155 @@ export type CourseMonitoringBackfillReport = {
   };
 };
 
+export type CourseMonitoringReconciliationReport = {
+  apply: boolean;
+  coursesScanned: number;
+  mismatchesFound: number;
+  transitions: Record<string, number>;
+  applied: number;
+  skippedAfterRefresh: number;
+};
+
+export async function reconcileCourseMonitoringLifecycle(input: {
+  apply: boolean;
+  actorId: string;
+  now?: Date;
+}): Promise<CourseMonitoringReconciliationReport> {
+  const now = input.now ?? new Date();
+  const courses = await prisma.course.findMany({
+    where: {
+      supportIncident: { isNot: null },
+      monitoringStatus: { isNot: null }
+    },
+    select: {
+      id: true,
+      monitoringStatus: {
+        select: {
+          state: true
+        }
+      },
+      supportIncident: {
+        select: {
+          status: true,
+          resolution: true
+        }
+      }
+    }
+  });
+  const mismatches = courses.flatMap((course) => {
+    if (!course.monitoringStatus || !course.supportIncident) {
+      return [];
+    }
+    const desiredState = getIncidentLifecycleState({
+      incidentStatus: course.supportIncident.status,
+      resolution: course.supportIncident.resolution,
+      currentState: course.monitoringStatus.state
+    });
+    return desiredState && desiredState !== course.monitoringStatus.state
+      ? [
+          {
+            courseId: course.id,
+            fromState: course.monitoringStatus.state,
+            toState: desiredState
+          }
+        ]
+      : [];
+  });
+  const report: CourseMonitoringReconciliationReport = {
+    apply: input.apply,
+    coursesScanned: courses.length,
+    mismatchesFound: mismatches.length,
+    transitions: Object.fromEntries(
+      [...new Set(mismatches.map((item) => `${item.fromState}->${item.toState}`))].map(
+        (transition) => [
+          transition,
+          mismatches.filter((item) => `${item.fromState}->${item.toState}` === transition).length
+        ]
+      )
+    ),
+    applied: 0,
+    skippedAfterRefresh: 0
+  };
+  if (!input.apply) {
+    return report;
+  }
+
+  for (const mismatch of mismatches) {
+    const outcome = await prisma.$transaction(
+      async (transaction) => {
+        const [status, incident] = await Promise.all([
+          transaction.courseMonitoringStatus.findUnique({
+            where: { courseId: mismatch.courseId }
+          }),
+          transaction.courseSupportIncident.findUnique({
+            where: { courseId: mismatch.courseId }
+          })
+        ]);
+        if (!status || !incident) {
+          return "skipped" as const;
+        }
+        const desiredState = getIncidentLifecycleState({
+          incidentStatus: incident.status,
+          resolution: incident.resolution,
+          currentState: status.state
+        });
+        if (!desiredState || desiredState === status.state) {
+          return "skipped" as const;
+        }
+        const updated = await transaction.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: mismatch.courseId,
+            revision: status.revision,
+            state: status.state
+          },
+          data: getReconciledMonitoringUpdate({
+            desiredState,
+            incident,
+            now
+          })
+        });
+        if (updated.count !== 1) {
+          return "skipped" as const;
+        }
+        await transaction.courseMonitoringEvent.create({
+          data: {
+            courseId: mismatch.courseId,
+            incidentId: incident.id,
+            eventType: desiredState === "HEALTHY" ? "RECOVERED" : "STATE_CHANGED",
+            source: "OPERATOR_CLI",
+            fromState: status.state,
+            toState: desiredState,
+            failureFingerprint:
+              desiredState === "AUTO_INVESTIGATING" ||
+              desiredState === "ENGINEERING_VERIFICATION_NEEDED"
+                ? incident.failureFingerprint
+                : null,
+            operatorActorId: input.actorId,
+            message:
+              "Reconciled the course monitoring lifecycle to the authoritative support incident outcome.",
+            idempotencyKey: `course-monitoring-reconcile-v1:${incident.id}:${incident.cycle}:${incident.revision}:${desiredState}`,
+            occurredAt: now,
+            audit: {
+              priorState: status.state,
+              incidentStatus: incident.status,
+              incidentResolution: incident.resolution,
+              customerDataIncluded: false
+            }
+          }
+        });
+        return "applied" as const;
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    );
+    if (outcome === "applied") {
+      report.applied += 1;
+    } else {
+      report.skippedAfterRefresh += 1;
+    }
+  }
+  return report;
+}
+
 export async function backfillCourseMonitoringLifecycle(input: {
   apply: boolean;
   now?: Date;
@@ -91,9 +240,8 @@ export async function backfillCourseMonitoringLifecycle(input: {
         automationEligibility: course.automationEligibility,
         bookingAccessMode: course.bookingAccessMode,
         latestProbeOutcome: course.probes[0]?.outcome,
-        incidentOpen: Boolean(
-          course.supportIncident && course.supportIncident.status !== "RESOLVED"
-        ),
+        incidentStatus: course.supportIncident?.status ?? null,
+        incidentResolution: course.supportIncident?.resolution ?? null,
         readerCandidate,
         humanApprovedTechnicalFinal
       });
@@ -375,10 +523,21 @@ function getBaselineState(input: {
   automationEligibility: string;
   bookingAccessMode: string;
   latestProbeOutcome?: string;
-  incidentOpen: boolean;
+  incidentStatus: string | null;
+  incidentResolution: string | null;
   readerCandidate: boolean;
   humanApprovedTechnicalFinal: boolean;
 }): CourseMonitoringState {
+  if (input.incidentStatus) {
+    const incidentState = getIncidentLifecycleState({
+      incidentStatus: input.incidentStatus,
+      resolution: input.incidentResolution,
+      currentState: "UNKNOWN"
+    });
+    if (incidentState) {
+      return incidentState;
+    }
+  }
   if (input.humanApprovedTechnicalFinal) {
     return "FINAL_TECHNICAL";
   }
@@ -395,7 +554,6 @@ function getBaselineState(input: {
     return "HEALTHY";
   }
   if (
-    input.incidentOpen ||
     input.readerCandidate ||
     (input.automationEligibility === "BLOCKED" &&
       (input.bookingAccessMode === "CAPTCHA_OR_QUEUE" ||
@@ -407,6 +565,73 @@ function getBaselineState(input: {
     return "AUTO_INVESTIGATING";
   }
   return "UNKNOWN";
+}
+
+export function getIncidentLifecycleState(input: {
+  incidentStatus: string;
+  resolution: string | null;
+  currentState: CourseMonitoringState;
+}): CourseMonitoringState | null {
+  if (input.currentState === "REVALIDATING_FINAL") {
+    return "REVALIDATING_FINAL";
+  }
+  if (input.incidentStatus === "NEEDS_HUMAN") {
+    return "ENGINEERING_VERIFICATION_NEEDED";
+  }
+  if (input.incidentStatus === "AUTO_INVESTIGATING") {
+    return "AUTO_INVESTIGATING";
+  }
+  if (input.incidentStatus !== "RESOLVED") {
+    return null;
+  }
+  if (
+    input.currentState !== "DEGRADED_RETRYING" &&
+    input.currentState !== "AUTO_INVESTIGATING" &&
+    input.currentState !== "ENGINEERING_VERIFICATION_NEEDED"
+  ) {
+    return null;
+  }
+  if (input.resolution === "MONITORING_RESTORED") {
+    return "HEALTHY";
+  }
+  if (input.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION") {
+    return "FINAL_TECHNICAL";
+  }
+  if (
+    input.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+    input.resolution === "SOURCE_UNVERIFIED"
+  ) {
+    return "FINAL_MANUAL";
+  }
+  return null;
+}
+
+function getReconciledMonitoringUpdate(input: {
+  desiredState: CourseMonitoringState;
+  incident: {
+    status: string;
+    resolution: string | null;
+    failureFingerprint: string;
+    nextAttemptAt: Date | null;
+    resolvedAt: Date | null;
+  };
+  now: Date;
+}): Prisma.CourseMonitoringStatusUpdateManyMutationInput {
+  const investigating =
+    input.desiredState === "AUTO_INVESTIGATING" ||
+    input.desiredState === "ENGINEERING_VERIFICATION_NEEDED";
+  return {
+    state: input.desiredState,
+    lastSuccessfulAt:
+      input.desiredState === "HEALTHY" ? (input.incident.resolvedAt ?? input.now) : undefined,
+    consecutiveFailures: investigating ? undefined : 0,
+    failureFingerprint: investigating ? input.incident.failureFingerprint : null,
+    firstDegradedAt: investigating ? undefined : null,
+    nextAutomaticAttemptAt: investigating ? input.incident.nextAttemptAt : null,
+    revalidationRequestedAt: null,
+    stateChangedAt: input.now,
+    revision: { increment: 1 }
+  };
 }
 
 function isAutomatedTechnicalFinal(course: {

@@ -167,6 +167,7 @@ export type CourseStatusInput = {
   incident: {
     id: string;
     status: string;
+    resolution?: string | null;
     kind: string;
     activeRealSearchCount: number;
     engineeringOnly?: boolean;
@@ -385,6 +386,78 @@ function classifyCourseStatus(
   course: CourseStatusInput,
   now: Date
 ): Omit<CourseInventoryItem, "automationQueueState"> {
+  if (course.incident?.status === "NEEDS_HUMAN") {
+    return withStatus(course, "REVIEW_REQUIRED", {
+      priorityGroup: "ACTION",
+      priorityScore: 0,
+      tone: "critical",
+      labelOverride: "Engineering verification needed",
+      meaningOverride:
+        "AI finished its bounded checks but still needs you to confirm the course works or provide more course information.",
+      actionOverride:
+        "Open the redacted course history, check the official course surface again, then confirm the result or add the missing details and request another AI recheck."
+    });
+  }
+  if (course.incident?.status === "AUTO_INVESTIGATING") {
+    const operatorRecheckQueued =
+      course.monitoringStatus?.revalidationRequestedAt !== null &&
+      course.monitoringStatus?.revalidationRequestedAt !== undefined;
+    return withStatus(course, statusKeyForFailure(course.incident.kind, course.bookingAccessMode), {
+      priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+      priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
+      tone: hasActivePriorityAlert(course) ? "critical" : "warning",
+      labelOverride: operatorRecheckQueued ? "AI recheck queued" : "Auto investigating",
+      meaningOverride: operatorRecheckQueued
+        ? "Your note is saved and waiting for AI to run a fresh course verification."
+        : "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
+      actionOverride: operatorRecheckQueued
+        ? "No action is needed yet. Wait for AI to finish; this course will move to Engineering verification needed only if you must confirm the result or provide more information."
+        : (course.incident.nextAction ??
+          "Automation owns safe provider, browser, metadata, reader, adapter, and fresh-runtime verification until the deadline.")
+    });
+  }
+  if (
+    course.incident?.status === "RESOLVED" &&
+    isStaleInvestigationState(course.monitoringStatus?.state)
+  ) {
+    if (course.incident.resolution === "MONITORING_RESTORED") {
+      return withStatus(course, "MONITORING_RESTORED", {
+        priorityGroup: "WORKING",
+        priorityScore: 5,
+        tone: "positive"
+      });
+    }
+    if (course.incident.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION") {
+      const statusKey =
+        course.bookingAccessMode === "CAPTCHA_OR_QUEUE" ? "CAPTCHA_OR_QUEUE" : "ACCOUNT_REQUIRED";
+      return withStatus(course, statusKey, {
+        priorityGroup: "LIMITATION",
+        priorityScore: 3,
+        tone: "neutral",
+        labelOverride: "Engineer-verified limitation",
+        meaningOverride:
+          "An engineer reviewed current official evidence and approved this precise technical limitation.",
+        actionOverride:
+          "No timer-based polling is scheduled. New real demand will trigger one safe revalidation."
+      });
+    }
+    if (
+      course.incident.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+      course.incident.resolution === "SOURCE_UNVERIFIED"
+    ) {
+      return withStatus(course, "DIRECT_SITE_ONLY", {
+        priorityGroup: "LIMITATION",
+        priorityScore: 3,
+        tone: "neutral",
+        labelOverride: "Known direct-booking limitation",
+        meaningOverride:
+          "The investigation reached a final direct-course or source-unavailable outcome; no automated repair is still running.",
+        actionOverride:
+          "Keep the official course details available to golfers and re-check only when stronger public booking evidence appears."
+      });
+    }
+  }
+
   const latestSuccessfulEvidence = getLatestSuccessfulEvidence(course);
   if (
     latestSuccessfulEvidence &&
@@ -864,6 +937,14 @@ function isRecoverableMonitoringState(state: string | undefined) {
     state === "AUTO_INVESTIGATING" ||
     state === "ENGINEERING_VERIFICATION_NEEDED" ||
     state === "REVALIDATING_FINAL"
+  );
+}
+
+function isStaleInvestigationState(state: string | undefined) {
+  return (
+    state === "DEGRADED_RETRYING" ||
+    state === "AUTO_INVESTIGATING" ||
+    state === "ENGINEERING_VERIFICATION_NEEDED"
   );
 }
 
