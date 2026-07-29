@@ -92,6 +92,90 @@ describe("search status email cadence", () => {
 });
 
 describe("renderSearchStatusHtml", () => {
+  it("combines openings, terminal contact guidance, and monitoring setup for all five courses", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-five-course-setup",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-08-02",
+      startTime: "11:00",
+      endTime: "14:00",
+      players: 1,
+      checkedAt: new Date("2026-07-29T14:19:48.000Z"),
+      courses: [
+        {
+          courseId: "quaboag",
+          courseName: "Quaboag Valley Golf Course",
+          rank: 1,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://quaboag.example/tee-times"
+        },
+        {
+          courseId: "skungamaug",
+          courseName: "Skungamaug River Golf Club",
+          rank: 2,
+          outcome: "MATCH_FOUND",
+          availableMatches: 1,
+          bookingUrl: "https://skungamaug.example/tee-times",
+          matchingTimes: [
+            {
+              startsAt: "2026-08-02T11:04:00-04:00",
+              availableSpots: 4,
+              priceCents: 4400,
+              holes: 18,
+              isNew: true
+            }
+          ]
+        },
+        {
+          courseId: "cedar-knob",
+          courseName: "Cedar Knob Golf Course",
+          rank: 3,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://cedar-knob.example/"
+        },
+        {
+          courseId: "hemlock-ridge",
+          courseName: "Hemlock Ridge Golf Course",
+          rank: 4,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://hemlock-ridge.example/"
+        },
+        {
+          courseId: "pine-knoll",
+          courseName: "Pine Knoll Executive Golf Course",
+          rank: 5,
+          outcome: "MANUAL_DIRECT",
+          availableMatches: 0,
+          bookingMethod: "CONTACT_COURSE",
+          automationReason: "NO_ONLINE_BOOKING",
+          bookingAccessMode: "CONTACT_COURSE",
+          monitoringDisposition: "MANUAL_FINAL",
+          phone: "(860) 555-0100"
+        }
+      ]
+    });
+
+    for (const courseName of [
+      "Quaboag Valley Golf Course",
+      "Skungamaug River Golf Club",
+      "Cedar Knob Golf Course",
+      "Hemlock Ridge Golf Course",
+      "Pine Knoll Executive Golf Course"
+    ]) {
+      expect(html.match(new RegExp(courseName, "g"))).toHaveLength(1);
+    }
+    expect(html).toContain("PRIORITY 2");
+    expect(html).toContain("AVAILABLE NOW");
+    expect(html).toContain("11:04 AM");
+    expect(html.match(/SETTING UP MONITORING/g)).toHaveLength(3);
+    expect(html).toContain("Please check directly with the course");
+    expect(html).toContain('href="tel:8605550100"');
+  });
+
   it("shows the exact provider-confirmed booking release time", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-window",
@@ -142,15 +226,15 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("AUTOMATIC ALERTS UNAVAILABLE");
-    expect(html).toContain("Use the official site for this course");
+    expect(html).toContain("SETTING UP MONITORING");
+    expect(html).toContain("working on reliable monitoring");
     expect(html).toContain("Every selected course has a result below");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we're watching for you");
     expect(html).toContain("COURSE LAYOUT");
     expect(html).toContain("18 Holes");
     expect(html).toContain("CHECKING FOR TEE TIMES");
-    expect(html).toContain("at most one morning status update per day");
+    expect(html).not.toContain("at most one morning status update per day");
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
     expect(html).toContain("x=&lt;unsafe&gt;");
@@ -235,7 +319,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
-    expect(html).toContain("PRIORITY 2 &middot; AUTOMATIC ALERTS UNAVAILABLE");
+    expect(html).toContain("PRIORITY 2 &middot; SETTING UP MONITORING");
   });
 
   it("revalidates a generic legacy block instead of treating it as final", () => {

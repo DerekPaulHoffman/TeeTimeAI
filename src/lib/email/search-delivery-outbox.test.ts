@@ -3953,21 +3953,23 @@ describe("search email delivery outbox", () => {
     expect(getSafeOfficialBookingUrl("javascript:alert(1)")).toBeUndefined();
   });
 
-  it("lists only retryable match groups", async () => {
+  it("lists retryable setup and match groups while daily email stays disabled", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: true },
-      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: false }
+      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: false },
+      { kind: "SETUP", groupKey: "group-2", createdAt: new Date(now.getTime() - 1_000), isOwnerRecipient: true }
     ] as never);
 
     await expect(
       listRetryableSearchEmailDeliveryGroups({ searchId: "search-1", alertGeneration: 3 })
     ).resolves.toEqual([
-      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), ownerRetryable: true }
+      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), ownerRetryable: true },
+      { kind: "SETUP", groupKey: "group-2", createdAt: new Date(now.getTime() - 1_000), ownerRetryable: true }
     ]);
     expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          kind: "MATCH"
+          kind: { in: ["SETUP", "MATCH"] }
         })
       })
     );

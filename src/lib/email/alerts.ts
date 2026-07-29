@@ -4,7 +4,11 @@ import { Resend, type ErrorResponse } from "resend";
 
 import { getRenderedAvailabilityTimes, renderCustomerEmail } from "@/lib/email/customer-email";
 import { isVercelProduction } from "@/lib/env";
-import type { SearchStatusEmailInput } from "@/lib/email/search-status";
+import { isSearchEmailDeliveryEnabled } from "@/lib/email/delivery-policy";
+import {
+  renderSearchStatusHtml,
+  type SearchStatusEmailInput
+} from "@/lib/email/search-status";
 import { buildEmailStopUrls, type EmailStopUrls } from "@/lib/email/search-actions";
 import { DEFAULT_TIME_ZONE, normalizeTimeZone } from "@/lib/timezones";
 
@@ -170,12 +174,72 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
 }
 
 export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Promise<EmailDelivery> {
-  console.info("[email:status-disabled]", {
-    recipientRef: createLogReference(input.to),
-    searchRef: createLogReference(input.searchId),
-    kind: input.kind
-  });
-  return { id: "suppressed", deliveryStatus: "dry_run" };
+  const deliveryKind = input.kind === "setup" ? "SETUP" : "DAILY";
+  if (!isSearchEmailDeliveryEnabled(deliveryKind)) {
+    console.info("[email:status-disabled]", {
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
+      kind: input.kind
+    });
+    return { id: "suppressed", deliveryStatus: "dry_run" };
+  }
+
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+
+  if (shouldDryRunRecipient(input.to)) {
+    console.warn("[email:status-dry-run]", {
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
+      kind: input.kind,
+      targetDate: input.targetDate,
+      courses: input.courses.length
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+  if (!apiKey || !from) {
+    if (isVercelProduction()) {
+      throw new EmailDeliveryConfigurationError();
+    }
+    console.warn("[email:status-not-configured-dry-run]", {
+      recipientRef: createLogReference(input.to),
+      searchRef: createLogReference(input.searchId),
+      kind: input.kind,
+      targetDate: input.targetDate
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+
+  const email = {
+    from,
+    to: input.to,
+    subject:
+      input.kind === "setup"
+        ? "Your Tee Time Spot alert is active"
+        : "Your morning Tee Time Spot update",
+    html: renderSearchStatusHtml({
+      ...input,
+      stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)
+    })
+  };
+  const result = await new Resend(apiKey).emails.send(
+    email,
+    input.stableIdempotencyKey || input.idempotencyKey
+      ? {
+          headers: {
+            "Idempotency-Key":
+              input.stableIdempotencyKey ??
+              buildContentScopedEmailIdempotencyKey(input.idempotencyKey!, email)
+          }
+        }
+      : undefined
+  );
+
+  if (result.error) {
+    throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
+  }
+
+  return { ...result.data, deliveryStatus: "sent" };
 }
 
 export async function sendAutomationWorkerHealthEmail(

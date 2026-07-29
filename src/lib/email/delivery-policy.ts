@@ -1,9 +1,9 @@
 import type { SearchEmailDeliveryKind } from "@prisma/client";
 
 export function areSearchStatusEmailsEnabled() {
-  return false;
+  return true;
 }
 
 export function isSearchEmailDeliveryEnabled(kind: SearchEmailDeliveryKind) {
-  return kind === "MATCH";
+  return kind === "MATCH" || kind === "SETUP";
 }

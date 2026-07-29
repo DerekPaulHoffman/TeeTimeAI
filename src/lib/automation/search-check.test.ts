@@ -32,7 +32,8 @@ const emailMocks = vi.hoisted(() => ({
 }));
 
 const deliveryPolicyMocks = vi.hoisted(() => ({
-  areSearchStatusEmailsEnabled: vi.fn()
+  areSearchStatusEmailsEnabled: vi.fn(),
+  isSearchEmailDeliveryEnabled: vi.fn()
 }));
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
@@ -217,6 +218,7 @@ describe("runSearchCheck email cadence", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-11T12:10:00.000Z"));
     deliveryPolicyMocks.areSearchStatusEmailsEnabled.mockReturnValue(true);
+    deliveryPolicyMocks.isSearchEmailDeliveryEnabled.mockReturnValue(true);
     courseMonitoringMocks.getCourseMonitoringRetryAt.mockImplementation(
       async (_courseIds, options) =>
         options?.transientRetryCourseIds?.length ? new Date(Date.now() + 2 * 60 * 1000) : null

@@ -68,7 +68,10 @@ import type {
 } from "@/lib/courses/intelligence";
 import { getCourseLayoutCompatibility, getCourseLayoutLabel } from "@/lib/courses/course-layout";
 import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
-import { areSearchStatusEmailsEnabled } from "@/lib/email/delivery-policy";
+import {
+  areSearchStatusEmailsEnabled,
+  isSearchEmailDeliveryEnabled
+} from "@/lib/email/delivery-policy";
 import {
   drainSearchEmailDeliveryGroup,
   finalizeSearchEmailDeliveryGroup,
@@ -980,10 +983,12 @@ async function checkSearch(
   const checkedAt = new Date();
   const statusEmailsEnabled = areSearchStatusEmailsEnabled();
   const statusKindBeforeRetry = statusEmailsEnabled
-    ? getSearchStatusEmailKind(
-        search.statusEmailSentAt,
-        checkedAt,
-        search.userTimeZone
+    ? getEnabledSearchStatusEmailKind(
+        getSearchStatusEmailKind(
+          search.statusEmailSentAt,
+          checkedAt,
+          search.userTimeZone
+        )
       )
     : null;
   const retriedDeliveries = await retryExistingSearchEmailDeliveryGroups({
@@ -1013,6 +1018,12 @@ async function checkSearch(
         alertGeneration: search.alertGeneration
       })
     : null;
+  if (
+    pendingStatusReplacement &&
+    !isSearchEmailDeliveryEnabled(pendingStatusReplacement.kind)
+  ) {
+    pendingStatusReplacement = null;
+  }
   if (retriedMatchCoveredDaily && pendingStatusReplacement?.kind === "DAILY") {
     const satisfied = await satisfyPendingDailyStatusReplacementWithMatch({
       searchId: search.id,
@@ -1034,7 +1045,13 @@ async function checkSearch(
       ? pendingStatusReplacement.kind === "SETUP"
         ? "setup"
         : "daily"
-      : getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone)
+      : getEnabledSearchStatusEmailKind(
+          getSearchStatusEmailKind(
+            search.statusEmailSentAt,
+            checkedAt,
+            search.userTimeZone
+          )
+        )
     : null;
   let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
     retriedMatchCoveredDaily
@@ -1162,6 +1179,17 @@ async function checkSearch(
     supportRetryAt,
     statusEmailOutcome
   };
+}
+
+function getEnabledSearchStatusEmailKind(
+  kind: SearchStatusEmailKind | null
+): SearchStatusEmailKind | null {
+  if (!kind) {
+    return null;
+  }
+  return isSearchEmailDeliveryEnabled(kind === "setup" ? "SETUP" : "DAILY")
+    ? kind
+    : null;
 }
 
 function getCoveredPendingMatchIds(

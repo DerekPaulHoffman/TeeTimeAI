@@ -13,6 +13,7 @@ import {
   EmailDeliveryNotAcceptedError,
   type TeeTimeAlertInput
 } from "@/lib/email/alerts";
+import { isSearchEmailDeliveryEnabled } from "@/lib/email/delivery-policy";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import {
   canonicalSearchEmailJson as canonicalJson,
@@ -757,7 +758,11 @@ export async function listRetryableSearchEmailDeliveryGroups(input: {
     where: {
       teeSearchId: input.searchId,
       alertGeneration: input.alertGeneration,
-      kind: "MATCH",
+      kind: {
+        in: (["SETUP", "DAILY", "MATCH"] as const).filter(
+          isSearchEmailDeliveryEnabled
+        )
+      },
       status: { in: ["PENDING", "FAILED", "SENDING"] }
     },
     select: {

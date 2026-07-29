@@ -277,7 +277,7 @@ describe("email alert delivery helpers", () => {
     });
   });
 
-  it("fails retryably only for match alerts when production email configuration is missing", async () => {
+  it("fails retryably for match and setup emails when production configuration is missing", async () => {
     await withMissingProductionEmailConfiguration(async () => {
       const expectedError = {
         name: "EmailDeliveryConfigurationError",
@@ -312,11 +312,11 @@ describe("email alert delivery helpers", () => {
           checkedAt: new Date("2026-07-10T12:00:00.000Z"),
           courses: []
         })
-      ).resolves.toEqual({ id: "suppressed", deliveryStatus: "dry_run" });
+      ).rejects.toMatchObject(expectedError);
     });
   });
 
-  it("suppresses setup status reports for every recipient", async () => {
+  it("dry-runs setup status reports for reserved recipients", async () => {
     await withMissingProductionEmailConfiguration(async () => {
       const result = await sendSearchStatusEmail({
         searchId: "search-1",
@@ -339,7 +339,7 @@ describe("email alert delivery helpers", () => {
         idempotencyKey: "tee-search-status-test-setup"
       });
 
-      expect(result).toEqual({ id: "suppressed", deliveryStatus: "dry_run" });
+      expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
     });
   });
 
