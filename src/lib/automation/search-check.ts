@@ -309,6 +309,8 @@ async function checkSearch(
       const localReaderEligible = getLocalReaderCourseKey(customerBookingUrl) !== null;
       const providerFamilyKey = resolveProviderCapability(course).providerFamilyKey;
       const cpsLocalReaderPreferred = localReaderEligible && providerFamilyKey === "CPS";
+      const chronogolfLocalReaderPreferred =
+        localReaderEligible && providerFamilyKey === "CHRONOGOLF";
       const supportedAdapterAvailable = hasSupportedAdapter(course);
 
       const monitoringGate = evaluateMonitoringGate(course);
@@ -547,7 +549,10 @@ async function checkSearch(
       try {
         const localReaderShouldRun =
           localReaderEligible &&
-          (cpsLocalReaderPreferred || localReaderCanOverrideGate || !supportedAdapterAvailable);
+          (cpsLocalReaderPreferred ||
+            chronogolfLocalReaderPreferred ||
+            localReaderCanOverrideGate ||
+            !supportedAdapterAvailable);
         const localTeeSheet = localReaderShouldRun
           ? await getFreshLocalReaderTeeSheet({
               searchId: search.id,

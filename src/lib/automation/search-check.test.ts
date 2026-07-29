@@ -1906,6 +1906,76 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
+  it("prefers a fresh allowlisted Chronogolf reader result before the server adapter", async () => {
+    const bookingUrl = "https://www.chronogolf.com/club/hyde-park-golf-club";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Hyde Park Golf Club",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            policyNotes: null,
+            detectedPlatform: "CHRONOGOLF",
+            providerFamilyKey: "CHRONOGOLF",
+            detectedBookingUrl: bookingUrl,
+            bookingMetadata: {
+              provider: "CHRONOGOLF",
+              clubId: 4006,
+              courseIds: ["5d8f129e-e7b8-4855-970c-bd3bc39879a3"],
+              bookingBaseUrl: bookingUrl
+            }
+          }
+        }
+      ]
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isChronogolfMetadata.mockReturnValue(true);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("hyde-park");
+    localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue({
+      slots: [
+        {
+          sourceId: "local-hyde-park-2026-07-12T09:10:00",
+          courseId: "course-1",
+          startsAt: "2026-07-12T09:10:00",
+          availableSpots: 4,
+          bookingUrl,
+          priceCents: 3900,
+          holes: 18,
+          bookableHoleCounts: [9, 18]
+        }
+      ],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+      readerVersion: "chronogolf-rendered-v1"
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledWith({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      targetDate: "2026-07-12",
+      players: 2
+    });
+    expect(adapterMocks.fetchChronogolfSlots).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "MATCH_FOUND",
+      availableMatches: 1
+    });
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rawSummary: expect.objectContaining({
+          providerExecution: "LOCAL_BROWSER_READER"
+        })
+      })
+    );
+  });
+
   it("retries a persisted match delivery group even after no match remains globally pending", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
