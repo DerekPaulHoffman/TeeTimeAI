@@ -205,6 +205,9 @@ export type BrowserDiscovery = {
     clubSlug: string;
     bookingBaseUrl: string;
   } | {
+    provider: "SUPREME_GOLF";
+    bookingBaseUrl: string;
+  } | {
     clubId: number;
     courseIds: string[];
     bookingBaseUrl: string;
@@ -725,6 +728,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     learnGolfBackDiscovery(providerEvidence, providerObservedUrls),
     learnGolfNowDiscovery(providerEvidence, providerObservedUrls),
     learnWebTracDiscovery(providerEvidence, providerObservedUrls),
+    learnSupremeGolfDiscovery(providerEvidence, providerObservedUrls),
     learnClubCaddieDiscovery(providerEvidence, providerObservedUrls),
     learnProtectedCpsDiscovery(providerEvidence, providerObservedUrls),
     learnCpsDiscovery(providerEvidence, providerObservedUrls),
@@ -1857,6 +1861,66 @@ function learnWebTracDiscovery(
       observedUrls,
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "webtrac-public-golf-search"
+    }
+  };
+}
+
+function learnSupremeGolfDiscovery(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const candidates = uniqueUrls([
+    ...observedUrls,
+    ...(evidence.linkCandidates ?? []).map(({ url }) => url),
+    ...(evidence.officialPage?.linkCandidates ?? []).map(({ url }) => url)
+  ]).flatMap((value) => {
+    const url = parseUrl(value);
+    if (
+      !url ||
+      url.hostname.toLocaleLowerCase("en-US") !== "sgnavigator.app" ||
+      !/^\/portal\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/book(?:\/[1-9]\d{0,9})?\/?$/iu.test(
+        url.pathname
+      )
+    ) {
+      return [];
+    }
+    url.protocol = "https:";
+    url.search = "";
+    url.hash = "";
+    return [url.toString().replace(/\/+$/u, "")];
+  });
+  if (candidates.length === 0) {
+    return null;
+  }
+  const bookingBaseUrl =
+    candidates.find((url) => /\/book\/[1-9]\d{0,9}$/u.test(url)) ??
+    candidates.find((url) => /\/book$/u.test(url));
+  if (!bookingBaseUrl) {
+    return null;
+  }
+
+  return {
+    courseId: evidence.courseId,
+    status: "LEARNED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes:
+      "The course's official site links to a public Supreme Golf Navigator tee sheet. Tee Time Spot reads signed-out server-rendered availability only and leaves account, waitlist, cart, payment, and booking actions to the golfer.",
+    apiEndpoint: `${bookingBaseUrl}/{date}`,
+    apiMetadata: {
+      provider: "SUPREME_GOLF",
+      bookingBaseUrl
+    },
+    confidence: 0.96,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "supreme-golf-public-tee-sheet"
     }
   };
 }

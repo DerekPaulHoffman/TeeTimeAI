@@ -13,6 +13,7 @@ import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { isWebTracMetadata } from "@/lib/adapters/webtrac";
 import { isWhooshMetadata } from "@/lib/adapters/whoosh";
+import { isSupremeGolfMetadata } from "@/lib/adapters/supreme-golf";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 
 export const SOURCE_MISSING_PROVIDER_FAMILY = "SOURCE_MISSING" as const;
@@ -33,6 +34,7 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "AGILYSYS",
   "CLUB_CADDIE",
   "WHOOSH",
+  "SUPREME_GOLF",
   "TENFORE"
 ] as const;
 
@@ -194,6 +196,13 @@ export const PROVIDER_CAPABILITIES = {
     matchesHostname: (hostname) => matchesDomain(hostname, "whoosh.io"),
     validatesMetadata: isWhooshMetadata
   },
+  SUPREME_GOLF: {
+    family: "SUPREME_GOLF",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: true,
+    matchesHostname: (hostname) => hostname === "sgnavigator.app",
+    validatesMetadata: isSupremeGolfMetadata
+  },
   TENFORE: {
     family: "TENFORE",
     detectedPlatform: "CUSTOM",
@@ -257,7 +266,8 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
   ["WEBTRAC", "WEBTRAC"],
   ["CLUB_CADDIE", "CLUB_CADDIE"],
-  ["WHOOSH", "WHOOSH"]
+  ["WHOOSH", "WHOOSH"],
+  ["SUPREME_GOLF", "SUPREME_GOLF"]
 ]);
 
 export function resolveProviderCapability(
@@ -719,6 +729,14 @@ function isProviderFamilyPublicBookingLandingUrl(
         /^\/patron\/club\/[a-z0-9][a-z0-9_-]{0,127}\/?$/iu.test(pathname) &&
         !url.hash
       );
+    case "SUPREME_GOLF":
+      return Boolean(
+        hostname === "sgnavigator.app" &&
+        /^\/portal\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/book(?:\/[1-9]\d{0,9})?\/?$/iu.test(
+          pathname
+        ) &&
+        !url.hash
+      );
     case "TENFORE":
       return Boolean(
         hostname === "fox.tenfore.golf" &&
@@ -1013,6 +1031,13 @@ function hasAllowedProviderBookingLandingQuery(url: URL, providerFamily: KnownPr
         ? isValidProviderLandingDate(entry)
         : Boolean(readBoundedProviderLandingInteger(entry, 2_147_483_647));
     });
+  }
+  if (providerFamily === "SUPREME_GOLF") {
+    return Boolean(
+      query.size === 1 &&
+      query.has("day") &&
+      isValidProviderLandingDate(query.get("day")!)
+    );
   }
   return false;
 }

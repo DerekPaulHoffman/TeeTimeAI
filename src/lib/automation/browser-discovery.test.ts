@@ -1434,6 +1434,39 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("learns reusable Supreme Golf metadata from an official public course link", () => {
+    const bookingUrl =
+      "https://sgnavigator.app/portal/gillette-ridge-golf-club/book";
+    const discovery = buildBrowserDiscovery({
+      courseId: "gillette-ridge",
+      courseName: "Gillette Ridge Golf Club",
+      sourceUrl: "https://www.gilletteridgegolf.com/",
+      finalUrl: "https://www.gilletteridgegolf.com/",
+      observedUrls: ["https://www.gilletteridgegolf.com/"],
+      officialPage: {
+        url: "https://www.gilletteridgegolf.com/",
+        courseName: "Gillette Ridge Golf Club",
+        linkCandidates: [{ url: bookingUrl, label: "Book Tee Times Here!" }]
+      },
+      visibleText: "Gillette Ridge Golf Club. Book tee times here."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      apiMetadata: {
+        provider: "SUPREME_GOLF",
+        bookingBaseUrl: bookingUrl
+      },
+      confidence: 0.96,
+      evidence: { learnedFrom: "supreme-golf-public-tee-sheet" }
+    });
+  });
+
   it("does not learn GolfBack metadata from a malformed course id", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "golfback-under-review",

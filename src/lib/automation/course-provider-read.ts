@@ -24,6 +24,10 @@ import { fetchTeesnapTeeSheet, isTeesnapMetadata } from "@/lib/adapters/teesnap"
 import { fetchWebTracTeeSheet, isWebTracMetadata } from "@/lib/adapters/webtrac";
 import { fetchWhooshTeeSheet, isWhooshMetadata } from "@/lib/adapters/whoosh";
 import {
+  fetchSupremeGolfTeeSheet,
+  isSupremeGolfMetadata
+} from "@/lib/adapters/supreme-golf";
+import {
   resolveProviderCapability,
   type ExternalDetectedPlatform
 } from "@/lib/automation/provider-capabilities";
@@ -188,6 +192,17 @@ export function fetchCourseTeeSheet(
       timeZone: course.timeZone,
       metadata: course.bookingMetadata,
       discoverBookingWindow
+    });
+  }
+  if (
+    providerFamily === "SUPREME_GOLF" &&
+    isSupremeGolfMetadata(course.bookingMetadata)
+  ) {
+    return fetchSupremeGolfTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
     });
   }
   return Promise.resolve({
