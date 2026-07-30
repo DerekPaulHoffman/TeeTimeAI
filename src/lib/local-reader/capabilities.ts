@@ -50,7 +50,7 @@ export function getRequiredLocalReaderCapability(
     case "PROPHET":
       return {
         key: "PROPHET_FREAR_RENDERED",
-        parserVersion: 3
+        parserVersion: 4
       };
   }
 }

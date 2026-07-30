@@ -429,7 +429,7 @@ describe("local Chrome reader contract", () => {
       <div class="teeSheet">
         <a class="teetime">
           9:30 AM $62.00 Cart Price Included
-          Frear Park Front/Frear Park Back 2 to 4 Players 18
+          Frear Park Front/Frear Park Back 2-4 Golfers 18 Holes Select
         </a>
         <a class="teetime">
           12:15 PM $44.00
@@ -449,7 +449,7 @@ describe("local Chrome reader contract", () => {
     expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("frear-park");
     expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      readerVersion: "legacy-prophet-rendered-v3",
+      readerVersion: "legacy-prophet-rendered-v4",
       pageUrl: job.bookingUrl,
       slots: [
         {
@@ -472,7 +472,7 @@ describe("local Chrome reader contract", () => {
       <div class="teeSheet">
         <a class="teetime">
           10:20 AM $54.00 Cart Price Included
-          Simsbury Farms Golf Course 1 to 4 Players 18
+          Simsbury Farms Golf Course 1 / 4 Players 18 $54.00
         </a>
       </div>
     `;
@@ -488,7 +488,7 @@ describe("local Chrome reader contract", () => {
     expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("simsbury-farms");
     expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      readerVersion: "legacy-prophet-rendered-v3",
+      readerVersion: "legacy-prophet-rendered-v4",
       pageUrl: job.bookingUrl,
       slots: [
         {

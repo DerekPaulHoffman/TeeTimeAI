@@ -39,11 +39,11 @@ describe("local reader capabilities", () => {
   it("requires the corrected Prophet redirect parser for both supported courses", () => {
     expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
       key: "PROPHET_FREAR_RENDERED",
-      parserVersion: 3
+      parserVersion: 4
     });
     expect(getRequiredLocalReaderCapability("simsbury-farms")).toEqual({
       key: "PROPHET_FREAR_RENDERED",
-      parserVersion: 3
+      parserVersion: 4
     });
   });
 });

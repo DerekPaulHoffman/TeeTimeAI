@@ -7,7 +7,7 @@ const READER_CAPABILITIES = Object.freeze([
   ["CPS_RENDERED", 1],
   ["CHRONOGOLF_RENDERED", 1],
   ["TENFORE_RENDERED", 1],
-  ["PROPHET_FREAR_RENDERED", 3]
+  ["PROPHET_FREAR_RENDERED", 4]
 ]);
 const ALLOWED_COURSES = Object.freeze({
   "grassy-hill": [

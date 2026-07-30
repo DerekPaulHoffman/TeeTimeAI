@@ -1,7 +1,7 @@
 (function initializeProphetReader(root) {
   "use strict";
 
-  const READER_VERSION = "legacy-prophet-rendered-v3";
+  const READER_VERSION = "legacy-prophet-rendered-v4";
   const HOSTNAME = "secure.east.prophetservices.com";
   const COURSE_CONFIGS = Object.freeze({
     "frear-park": {
@@ -119,8 +119,14 @@
   function parseCard(card, job) {
     const text = normalizeText(card.innerText || card.textContent);
     const timeMatch = /\b(\d{1,2}:\d{2}\s*(?:AM|PM))\b/i.exec(text);
-    const playerMatch = /\b([1-4])\s+to\s+([1-4])\s+Players\b/i.exec(text);
-    const holesMatch = /\b(9|18)\s*$/u.exec(text);
+    const playerMatch =
+      /\b([1-4])\s*(?:to|[-–—/])\s*([1-4])\s+(?:Players?|Golfers?)\b/i.exec(text);
+    const explicitHolesMatch = /\b(9|18)\s*Holes?\b/i.exec(text);
+    const standaloneHolesMatches = Array.from(
+      text.matchAll(/(?<![$\d])\b(9|18)\b(?![:\d])/gu)
+    );
+    const holesMatch =
+      explicitHolesMatch ?? standaloneHolesMatches[standaloneHolesMatches.length - 1] ?? null;
     const priceMatch = /\$(\d{1,4})(?:\.(\d{2}))?\b/u.exec(text);
     const startsAtLocal = timeMatch ? toLocalDateTime(job.targetDate, timeMatch[1]) : null;
     if (!startsAtLocal || !playerMatch || !holesMatch) return null;
