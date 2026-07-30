@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   assertSameOriginOperatorMutation: vi.fn(),
   getCurrentOperator: vi.fn(),
   revalidatePath: vi.fn(),
+  applyOperatorCourseDecision: vi.fn(),
   requestOperatorCourseRecheck: vi.fn(),
   updateOperatorCourseOfficialLinks: vi.fn()
 }));
@@ -24,15 +25,21 @@ vi.mock("@/lib/operator/mutation-security", () => ({
   assertSameOriginOperatorMutation: mocks.assertSameOriginOperatorMutation
 }));
 vi.mock("@/lib/operator/course-monitoring", () => ({
+  applyOperatorCourseDecision: mocks.applyOperatorCourseDecision,
   approveOperatorCourseTechnicalFinal: vi.fn(),
   correctOperatorCourseBookingLink: vi.fn(),
   humanReviewReasonSchema: { parse: vi.fn((value: string) => value) },
+  operatorCourseDecisionSchema: { parse: vi.fn((value: string) => value) },
   reopenOperatorCourseTechnicalFinal: vi.fn(),
   requestOperatorCourseRecheck: mocks.requestOperatorCourseRecheck,
   updateOperatorCourseOfficialLinks: mocks.updateOperatorCourseOfficialLinks
 }));
 
-import { requestRecheckAction, updateOfficialLinksAction } from "./actions";
+import {
+  requestRecheckAction,
+  setCourseOutcomeAction,
+  updateOfficialLinksAction
+} from "./actions";
 
 const idleState = {
   status: "idle" as const,
@@ -60,6 +67,17 @@ function officialLinksFormData() {
   formData.set("website", "https://course.example");
   formData.set("bookingUrl", "https://course.example/book");
   formData.set("idempotencyKey", "operator-links-123456");
+  return formData;
+}
+
+function temporaryOutcomeFormData() {
+  const formData = new FormData();
+  formData.set("reference", "cm_123456789012345678901234");
+  formData.set("statusRevision", "4");
+  formData.set("incidentCycle", "2");
+  formData.set("incidentRevision", "7");
+  formData.set("decision", "WEBSITE_TEMPORARILY_UNAVAILABLE");
+  formData.set("idempotencyKey", "operator-temporary-123456");
   return formData;
 }
 
@@ -133,6 +151,39 @@ describe("updateOfficialLinksAction", () => {
       expect.objectContaining({
         apply: true,
         dispatchSearches: true
+      })
+    );
+  });
+});
+
+describe("setCourseOutcomeAction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getCurrentOperator.mockResolvedValue({
+      clerkUserId: "operator-user"
+    });
+  });
+
+  it("confirms the temporary website status without calling it final", async () => {
+    mocks.applyOperatorCourseDecision.mockResolvedValue({
+      action: "set_course_outcome",
+      applied: true
+    });
+
+    await expect(
+      setCourseOutcomeAction(idleState, temporaryOutcomeFormData())
+    ).resolves.toEqual({
+      status: "success",
+      message:
+        "The course website is marked temporarily unavailable. Golfers will see that their alert remains active while Tee Time Spot checks back."
+    });
+    expect(mocks.applyOperatorCourseDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: "WEBSITE_TEMPORARILY_UNAVAILABLE"
+      }),
+      expect.objectContaining({
+        apply: true,
+        dispatchSearches: false
       })
     );
   });

@@ -123,6 +123,8 @@ export async function setCourseOutcomeAction(
       message:
         decision === "LOCAL_READER"
           ? "This course now uses the local tee-time reader. A fresh check is queued."
+          : decision === "WEBSITE_TEMPORARILY_UNAVAILABLE"
+            ? "The course website is marked temporarily unavailable. Golfers will see that their alert remains active while Tee Time Spot checks back."
           : "The final course outcome was saved."
     };
   } catch (error) {

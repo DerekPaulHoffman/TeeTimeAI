@@ -84,11 +84,14 @@ describe("operator course controls", () => {
     expect((save as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("offers concrete private, local-reader, and manual outcomes without evidence fields", () => {
+  it("offers temporary, private, local-reader, and manual outcomes without evidence fields", () => {
     render(<CourseOutcomeForm {...identity} />);
 
-    const outcome = screen.getByLabelText("Final outcome or monitoring path");
+    const outcome = screen.getByLabelText("Course outcome or monitoring path");
     expect(screen.getByRole("option", { name: "Use the local tee-time reader" })).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "Course website temporarily unavailable" })
+    ).toBeTruthy();
     expect(screen.getByRole("option", { name: "This is a private course" })).toBeTruthy();
     expect(screen.getByRole("option", { name: "Phone or manual booking only" })).toBeTruthy();
     expect(screen.queryByLabelText("Official evidence")).toBeNull();
@@ -103,5 +106,12 @@ describe("operator course controls", () => {
     expect(
       (screen.getByRole("button", { name: "Set final outcome" }) as HTMLButtonElement).disabled
     ).toBe(false);
+
+    fireEvent.change(outcome, {
+      target: { value: "WEBSITE_TEMPORARILY_UNAVAILABLE" }
+    });
+
+    expect(screen.getByText(/Keep the alert active/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Set temporary status" })).toBeTruthy();
   });
 });

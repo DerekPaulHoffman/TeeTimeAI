@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   createIncidentReference,
+  getHumanReviewRetryAt,
   getCourseMonitoringEscalationDeadline,
   sanitizeEvidenceUrl
 } from "@/lib/automation/course-monitoring";
@@ -45,6 +46,7 @@ export const humanReviewReasonSchema = z.enum([
 
 export const operatorCourseDecisionSchema = z.enum([
   "LOCAL_READER",
+  "WEBSITE_TEMPORARILY_UNAVAILABLE",
   "PRIVATE_COURSE",
   "PHONE_OR_MANUAL",
   "ACCOUNT_REQUIRED",
@@ -628,6 +630,7 @@ export async function applyOperatorCourseDecision(
   if (!current.incident) {
     throw new Error("A durable course incident is required before setting the course outcome.");
   }
+  const incident = current.incident;
   const preview = {
     action: "set_course_outcome" as const,
     courseRef: current.status.reference,
@@ -638,6 +641,116 @@ export async function applyOperatorCourseDecision(
   }
 
   const now = new Date();
+  if (input.decision === "WEBSITE_TEMPORARILY_UNAVAILABLE") {
+    const message =
+      "The course website is currently not working correctly. Tee Time Spot will check again and let golfers know when tee times can be viewed.";
+    const retryAt = getHumanReviewRetryAt(
+      now,
+      incident.activeRealSearchCount
+    );
+    const failureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: current.status.course.providerFamilyKey,
+      failureClass: "UNKNOWN",
+      operation: "AVAILABILITY",
+      httpStatus: null
+    });
+    await prisma.$transaction(
+      async (transaction) => {
+        await assertMutationStillCurrent(transaction, current, input);
+        await transaction.course.update({
+          where: { id: current.status.courseId },
+          data: {
+            automationEligibility: "NEEDS_REVIEW",
+            automationReason: "TEMPORARILY_UNAVAILABLE",
+            intelligenceVerifiedAt: null,
+            intelligenceReviewAt: retryAt,
+            intelligenceConfidence: null
+          }
+        });
+        await transaction.courseMonitoringStatus.update({
+          where: {
+            courseId: current.status.courseId,
+            revision: current.status.revision
+          },
+          data: {
+            state: "DEGRADED_RETRYING",
+            lastFailureAt: now,
+            consecutiveFailures: { increment: 1 },
+            failureFingerprint,
+            firstDegradedAt: current.status.firstDegradedAt ?? now,
+            nextAutomaticAttemptAt: retryAt,
+            revalidationRequestedAt: null,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        await transaction.courseSupportIncident.update({
+          where: {
+            id: incident.id,
+            cycle: incident.cycle,
+            revision: incident.revision
+          },
+          data: {
+            cycle: incident.status === "RESOLVED" ? { increment: 1 } : undefined,
+            status: "AUTO_INVESTIGATING",
+            kind: "FETCH_FAILED",
+            failureClass: "UNKNOWN",
+            failureFingerprint,
+            latestMessage: message,
+            nextAction: "Check the official course website again after the temporary retry window.",
+            nextAttemptAt: retryAt,
+            confirmedAt: now,
+            escalationDeadlineAt: retryAt,
+            humanReviewReason: null,
+            nextReminderAt: null,
+            resolvedAt: null,
+            resolution: null,
+            resolutionMessage: null,
+            resolutionNotifiedAt: null,
+            decisionActorId: null,
+            decisionAt: null,
+            decisionNote: null,
+            decisionEvidenceUrl: null,
+            decisionIdempotencyKey: null,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        await transaction.courseMonitoringEvent.create({
+          data: {
+            courseId: current.status.courseId,
+            incidentId: incident.id,
+            eventType: "HUMAN_DECISION",
+            source: context.source,
+            fromState: current.status.state,
+            toState: "DEGRADED_RETRYING",
+            outcome: "FETCH_FAILED",
+            failureFingerprint,
+            message,
+            evidenceUrl:
+              current.status.course.detectedBookingUrl ?? current.status.course.website,
+            operatorActorId: normalizeActorId(context.actorId),
+            idempotencyKey: input.idempotencyKey,
+            occurredAt: now,
+            audit: {
+              action: "set_course_outcome",
+              decision: input.decision,
+              timerBasedRevalidation: true,
+              customerDataIncluded: false
+            }
+          }
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    );
+    return {
+      ...preview,
+      retryAt,
+      applied: true,
+      replayed: false
+    };
+  }
+
   if (input.decision === "LOCAL_READER") {
     const message = "Use the local tee-time reader for this course.";
     const failureFingerprint = buildProviderFailureFingerprint({
@@ -1341,7 +1454,10 @@ function technicalCourseFieldsForReason(reason: CourseHumanReviewReason): {
 }
 
 function getFinalDecision(
-  decision: Exclude<OperatorCourseDecision, "LOCAL_READER">
+  decision: Exclude<
+    OperatorCourseDecision,
+    "LOCAL_READER" | "WEBSITE_TEMPORARILY_UNAVAILABLE"
+  >
 ): {
   state: "FINAL_IDENTITY" | "FINAL_MANUAL" | "FINAL_TECHNICAL";
   resolution:

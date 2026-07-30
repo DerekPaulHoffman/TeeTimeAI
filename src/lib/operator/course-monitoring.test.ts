@@ -478,6 +478,79 @@ describe("operator course monitoring mutations", () => {
     });
   });
 
+  it("marks a broken course website as temporary and schedules a retry", async () => {
+    const retryStartedAt = Date.now();
+
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "WEBSITE_TEMPORARILY_UNAVAILABLE",
+          idempotencyKey: "operator-temporary-123456"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "set_course_outcome",
+      decision: "WEBSITE_TEMPORARILY_UNAVAILABLE",
+      retryAt: expect.any(Date),
+      applied: true
+    });
+
+    expect(transactionMocks.course.update).toHaveBeenCalledWith({
+      where: { id: "course-1" },
+      data: expect.objectContaining({
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "TEMPORARILY_UNAVAILABLE",
+        intelligenceReviewAt: expect.any(Date)
+      })
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 4
+      },
+      data: expect.objectContaining({
+        state: "DEGRADED_RETRYING",
+        nextAutomaticAttemptAt: expect.any(Date),
+        revalidationRequestedAt: null
+      })
+    });
+    const retryAt = transactionMocks.courseMonitoringStatus.update.mock.calls.at(-1)?.[0]
+      .data.nextAutomaticAttemptAt as Date;
+    expect(retryAt.getTime()).toBeGreaterThanOrEqual(
+      retryStartedAt + 6 * 60 * 60 * 1000
+    );
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        revision: 7
+      },
+      data: expect.objectContaining({
+        status: "AUTO_INVESTIGATING",
+        kind: "FETCH_FAILED",
+        nextAttemptAt: retryAt,
+        resolvedAt: null,
+        resolution: null
+      })
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "HUMAN_DECISION",
+        toState: "DEGRADED_RETRYING",
+        outcome: "FETCH_FAILED",
+        audit: expect.objectContaining({
+          decision: "WEBSITE_TEMPORARILY_UNAVAILABLE",
+          timerBasedRevalidation: true
+        })
+      })
+    });
+  });
+
   it("routes the course to the local reader and queues a fresh reader check", async () => {
     localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
       id: "local-reader-job-2"

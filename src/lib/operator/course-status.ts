@@ -399,6 +399,18 @@ function classifyCourseStatus(
     });
   }
   if (course.incident?.status === "AUTO_INVESTIGATING") {
+    if (course.automationReason === "TEMPORARILY_UNAVAILABLE") {
+      return withStatus(course, "SITE_FAILED", {
+        priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+        priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
+        tone: hasActivePriorityAlert(course) ? "critical" : "warning",
+        labelOverride: "Course website temporarily unavailable",
+        meaningOverride:
+          "An operator confirmed that the course website is not working correctly, so Tee Time Spot cannot currently view its tee times.",
+        actionOverride:
+          "A future check is scheduled. Golfers keep their active alerts and will be emailed when tee-time checks resume."
+      });
+    }
     const operatorRecheckQueued =
       course.monitoringStatus?.revalidationRequestedAt !== null &&
       course.monitoringStatus?.revalidationRequestedAt !== undefined;
@@ -495,6 +507,18 @@ function classifyCourseStatus(
   }
 
   if (course.monitoringStatus?.state === "DEGRADED_RETRYING") {
+    if (course.automationReason === "TEMPORARILY_UNAVAILABLE") {
+      return withStatus(course, "SITE_FAILED", {
+        priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
+        priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
+        tone: hasActivePriorityAlert(course) ? "critical" : "warning",
+        labelOverride: "Course website temporarily unavailable",
+        meaningOverride:
+          "An operator confirmed that the course website is not working correctly, so Tee Time Spot cannot currently view its tee times.",
+        actionOverride:
+          "A future check is scheduled. Golfers keep their active alerts and will be emailed when tee-time checks resume."
+      });
+    }
     return withStatus(course, "SITE_FAILED", {
       priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
       priorityScore: hasActivePriorityAlert(course) ? 0 : 1,

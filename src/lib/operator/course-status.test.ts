@@ -651,6 +651,40 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("explains a temporary course website outage and the scheduled follow-up", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          automationEligibility: "NEEDS_REVIEW",
+          automationReason: "TEMPORARILY_UNAVAILABLE",
+          activeAlertCount: 1,
+          incident: {
+            id: "incident-temporary",
+            status: "AUTO_INVESTIGATING",
+            kind: "FETCH_FAILED",
+            activeRealSearchCount: 1,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "The course website is currently not working correctly.",
+            nextAction: "Check the official course website again.",
+            failureClass: "UNKNOWN"
+          },
+          monitoringStatus: monitoringStatus("DEGRADED_RETRYING", {
+            nextAutomaticAttemptAt: new Date("2026-07-25T00:00:00.000Z")
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusLabel: "Course website temporarily unavailable",
+      statusMeaning:
+        "An operator confirmed that the course website is not working correctly, so Tee Time Spot cannot currently view its tee times.",
+      automationQueueState: "IN_PROGRESS"
+    });
+    expect(result.recommendedAction).toContain("will be emailed when tee-time checks resume");
+  });
+
   it("distinguishes an operator-requested AI recheck from generic investigation", () => {
     const [result] = buildCourseInventory(
       [

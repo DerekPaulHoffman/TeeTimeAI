@@ -154,6 +154,8 @@ type CourseOutcomeFormProps = MutationIdentity;
 const outcomeHelp: Record<OperatorCourseDecision, string> = {
   LOCAL_READER:
     "Route public tee-time checks through the local reader and queue a fresh reader job.",
+  WEBSITE_TEMPORARILY_UNAVAILABLE:
+    "Keep the alert active, tell golfers the course website is not working correctly, and schedule a future check.",
   PRIVATE_COURSE:
     "Close monitoring because this is a private course, not a public tee-time source.",
   PHONE_OR_MANUAL:
@@ -190,7 +192,7 @@ export function CourseOutcomeForm(props: CourseOutcomeFormProps) {
       </p>
       <MutationFields {...props} />
       <label>
-        Final outcome or monitoring path
+        Course outcome or monitoring path
         <select
           name="decision"
           onChange={(event) =>
@@ -203,6 +205,9 @@ export function CourseOutcomeForm(props: CourseOutcomeFormProps) {
             Choose an outcome
           </option>
           <option value="LOCAL_READER">Use the local tee-time reader</option>
+          <option value="WEBSITE_TEMPORARILY_UNAVAILABLE">
+            Course website temporarily unavailable
+          </option>
           <option value="PRIVATE_COURSE">This is a private course</option>
           <option value="PHONE_OR_MANUAL">Phone or manual booking only</option>
           <option value="ACCOUNT_REQUIRED">Account required to view tee times</option>
@@ -216,9 +221,13 @@ export function CourseOutcomeForm(props: CourseOutcomeFormProps) {
         {pending
           ? decision === "LOCAL_READER"
             ? "Routing to reader…"
+            : decision === "WEBSITE_TEMPORARILY_UNAVAILABLE"
+              ? "Saving temporary status…"
             : "Saving final outcome…"
           : decision === "LOCAL_READER"
             ? "Use local reader and recheck"
+            : decision === "WEBSITE_TEMPORARILY_UNAVAILABLE"
+              ? "Set temporary status"
             : "Set final outcome"}
       </button>
     </form>

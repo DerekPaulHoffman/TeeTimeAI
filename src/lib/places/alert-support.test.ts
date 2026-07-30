@@ -224,6 +224,34 @@ describe("course alert support enrichment", () => {
     expect(course.monitoringReadinessObservedAt).toBe(observedAt.toISOString());
   });
 
+  it("keeps an operator-confirmed website outage temporary even without a new probe", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-temporary",
+        googlePlaceId: "temporary",
+        name: "Temporary Website Golf Course",
+        latitude: 41.72,
+        longitude: -72.2,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "TEMPORARILY_UNAVAILABLE",
+        probes: []
+      }
+    ] as never);
+
+    const [course] = await enrichCoursesWithAlertSupport([
+      {
+        googlePlaceId: "temporary",
+        name: "Temporary Website Golf Course",
+        latitude: 41.72,
+        longitude: -72.2,
+        timeZone: "America/New_York"
+      }
+    ]);
+
+    expect(course.monitoringReadiness).toBe("TEMPORARILY_UNAVAILABLE");
+  });
+
   it("makes the exact Grassy Hill local-reader course selectable for alerts", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {

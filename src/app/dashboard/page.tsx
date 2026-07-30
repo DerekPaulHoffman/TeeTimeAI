@@ -468,6 +468,7 @@ function DashboardSearchCard({
             const monitoringVerdict = getDashboardMonitoringVerdict({
               alertSupport,
               automationEligibility: preference.course.automationEligibility,
+              automationReason: preference.course.automationReason,
               latestProbe,
               upcomingBookingWindow,
               firstTimeLookup:
@@ -704,6 +705,7 @@ function formatObservationDate(value: Date | string | undefined) {
 function getDashboardMonitoringVerdict(input: {
   alertSupport: ReturnType<typeof getCourseAlertSupport> | null;
   automationEligibility: string;
+  automationReason: string;
   latestProbe?: {
     outcome:
       | "MATCH_FOUND"
@@ -741,6 +743,7 @@ function getDashboardMonitoringVerdict(input: {
     };
   }
   if (
+    input.automationReason === "TEMPORARILY_UNAVAILABLE" ||
     input.latestProbe?.outcome === "FETCH_FAILED" ||
     input.latestProbe?.outcome === "BLOCKED_TOOLING"
   ) {

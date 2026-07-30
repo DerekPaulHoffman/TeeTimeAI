@@ -152,6 +152,12 @@ function mapCourseAlertSupport(
 function getMonitoringReadiness(course: KnownCourseRecord) {
   const latestProbe = course.probes?.[0];
   const monitoringReadinessObservedAt = latestProbe?.observedAt.toISOString();
+  if (course.automationReason === "TEMPORARILY_UNAVAILABLE") {
+    return {
+      monitoringReadiness: "TEMPORARILY_UNAVAILABLE" as const,
+      ...(monitoringReadinessObservedAt ? { monitoringReadinessObservedAt } : {})
+    };
+  }
   if (course.automationEligibility === "BLOCKED") {
     return {
       monitoringReadiness: "UNAVAILABLE" as const,
