@@ -22,7 +22,10 @@ enum AutomationEligibility {
 
 enum CourseMonitoringMode {
   AUTOMATIC
+  SERVER_ONLY
+  BROWSER_ONLY
   LOCAL_READER_ONLY
+  CONTACT_ONLY
 }
 
 enum DetectedPlatform {
@@ -179,6 +182,7 @@ enum CourseSupportIncidentKind {
 enum CourseSupportResolution {
   MONITORING_RESTORED
   DIRECT_BOOKING_CLASSIFIED
+  TECHNICAL_LIMITATION_CLASSIFIED
   SOURCE_UNVERIFIED
   HUMAN_VERIFIED_TECHNICAL_LIMITATION
 }
@@ -541,36 +545,54 @@ model TeeSearch {
 }
 
 model LocalReaderJob {
-  id              String                @id @default(cuid())
-  teeSearchId     String?
-  courseId        String
-  scheduleVersion Int?
-  purpose         LocalReaderJobPurpose @default(ALERT_CHECK)
-  verificationKey String?               @unique
-  courseKey       String
-  targetDate      String
-  players         Int
-  bookingUrl      String
-  status          LocalReaderJobStatus  @default(PENDING)
-  leaseToken      String?
-  leaseExpiresAt  DateTime?
-  claimedAt       DateTime?
-  deviceId        String?
-  jobExpiresAt    DateTime
-  result          Json?
-  resultExpiresAt DateTime?
-  readerVersion   String?
-  completedAt     DateTime?
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
-  teeSearch       TeeSearch?            @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course          Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                    String                @id @default(cuid())
+  teeSearchId           String?
+  courseId              String
+  scheduleVersion       Int?
+  purpose               LocalReaderJobPurpose @default(ALERT_CHECK)
+  verificationKey       String?               @unique
+  courseKey             String
+  targetDate            String
+  players               Int
+  bookingUrl            String
+  status                LocalReaderJobStatus  @default(PENDING)
+  leaseToken            String?
+  leaseExpiresAt        DateTime?
+  claimedAt             DateTime?
+  deviceId              String?
+  jobExpiresAt          DateTime
+  result                Json?
+  resultExpiresAt       DateTime?
+  readerVersion         String?
+  requiredCapabilityKey String?
+  requiredParserVersion Int?
+  completedAt           DateTime?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  teeSearch             TeeSearch?            @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course                Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([teeSearchId, courseId, scheduleVersion, targetDate, players])
   @@index([status, jobExpiresAt, createdAt])
   @@index([purpose, status, jobExpiresAt])
   @@index([teeSearchId, courseId, resultExpiresAt])
   @@index([leaseExpiresAt])
+  @@index([requiredCapabilityKey, status, jobExpiresAt])
+}
+
+model LocalReaderAgent {
+  deviceId                 String    @id
+  readerVersion            String
+  buildId                  String
+  capabilities             Json
+  lastSeenAt               DateTime
+  lastSuccessfulAt         DateTime?
+  lastSuccessfulCapability String?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  @@index([lastSeenAt])
+  @@index([lastSuccessfulAt])
 }
 
 model SearchEmailDelivery {
@@ -920,6 +942,7 @@ model CourseSupportVerificationRequest {
   leaseExpiresAt                DateTime?
   workflowRunId                 String?
   nextAttemptAt                 DateTime?
+  deadlineAt                    DateTime
   attemptCount                  Int                             @default(0)
   targetDateLocal               String
   startTimeLocal                String                          @default("06:00")
@@ -951,6 +974,7 @@ model CourseSupportVerificationRequest {
   @@index([leaseExpiresAt], map: "CourseSupportVerification_leaseExpiresAt_idx")
   @@index([courseId, status], map: "CourseSupportVerification_course_status_idx")
   @@index([releaseSha, status], map: "CourseSupportVerification_release_status_idx")
+  @@index([status, deadlineAt], map: "CourseSupportVerification_status_deadline_idx")
 }
 
 model CourseSupportBatchSearch {

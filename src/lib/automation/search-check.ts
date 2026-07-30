@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { CourseMonitoringState } from "@prisma/client";
+import type { CourseMonitoringMode, CourseMonitoringState } from "@prisma/client";
 
 import {
   finishAutomationRun,
@@ -119,7 +119,7 @@ type AutomationCourse = AutomationCourseProviderRead & {
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
-  monitoringMode: "AUTOMATIC" | "LOCAL_READER_ONLY";
+  monitoringMode: CourseMonitoringMode;
   bookingAccessMode: BookingAccessMode;
   intelligenceVerifiedAt: Date | null;
   intelligenceReviewAt: Date | null;
@@ -307,8 +307,12 @@ async function checkSearch(
       await maintainSearchCheckLease(lease);
       const course = preference.course as AutomationCourse;
       const customerBookingUrl = getCustomerBookingUrl(course);
-      const localReaderEligible = getLocalReaderCourseKey(customerBookingUrl) !== null;
-      const localReaderOnly = course.monitoringMode === "LOCAL_READER_ONLY";
+      const localReaderAllowed =
+        course.monitoringMode !== "SERVER_ONLY" && course.monitoringMode !== "CONTACT_ONLY";
+      const localReaderEligible =
+        localReaderAllowed && getLocalReaderCourseKey(customerBookingUrl) !== null;
+      const localReaderOnly =
+        course.monitoringMode === "LOCAL_READER_ONLY" || course.monitoringMode === "BROWSER_ONLY";
       const providerFamilyKey = resolveProviderCapability(course).providerFamilyKey;
       const cpsLocalReaderPreferred = localReaderEligible && providerFamilyKey === "CPS";
       const chronogolfLocalReaderPreferred =
@@ -414,7 +418,9 @@ async function checkSearch(
         getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
           "incompatible"
       ) {
-        const message = `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
+        const message = `${course.name} is verified as ${getCourseLayoutLabel(
+          course.layoutHoleCounts
+        )} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
         await markMissingMatchesUnavailable({
           searchId: search.id,
           alertGeneration: search.alertGeneration,
@@ -449,7 +455,7 @@ async function checkSearch(
 
       if (localReaderOnly && !localReaderEligible) {
         const message =
-          "This course is configured for local-reader-only monitoring, but its booking page is not allowlisted.";
+          "This course is configured for rendered-page monitoring, but its booking page is not allowlisted.";
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
@@ -617,13 +623,10 @@ async function checkSearch(
           throw new Error("No reusable server adapter is available for this course.");
         }
         if (!teeSheet) {
-          const providerExecution = await runWithProviderRequestLease(
-            providerFamilyKey,
-            () => {
-              providerRequestStarted = true;
-              return fetchCourseTeeSheet(course, search.date, search.players, refreshBookingWindow);
-            }
-          );
+          const providerExecution = await runWithProviderRequestLease(providerFamilyKey, () => {
+            providerRequestStarted = true;
+            return fetchCourseTeeSheet(course, search.date, search.players, refreshBookingWindow);
+          });
           if (!providerExecution.acquired) {
             monitoringRetryCourseIds.add(course.id);
             courseResults.push({
@@ -875,8 +878,7 @@ async function checkSearch(
               })
             : null;
         const localReaderTerminalFailure =
-          localReaderJob?.queueDisposition ===
-          "RETRYING_AFTER_TERMINAL_FAILURE";
+          localReaderJob?.queueDisposition === "RETRYING_AFTER_TERMINAL_FAILURE";
         if (localReaderJob) {
           monitoringRetryCourseIds.add(course.id);
           if (localReaderTerminalFailure) {
@@ -916,8 +918,7 @@ async function checkSearch(
           course,
           searchId: search.id,
           kind:
-            localReaderTerminalFailure ||
-            (localReaderEligible && !supportedAdapterAvailable)
+            localReaderTerminalFailure || (localReaderEligible && !supportedAdapterAvailable)
               ? "READER_CANDIDATE"
               : "FETCH_FAILED",
           message,
@@ -926,19 +927,18 @@ async function checkSearch(
             ? "LOCAL_READER_ALLOWLIST"
             : localReaderOnly
               ? "LOCAL_READER_ONLY"
-            : providerRequestStarted
-              ? "TYPED_PROVIDER_ADAPTER"
-              : localReaderCanOverrideGate
-                ? "LOCAL_READER"
-                : "PUBLIC_PROVIDER_PRECHECK",
-          nextAction:
-            localReaderOnly
-              ? "Keep the local reader enabled; this course intentionally skips server adapters and browser discovery."
-              : cpsLocalReaderPreferred
+              : providerRequestStarted
+                ? "TYPED_PROVIDER_ADAPTER"
+                : localReaderCanOverrideGate
+                  ? "LOCAL_READER"
+                  : "PUBLIC_PROVIDER_PRECHECK",
+          nextAction: localReaderOnly
+            ? "Keep the local reader enabled; this course intentionally skips server adapters and browser discovery."
+            : cpsLocalReaderPreferred
               ? "Keep the Local Reader enabled. Safe CPS tenants are accepted automatically, and failures are queued for local verification."
               : localReaderEligible && !supportedAdapterAvailable
                 ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
-              : "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
+                : "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
         });
         supportIssues.push({ courseId: course.id, ...supportIssue });
         courseResults.push({
@@ -1043,11 +1043,7 @@ async function checkSearch(
   const statusEmailsEnabled = areSearchStatusEmailsEnabled();
   const statusKindBeforeRetry = statusEmailsEnabled
     ? getEnabledSearchStatusEmailKind(
-        getSearchStatusEmailKind(
-          search.statusEmailSentAt,
-          checkedAt,
-          search.userTimeZone
-        )
+        getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone)
       )
     : null;
   const retriedDeliveries = await retryExistingSearchEmailDeliveryGroups({
@@ -1077,10 +1073,7 @@ async function checkSearch(
         alertGeneration: search.alertGeneration
       })
     : null;
-  if (
-    pendingStatusReplacement &&
-    !isSearchEmailDeliveryEnabled(pendingStatusReplacement.kind)
-  ) {
+  if (pendingStatusReplacement && !isSearchEmailDeliveryEnabled(pendingStatusReplacement.kind)) {
     pendingStatusReplacement = null;
   }
   if (retriedMatchCoveredDaily && pendingStatusReplacement?.kind === "DAILY") {
@@ -1105,17 +1098,12 @@ async function checkSearch(
         ? "setup"
         : "daily"
       : getEnabledSearchStatusEmailKind(
-          getSearchStatusEmailKind(
-            search.statusEmailSentAt,
-            checkedAt,
-            search.userTimeZone
-          )
+          getSearchStatusEmailKind(search.statusEmailSentAt, checkedAt, search.userTimeZone)
         )
     : null;
-  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
-    retriedMatchCoveredDaily
-      ? "covered_by_match_alert"
-      : "skipped";
+  let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] = retriedMatchCoveredDaily
+    ? "covered_by_match_alert"
+    : "skipped";
 
   if (pendingStatusReplacement) {
     try {
@@ -1246,9 +1234,7 @@ function getEnabledSearchStatusEmailKind(
   if (!kind) {
     return null;
   }
-  return isSearchEmailDeliveryEnabled(kind === "setup" ? "SETUP" : "DAILY")
-    ? kind
-    : null;
+  return isSearchEmailDeliveryEnabled(kind === "setup" ? "SETUP" : "DAILY") ? kind : null;
 }
 
 function getCoveredPendingMatchIds(
@@ -1446,9 +1432,7 @@ async function deliverSearchStatusReport(input: {
   lease: SearchCheckLease;
   assertCurrent?: () => Promise<void>;
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
-  const snapshot = buildSearchStatusSnapshot(
-    input.snapshotCourseResults ?? input.courseResults
-  );
+  const snapshot = buildSearchStatusSnapshot(input.snapshotCourseResults ?? input.courseResults);
   const persistedStatusReport = toSearchEmailJson({
     kind: input.kind,
     targetDate: input.searchWindow.date,
@@ -1486,7 +1470,9 @@ async function deliverSearchStatusReport(input: {
     input.periodKey ??
     (input.kind === "setup"
       ? `setup-${createEmailSnapshotKey(persistedStatusReport)}`
-      : `daily-${input.search.statusEmailSentAt?.getTime() ?? "initial"}-${createEmailSnapshotKey(persistedStatusReport)}`);
+      : `daily-${
+          input.search.statusEmailSentAt?.getTime() ?? "initial"
+        }-${createEmailSnapshotKey(persistedStatusReport)}`);
   const replacementSuffix = input.supersededStatusGroups?.length
     ? `-replacement-${createEmailSnapshotKey(
         input.supersededStatusGroups.map((group) => `${group.kind}:${group.groupKey}`).sort()

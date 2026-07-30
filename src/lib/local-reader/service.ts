@@ -11,13 +11,16 @@ import {
   localReaderCourseKeySchema,
   localReaderResultSchema,
   validateLocalReaderResultForJob,
-  type LocalReaderResult,
+  type LocalReaderResult
 } from "./contracts";
+import { getLocalReaderCourse, getLocalReaderCourseKey, getLocalReaderJobUrl } from "./course-key";
 import {
-  getLocalReaderCourse,
-  getLocalReaderCourseKey,
-  getLocalReaderJobUrl,
-} from "./course-key";
+  LEGACY_READER_1_6_CAPABILITIES,
+  getRequiredLocalReaderCapability,
+  localReaderCapabilitiesSchema,
+  readerSupportsCapability,
+  type LocalReaderAgentHandshake
+} from "./capabilities";
 
 export { getLocalReaderCourseKey } from "./course-key";
 
@@ -25,9 +28,18 @@ const JOB_LIFETIME_MS = 30 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
 
-export type LocalReaderQueueDisposition =
-  | "PENDING"
-  | "RETRYING_AFTER_TERMINAL_FAILURE";
+export type LocalReaderQueueDisposition = "PENDING" | "RETRYING_AFTER_TERMINAL_FAILURE";
+
+async function resolveRequiredCapability(
+  courseId: string,
+  courseKey: ReturnType<typeof getLocalReaderCourseKey> & {}
+) {
+  const course = await prisma.course.findUnique({
+    where: { id: courseId },
+    select: { name: true }
+  });
+  return getRequiredLocalReaderCapability(courseKey, course?.name);
+}
 
 export async function queueLocalReaderCourseVerification(input: {
   courseId: string;
@@ -37,15 +49,13 @@ export async function queueLocalReaderCourseVerification(input: {
 }) {
   const courseKey = getLocalReaderCourseKey(input.bookingUrl);
   if (!courseKey) return null;
+  const requiredCapability = await resolveRequiredCapability(input.courseId, courseKey);
   const now = new Date();
   const verificationKey = createHash("sha256")
     .update(
-      [
-        "local-reader-course-verification",
-        input.courseId,
-        input.targetDate,
-        input.players
-      ].join("\n")
+      ["local-reader-course-verification", input.courseId, input.targetDate, input.players].join(
+        "\n"
+      )
     )
     .digest("hex");
   const existing = await prisma.localReaderJob.findUnique({
@@ -73,21 +83,15 @@ export async function queueLocalReaderCourseVerification(input: {
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
-      bookingUrl: getLocalReaderJobUrl(
-        courseKey,
-        input.targetDate,
-        input.players,
-      ),
-      jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS)
+      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate, input.players),
+      jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
+      requiredCapabilityKey: requiredCapability.key,
+      requiredParserVersion: requiredCapability.parserVersion
     },
     update: {
       purpose: "COURSE_VERIFICATION",
       courseKey,
-      bookingUrl: getLocalReaderJobUrl(
-        courseKey,
-        input.targetDate,
-        input.players,
-      ),
+      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate, input.players),
       status: "PENDING",
       leaseToken: null,
       leaseExpiresAt: null,
@@ -97,7 +101,9 @@ export async function queueLocalReaderCourseVerification(input: {
       result: undefined,
       resultExpiresAt: null,
       readerVersion: null,
-      completedAt: null
+      completedAt: null,
+      requiredCapabilityKey: requiredCapability.key,
+      requiredParserVersion: requiredCapability.parserVersion
     }
   });
 }
@@ -112,6 +118,7 @@ export async function queueLocalReaderJob(input: {
 }) {
   const courseKey = getLocalReaderCourseKey(input.bookingUrl);
   if (!courseKey) return null;
+  const requiredCapability = await resolveRequiredCapability(input.courseId, courseKey);
   const now = new Date();
   const reusableAcrossScheduleVersions = await prisma.localReaderJob.findFirst({
     where: {
@@ -122,25 +129,25 @@ export async function queueLocalReaderJob(input: {
       OR: [
         {
           status: "PENDING",
-          jobExpiresAt: { gt: now },
+          jobExpiresAt: { gt: now }
         },
         {
           status: "LEASED",
           jobExpiresAt: { gt: now },
-          leaseExpiresAt: { gt: now },
+          leaseExpiresAt: { gt: now }
         },
         {
           status: "COMPLETED",
-          resultExpiresAt: { gt: now },
-        },
-      ],
+          resultExpiresAt: { gt: now }
+        }
+      ]
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "asc" }
   });
   if (reusableAcrossScheduleVersions) {
     return {
       ...reusableAcrossScheduleVersions,
-      queueDisposition: "PENDING" as const,
+      queueDisposition: "PENDING" as const
     };
   }
   const unique = {
@@ -148,12 +155,12 @@ export async function queueLocalReaderJob(input: {
     courseId: input.courseId,
     scheduleVersion: input.scheduleVersion,
     targetDate: input.targetDate,
-    players: input.players,
+    players: input.players
   };
   const existing = await prisma.localReaderJob.findUnique({
     where: {
-      teeSearchId_courseId_scheduleVersion_targetDate_players: unique,
-    },
+      teeSearchId_courseId_scheduleVersion_targetDate_players: unique
+    }
   });
   if (
     existing &&
@@ -168,7 +175,7 @@ export async function queueLocalReaderJob(input: {
   ) {
     return {
       ...existing,
-      queueDisposition: "PENDING" as const,
+      queueDisposition: "PENDING" as const
     };
   }
   const retryingAfterTerminalFailure =
@@ -179,7 +186,7 @@ export async function queueLocalReaderJob(input: {
         existing.jobExpiresAt <= now));
   const job = await prisma.localReaderJob.upsert({
     where: {
-      teeSearchId_courseId_scheduleVersion_targetDate_players: unique,
+      teeSearchId_courseId_scheduleVersion_targetDate_players: unique
     },
     create: {
       teeSearchId: input.searchId,
@@ -188,20 +195,14 @@ export async function queueLocalReaderJob(input: {
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
-      bookingUrl: getLocalReaderJobUrl(
-        courseKey,
-        input.targetDate,
-        input.players,
-      ),
+      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate, input.players),
       jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
+      requiredCapabilityKey: requiredCapability.key,
+      requiredParserVersion: requiredCapability.parserVersion
     },
     update: {
       courseKey,
-      bookingUrl: getLocalReaderJobUrl(
-        courseKey,
-        input.targetDate,
-        input.players,
-      ),
+      bookingUrl: getLocalReaderJobUrl(courseKey, input.targetDate, input.players),
       status: "PENDING",
       leaseToken: null,
       leaseExpiresAt: null,
@@ -212,34 +213,52 @@ export async function queueLocalReaderJob(input: {
       resultExpiresAt: null,
       readerVersion: null,
       completedAt: null,
-    },
+      requiredCapabilityKey: requiredCapability.key,
+      requiredParserVersion: requiredCapability.parserVersion
+    }
   });
   return {
     ...job,
     queueDisposition: retryingAfterTerminalFailure
       ? ("RETRYING_AFTER_TERMINAL_FAILURE" as const)
-      : ("PENDING" as const),
+      : ("PENDING" as const)
   };
 }
 
-export async function claimNextLocalReaderJob(deviceId: string) {
+export async function claimNextLocalReaderJob(input: string | LocalReaderAgentHandshake) {
+  const handshake = normalizeReaderHandshake(input);
+  const deviceId = handshake.deviceId;
   const now = new Date();
+  await recordReaderHeartbeat(handshake, now);
   await prisma.localReaderJob.updateMany({
     where: {
       status: { in: ["PENDING", "LEASED"] },
-      jobExpiresAt: { lte: now },
+      jobExpiresAt: { lte: now }
     },
-    data: { status: "EXPIRED", leaseToken: null, leaseExpiresAt: null },
+    data: { status: "EXPIRED", leaseToken: null, leaseExpiresAt: null }
   });
   const candidate = await prisma.localReaderJob.findFirst({
     where: {
       jobExpiresAt: { gt: now },
-      OR: [
-        { status: "PENDING" },
-        { status: "LEASED", leaseExpiresAt: { lte: now } },
-      ],
+      AND: [
+        {
+          OR: [{ status: "PENDING" }, { status: "LEASED", leaseExpiresAt: { lte: now } }]
+        },
+        {
+          OR: [
+            {
+              requiredCapabilityKey: null,
+              requiredParserVersion: null
+            },
+            ...handshake.capabilities.map((capability) => ({
+              requiredCapabilityKey: capability.key,
+              requiredParserVersion: { lte: capability.parserVersion }
+            }))
+          ]
+        }
+      ]
     },
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "asc" }
   });
   if (!candidate) return null;
 
@@ -249,24 +268,21 @@ export async function claimNextLocalReaderJob(deviceId: string) {
     where: {
       id: candidate.id,
       jobExpiresAt: { gt: now },
-      OR: [
-        { status: "PENDING" },
-        { status: "LEASED", leaseExpiresAt: { lte: now } },
-      ],
+      OR: [{ status: "PENDING" }, { status: "LEASED", leaseExpiresAt: { lte: now } }]
     },
     data: {
       status: "LEASED",
       leaseToken,
       leaseExpiresAt,
       claimedAt: now,
-      deviceId,
-    },
+      deviceId
+    }
   });
   if (claimed.count !== 1) return null;
   const courseKey = localReaderCourseKeySchema.parse(candidate.courseKey);
   const course = await prisma.course.findUnique({
     where: { id: candidate.courseId },
-    select: { name: true },
+    select: { name: true }
   });
   const readerCourse = getLocalReaderCourse(courseKey, course?.name);
   if (!readerCourse) {
@@ -282,7 +298,15 @@ export async function claimNextLocalReaderJob(deviceId: string) {
     courseName: readerCourse.courseName,
     bookingUrl: candidate.bookingUrl,
     cardTextIncludes: [...readerCourse.cardTextIncludes],
-    leaseToken,
+    requiredCapability: {
+      key:
+        candidate.requiredCapabilityKey ??
+        getRequiredLocalReaderCapability(courseKey, course?.name).key,
+      parserVersion:
+        candidate.requiredParserVersion ??
+        getRequiredLocalReaderCapability(courseKey, course?.name).parserVersion
+    },
+    leaseToken
   };
 }
 
@@ -292,7 +316,7 @@ export async function completeLocalReaderJob(input: {
   result: LocalReaderResult;
 }) {
   const current = await prisma.localReaderJob.findUnique({
-    where: { id: input.jobId },
+    where: { id: input.jobId }
   });
   if (
     !current ||
@@ -306,7 +330,7 @@ export async function completeLocalReaderJob(input: {
   const courseKey = localReaderCourseKeySchema.parse(current.courseKey);
   const course = await prisma.course.findUnique({
     where: { id: current.courseId },
-    select: { name: true },
+    select: { name: true }
   });
   const readerCourse = getLocalReaderCourse(courseKey, course?.name);
   if (!readerCourse) {
@@ -323,8 +347,16 @@ export async function completeLocalReaderJob(input: {
       courseName: readerCourse.courseName,
       bookingUrl: current.bookingUrl,
       cardTextIncludes: [...readerCourse.cardTextIncludes],
+      requiredCapability: {
+        key:
+          current.requiredCapabilityKey ??
+          getRequiredLocalReaderCapability(courseKey, course?.name).key,
+        parserVersion:
+          current.requiredParserVersion ??
+          getRequiredLocalReaderCapability(courseKey, course?.name).parserVersion
+      }
     },
-    input.result,
+    input.result
   );
   const completedAt = new Date();
   const updated = await prisma.localReaderJob.updateMany({
@@ -332,7 +364,7 @@ export async function completeLocalReaderJob(input: {
       id: current.id,
       status: "LEASED",
       leaseToken: input.leaseToken,
-      leaseExpiresAt: { gt: completedAt },
+      leaseExpiresAt: { gt: completedAt }
     },
     data: {
       status: "COMPLETED",
@@ -341,19 +373,25 @@ export async function completeLocalReaderJob(input: {
       readerVersion: input.result.readerVersion,
       completedAt,
       leaseToken: null,
-      leaseExpiresAt: null,
-    },
+      leaseExpiresAt: null
+    }
   });
   if (updated.count !== 1) throw new Error("The local reader lease changed");
+  await recordReaderSuccess({
+    deviceId: current.deviceId,
+    readerVersion: input.result.readerVersion,
+    capability:
+      current.requiredCapabilityKey ??
+      getRequiredLocalReaderCapability(courseKey, course?.name).key,
+    now: completedAt
+  });
 
   if (
     current.purpose === "COURSE_VERIFICATION" &&
-    (input.result.status === "AVAILABLE" ||
-      input.result.status === "NO_AVAILABILITY")
+    (input.result.status === "AVAILABLE" || input.result.status === "NO_AVAILABILITY")
   ) {
     try {
-      const outcome =
-        input.result.status === "AVAILABLE" ? "MATCH_FOUND" : "NO_MATCH";
+      const outcome = input.result.status === "AVAILABLE" ? "MATCH_FOUND" : "NO_MATCH";
       await recordCourseMonitoringSuccess({
         courseId: current.courseId,
         outcome,
@@ -365,12 +403,29 @@ export async function completeLocalReaderJob(input: {
         now: completedAt,
         runtimeVersion: input.result.readerVersion
       });
-      await resolveCourseSupportIncident({
-        courseId: current.courseId,
-        resolution: "MONITORING_RESTORED",
-        message: `Fresh signed local public-page verification completed successfully with outcome ${outcome}.`,
-        now: completedAt
-      });
+      const incidentModel = (
+        prisma as typeof prisma & {
+          courseSupportIncident?: {
+            findUnique: (input: unknown) => Promise<{
+              activeBatchId: string | null;
+            } | null>;
+          };
+        }
+      ).courseSupportIncident;
+      const activeIncident = incidentModel
+        ? await incidentModel.findUnique({
+            where: { courseId: current.courseId },
+            select: { activeBatchId: true }
+          })
+        : null;
+      if (!activeIncident?.activeBatchId) {
+        await resolveCourseSupportIncident({
+          courseId: current.courseId,
+          resolution: "MONITORING_RESTORED",
+          message: `Fresh signed local public-page verification completed successfully with outcome ${outcome}.`,
+          now: completedAt
+        });
+      }
     } catch {
       console.error("[local-reader:course-verification-reconciliation-failed]", {
         category: "monitoring_reconciliation_failed"
@@ -386,16 +441,180 @@ export async function completeLocalReaderJob(input: {
         courseId: current.courseId,
         targetDate: current.targetDate,
         players: current.players,
-        status: "PENDING",
+        status: "PENDING"
       },
       data: {
         status: "EXPIRED",
         leaseToken: null,
-        leaseExpiresAt: null,
-      },
+        leaseExpiresAt: null
+      }
     });
   }
   return { searchId: current.teeSearchId, completedAt };
+}
+
+function normalizeReaderHandshake(
+  input: string | LocalReaderAgentHandshake
+): LocalReaderAgentHandshake {
+  if (typeof input === "string") {
+    return {
+      deviceId: input,
+      readerVersion: "1.6.0",
+      buildId: "legacy-1.6.0",
+      capabilities: LEGACY_READER_1_6_CAPABILITIES
+    };
+  }
+  return {
+    deviceId: input.deviceId,
+    readerVersion: input.readerVersion.trim().slice(0, 64),
+    buildId: input.buildId.trim().slice(0, 100),
+    capabilities: localReaderCapabilitiesSchema.parse(input.capabilities)
+  };
+}
+
+async function recordReaderHeartbeat(handshake: LocalReaderAgentHandshake, now: Date) {
+  const model = (
+    prisma as typeof prisma & {
+      localReaderAgent?: {
+        upsert: (input: unknown) => Promise<unknown>;
+      };
+    }
+  ).localReaderAgent;
+  if (!model) return;
+  await model.upsert({
+    where: { deviceId: handshake.deviceId },
+    create: {
+      deviceId: handshake.deviceId,
+      readerVersion: handshake.readerVersion,
+      buildId: handshake.buildId,
+      capabilities: handshake.capabilities as Prisma.InputJsonValue,
+      lastSeenAt: now
+    },
+    update: {
+      readerVersion: handshake.readerVersion,
+      buildId: handshake.buildId,
+      capabilities: handshake.capabilities as Prisma.InputJsonValue,
+      lastSeenAt: now
+    }
+  });
+  await requeueReaderBlockedIncidents(handshake.capabilities, now);
+}
+
+async function recordReaderSuccess(input: {
+  deviceId: string | null;
+  readerVersion: string;
+  capability: string;
+  now: Date;
+}) {
+  if (!input.deviceId) return;
+  const model = (
+    prisma as typeof prisma & {
+      localReaderAgent?: {
+        updateMany: (input: unknown) => Promise<unknown>;
+      };
+    }
+  ).localReaderAgent;
+  if (!model) return;
+  await model.updateMany({
+    where: { deviceId: input.deviceId },
+    data: {
+      readerVersion: input.readerVersion,
+      lastSeenAt: input.now,
+      lastSuccessfulAt: input.now,
+      lastSuccessfulCapability: input.capability
+    }
+  });
+}
+
+async function requeueReaderBlockedIncidents(
+  capabilities: LocalReaderAgentHandshake["capabilities"],
+  now: Date
+) {
+  const incidents = await prisma.courseSupportIncident.findMany({
+    where: {
+      status: "NEEDS_HUMAN",
+      humanReviewReason: "READER_RELOAD_REQUIRED",
+      activeBatchId: null
+    },
+    select: {
+      id: true,
+      revision: true,
+      courseId: true,
+      course: {
+        select: {
+          name: true,
+          detectedBookingUrl: true,
+          website: true,
+          monitoringStatus: {
+            select: { revision: true }
+          }
+        }
+      }
+    }
+  });
+  for (const incident of incidents) {
+    const courseKey = getLocalReaderCourseKey(
+      incident.course.detectedBookingUrl ?? incident.course.website
+    );
+    if (!courseKey) continue;
+    const required = getRequiredLocalReaderCapability(courseKey, incident.course.name);
+    if (!readerSupportsCapability(capabilities, required.key, required.parserVersion)) {
+      continue;
+    }
+    await prisma.$transaction(async (transaction) => {
+      const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+        where: {
+          id: incident.id,
+          revision: incident.revision,
+          status: "NEEDS_HUMAN",
+          activeBatchId: null
+        },
+        data: {
+          status: "AUTO_INVESTIGATING",
+          humanReviewReason: null,
+          nextReminderAt: null,
+          nextAttemptAt: now,
+          latestMessage:
+            "A compatible signed local reader is online; exact public-page revalidation was requeued.",
+          revision: { increment: 1 }
+        }
+      });
+      if (incidentUpdated.count !== 1) return;
+      if (incident.course.monitoringStatus) {
+        await transaction.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: incident.courseId,
+            revision: incident.course.monitoringStatus.revision
+          },
+          data: {
+            state: "AUTO_INVESTIGATING",
+            nextAutomaticAttemptAt: now,
+            revalidationRequestedAt: now,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+      }
+      await transaction.courseMonitoringEvent.create({
+        data: {
+          courseId: incident.courseId,
+          incidentId: incident.id,
+          eventType: "REVALIDATION_REQUESTED",
+          source: "LOCAL_READER",
+          fromState: "ENGINEERING_VERIFICATION_NEEDED",
+          toState: "AUTO_INVESTIGATING",
+          readPath: required.key,
+          message:
+            "A compatible reader capability came online, so exact runtime verification was requeued.",
+          occurredAt: now,
+          audit: {
+            parserVersion: required.parserVersion,
+            customerDataIncluded: false
+          }
+        }
+      });
+    });
+  }
 }
 
 export async function getFreshLocalReaderTeeSheet(input: {
@@ -412,9 +631,9 @@ export async function getFreshLocalReaderTeeSheet(input: {
       targetDate: input.targetDate,
       players: input.players,
       status: "COMPLETED",
-      resultExpiresAt: { gt: new Date() },
+      resultExpiresAt: { gt: new Date() }
     },
-    orderBy: { completedAt: "desc" },
+    orderBy: { completedAt: "desc" }
   });
   if (!row?.result) return null;
   const result = localReaderResultSchema.parse(row.result);
@@ -423,10 +642,9 @@ export async function getFreshLocalReaderTeeSheet(input: {
   }
   return {
     slots: buildLocalReaderSlots(input.courseId, result),
-    targetDateStatus:
-      result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
+    targetDateStatus: result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
     bookingWindowEvidence: null,
-    readerVersion: result.readerVersion,
+    readerVersion: result.readerVersion
   };
 }
 
@@ -444,9 +662,9 @@ export async function getLocalReaderCourseVerification(input: {
       courseId: input.courseId,
       targetDate: input.targetDate,
       players: input.players,
-      status: { in: ["PENDING", "LEASED", "COMPLETED"] },
+      status: { in: ["PENDING", "LEASED", "COMPLETED"] }
     },
-    orderBy: { createdAt: "desc" },
+    orderBy: { createdAt: "desc" }
   });
   if (!row) return null;
   if (
@@ -474,14 +692,11 @@ export async function getLocalReaderCourseVerification(input: {
     status: "COMPLETED" as const,
     observedAt,
     readerVersion: result.readerVersion,
-    slots: buildLocalReaderSlots(input.courseId, result),
+    slots: buildLocalReaderSlots(input.courseId, result)
   };
 }
 
-function buildLocalReaderSlots(
-  courseId: string,
-  result: LocalReaderResult,
-): TeeTimeSlot[] {
+function buildLocalReaderSlots(courseId: string, result: LocalReaderResult): TeeTimeSlot[] {
   return result.slots.map((slot) => {
     const holes = slot.holes.includes(18) ? 18 : slot.holes[0];
     return {
@@ -492,7 +707,7 @@ function buildLocalReaderSlots(
       bookingUrl: result.pageUrl,
       ...(slot.priceCents === null ? {} : { priceCents: slot.priceCents }),
       holes,
-      bookableHoleCounts: slot.holes,
+      bookableHoleCounts: slot.holes
     };
   });
 }

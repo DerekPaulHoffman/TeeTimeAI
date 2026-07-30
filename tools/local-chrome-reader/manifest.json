@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tee Time Spot Local Reader",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Reads allowlisted public tee-time pages for Tee Time Spot alerts.",
   "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": [
@@ -21,9 +21,7 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://*.cps.golf/onlineresweb/search-teetime*"
-      ],
+      "matches": ["https://*.cps.golf/onlineresweb/search-teetime*"],
       "js": ["cps-reader.js", "content.js"],
       "run_at": "document_idle"
     },
@@ -39,16 +37,12 @@
       "run_at": "document_idle"
     },
     {
-      "matches": [
-        "https://fox.tenfore.golf/*"
-      ],
+      "matches": ["https://fox.tenfore.golf/*"],
       "js": ["tenfore-reader.js", "content.js"],
       "run_at": "document_idle"
     },
     {
-      "matches": [
-        "https://secure.east.prophetservices.com/FrearParkV3/*"
-      ],
+      "matches": ["https://secure.east.prophetservices.com/FrearParkV3/*"],
       "js": ["prophet-reader.js", "content.js"],
       "run_at": "document_idle"
     }

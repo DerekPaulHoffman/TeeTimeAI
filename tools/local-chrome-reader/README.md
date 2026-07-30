@@ -7,8 +7,8 @@ signed backend job -> local Chrome page -> normalized slots -> signed backend re
 ```
 
 It reads only signed backend jobs for exact, signed-out CPS tee-time search
-routes, exact TenFore tenant routes, explicitly allowlisted Chronogolf
-public club profiles, and Frear Park's exact legacy Prophet tee sheet. CPS
+routes, exact TenFore tenant routes, safe public Chronogolf club profiles,
+and Frear Park's exact legacy Prophet tee sheet. CPS
 tenants are accepted automatically only when the URL
 is HTTPS, uses one `*.cps.golf` tenant host, and stays on
 `/onlineresweb/search-teetime`. TenFore tenants are accepted only on
@@ -29,10 +29,11 @@ job URL remains on `fox.tenfore.golf`, contains one safe tenant path, and render
 the requested date. The local reader never generates, reads, or replays
 TenFore's underlying CAPTCHA token.
 
-The Chronogolf allowlist contains only the exact public profiles owned by
-current course-support work, including Lyman Orchards. Those pages are opened
-with a date, tee-time step, and public player-count selection; unrelated club
-paths and unexpected page shapes fail closed.
+Chronogolf pages are accepted only on the public `chronogolf.com/club/<slug>`
+route with one safe slug. Those pages are opened with a date, tee-time step,
+and public player-count selection; unrelated paths and unexpected page shapes
+fail closed. A newly discovered safe public club profile can therefore use the
+existing generic parser without a course-specific extension release.
 
 Frear Park jobs use only the public rendered tee sheet with an exact date,
 player count, both public nines, and 18-hole filter. The reader ignores the
@@ -64,12 +65,18 @@ alerts. POST `/jobs` accepts `courseKey`, `targetDate`, and `players`;
 4. Leave Chrome running. The extension polls outbound once per minute and opens
    an inactive tab only when a signed allowlisted reader job is waiting.
 
-After pulling a reader update, use the extension's reload button on
-`chrome://extensions` so Chrome applies the new manifest and scripts.
+The worker reports its build and parser capabilities with every poll. The
+backend leases only compatible work and automatically requeues exact
+verification when a required capability appears. New CPS, TenFore, and safe
+public Chronogolf profiles that fit an existing parser do not require a reload.
+An actual parser or manifest change to this unpacked development extension
+still requires Chrome's **Reload** action; unattended binary updates require a
+separately signed Web Store or enterprise-managed extension package.
 
 The production backend persists short-lived jobs and leases in Neon. The
 extension signs every request with HMAC-SHA256 and accepts only jobs whose
-course key, course name, card filter, host, and route match its static allowlist.
+required parser capability, course key, course name, card filter, host, and
+route match its bounded public-route rules.
 A completed read requeues the normal search workflow, which owns match
 persistence and alert email delivery.
 

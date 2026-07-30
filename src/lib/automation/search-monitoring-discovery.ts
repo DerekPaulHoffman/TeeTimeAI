@@ -147,9 +147,8 @@ type RecentCourseAutomationDiscovery = Awaited<
   ReturnType<typeof listRecentCourseAutomationDiscoveries>
 >[number];
 
-type MonitoringDiscoveryCourse =
-  ActiveAutomationSearch["preferences"][number]["course"] &
-    Pick<BrowserProbeCourseInput, "monitoringFailureEvidence">;
+type MonitoringDiscoveryCourse = ActiveAutomationSearch["preferences"][number]["course"] &
+  Pick<BrowserProbeCourseInput, "monitoringFailureEvidence">;
 
 type MonitoringDiscoveryCandidate = {
   course: MonitoringDiscoveryCourse;
@@ -179,9 +178,7 @@ async function resolveRemediationDiscoveryContext(
     return null;
   }
 
-  const preferenceCourseIds = search.preferences.map(
-    (preference) => preference.course.id
-  );
+  const preferenceCourseIds = search.preferences.map((preference) => preference.course.id);
   if (preferenceCourseIds.length === 0) {
     return null;
   }
@@ -272,8 +269,7 @@ async function resolveRemediationDiscoveryContext(
     currentSearch.remediationDispatchVersion !== remediationDispatchVersion ||
     currentSearch.checkLeaseToken !== search.checkLeaseToken ||
     !currentSearch.checkLeaseExpiresAt ||
-    currentSearch.checkLeaseExpiresAt.getTime() !==
-      checkLeaseExpiresAt.getTime() ||
+    currentSearch.checkLeaseExpiresAt.getTime() !== checkLeaseExpiresAt.getTime() ||
     currentSearch.checkLeaseExpiresAt.getTime() <= now.getTime() ||
     dispatch.batch.status !== "VERIFYING" ||
     dispatch.batch.recheckDispatchKey !== search.remediationDispatchKey ||
@@ -327,18 +323,20 @@ export async function prepareSearchMonitoring(
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   const includeCourseIds = new Set(options.includeCourseIds ?? []);
   const forceFreshCourseIds = new Set(options.forceFreshCourseIds ?? []);
-  const repeatedFailureEvidenceByCourse =
-    await listRepeatedMonitoringFailureEvidence(
-      search.preferences.map((preference) => preference.course.id)
-    );
+  const repeatedFailureEvidenceByCourse = await listRepeatedMonitoringFailureEvidence(
+    search.preferences.map((preference) => preference.course.id)
+  );
   const probeCourses = search.preferences
     .map((preference) => ({
       ...preference.course,
-      monitoringFailureEvidence: repeatedFailureEvidenceByCourse.get(
-        preference.course.id
-      )
+      monitoringFailureEvidence: repeatedFailureEvidenceByCourse.get(preference.course.id)
     }))
-    .filter((course) => course.monitoringMode !== "LOCAL_READER_ONLY")
+    .filter(
+      (course) =>
+        course.monitoringMode !== "LOCAL_READER_ONLY" &&
+        course.monitoringMode !== "BROWSER_ONLY" &&
+        course.monitoringMode !== "CONTACT_ONLY"
+    )
     .filter(
       (course) =>
         includeCourseIds.has(course.id) ||
@@ -352,13 +350,12 @@ export async function prepareSearchMonitoring(
         ) ||
         isLegacyPolicyOnlyBlock(course)
     );
-  const candidateInputs = probeCourses
-    .map((course) => ({
-      course,
-      sourceUrl: shouldRevalidatePrivateCourseIdentity(course, now)
-        ? getSafePrivateIdentityRevalidationUrl(course)
-        : getSafeMonitoringProbeUrl(course)
-    }));
+  const candidateInputs = probeCourses.map((course) => ({
+    course,
+    sourceUrl: shouldRevalidatePrivateCourseIdentity(course, now)
+      ? getSafePrivateIdentityRevalidationUrl(course)
+      : getSafeMonitoringProbeUrl(course)
+  }));
   const appliedCourseIds: string[] = [];
   for (const { course, sourceUrl } of candidateInputs) {
     if (sourceUrl || !isLegacyPolicyOnlyBlock(course)) {
@@ -376,11 +373,10 @@ export async function prepareSearchMonitoring(
       appliedCourseIds.push(course.id);
     }
   }
-  const candidates = candidateInputs
-    .filter(
-      (candidate): candidate is typeof candidate & { sourceUrl: string } =>
-        Boolean(candidate.sourceUrl)
-    );
+  const candidates = candidateInputs.filter(
+    (candidate): candidate is typeof candidate & { sourceUrl: string } =>
+      Boolean(candidate.sourceUrl)
+  );
 
   if (candidates.length === 0) {
     return {
@@ -392,19 +388,11 @@ export async function prepareSearchMonitoring(
     };
   }
 
-  const remediationContext = await resolveRemediationDiscoveryContext(
-    search,
-    now
-  );
-  const normalLookbackStartedAt = new Date(
-    now.getTime() - DISCOVERY_LOOKBACK_MS
-  );
+  const remediationContext = await resolveRemediationDiscoveryContext(search, now);
+  const normalLookbackStartedAt = new Date(now.getTime() - DISCOVERY_LOOKBACK_MS);
   const requestedLookbackStartedAt = remediationContext
     ? new Date(
-        Math.min(
-          normalLookbackStartedAt.getTime(),
-          remediationContext.dispatchedAt.getTime()
-        ) - 1
+        Math.min(normalLookbackStartedAt.getTime(), remediationContext.dispatchedAt.getTime()) - 1
       )
     : normalLookbackStartedAt;
   const recentDiscoveries = await listRecentCourseAutomationDiscoveries(
@@ -418,17 +406,13 @@ export async function prepareSearchMonitoring(
           .filter(
             (discovery) =>
               remediationCourseIds.has(discovery.courseId) &&
-              discovery.createdAt.getTime() >=
-                remediationContext.dispatchedAt.getTime()
+              discovery.createdAt.getTime() >= remediationContext.dispatchedAt.getTime()
           )
           .map((discovery) => discovery.courseId)
       : []
   );
   const discoveriesByCourse = new Map<string, Date[]>();
-  const recentDiscoveriesByCourse = new Map<
-    string,
-    RecentCourseAutomationDiscovery[]
-  >();
+  const recentDiscoveriesByCourse = new Map<string, RecentCourseAutomationDiscovery[]>();
   const previousEvidenceByCourse = new Map<string, unknown>();
   for (const discovery of recentDiscoveries
     .filter((candidate) => isFreshDiscovery(candidate.createdAt, now))
@@ -455,8 +439,7 @@ export async function prepareSearchMonitoring(
       continue;
     }
     if (
-      (discoveriesByCourse.get(candidate.course.id)?.length ?? 0) <
-      MAX_DISCOVERY_ATTEMPTS_PER_DAY
+      (discoveriesByCourse.get(candidate.course.id)?.length ?? 0) < MAX_DISCOVERY_ATTEMPTS_PER_DAY
     ) {
       continue;
     }
@@ -476,10 +459,7 @@ export async function prepareSearchMonitoring(
       await recordBrowserDiscovery(replayed);
       appliedCourseIds.push(candidate.course.id);
       replayAppliedCourseIds.add(candidate.course.id);
-      if (
-        isLegacyPolicyOnlyBlock(candidate.course) &&
-        replacesLegacyPolicyOnlyBlock(replayed)
-      ) {
+      if (isLegacyPolicyOnlyBlock(candidate.course) && replacesLegacyPolicyOnlyBlock(replayed)) {
         resolvedLegacyPolicyCourseIds.add(candidate.course.id);
       }
     }
@@ -501,9 +481,9 @@ export async function prepareSearchMonitoring(
     const attempts = discoveriesByCourse.get(course.id) ?? [];
     const remediationOverrideEligible = Boolean(
       remediationContext &&
-        remediationCourseIds.has(course.id) &&
-        !postDispatchDiscoveryCourseIds.has(course.id) &&
-        !replayAppliedCourseIds.has(course.id)
+      remediationCourseIds.has(course.id) &&
+      !postDispatchDiscoveryCourseIds.has(course.id) &&
+      !replayAppliedCourseIds.has(course.id)
     );
     return (
       forceFreshCourseIds.has(course.id) ||
@@ -525,8 +505,7 @@ export async function prepareSearchMonitoring(
       }).providerFamilyKey,
     async ({ course, sourceUrl }) => {
       const leasedFetch = createProviderLeasedDiscoveryFetch(publicFetch);
-      const forcedPolicyReconciliation =
-        forcedPolicyReconciliationCourseIds.has(course.id);
+      const forcedPolicyReconciliation = forcedPolicyReconciliationCourseIds.has(course.id);
       const markAttempted = () => {
         if (!attemptedCourseIds.includes(course.id)) {
           attemptedCourseIds.push(course.id);
@@ -534,7 +513,9 @@ export async function prepareSearchMonitoring(
       };
       try {
         const officialWebsite = readSafePublicUrl(course.website);
-        const sourceKey = `${normalizeSourceKey(sourceUrl)}|${normalizeCourseLinkName(course.name)}|${
+        const sourceKey = `${normalizeSourceKey(
+          sourceUrl
+        )}|${normalizeCourseLinkName(course.name)}|${
           officialWebsite ? normalizeSourceKey(officialWebsite) : "SOURCE_MISSING"
         }`;
         let evidencePromise = evidenceBySource.get(sourceKey);
@@ -561,14 +542,11 @@ export async function prepareSearchMonitoring(
           courseId: course.id,
           courseName: course.name
         };
-        const initialDiscovery = buildBrowserDiscovery(
+        const initialDiscovery = buildBrowserDiscovery(collectedWithCorroboration);
+        const legacyProphetAwareDiscovery = buildLegacyProphetFallbackDiscovery(
+          initialDiscovery,
           collectedWithCorroboration
         );
-        const legacyProphetAwareDiscovery =
-          buildLegacyProphetFallbackDiscovery(
-            initialDiscovery,
-            collectedWithCorroboration
-          );
         const chronogolfDiscovery = await enrichChronogolfDiscovery(
           legacyProphetAwareDiscovery,
           leasedFetch
@@ -578,15 +556,10 @@ export async function prepareSearchMonitoring(
           course.name,
           leasedFetch
         );
-        const reviewableCpsDiscovery =
-          keepIncompleteCpsDiscoveryActionable(cpsDiscovery);
+        const reviewableCpsDiscovery = keepIncompleteCpsDiscoveryActionable(cpsDiscovery);
         const reasonAwareDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
           keepPolicyOnlyDiscoveryActionable(
-            await enrichTeesnapDiscovery(
-              reviewableCpsDiscovery,
-              course.name,
-              leasedFetch
-            )
+            await enrichTeesnapDiscovery(reviewableCpsDiscovery, course.name, leasedFetch)
           ),
           collected.accessBarriers
         );
@@ -597,13 +570,13 @@ export async function prepareSearchMonitoring(
         await recordBrowserDiscovery(discovery);
         const expectedCourse = getMonitoringCourseExpectation(course);
         const replacesLegacyPolicy =
-          isLegacyPolicyOnlyBlock(course) &&
-          replacesLegacyPolicyOnlyBlock(discovery);
-        const applied = isLegacyPolicyOnlyBlock(course) && !replacesLegacyPolicy
-          ? null
-          : expectedCourse
-            ? await applyBrowserDiscoveryToCourse(discovery, expectedCourse)
-            : await applyBrowserDiscoveryToCourse(discovery);
+          isLegacyPolicyOnlyBlock(course) && replacesLegacyPolicyOnlyBlock(discovery);
+        const applied =
+          isLegacyPolicyOnlyBlock(course) && !replacesLegacyPolicy
+            ? null
+            : expectedCourse
+              ? await applyBrowserDiscoveryToCourse(discovery, expectedCourse)
+              : await applyBrowserDiscoveryToCourse(discovery);
         if (applied) {
           appliedCourseIds.push(course.id);
           if (replacesLegacyPolicy) {
@@ -638,9 +611,7 @@ export async function prepareSearchMonitoring(
       !isLegacyPolicyOnlyBlock(course) ||
       resolvedLegacyPolicyCourseIds.has(course.id) ||
       (!attemptedCourseIdSet.has(course.id) &&
-        !hasRecentLegacyPolicyReconciliation(
-          recentDiscoveriesByCourse.get(course.id) ?? []
-        ))
+        !hasRecentLegacyPolicyReconciliation(recentDiscoveriesByCourse.get(course.id) ?? []))
     ) {
       continue;
     }
@@ -671,11 +642,7 @@ export async function prepareSearchMonitoring(
             forcedPolicyReconciliationCourseIds.has(course.id) &&
             attemptedCourseIdSet.has(course.id)
           );
-          return Boolean(
-            !alreadyMarked &&
-            !markedThisRun &&
-            !appliedCourseIdSet.has(course.id)
-          );
+          return Boolean(!alreadyMarked && !markedThisRun && !appliedCourseIdSet.has(course.id));
         }
       }
       const persistedAttempts = discoveriesByCourse.get(course.id)?.length ?? 0;
@@ -695,8 +662,7 @@ export async function prepareSearchMonitoring(
 
 function buildLegacyProphetFallbackDiscovery(
   discovery: BrowserDiscovery,
-  evidence: CollectedPageEvidence &
-    Pick<BrowserDiscoveryEvidence, "courseId" | "courseName">
+  evidence: CollectedPageEvidence & Pick<BrowserDiscoveryEvidence, "courseId" | "courseName">
 ): BrowserDiscovery {
   if (
     discovery.detectedPlatform !== "UNKNOWN" ||
@@ -709,29 +675,23 @@ function buildLegacyProphetFallbackDiscovery(
   const configuration = evidence.legacyProphetConfigurations[0];
   const exactOfficialWidget = evidence.officialPage.linkCandidates.some(
     (candidate) =>
-      normalizeSourceKey(candidate.url) ===
-        normalizeSourceKey(configuration.providerUrl) &&
+      normalizeSourceKey(candidate.url) === normalizeSourceKey(configuration.providerUrl) &&
       candidate.label === `Book tee times at ${evidence.courseName}`
   );
   const followup = evidence.legacyProphetFollowupOutcomes.find(
     (candidate) =>
-      normalizeSourceKey(candidate.providerUrl) ===
-      normalizeSourceKey(configuration.providerUrl)
+      normalizeSourceKey(candidate.providerUrl) === normalizeSourceKey(configuration.providerUrl)
   );
-  if (
-    !exactOfficialWidget ||
-    !followup ||
-    followup.outcome === "MODERN_CPS_TENANT"
-  ) {
+  if (!exactOfficialWidget || !followup || followup.outcome === "MODERN_CPS_TENANT") {
     return discovery;
   }
 
   const corroboratedManagedChallenge = Boolean(
     followup.outcome === "MANAGED_CHALLENGE" &&
-      evidence.corroboratedAccessBarrier &&
-      evidence.corroboratedAccessBarrier.status === 403 &&
-      normalizeSourceKey(evidence.corroboratedAccessBarrier.url) ===
-        normalizeSourceKey(configuration.providerUrl)
+    evidence.corroboratedAccessBarrier &&
+    evidence.corroboratedAccessBarrier.status === 403 &&
+    normalizeSourceKey(evidence.corroboratedAccessBarrier.url) ===
+      normalizeSourceKey(configuration.providerUrl)
   );
   const observedUrls = uniqueStrings([
     evidence.sourceUrl,
@@ -799,9 +759,7 @@ function buildLegacyProphetFallbackDiscovery(
   };
 }
 
-function keepIncompleteCpsDiscoveryActionable(
-  discovery: BrowserDiscovery
-): BrowserDiscovery {
+function keepIncompleteCpsDiscoveryActionable(discovery: BrowserDiscovery): BrowserDiscovery {
   const learnedFrom = discovery.evidence.learnedFrom;
   if (
     discovery.detectedPlatform !== "CUSTOM" ||
@@ -837,10 +795,7 @@ function getLegacyProphetFallbackEvidenceKind(
       ? "legacy-prophet-managed-challenge-confirmed"
       : "legacy-prophet-managed-challenge-unconfirmed";
   }
-  if (
-    followup.outcome === "NO_MODERN_CPS_TENANT" &&
-    sourceKind === "OFFICIAL_LINK"
-  ) {
+  if (followup.outcome === "NO_MODERN_CPS_TENANT" && sourceKind === "OFFICIAL_LINK") {
     return "legacy-prophet-official-link-without-modern-tenant";
   }
   return {
@@ -854,9 +809,7 @@ function getLegacyProphetFallbackEvidenceKind(
   }[followup.outcome];
 }
 
-function getSafeMonitoringProbeUrl(
-  course: MonitoringDiscoveryCandidate["course"]
-) {
+function getSafeMonitoringProbeUrl(course: MonitoringDiscoveryCandidate["course"]) {
   const safeUrl = readSafePublicUrl(getBestProbeUrl(course));
   return safeUrl ? parseSafePublicUrl(safeUrl).toString() : null;
 }
@@ -868,22 +821,16 @@ function shouldRediscoverFailedRunnableProvider(
 ) {
   return Boolean(
     course.automationEligibility !== "BLOCKED" &&
-      resolveProviderCapability(course).isRunnable &&
-      hasCurrentRepeatedMonitoringFailure(
-        monitoringFailureEvidence,
-        now
-      ) &&
-      getBestProbeUrl(course)
+    resolveProviderCapability(course).isRunnable &&
+    hasCurrentRepeatedMonitoringFailure(monitoringFailureEvidence, now) &&
+    getBestProbeUrl(course)
   );
 }
 
 async function listRepeatedMonitoringFailureEvidence(courseIds: string[]) {
   const uniqueCourseIds = [...new Set(courseIds)];
   if (uniqueCourseIds.length === 0) {
-    return new Map<
-      string,
-      BrowserProbeCourseInput["monitoringFailureEvidence"]
-    >();
+    return new Map<string, BrowserProbeCourseInput["monitoringFailureEvidence"]>();
   }
   const incidents = await prisma.courseSupportIncident.findMany({
     where: {
@@ -912,9 +859,7 @@ async function listRepeatedMonitoringFailureEvidence(courseIds: string[]) {
     incidents.map((incident) => {
       const latestProbe = incident.course.probes[0];
       const latestSuccessfulAt =
-        latestProbe &&
-        (latestProbe.outcome === "MATCH_FOUND" ||
-          latestProbe.outcome === "NO_MATCH")
+        latestProbe && (latestProbe.outcome === "MATCH_FOUND" || latestProbe.outcome === "NO_MATCH")
           ? latestProbe.observedAt
           : null;
       return [
@@ -930,9 +875,7 @@ async function listRepeatedMonitoringFailureEvidence(courseIds: string[]) {
   );
 }
 
-function getMonitoringCourseExpectation(
-  course: MonitoringDiscoveryCandidate["course"]
-) {
+function getMonitoringCourseExpectation(course: MonitoringDiscoveryCandidate["course"]) {
   return course.updatedAt instanceof Date
     ? {
         updatedAt: course.updatedAt,
@@ -943,20 +886,14 @@ function getMonitoringCourseExpectation(
     : undefined;
 }
 
-function getLegacyPolicyEvidencePreservation(
-  course: MonitoringDiscoveryCandidate["course"]
-) {
+function getLegacyPolicyEvidencePreservation(course: MonitoringDiscoveryCandidate["course"]) {
   return {
-    preserveWebsite: Boolean(
-      course.website && readSafeCustomerReferenceUrl(course.website)
-    ),
+    preserveWebsite: Boolean(course.website && readSafeCustomerReferenceUrl(course.website)),
     preserveDetectedBookingUrl: Boolean(
-      course.detectedBookingUrl &&
-      readSafeCustomerReferenceUrl(course.detectedBookingUrl)
+      course.detectedBookingUrl && readSafeCustomerReferenceUrl(course.detectedBookingUrl)
     ),
     preserveBookingMetadata: Boolean(
-      course.bookingMetadata &&
-      hasProviderCoherentPersistedMetadata(course)
+      course.bookingMetadata && hasProviderCoherentPersistedMetadata(course)
     )
   };
 }
@@ -1004,7 +941,10 @@ function isAllowedCredentialFreeCustomerPath(pathname: string) {
   const segments = pathname
     .split(/[/;=]+/u)
     .map((segment) =>
-      segment.normalize("NFKC").replace(/[^a-z0-9]/giu, "").toLowerCase()
+      segment
+        .normalize("NFKC")
+        .replace(/[^a-z0-9]/giu, "")
+        .toLowerCase()
     )
     .filter(Boolean);
   const accessRoots = new Set([
@@ -1030,17 +970,14 @@ function isAllowedCredentialFreeCustomerPath(pathname: string) {
   const queueRoots = new Set(["queue", "queueit", "waitingroom"]);
   const queueDestinations = new Set(["landing", "status", "wait"]);
   return Boolean(
-    (segments.length === 1 &&
-      (accessRoots.has(segments[0]!) || queueRoots.has(segments[0]!))) ||
+    (segments.length === 1 && (accessRoots.has(segments[0]!) || queueRoots.has(segments[0]!))) ||
     (segments.length === 2 &&
       ((accessRoots.has(segments[0]!) && accessDestinations.has(segments[1]!)) ||
         (queueRoots.has(segments[0]!) && queueDestinations.has(segments[1]!))))
   );
 }
 
-function hasProviderCoherentPersistedMetadata(
-  course: MonitoringDiscoveryCandidate["course"]
-) {
+function hasProviderCoherentPersistedMetadata(course: MonitoringDiscoveryCandidate["course"]) {
   if (
     !course.bookingMetadata ||
     !isPlainRecord(course.bookingMetadata) ||
@@ -1049,9 +986,7 @@ function hasProviderCoherentPersistedMetadata(
     return false;
   }
   const provider = resolveProviderCapability(course);
-  const bookingBaseUrl = readSafePublicUrl(
-    course.bookingMetadata.bookingBaseUrl
-  );
+  const bookingBaseUrl = readSafePublicUrl(course.bookingMetadata.bookingBaseUrl);
   if (!provider.isRunnable || !bookingBaseUrl) {
     return false;
   }
@@ -1114,9 +1049,7 @@ function hasOnlySafePersistedProviderMetadata(
   if (Array.isArray(value)) {
     return (
       value.length <= 100 &&
-      value.every((item) =>
-        hasOnlySafePersistedProviderMetadata(item, depth + 1, seen)
-      )
+      value.every((item) => hasOnlySafePersistedProviderMetadata(item, depth + 1, seen))
     );
   }
   const entries = Object.entries(value);
@@ -1151,10 +1084,7 @@ function replacesLegacyPolicyOnlyBlock(discovery: BrowserDiscovery) {
 }
 
 function isLegacyPolicyOnlyBlock(
-  course: Pick<
-    MonitoringDiscoveryCandidate["course"],
-    "automationEligibility" | "automationReason"
-  >
+  course: Pick<MonitoringDiscoveryCandidate["course"], "automationEligibility" | "automationReason">
 ) {
   return (
     course.automationEligibility === "BLOCKED" &&
@@ -1179,9 +1109,7 @@ function shouldForceLegacyPolicyReconciliation(
   );
 }
 
-function hasRecentLegacyPolicyReconciliation(
-  discoveries: RecentCourseAutomationDiscovery[]
-) {
+function hasRecentLegacyPolicyReconciliation(discoveries: RecentCourseAutomationDiscovery[]) {
   return discoveries.some((discovery) => {
     if (!isPlainRecord(discovery.evidence)) {
       return false;
@@ -1195,19 +1123,14 @@ function hasRecentLegacyPolicyReconciliation(
 }
 
 function markLegacyPolicyReconciliation(discovery: BrowserDiscovery): BrowserDiscovery {
-  if (
-    discovery.evidence.learnedFrom
-      .split(":")
-      .includes(LEGACY_POLICY_RECONCILIATION_MARKER)
-  ) {
+  if (discovery.evidence.learnedFrom.split(":").includes(LEGACY_POLICY_RECONCILIATION_MARKER)) {
     return discovery;
   }
   return {
     ...discovery,
     evidence: {
       ...discovery.evidence,
-      learnedFrom:
-        `${discovery.evidence.learnedFrom}:${LEGACY_POLICY_RECONCILIATION_MARKER}`
+      learnedFrom: `${discovery.evidence.learnedFrom}:${LEGACY_POLICY_RECONCILIATION_MARKER}`
     }
   };
 }
@@ -1238,9 +1161,7 @@ function replayRecentInspectedDiscovery(
   }
   for (const discovery of discoveries
     .filter(
-      (item) =>
-        item.courseId === candidate.course.id &&
-        isFreshDiscovery(item.createdAt, now)
+      (item) => item.courseId === candidate.course.id && isFreshDiscovery(item.createdAt, now)
     )
     .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())) {
     if (discovery.status === "FAILED") {
@@ -1272,9 +1193,7 @@ function replayRecentInspectedDiscovery(
   return null;
 }
 
-function isRejectedManualReplayEvidence(
-  discovery: RecentCourseAutomationDiscovery
-) {
+function isRejectedManualReplayEvidence(discovery: RecentCourseAutomationDiscovery) {
   if (!isPlainRecord(discovery.evidence)) {
     return false;
   }
@@ -1304,9 +1223,7 @@ function readPersistedDiscoveryEvidence(
   const finalUrl = readOptionalSafePublicUrl(discovery.evidence.finalUrl);
   const visibleText = readOptionalBoundedText(discovery.evidence.visibleText, 12_000);
   const accessBarriers = readOptionalAccessBarriers(discovery.evidence.accessBarriers);
-  const bookingCallToAction = readOptionalBoolean(
-    discovery.evidence.bookingCallToAction
-  );
+  const bookingCallToAction = readOptionalBoolean(discovery.evidence.bookingCallToAction);
   if (
     !observedUrls ||
     finalUrl === null ||
@@ -1337,13 +1254,8 @@ function readPersistedDiscoveryEvidence(
   };
 }
 
-function hasCurrentCourseOnlineBookingEvidence(
-  course: MonitoringDiscoveryCandidate["course"]
-) {
-  if (
-    course.bookingMethod === "PUBLIC_ONLINE" ||
-    course.automationEligibility === "ALLOWED"
-  ) {
+function hasCurrentCourseOnlineBookingEvidence(course: MonitoringDiscoveryCandidate["course"]) {
+  if (course.bookingMethod === "PUBLIC_ONLINE" || course.automationEligibility === "ALLOWED") {
     return true;
   }
   const provider = resolveProviderCapability(course);
@@ -1394,9 +1306,7 @@ function isTrustedReplayClassification(discovery: BrowserDiscovery) {
     discovery.status === "VERIFIED" &&
     discovery.automationEligibility === "BLOCKED" &&
     discovery.automationReason === "NO_ONLINE_BOOKING" &&
-    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
-      discovery.bookingMethod ?? ""
-    )
+    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(discovery.bookingMethod ?? "")
   );
 }
 
@@ -1432,42 +1342,38 @@ function hasExplicitReplayTeeTimeDestination(url: URL) {
 }
 
 function hasReplayPositiveOnlineBookingText(value: string) {
-  return normalizeReplayTeeTimeTypography(value).split(/[.!?]+/).some((statement) => {
-    const normalized = statement.replace(/\s+/g, " ").trim();
-    const hasExplicitTeeTimeText = /\btee\s*times?\b/i.test(normalized);
-    if (
-      /\b(?:no|not|never|without|do\s+not|does\s+not|cannot|can['’]t)\b.{0,60}\bonline\b/i.test(
-        normalized
-      ) ||
-      /\bonline\s+(?:booking|reservations?|tee\s*times?)\b.{0,40}\b(?:not\s+available|unavailable|disabled)\b/i.test(
-        normalized
-      )
-    ) {
-      return false;
-    }
-    if (!hasExplicitTeeTimeText) {
-      return false;
-    }
-    if (
-      /\b(?:call(?:ing)?|phone)\b/i.test(normalized) &&
-      !/\bonline\b/i.test(normalized)
-    ) {
-      return false;
-    }
-    return (
-      /\bonline\b/i.test(normalized) ||
-      /^(?:book|reserve|schedule|view|see|search|find|check|make)\b.{0,80}\btee\s*times?\b/i.test(
-        normalized
-      )
-    );
-  });
+  return normalizeReplayTeeTimeTypography(value)
+    .split(/[.!?]+/)
+    .some((statement) => {
+      const normalized = statement.replace(/\s+/g, " ").trim();
+      const hasExplicitTeeTimeText = /\btee\s*times?\b/i.test(normalized);
+      if (
+        /\b(?:no|not|never|without|do\s+not|does\s+not|cannot|can['’]t)\b.{0,60}\bonline\b/i.test(
+          normalized
+        ) ||
+        /\bonline\s+(?:booking|reservations?|tee\s*times?)\b.{0,40}\b(?:not\s+available|unavailable|disabled)\b/i.test(
+          normalized
+        )
+      ) {
+        return false;
+      }
+      if (!hasExplicitTeeTimeText) {
+        return false;
+      }
+      if (/\b(?:call(?:ing)?|phone)\b/i.test(normalized) && !/\bonline\b/i.test(normalized)) {
+        return false;
+      }
+      return (
+        /\bonline\b/i.test(normalized) ||
+        /^(?:book|reserve|schedule|view|see|search|find|check|make)\b.{0,80}\btee\s*times?\b/i.test(
+          normalized
+        )
+      );
+    });
 }
 
 function normalizeReplayTeeTimeTypography(value: string) {
-  return value.replace(
-    /\btee(?:[\s\x2d\u00ad\u2010-\u2015\u2212])+(times?)\b/giu,
-    "tee $1"
-  );
+  return value.replace(/\btee(?:[\s\x2d\u00ad\u2010-\u2015\u2212])+(times?)\b/giu, "tee $1");
 }
 
 function isFreshDiscovery(createdAt: Date, now: Date) {
@@ -1525,10 +1431,7 @@ function readOptionalAccessBarriers(value: unknown) {
   }
   const barriers: NonNullable<BrowserDiscoveryEvidence["accessBarriers"]> = [];
   for (const barrier of value) {
-    if (
-      !isPlainRecord(barrier) ||
-      (barrier.status !== 401 && barrier.status !== 403)
-    ) {
+    if (!isPlainRecord(barrier) || (barrier.status !== 401 && barrier.status !== 403)) {
       return null;
     }
     const url = readSafePublicUrl(barrier.url);
@@ -1542,9 +1445,10 @@ function readOptionalAccessBarriers(value: unknown) {
 
 function haveSameReplayHostname(left: string, right: string) {
   try {
-    const normalize = (hostname: string) =>
-      hostname.toLowerCase().replace(/^www\./u, "");
-    return normalize(parseSafePublicUrl(left).hostname) === normalize(parseSafePublicUrl(right).hostname);
+    const normalize = (hostname: string) => hostname.toLowerCase().replace(/^www\./u, "");
+    return (
+      normalize(parseSafePublicUrl(left).hostname) === normalize(parseSafePublicUrl(right).hostname)
+    );
   } catch {
     return false;
   }
@@ -1580,13 +1484,8 @@ export async function collectOfficialSiteEvidence(
     providerHandoffScopeUrl ??= finalUrl;
   };
   const assertCollectionFetchScope = (url: string) => {
-    if (
-      providerHandoffScopeUrl &&
-      !isWithinProviderHandoffScope(providerHandoffScopeUrl, url)
-    ) {
-      throw new Error(
-        "Provider handoff follow-up left the validated booking surface"
-      );
+    if (providerHandoffScopeUrl && !isWithinProviderHandoffScope(providerHandoffScopeUrl, url)) {
+      throw new Error("Provider handoff follow-up left the validated booking surface");
     }
   };
   const fetchPage = async (url: string) => {
@@ -1625,14 +1524,12 @@ export async function collectOfficialSiteEvidence(
     const canonicalFinal = canonicalizeCollectedOfficialUrl(firstPage.finalUrl);
     const trustedOfficialSource = Boolean(
       isSelectedPersistedOfficialSource(sourceUrl, expectedOfficialWebsite) &&
-        haveSameReplayHostname(sourceUrl, firstPage.finalUrl)
+      haveSameReplayHostname(sourceUrl, firstPage.finalUrl)
     );
     return {
       sourceUrl: canonicalSource,
       finalUrl: trustedOfficialSource ? canonicalFinal : canonicalSource,
-      ...(trustedOfficialSource
-        ? { sourcePageAvailability: "SOFT_NOT_FOUND" as const }
-        : {}),
+      ...(trustedOfficialSource ? { sourcePageAvailability: "SOFT_NOT_FOUND" as const } : {}),
       observedUrls: trustedOfficialSource
         ? uniqueStrings([canonicalSource, canonicalFinal])
         : [canonicalSource],
@@ -1644,11 +1541,7 @@ export async function collectOfficialSiteEvidence(
       accessBarriers: []
     };
   }
-  const rawFirstPageEvidence = extractHtmlEvidence(
-    firstPage.html,
-    firstPage.finalUrl,
-    courseName
-  );
+  const rawFirstPageEvidence = extractHtmlEvidence(firstPage.html, firstPage.finalUrl, courseName);
   const firstPageEvidence = providerHandoffScopeUrl
     ? sanitizeTargetScopedProviderLandingEvidence(
         rawFirstPageEvidence,
@@ -1656,23 +1549,22 @@ export async function collectOfficialSiteEvidence(
         firstPage.html
       )
     : rawFirstPageEvidence;
-  const pages = [{
-    ...firstPage,
-    evidence: firstPageEvidence
-  }];
-  let matchedCoursePage = courseName && (
-    doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
-    doesPageMarkupIdentifyCourse(firstPage.html, courseName) ||
-    hasTargetScopedDirectLegacyProphetLink(
-      pages[0].evidence.linkCandidates
-    )
-  )
-    ? pages[0]
-    : undefined;
+  const pages = [
+    {
+      ...firstPage,
+      evidence: firstPageEvidence
+    }
+  ];
+  let matchedCoursePage =
+    courseName &&
+    (doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
+      doesPageMarkupIdentifyCourse(firstPage.html, courseName) ||
+      hasTargetScopedDirectLegacyProphetLink(pages[0].evidence.linkCandidates))
+      ? pages[0]
+      : undefined;
   const sourcePageSupportsBookingRouteInference = Boolean(
     courseName &&
-      (matchedCoursePage ||
-        doesSecondaryHeadingIdentifyCourse(firstPage.html, courseName))
+    (matchedCoursePage || doesSecondaryHeadingIdentifyCourse(firstPage.html, courseName))
   );
   const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
   const targetScopedOfficialRedirects: Array<{
@@ -1687,15 +1579,10 @@ export async function collectOfficialSiteEvidence(
   let wordpressContentAttempted = false;
 
   for (let followup = 0; followup < MAX_BOOKING_LINK_FOLLOWUPS; followup += 1) {
-    const observedLinkCandidates = pages.flatMap(
-      (page) => page.evidence.linkCandidates
-    );
+    const observedLinkCandidates = pages.flatMap((page) => page.evidence.linkCandidates);
     const linkCandidates = uniqueLinkCandidates<CollectedLinkCandidate>([
       ...(sourcePageSupportsBookingRouteInference
-        ? deriveSameOriginBookingRouteCandidates(
-            observedLinkCandidates,
-            firstPage.finalUrl
-          )
+        ? deriveSameOriginBookingRouteCandidates(observedLinkCandidates, firstPage.finalUrl)
         : []),
       ...observedLinkCandidates
     ]);
@@ -1708,36 +1595,21 @@ export async function collectOfficialSiteEvidence(
     const inferredBookingRoute = unvisitedCandidates.find(
       (candidate) => candidate.inferredCourseBookingRoute
     )?.url;
-    const targetScopedProviderFollowup =
-      targetScopedBookingProviderLinks.find((providerLink) =>
-        unvisitedCandidates.some(
-          (candidate) =>
-            normalizeSourceKey(candidate.url) ===
-            normalizeSourceKey(providerLink.url)
-        )
-      )?.url;
+    const targetScopedProviderFollowup = targetScopedBookingProviderLinks.find((providerLink) =>
+      unvisitedCandidates.some(
+        (candidate) => normalizeSourceKey(candidate.url) === normalizeSourceKey(providerLink.url)
+      )
+    )?.url;
     const followupCandidate =
       pickExactCourseBookingCandidate(unvisitedCandidates, courseName) ??
       inferredBookingRoute ??
       (matchedCoursePage
-        ? pickBookingSurfaceCandidate(
-            unvisitedCandidates,
-            firstPage.finalUrl,
-            courseName
-          )
+        ? pickBookingSurfaceCandidate(unvisitedCandidates, firstPage.finalUrl, courseName)
         : undefined) ??
       targetScopedProviderFollowup ??
       pickOfficialPolicyCandidate(unvisitedCandidates, firstPage.finalUrl) ??
-      pickOfficialCourseDetailCandidate(
-        unvisitedCandidates,
-        courseName,
-        firstPage.finalUrl
-      ) ??
-      pickLikelyBookingCandidate(
-        unvisitedCandidates,
-        firstPage.finalUrl,
-        courseName
-      ) ??
+      pickOfficialCourseDetailCandidate(unvisitedCandidates, courseName, firstPage.finalUrl) ??
+      pickLikelyBookingCandidate(unvisitedCandidates, firstPage.finalUrl, courseName) ??
       pickPrivateClubInformationCandidate(
         unvisitedCandidates,
         pages.map((page) => page.evidence.visibleText).join(" "),
@@ -1747,57 +1619,38 @@ export async function collectOfficialSiteEvidence(
       break;
     }
     const matchingFollowedLinkCandidates = linkCandidates.filter(
-      (candidate) =>
-        normalizeSourceKey(candidate.url) ===
-        normalizeSourceKey(followupCandidate)
+      (candidate) => normalizeSourceKey(candidate.url) === normalizeSourceKey(followupCandidate)
     );
     const followedLinkCandidate =
-      matchingFollowedLinkCandidates.find(
-        (candidate) => candidate.legacyProphetConfiguration
-      ) ?? matchingFollowedLinkCandidates[0];
+      matchingFollowedLinkCandidates.find((candidate) => candidate.legacyProphetConfiguration) ??
+      matchingFollowedLinkCandidates[0];
     const followsTargetScopedProviderLink = Boolean(
       followedLinkCandidate &&
-        targetScopedBookingProviderLinks.some(
-          (providerLink) =>
-            normalizeSourceKey(providerLink.url) ===
-            normalizeSourceKey(followedLinkCandidate.url)
-        )
+      targetScopedBookingProviderLinks.some(
+        (providerLink) =>
+          normalizeSourceKey(providerLink.url) === normalizeSourceKey(followedLinkCandidate.url)
+      )
     );
     const followsBookingPageFromMatchedCourse = Boolean(
       matchedCoursePage &&
-        followedLinkCandidate &&
-        haveSameReplayHostname(
-          firstPage.finalUrl,
-          followedLinkCandidate.url
-        ) &&
-        isBookingLikeOfficialFollowup(followedLinkCandidate) &&
-        matchedCoursePage.evidence.linkCandidates.some(
-          (candidate) =>
-            normalizeSourceKey(candidate.url) ===
-            normalizeSourceKey(followedLinkCandidate.url)
-        )
+      followedLinkCandidate &&
+      haveSameReplayHostname(firstPage.finalUrl, followedLinkCandidate.url) &&
+      isBookingLikeOfficialFollowup(followedLinkCandidate) &&
+      matchedCoursePage.evidence.linkCandidates.some(
+        (candidate) =>
+          normalizeSourceKey(candidate.url) === normalizeSourceKey(followedLinkCandidate.url)
+      )
     );
     const exactTargetOfficialRedirect =
       courseName &&
       followedLinkCandidate &&
       (followedLinkCandidate.targetScopedRedirect ||
-        haveSameReplayHostname(
-          firstPage.finalUrl,
-          followedLinkCandidate.url
-        )) &&
-      doesProviderLinkLabelExactlyIdentifyCourse(
-        followedLinkCandidate.label,
-        courseName
-      )
+        haveSameReplayHostname(firstPage.finalUrl, followedLinkCandidate.url)) &&
+      doesProviderLinkLabelExactlyIdentifyCourse(followedLinkCandidate.label, courseName)
         ? followedLinkCandidate
         : undefined;
     const identifiesTargetCourse = Boolean(
-      courseName &&
-        doesFollowupIdentifyCourse(
-          followupCandidate,
-          linkCandidates,
-          courseName
-        )
+      courseName && doesFollowupIdentifyCourse(followupCandidate, linkCandidates, courseName)
     );
     visited.add(normalizeSourceKey(followupCandidate));
 
@@ -1807,16 +1660,9 @@ export async function collectOfficialSiteEvidence(
         : fetchPage(followupCandidate));
       const fetchedProviderHandoff = Boolean(
         providerHandoffScopeUrl &&
-          isWithinProviderHandoffScope(
-            providerHandoffScopeUrl,
-            fetched.finalUrl
-          )
+        isWithinProviderHandoffScope(providerHandoffScopeUrl, fetched.finalUrl)
       );
-      let extractedEvidence = extractHtmlEvidence(
-        fetched.html,
-        fetched.finalUrl,
-        courseName
-      );
+      let extractedEvidence = extractHtmlEvidence(fetched.html, fetched.finalUrl, courseName);
       if (
         followedLinkCandidate &&
         !wordpressContentAttempted &&
@@ -1872,10 +1718,7 @@ export async function collectOfficialSiteEvidence(
         }
       }
       if (followsTargetScopedProviderLink) {
-        targetScopedProviderObservedUrls.push(
-          page.finalUrl,
-          ...page.evidence.observedUrls
-        );
+        targetScopedProviderObservedUrls.push(page.finalUrl, ...page.evidence.observedUrls);
       }
       if (followedLinkCandidate?.legacyProphetConfiguration) {
         const modernCpsUrl = findStrictModernCpsUrl([page.finalUrl]);
@@ -1916,13 +1759,9 @@ export async function collectOfficialSiteEvidence(
         ((identifiesTargetCourse &&
           (doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
             doesPageMarkupIdentifyCourse(fetched.html, courseName) ||
-            hasTargetScopedDirectLegacyProphetLink(
-              page.evidence.linkCandidates
-            ))) ||
+            hasTargetScopedDirectLegacyProphetLink(page.evidence.linkCandidates))) ||
           (followedLinkCandidate?.inferredCourseBookingRoute &&
-            page.evidence.linkCandidates.some(
-              (candidate) => candidate.targetScopedRedirect
-            )))
+            page.evidence.linkCandidates.some((candidate) => candidate.targetScopedRedirect)))
       ) {
         matchedCoursePage = page;
       }
@@ -1932,10 +1771,7 @@ export async function collectOfficialSiteEvidence(
         throw error;
       }
       if (followedLinkCandidate?.legacyProphetConfiguration) {
-        const outcome = classifyLegacyProphetFollowupFailure(
-          followedLinkCandidate.url,
-          error
-        );
+        const outcome = classifyLegacyProphetFollowupFailure(followedLinkCandidate.url, error);
         legacyProphetFollowupOutcomes.push(outcome);
         if (outcome.modernCpsUrl) {
           failedFollowupObservedUrls.push(outcome.modernCpsUrl);
@@ -1951,9 +1787,9 @@ export async function collectOfficialSiteEvidence(
   }
 
   const finalPage = pages.at(-1)!;
-  const targetScopedOfficialLinks = matchedCoursePage && courseName
-    ? uniqueLinkCandidates(
-        [
+  const targetScopedOfficialLinks =
+    matchedCoursePage && courseName
+      ? uniqueLinkCandidates([
           ...pages.flatMap((page) => {
             if (!haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)) {
               return [];
@@ -1964,56 +1800,42 @@ export async function collectOfficialSiteEvidence(
             return page.evidence.linkCandidates.filter(
               (candidate) =>
                 !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
-                (doesProviderLinkLabelExactlyIdentifyCourse(
-                  candidate.label,
-                  courseName
-                ) ||
-                  (pageIdentifiesCourse &&
-                    isLegacyTeeItUpPlayUrl(candidate.url)))
+                (doesProviderLinkLabelExactlyIdentifyCourse(candidate.label, courseName) ||
+                  (pageIdentifiesCourse && isLegacyTeeItUpPlayUrl(candidate.url)))
             );
           }),
           ...targetScopedOfficialRedirects,
           ...targetScopedBookingProviderLinks
-        ]
-      )
-    : [];
-  const officialPageLinkCandidates = matchedCoursePage && courseName
-    ? uniqueLinkCandidates(
-        [
+        ])
+      : [];
+  const officialPageLinkCandidates =
+    matchedCoursePage && courseName
+      ? uniqueLinkCandidates([
           ...matchedCoursePage.evidence.linkCandidates,
           ...targetScopedOfficialLinks
-        ]
-      )
-        .slice(0, 200)
-        .map(({ url, label }) => ({ url, label }))
-    : [];
+        ])
+          .slice(0, 200)
+          .map(({ url, label }) => ({ url, label }))
+      : [];
   const officialPageLinkKeys = new Set(
-    officialPageLinkCandidates.map((candidate) =>
-      normalizeSourceKey(candidate.url)
-    )
+    officialPageLinkCandidates.map((candidate) => normalizeSourceKey(candidate.url))
   );
   const officialPageUnlabeledObservedUrls = matchedCoursePage
     ? uniqueStrings([
         ...matchedCoursePage.evidence.observedUrls,
         ...targetScopedProviderObservedUrls
       ])
-        .filter(
-          (url) => !officialPageLinkKeys.has(normalizeSourceKey(url))
-        )
+        .filter((url) => !officialPageLinkKeys.has(normalizeSourceKey(url)))
         .slice(0, 200)
     : [];
   return {
     sourceUrl,
     finalUrl: finalPage.finalUrl,
-    observedUrls: uniqueStrings(
-      [
-        ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
-        ...failedFollowupObservedUrls
-      ]
-    ),
-    linkCandidates: uniqueLinkCandidates(
-      pages.flatMap((page) => page.evidence.linkCandidates)
-    )
+    observedUrls: uniqueStrings([
+      ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
+      ...failedFollowupObservedUrls
+    ]),
+    linkCandidates: uniqueLinkCandidates(pages.flatMap((page) => page.evidence.linkCandidates))
       .slice(0, 200)
       .map(({ url, label }) => ({ url, label })),
     ...(matchedCoursePage && courseName
@@ -2022,14 +1844,17 @@ export async function collectOfficialSiteEvidence(
             url: matchedCoursePage.finalUrl,
             linkCandidates: officialPageLinkCandidates,
             ...(officialPageUnlabeledObservedUrls.length > 0
-                ? { observedUrls: officialPageUnlabeledObservedUrls }
-                : {}),
+              ? { observedUrls: officialPageUnlabeledObservedUrls }
+              : {}),
             courseName,
             visibleText: matchedCoursePage.evidence.visibleText.slice(0, 12_000)
           }
         }
       : {}),
-    visibleText: pages.slice().reverse().map((page) => page.evidence.visibleText)
+    visibleText: pages
+      .slice()
+      .reverse()
+      .map((page) => page.evidence.visibleText)
       .filter(Boolean)
       .join("\n")
       .slice(0, 12_000),
@@ -2045,9 +1870,7 @@ export async function collectOfficialSiteEvidence(
     legacyProphetConfigurations: uniqueLegacyProphetConfigurations(
       pages.flatMap((page) =>
         page.evidence.linkCandidates.flatMap((candidate) =>
-          candidate.legacyProphetConfiguration
-            ? [candidate.legacyProphetConfiguration]
-            : []
+          candidate.legacyProphetConfiguration ? [candidate.legacyProphetConfiguration] : []
         )
       )
     ),
@@ -2061,10 +1884,7 @@ export async function collectOfficialSiteEvidence(
   };
 }
 
-function shouldRevalidatePrivateCourseIdentity(
-  course: BrowserProbeCourseInput,
-  now: Date
-) {
+function shouldRevalidatePrivateCourseIdentity(course: BrowserProbeCourseInput, now: Date) {
   if (course.isPublic !== false) {
     return false;
   }
@@ -2072,14 +1892,9 @@ function shouldRevalidatePrivateCourseIdentity(
   return gate.requiresRevalidation;
 }
 
-function getSafePrivateIdentityRevalidationUrl(
-  course: BrowserProbeCourseInput
-) {
+function getSafePrivateIdentityRevalidationUrl(course: BrowserProbeCourseInput) {
   const website = readSafePublicUrl(course.website);
-  if (
-    !website ||
-    resolveProviderCapability({ detectedBookingUrl: website }).capability
-  ) {
+  if (!website || resolveProviderCapability({ detectedBookingUrl: website }).capability) {
     return null;
   }
   return website;
@@ -2105,17 +1920,10 @@ function doesPageUrlIdentifyCourse(value: string, courseName: string) {
   try {
     const url = new URL(value);
     const decodedPath = decodeURIComponent(url.pathname);
-    const pathIdentities = [
-      ...(decodedPath.split("/").filter(Boolean).slice(-1)),
-      decodedPath
-    ].map((identity) =>
-      identity
-        .replace(/[-_]+/g, " ")
-        .replace(/\btee\s*times?\b/gi, " ")
+    const pathIdentities = [...decodedPath.split("/").filter(Boolean).slice(-1), decodedPath].map(
+      (identity) => identity.replace(/[-_]+/g, " ").replace(/\btee\s*times?\b/gi, " ")
     );
-    return pathIdentities.some((identity) =>
-      haveCompatibleCourseNames(courseName, identity)
-    );
+    return pathIdentities.some((identity) => haveCompatibleCourseNames(courseName, identity));
   } catch {
     return false;
   }
@@ -2141,11 +1949,7 @@ async function fetchPublicHtml(
     for (const candidate of secureCandidates) {
       try {
         assertPublicHtmlUrlPolicy(candidate, urlPolicy);
-        return await fetchPublicHtmlFromUrl(
-          candidate.toString(),
-          fetchImpl,
-          urlPolicy
-        );
+        return await fetchPublicHtmlFromUrl(candidate.toString(), fetchImpl, urlPolicy);
       } catch (error) {
         if (error instanceof ProviderDiscoveryLeaseDeferredError) {
           throw error;
@@ -2159,10 +1963,7 @@ async function fetchPublicHtml(
   return fetchPublicHtmlFromUrl(parsedSource.toString(), fetchImpl, urlPolicy);
 }
 
-function fetchPublicHtmlWithProviderBoundary(
-  sourceUrl: string,
-  fetchImpl: typeof fetch
-) {
+function fetchPublicHtmlWithProviderBoundary(sourceUrl: string, fetchImpl: typeof fetch) {
   let scopedProviderFamily: string | null = null;
   let scopedProviderUrl: string | null = null;
   return fetchPublicHtml(sourceUrl, fetchImpl, (candidate) => {
@@ -2182,18 +1983,15 @@ function fetchPublicHtmlWithProviderBoundary(
     }
     return Boolean(
       scopedProviderUrl &&
-        candidateCapability.providerFamilyKey === scopedProviderFamily &&
-        haveSameReplayHostname(scopedProviderUrl, candidate.toString()) &&
-        getProviderPublicBookingLandingIdentity(scopedProviderUrl) ===
-          getProviderPublicBookingLandingIdentity(candidate)
+      candidateCapability.providerFamilyKey === scopedProviderFamily &&
+      haveSameReplayHostname(scopedProviderUrl, candidate.toString()) &&
+      getProviderPublicBookingLandingIdentity(scopedProviderUrl) ===
+        getProviderPublicBookingLandingIdentity(candidate)
     );
   });
 }
 
-function fetchPublicProviderLandingHtml(
-  sourceUrl: string,
-  fetchImpl: typeof fetch
-) {
+function fetchPublicProviderLandingHtml(sourceUrl: string, fetchImpl: typeof fetch) {
   const parsedSource = parseSafePublicUrl(sourceUrl);
   const source = new URL(parsedSource);
   if (source.protocol === "http:") {
@@ -2203,10 +2001,7 @@ function fetchPublicProviderLandingHtml(
   const sourceCapability = resolveProviderCapability({
     detectedBookingUrl: source.toString()
   });
-  if (
-    !sourceCapability.capability ||
-    !isProviderPublicBookingLandingUrl(source)
-  ) {
+  if (!sourceCapability.capability || !isProviderPublicBookingLandingUrl(source)) {
     throw new Error("Provider handoff is not a public booking landing page");
   }
 
@@ -2216,20 +2011,16 @@ function fetchPublicProviderLandingHtml(
     });
     return Boolean(
       candidateCapability.capability &&
-        candidateCapability.providerFamilyKey ===
-          sourceCapability.providerFamilyKey &&
-        haveSameReplayHostname(source.toString(), candidate.toString()) &&
-        isProviderPublicBookingLandingUrl(candidate) &&
-        getProviderPublicBookingLandingIdentity(source) ===
-          getProviderPublicBookingLandingIdentity(candidate)
+      candidateCapability.providerFamilyKey === sourceCapability.providerFamilyKey &&
+      haveSameReplayHostname(source.toString(), candidate.toString()) &&
+      isProviderPublicBookingLandingUrl(candidate) &&
+      getProviderPublicBookingLandingIdentity(source) ===
+        getProviderPublicBookingLandingIdentity(candidate)
     );
   });
 }
 
-function assertPublicHtmlUrlPolicy(
-  url: URL,
-  urlPolicy: PublicHtmlUrlPolicy | undefined
-) {
+function assertPublicHtmlUrlPolicy(url: URL, urlPolicy: PublicHtmlUrlPolicy | undefined) {
   if (urlPolicy && !urlPolicy(url)) {
     throw new Error("Provider landing page left the validated booking surface");
   }
@@ -2344,10 +2135,7 @@ const GENERIC_PAGE_TITLE_IDENTITIES = new Set([
 function isInitialOfficialSiteSoftNotFoundPage(html: string) {
   const structuralHtml = html
     .replace(/<!--[\s\S]*?-->/gu, "")
-    .replace(
-      /<(script|style|template|textarea)\b[^>]*>[\s\S]*?<\/\1>/giu,
-      ""
-    );
+    .replace(/<(script|style|template|textarea)\b[^>]*>[\s\S]*?<\/\1>/giu, "");
   const normalizeIdentity = (value: string) =>
     stripHtml(decodeHtmlEntities(value))
       .normalize("NFKD")
@@ -2355,8 +2143,7 @@ function isInitialOfficialSiteSoftNotFoundPage(html: string) {
       .toLocaleLowerCase("en-US")
       .replace(/[^a-z0-9]+/gu, " ")
       .trim();
-  const headHtml =
-    structuralHtml.match(/<head\b[^>]*>([\s\S]*?)<\/head>/iu)?.[1] ?? "";
+  const headHtml = structuralHtml.match(/<head\b[^>]*>([\s\S]*?)<\/head>/iu)?.[1] ?? "";
   const titleIdentity = normalizeIdentity(
     headHtml.match(/<title\b[^>]*>([\s\S]*?)<\/title>/iu)?.[1] ?? ""
   );
@@ -2366,9 +2153,7 @@ function isInitialOfficialSiteSoftNotFoundPage(html: string) {
   if (!GENERIC_PAGE_TITLE_IDENTITIES.has(titleIdentity)) {
     return false;
   }
-  const firstHeading = structuralHtml.match(
-    /<h1\b([^>]*)>([\s\S]*?)<\/h1>/iu
-  );
+  const firstHeading = structuralHtml.match(/<h1\b([^>]*)>([\s\S]*?)<\/h1>/iu);
   if (
     !firstHeading ||
     /(?:^|\s)hidden(?:\s|=|$)|\baria-hidden\s*=\s*["']?true\b|\bstyle\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)/iu.test(
@@ -2377,9 +2162,7 @@ function isInitialOfficialSiteSoftNotFoundPage(html: string) {
   ) {
     return false;
   }
-  return SOFT_NOT_FOUND_PAGE_IDENTITIES.has(
-    normalizeIdentity(firstHeading[2] ?? "")
-  );
+  return SOFT_NOT_FOUND_PAGE_IDENTITIES.has(normalizeIdentity(firstHeading[2] ?? ""));
 }
 
 function isSelectedPersistedOfficialSource(
@@ -2395,10 +2178,9 @@ function isSelectedPersistedOfficialSource(
     const normalizePath = (url: URL) =>
       decodePublicUrlPath(url.pathname)?.replace(/\/+$/u, "") || "/";
     return Boolean(
-      !resolveProviderCapability({ detectedBookingUrl: source.toString() })
-        .capability &&
-        haveSameReplayHostname(source.toString(), expected.toString()) &&
-        normalizePath(source) === normalizePath(expected)
+      !resolveProviderCapability({ detectedBookingUrl: source.toString() }).capability &&
+      haveSameReplayHostname(source.toString(), expected.toString()) &&
+      normalizePath(source) === normalizePath(expected)
     );
   } catch {
     return false;
@@ -2419,25 +2201,17 @@ function doesPageMarkupIdentifyCourse(html: string, courseName: string) {
   ]
     .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
     .filter(Boolean);
-  return identities.some((identity) =>
-    haveCompatibleCourseNames(courseName, identity)
-  );
+  return identities.some((identity) => haveCompatibleCourseNames(courseName, identity));
 }
 
-function doesOfficialHostnameIdentifyCourse(
-  pageUrl: string,
-  courseName: string
-) {
-  const targetIdentity = normalizeCourseIdentityName(courseName).replace(
-    /\s+/gu,
-    ""
-  );
+function doesOfficialHostnameIdentifyCourse(pageUrl: string, courseName: string) {
+  const targetIdentity = normalizeCourseIdentityName(courseName).replace(/\s+/gu, "");
   if (targetIdentity.length < 4) {
     return false;
   }
   try {
-    return parseSafePublicUrl(pageUrl).hostname
-      .toLocaleLowerCase("en-US")
+    return parseSafePublicUrl(pageUrl)
+      .hostname.toLocaleLowerCase("en-US")
       .replace(/^www\./u, "")
       .split(".")
       .some((label) => {
@@ -2451,13 +2225,8 @@ function doesOfficialHostnameIdentifyCourse(
   }
 }
 
-function doesSecondaryHeadingIdentifyCourse(
-  html: string,
-  courseName: string
-) {
-  return [
-    ...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/giu)
-  ]
+function doesSecondaryHeadingIdentifyCourse(html: string, courseName: string) {
+  return [...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/giu)]
     .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
     .filter(Boolean)
     .some((identity) => haveCompatibleCourseNames(courseName, identity));
@@ -2469,10 +2238,7 @@ async function fetchWordPressRenderedPageContent(
   fetchImpl: typeof fetch,
   contentFetches: Map<string, Promise<string | null>>
 ) {
-  const apiUrl = findWordPressRenderedPageContentUrl(
-    sourceHtml,
-    sourcePageUrl
-  );
+  const apiUrl = findWordPressRenderedPageContentUrl(sourceHtml, sourcePageUrl);
   if (!apiUrl) {
     return null;
   }
@@ -2480,11 +2246,7 @@ async function fetchWordPressRenderedPageContent(
   const cacheKey = `${normalizeSourceKey(apiUrl)}\u0000${normalizeSourceKey(sourcePageUrl)}`;
   let renderedContent = contentFetches.get(cacheKey);
   if (!renderedContent) {
-    renderedContent = fetchWordPressRenderedPageContentFromUrl(
-      apiUrl,
-      sourcePageUrl,
-      fetchImpl
-    );
+    renderedContent = fetchWordPressRenderedPageContentFromUrl(apiUrl, sourcePageUrl, fetchImpl);
     contentFetches.set(cacheKey, renderedContent);
   }
   return renderedContent;
@@ -2532,10 +2294,7 @@ async function fetchWordPressRenderedPageContentFromUrl(
   return payload.content.rendered;
 }
 
-function findWordPressRenderedPageContentUrl(
-  sourceHtml: string,
-  sourcePageUrl: string
-) {
+function findWordPressRenderedPageContentUrl(sourceHtml: string, sourcePageUrl: string) {
   const source = parseSafePublicUrl(sourcePageUrl);
   const decodedHtml = decodeHtmlEntities(sourceHtml);
   const candidates: string[] = [];
@@ -2544,11 +2303,7 @@ function findWordPressRenderedPageContentUrl(
     const rel = readHtmlTagAttribute(tag, "rel")?.toLowerCase();
     const type = readHtmlTagAttribute(tag, "type")?.toLowerCase();
     const href = readHtmlTagAttribute(tag, "href");
-    if (
-      !rel?.split(/\s+/u).includes("alternate") ||
-      type !== "application/json" ||
-      !href
-    ) {
+    if (!rel?.split(/\s+/u).includes("alternate") || type !== "application/json" || !href) {
       continue;
     }
     const resolved = resolveHttpUrl(href, source.toString());
@@ -2572,21 +2327,18 @@ function findWordPressRenderedPageContentUrl(
 function readHtmlTagAttribute(tag: string, attribute: string) {
   const escapedAttribute = attribute.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = tag.match(
-    new RegExp(
-      `(?:^|\\s)${escapedAttribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
-      "i"
-    )
+    new RegExp(`(?:^|\\s)${escapedAttribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i")
   );
   return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
-function isBookingLikeOfficialFollowup(candidate: {
-  url: string;
-  label: string;
-}) {
+function isBookingLikeOfficialFollowup(candidate: { url: string; label: string }) {
   const parsed = parseSafePublicUrl(candidate.url);
   return /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
-    `${candidate.label} ${parsed.hostname.replace(/[._-]+/gu, " ")} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
+    `${candidate.label} ${parsed.hostname.replace(
+      /[._-]+/gu,
+      " "
+    )} ${parsed.pathname.replace(/[-_]+/gu, " ")}`
   );
 }
 
@@ -2599,8 +2351,7 @@ function getUniqueTargetScopedBookingProviderLink(
   const hasAnotherOfficialBookingChoice = candidates.some(
     (candidate) =>
       haveSameReplayHostname(officialUrl, candidate.url) &&
-      normalizeSourceKey(candidate.url) !==
-        normalizeSourceKey(bookingPageUrl) &&
+      normalizeSourceKey(candidate.url) !== normalizeSourceKey(bookingPageUrl) &&
       isBookingLikeOfficialFollowup(candidate)
   );
   if (hasAnotherOfficialBookingChoice) {
@@ -2645,10 +2396,7 @@ function getUniqueTargetScopedBookingProviderLink(
   return (
     (courseName
       ? providerLinks.find((providerLink) =>
-          doesProviderLinkLabelExactlyIdentifyCourse(
-            providerLink.label,
-            courseName
-          )
+          doesProviderLinkLabelExactlyIdentifyCourse(providerLink.label, courseName)
         )
       : undefined) ?? providerLinks[0]
   );
@@ -2662,7 +2410,7 @@ function isInspectablePublicHtmlLink(value: string) {
     });
     return Boolean(
       !isProviderInfrastructureUrl(url) &&
-        (!capability.capability || isProviderPublicBookingLandingUrl(url))
+      (!capability.capability || isProviderPublicBookingLandingUrl(url))
     );
   } catch {
     return false;
@@ -2697,11 +2445,11 @@ function sanitizeTargetScopedProviderLandingEvidence(
       });
       return Boolean(
         capability.capability &&
-          capability.providerFamilyKey === providerFamilyKey &&
-          haveSameReplayHostname(providerUrl, url.toString()) &&
-          isProviderPublicBookingLandingUrl(url) &&
-          getProviderPublicBookingLandingIdentity(providerUrl) ===
-            getProviderPublicBookingLandingIdentity(url)
+        capability.providerFamilyKey === providerFamilyKey &&
+        haveSameReplayHostname(providerUrl, url.toString()) &&
+        isProviderPublicBookingLandingUrl(url) &&
+        getProviderPublicBookingLandingIdentity(providerUrl) ===
+          getProviderPublicBookingLandingIdentity(url)
       );
     } catch {
       return false;
@@ -2715,15 +2463,9 @@ function sanitizeTargetScopedProviderLandingEvidence(
     ),
     visibleText: stripHtmlPreservingBlockBoundaries(
       decodeHtmlEntities(html)
-        .replace(
-          /<script\b[^>]*>[\s\S]*?(?:<\/script\s*>|$)/giu,
-          " "
-        )
+        .replace(/<script\b[^>]*>[\s\S]*?(?:<\/script\s*>|$)/giu, " ")
         .replace(/<style\b[^>]*>[\s\S]*?(?:<\/style\s*>|$)/giu, " ")
-        .replace(
-          /<(nav|header)\b[^>]*>[\s\S]*?<\/\1\s*>/giu,
-          " "
-        )
+        .replace(/<(nav|header)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, " ")
     )
       .split(/\n+/u)
       .map((line) => line.replace(/\s+/gu, " ").trim())
@@ -2751,23 +2493,19 @@ function isWithinProviderHandoffScope(scopeUrl: string, candidateUrl: string) {
     });
     return Boolean(
       scopeCapability.capability &&
-        candidateCapability.capability &&
-        scopeCapability.providerFamilyKey ===
-          candidateCapability.providerFamilyKey &&
-        haveSameReplayHostname(scope.toString(), candidate.toString()) &&
-        isProviderPublicBookingLandingUrl(candidate) &&
-        getProviderPublicBookingLandingIdentity(scope) ===
-          getProviderPublicBookingLandingIdentity(candidate)
+      candidateCapability.capability &&
+      scopeCapability.providerFamilyKey === candidateCapability.providerFamilyKey &&
+      haveSameReplayHostname(scope.toString(), candidate.toString()) &&
+      isProviderPublicBookingLandingUrl(candidate) &&
+      getProviderPublicBookingLandingIdentity(scope) ===
+        getProviderPublicBookingLandingIdentity(candidate)
     );
   } catch {
     return false;
   }
 }
 
-function doesBookingLabelIdentifyAnotherCourse(
-  label: string,
-  courseName: string
-) {
+function doesBookingLabelIdentifyAnotherCourse(label: string, courseName: string) {
   const normalized = label.replace(/\s+/gu, " ").trim();
   if (
     /^(?:book(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|book\s+online|general\s+public|public|reserve(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|tee\s*times?)$/iu.test(
@@ -2792,11 +2530,7 @@ function deriveSameOriginBookingRouteCandidates(
       .replace(/[\u200B-\u200D\uFEFF]/gu, "")
       .replace(/\s+/gu, " ")
       .trim();
-    if (
-      !/^(?:book|reserve)(?:\s+(?:a|your))?\s+tee\s*times?$/iu.test(
-        label
-      )
-    ) {
+    if (!/^(?:book|reserve)(?:\s+(?:a|your))?\s+tee\s*times?$/iu.test(label)) {
       return [];
     }
 
@@ -2804,13 +2538,8 @@ function deriveSameOriginBookingRouteCandidates(
     if (observedTarget.origin !== official.origin) {
       return [];
     }
-    const observedRoute = decodeURIComponent(observedTarget.pathname)
-      .replace(/[-_]+/gu, " ");
-    if (
-      /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
-        observedRoute
-      )
-    ) {
+    const observedRoute = decodeURIComponent(observedTarget.pathname).replace(/[-_]+/gu, " ");
+    if (/\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(observedRoute)) {
       return [];
     }
 
@@ -2820,9 +2549,7 @@ function deriveSameOriginBookingRouteCandidates(
       .toLocaleLowerCase("en-US")
       .replace(/[^a-z0-9]+/gu, "-")
       .replace(/^-+|-+$/gu, "");
-    const inferred = parseSafePublicUrl(
-      new URL(`/${slug}`, official.origin).toString()
-    ).toString();
+    const inferred = parseSafePublicUrl(new URL(`/${slug}`, official.origin).toString()).toString();
     if (normalizeSourceKey(inferred) === normalizeSourceKey(candidate.url)) {
       return [];
     }
@@ -2835,18 +2562,9 @@ function mergeHtmlEvidence(
   right: ReturnType<typeof extractHtmlEvidence>
 ) {
   return {
-    observedUrls: uniqueStrings([
-      ...left.observedUrls,
-      ...right.observedUrls
-    ]),
-    linkCandidates: uniqueLinkCandidates([
-      ...left.linkCandidates,
-      ...right.linkCandidates
-    ]),
-    visibleText: [left.visibleText, right.visibleText]
-      .filter(Boolean)
-      .join("\n")
-      .slice(0, 12_000),
+    observedUrls: uniqueStrings([...left.observedUrls, ...right.observedUrls]),
+    linkCandidates: uniqueLinkCandidates([...left.linkCandidates, ...right.linkCandidates]),
+    visibleText: [left.visibleText, right.visibleText].filter(Boolean).join("\n").slice(0, 12_000),
     teeItUpLegacyConfigurations: uniqueTeeItUpLegacyConfigurations([
       ...left.teeItUpLegacyConfigurations,
       ...right.teeItUpLegacyConfigurations
@@ -2864,7 +2582,7 @@ export async function prepareCourseSupportVerificationMonitoring(
   if (!course) {
     throw new Error("Course-support verification course was not found.");
   }
-  if (course.monitoringMode === "LOCAL_READER_ONLY") {
+  if (course.monitoringMode === "LOCAL_READER_ONLY" || course.monitoringMode === "BROWSER_ONLY") {
     const bookingUrl = course.detectedBookingUrl ?? course.website;
     return getLocalReaderCourseKey(bookingUrl)
       ? {
@@ -2881,6 +2599,15 @@ export async function prepareCourseSupportVerificationMonitoring(
           deferredCourseIds: [],
           retryCourseIds: []
         };
+  }
+  if (course.monitoringMode === "CONTACT_ONLY") {
+    return {
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: []
+    };
   }
 
   const detachedSearch = {
@@ -2899,11 +2626,7 @@ export async function prepareCourseSupportVerificationMonitoring(
   });
 }
 
-function extractHtmlEvidence(
-  html: string,
-  pageUrl: string,
-  courseName?: string
-) {
+function extractHtmlEvidence(html: string, pageUrl: string, courseName?: string) {
   const observedUrls: string[] = [];
   const linkCandidates: CollectedLinkCandidate[] = [];
   const decodedHtml = decodeHtmlEntities(html);
@@ -2971,9 +2694,9 @@ function extractHtmlEvidence(
     }
   }
 
-  const decodedWidgetConfigs = [...decodedHtml.matchAll(
-    /\bdata-widget-config\s*=\s*(?:"([^"]+)"|'([^']+)')/gi
-  )]
+  const decodedWidgetConfigs = [
+    ...decodedHtml.matchAll(/\bdata-widget-config\s*=\s*(?:"([^"]+)"|'([^']+)')/gi)
+  ]
     .map((match) => decodeWidgetConfig(match[1] ?? match[2]))
     .filter(Boolean);
   for (const candidate of extractLegacyProphetWidgetBookingCandidates(
@@ -3018,10 +2741,7 @@ function extractHtmlEvidence(
     observedUrls: uniqueStrings(observedUrls),
     linkCandidates: courseScopedLinkCandidates,
     visibleText,
-    teeItUpLegacyConfigurations: extractTeeItUpLegacyConfigurations(
-      embeddedContent,
-      pageUrl
-    )
+    teeItUpLegacyConfigurations: extractTeeItUpLegacyConfigurations(embeddedContent, pageUrl)
   };
 }
 
@@ -3066,17 +2786,12 @@ function deriveChronogolfWidgetProfileUrl(value: string) {
   return `https://www.chronogolf.com/club/${clubId}`;
 }
 
-function extractTeeItUpLegacyConfigurations(
-  embeddedContent: string,
-  pageUrl: string
-) {
+function extractTeeItUpLegacyConfigurations(embeddedContent: string, pageUrl: string) {
   if (!isLegacyTeeItUpPlayUrl(pageUrl)) {
     return [];
   }
   const providerUrl = new URL(pageUrl);
-  const alias = providerUrl.hostname.match(
-    /^(.+)\.play\.teeitup\.(?:golf|com)$/i
-  )?.[1];
+  const alias = providerUrl.hostname.match(/^(.+)\.play\.teeitup\.(?:golf|com)$/i)?.[1];
   if (!alias) {
     return [];
   }
@@ -3095,37 +2810,37 @@ function extractTeeItUpLegacyConfigurations(
     const courseName = match[3]?.trim();
     if (
       !observedAlias ||
-      observedAlias.toLocaleLowerCase("en-US") !==
-        alias.toLocaleLowerCase("en-US") ||
+      observedAlias.toLocaleLowerCase("en-US") !== alias.toLocaleLowerCase("en-US") ||
       !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(observedAlias) ||
       facilityIds.length === 0 ||
       facilityIds.length > 20 ||
-      facilityIds.some(
-        (facilityId) =>
-          !Number.isSafeInteger(facilityId) || facilityId <= 0
-      ) ||
+      facilityIds.some((facilityId) => !Number.isSafeInteger(facilityId) || facilityId <= 0) ||
       new Set(facilityIds).size !== facilityIds.length ||
       !courseName
     ) {
       return [];
     }
-    return [{
-      providerUrl: `https://${providerUrl.hostname.toLocaleLowerCase("en-US")}/`,
-      alias: observedAlias,
-      facilityIds,
-      courseName
-    }];
+    return [
+      {
+        providerUrl: `https://${providerUrl.hostname.toLocaleLowerCase("en-US")}/`,
+        alias: observedAlias,
+        facilityIds,
+        courseName
+      }
+    ];
   });
 
   return uniqueTeeItUpLegacyConfigurations(configurations);
 }
 
-function uniqueTeeItUpLegacyConfigurations<T extends {
-  providerUrl: string;
-  alias: string;
-  facilityIds: number[];
-  courseName: string;
-}>(configurations: T[]) {
+function uniqueTeeItUpLegacyConfigurations<
+  T extends {
+    providerUrl: string;
+    alias: string;
+    facilityIds: number[];
+    courseName: string;
+  }
+>(configurations: T[]) {
   const seen = new Set<string>();
   return configurations.filter((configuration) => {
     const key = JSON.stringify(configuration);
@@ -3178,10 +2893,7 @@ function pickExactCourseBookingCandidate(
   return candidates.find(
     (candidate) =>
       isBookingLikeOfficialFollowup(candidate) &&
-      doesProviderLinkLabelExactlyIdentifyCourse(
-        candidate.label,
-        courseName
-      )
+      doesProviderLinkLabelExactlyIdentifyCourse(candidate.label, courseName)
   )?.url;
 }
 
@@ -3216,13 +2928,13 @@ function pickOfficialCourseDetailCandidate(
 }
 
 function normalizeCourseLinkName(value: string) {
-  return value.normalize("NFKD").replace(/[^a-z0-9]+/gi, "").toLowerCase();
+  return value
+    .normalize("NFKD")
+    .replace(/[^a-z0-9]+/gi, "")
+    .toLowerCase();
 }
 
-function doesProviderLinkLabelExactlyIdentifyCourse(
-  label: string,
-  courseName: string
-) {
+function doesProviderLinkLabelExactlyIdentifyCourse(label: string, courseName: string) {
   const courseLabel = label
     .replace(
       /^\s*(?:book(?:ing)?|reserve)(?:\s+(?:a|your))?\s+tee\s*times?(?:\s+(?:at|for))?(?:\s*[-:|]\s*|\s+)/i,
@@ -3296,7 +3008,11 @@ function scoreBookingCandidate(
   const parsed = new URL(candidate.url);
   const searchable = `${candidate.label} ${parsed.hostname} ${parsed.pathname} ${parsed.search}`;
   let score = 0;
-  if (/foreupsoftware\.com|\.book\.teeitup\.(?:golf|com)|\.cps\.golf|\.teesnap\.net|fox\.tenfore\.golf/i.test(candidate.url)) {
+  if (
+    /foreupsoftware\.com|\.book\.teeitup\.(?:golf|com)|\.cps\.golf|\.teesnap\.net|fox\.tenfore\.golf/i.test(
+      candidate.url
+    )
+  ) {
     score += 100;
   }
   if (/tee.?times?/i.test(searchable)) {
@@ -3305,18 +3021,15 @@ function scoreBookingCandidate(
   if (/book|reserve|reservation/i.test(searchable)) {
     score += 15;
   }
-  if (
-    courseName &&
-    candidate.label &&
-    haveCompatibleCourseNames(courseName, candidate.label)
-  ) {
+  if (courseName && candidate.label && haveCompatibleCourseNames(courseName, candidate.label)) {
     score += 80;
   }
   if (courseName && parsed.hostname.endsWith(".cps.golf")) {
     const targetIdentity = normalizeCourseIdentityName(
       courseName.replace(/\b(?:and|at|of)\b/gi, " ")
     ).replace(/\s+/g, "");
-    const tenant = parsed.hostname.split(".")[0]
+    const tenant = parsed.hostname
+      .split(".")[0]
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "");
     if (
@@ -3329,7 +3042,11 @@ function scoreBookingCandidate(
   if (normalizeSourceKey(candidate.url) === normalizeSourceKey(currentUrl)) {
     score -= 100;
   }
-  if (/facebook\.com|instagram\.com|youtube\.com|linkedin\.com|twitter\.com|x\.com/i.test(parsed.hostname)) {
+  if (
+    /facebook\.com|instagram\.com|youtube\.com|linkedin\.com|twitter\.com|x\.com/i.test(
+      parsed.hostname
+    )
+  ) {
     score -= 100;
   }
   if (/\.(?:css|js|mjs|png|jpe?g|gif|webp|svg|ico|woff2?)(?:$|[?#])/i.test(parsed.pathname)) {
@@ -3439,18 +3156,20 @@ function hasSensitivePublicUrlState(url: URL, nestingDepth = 0) {
     pathSegments.some(isForbiddenPublicPathSegment) ||
     hasForbiddenAdjacentPublicPathSegments(pathSegments) ||
     hasRestrictedPublicBookingPathSegments(pathSegments) ||
-    pathSegments.some((segment, index) =>
-      (isOpaquePublicCredentialValue(segment) ||
-        isOpaquePublicRedirectPathSegment(pathSegments, index)) &&
-      !isAllowedPublicOpaquePathSegment(pathSegments, index)
+    pathSegments.some(
+      (segment, index) =>
+        (isOpaquePublicCredentialValue(segment) ||
+          isOpaquePublicRedirectPathSegment(pathSegments, index)) &&
+        !isAllowedPublicOpaquePathSegment(pathSegments, index)
     ) ||
     hashSegments.some(isForbiddenPublicPathSegment) ||
     hasForbiddenAdjacentPublicPathSegments(hashSegments) ||
     hasRestrictedPublicBookingPathSegments(hashSegments) ||
-    hashSegments.some((segment, index) =>
-      (isOpaquePublicCredentialValue(segment) ||
-        isOpaquePublicRedirectPathSegment(hashSegments, index)) &&
-      !isAllowedPublicOpaquePathSegment(hashSegments, index)
+    hashSegments.some(
+      (segment, index) =>
+        (isOpaquePublicCredentialValue(segment) ||
+          isOpaquePublicRedirectPathSegment(hashSegments, index)) &&
+        !isAllowedPublicOpaquePathSegment(hashSegments, index)
     )
   );
 }
@@ -3483,24 +3202,20 @@ function hasRestrictedPublicBookingPathSegments(segments: string[]) {
       return false;
     }
     const tailSegments = normalized.slice(index + 1);
-    return tailSegments.join("").includes("teetime") || tailSegments.some(
-      (tailSegment) =>
+    return (
+      tailSegments.join("").includes("teetime") ||
+      tailSegments.some((tailSegment) =>
         /^(?:book|booking|reserve|reservation|schedule|checkout|cart|portal|dashboard|account)$/.test(
           tailSegment
         )
+      )
     );
   });
 }
 
-function hasSensitivePublicFragmentState(
-  value: string,
-  parentUrl: URL,
-  nestingDepth: number
-) {
+function hasSensitivePublicFragmentState(value: string, parentUrl: URL, nestingDepth: number) {
   const fragment = value.replace(/^\/+/, "");
-  const queryLike = fragment.includes("?")
-    ? fragment.slice(fragment.indexOf("?") + 1)
-    : fragment;
+  const queryLike = fragment.includes("?") ? fragment.slice(fragment.indexOf("?") + 1) : fragment;
   if (!queryLike.includes("=")) {
     return false;
   }
@@ -3563,7 +3278,10 @@ function hasUnsafeNestedPublicUrl(
 }
 
 function isNavigationPublicUrlKey(value: string) {
-  const normalized = value.normalize("NFKC").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
   return /^(?:url|uri|(?:next|continue|destination|dest|goto|return|redirect|success|cancel|callback|forward|target|relay)(?:to|url|uri|path|location|destination)?)$/.test(
     normalized
   );
@@ -3596,28 +3314,21 @@ function isForbiddenPublicPathSegment(value: string) {
     )
   );
   const hasSensitiveFlowPair =
-    tokens.some((token) =>
-      /^(?:payment|pay|cart|purchase|order|challenge)$/i.test(token)
-    ) &&
+    tokens.some((token) => /^(?:payment|pay|cart|purchase|order|challenge)$/i.test(token)) &&
     tokens.some((token) =>
       /^(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|page|wait|waiting|progress|acs|connect|provider|gateway|settings|reset|recover|recovery|forgot|checkout|booking|reservation)$/i.test(
         token
       )
     );
   const hasAccountSurfacePair =
-    tokens.some((token) =>
-      /^(?:admin|staff|member|customer|user)$/i.test(token)
-    ) &&
+    tokens.some((token) => /^(?:admin|staff|member|customer|user)$/i.test(token)) &&
     tokens.some((token) =>
       /^(?:account|dashboard|portal|profile|settings|login|signin)$/i.test(token)
     );
   const hasIdentityRecoveryPair =
     tokens.some((token) =>
-      /^(?:forgot|reset|recover|recovery|confirm|confirmation|verify|verification)$/i.test(
-        token
-      )
-    ) &&
-    tokens.some((token) => /^(?:username|email|password|account)$/i.test(token));
+      /^(?:forgot|reset|recover|recovery|confirm|confirmation|verify|verification)$/i.test(token)
+    ) && tokens.some((token) => /^(?:username|email|password|account)$/i.test(token));
   return (
     hasStrongSensitiveToken ||
     hasSensitiveFlowPair ||
@@ -3645,9 +3356,7 @@ function isForbiddenCompactPublicSecurityRoute(normalized: string) {
     /^auth\d*(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|challenge|login|signin|provider|gateway|server|service|proxy)[a-z0-9]*$/.test(
       normalized
     ) ||
-    /^auth(?:n|z|enticate|entication|orize|orization)[a-z0-9]*$/.test(
-      normalized
-    ) ||
+    /^auth(?:n|z|enticate|entication|orize|orization)[a-z0-9]*$/.test(normalized) ||
     /^(?:accounts?|myaccount|useraccount|memberaccount|customeraccount|clientaccount|partneraccount|employeeaccount|regionalaccount)(?:(?:login|signin|signup|portal|dashboard|profile|settings|callback|redirect|recovery|recover|reset|management|manage)[a-z0-9]*)?$/.test(
       normalized
     ) ||
@@ -3666,9 +3375,7 @@ function isForbiddenCompactPublicSecurityRoute(normalized: string) {
     /^(?:email|username)(?:verify|verification|confirm|confirmation|reset|recovery)[a-z0-9]*$/.test(
       normalized
     ) ||
-    /^billing(?:portal|account|history|settings|payment|invoices?|details?)?$/.test(
-      normalized
-    ) ||
+    /^billing(?:portal|account|history|settings|payment|invoices?|details?)?$/.test(normalized) ||
     /^payment[a-z0-9]*$/.test(normalized) ||
     /^(?:credentials?|signature|signed(?:url)?|assertion|relaystate|consent|jsessionid|authcode|nonce|jwt|bearer)[a-z0-9]*$/.test(
       normalized
@@ -3683,9 +3390,7 @@ function isForbiddenCompactPublicSecurityRoute(normalized: string) {
     /^(?:order|cart)(?:review|summary|confirm|confirmation|checkout|payment|billing)[a-z0-9]*$/.test(
       normalized
     ) ||
-    /^(?:booking|reservation|cart)(?:payment|checkout)[a-z0-9]*$/.test(
-      normalized
-    ) ||
+    /^(?:booking|reservation|cart)(?:payment|checkout)[a-z0-9]*$/.test(normalized) ||
     /^(?:payment|pay|cart|purchase|order|challenge)(?:callback|redirect|flow|session|step|start|confirm|confirmation|verify|verification|response|request|status|page|wait|waiting|progress|checkout)[a-z0-9]*$/.test(
       normalized
     )
@@ -3702,14 +3407,15 @@ function getPublicSecurityTokens(value: string) {
 }
 
 function isSensitivePublicUrlKey(value: string) {
-  const normalized = value.normalize("NFKC").replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const normalized = value
+    .normalize("NFKC")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
   return (
     /^(?:token|secret|nonce|jwt|ticket|loginticket|serviceticket|authorization|signature|signed|sig|credential|password|expires?|expiry|expiration|assertion|relaystate|saml(?:response|art)?|oauth(?:token|code|state|verifier)?|authcode|verificationcode|session(?:id|token|key|state)?|clientid|responsetype|redirecturi|granttype|scope|codechallenge|codeverifier|(?:access|auth|id|api|client)(?:token|key|secret))$/.test(
       normalized
     ) ||
-    /^(?:saml|oauth|openid|oidc|auth|authentication|login)[a-z0-9]*$/.test(
-      normalized
-    ) ||
+    /^(?:saml|oauth|openid|oidc|auth|authentication|login)[a-z0-9]*$/.test(normalized) ||
     /^(?:sigalg|openidmode|openidreturnto|openidclaimedid|openididentity|openidrealm|openidassochandle|openidresponse(?:nonce)?|samlrequest|oauthnonce|oauthcallback)$/.test(
       normalized
     ) ||
@@ -3719,9 +3425,7 @@ function isSensitivePublicUrlKey(value: string) {
     /^(?:csrf|csrftoken|xcsrftoken|csrfmiddlewaretoken|xsrf|xsrftoken|formkey|requestverificationtoken|antiforgerytoken|anticsrftoken|authenticitytoken|verificationtoken|checkoutsessionid|paymentintent|orderid|transactionid|invoiceid|cartid)$/.test(
       normalized
     ) ||
-    /(?:password|credential|signature|authorization|assertion|relaystate)/.test(
-      normalized
-    )
+    /(?:password|credential|signature|authorization|assertion|relaystate)/.test(normalized)
   );
 }
 
@@ -3748,9 +3452,10 @@ function isContextualSensitivePublicUrlParameter(key: string, value: string, url
       .toLowerCase();
     return normalizedCandidate !== normalizedKey && isSensitivePublicUrlKey(candidate);
   });
-  const hasSecretShapedValue = /(?:^|[^a-z0-9])(?:private|secret|token|credential|signature|session|nonce|ticket|auth)(?:[^a-z0-9]|$)/i.test(
-    value
-  );
+  const hasSecretShapedValue =
+    /(?:^|[^a-z0-9])(?:private|secret|token|credential|signature|session|nonce|ticket|auth)(?:[^a-z0-9]|$)/i.test(
+      value
+    );
   return hasAuthenticationContext || hasSensitiveCompanion || hasSecretShapedValue;
 }
 
@@ -3759,12 +3464,8 @@ function isOpaquePublicCredentialValue(value: string) {
     /^(?:sk|pk|rk)_(?:test|live)_[A-Za-z0-9_-]{12,}$/i.test(value) ||
     /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/.test(value) ||
     /^[A-Za-z0-9+/_-]{16,}={1,2}$/.test(value) ||
-    (/^[A-Za-z0-9]{19,}$/.test(value) &&
-      /[A-Za-z]/.test(value) &&
-      /\d/.test(value)) ||
-    (/^[A-Za-z]{19,}$/.test(value) &&
-      /[a-z]/.test(value) &&
-      /[A-Z]/.test(value))
+    (/^[A-Za-z0-9]{19,}$/.test(value) && /[A-Za-z]/.test(value) && /\d/.test(value)) ||
+    (/^[A-Za-z]{19,}$/.test(value) && /[a-z]/.test(value) && /[A-Z]/.test(value))
   );
 }
 
@@ -3772,8 +3473,7 @@ function isAllowedPublicOpaquePathSegment(segments: string[], index: number) {
   return (
     /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.test(
       segments[index] ?? ""
-    ) &&
-    /^(?:programs?|courses?)$/i.test(segments[index - 1] ?? "")
+    ) && /^(?:programs?|courses?)$/i.test(segments[index - 1] ?? "")
   );
 }
 
@@ -3805,9 +3505,7 @@ function isForbiddenProviderSurfaceHostname(hostname: string) {
       /^(?:admin|staff|member|customer|user)(?:account|dashboard|portal|profile|settings|login|signin)[a-z0-9]*$/.test(
         compact
       ) ||
-      /^(?:arkose|arkoselabs|okta|onelogin|cloudflareaccess)$/.test(
-        compact
-      )
+      /^(?:arkose|arkoselabs|okta|onelogin|cloudflareaccess)$/.test(compact)
     );
   });
   return (
@@ -3905,9 +3603,7 @@ function findStrictModernCpsUrl(values: Array<string | undefined>) {
       /^[a-z0-9](?:[a-z0-9-]{0,62})\.cps\.golf$/iu.test(url.hostname) &&
       url.hostname.toLowerCase() !== "sc.cps.golf" &&
       (url.pathname === "/" ||
-        /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/iu.test(
-          url.pathname
-        ))
+        /\/(?:onlineresweb|onlineres\/onlineapi)(?:\/|$)/iu.test(url.pathname))
     ) {
       return url.toString();
     }
@@ -3936,18 +3632,13 @@ function classifyLegacyProphetFollowupFailure(
       ...(modernCpsUrl ? { modernCpsUrl } : {})
     };
   }
-  if (
-    error instanceof Error &&
-    /(?:abort|timeout)/iu.test(`${error.name} ${error.message}`)
-  ) {
+  if (error instanceof Error && /(?:abort|timeout)/iu.test(`${error.name} ${error.message}`)) {
     return { providerUrl, outcome: "TIMEOUT" };
   }
   return { providerUrl, outcome: "FETCH_FAILED" };
 }
 
-function uniqueLegacyProphetConfigurations(
-  values: LegacyProphetConfiguration[]
-) {
+function uniqueLegacyProphetConfigurations(values: LegacyProphetConfiguration[]) {
   const seen = new Set<string>();
   const exactConfigurations = values.filter((configuration) => {
     const key = [
@@ -3973,10 +3664,7 @@ function uniqueLegacyProphetConfigurations(
   );
 }
 
-function extractLegacyProphetWidgetBookingCandidates(
-  configs: string[],
-  courseName?: string
-) {
+function extractLegacyProphetWidgetBookingCandidates(configs: string[], courseName?: string) {
   if (!courseName) {
     return [];
   }
@@ -4041,10 +3729,7 @@ function annotateDirectLegacyProphetBookingLinks(input: {
   const courseName = input.courseName?.trim();
   if (
     !courseName ||
-    !doesLegacyProphetPageMarkupIdentifyCourse(
-      input.decodedHtml,
-      courseName
-    ) ||
+    !doesLegacyProphetPageMarkupIdentifyCourse(input.decodedHtml, courseName) ||
     !hasDirectLegacyProphetTeeTimeContext(input.visibleText)
   ) {
     return input.candidates;
@@ -4074,19 +3759,13 @@ function annotateDirectLegacyProphetBookingLinks(input: {
   });
 }
 
-function hasTargetScopedDirectLegacyProphetLink(
-  candidates: CollectedLinkCandidate[]
-) {
+function hasTargetScopedDirectLegacyProphetLink(candidates: CollectedLinkCandidate[]) {
   return candidates.some(
-    (candidate) =>
-      candidate.legacyProphetConfiguration?.sourceKind === "OFFICIAL_LINK"
+    (candidate) => candidate.legacyProphetConfiguration?.sourceKind === "OFFICIAL_LINK"
   );
 }
 
-function doesLegacyProphetPageMarkupIdentifyCourse(
-  html: string,
-  courseName: string
-) {
+function doesLegacyProphetPageMarkupIdentifyCourse(html: string, courseName: string) {
   const targetKey = normalizeLegacyProphetCourseKey(courseName);
   if (targetKey.length < 5) {
     return false;
@@ -4095,16 +3774,8 @@ function doesLegacyProphetPageMarkupIdentifyCourse(
     ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
     ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
   ]
-    .map((match) =>
-      normalizeLegacyProphetCourseKey(
-        stripHtml(decodeHtmlEntities(match[1] ?? ""))
-      )
-    )
-    .some(
-      (identityKey) =>
-        identityKey.length >= 5 &&
-        identityKey === targetKey
-    );
+    .map((match) => normalizeLegacyProphetCourseKey(stripHtml(decodeHtmlEntities(match[1] ?? ""))))
+    .some((identityKey) => identityKey.length >= 5 && identityKey === targetKey);
 }
 
 function hasDirectLegacyProphetTeeTimeContext(visibleText: string) {
@@ -4123,20 +3794,11 @@ function isDirectLegacyProphetBookingLabel(label: string) {
   );
 }
 
-function doesLegacyProphetRootIdentifyCourse(
-  providerUrl: string,
-  courseName: string
-) {
+function doesLegacyProphetRootIdentifyCourse(providerUrl: string, courseName: string) {
   const segment = new URL(providerUrl).pathname.split("/").filter(Boolean)[0];
-  const providerKey = normalizeLegacyProphetCourseKey(
-    segment.replace(/v\d+$/iu, "")
-  );
+  const providerKey = normalizeLegacyProphetCourseKey(segment.replace(/v\d+$/iu, ""));
   const courseKey = normalizeLegacyProphetCourseKey(courseName);
-  return Boolean(
-    providerKey.length >= 5 &&
-      courseKey.length >= 5 &&
-      providerKey === courseKey
-  );
+  return Boolean(providerKey.length >= 5 && courseKey.length >= 5 && providerKey === courseKey);
 }
 
 function normalizeLegacyProphetCourseKey(value: string) {
@@ -4149,38 +3811,24 @@ function normalizeLegacyProphetCourseKey(value: string) {
     .filter(
       (token) =>
         token &&
-        ![
-          "club",
-          "cc",
-          "course",
-          "country",
-          "gc",
-          "golf",
-          "municipal",
-          "park",
-          "the"
-        ].includes(token)
+        !["club", "cc", "course", "country", "gc", "golf", "municipal", "park", "the"].includes(
+          token
+        )
     )
     .join("");
 }
 
-function isLegacyProphetCookielessSessionRedirect(
-  sourceUrl: string,
-  redirectUrl: URL
-) {
+function isLegacyProphetCookielessSessionRedirect(sourceUrl: string, redirectUrl: URL) {
   const decodedPath = decodePublicUrlPath(redirectUrl.pathname);
   return Boolean(
     getSafeLegacyProphetWidgetRoot(sourceUrl) &&
-      redirectUrl.protocol === "https:" &&
-      redirectUrl.hostname.toLowerCase() ===
-        "secure.east.prophetservices.com" &&
-      !redirectUrl.username &&
-      !redirectUrl.password &&
-      !redirectUrl.port &&
-      decodedPath &&
-      /^\/\(S\([^/]{8,512}\)\)(?:\/|$)/iu.test(
-        decodedPath
-      )
+    redirectUrl.protocol === "https:" &&
+    redirectUrl.hostname.toLowerCase() === "secure.east.prophetservices.com" &&
+    !redirectUrl.username &&
+    !redirectUrl.password &&
+    !redirectUrl.port &&
+    decodedPath &&
+    /^\/\(S\([^/]{8,512}\)\)(?:\/|$)/iu.test(decodedPath)
   );
 }
 
@@ -4191,8 +3839,8 @@ function getSafeLegacyProphetWidgetRoot(value: string) {
     const isTenantRoot = segments.length === 1;
     const isExactLegacySearchLanding = Boolean(
       segments.length === 3 &&
-        segments[1]?.toLocaleLowerCase("en-US") === "home" &&
-        segments[2]?.toLocaleLowerCase("en-US") === "nindex"
+      segments[1]?.toLocaleLowerCase("en-US") === "home" &&
+      segments[2]?.toLocaleLowerCase("en-US") === "nindex"
     );
     if (
       url.protocol !== "https:" ||
@@ -4204,9 +3852,7 @@ function getSafeLegacyProphetWidgetRoot(value: string) {
       url.hash ||
       (!isTenantRoot && !isExactLegacySearchLanding) ||
       !/^[a-z0-9][a-z0-9_-]{0,79}$/iu.test(segments[0]) ||
-      /(?:account|auth|captcha|checkout|login|queue|session|webstore)/iu.test(
-        segments[0]
-      )
+      /(?:account|auth|captcha|checkout|login|queue|session|webstore)/iu.test(segments[0])
     ) {
       return null;
     }
@@ -4238,7 +3884,10 @@ function decodeEmbeddedContent(value: string) {
 }
 
 function stripHtml(value: string) {
-  return value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return value
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function stripHtmlPreservingBlockBoundaries(value: string) {

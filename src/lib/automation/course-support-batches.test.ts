@@ -76,6 +76,7 @@ import {
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
   deriveCourseSupportCurrentDemand,
+  findConflictingResponderPaths,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
   isDurableTerminalProof,
@@ -98,6 +99,37 @@ import {
 const now = new Date("2026-07-15T20:00:00.000Z");
 
 describe("course-support path planning", () => {
+  it("rejects exact and provider-family code scope collisions", () => {
+    expect(
+      findConflictingResponderPaths(
+        [
+          "src/lib/tee-times/adapters/cps/normalize.ts",
+          "src/lib/automation/course-support-batches.ts",
+          "docs/course-support-responder.md"
+        ],
+        [
+          "src/lib/tee-times/adapters/cps/fetch.ts",
+          "src/lib/automation/course-support-batches.ts"
+        ]
+      )
+    ).toEqual([
+      "src/lib/automation/course-support-batches.ts",
+      "src/lib/tee-times/adapters/cps/normalize.ts"
+    ]);
+  });
+
+  it("keeps unrelated provider and documentation scopes independent", () => {
+    expect(
+      findConflictingResponderPaths(
+        [
+          "src/lib/tee-times/adapters/chronogolf/fetch.ts",
+          "docs/course-support-responder.md"
+        ],
+        ["src/lib/tee-times/adapters/cps/fetch.ts"]
+      )
+    ).toEqual([]);
+  });
+
   it("reopens only an unreleased verifying batch whose original plan was empty", () => {
     expect(
       canAppendCourseSupportBatchPath({
@@ -1467,6 +1499,8 @@ describe("fresh runtime verification", () => {
           bookingMethod: "PHONE_ONLY",
           automationEligibility: "BLOCKED",
           automationReason: "NO_ONLINE_BOOKING",
+          monitoringMode: "CONTACT_ONLY",
+          website: "https://course.example/",
           latestDiscovery: {
             status: "VERIFIED",
             bookingMethod: "PHONE_ONLY",
@@ -1480,6 +1514,34 @@ describe("fresh runtime verification", () => {
         }
       }).result
     ).toBe("FINAL_DISPOSITION");
+  });
+
+  it("rejects contact-only evidence from a different origin", () => {
+    expect(
+      classifyFreshBatchEvidence({
+        batchCreatedAt: now,
+        incidentFirstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        incidentLastSeenAt: new Date("2026-07-15T19:45:00.000Z"),
+        course: {
+          ...runnableCourse,
+          bookingMethod: "PHONE_ONLY",
+          automationEligibility: "BLOCKED",
+          automationReason: "NO_ONLINE_BOOKING",
+          monitoringMode: "CONTACT_ONLY",
+          website: "https://course.example/",
+          latestDiscovery: {
+            status: "VERIFIED",
+            bookingMethod: "PHONE_ONLY",
+            automationEligibility: "BLOCKED",
+            automationReason: "NO_ONLINE_BOOKING",
+            sourceUrl: "https://unrelated.example/phone-only",
+            bookingUrl: null,
+            confidence: 0.9,
+            createdAt: new Date("2026-07-15T19:30:00.000Z")
+          }
+        }
+      }).result
+    ).toBe("STALE_EVIDENCE");
   });
 
   it("accepts current exact browser-verified private identity evidence", () => {

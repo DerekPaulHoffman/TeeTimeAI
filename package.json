@@ -26,6 +26,7 @@
     "automation:backfill-timezones": "tsx scripts/automation/backfill-course-timezones.ts",
     "automation:place-review": "tsx scripts/automation/manage-google-place-review.ts",
     "automation:course-support": "tsx scripts/automation/course-support.ts",
+    "automation:course-support:preflight": "node scripts/automation/course-support-preflight.mjs",
     "automation:course-profile": "tsx scripts/automation/course-profile.ts",
     "automation:course-monitoring": "tsx scripts/automation/course-monitoring.ts",
     "automation:local-reader-verification": "tsx scripts/automation/local-reader-verification.ts",

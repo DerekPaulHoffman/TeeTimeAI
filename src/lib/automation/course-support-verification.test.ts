@@ -100,9 +100,7 @@ function course(overrides: Record<string, unknown> = {}) {
 
 function fingerprint(courseValue = course()) {
   return buildCourseSupportProviderSnapshotFingerprint(
-    courseValue as Parameters<
-      typeof buildCourseSupportProviderSnapshotFingerprint
-    >[0]
+    courseValue as Parameters<typeof buildCourseSupportProviderSnapshotFingerprint>[0]
   );
 }
 
@@ -163,10 +161,7 @@ function request(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function verificationEvidence(
-  outcome = "NO_MATCH",
-  providerExecution = true
-) {
+function verificationEvidence(outcome = "NO_MATCH", providerExecution = true) {
   return {
     schemaVersion: 1,
     kind: "PROVIDER_VERIFICATION",
@@ -492,10 +487,9 @@ describe("course-support verification scheduling", () => {
 
     expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledTimes(1);
     expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
-    expect(prismaMocks.transaction).toHaveBeenCalledWith(
-      expect.any(Function),
-      { isolationLevel: "Serializable" }
-    );
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "Serializable"
+    });
   });
 
   it("does not schedule an engineering request while any active future pair exists", async () => {
@@ -643,6 +637,7 @@ describe("course-support verification scheduling", () => {
       expect.objectContaining({
         where: {
           createdAt: { gt: new Date("2026-07-20T12:00:00.000Z") },
+          deadlineAt: { gt: now },
           OR: [
             { status: "QUEUED", nextAttemptAt: { lte: now } },
             { status: "RETRYABLE_FAILED", nextAttemptAt: { lte: now } },
@@ -655,7 +650,7 @@ describe("course-support verification scheduling", () => {
     expect(prismaMocks.rootRequestUpdateMany).toHaveBeenCalledWith({
       where: {
         status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] },
-        createdAt: { lte: new Date("2026-07-20T12:00:00.000Z") }
+        deadlineAt: { lte: now }
       },
       data: {
         status: "STALE",
@@ -803,13 +798,7 @@ describe("course-support verification execution fencing", () => {
     }
   ])(
     "stales due work after a $label",
-    async ({
-      batchStatus,
-      batchCompletedAt,
-      incidentCycle,
-      activeBatchId,
-      reason
-    }) => {
+    async ({ batchStatus, batchCompletedAt, incidentCycle, activeBatchId, reason }) => {
       prismaMocks.requestFindUnique.mockResolvedValue(
         request({
           runtimeVersion: null,
@@ -1015,9 +1004,7 @@ describe("course-support verification execution fencing", () => {
     const changedCourse = course({
       bookingMetadata: { provider: "CPS", facilityId: "fresh-discovery" }
     });
-    prismaMocks.requestFindUnique.mockResolvedValue(
-      request({ course: changedCourse })
-    );
+    prismaMocks.requestFindUnique.mockResolvedValue(request({ course: changedCourse }));
 
     const result = await attachCourseSupportVerificationProviderSnapshot({
       requestId: "request-1",
@@ -1028,10 +1015,7 @@ describe("course-support verification execution fencing", () => {
     });
 
     expect(result).toMatchObject({ attached: true, revision: 2 });
-    expect(result).toHaveProperty(
-      "providerSnapshotFingerprint",
-      fingerprint(changedCourse)
-    );
+    expect(result).toHaveProperty("providerSnapshotFingerprint", fingerprint(changedCourse));
     expect(result).toMatchObject({
       discoveryAttemptedAt: new Date("2026-07-21T11:57:00.000Z"),
       discoveryVerifiedAt: null
@@ -1176,12 +1160,7 @@ describe("course-support verification terminal evidence", () => {
         now
       })
     ).toEqual(new Date("2026-07-21T18:00:00.000Z"));
-    for (const retryAfterSeconds of [
-      Number.NaN,
-      Number.POSITIVE_INFINITY,
-      -1,
-      Number.MAX_VALUE
-    ]) {
+    for (const retryAfterSeconds of [Number.NaN, Number.POSITIVE_INFINITY, -1, Number.MAX_VALUE]) {
       expect(
         resolveCourseSupportProviderRetryNotBeforeAt({
           retryAfterSeconds,
@@ -1217,8 +1196,7 @@ describe("course-support verification terminal evidence", () => {
       adapterKey: "cps.public-read",
       availabilityCount: 0,
       httpStatus: 200,
-      message:
-        "Fetched https://book.example/tee-times?session=secret for owner@example.com",
+      message: "Fetched https://book.example/tee-times?session=secret for owner@example.com",
       bookingUrl: "https://evil.example/?token=secret",
       slots: [{ startsAt: "2026-07-21T09:00:00" }],
       recipient: "owner@example.com"
@@ -1373,7 +1351,10 @@ describe("course-support verification terminal evidence", () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
       request({
         course: course({
-          bookingMetadata: { provider: "CPS", facilityId: "changed-after-check" }
+          bookingMetadata: {
+            provider: "CPS",
+            facilityId: "changed-after-check"
+          }
         })
       })
     );
@@ -1433,8 +1414,7 @@ describe("course-support verification terminal evidence", () => {
         leaseToken: "lease-1",
         runtimeVersion: releaseSha,
         failureClass: "TIMEOUT",
-        message:
-          "request timed out at https://book.example/?token=secret session=bare-secret",
+        message: "request timed out at https://book.example/?token=secret session=bare-secret",
         retryAt,
         now
       })
@@ -1450,8 +1430,7 @@ describe("course-support verification terminal evidence", () => {
           status: "RETRYABLE_FAILED",
           nextAttemptAt: retryAt,
           failureClass: "TIMEOUT",
-          lastError:
-            "request timed out at https://book.example [redacted-credential]"
+          lastError: "request timed out at https://book.example [redacted-credential]"
         })
       })
     );
@@ -1490,9 +1469,7 @@ describe("course-support verification terminal evidence", () => {
         })
       })
     );
-    expect(
-      prismaMocks.requestUpdateMany.mock.calls[0][0].data.evidence
-    ).toMatchObject({
+    expect(prismaMocks.requestUpdateMany.mock.calls[0][0].data.evidence).toMatchObject({
       providerRetryNotBeforeAt: "2026-07-21T13:00:00.000Z"
     });
   });
@@ -1709,43 +1686,40 @@ describe("course-support verification terminal evidence", () => {
         ...currentIntelligence()
       }
     }
-  ])(
-    "invalidates prior runnable proof after a $label change",
-    async ({ courseOverrides }) => {
-      prismaMocks.requestFindUnique.mockResolvedValue(
-        request({
-          status: "SUCCEEDED",
-          revision: 2,
-          leaseToken: null,
-          leaseExpiresAt: null,
-          outcome: "NO_MATCH",
-          evidence: verificationEvidence(),
-          course: course(courseOverrides),
-          completedAt: now
-        })
-      );
+  ])("invalidates prior runnable proof after a $label change", async ({ courseOverrides }) => {
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      request({
+        status: "SUCCEEDED",
+        revision: 2,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        outcome: "NO_MATCH",
+        evidence: verificationEvidence(),
+        course: course(courseOverrides),
+        completedAt: now
+      })
+    );
 
-      await expect(
-        getEligibleCourseSupportVerificationProof({
-          batchIncidentId: "batch-incident-1",
-          releaseSha,
-          now
+    await expect(
+      getEligibleCourseSupportVerificationProof({
+        batchIncidentId: "batch-incident-1",
+        releaseSha,
+        now
+      })
+    ).resolves.toEqual({
+      eligible: false,
+      reason: "monitoring_not_actionable"
+    });
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "STALE",
+          lastError: "monitoring_not_actionable"
         })
-      ).resolves.toEqual({
-        eligible: false,
-        reason: "monitoring_not_actionable"
-      });
-      expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: "STALE",
-            lastError: "monitoring_not_actionable"
-          })
-        })
-      );
-      expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
-    }
-  );
+      })
+    );
+    expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
+  });
 
   it("invalidates runnable proof that bypassed verified discovery", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
@@ -1795,9 +1769,7 @@ describe("course-support verification terminal evidence", () => {
           leaseToken: null,
           leaseExpiresAt: null,
           nextAttemptAt:
-            status === "RETRYABLE_FAILED"
-              ? new Date("2026-07-21T12:30:00.000Z")
-              : null,
+            status === "RETRYABLE_FAILED" ? new Date("2026-07-21T12:30:00.000Z") : null,
           outcome: "FETCH_FAILED",
           failureClass: "AUTH",
           evidence: {

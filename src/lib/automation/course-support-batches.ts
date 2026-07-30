@@ -220,6 +220,9 @@ export type CourseSupportCourseEvidence = {
   bookingMethod: BookingMethod;
   automationEligibility: "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
   automationReason: AutomationReason;
+  monitoringMode?: string | null;
+  website?: string | null;
+  detectedBookingUrl?: string | null;
   policyNotes?: string | null;
   intelligenceVerifiedAt?: Date | null;
   intelligenceReviewAt?: Date | null;
@@ -862,9 +865,7 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
     !input.recheckDispatchedAt &&
     input.dirtyPaths.length === 0 &&
     input.incidentResults.length > 0 &&
-    input.incidentResults.every(
-      (result) => result === "PENDING" || result === "STALE_EVIDENCE"
-    )
+    input.incidentResults.every((result) => result === "PENDING" || result === "STALE_EVIDENCE")
   );
 }
 
@@ -889,8 +890,7 @@ export function chooseCourseSupportReleaseDiffBase(input: {
   }
 
   const trustedBaseSha = input.persistedReleaseSha ?? input.baseSha;
-  return input.claimedBaseIsAncestorOfOriginMain &&
-    input.originMainIsAncestorOfRequestedRelease
+  return input.claimedBaseIsAncestorOfOriginMain && input.originMainIsAncestorOfRequestedRelease
     ? input.originMainSha
     : trustedBaseSha;
 }
@@ -1099,15 +1099,11 @@ export async function inspectCourseSupportQueue(input?: {
     activeBatches[0] ??
     null;
   const activeProviderGroups = new Set(
-    activeBatches.map(
-      (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`
-    )
+    activeBatches.map((batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`)
   );
   const availableDueIncidents = dueIncidents.filter(
     (incident) =>
-      !activeProviderGroups.has(
-        `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
-      )
+      !activeProviderGroups.has(`${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`)
   );
 
   const providerGroups = new Set(
@@ -1140,10 +1136,11 @@ export async function inspectCourseSupportQueue(input?: {
   ).length;
   const readOnlyDispatchGroups = [
     ...dueDemand
-      .filter(({ incident }) =>
-        !activeProviderGroups.has(
-          `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
-        )
+      .filter(
+        ({ incident }) =>
+          !activeProviderGroups.has(
+            `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
+          )
       )
       .reduce(
         (groups, item) => {
@@ -1229,10 +1226,7 @@ export async function inspectCourseSupportQueue(input?: {
     dueHistoricalRealCount,
     providerGroupCount: providerGroups.size,
     activeWriterCount: activeBatches.length,
-    availableWriterSlots: Math.max(
-      0,
-      MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length
-    ),
+    availableWriterSlots: Math.max(0, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length),
     readOnlyDispatchPlan: {
       maxProviderGroups: 3,
       maxCoursesPerGroup: 5,
@@ -1256,9 +1250,7 @@ export async function inspectCourseSupportQueue(input?: {
       status: batch.status,
       providerFamilyKey: batch.providerFamilyKey,
       leaseExpiresAt: batch.leaseExpiresAt.toISOString(),
-      ownedByCurrentTask: Boolean(
-        requestingThreadId && batch.ownerThreadId === requestingThreadId
-      )
+      ownedByCurrentTask: Boolean(requestingThreadId && batch.ownerThreadId === requestingThreadId)
     })),
     expiredBatch: expiredBatch
       ? {
@@ -1313,7 +1305,8 @@ export async function claimCourseSupportBatch(input: {
         leaseExpiresAt: true,
         status: true,
         providerFamilyKey: true,
-        failureFingerprint: true
+        failureFingerprint: true,
+        summary: true
       }
     });
     if (activeBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
@@ -1389,9 +1382,7 @@ export async function claimCourseSupportBatch(input: {
         : Promise.resolve(null)
     ]);
     const activeProviderGroups = new Set(
-      activeBatches.map(
-        (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`
-      )
+      activeBatches.map((batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`)
     );
     const candidates = allCandidates.filter(
       (candidate) =>
@@ -1455,6 +1446,29 @@ export async function claimCourseSupportBatch(input: {
     const leaseToken = randomUUID();
     const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
     const plannedPaths = normalizePaths(input.plannedPaths ?? []);
+    const conflictingInitialPaths = findConflictingResponderPaths(
+      plannedPaths,
+      activeBatches.flatMap((activeBatch) => readBatchPlannedPaths(activeBatch.summary))
+    );
+    if (conflictingInitialPaths.length > 0) {
+      const recorded = await recordRoutineResponderObservation({
+        outcome: "deferred_busy",
+        now,
+        summary: {
+          activeBatchCount: activeBatches.length,
+          scopeConflictCount: conflictingInitialPaths.length
+        }
+      });
+      return {
+        outcome: "deferred_busy" as const,
+        durableCloseoutRecorded: recorded,
+        scopeConflict: true,
+        ...getResponderThreadPolicy({
+          outcome: "deferred_busy",
+          durableCloseoutRecorded: recorded
+        })
+      };
+    }
     const created = await prisma.$transaction(
       async (tx) => {
         const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
@@ -1830,6 +1844,21 @@ export async function appendCourseSupportBatchPath(input: {
   const plannedPaths = normalizePaths([...currentPlannedPaths, path]);
   const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
   await prisma.$transaction(async (transaction) => {
+    const otherActiveBatches = await transaction.courseSupportBatch.findMany({
+      where: {
+        id: { not: input.batchId },
+        status: { in: ACTIVE_BATCH_STATUSES },
+        leaseExpiresAt: { gte: now }
+      },
+      select: { summary: true }
+    });
+    const conflicts = findConflictingResponderPaths(
+      [path],
+      otherActiveBatches.flatMap((activeBatch) => readBatchPlannedPaths(activeBatch.summary))
+    );
+    if (conflicts.length > 0) {
+      throw new Error("Responder code scope is already owned by another active provider batch.");
+    }
     const updated = await transaction.courseSupportBatch.updateMany({
       where: {
         id: input.batchId,
@@ -3583,7 +3612,9 @@ export async function closeoutCourseSupportBatch(input: {
           const finalMonitoringState =
             proof.kind === "EXACT_PLACE_REVIEW" || proof.kind === "BROWSER_PRIVATE_IDENTITY"
               ? ("FINAL_IDENTITY" as const)
-              : ("FINAL_MANUAL" as const);
+              : proof.kind === "FINAL_DISPOSITION" && proof.disposition !== "MANUAL_DIRECT"
+                ? ("FINAL_TECHNICAL" as const)
+                : ("FINAL_MANUAL" as const);
           incidentUpdated = await tx.courseSupportIncident.updateMany({
             where: {
               id: entry.incidentId,
@@ -3631,7 +3662,11 @@ export async function closeoutCourseSupportBatch(input: {
                 audit: {
                   automatedFinal: true,
                   finalKind:
-                    finalMonitoringState === "FINAL_IDENTITY" ? "identity" : "manual_direct",
+                    finalMonitoringState === "FINAL_IDENTITY"
+                      ? "identity"
+                      : finalMonitoringState === "FINAL_TECHNICAL"
+                        ? "known_technical_limitation"
+                        : "manual_direct",
                   customerDataIncluded: false
                 }
               }
@@ -3863,9 +3898,13 @@ export async function closeoutCourseSupportBatch(input: {
 
 function getFinalDispositionResolution(proofSnapshot: unknown) {
   const proof = asJsonObject(proofSnapshot as Prisma.JsonValue | null);
-  return proof.kind === "SOURCE_UNVERIFIED_FINAL"
-    ? ("SOURCE_UNVERIFIED" as const)
-    : ("DIRECT_BOOKING_CLASSIFIED" as const);
+  if (proof.kind === "SOURCE_UNVERIFIED_FINAL") {
+    return "SOURCE_UNVERIFIED" as const;
+  }
+  if (proof.kind === "FINAL_DISPOSITION" && proof.disposition !== "MANUAL_DIRECT") {
+    return "TECHNICAL_LIMITATION_CLASSIFIED" as const;
+  }
+  return "DIRECT_BOOKING_CLASSIFIED" as const;
 }
 
 export async function recoverCourseSupportBatch(input: {
@@ -3981,9 +4020,7 @@ export async function recoverCourseSupportBatch(input: {
           now
         })
       ) {
-        const nextAttemptAt = new Date(
-          now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS
-        );
+        const nextAttemptAt = new Date(now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS);
         const message =
           "Expired unreleased responder work was safely requeued without adopting local changes.";
         const summary = asJsonObject(batch.summary);
@@ -4526,9 +4563,11 @@ function getPersistedFinalDisposition(
 
   const manualDisposition =
     course.isPublic &&
+    course.monitoringMode === "CONTACT_ONLY" &&
     isCoherentManualDisposition(course) &&
     isCoherentManualDisposition(discovery) &&
     discovery.bookingMethod === course.bookingMethod &&
+    hasAuthoritativeContactEvidence(course, discovery.sourceUrl) &&
     ["VERIFIED", "BLOCKED"].includes(discovery.status);
   const blockedDisposition =
     course.isPublic &&
@@ -4729,6 +4768,65 @@ function normalizePaths(paths: string[]) {
       paths.map((path) => path.trim().replaceAll("\\", "/").replace(/^\.\//, "")).filter(Boolean)
     )
   ].sort();
+}
+
+function hasAuthoritativeContactEvidence(
+  course: Pick<
+    CourseSupportCourseEvidence,
+    "website" | "detectedBookingUrl" | "bookingMethod" | "automationReason"
+  >,
+  evidenceUrl: string
+) {
+  if (
+    !["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(course.bookingMethod) ||
+    course.automationReason !== "NO_ONLINE_BOOKING"
+  ) {
+    return false;
+  }
+  try {
+    const evidence = new URL(evidenceUrl);
+    if (evidence.protocol !== "https:" || evidence.username || evidence.password) {
+      return false;
+    }
+    const officialOrigins = [course.website, course.detectedBookingUrl].flatMap((value) => {
+      try {
+        const url = new URL(value ?? "");
+        return url.protocol === "https:" && !url.username && !url.password ? [url.origin] : [];
+      } catch {
+        return [];
+      }
+    });
+    return officialOrigins.includes(evidence.origin);
+  } catch {
+    return false;
+  }
+}
+
+function readBatchPlannedPaths(summary: Prisma.JsonValue | null) {
+  const object = asJsonObject(summary);
+  return normalizePaths(
+    Array.isArray(object.plannedPaths)
+      ? object.plannedPaths.filter((path): path is string => typeof path === "string")
+      : []
+  );
+}
+
+export function findConflictingResponderPaths(requestedPaths: string[], ownedPaths: string[]) {
+  const owned = new Set(normalizePaths(ownedPaths).map(getResponderCodeScope));
+  return normalizePaths(requestedPaths).filter((path) => owned.has(getResponderCodeScope(path)));
+}
+
+function getResponderCodeScope(path: string) {
+  const normalized = path.toLowerCase();
+  const providerAdapter = /^src\/lib\/tee-times\/(?:adapters|providers)\/([^/]+)/u.exec(normalized);
+  if (providerAdapter) {
+    return `provider-adapter:${providerAdapter[1]}`;
+  }
+  const localReader = /^tools\/local-chrome-reader\/([^/]+-reader\.js)$/u.exec(normalized);
+  if (localReader) {
+    return `local-reader:${localReader[1]}`;
+  }
+  return `file:${normalized}`;
 }
 
 function validatePlannedPath(value: string) {
@@ -5611,9 +5709,10 @@ function validateGitSha(value: string, label: string) {
 }
 
 function createCourseSupportBatchReference(now: Date) {
-  return `support-${now.toISOString().replace(/\D/g, "").slice(0, 14)}-${randomUUID()
-    .replaceAll("-", "")
-    .slice(0, 10)}`;
+  return `support-${now
+    .toISOString()
+    .replace(/\D/g, "")
+    .slice(0, 14)}-${randomUUID().replaceAll("-", "").slice(0, 10)}`;
 }
 
 export function isTransientCourseSupportFailure(failureClass: CourseSupportFailureClass) {

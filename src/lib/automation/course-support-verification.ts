@@ -22,8 +22,8 @@ import { getAutomationRuntimeVersion } from "./runtime-version";
 
 export const COURSE_SUPPORT_VERIFICATION_LEASE_MS = 10 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_MAX_DUE = 20;
-export const COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS =
-  24 * 60 * 60 * 1000;
+export const COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS = 12 * 60 * 1000;
+const COURSE_SUPPORT_VERIFICATION_LEGACY_HORIZON_MS = 24 * 60 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_START_TIME = "06:00";
 export const COURSE_SUPPORT_VERIFICATION_END_TIME = "20:00";
 export const COURSE_SUPPORT_VERIFICATION_PLAYERS = 1;
@@ -69,6 +69,7 @@ const requestExecutionSelect = {
   leaseToken: true,
   leaseExpiresAt: true,
   nextAttemptAt: true,
+  deadlineAt: true,
   targetDateLocal: true,
   startTimeLocal: true,
   endTimeLocal: true,
@@ -116,10 +117,9 @@ type ProviderCourseSnapshot = Prisma.CourseGetPayload<{
   select: typeof providerCourseSelect;
 }>;
 
-type VerificationExecutionRow =
-  Prisma.CourseSupportVerificationRequestGetPayload<{
-    select: typeof requestExecutionSelect;
-  }>;
+type VerificationExecutionRow = Prisma.CourseSupportVerificationRequestGetPayload<{
+  select: typeof requestExecutionSelect;
+}>;
 
 export type CourseSupportVerificationIntent = {
   targetDateLocal: string;
@@ -213,14 +213,10 @@ export async function scheduleCourseSupportVerificationRequests(input: {
         throw new Error("Course-support verification batch was not found.");
       }
       if (batch.releaseSha !== releaseSha) {
-        throw new Error(
-          "Course-support verification release must equal the batch release SHA."
-        );
+        throw new Error("Course-support verification release must equal the batch release SHA.");
       }
       if (batch.status !== "VERIFYING" || batch.completedAt !== null) {
-        throw new Error(
-          "Course-support verification requires an actively verifying batch."
-        );
+        throw new Error("Course-support verification requires an actively verifying batch.");
       }
 
       const eligible = [] as Array<{
@@ -228,6 +224,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
         courseId: string;
         releaseSha: string;
         nextAttemptAt: Date;
+        deadlineAt: Date;
         targetDateLocal: string;
         startTimeLocal: string;
         endTimeLocal: string;
@@ -261,15 +258,13 @@ export async function scheduleCourseSupportVerificationRequests(input: {
         }
 
         const provider = buildProviderSnapshot(entry.course);
-        const intent = buildCourseSupportVerificationIntent(
-          entry.course.timeZone,
-          now
-        );
+        const intent = buildCourseSupportVerificationIntent(entry.course.timeZone, now);
         eligible.push({
           batchIncidentId: entry.id,
           courseId: entry.courseId,
           releaseSha,
           nextAttemptAt: now,
+          deadlineAt: new Date(now.getTime() + COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS),
           ...intent,
           ...provider,
           providerSnapshotAt: now,
@@ -316,27 +311,22 @@ export async function scheduleCourseSupportVerificationRequests(input: {
   );
 }
 
-export async function listDueCourseSupportVerificationRequests(input: {
-  now?: Date;
-  limit?: number;
-} = {}) {
+export async function listDueCourseSupportVerificationRequests(
+  input: {
+    now?: Date;
+    limit?: number;
+  } = {}
+) {
   const now = validDate(input.now ?? new Date(), "due-list time");
   const requestedLimit =
     input.limit === undefined || !Number.isFinite(input.limit)
       ? COURSE_SUPPORT_VERIFICATION_MAX_DUE
       : Math.trunc(input.limit);
-  const limit = Math.min(
-    COURSE_SUPPORT_VERIFICATION_MAX_DUE,
-    Math.max(1, requestedLimit)
-  );
-  const horizonStartedAfter = new Date(
-    now.getTime() - COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS
-  );
-
+  const limit = Math.min(COURSE_SUPPORT_VERIFICATION_MAX_DUE, Math.max(1, requestedLimit));
   await prisma.courseSupportVerificationRequest.updateMany({
     where: {
       status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] },
-      createdAt: { lte: horizonStartedAfter }
+      deadlineAt: { lte: now }
     },
     data: {
       status: "STALE",
@@ -352,7 +342,10 @@ export async function listDueCourseSupportVerificationRequests(input: {
 
   return prisma.courseSupportVerificationRequest.findMany({
     where: {
-      createdAt: { gt: horizonStartedAfter },
+      createdAt: {
+        gt: new Date(now.getTime() - COURSE_SUPPORT_VERIFICATION_LEGACY_HORIZON_MS)
+      },
+      deadlineAt: { gt: now },
       OR: [
         { status: "QUEUED", nextAttemptAt: { lte: now } },
         { status: "RETRYABLE_FAILED", nextAttemptAt: { lte: now } },
@@ -392,12 +385,7 @@ export async function claimCourseSupportVerificationRequest(input: {
         return rejected("stale_revision");
       }
       if (isRequestHorizonExpired(request, now)) {
-        await markRequestStale(
-          transaction,
-          request,
-          now,
-          "request_horizon_exceeded"
-        );
+        await markRequestStale(transaction, request, now, "request_horizon_exceeded");
         return rejected("request_horizon_exceeded");
       }
       if (request.batchIncident.batch.releaseSha !== request.releaseSha) {
@@ -426,16 +414,10 @@ export async function claimCourseSupportVerificationRequest(input: {
 
       const provider = buildProviderSnapshot(request.course);
       const providerSnapshotChanged =
-        provider.providerSnapshotFingerprint !==
-        request.providerSnapshotFingerprint;
-      const intent = buildCourseSupportVerificationIntent(
-        request.course.timeZone,
-        now
-      );
+        provider.providerSnapshotFingerprint !== request.providerSnapshotFingerprint;
+      const intent = buildCourseSupportVerificationIntent(request.course.timeZone, now);
       const leaseToken = randomUUID();
-      const leaseExpiresAt = new Date(
-        now.getTime() + COURSE_SUPPORT_VERIFICATION_LEASE_MS
-      );
+      const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_VERIFICATION_LEASE_MS);
       const updated = await transaction.courseSupportVerificationRequest.updateMany({
         where: {
           id: request.id,
@@ -526,9 +508,7 @@ export async function heartbeatCourseSupportVerificationRequest(input: {
 }) {
   const now = validDate(input.now ?? new Date(), "heartbeat time");
   validateReleaseSha(input.runtimeVersion);
-  const leaseExpiresAt = new Date(
-    now.getTime() + COURSE_SUPPORT_VERIFICATION_LEASE_MS
-  );
+  const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_VERIFICATION_LEASE_MS);
   const updated = await prisma.courseSupportVerificationRequest.updateMany({
     where: ownedCheckingWhere(input, now),
     data: { leaseExpiresAt, updatedAt: now }
@@ -570,22 +550,14 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
         return rejectedAttachment(eligibility.reason);
       }
-      if (
-        ownedRequest.batchIncident.batch.releaseSha !== ownedRequest.releaseSha
-      ) {
-        await markRequestStale(
-          transaction,
-          ownedRequest,
-          now,
-          "batch_release_changed"
-        );
+      if (ownedRequest.batchIncident.batch.releaseSha !== ownedRequest.releaseSha) {
+        await markRequestStale(transaction, ownedRequest, now, "batch_release_changed");
         return rejectedAttachment("batch_release_changed");
       }
 
       const provider = buildProviderSnapshot(ownedRequest.course);
       const providerSnapshotChanged =
-        provider.providerSnapshotFingerprint !==
-        ownedRequest.providerSnapshotFingerprint;
+        provider.providerSnapshotFingerprint !== ownedRequest.providerSnapshotFingerprint;
       const updated = await transaction.courseSupportVerificationRequest.updateMany({
         where: ownedCheckingWhere(input, now),
         data: {
@@ -608,9 +580,7 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
         revision: ownedRequest.revision + 1,
         providerSnapshotFingerprint: provider.providerSnapshotFingerprint,
         discoveryAttemptedAt: ownedRequest.discoveryAttemptedAt,
-        discoveryVerifiedAt: providerSnapshotChanged
-          ? null
-          : ownedRequest.discoveryVerifiedAt,
+        discoveryVerifiedAt: providerSnapshotChanged ? null : ownedRequest.discoveryVerifiedAt,
         courseId: ownedRequest.courseId,
         intent: {
           targetDateLocal: ownedRequest.targetDateLocal,
@@ -657,12 +627,7 @@ export async function markCourseSupportVerificationDiscoveryAttempted(input: {
         return rejectedDiscoveryMark(eligibility.reason);
       }
       if (!providerSnapshotIsCurrent(ownedRequest)) {
-        await markRequestStale(
-          transaction,
-          ownedRequest,
-          now,
-          "provider_snapshot_changed"
-        );
+        await markRequestStale(transaction, ownedRequest, now, "provider_snapshot_changed");
         return rejectedDiscoveryMark("provider_snapshot_changed");
       }
       if (ownedRequest.discoveryAttemptedAt) {
@@ -723,12 +688,7 @@ export async function markCourseSupportVerificationDiscoveryVerified(input: {
         return rejectedDiscoveryMark(eligibility.reason);
       }
       if (!providerSnapshotIsCurrent(ownedRequest)) {
-        await markRequestStale(
-          transaction,
-          ownedRequest,
-          now,
-          "provider_snapshot_changed"
-        );
+        await markRequestStale(transaction, ownedRequest, now, "provider_snapshot_changed");
         return rejectedDiscoveryMark("provider_snapshot_changed");
       }
       if (
@@ -800,42 +760,21 @@ export async function completeCourseSupportVerificationRequest(input: {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
         return rejectedCompletion(eligibility.reason);
       }
-      if (
-        ownedRequest.batchIncident.batch.releaseSha !== ownedRequest.releaseSha
-      ) {
-        await markRequestStale(
-          transaction,
-          ownedRequest,
-          now,
-          "batch_release_changed"
-        );
+      if (ownedRequest.batchIncident.batch.releaseSha !== ownedRequest.releaseSha) {
+        await markRequestStale(transaction, ownedRequest, now, "batch_release_changed");
         return rejectedCompletion("batch_release_changed");
       }
       if (
-        (input.observation.outcome === "MATCH_FOUND" ||
-          input.observation.outcome === "NO_MATCH") &&
+        (input.observation.outcome === "MATCH_FOUND" || input.observation.outcome === "NO_MATCH") &&
         !hasCoherentVerifiedDiscovery(ownedRequest, now)
       ) {
-        await markRequestStale(
-          transaction,
-          ownedRequest,
-          now,
-          "discovery_not_verified"
-        );
+        await markRequestStale(transaction, ownedRequest, now, "discovery_not_verified");
         return rejectedCompletion("discovery_not_verified");
       }
 
       const provider = buildProviderSnapshot(ownedRequest.course);
-      if (
-        provider.providerSnapshotFingerprint !==
-        ownedRequest.providerSnapshotFingerprint
-      ) {
-        await markRequestStale(
-          transaction,
-          ownedRequest,
-          now,
-          "provider_snapshot_changed"
-        );
+      if (provider.providerSnapshotFingerprint !== ownedRequest.providerSnapshotFingerprint) {
+        await markRequestStale(transaction, ownedRequest, now, "provider_snapshot_changed");
         return rejectedCompletion("provider_snapshot_changed");
       }
 
@@ -891,11 +830,10 @@ export async function failCourseSupportVerificationRequest(input: {
 }) {
   const now = validDate(input.now ?? new Date(), "failure time");
   validateReleaseSha(input.runtimeVersion);
-  const providerRetryNotBeforeAt =
-    resolveCourseSupportProviderRetryNotBeforeAt({
-      retryAfterSeconds: input.retryAfterSeconds ?? null,
-      now
-    });
+  const providerRetryNotBeforeAt = resolveCourseSupportProviderRetryNotBeforeAt({
+    retryAfterSeconds: input.retryAfterSeconds ?? null,
+    now
+  });
   const retryAt = resolveCourseSupportVerificationRetryAt({
     requestedRetryAt: input.retryAt ?? null,
     retryAfterSeconds: input.retryAfterSeconds ?? null,
@@ -921,18 +859,12 @@ export async function failCourseSupportVerificationRequest(input: {
       );
       const provider = buildProviderSnapshot(ownedRequest.course);
       const stillCurrent =
-        ownedRequest.batchIncident.batch.releaseSha ===
-          ownedRequest.releaseSha &&
-        provider.providerSnapshotFingerprint ===
-          ownedRequest.providerSnapshotFingerprint;
+        ownedRequest.batchIncident.batch.releaseSha === ownedRequest.releaseSha &&
+        provider.providerSnapshotFingerprint === ownedRequest.providerSnapshotFingerprint;
       const retryWithinRequestHorizon = Boolean(
-        retryAt &&
-          retryAt.getTime() <
-            ownedRequest.createdAt.getTime() +
-              COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS
+        retryAt && retryAt.getTime() < getVerificationDeadline(ownedRequest).getTime()
       );
-      const retryable =
-        eligibility.eligible && stillCurrent && retryWithinRequestHorizon;
+      const retryable = eligibility.eligible && stillCurrent && retryWithinRequestHorizon;
       const status = retryable ? "RETRYABLE_FAILED" : "STALE";
       const message = boundedMessage(input.message);
       const observation: CourseSupportVerificationObservation = {
@@ -1021,17 +953,10 @@ export async function getEligibleCourseSupportVerificationProof(input: {
       if (
         !hasCoherentVerifiedDiscovery(
           request,
-          request.completedAt.getTime() < now.getTime()
-            ? request.completedAt
-            : now
+          request.completedAt.getTime() < now.getTime() ? request.completedAt : now
         )
       ) {
-        await markRequestStale(
-          transaction,
-          request,
-          now,
-          "discovery_not_verified"
-        );
+        await markRequestStale(transaction, request, now, "discovery_not_verified");
         return rejectedProof("discovery_not_verified");
       }
       if (
@@ -1062,12 +987,7 @@ export async function getEligibleCourseSupportVerificationProof(input: {
         buildProviderSnapshot(request.course).providerSnapshotFingerprint !==
         request.providerSnapshotFingerprint
       ) {
-        await markRequestStale(
-          transaction,
-          request,
-          now,
-          "provider_snapshot_changed"
-        );
+        await markRequestStale(transaction, request, now, "provider_snapshot_changed");
         return rejectedProof("provider_snapshot_changed");
       }
 
@@ -1132,12 +1052,7 @@ export async function getCurrentCourseSupportVerificationFailure(input: {
         }) ||
         request.evidence.failureClass !== request.failureClass
       ) {
-        await markRequestStaleIfNeeded(
-          transaction,
-          request,
-          now,
-          "invalid_evidence"
-        );
+        await markRequestStaleIfNeeded(transaction, request, now, "invalid_evidence");
         return rejectedFailureObservation("invalid_evidence");
       }
 
@@ -1147,32 +1062,19 @@ export async function getCurrentCourseSupportVerificationFailure(input: {
         now
       );
       if (!eligibility.eligible) {
-        await markRequestStaleIfNeeded(
-          transaction,
-          request,
-          now,
-          eligibility.reason
-        );
+        await markRequestStaleIfNeeded(transaction, request, now, eligibility.reason);
         return rejectedFailureObservation(eligibility.reason);
       }
       if (
         buildProviderSnapshot(request.course).providerSnapshotFingerprint !==
         request.providerSnapshotFingerprint
       ) {
-        await markRequestStaleIfNeeded(
-          transaction,
-          request,
-          now,
-          "provider_snapshot_changed"
-        );
+        await markRequestStaleIfNeeded(transaction, request, now, "provider_snapshot_changed");
         return rejectedFailureObservation("provider_snapshot_changed");
       }
 
       const observedAt = new Date(String(request.evidence.observedAt));
-      const providerRetryNotBeforeAt = parseProviderRetryNotBeforeAt(
-        request.evidence,
-        observedAt
-      );
+      const providerRetryNotBeforeAt = parseProviderRetryNotBeforeAt(request.evidence, observedAt);
       return {
         current: true as const,
         releaseSha,
@@ -1252,12 +1154,8 @@ export function buildCourseSupportProviderSnapshotFingerprint(input: {
         automationReason: input.automationReason,
         monitoringMode: input.monitoringMode,
         isPublic: input.isPublic ?? null,
-        intelligenceVerifiedAt: normalizeFingerprintDate(
-          input.intelligenceVerifiedAt
-        ),
-        intelligenceReviewAt: normalizeFingerprintDate(
-          input.intelligenceReviewAt
-        ),
+        intelligenceVerifiedAt: normalizeFingerprintDate(input.intelligenceVerifiedAt),
+        intelligenceReviewAt: normalizeFingerprintDate(input.intelligenceReviewAt),
         intelligenceConfidence: input.intelligenceConfidence ?? null,
         bookingMetadata: input.bookingMetadata ?? null
       })
@@ -1277,15 +1175,12 @@ function normalizeFingerprintDate(value: Date | null | undefined) {
 
 function buildProviderSnapshot(course: ProviderCourseSnapshot) {
   return {
-    providerFamilyKeySnapshot: normalizeProviderFamilyKey(
-      course.providerFamilyKey
-    ),
+    providerFamilyKeySnapshot: normalizeProviderFamilyKey(course.providerFamilyKey),
     platformSnapshot: course.detectedPlatform,
     bookingMethodSnapshot: course.bookingMethod,
     automationEligibilitySnapshot: course.automationEligibility,
     automationReasonSnapshot: course.automationReason,
-    providerSnapshotFingerprint:
-      buildCourseSupportProviderSnapshotFingerprint(course)
+    providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(course)
   };
 }
 
@@ -1352,8 +1247,7 @@ function buildDetachedEligibilityInput(input: {
     batchIncidentIncidentId: input.batchIncident.incidentId,
     batchIncidentCourseId: input.batchIncident.courseId,
     batchIncidentCycle: input.batchIncident.cycle,
-    batchIncidentVerifiedIncidentUpdatedAt:
-      input.batchIncident.verifiedIncidentUpdatedAt,
+    batchIncidentVerifiedIncidentUpdatedAt: input.batchIncident.verifiedIncidentUpdatedAt,
     courseId: input.courseId,
     course: input.course,
     releaseSha: input.releaseSha,
@@ -1400,9 +1294,7 @@ async function evaluateDetachedEligibility(
   if (input.incident.status !== "AUTO_INVESTIGATING") {
     return { eligible: false, reason: "incident_resolved" };
   }
-  if (
-    evaluateMonitoringGate({ ...input.course, now }).disposition !== "ACTIONABLE"
-  ) {
+  if (evaluateMonitoringGate({ ...input.course, now }).disposition !== "ACTIONABLE") {
     return { eligible: false, reason: "monitoring_not_actionable" };
   }
   const activeFuturePairs = await transaction.teeSearch.count({
@@ -1417,10 +1309,7 @@ async function evaluateDetachedEligibility(
   if (activeFuturePairs > 0) {
     return { eligible: false, reason: "active_demand" };
   }
-  if (
-    input.incident.activeRealSearchCount === 0 &&
-    input.incident.earliestTargetDate === null
-  ) {
+  if (input.incident.activeRealSearchCount === 0 && input.incident.earliestTargetDate === null) {
     return { eligible: true };
   }
 
@@ -1444,22 +1333,18 @@ async function evaluateDetachedEligibility(
   if (incidentUpdated.count !== 1) {
     return { eligible: false, reason: "incident_demand_changed" };
   }
-  const batchIncidentUpdated =
-    await transaction.courseSupportBatchIncident.updateMany({
-      where: {
-        id: input.batchIncidentId,
-        batchId: input.batchId,
-        incidentId: input.batchIncidentIncidentId,
-        cycle: input.batchIncidentCycle,
-        verifiedIncidentUpdatedAt:
-          input.batchIncidentVerifiedIncidentUpdatedAt
-      },
-      data: { verifiedIncidentUpdatedAt: reconciledAt }
-    });
+  const batchIncidentUpdated = await transaction.courseSupportBatchIncident.updateMany({
+    where: {
+      id: input.batchIncidentId,
+      batchId: input.batchId,
+      incidentId: input.batchIncidentIncidentId,
+      cycle: input.batchIncidentCycle,
+      verifiedIncidentUpdatedAt: input.batchIncidentVerifiedIncidentUpdatedAt
+    },
+    data: { verifiedIncidentUpdatedAt: reconciledAt }
+  });
   if (batchIncidentUpdated.count !== 1) {
-    throw new Error(
-      "Course-support demand changed while detached verification was scheduled."
-    );
+    throw new Error("Course-support demand changed while detached verification was scheduled.");
   }
   return { eligible: true };
 }
@@ -1528,20 +1413,23 @@ function isDueForClaim(request: VerificationExecutionRow, now: Date) {
   }
   return (
     request.status === "CHECKING" &&
-    Boolean(
-      request.leaseExpiresAt &&
-        request.leaseExpiresAt.getTime() <= now.getTime()
-    )
+    Boolean(request.leaseExpiresAt && request.leaseExpiresAt.getTime() <= now.getTime())
   );
 }
 
 function isRequestHorizonExpired(
-  request: Pick<VerificationExecutionRow, "createdAt">,
+  request: Pick<VerificationExecutionRow, "deadlineAt" | "createdAt">,
   now: Date
 ) {
+  return now.getTime() >= getVerificationDeadline(request).getTime();
+}
+
+function getVerificationDeadline(
+  request: Pick<VerificationExecutionRow, "deadlineAt" | "createdAt">
+) {
   return (
-    now.getTime() >=
-    request.createdAt.getTime() + COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS
+    request.deadlineAt ??
+    new Date(request.createdAt.getTime() + COURSE_SUPPORT_VERIFICATION_LEGACY_HORIZON_MS)
   );
 }
 
@@ -1555,10 +1443,7 @@ function claimableStatePredicate(now: Date) {
 
 async function markRequestStale(
   transaction: Prisma.TransactionClient,
-  request: Pick<
-    VerificationExecutionRow,
-    "id" | "revision" | "status" | "leaseToken"
-  >,
+  request: Pick<VerificationExecutionRow, "id" | "revision" | "status" | "leaseToken">,
   now: Date,
   reason: CourseSupportVerificationRejectionReason
 ) {
@@ -1584,10 +1469,7 @@ async function markRequestStale(
 
 async function markRequestStaleIfNeeded(
   transaction: Prisma.TransactionClient,
-  request: Pick<
-    VerificationExecutionRow,
-    "id" | "revision" | "status" | "leaseToken"
-  >,
+  request: Pick<VerificationExecutionRow, "id" | "revision" | "status" | "leaseToken">,
   now: Date,
   reason: CourseSupportVerificationRejectionReason
 ) {
@@ -1611,22 +1493,15 @@ function buildAllowlistedEvidence(
   ) {
     throw new Error("Course-support verification evidence is not fresh.");
   }
-  const availabilityCount = normalizeAvailabilityCount(
-    observation.availabilityCount
-  );
+  const availabilityCount = normalizeAvailabilityCount(observation.availabilityCount);
   const httpStatus = normalizeHttpStatus(observation.httpStatus);
   const adapterKey = normalizeAdapterKey(observation.adapterKey);
-  const message = observation.message
-    ? boundedMessage(observation.message)
-    : null;
+  const message = observation.message ? boundedMessage(observation.message) : null;
   if (
-    (observation.outcome === "MATCH_FOUND" ||
-      observation.outcome === "NO_MATCH") &&
+    (observation.outcome === "MATCH_FOUND" || observation.outcome === "NO_MATCH") &&
     observation.providerExecution !== true
   ) {
-    throw new Error(
-      "Runnable course-support verification outcomes require provider execution."
-    );
+    throw new Error("Runnable course-support verification outcomes require provider execution.");
   }
 
   return {
@@ -1649,9 +1524,7 @@ function buildAllowlistedEvidence(
     ...(providerRetryNotBeforeAt
       ? { providerRetryNotBeforeAt: providerRetryNotBeforeAt.toISOString() }
       : {}),
-    ...(observation.failureClass
-      ? { failureClass: observation.failureClass }
-      : {}),
+    ...(observation.failureClass ? { failureClass: observation.failureClass } : {}),
     ...(message ? { message } : {})
   };
 }
@@ -1670,8 +1543,7 @@ function isCoherentVerificationEvidence(
     return false;
   }
   const providerExecution = value.providerExecution;
-  const observedAt =
-    typeof value.observedAt === "string" ? new Date(value.observedAt) : null;
+  const observedAt = typeof value.observedAt === "string" ? new Date(value.observedAt) : null;
   const providerRetryNotBeforeAt = observedAt
     ? parseProviderRetryNotBeforeAt(value, observedAt)
     : null;
@@ -1685,8 +1557,7 @@ function isCoherentVerificationEvidence(
     value.providerSnapshotFingerprint !== expected.providerSnapshotFingerprint ||
     !observedAt ||
     !Number.isFinite(observedAt.getTime()) ||
-    (value.providerRetryNotBeforeAt !== undefined &&
-      !providerRetryNotBeforeAt)
+    (value.providerRetryNotBeforeAt !== undefined && !providerRetryNotBeforeAt)
   ) {
     return false;
   }
@@ -1696,10 +1567,7 @@ function isCoherentVerificationEvidence(
   );
 }
 
-function parseProviderRetryNotBeforeAt(
-  value: Prisma.JsonObject,
-  observedAt: Date
-) {
+function parseProviderRetryNotBeforeAt(value: Prisma.JsonObject, observedAt: Date) {
   const raw = value.providerRetryNotBeforeAt;
   if (typeof raw !== "string") {
     return null;
@@ -1770,8 +1638,7 @@ export function resolveCourseSupportProviderRetryNotBeforeAt(input: {
   }
   const retryAfterMilliseconds = Math.ceil(input.retryAfterSeconds) * 1000;
   const retryAfterAt = new Date(now.getTime() + retryAfterMilliseconds);
-  return Number.isFinite(retryAfterAt.getTime()) &&
-    retryAfterAt.getTime() > now.getTime()
+  return Number.isFinite(retryAfterAt.getTime()) && retryAfterAt.getTime() > now.getTime()
     ? retryAfterAt
     : null;
 }
@@ -1794,10 +1661,7 @@ export function resolveCourseSupportVerificationRetryAt(input: {
     // beyond this request's bounded retry horizon is left to incident backoff.
     return null;
   }
-  const requestedRetryAt = validateRetryAt(
-    input.requestedRetryAt ?? null,
-    now
-  );
+  const requestedRetryAt = validateRetryAt(input.requestedRetryAt ?? null, now);
   return validateRetryAt(
     !requestedRetryAt || requestedRetryAt.getTime() < retryAfterAt.getTime()
       ? retryAfterAt
@@ -1823,9 +1687,7 @@ function validateRetryAt(value: Date | null, now: Date) {
 function validateReleaseSha(value: string) {
   const normalized = value.trim();
   if (!FULL_GIT_SHA.test(normalized)) {
-    throw new Error(
-      "Course-support verification requires a full Git release SHA."
-    );
+    throw new Error("Course-support verification requires a full Git release SHA.");
   }
   return normalized;
 }
@@ -1858,18 +1720,14 @@ function providerSnapshotIsCurrent(request: VerificationExecutionRow) {
 }
 
 function hasCoherentVerifiedDiscovery(
-  request: Pick<
-    VerificationExecutionRow,
-    "discoveryAttemptedAt" | "discoveryVerifiedAt"
-  >,
+  request: Pick<VerificationExecutionRow, "discoveryAttemptedAt" | "discoveryVerifiedAt">,
   notAfter: Date
 ) {
   return Boolean(
     request.discoveryAttemptedAt &&
-      request.discoveryVerifiedAt &&
-      request.discoveryVerifiedAt.getTime() >=
-        request.discoveryAttemptedAt.getTime() &&
-      request.discoveryVerifiedAt.getTime() <= notAfter.getTime()
+    request.discoveryVerifiedAt &&
+    request.discoveryVerifiedAt.getTime() >= request.discoveryAttemptedAt.getTime() &&
+    request.discoveryVerifiedAt.getTime() <= notAfter.getTime()
   );
 }
 
@@ -1881,9 +1739,7 @@ function rejectedAttachment(reason: CourseSupportVerificationRejectionReason) {
   return { attached: false as const, reason };
 }
 
-function rejectedDiscoveryMark(
-  reason: CourseSupportVerificationRejectionReason
-) {
+function rejectedDiscoveryMark(reason: CourseSupportVerificationRejectionReason) {
   return { marked: false as const, reason };
 }
 
@@ -1899,8 +1755,6 @@ function rejectedProof(reason: CourseSupportVerificationRejectionReason) {
   return { eligible: false as const, reason };
 }
 
-function rejectedFailureObservation(
-  reason: CourseSupportVerificationRejectionReason
-) {
+function rejectedFailureObservation(reason: CourseSupportVerificationRejectionReason) {
   return { current: false as const, reason };
 }

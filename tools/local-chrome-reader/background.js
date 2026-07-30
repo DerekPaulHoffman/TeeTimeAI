@@ -3,130 +3,109 @@
 const DEFAULT_BACKEND_ORIGIN = "https://teetimespot.com";
 const POLL_ALARM = "tee-time-spot-local-reader-poll";
 const POLL_PERIOD_MINUTES = 1;
+const READER_CAPABILITIES = Object.freeze([
+  ["CPS_RENDERED", 1],
+  ["CHRONOGOLF_RENDERED", 1],
+  ["TENFORE_RENDERED", 1],
+  ["PROPHET_FREAR_RENDERED", 1]
+]);
 const ALLOWED_COURSES = Object.freeze({
   "grassy-hill": [
     "Grassy Hill Country Club",
     "grassyhill.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
-  overpeck: [
-    "Overpeck Golf Course",
-    "overpeckgc.cps.golf",
-    "/onlineresweb/search-teetime",
-    [],
-  ],
+  overpeck: ["Overpeck Golf Course", "overpeckgc.cps.golf", "/onlineresweb/search-teetime", []],
   "glen-mills": [
     "The Golf Course at Glen Mills",
     "golfatglenmills.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   "bayberry-hills": [
     "Bayberry Hills Golf Course",
     "yarmouthpublic.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   "oak-lane": [
     "The Tradition Golf Club at Oak Lane",
     "traditionoaklane.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   "candia-woods": [
     "Candia Woods Golf Links",
     "candiawoods.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   "oxford-greens": [
     "The Golf Club at Oxford Greens",
     "oxfordgreens.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   shennecossett: [
     "Shennecossett Golf Course",
     "shennecossett.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
-  stanley: [
-    "Stanley Golf Course SGC",
-    "stanleygolf.cps.golf",
-    "/onlineresweb/search-teetime",
-    [],
-  ],
-  colonie: [
-    "Colonie Golf Course",
-    "colonie.cps.golf",
-    "/onlineresweb/search-teetime",
-    [],
-  ],
+  stanley: ["Stanley Golf Course SGC", "stanleygolf.cps.golf", "/onlineresweb/search-teetime", []],
+  colonie: ["Colonie Golf Course", "colonie.cps.golf", "/onlineresweb/search-teetime", []],
   "springfield-township": [
     "Springfield Twp Golf Course",
     "springfield.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   "pine-hollow": [
     "Pine Hollow Golf Club",
     "pinehollow.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   "capital-hills": [
     "Capital Hills at Albany",
     "capitalhillsny.cps.golf",
     "/onlineresweb/search-teetime",
-    [],
+    []
   ],
   crestbrook: [
     "Crestbrook Golf Course",
     "www.chronogolf.com",
     "/club/crestbrook-park-golf-course",
-    [],
+    []
   ],
   "crystal-lake": [
     "crystal lake golf",
     "www.chronogolf.com",
     "/club/crystal-lake-golf-club-rhode-island-mapleville",
-    [],
+    []
   ],
-  chanticlair: [
-    "Chanticlair Golf Course",
-    "www.chronogolf.com",
-    "/club/chanticlair-golf-club",
-    [],
-  ],
+  chanticlair: ["Chanticlair Golf Course", "www.chronogolf.com", "/club/chanticlair-golf-club", []],
   "lyman-orchards": [
     "Lyman Orchards Golf Club",
     "www.chronogolf.com",
     "/club/lyman-orchards-golf-club",
-    [],
+    []
   ],
-  "hyde-park": [
-    "Hyde Park Golf Club",
-    "www.chronogolf.com",
-    "/club/hyde-park-golf-club",
-    [],
-  ],
+  "hyde-park": ["Hyde Park Golf Club", "www.chronogolf.com", "/club/hyde-park-golf-club", []],
   "frear-park": [
     "Frear Park Municipal Golf Course",
     "secure.east.prophetservices.com",
     "/FrearParkV3/Home/NIndex",
-    [],
-  ],
+    []
+  ]
 });
 let pollInProgress = false;
 
 function isAllowlistedCpsJob(job) {
   try {
     if (
-      !/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u.test(
-        job?.courseKey || "",
-      ) ||
+      !/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u.test(job?.courseKey || "") ||
       typeof job.courseName !== "string" ||
       job.courseName.trim().length === 0 ||
       job.courseName.length > 160 ||
@@ -179,6 +158,37 @@ function isAllowlistedTenForeJob(job) {
   }
 }
 
+function isAllowlistedChronogolfJob(job) {
+  try {
+    if (
+      !/^chronogolf:[a-z0-9][a-z0-9-]{0,127}$/u.test(job?.courseKey || "") ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "")
+    ) {
+      return false;
+    }
+    const slug = job.courseKey.slice("chronogolf:".length);
+    const url = new URL(job.bookingUrl);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "www.chronogolf.com" &&
+      url.pathname === `/club/${slug}` &&
+      url.searchParams.get("date") === job.targetDate &&
+      url.searchParams.get("step") === "teetimes" &&
+      Array.from(url.searchParams.keys()).every((key) => ["date", "step"].includes(key)) &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedProphetJob(job) {
   try {
     if (
@@ -194,22 +204,14 @@ function isAllowlistedProphetJob(job) {
       return false;
     }
     const url = new URL(job.bookingUrl);
-    const allowedKeys = new Set([
-      "CourseId",
-      "Date",
-      "Time",
-      "Player",
-      "Hole",
-    ]);
+    const allowedKeys = new Set(["CourseId", "Date", "Time", "Player", "Hole"]);
     return (
       url.protocol === "https:" &&
       url.hostname === "secure.east.prophetservices.com" &&
       url.pathname === "/FrearParkV3/Home/NIndex" &&
       url.searchParams.size === allowedKeys.size &&
       Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
-      Array.from(url.searchParams.keys()).every((key) =>
-        allowedKeys.has(key),
-      ) &&
+      Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
       url.searchParams.get("CourseId") === "1,2" &&
       url.searchParams.get("Date") === job.targetDate &&
       url.searchParams.get("Time") === "AnyTime" &&
@@ -226,7 +228,19 @@ function isAllowlistedProphetJob(job) {
 
 function isAllowlistedJob(job) {
   try {
+    const required = job?.requiredCapability;
+    if (
+      !required ||
+      typeof required.key !== "string" ||
+      !Number.isInteger(required.parserVersion) ||
+      !READER_CAPABILITIES.some(
+        ([key, parserVersion]) => key === required.key && parserVersion >= required.parserVersion
+      )
+    ) {
+      return false;
+    }
     if (isAllowlistedCpsJob(job)) return true;
+    if (isAllowlistedChronogolfJob(job)) return true;
     if (isAllowlistedTenForeJob(job)) return true;
     if (isAllowlistedProphetJob(job)) return true;
     const allowed = ALLOWED_COURSES[job?.courseKey];
@@ -238,15 +252,13 @@ function isAllowlistedJob(job) {
     const step = url.searchParams.get("step");
     return (
       job.courseName === courseName &&
-      JSON.stringify(job.cardTextIncludes) ===
-        JSON.stringify(cardTextIncludes) &&
+      JSON.stringify(job.cardTextIncludes) === JSON.stringify(cardTextIncludes) &&
       url.protocol === "https:" &&
       url.hostname === hostname &&
       url.pathname === pathname &&
       url.username === "" &&
       url.password === "" &&
-      (!isChronogolf ||
-        (/^\d{4}-\d{2}-\d{2}$/u.test(date || "") && step === "teetimes"))
+      (!isChronogolf || (/^\d{4}-\d{2}-\d{2}$/u.test(date || "") && step === "teetimes"))
     );
   } catch {
     return false;
@@ -254,9 +266,7 @@ function isAllowlistedJob(job) {
 }
 
 function bytesToHex(bytes) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function hmacHex(secret, value) {
@@ -265,12 +275,10 @@ async function hmacHex(secret, value) {
     new TextEncoder().encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign"],
+    ["sign"]
   );
   return bytesToHex(
-    new Uint8Array(
-      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)),
-    ),
+    new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)))
   );
 }
 
@@ -279,13 +287,13 @@ async function getSettings() {
     "enabled",
     "backendOrigin",
     "deviceId",
-    "deviceToken",
+    "deviceToken"
   ]);
   return {
     enabled: settings.enabled === true,
     backendOrigin: settings.backendOrigin || DEFAULT_BACKEND_ORIGIN,
     deviceId: settings.deviceId || "",
-    deviceToken: (settings.deviceToken || "").replace(/^\uFEFF/u, "").trim(),
+    deviceToken: (settings.deviceToken || "").replace(/^\uFEFF/u, "").trim()
   };
 }
 
@@ -296,7 +304,7 @@ async function signedFetch(path, options = {}) {
   const timestamp = String(Date.now());
   const signature = await hmacHex(
     settings.deviceToken,
-    `${method}\n${path}\n${timestamp}\n${body}`,
+    `${method}\n${path}\n${timestamp}\n${body}`
   );
   return fetch(`${settings.backendOrigin}${path}`, {
     method,
@@ -305,11 +313,9 @@ async function signedFetch(path, options = {}) {
       "content-type": "application/json",
       "x-local-reader-timestamp": timestamp,
       "x-local-reader-signature": signature,
-      ...(options.leaseToken
-        ? { "x-local-reader-lease": options.leaseToken }
-        : {}),
+      ...(options.leaseToken ? { "x-local-reader-lease": options.leaseToken } : {})
     },
-    cache: "no-store",
+    cache: "no-store"
   });
 }
 
@@ -317,7 +323,7 @@ async function setLastStatus(status, detail) {
   await chrome.storage.local.set({
     lastStatus: status,
     lastDetail: detail,
-    lastStatusAt: new Date().toISOString(),
+    lastStatusAt: new Date().toISOString()
   });
 }
 
@@ -386,7 +392,7 @@ async function finishJob(tabId, result) {
     const response = await signedFetch(path, {
       method: "POST",
       body,
-      leaseToken: pending.job.leaseToken,
+      leaseToken: pending.job.leaseToken
     });
     if (!response.ok) {
       throw new Error(`Result API returned ${response.status}`);
@@ -399,13 +405,10 @@ async function finishJob(tabId, result) {
       result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
         ? "COMPLETED"
         : result.status,
-      resultDetail,
+      resultDetail
     );
   } catch (error) {
-    await setLastStatus(
-      "RESULT_FAILED",
-      error instanceof Error ? error.message : String(error),
-    );
+    await setLastStatus("RESULT_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
     await closePendingTab(tabId);
   }
@@ -416,18 +419,22 @@ async function poll() {
   pollInProgress = true;
   try {
     const settings = await getSettings();
-    if (
-      !settings.enabled ||
-      !settings.deviceId ||
-      settings.deviceToken.length < 16
-    ) {
+    if (!settings.enabled || !settings.deviceId || settings.deviceToken.length < 16) {
       return;
     }
     const jobs = await pendingJobs();
     await cleanStalePendingJobs(jobs);
     if (Object.keys(jobs).length > 0) return;
 
-    const path = `/api/local-reader/jobs/next?deviceId=${encodeURIComponent(settings.deviceId)}`;
+    const readerVersion = chrome.runtime.getManifest().version;
+    const capabilities = READER_CAPABILITIES.map(
+      ([key, parserVersion]) => `${key}:${parserVersion}`
+    ).join(",");
+    const path =
+      `/api/local-reader/jobs/next?deviceId=${encodeURIComponent(settings.deviceId)}` +
+      `&readerVersion=${encodeURIComponent(readerVersion)}` +
+      `&buildId=${encodeURIComponent(`chrome-extension-${readerVersion}`)}` +
+      `&capabilities=${encodeURIComponent(capabilities)}`;
     const response = await signedFetch(path);
     if (!response.ok) {
       throw new Error(`Job API returned ${response.status}`);
@@ -442,43 +449,33 @@ async function poll() {
     }
     const tab = await chrome.tabs.create({
       url: payload.job.bookingUrl,
-      active: false,
+      active: false
     });
     if (!tab.id) throw new Error("Chrome did not create a worker tab.");
     jobs[String(tab.id)] = {
       job: payload.job,
-      openedAt: new Date().toISOString(),
+      openedAt: new Date().toISOString()
     };
     await savePendingJobs(jobs);
-    await setLastStatus(
-      "READING",
-      `${payload.job.courseKey} ${payload.job.targetDate}`,
-    );
+    await setLastStatus("READING", `${payload.job.courseKey} ${payload.job.targetDate}`);
     await wakePendingTab(tab.id);
   } catch (error) {
-    await setLastStatus(
-      "POLL_FAILED",
-      error instanceof Error ? error.message : String(error),
-    );
+    await setLastStatus("POLL_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
     pollInProgress = false;
   }
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const settings = await chrome.storage.local.get([
-    "backendOrigin",
-    "deviceId",
-    "enabled",
-  ]);
+  const settings = await chrome.storage.local.get(["backendOrigin", "deviceId", "enabled"]);
   await chrome.storage.local.set({
     backendOrigin: settings.backendOrigin || DEFAULT_BACKEND_ORIGIN,
     deviceId: settings.deviceId || `chrome-${crypto.randomUUID()}`,
-    enabled: settings.enabled === true,
+    enabled: settings.enabled === true
   });
   await chrome.alarms.create(POLL_ALARM, {
     delayInMinutes: 0.1,
-    periodInMinutes: POLL_PERIOD_MINUTES,
+    periodInMinutes: POLL_PERIOD_MINUTES
   });
   await chrome.runtime.openOptionsPage();
 });
@@ -486,7 +483,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(async () => {
   await chrome.alarms.create(POLL_ALARM, {
     delayInMinutes: 0.1,
-    periodInMinutes: POLL_PERIOD_MINUTES,
+    periodInMinutes: POLL_PERIOD_MINUTES
   });
   await poll();
 });

@@ -77,13 +77,12 @@ export async function executeCourseSupportVerificationStep(
   }
 
   let revision = input.expectedRevision;
-  const beforeDiscovery =
-    await attachCourseSupportVerificationProviderSnapshot({
-      requestId: input.requestId,
-      expectedRevision: revision,
-      leaseToken: input.leaseToken,
-      runtimeVersion
-    });
+  const beforeDiscovery = await attachCourseSupportVerificationProviderSnapshot({
+    requestId: input.requestId,
+    expectedRevision: revision,
+    leaseToken: input.leaseToken,
+    runtimeVersion
+  });
   if (!beforeDiscovery.attached) {
     return { outcome: "stopped" as const, reason: beforeDiscovery.reason };
   }
@@ -129,9 +128,12 @@ export async function executeCourseSupportVerificationStep(
   const beforeDiscoveryBookingUrl =
     courseBeforeDiscovery.detectedBookingUrl ?? courseBeforeDiscovery.website;
   const beforeDiscoveryReaderEligible =
+    courseBeforeDiscovery.monitoringMode !== "SERVER_ONLY" &&
+    courseBeforeDiscovery.monitoringMode !== "CONTACT_ONLY" &&
     getLocalReaderCourseKey(beforeDiscoveryBookingUrl) !== null;
   const localReaderOnly =
-    courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY";
+    courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY" ||
+    courseBeforeDiscovery.monitoringMode === "BROWSER_ONLY";
   if (localReaderOnly && !beforeDiscoveryReaderEligible) {
     return failVerification({
       input,
@@ -139,8 +141,7 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "READER_PARSER_MISSING",
       providerExecution: false,
-      message:
-        "Local-reader-only monitoring is configured without an allowlisted reader."
+      message: "Local-reader-only monitoring is configured without an allowlisted reader."
     });
   }
   if (!beforeDiscoveryGate.adapterAllowed && !localReaderOnly) {
@@ -174,13 +175,12 @@ export async function executeCourseSupportVerificationStep(
   if (!beforeDiscovery.discoveryVerifiedAt) {
     let forceFreshDiscovery = false;
     if (!beforeDiscovery.discoveryAttemptedAt) {
-      const attempted =
-        await markCourseSupportVerificationDiscoveryAttempted({
-          requestId: input.requestId,
-          expectedRevision: revision,
-          leaseToken: input.leaseToken,
-          runtimeVersion
-        });
+      const attempted = await markCourseSupportVerificationDiscoveryAttempted({
+        requestId: input.requestId,
+        expectedRevision: revision,
+        leaseToken: input.leaseToken,
+        runtimeVersion
+      });
       if (!attempted.marked) {
         return { outcome: "stopped" as const, reason: attempted.reason };
       }
@@ -188,9 +188,7 @@ export async function executeCourseSupportVerificationStep(
       forceFreshDiscovery = true;
     }
 
-    let discovery: Awaited<
-      ReturnType<typeof prepareCourseSupportVerificationMonitoring>
-    >;
+    let discovery: Awaited<ReturnType<typeof prepareCourseSupportVerificationMonitoring>>;
     try {
       discovery = await prepareCourseSupportVerificationMonitoring(
         ownedCourseId,
@@ -243,21 +241,18 @@ export async function executeCourseSupportVerificationStep(
         message: cappedRetry
           ? "Official-source verification discovery is waiting for its bounded retry window."
           : "No safe official source was attempted for provider verification.",
-        retryAt: cappedRetry
-          ? new Date(Date.now() + TRANSIENT_RETRY_MS)
-          : undefined
+        retryAt: cappedRetry ? new Date(Date.now() + TRANSIENT_RETRY_MS) : undefined
       });
     }
     discoveryCompletedThisRun = true;
   }
 
-  const afterDiscovery =
-    await attachCourseSupportVerificationProviderSnapshot({
-      requestId: input.requestId,
-      expectedRevision: revision,
-      leaseToken: input.leaseToken,
-      runtimeVersion
-    });
+  const afterDiscovery = await attachCourseSupportVerificationProviderSnapshot({
+    requestId: input.requestId,
+    expectedRevision: revision,
+    leaseToken: input.leaseToken,
+    runtimeVersion
+  });
   if (!afterDiscovery.attached) {
     return { outcome: "stopped" as const, reason: afterDiscovery.reason };
   }
@@ -366,7 +361,10 @@ export async function executeCourseSupportVerificationStep(
 
   const capability = resolveProviderCapability(course);
   const bookingUrl = course.detectedBookingUrl ?? course.website;
-  const localReaderEligible = getLocalReaderCourseKey(bookingUrl) !== null;
+  const localReaderEligible =
+    course.monitoringMode !== "SERVER_ONLY" &&
+    course.monitoringMode !== "CONTACT_ONLY" &&
+    getLocalReaderCourseKey(bookingUrl) !== null;
   if (localReaderEligible) {
     const readerVerification = await getLocalReaderCourseVerification({
       courseId,
@@ -438,8 +436,7 @@ export async function executeCourseSupportVerificationStep(
       input,
       revision,
       runtimeVersion,
-      failureClass:
-        getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
+      failureClass: getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
       providerExecution: false,
       message: "No reusable public read-only provider adapter is runnable."
     });
@@ -447,18 +444,15 @@ export async function executeCourseSupportVerificationStep(
 
   let providerExecutionStarted = false;
   try {
-    const execution = await runWithProviderRequestLease(
-      capability.providerFamilyKey,
-      () => {
-        providerExecutionStarted = true;
-        return fetchCourseTeeSheet(
-          course,
-          new Date(`${intent.targetDateLocal}T00:00:00.000Z`),
-          intent.players,
-          true
-        );
-      }
-    );
+    const execution = await runWithProviderRequestLease(capability.providerFamilyKey, () => {
+      providerExecutionStarted = true;
+      return fetchCourseTeeSheet(
+        course,
+        new Date(`${intent.targetDateLocal}T00:00:00.000Z`),
+        intent.players,
+        true
+      );
+    });
     if (!execution.acquired) {
       return failVerification({
         input,
@@ -536,33 +530,24 @@ export async function executeCourseSupportVerificationStep(
       httpStatus: failure.httpStatus,
       retryAfterSeconds: failure.retryAfterSeconds,
       message: "Public provider availability verification failed.",
-      retryAt: LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass) &&
-          localReaderEligible
-        ? new Date(failedAt.getTime() + LEASE_BUSY_RETRY_MS)
-        : TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
-          ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
-          : null
+      retryAt:
+        LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass) && localReaderEligible
+          ? new Date(failedAt.getTime() + LEASE_BUSY_RETRY_MS)
+          : TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
+            ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
+            : null
     });
   }
 }
 
-function hasCoherentDiscoveryProof(
-  attemptedAt: Date | null,
-  verifiedAt: Date | null
-) {
-  return Boolean(
-    attemptedAt &&
-      verifiedAt &&
-      attemptedAt.getTime() <= verifiedAt.getTime()
-  );
+function hasCoherentDiscoveryProof(attemptedAt: Date | null, verifiedAt: Date | null) {
+  return Boolean(attemptedAt && verifiedAt && attemptedAt.getTime() <= verifiedAt.getTime());
 }
 
-function getMonitoringGateFailureClass(
-  course: {
-    automationReason: string | null;
-    isPublic: boolean | null;
-  }
-): CourseSupportFailureClass {
+function getMonitoringGateFailureClass(course: {
+  automationReason: string | null;
+  isPublic: boolean | null;
+}): CourseSupportFailureClass {
   if (course.isPublic === false) {
     return "UNSUPPORTED_FAMILY";
   }
@@ -575,10 +560,7 @@ function getMonitoringGateFailureClass(
   return "UNSUPPORTED_FAMILY";
 }
 
-function getTransientProviderRetryAt(
-  now: Date,
-  retryAfterSeconds: number | null
-) {
+function getTransientProviderRetryAt(now: Date, retryAfterSeconds: number | null) {
   const providerDelayMs =
     retryAfterSeconds === null
       ? 0
@@ -645,6 +627,9 @@ async function failVerification(input: {
     }
   });
   return failed.failed
-    ? { outcome: "failed" as const, retryable: failed.status === "RETRYABLE_FAILED" }
+    ? {
+        outcome: "failed" as const,
+        retryable: failed.status === "RETRYABLE_FAILED"
+      }
     : { outcome: "stopped" as const, reason: failed.reason };
 }
