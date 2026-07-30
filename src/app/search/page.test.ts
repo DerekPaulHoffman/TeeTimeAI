@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { metadata, searchStructuredData } from "./page";
+import { metadata } from "./page";
+import { searchStructuredData } from "./search-page-seo";
 
 describe("search page metadata", () => {
   it("identifies the search route consistently in canonical and social metadata", () => {

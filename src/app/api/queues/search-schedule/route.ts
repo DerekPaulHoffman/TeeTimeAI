@@ -7,13 +7,16 @@ import { consumeSearchScheduleQueueMessage } from "@/lib/automation/search-sched
 
 export const runtime = "nodejs";
 
-export const POST = handleCallback(
-  async (message) => {
-    await consumeSearchScheduleQueueMessage(message);
-  },
-  {
-    visibilityTimeoutSeconds: 120,
-    retry: (error, metadata) =>
-      getSearchScheduleQueueRetryDirective(error, metadata.deliveryCount)
-  }
-);
+export async function POST(request: Request) {
+  const queueCallback = handleCallback(
+    async (message) => {
+      await consumeSearchScheduleQueueMessage(message);
+    },
+    {
+      visibilityTimeoutSeconds: 120,
+      retry: (error, metadata) =>
+        getSearchScheduleQueueRetryDirective(error, metadata.deliveryCount)
+    }
+  );
+  return queueCallback(request);
+}

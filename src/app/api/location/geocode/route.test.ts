@@ -10,8 +10,12 @@ vi.mock("@/lib/places/geocode", async (importOriginal) => {
 });
 
 import { geocodeLocation, LocationNotFoundError } from "@/lib/places/geocode";
+import {
+  geocodeSuccessCacheHeaders,
+  getGeocodeErrorResponse
+} from "@/lib/places/geocode-response";
 
-import { GET, geocodeSuccessCacheHeaders, getGeocodeErrorResponse } from "./route";
+import { GET } from "./route";
 
 const mockedGeocodeLocation = vi.mocked(geocodeLocation);
 const originalEnv = {

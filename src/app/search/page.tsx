@@ -4,30 +4,15 @@ import { currentUser } from "@clerk/nextjs/server";
 import { StructuredData } from "@/components/structured-data";
 import { TeeTimeIntake } from "@/components/tee-time-intake";
 import { getClerkPublishableKey, hasClerkConfig } from "@/lib/env";
-import {
-  buildPageMetadata,
-  buildPageStructuredData
-} from "@/lib/seo";
 import "leaflet/dist/leaflet.css";
 import "../pricing.css";
 
-const title = "Find Public Golf Tee Times & Set Free Alerts";
-const description =
-  "Search nearby public golf courses and create free golf tee time alerts for your preferred date, time window, and group size.";
-const path = "/search";
+import {
+  searchPageMetadata,
+  searchStructuredData
+} from "./search-page-seo";
 
-export const metadata = buildPageMetadata({
-  title,
-  description,
-  path
-});
-
-export const searchStructuredData = buildPageStructuredData({
-  name: title,
-  description,
-  path,
-  type: "WebPage"
-});
+export const metadata = searchPageMetadata;
 
 export default async function SearchPage() {
   const accountEnabled = hasClerkConfig();
