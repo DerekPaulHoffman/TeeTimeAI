@@ -140,6 +140,7 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
   bookingWindowEvidenceUrl: true,
   automationEligibility: true,
   automationReason: true,
+  monitoringMode: true,
   bookingAccessMode: true,
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,

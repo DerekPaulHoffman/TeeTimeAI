@@ -3912,6 +3912,19 @@ describe("detached verification atomic batch fences", () => {
         bookingWindowEvidenceUrl: "https://course.example/booking-policy"
       })
     );
+    expect(prismaMocks.verificationRequestFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          batchIncident: expect.objectContaining({
+            select: expect.objectContaining({
+              course: {
+                select: expect.objectContaining({ monitoringMode: true })
+              }
+            })
+          })
+        })
+      })
+    );
   });
 
   it("persists detached success for historical real demand after its searches end", async () => {
