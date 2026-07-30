@@ -364,6 +364,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           outcome,
           message,
           rawSummary: {
@@ -378,7 +379,7 @@ async function checkSearch(
               state: "FINAL_MANUAL",
               outcome: "MANUAL_DIRECT",
               message,
-              runtimeVersion: getAutomationRuntimeVersion()
+              runtimeVersion
             });
           } else if (monitoringGate.disposition === "IDENTITY_FINAL") {
             await recordCourseMonitoringFinalClassification({
@@ -386,7 +387,7 @@ async function checkSearch(
               state: "FINAL_IDENTITY",
               outcome: "IDENTITY_FINAL",
               message,
-              runtimeVersion: getAutomationRuntimeVersion()
+              runtimeVersion
             });
           }
           await resolveCourseSupportIncident({
@@ -435,6 +436,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           outcome: "NO_MATCH",
           message
         });
@@ -461,6 +463,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           outcome: "BLOCKED_TOOLING",
           message,
           rawSummary: {
@@ -504,6 +507,7 @@ async function checkSearch(
             searchId: search.id,
             courseId: course.id,
             automationRunId,
+            runtimeVersion,
             outcome: "NEEDS_ADAPTER",
             message,
             rawSummary: {
@@ -535,6 +539,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           outcome: "NEEDS_ADAPTER",
           message,
           rawSummary: {
@@ -590,6 +595,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           targetDate: searchWindow.date,
           bookingWindow: storedBookingWindow
         });
@@ -671,6 +677,7 @@ async function checkSearch(
             searchId: search.id,
             courseId: course.id,
             automationRunId,
+            runtimeVersion,
             targetDate: searchWindow.date,
             bookingWindow,
             providerExecution: true
@@ -765,6 +772,7 @@ async function checkSearch(
               searchId: search.id,
               courseId: course.id,
               automationRunId,
+              runtimeVersion,
               outcome: "FETCH_FAILED",
               message: unsafeBookingMessage,
               rawSummary: {
@@ -910,6 +918,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           outcome: "FETCH_FAILED",
           message,
           rawSummary: providerRequestStarted
@@ -1847,6 +1856,7 @@ async function recordBookingWindowWaitingProbe(input: {
   searchId: string;
   courseId: string;
   automationRunId: string;
+  runtimeVersion: string;
   targetDate: string;
   bookingWindow: TargetBookingWindow;
   providerExecution?: boolean;
@@ -1855,6 +1865,7 @@ async function recordBookingWindowWaitingProbe(input: {
     searchId: input.searchId,
     courseId: input.courseId,
     automationRunId: input.automationRunId,
+    runtimeVersion: input.runtimeVersion,
     outcome: "NO_MATCH",
     message: input.bookingWindow.exactTime
       ? `Booking for ${input.targetDate} opens at ${input.bookingWindow.opensAt.toISOString()}.`
