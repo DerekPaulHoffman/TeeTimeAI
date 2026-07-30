@@ -2891,6 +2891,50 @@ button {
   margin: 0 0 18px;
 }
 
+.operator-panel-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.operator-panel-heading h2 {
+  margin-bottom: 6px;
+}
+
+.operator-panel-heading p {
+  color: #66736c;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  margin: 0;
+  max-width: 35rem;
+}
+
+.operator-link-status {
+  background: #edf8f0;
+  border-radius: 999px;
+  color: #21643b;
+  font-size: 0.65rem;
+  font-weight: 850;
+  padding: 5px 9px;
+}
+
+.operator-link-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 18px 0;
+}
+
+.operator-link-context span {
+  background: #f1f5f2;
+  border-radius: 999px;
+  color: #526158;
+  font-size: 0.66rem;
+  font-weight: 750;
+  padding: 6px 9px;
+}
+
 .operator-detail-list {
   display: grid;
   gap: 12px;
@@ -2954,7 +2998,8 @@ button {
   padding: 12px;
 }
 
-.operator-action-card {
+.operator-action-card,
+.operator-official-links {
   display: grid;
   gap: 13px;
 }
@@ -2989,7 +3034,8 @@ button {
   color: #21643b;
 }
 
-.operator-action-card label {
+.operator-action-card label,
+.operator-official-links label {
   color: #405047;
   display: grid;
   font-size: 0.72rem;
@@ -2999,7 +3045,8 @@ button {
 
 .operator-action-card input,
 .operator-action-card select,
-.operator-action-card textarea {
+.operator-action-card textarea,
+.operator-official-links input {
   background: #fbfcfb;
   border: 1px solid #cbd9d0;
   border-radius: 8px;
@@ -3013,7 +3060,8 @@ button {
   resize: vertical;
 }
 
-.operator-action-card button {
+.operator-action-card button,
+.operator-official-links button {
   background: var(--fairway-dark);
   border: 0;
   border-radius: 8px;
@@ -3025,9 +3073,20 @@ button {
   padding: 10px 14px;
 }
 
-.operator-action-card button:disabled {
-  cursor: wait;
+.operator-action-card button:disabled,
+.operator-official-links button:disabled {
+  cursor: not-allowed;
   opacity: 0.65;
+}
+
+.operator-outcome-help {
+  background: #f3f7f4;
+  border-left: 3px solid var(--fairway);
+  color: #435249;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  margin: 0;
+  padding: 10px 12px;
 }
 
 .operator-timeline {

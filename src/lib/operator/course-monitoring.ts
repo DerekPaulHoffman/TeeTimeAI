@@ -42,6 +42,17 @@ export const humanReviewReasonSchema = z.enum([
   "OTHER_TECHNICAL_LIMITATION"
 ]);
 
+export const operatorCourseDecisionSchema = z.enum([
+  "LOCAL_READER",
+  "PRIVATE_COURSE",
+  "PHONE_OR_MANUAL",
+  "ACCOUNT_REQUIRED",
+  "CAPTCHA_OR_QUEUE",
+  "OTHER_TECHNICAL_LIMITATION"
+]);
+
+export type OperatorCourseDecision = z.infer<typeof operatorCourseDecisionSchema>;
+
 export type OperatorMutationContext = {
   actorId: string;
   source: "OPERATOR_DASHBOARD" | "OPERATOR_CLI";
@@ -143,7 +154,8 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
       bookingAccessMode: status.course.bookingAccessMode,
       automationEligibility: status.course.automationEligibility,
       automationReason: status.course.automationReason,
-      monitoringMode: status.course.monitoringMode
+      monitoringMode: status.course.monitoringMode,
+      isPublic: status.course.isPublic
     },
     incident: status.course.supportIncident
       ? {
@@ -302,6 +314,149 @@ export async function correctOperatorCourseBookingLink(
   return { ...preview, applied: true, replayed: false };
 }
 
+export async function updateOperatorCourseOfficialLinks(
+  rawInput: {
+    reference: string;
+    statusRevision: number;
+    incidentCycle: number | null;
+    incidentRevision: number | null;
+    website: string | null;
+    bookingUrl: string | null;
+    idempotencyKey: string;
+  },
+  context: OperatorMutationContext
+) {
+  const input = z
+    .object({
+      reference: referenceSchema,
+      statusRevision: revisionSchema,
+      incidentCycle: cycleSchema,
+      incidentRevision: revisionSchema.nullable(),
+      website: z.string().trim().max(1000).nullable(),
+      bookingUrl: z.string().trim().max(1000).nullable(),
+      idempotencyKey: idempotencyKeySchema
+    })
+    .parse(rawInput);
+  const website = optionalSafeHttpsUrl(input.website, "official course site");
+  const bookingUrl = optionalSafeHttpsUrl(input.bookingUrl, "official booking page");
+  if (!website && !bookingUrl) {
+    throw new Error("Enter an official course site or booking page.");
+  }
+  const current = await requireMutationTarget(
+    input.reference,
+    input.statusRevision,
+    input.incidentCycle,
+    input.incidentRevision,
+    input.idempotencyKey
+  );
+  if (
+    website === current.status.course.website &&
+    bookingUrl === current.status.course.detectedBookingUrl
+  ) {
+    throw new Error("Change at least one official link before saving.");
+  }
+  const provider = resolveProviderCapability({
+    website,
+    detectedBookingUrl: bookingUrl
+  });
+  const evidenceUrl = bookingUrl ?? website!;
+  const preview = {
+    action: "update_official_links" as const,
+    courseRef: current.status.reference,
+    providerFamilyKey: provider.providerFamilyKey,
+    queuedAlertCount: current.activeSearches.length
+  };
+  if (!context.apply || current.replayed) {
+    return { ...preview, applied: false, replayed: current.replayed };
+  }
+
+  const now = new Date();
+  const message = "Official links changed. Link verification and a fresh monitoring check were queued.";
+  await prisma.$transaction(
+    async (transaction) => {
+      await assertMutationStillCurrent(transaction, current, input);
+      const incident = await ensureOperatorIncident(transaction, {
+        current,
+        now,
+        kind: "NEEDS_ADAPTER",
+        failureClass: "MISSING_METADATA",
+        failureFingerprint: buildProviderFailureFingerprint({
+          providerFamilyKey: provider.providerFamilyKey,
+          failureClass: "MISSING_METADATA",
+          operation: "METADATA",
+          httpStatus: null
+        }),
+        providerFamilyKey: provider.providerFamilyKey,
+        bookingUrlSnapshot: bookingUrl ?? website!,
+        message
+      });
+      await transaction.course.update({
+        where: { id: current.status.courseId },
+        data: {
+          website,
+          detectedBookingUrl: bookingUrl,
+          detectedPlatform: provider.detectedPlatform,
+          providerFamilyKey: provider.providerFamilyKey,
+          automationEligibility: "NEEDS_REVIEW",
+          automationReason: "OTHER",
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null
+        }
+      });
+      await transaction.courseMonitoringStatus.update({
+        where: {
+          courseId: current.status.courseId,
+          revision: current.status.revision
+        },
+        data: {
+          state: "AUTO_INVESTIGATING",
+          failureFingerprint: incident.failureFingerprint,
+          firstDegradedAt: current.status.firstDegradedAt ?? now,
+          nextAutomaticAttemptAt: now,
+          revalidationRequestedAt: now,
+          stateChangedAt: now,
+          revision: { increment: 1 }
+        }
+      });
+      await transaction.courseMonitoringEvent.create({
+        data: {
+          courseId: current.status.courseId,
+          incidentId: incident.id,
+          eventType: "REVALIDATION_REQUESTED",
+          source: context.source,
+          fromState: current.status.state,
+          toState: "AUTO_INVESTIGATING",
+          message,
+          evidenceUrl,
+          operatorActorId: normalizeActorId(context.actorId),
+          idempotencyKey: input.idempotencyKey,
+          occurredAt: now,
+          audit: {
+            action: "update_official_links",
+            providerFamilyKey: provider.providerFamilyKey,
+            websiteChanged: website !== current.status.course.website,
+            bookingUrlChanged: bookingUrl !== current.status.course.detectedBookingUrl,
+            customerDataIncluded: false
+          }
+        }
+      });
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
+  const localReaderJob = await queueOperatorLocalReaderRecheck(current, now, bookingUrl);
+  await dispatchAffectedSearches(
+    current.activeSearches.map((search) => search.id),
+    context.dispatchSearches
+  );
+  return {
+    ...preview,
+    localReaderQueued: localReaderJob !== null,
+    applied: true,
+    replayed: false
+  };
+}
+
 export async function requestOperatorCourseRecheck(
   rawInput: {
     reference: string;
@@ -424,6 +579,238 @@ export async function requestOperatorCourseRecheck(
     applied: true,
     replayed: false
   };
+}
+
+export async function applyOperatorCourseDecision(
+  rawInput: {
+    reference: string;
+    statusRevision: number;
+    incidentCycle: number | null;
+    incidentRevision: number | null;
+    decision: OperatorCourseDecision;
+    idempotencyKey: string;
+  },
+  context: OperatorMutationContext
+) {
+  const input = z
+    .object({
+      reference: referenceSchema,
+      statusRevision: revisionSchema,
+      incidentCycle: cycleSchema,
+      incidentRevision: revisionSchema.nullable(),
+      decision: operatorCourseDecisionSchema,
+      idempotencyKey: idempotencyKeySchema
+    })
+    .parse(rawInput);
+  const current = await requireMutationTarget(
+    input.reference,
+    input.statusRevision,
+    input.incidentCycle,
+    input.incidentRevision,
+    input.idempotencyKey
+  );
+  if (!current.incident) {
+    throw new Error("A durable course incident is required before setting the course outcome.");
+  }
+  const preview = {
+    action: "set_course_outcome" as const,
+    courseRef: current.status.reference,
+    decision: input.decision
+  };
+  if (!context.apply || current.replayed) {
+    return { ...preview, applied: false, replayed: current.replayed };
+  }
+
+  const now = new Date();
+  if (input.decision === "LOCAL_READER") {
+    const message = "Use the local tee-time reader for this course.";
+    const failureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: current.status.course.providerFamilyKey,
+      failureClass: "READER_PARSER_MISSING",
+      operation: "AVAILABILITY",
+      httpStatus: null
+    });
+    await prisma.$transaction(
+      async (transaction) => {
+        await assertMutationStillCurrent(transaction, current, input);
+        await transaction.course.update({
+          where: { id: current.status.courseId },
+          data: {
+            monitoringMode: "LOCAL_READER_ONLY",
+            automationEligibility: "NEEDS_REVIEW",
+            automationReason: "OTHER",
+            intelligenceVerifiedAt: null,
+            intelligenceReviewAt: null,
+            intelligenceConfidence: null
+          }
+        });
+        await transaction.courseMonitoringStatus.update({
+          where: {
+            courseId: current.status.courseId,
+            revision: current.status.revision
+          },
+          data: {
+            state: "AUTO_INVESTIGATING",
+            failureFingerprint,
+            firstDegradedAt: current.status.firstDegradedAt ?? now,
+            nextAutomaticAttemptAt: now,
+            revalidationRequestedAt: now,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        await transaction.courseSupportIncident.update({
+          where: {
+            id: current.incident!.id,
+            cycle: current.incident!.cycle,
+            revision: current.incident!.revision
+          },
+          data: {
+            cycle: current.incident!.status === "RESOLVED" ? { increment: 1 } : undefined,
+            status: "AUTO_INVESTIGATING",
+            kind: "READER_CANDIDATE",
+            failureClass: "READER_PARSER_MISSING",
+            failureFingerprint,
+            latestMessage: message,
+            nextAction: message,
+            nextAttemptAt: now,
+            confirmedAt: now,
+            escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+              now,
+              current.incident!.activeRealSearchCount
+            ),
+            humanReviewReason: null,
+            nextReminderAt: null,
+            resolvedAt: null,
+            resolution: null,
+            resolutionMessage: null,
+            resolutionNotifiedAt: null,
+            decisionActorId: null,
+            decisionAt: null,
+            decisionNote: null,
+            decisionEvidenceUrl: null,
+            decisionIdempotencyKey: null,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        await transaction.courseMonitoringEvent.create({
+          data: {
+            courseId: current.status.courseId,
+            incidentId: current.incident!.id,
+            eventType: "HUMAN_DECISION",
+            source: context.source,
+            fromState: current.status.state,
+            toState: "AUTO_INVESTIGATING",
+            failureFingerprint,
+            message,
+            evidenceUrl:
+              current.status.course.detectedBookingUrl ?? current.status.course.website,
+            operatorActorId: normalizeActorId(context.actorId),
+            idempotencyKey: input.idempotencyKey,
+            occurredAt: now,
+            audit: {
+              action: "set_course_outcome",
+              decision: input.decision,
+              customerDataIncluded: false
+            }
+          }
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    );
+    const localReaderJob = await queueOperatorLocalReaderRecheck(current, now);
+    await dispatchAffectedSearches(
+      current.activeSearches.map((search) => search.id),
+      context.dispatchSearches
+    );
+    return {
+      ...preview,
+      localReaderQueued: localReaderJob !== null,
+      applied: true,
+      replayed: false
+    };
+  }
+
+  const finalDecision = getFinalDecision(input.decision);
+  await prisma.$transaction(
+    async (transaction) => {
+      await assertMutationStillCurrent(transaction, current, input);
+      await transaction.course.update({
+        where: { id: current.status.courseId },
+        data: {
+          ...finalDecision.course,
+          policyNotes: finalDecision.message,
+          intelligenceVerifiedAt: now,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: 1
+        }
+      });
+      await transaction.courseMonitoringStatus.update({
+        where: {
+          courseId: current.status.courseId,
+          revision: current.status.revision
+        },
+        data: {
+          state: finalDecision.state,
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+          stateChangedAt: now,
+          revision: { increment: 1 }
+        }
+      });
+      await transaction.courseSupportIncident.update({
+        where: {
+          id: current.incident!.id,
+          cycle: current.incident!.cycle,
+          revision: current.incident!.revision
+        },
+        data: {
+          status: "RESOLVED",
+          humanReviewReason: finalDecision.humanReviewReason,
+          nextReminderAt: null,
+          nextAttemptAt: null,
+          resolvedAt: now,
+          resolution: finalDecision.resolution,
+          resolutionMessage: finalDecision.message,
+          decisionActorId: normalizeActorId(context.actorId),
+          decisionAt: now,
+          decisionNote: finalDecision.message,
+          decisionEvidenceUrl:
+            current.status.course.detectedBookingUrl ?? current.status.course.website,
+          decisionIdempotencyKey: input.idempotencyKey,
+          lastSeenAt: now,
+          revision: { increment: 1 }
+        }
+      });
+      await transaction.courseMonitoringEvent.create({
+        data: {
+          courseId: current.status.courseId,
+          incidentId: current.incident!.id,
+          eventType: "HUMAN_DECISION",
+          source: context.source,
+          fromState: current.status.state,
+          toState: finalDecision.state,
+          outcome: finalDecision.outcome,
+          failureFingerprint: current.incident!.failureFingerprint,
+          message: finalDecision.message,
+          evidenceUrl:
+            current.status.course.detectedBookingUrl ?? current.status.course.website,
+          operatorActorId: normalizeActorId(context.actorId),
+          idempotencyKey: input.idempotencyKey,
+          occurredAt: now,
+          audit: {
+            action: "set_course_outcome",
+            decision: input.decision,
+            timerBasedRevalidation: false,
+            customerDataIncluded: false
+          }
+        }
+      });
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
+  return { ...preview, applied: true, replayed: false };
 }
 
 export async function approveOperatorCourseTechnicalFinal(
@@ -711,6 +1098,9 @@ async function requireMutationTarget(
           timeZone: true,
           bookingAccessMode: true,
           automationReason: true,
+          isPublic: true,
+          monitoringMode: true,
+          bookingMethod: true,
           supportIncident: true
         }
       }
@@ -749,9 +1139,13 @@ async function requireMutationTarget(
 
 async function queueOperatorLocalReaderRecheck(
   current: Awaited<ReturnType<typeof requireMutationTarget>>,
-  now: Date
+  now: Date,
+  bookingUrlOverride?: string | null
 ) {
-  const bookingUrl = current.status.course.detectedBookingUrl;
+  const bookingUrl =
+    bookingUrlOverride === undefined
+      ? current.status.course.detectedBookingUrl
+      : bookingUrlOverride;
   if (!bookingUrl) return null;
   const activeSearch = current.activeSearches[0];
   const fallbackDate = getCourseLocalDateStorageBoundary(
@@ -930,12 +1324,84 @@ function technicalCourseFieldsForReason(reason: CourseHumanReviewReason): {
   };
 }
 
+function getFinalDecision(
+  decision: Exclude<OperatorCourseDecision, "LOCAL_READER">
+): {
+  state: "FINAL_IDENTITY" | "FINAL_MANUAL" | "FINAL_TECHNICAL";
+  resolution:
+    | "IDENTITY_CLASSIFIED"
+    | "DIRECT_BOOKING_CLASSIFIED"
+    | "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
+  humanReviewReason: CourseHumanReviewReason | null;
+  outcome: "IDENTITY_FINAL" | "MANUAL_DIRECT" | "BLOCKED_AUTH" | "BLOCKED_TOOLING";
+  message: string;
+  course: Prisma.CourseUpdateInput;
+} {
+  if (decision === "PRIVATE_COURSE") {
+    return {
+      state: "FINAL_IDENTITY",
+      resolution: "IDENTITY_CLASSIFIED",
+      humanReviewReason: null,
+      outcome: "IDENTITY_FINAL",
+      message: "This is a private course. Public tee-time monitoring is closed.",
+      course: {
+        isPublic: false,
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        monitoringMode: "CONTACT_ONLY"
+      }
+    };
+  }
+  if (decision === "PHONE_OR_MANUAL") {
+    return {
+      state: "FINAL_MANUAL",
+      resolution: "DIRECT_BOOKING_CLASSIFIED",
+      humanReviewReason: null,
+      outcome: "MANUAL_DIRECT",
+      message: "Tee times are available only by phone or another manual course process.",
+      course: {
+        isPublic: true,
+        bookingMethod: "PHONE_ONLY",
+        bookingAccessMode: "PHONE_ONLY",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        monitoringMode: "CONTACT_ONLY"
+      }
+    };
+  }
+  const technicalFields = technicalCourseFieldsForReason(decision);
+  const message =
+    decision === "ACCOUNT_REQUIRED"
+      ? "An account is required to view tee times."
+      : decision === "CAPTCHA_OR_QUEUE"
+        ? "A captcha or waiting room blocks signed-out tee-time monitoring."
+        : "This course has another confirmed technical limitation.";
+  return {
+    state: "FINAL_TECHNICAL",
+    resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+    humanReviewReason: decision,
+    outcome: decision === "ACCOUNT_REQUIRED" ? "BLOCKED_AUTH" : "BLOCKED_TOOLING",
+    message,
+    course: {
+      automationEligibility: "BLOCKED",
+      ...technicalFields
+    }
+  };
+}
+
 function requireSafeHttpsUrl(value: string, label: string) {
   const sanitized = sanitizeEvidenceUrl(value);
   if (!sanitized) {
     throw new Error(`${label} must be a public HTTPS URL without credentials.`);
   }
   return sanitized;
+}
+
+function optionalSafeHttpsUrl(value: string | null, label: string) {
+  if (!value?.trim()) {
+    return null;
+  }
+  return requireSafeHttpsUrl(value, label);
 }
 
 function safeOperatorUrl(value: string | null | undefined) {

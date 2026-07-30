@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const transactionMocks = vi.hoisted(() => ({
+  course: {
+    update: vi.fn()
+  },
   courseMonitoringEvent: {
     create: vi.fn(),
     findUnique: vi.fn()
@@ -40,8 +43,10 @@ vi.mock("@/lib/automation/search-scheduler", () => ({
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
 import {
+  applyOperatorCourseDecision,
   correctOperatorCourseBookingLink,
-  requestOperatorCourseRecheck
+  requestOperatorCourseRecheck,
+  updateOperatorCourseOfficialLinks
 } from "./course-monitoring";
 
 const reference = "cm_123456789012345678901234";
@@ -94,6 +99,10 @@ describe("operator course monitoring mutations", () => {
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
       cycle: 2,
       revision: 7
+    });
+    transactionMocks.courseSupportIncident.update.mockResolvedValue({
+      id: "incident-1",
+      failureFingerprint: "updated-fingerprint"
     });
     prismaMocks.$transaction.mockImplementation(
       async (callback: (transaction: typeof transactionMocks) => Promise<unknown>) =>
@@ -325,6 +334,155 @@ describe("operator course monitoring mutations", () => {
       targetDate: "2026-08-02",
       players: 3,
       bookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime"
+    });
+  });
+
+  it("saves both editable official links and immediately requests verification", async () => {
+    await expect(
+      updateOperatorCourseOfficialLinks(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          website: "https://new-course.example",
+          bookingUrl: "https://new-course.example/tee-times",
+          idempotencyKey: "operator-links-123456789"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "update_official_links",
+      applied: true,
+      replayed: false
+    });
+
+    expect(transactionMocks.course.update).toHaveBeenCalledWith({
+      where: { id: "course-1" },
+      data: expect.objectContaining({
+        website: "https://new-course.example/",
+        detectedBookingUrl: "https://new-course.example/tee-times",
+        automationEligibility: "NEEDS_REVIEW"
+      })
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 4
+      },
+      data: expect.objectContaining({
+        state: "AUTO_INVESTIGATING",
+        revalidationRequestedAt: expect.any(Date),
+        nextAutomaticAttemptAt: expect.any(Date)
+      })
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "REVALIDATION_REQUESTED",
+        evidenceUrl: "https://new-course.example/tee-times"
+      })
+    });
+  });
+
+  it("records a private course as a final identity outcome", async () => {
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "PRIVATE_COURSE",
+          idempotencyKey: "operator-private-123456"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "set_course_outcome",
+      decision: "PRIVATE_COURSE",
+      applied: true
+    });
+
+    expect(transactionMocks.course.update).toHaveBeenCalledWith({
+      where: { id: "course-1" },
+      data: expect.objectContaining({
+        isPublic: false,
+        automationEligibility: "BLOCKED",
+        monitoringMode: "CONTACT_ONLY"
+      })
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 4
+      },
+      data: expect.objectContaining({
+        state: "FINAL_IDENTITY",
+        nextAutomaticAttemptAt: null
+      })
+    });
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        revision: 7
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolution: "IDENTITY_CLASSIFIED",
+        humanReviewReason: null
+      })
+    });
+  });
+
+  it("routes the course to the local reader and queues a fresh reader check", async () => {
+    localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
+      id: "local-reader-job-2"
+    });
+
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "LOCAL_READER",
+          idempotencyKey: "operator-reader-1234567"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "set_course_outcome",
+      decision: "LOCAL_READER",
+      localReaderQueued: true,
+      applied: true
+    });
+
+    expect(transactionMocks.course.update).toHaveBeenCalledWith({
+      where: { id: "course-1" },
+      data: expect.objectContaining({
+        monitoringMode: "LOCAL_READER_ONLY",
+        automationEligibility: "NEEDS_REVIEW"
+      })
+    });
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        revision: 7
+      },
+      data: expect.objectContaining({
+        status: "AUTO_INVESTIGATING",
+        kind: "READER_CANDIDATE",
+        failureClass: "READER_PARSER_MISSING"
+      })
+    });
+    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
+      courseId: "course-1",
+      targetDate: expect.any(String),
+      players: 2,
+      bookingUrl: "https://course.example/book"
     });
   });
 });

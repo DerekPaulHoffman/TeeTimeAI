@@ -5,13 +5,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
 import {
-  Activity,
   ArrowLeft,
   CheckCircle2,
   Clock3,
   ExternalLink,
   History,
-  Link2,
   ShieldAlert,
   Wrench
 } from "lucide-react";
@@ -20,11 +18,7 @@ import { hasClerkConfig } from "@/lib/env";
 import { getCurrentOperator } from "@/lib/operator/auth";
 import { loadOperatorCourseMonitoringDetail } from "@/lib/operator/course-monitoring";
 
-import {
-  approveTechnicalFinalAction,
-  correctBookingLinkAction,
-  reopenTechnicalFinalAction
-} from "./actions";
+import { CourseOutcomeForm, OfficialLinksForm } from "./operator-course-controls";
 import { OperatorRecheckForm } from "./operator-recheck-form";
 
 export const dynamic = "force-dynamic";
@@ -62,15 +56,8 @@ export default async function OperatorCoursePage({
   if (!detail) {
     notFound();
   }
-
-  const hidden = (
-    <>
-      <input name="reference" type="hidden" value={detail.reference} />
-      <input name="statusRevision" type="hidden" value={detail.revision} />
-      <input name="incidentCycle" type="hidden" value={detail.incident?.cycle ?? ""} />
-      <input name="incidentRevision" type="hidden" value={detail.incident?.revision ?? ""} />
-    </>
-  );
+  const stateLabel = getCourseStateLabel(detail);
+  const isFinal = detail.state.startsWith("FINAL_");
 
   return (
     <main className="operator-page operator-course-detail">
@@ -90,14 +77,14 @@ export default async function OperatorCoursePage({
             redacted history.
           </p>
         </div>
-        <span className="status-pill operator-status-neutral">{formatEnum(detail.state)}</span>
+        <span className="status-pill operator-status-neutral">{stateLabel}</span>
       </header>
 
       <section className="operator-section">
         <div className="operator-health-strip">
           <Fact
             label="Current state"
-            value={formatEnum(detail.state)}
+            value={stateLabel}
             detail={`Changed ${formatDateTime(detail.stateChangedAt)}`}
           />
           <Fact
@@ -112,12 +99,16 @@ export default async function OperatorCoursePage({
           <Fact
             label="Escalation deadline"
             value={
-              detail.incident?.escalationDeadlineAt
+              isFinal
+                ? "Closed"
+                : detail.incident?.escalationDeadlineAt
                 ? formatDateTime(detail.incident.escalationDeadlineAt)
                 : "None"
             }
             detail={
-              detail.incident?.humanReviewReason
+              isFinal
+                ? "Final decision recorded"
+                : detail.incident?.humanReviewReason
                 ? formatEnum(detail.incident.humanReviewReason)
                 : "Automation still owns the next step"
             }
@@ -140,21 +131,18 @@ export default async function OperatorCoursePage({
       </section>
 
       <section className="operator-section operator-course-detail-grid">
-        <article className="operator-panel">
-          <h2>
-            <Link2 size={18} />
-            Official surfaces
-          </h2>
-          <dl className="operator-detail-list">
-            <Detail label="Provider" value={formatEnum(detail.course.providerFamilyKey)} />
-            <Detail label="Platform" value={formatEnum(detail.course.detectedPlatform)} />
-            <Detail label="Booking method" value={formatEnum(detail.course.bookingMethod)} />
-            <Detail label="Access" value={formatEnum(detail.course.bookingAccessMode)} />
-            <Detail label="Monitoring path" value={formatEnum(detail.course.monitoringMode)} />
-          </dl>
-          <SafeLink label="Official course site" value={detail.course.website} />
-          <SafeLink label="Official booking page" value={detail.course.detectedBookingUrl} />
-        </article>
+        <OfficialLinksForm
+          bookingUrl={detail.course.detectedBookingUrl}
+          idempotencyKey={`links:${randomUUID()}`}
+          incidentCycle={detail.incident?.cycle ?? null}
+          incidentRevision={detail.incident?.revision ?? null}
+          monitoringPath={formatEnum(detail.course.monitoringMode)}
+          platform={formatEnum(detail.course.detectedPlatform)}
+          provider={formatEnum(detail.course.providerFamilyKey)}
+          reference={detail.reference}
+          statusRevision={detail.revision}
+          website={detail.course.website}
+        />
 
         <article className="operator-panel">
           <h2>
@@ -197,33 +185,6 @@ export default async function OperatorCoursePage({
 
       <section className="operator-section">
         <div className="operator-action-grid">
-          <OperatorForm
-            action={correctBookingLinkAction}
-            icon={<Link2 size={17} />}
-            title="Correct official booking link"
-            submitLabel="Verify link and recheck"
-          >
-            {hidden}
-            <input name="idempotencyKey" type="hidden" value={`link:${randomUUID()}`} />
-            <label>
-              HTTPS booking link
-              <input
-                defaultValue={detail.course.detectedBookingUrl ?? ""}
-                name="bookingUrl"
-                required
-                type="url"
-              />
-            </label>
-            <label>
-              Official evidence
-              <input name="evidenceUrl" required type="url" />
-            </label>
-            <label>
-              Bounded note
-              <textarea maxLength={500} name="note" required rows={3} />
-            </label>
-          </OperatorForm>
-
           <OperatorRecheckForm
             idempotencyKey={`recheck:${randomUUID()}`}
             incidentCycle={detail.incident?.cycle ?? null}
@@ -232,57 +193,14 @@ export default async function OperatorCoursePage({
             statusRevision={detail.revision}
           />
 
-          {detail.incident && detail.state !== "FINAL_TECHNICAL" ? (
-            <OperatorForm
-              action={approveTechnicalFinalAction}
-              icon={<ShieldAlert size={17} />}
-              title="Approve technical limitation"
-              submitLabel="Record final decision"
-            >
-              {hidden}
-              <input name="idempotencyKey" type="hidden" value={`final:${randomUUID()}`} />
-              <label>
-                Precise reason
-                <select name="reason" required>
-                  <option value="CAPTCHA_OR_QUEUE">Captcha or queue</option>
-                  <option value="ACCOUNT_REQUIRED">Account required</option>
-                  <option value="SOURCE_UNVERIFIED">Source unverified</option>
-                  <option value="READER_RELOAD_REQUIRED">Reader reload or install required</option>
-                  <option value="OFFICIAL_LINK_VERIFICATION_FAILED">
-                    Official link verification failed
-                  </option>
-                  <option value="OTHER_TECHNICAL_LIMITATION">Other technical limitation</option>
-                </select>
-              </label>
-              <label>
-                Official evidence
-                <input name="evidenceUrl" required type="url" />
-              </label>
-              <label>
-                Decision note
-                <textarea maxLength={500} name="note" required rows={3} />
-              </label>
-            </OperatorForm>
-          ) : null}
-
-          {detail.state === "FINAL_TECHNICAL" ? (
-            <OperatorForm
-              action={reopenTechnicalFinalAction}
-              icon={<Activity size={17} />}
-              title="Reopen engineer decision"
-              submitLabel="Reopen investigation"
-            >
-              {hidden}
-              <input name="idempotencyKey" type="hidden" value={`reopen:${randomUUID()}`} />
-              <label>
-                New official evidence
-                <input name="evidenceUrl" required type="url" />
-              </label>
-              <label>
-                Why the evidence changed
-                <textarea maxLength={500} name="note" required rows={3} />
-              </label>
-            </OperatorForm>
+          {detail.incident ? (
+            <CourseOutcomeForm
+              idempotencyKey={`outcome:${randomUUID()}`}
+              incidentCycle={detail.incident.cycle}
+              incidentRevision={detail.incident.revision}
+              reference={detail.reference}
+              statusRevision={detail.revision}
+            />
           ) : null}
         </div>
       </section>
@@ -357,56 +275,12 @@ function Fact({ label, value, detail }: { label: string; value: string | number;
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
-    </div>
-  );
-}
-
-function SafeLink({ label, value }: { label: string; value: string | null }) {
-  return value ? (
-    <a href={value} rel="noreferrer" target="_blank">
-      {label} <ExternalLink size={13} />
-    </a>
-  ) : (
-    <p>{label}: not verified</p>
-  );
-}
-
 function ChecklistItem({ label, complete }: { label: string; complete: boolean }) {
   return (
     <li>
       {complete ? <CheckCircle2 size={16} /> : <Clock3 size={16} />}
       <span>{label}</span>
     </li>
-  );
-}
-
-function OperatorForm({
-  action,
-  children,
-  icon,
-  title,
-  submitLabel
-}: {
-  action: (formData: FormData) => Promise<void>;
-  children: React.ReactNode;
-  icon: React.ReactNode;
-  title: string;
-  submitLabel: string;
-}) {
-  return (
-    <form action={action} className="operator-action-card">
-      <h2>
-        {icon}
-        {title}
-      </h2>
-      {children}
-      <button type="submit">{submitLabel}</button>
-    </form>
   );
 }
 
@@ -430,6 +304,30 @@ function formatEnum(value: string | null | undefined) {
     .replaceAll("_", " ")
     .toLocaleLowerCase("en-US")
     .replace(/(^|\s)\S/gu, (character) => character.toLocaleUpperCase());
+}
+
+function getCourseStateLabel(
+  detail: NonNullable<Awaited<ReturnType<typeof loadOperatorCourseMonitoringDetail>>>
+) {
+  if (detail.course.monitoringMode === "LOCAL_READER_ONLY") {
+    return "Local reader";
+  }
+  if (detail.state === "FINAL_IDENTITY" && detail.course.isPublic === false) {
+    return "Private course";
+  }
+  if (detail.state === "FINAL_MANUAL") {
+    return "Phone or manual booking";
+  }
+  if (detail.state === "FINAL_TECHNICAL") {
+    if (detail.incident?.humanReviewReason === "ACCOUNT_REQUIRED") {
+      return "Account required";
+    }
+    if (detail.incident?.humanReviewReason === "CAPTCHA_OR_QUEUE") {
+      return "Captcha or waiting room";
+    }
+    return "Final technical limitation";
+  }
+  return formatEnum(detail.state);
 }
 
 function formatDateTime(value: Date) {

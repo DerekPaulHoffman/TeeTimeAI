@@ -427,6 +427,17 @@ function classifyCourseStatus(
         tone: "positive"
       });
     }
+    if (course.incident.resolution === "IDENTITY_CLASSIFIED") {
+      return withStatus(course, "PRIVATE_OR_INVALID", {
+        priorityGroup: "LIMITATION",
+        priorityScore: 3,
+        tone: "neutral",
+        labelOverride: "Private course",
+        meaningOverride:
+          "An operator confirmed this is a private course, so public tee-time monitoring is closed.",
+        actionOverride: "No further monitoring work is scheduled."
+      });
+    }
     if (course.incident.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION") {
       const statusKey =
         course.bookingAccessMode === "CAPTCHA_OR_QUEUE" ? "CAPTCHA_OR_QUEUE" : "ACCOUNT_REQUIRED";

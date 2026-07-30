@@ -246,6 +246,35 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("shows an operator-classified private course as a final identity", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("AUTO_INVESTIGATING"),
+          incident: {
+            id: "incident-private",
+            status: "RESOLVED",
+            resolution: "IDENTITY_CLASSIFIED",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "This is a private course.",
+            nextAction: null,
+            failureClass: "MISSING_SOURCE"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "PRIVATE_OR_INVALID",
+      statusLabel: "Private course",
+      priorityGroup: "LIMITATION",
+      automationQueueState: null
+    });
+  });
+
   it("explains that no match is a successful monitor result", () => {
     const [result] = buildCourseInventory(
       [

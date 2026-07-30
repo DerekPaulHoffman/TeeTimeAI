@@ -594,6 +594,9 @@ export function getIncidentLifecycleState(input: {
   if (input.resolution === "MONITORING_RESTORED") {
     return "HEALTHY";
   }
+  if (input.resolution === "IDENTITY_CLASSIFIED") {
+    return "FINAL_IDENTITY";
+  }
   if (input.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION") {
     return "FINAL_TECHNICAL";
   }

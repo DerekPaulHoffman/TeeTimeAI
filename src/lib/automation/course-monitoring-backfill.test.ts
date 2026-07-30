@@ -169,6 +169,13 @@ describe("course monitoring backfill", () => {
     expect(
       getIncidentLifecycleState({
         incidentStatus: "RESOLVED",
+        resolution: "IDENTITY_CLASSIFIED",
+        currentState: "AUTO_INVESTIGATING"
+      })
+    ).toBe("FINAL_IDENTITY");
+    expect(
+      getIncidentLifecycleState({
+        incidentStatus: "RESOLVED",
         resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
         currentState: "REVALIDATING_FINAL"
       })
