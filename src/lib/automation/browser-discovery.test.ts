@@ -12,6 +12,7 @@ import {
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
   getBestProbeUrl,
+  isLegacyProphetPublicBookingLandingUrl,
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
@@ -22,6 +23,56 @@ import {
 } from "./browser-discovery";
 
 describe("structured phone-booking evidence", () => {
+  it("recognizes only safe public legacy Prophet booking landings", () => {
+    expect(
+      isLegacyProphetPublicBookingLandingUrl(
+        "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/nIndex"
+      )
+    ).toBe(true);
+    expect(
+      isLegacyProphetPublicBookingLandingUrl(
+        "https://secure.east.prophetservices.com/checkout"
+      )
+    ).toBe(false);
+    expect(
+      isLegacyProphetPublicBookingLandingUrl(
+        "https://secure.east.prophetservices.com/Course/Home/login"
+      )
+    ).toBe(false);
+    expect(
+      isLegacyProphetPublicBookingLandingUrl(
+        "https://unknown-provider.example/Course"
+      )
+    ).toBe(false);
+  });
+
+  it("keeps an embedded legacy Prophet booking landing actionable", () => {
+    const bookingUrl =
+      "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/nIndex";
+    expect(
+      buildBrowserDiscovery({
+        courseId: "simsbury-farms",
+        courseName: "Simsbury Farms Golf Course",
+        sourceUrl: "https://www.simsburyfarms.com/",
+        finalUrl: "https://www.simsburyfarms.com/",
+        observedUrls: [
+          "https://www.simsburyfarms.com/",
+          bookingUrl
+        ],
+        linkCandidates: [{
+          url: bookingUrl,
+          label: "Embedded tee-time booking"
+        }],
+        visibleText: "Simsbury Farms Golf Course. Book a tee time online."
+      })
+    ).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      evidence: { learnedFrom: "browser-visible-links" }
+    });
+  });
+
   it("extracts a visible Square or Weebly phone-booking action", () => {
     const evidence = extractStructuredPhoneBookingEvidence([
       String.raw`{\"actionButton\":{\"link\":{\"link\":{\"phone\":\"8607497740\"},\"type\":\"phone\"},\"label\":\"Call to Book a Tee Time\\n\",\"hidden\":false}}`

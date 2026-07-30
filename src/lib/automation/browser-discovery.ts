@@ -779,11 +779,20 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
         providerEvidence.sourceUrl,
         getSafeNonProviderBarrierFallback(providerEvidence.accessBarriers)
       ]);
+  const embeddedLegacyProphetBooking = (
+    providerEvidence.linkCandidates ?? []
+  ).some(
+    (candidate) =>
+      candidate.label === "Embedded tee-time booking" &&
+      isLegacyProphetPublicBookingLandingUrl(candidate.url)
+  );
 
   return withCourseIdentityCorroboration({
     courseId: evidence.courseId,
     status: "INSPECTED",
-    detectedPlatform: detectPlatform(observedUrls),
+    detectedPlatform: embeddedLegacyProphetBooking
+      ? "CUSTOM"
+      : detectPlatform(observedUrls),
     sourceUrl: providerEvidence.sourceUrl,
     bookingUrl,
     confidence: !bookingUrl || bookingUrl === evidence.sourceUrl ? 0.25 : 0.45,
@@ -7544,7 +7553,17 @@ function pickBookingLikeUrl(
     return recognizedProvider.url;
   }
 
-  return candidates.find(({ parsed }) => {
+  return candidates.find(({ url, parsed }) => {
+    if (
+      isLegacyProphetPublicBookingLandingUrl(parsed) &&
+      linkCandidates.some(
+        (candidate) =>
+          candidate.label === "Embedded tee-time booking" &&
+          haveSameExactUrl(candidate.url, url)
+      )
+    ) {
+      return true;
+    }
     if (parsed.hostname.endsWith("chelseareservations.com")) {
       return true;
     }
@@ -7853,6 +7872,38 @@ export function isLegacyTeeItUpPlayUrl(value: string) {
       url.pathname === "/" &&
       !url.search &&
       getLegacyTeeItUpHost(url.hostname)
+  );
+}
+
+export function isLegacyProphetPublicBookingLandingUrl(
+  value: URL | string
+) {
+  let url: URL;
+  try {
+    url = value instanceof URL ? value : new URL(value);
+  } catch {
+    return false;
+  }
+  const tenant =
+    url.pathname.split("/").filter(Boolean)[0]?.toLowerCase() ?? "";
+  return Boolean(
+    url.protocol === "https:" &&
+    !url.username &&
+    !url.password &&
+    !url.port &&
+    url.hostname.toLowerCase() === "secure.east.prophetservices.com" &&
+    /^\/[a-z0-9_-]{3,128}(?:\/home\/nindex)?\/?$/iu.test(url.pathname) &&
+    ![
+      "account",
+      "cart",
+      "checkout",
+      "login",
+      "payment",
+      "reservation",
+      "reserve"
+    ].includes(tenant) &&
+    !url.search &&
+    !url.hash
   );
 }
 

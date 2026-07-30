@@ -18,6 +18,7 @@ import {
   buildBrowserFrameCandidates,
   buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
+  buildBrowserWidgetCandidates,
   finalizeBrowserEvidenceSnapshots,
   hasDistinctProviderBookingCandidate,
   isRelevantBrowserAccessBarrierUrl,
@@ -571,9 +572,13 @@ async function collectPageEvidence(
       .filter((text) => text.includes("actionButton"))
       .map((text) => text.slice(0, 100_000))
       .slice(0, 3);
-    const widgetConfigs = Array.from(document.querySelectorAll<HTMLElement>("[data-widget-config]"))
+    const widgetConfigInputs = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-widget-config]")
+    )
       .map((element) => element.getAttribute("data-widget-config"))
       .filter((value): value is string => Boolean(value))
+      .slice(0, 50);
+    const widgetConfigs = widgetConfigInputs
       .map((value) => {
         try {
           return atob(value);
@@ -591,6 +596,7 @@ async function collectPageEvidence(
       structuredActionScripts,
       linkCandidates,
       scripts,
+      widgetConfigInputs,
       visibleText: [
         inlineCourseData,
         widgetConfigs,
@@ -602,20 +608,24 @@ async function collectPageEvidence(
   });
   const {
     frameCandidateInputs,
+    widgetConfigInputs,
     ...pageEvidence
   } = evidence;
   const frameCandidates = buildBrowserFrameCandidates(frameCandidateInputs);
+  const widgetCandidates = buildBrowserWidgetCandidates(widgetConfigInputs);
   const staticFrameCandidates = await collectStaticPageFrameCandidates(page);
   return prepareBrowserPageEvidence({
     ...pageEvidence,
     anchors: [
       ...pageEvidence.anchors,
       ...frameCandidates.map((candidate) => candidate.url),
+      ...widgetCandidates.map((candidate) => candidate.url),
       ...staticFrameCandidates.map((candidate) => candidate.url)
     ],
     linkCandidates: [
       ...pageEvidence.linkCandidates,
       ...frameCandidates,
+      ...widgetCandidates,
       ...staticFrameCandidates
     ]
   }, officialCourseName);

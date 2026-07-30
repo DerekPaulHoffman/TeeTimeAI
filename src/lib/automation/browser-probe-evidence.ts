@@ -2,6 +2,7 @@ import {
   evaluateBrowserDiscoveryMonitoringGate,
   extractStructuredPhoneBookingEvidence,
   haveSamePublicWebsiteOrigin,
+  isLegacyProphetPublicBookingLandingUrl,
   prioritizeBrowserDiscoveryLinks,
   type BrowserAccessBarrier,
   type BrowserDiscovery,
@@ -127,6 +128,46 @@ export function buildBrowserFrameCandidatesFromHtml(
     }));
 
   return buildBrowserFrameCandidates(candidates);
+}
+
+export function buildBrowserWidgetCandidates(encodedConfigs: string[]) {
+  const seen = new Set<string>();
+
+  return encodedConfigs.slice(0, 50).flatMap((encodedConfig) => {
+    try {
+      const config = JSON.parse(
+        Buffer.from(encodedConfig, "base64").toString("utf8")
+      ) as Record<string, unknown>;
+      const value = [config.baseURL, config.baseUrl].find(
+        (candidate): candidate is string =>
+          typeof candidate === "string" && Boolean(candidate.trim())
+      );
+      if (!value) {
+        return [];
+      }
+
+      const url = new URL(value);
+      if (
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        url.port ||
+        (!isLegacyProphetPublicBookingLandingUrl(url) &&
+          !isProviderPublicBookingLandingUrl(url)) ||
+        seen.has(url.toString())
+      ) {
+        return [];
+      }
+
+      seen.add(url.toString());
+      return [{
+        url: url.toString(),
+        label: "Embedded tee-time booking"
+      }];
+    } catch {
+      return [];
+    }
+  });
 }
 
 export function isRelevantBrowserAccessBarrierUrl(input: {

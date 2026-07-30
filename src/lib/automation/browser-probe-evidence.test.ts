@@ -5,6 +5,7 @@ import {
   buildBrowserFrameCandidates,
   buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
+  buildBrowserWidgetCandidates,
   finalizeBrowserEvidenceSnapshots,
   hasDistinctProviderBookingCandidate,
   isRelevantBrowserAccessBarrierUrl,
@@ -47,6 +48,49 @@ describe("browser probe evidence pipeline", () => {
         label: "Book a tee time"
       }
     ]);
+  });
+
+  it("collects safe public booking URLs from encoded tee-time widget configuration", () => {
+    const encode = (value: unknown) =>
+      Buffer.from(JSON.stringify(value)).toString("base64");
+
+    expect(
+      buildBrowserWidgetCandidates([
+        encode({
+          baseURL:
+            "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/nIndex"
+        }),
+        encode({
+          baseUrl:
+            "https://cedar-ridge-golf-course-v2.book.teeitup.com/"
+        })
+      ])
+    ).toEqual([
+      {
+        url:
+          "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/nIndex",
+        label: "Embedded tee-time booking"
+      },
+      {
+        url: "https://cedar-ridge-golf-course-v2.book.teeitup.com/",
+        label: "Embedded tee-time booking"
+      }
+    ]);
+  });
+
+  it("rejects unsafe or non-booking widget destinations", () => {
+    const encode = (value: unknown) =>
+      Buffer.from(JSON.stringify(value)).toString("base64");
+
+    expect(
+      buildBrowserWidgetCandidates([
+        "not-base64-json",
+        encode({ baseURL: "http://secure.east.prophetservices.com/Course" }),
+        encode({ baseURL: "https://user@example.com/course" }),
+        encode({ baseURL: "https://secure.east.prophetservices.com/checkout" }),
+        encode({ baseURL: "https://unknown-provider.example/tee-times" })
+      ])
+    ).toEqual([]);
   });
 
   it("rejects credentialed and non-web lazy iframe sources", () => {
