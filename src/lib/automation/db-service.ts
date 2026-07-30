@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import { resolveBookingAccessMode } from "@/lib/courses/intelligence";
 import {
+  lockSearchForAlertMutation,
   lockSearchForEmailReconciliation,
   suppressSearchEmailDeliveriesForMatches
 } from "@/lib/email/search-delivery-outbox";
@@ -1743,6 +1744,63 @@ export async function completeScheduledSearchCheck(input: {
   return rows[0] ?? null;
 }
 
+export async function completeExpiredSyntheticSearch(input: {
+  searchId: string;
+  scheduleVersion: number;
+  leaseToken: string;
+  outcome: string;
+}) {
+  return prisma.$transaction(async (transaction) => {
+    const search = await lockSearchForAlertMutation(transaction, {
+      searchId: input.searchId
+    });
+    if (
+      search.status !== "ACTIVE" ||
+      search.checkLeaseToken !== input.leaseToken
+    ) {
+      return null;
+    }
+
+    const completedAt = new Date();
+    const updated = await transaction.teeSearch.updateMany({
+      where: {
+        id: input.searchId,
+        scheduleVersion: input.scheduleVersion,
+        checkLeaseToken: input.leaseToken,
+        status: "ACTIVE"
+      },
+      data: {
+        status: "COMPLETED",
+        scheduleVersion: { increment: 1 },
+        alertGeneration: { increment: 1 },
+        checkStatus: "STOPPED",
+        nextCheckAt: null,
+        workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null,
+        lastCheckedAt: completedAt,
+        lastCheckOutcome: input.outcome
+      }
+    });
+    if (updated.count !== 1) {
+      return null;
+    }
+
+    await transaction.teeTimeMatch.updateMany({
+      where: {
+        teeSearchId: input.searchId,
+        alertStatus: "PENDING"
+      },
+      data: {
+        alertStatus: "SUPPRESSED",
+        sentAt: null
+      }
+    });
+    return { completedAt };
+  });
+}
+
 export async function failScheduledSearchCheck(input: {
   searchId: string;
   scheduleVersion: number;
@@ -1841,6 +1899,7 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
     },
     select: {
       id: true,
+      createdAt: true,
       date: true,
       endTime: true,
       userTimeZone: true,

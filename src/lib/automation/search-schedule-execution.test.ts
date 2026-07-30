@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   claimScheduledSearchCheck: vi.fn(),
+  completeExpiredSyntheticSearch: vi.fn(),
   completeScheduledSearchCheck: vi.fn(),
   failScheduledSearchCheck: vi.fn(),
   getSearchScheduleTiming: vi.fn()
@@ -36,6 +37,9 @@ beforeEach(() => {
       nextCheckAt: input.nextCheckAt
     })
   );
+  dbMocks.completeExpiredSyntheticSearch.mockResolvedValue({
+    completedAt: new Date("2026-07-16T06:00:00.000Z")
+  });
   dbMocks.failScheduledSearchCheck.mockImplementation(
     async (input: { nextCheckAt: Date }) => ({
       count: 1,
@@ -115,6 +119,7 @@ describe("executeScheduledSearchCheck", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
     dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      createdAt: new Date("2026-07-15T00:00:00.000Z"),
       date: new Date("2026-07-18T00:00:00.000Z"),
       endTime: "18:00",
       userTimeZone: "America/New_York",
@@ -142,6 +147,65 @@ describe("executeScheduledSearchCheck", () => {
       outcome: expect.any(String),
       nextCheckAt: new Date("2026-07-15T12:15:00.000Z")
     });
+  });
+
+  it("completes a multi-cycle synthetic search after eighteen hours", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T18:00:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      createdAt: new Date("2026-07-15T00:00:00.000Z"),
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "TEST",
+      syntheticMultiCycle: true,
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "completed",
+      nextCheckAt: null
+    });
+    expect(runSearchCheck).not.toHaveBeenCalled();
+    expect(dbMocks.completeExpiredSyntheticSearch).toHaveBeenCalledWith({
+      searchId: "search-1",
+      scheduleVersion: 3,
+      leaseToken: "lease-1",
+      outcome: "synthetic multi-cycle test lifetime ended"
+    });
+  });
+
+  it("caps the next multi-cycle synthetic wake at the eighteen-hour lifetime", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T17:55:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      createdAt: new Date("2026-07-15T00:00:00.000Z"),
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "TEST",
+      syntheticMultiCycle: true,
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-07-15T18:00:00.000Z"
+    });
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nextCheckAt: new Date("2026-07-15T18:00:00.000Z")
+      })
+    );
   });
 
   it("returns an earlier durable delivery retry when the check fails", async () => {

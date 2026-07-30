@@ -5,6 +5,7 @@ import {
   classifyAutomationRunKind,
   claimScheduledSearchCheck,
   closeHourlyImprovementRun,
+  completeExpiredSyntheticSearch,
   completeScheduledSearchCheck,
   failScheduledSearchCheck,
   getActiveSearchForAutomation,
@@ -27,6 +28,7 @@ import {
 } from "./improvement";
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
+  lockSearchForAlertMutation: vi.fn(),
   lockSearchForEmailReconciliation: vi.fn(),
   suppressSearchEmailDeliveriesForMatches: vi.fn()
 }));
@@ -184,6 +186,60 @@ describe("search check row lease", () => {
     };
     expect(query.strings?.join(" ")).toContain("GREATEST");
     expect(query.strings?.join(" ")).toContain('current."recheckRequestedAt"');
+  });
+
+  it("terminalizes an expired synthetic search and its pending matches", async () => {
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      callback(mockedPrisma as never)
+    );
+    deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({
+      id: "search-1",
+      status: "ACTIVE",
+      checkLeaseToken: "lease-token"
+    });
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 2 } as never);
+
+    await expect(
+      completeExpiredSyntheticSearch({
+        searchId: "search-1",
+        scheduleVersion: 4,
+        leaseToken: "lease-token",
+        outcome: "synthetic multi-cycle test lifetime ended"
+      })
+    ).resolves.toEqual({ completedAt: expect.any(Date) });
+
+    expect(deliveryOutboxMocks.lockSearchForAlertMutation).toHaveBeenCalledWith(
+      mockedPrisma,
+      { searchId: "search-1" }
+    );
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "search-1",
+        scheduleVersion: 4,
+        checkLeaseToken: "lease-token",
+        status: "ACTIVE"
+      },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        scheduleVersion: { increment: 1 },
+        alertGeneration: { increment: 1 },
+        checkStatus: "STOPPED",
+        nextCheckAt: null,
+        workflowRunId: null,
+        lastCheckOutcome: "synthetic multi-cycle test lifetime ended"
+      })
+    });
+    expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith({
+      where: {
+        teeSearchId: "search-1",
+        alertStatus: "PENDING"
+      },
+      data: {
+        alertStatus: "SUPPRESSED",
+        sentAt: null
+      }
+    });
   });
 
   it("keeps the earliest durable delivery retry when a scheduled check fails", async () => {

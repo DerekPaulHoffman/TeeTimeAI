@@ -1,5 +1,8 @@
+import type { WebsiteTrafficClass } from "@prisma/client";
+
 import {
   claimScheduledSearchCheck,
+  completeExpiredSyntheticSearch,
   completeScheduledSearchCheck,
   failScheduledSearchCheck,
   getSearchScheduleTiming
@@ -15,6 +18,7 @@ import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
 
 const FAILED_CHECK_RETRY_MINUTES = 5;
 const SUPPORT_DISCOVERY_RETRY_MINUTES = 15;
+export const SYNTHETIC_MULTI_CYCLE_LIFETIME_MS = 18 * 60 * 60 * 1000;
 
 export async function executeScheduledSearchCheck(searchId: string, scheduleVersion: number) {
   const claimed = await claimScheduledSearchCheck(searchId, scheduleVersion);
@@ -28,13 +32,31 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
   }
 
   try {
+    const now = new Date();
+    const syntheticExpiresAt = getSyntheticMultiCycleExpiresAt(timing);
+    if (syntheticExpiresAt && now >= syntheticExpiresAt) {
+      const completed = await completeExpiredSyntheticSearch({
+        searchId,
+        scheduleVersion,
+        leaseToken: claimed.token,
+        outcome: "synthetic multi-cycle test lifetime ended"
+      });
+      return {
+        outcome: completed ? "completed" : "stopped",
+        nextCheckAt: null,
+        availableMatches: 0,
+        newlyAlertedMatches: 0,
+        courseResults: []
+      };
+    }
+
     const searchExpiresAt = calculateSearchWindowEnd(
       timing.date,
       timing.endTime,
       timing.preferences.map((preference) => preference.course.timeZone),
       timing.userTimeZone
     );
-    if (new Date() >= searchExpiresAt) {
+    if (now >= searchExpiresAt) {
       await completeScheduledSearchCheck({
         searchId,
         scheduleVersion,
@@ -62,22 +84,25 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       !timing.syntheticMultiCycle;
     const nextCheckAt = completeSyntheticSearch
       ? null
-      : calculateNextCheckAt(
-          timing.date,
-          timing.cadenceMinutes,
-          schedulingNow,
-          searchExpiresAt,
-          refreshedTiming?.preferences.map((preference) => preference.course) ??
-            timing.preferences.map((preference) => preference.course),
-          result.supportRetryNeeded,
-          checkStartedAt,
-          {
-            supportRetryAt: result.supportRetryAt,
-            sleepUntilExpiration: shouldSleepTechnicalFinalSearch(
-              refreshedTiming?.preferences.map((preference) => preference.course) ??
-                timing.preferences.map((preference) => preference.course)
-            )
-          }
+      : capAtSyntheticExpiration(
+          calculateNextCheckAt(
+            timing.date,
+            timing.cadenceMinutes,
+            schedulingNow,
+            searchExpiresAt,
+            refreshedTiming?.preferences.map((preference) => preference.course) ??
+              timing.preferences.map((preference) => preference.course),
+            result.supportRetryNeeded,
+            checkStartedAt,
+            {
+              supportRetryAt: result.supportRetryAt,
+              sleepUntilExpiration: shouldSleepTechnicalFinalSearch(
+                refreshedTiming?.preferences.map((preference) => preference.course) ??
+                  timing.preferences.map((preference) => preference.course)
+              )
+            }
+          ),
+          syntheticExpiresAt
         );
     const completion = await completeScheduledSearchCheck({
       searchId,
@@ -115,6 +140,27 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       courseResults: []
     };
   }
+}
+
+function getSyntheticMultiCycleExpiresAt(timing: {
+  createdAt: Date;
+  trafficClass: WebsiteTrafficClass;
+  syntheticMultiCycle: boolean;
+}) {
+  return isSyntheticWebsiteTrafficClass(timing.trafficClass) &&
+    timing.syntheticMultiCycle
+    ? new Date(timing.createdAt.getTime() + SYNTHETIC_MULTI_CYCLE_LIFETIME_MS)
+    : null;
+}
+
+function capAtSyntheticExpiration(
+  nextCheckAt: Date | null,
+  syntheticExpiresAt: Date | null
+) {
+  if (!nextCheckAt || !syntheticExpiresAt) {
+    return nextCheckAt;
+  }
+  return nextCheckAt < syntheticExpiresAt ? nextCheckAt : syntheticExpiresAt;
 }
 
 export function calculateNextCheckAt(
