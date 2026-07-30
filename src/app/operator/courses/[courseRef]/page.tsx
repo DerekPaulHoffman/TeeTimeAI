@@ -319,6 +319,9 @@ function formatEnum(value: string | null | undefined) {
 function getCourseStateLabel(
   detail: NonNullable<Awaited<ReturnType<typeof loadOperatorCourseMonitoringDetail>>>
 ) {
+  if (detail.course.automationReason === "TEMPORARILY_UNAVAILABLE") {
+    return "Course website temporarily unavailable";
+  }
   if (detail.course.monitoringMode === "LOCAL_READER_ONLY") {
     return "Local reader";
   }
