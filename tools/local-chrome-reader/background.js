@@ -7,7 +7,7 @@ const READER_CAPABILITIES = Object.freeze([
   ["CPS_RENDERED", 1],
   ["CHRONOGOLF_RENDERED", 1],
   ["TENFORE_RENDERED", 1],
-  ["PROPHET_FREAR_RENDERED", 1]
+  ["PROPHET_FREAR_RENDERED", 2]
 ]);
 const ALLOWED_COURSES = Object.freeze({
   "grassy-hill": [
@@ -98,7 +98,17 @@ const ALLOWED_COURSES = Object.freeze({
     "secure.east.prophetservices.com",
     "/FrearParkV3/Home/NIndex",
     []
+  ],
+  "simsbury-farms": [
+    "Simsbury Farms Golf Course",
+    "secure.east.prophetservices.com",
+    "/SimsburyFarmsV3",
+    []
   ]
+});
+const PROPHET_COURSES = Object.freeze({
+  "frear-park": ["Frear Park Municipal Golf Course", "/FrearParkV3/Home/NIndex", "1,2"],
+  "simsbury-farms": ["Simsbury Farms Golf Course", "/SimsburyFarmsV3", "1"]
 });
 let pollInProgress = false;
 
@@ -191,9 +201,10 @@ function isAllowlistedChronogolfJob(job) {
 
 function isAllowlistedProphetJob(job) {
   try {
+    const config = PROPHET_COURSES[job?.courseKey];
     if (
-      job?.courseKey !== "frear-park" ||
-      job.courseName !== "Frear Park Municipal Golf Course" ||
+      !config ||
+      job.courseName !== config[0] ||
       !Array.isArray(job.cardTextIncludes) ||
       job.cardTextIncludes.length !== 0 ||
       !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "") ||
@@ -208,11 +219,11 @@ function isAllowlistedProphetJob(job) {
     return (
       url.protocol === "https:" &&
       url.hostname === "secure.east.prophetservices.com" &&
-      url.pathname === "/FrearParkV3/Home/NIndex" &&
+      url.pathname === config[1] &&
       url.searchParams.size === allowedKeys.size &&
       Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
       Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
-      url.searchParams.get("CourseId") === "1,2" &&
+      url.searchParams.get("CourseId") === config[2] &&
       url.searchParams.get("Date") === job.targetDate &&
       url.searchParams.get("Time") === "AnyTime" &&
       url.searchParams.get("Player") === String(job.players) &&

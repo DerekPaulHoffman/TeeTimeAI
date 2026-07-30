@@ -8,7 +8,7 @@ signed backend job -> local Chrome page -> normalized slots -> signed backend re
 
 It reads only signed backend jobs for exact, signed-out CPS tee-time search
 routes, exact TenFore tenant routes, safe public Chronogolf club profiles,
-and Frear Park's exact legacy Prophet tee sheet. CPS
+and the exact Frear Park and Simsbury Farms legacy Prophet tee sheets. CPS
 tenants are accepted automatically only when the URL
 is HTTPS, uses one `*.cps.golf` tenant host, and stays on
 `/onlineresweb/search-teetime`. TenFore tenants are accepted only on
@@ -35,10 +35,11 @@ and public player-count selection; unrelated paths and unexpected page shapes
 fail closed. A newly discovered safe public club profile can therefore use the
 existing generic parser without a course-specific extension release.
 
-Frear Park jobs use only the public rendered tee sheet with an exact date,
-player count, both public nines, and 18-hole filter. The reader ignores the
-session-bearing links on individual tee-time cards, returns the stable public
-search URL, and never clicks a tee time or enters the transaction flow.
+Legacy Prophet jobs use only the exact public rendered tee sheet, course IDs,
+date, player count, and 18-hole filter recorded for Frear Park or Simsbury
+Farms. The reader ignores session-bearing links on individual tee-time cards,
+returns the stable public search URL, and never clicks a tee time or enters the
+transaction flow.
 
 ## Run the local proof backend
 

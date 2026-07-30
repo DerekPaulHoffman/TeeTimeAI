@@ -12,13 +12,13 @@ import {
   signLocalReaderPayload,
   validateLocalReaderResultForJob,
   verifyLocalReaderSignature,
-  type LocalReaderJob,
+  type LocalReaderJob
 } from "./contracts";
 import {
   getLocalReaderJobUrl,
   getLocalReaderCourseKey,
   isLocalReaderCandidateUrl,
-  LOCAL_READER_COURSE_KEYS,
+  LOCAL_READER_COURSE_KEYS
 } from "./course-key";
 
 type Reader = {
@@ -27,16 +27,14 @@ type Reader = {
   readSnapshot: (
     documentRoot: Document,
     pageUrl: string,
-    job: LocalReaderJob,
+    job: LocalReaderJob
   ) => {
     status: string;
     slots: Array<Record<string, unknown>>;
   };
 };
 
-function jobFor(
-  courseKey: keyof typeof LOCAL_READER_COURSES = "grassy-hill",
-): LocalReaderJob {
+function jobFor(courseKey: keyof typeof LOCAL_READER_COURSES = "grassy-hill"): LocalReaderJob {
   const course = LOCAL_READER_COURSES[courseKey];
   return {
     id: "job-1",
@@ -47,7 +45,7 @@ function jobFor(
     expiresAt: "2026-07-24T12:05:00.000Z",
     courseName: course.courseName,
     bookingUrl: course.bookingUrl,
-    cardTextIncludes: [...course.cardTextIncludes],
+    cardTextIncludes: [...course.cardTextIncludes]
   };
 }
 
@@ -61,7 +59,7 @@ function dynamicCpsJob(hostname = "future-public.cps.golf"): LocalReaderJob {
     expiresAt: "2026-07-24T12:05:00.000Z",
     courseName: "Future Public Golf Course",
     bookingUrl: `https://${hostname}/onlineresweb/search-teetime`,
-    cardTextIncludes: [],
+    cardTextIncludes: []
   };
 }
 
@@ -75,14 +73,14 @@ function dynamicTenForeJob(tenant = "gainfieldfarms"): LocalReaderJob {
     expiresAt: "2026-07-28T12:05:00.000Z",
     courseName: "Gainfield Farms Golf Course",
     bookingUrl: `https://fox.tenfore.golf/${tenant}?date=2026-07-29`,
-    cardTextIncludes: [],
+    cardTextIncludes: []
   };
 }
 
 function loadReader() {
   const source = readFileSync(
     resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
-    "utf8",
+    "utf8"
   );
   const context: Record<string, unknown> = { URL };
   context.globalThis = context;
@@ -92,13 +90,8 @@ function loadReader() {
 
 function loadChronogolfReader() {
   const source = readFileSync(
-    resolve(
-      process.cwd(),
-      "tools",
-      "local-chrome-reader",
-      "chronogolf-reader.js",
-    ),
-    "utf8",
+    resolve(process.cwd(), "tools", "local-chrome-reader", "chronogolf-reader.js"),
+    "utf8"
   );
   const context: Record<string, unknown> = { URL };
   context.globalThis = context;
@@ -108,13 +101,8 @@ function loadChronogolfReader() {
 
 function loadTenForeReader() {
   const source = readFileSync(
-    resolve(
-      process.cwd(),
-      "tools",
-      "local-chrome-reader",
-      "tenfore-reader.js",
-    ),
-    "utf8",
+    resolve(process.cwd(), "tools", "local-chrome-reader", "tenfore-reader.js"),
+    "utf8"
   );
   const context: Record<string, unknown> = { URL };
   context.globalThis = context;
@@ -124,13 +112,8 @@ function loadTenForeReader() {
 
 function loadProphetReader() {
   const source = readFileSync(
-    resolve(
-      process.cwd(),
-      "tools",
-      "local-chrome-reader",
-      "prophet-reader.js",
-    ),
-    "utf8",
+    resolve(process.cwd(), "tools", "local-chrome-reader", "prophet-reader.js"),
+    "utf8"
   );
   const context: Record<string, unknown> = { URL };
   context.globalThis = context;
@@ -146,58 +129,42 @@ describe("local Chrome reader contract", () => {
         course.provider === "CPS"
           ? "?TeeOffTimeMin=0"
           : course.provider === "PROPHET"
-            ? "?CourseId=1,2&Date=2026-07-25&Time=AnyTime&Player=2&Hole=18"
-          : "?date=2026-07-25&step=teetimes";
-      expect(
-        isAllowedLocalReaderUrl(courseKey, `${course.bookingUrl}${suffix}`),
-      ).toBe(true);
+            ? `?CourseId=${course.prophetCourseIds}&Date=2026-07-25&Time=AnyTime&Player=2&Hole=18`
+            : "?date=2026-07-25&step=teetimes";
+      expect(isAllowedLocalReaderUrl(courseKey, `${course.bookingUrl}${suffix}`)).toBe(true);
     }
     expect(
       isAllowedLocalReaderUrl(
         "grassy-hill",
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout",
-      ),
+        "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout"
+      )
     ).toBe(false);
     expect(
-      isAllowedLocalReaderUrl(
-        "grassy-hill",
-        "https://fenwick.cps.golf/onlineresweb/search-teetime",
-      ),
+      isAllowedLocalReaderUrl("grassy-hill", "https://fenwick.cps.golf/onlineresweb/search-teetime")
     ).toBe(false);
   });
 
   it("keeps the extension permissions and job allowlist synchronized", () => {
     const manifest = JSON.parse(
-      readFileSync(
-        resolve(process.cwd(), "tools", "local-chrome-reader", "manifest.json"),
-        "utf8",
-      ),
+      readFileSync(resolve(process.cwd(), "tools", "local-chrome-reader", "manifest.json"), "utf8")
     ) as {
       host_permissions: string[];
       content_scripts: Array<{ matches: string[] }>;
     };
     const backgroundSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
-      "utf8",
+      "utf8"
     );
-    const contentMatches = manifest.content_scripts.flatMap(
-      (entry) => entry.matches,
-    );
+    const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
-    expect(contentMatches).toContain(
-      "https://*.cps.golf/onlineresweb/search-teetime*",
-    );
-    expect(manifest.host_permissions).toContain(
-      "https://fox.tenfore.golf/*",
-    );
+    expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
+    expect(manifest.host_permissions).toContain("https://fox.tenfore.golf/*");
     expect(contentMatches).toContain("https://fox.tenfore.golf/*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
+    expect(backgroundSource).toContain("function isAllowlistedTenForeJob(job)");
     expect(backgroundSource).toContain(
-      "function isAllowlistedTenForeJob(job)",
-    );
-    expect(backgroundSource).toContain(
-      '/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u',
+      "/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u"
     );
 
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
@@ -207,8 +174,8 @@ describe("local Chrome reader contract", () => {
       expect(manifest.host_permissions).toContain(`https://${hostname}/*`);
       expect(contentMatches).toContain(
         course.provider === "PROPHET"
-          ? "https://secure.east.prophetservices.com/FrearParkV3/*"
-          : `${course.bookingUrl}*`,
+          ? `${course.bookingUrl.replace(/\/Home\/NIndex$/u, "")}/*`
+          : `${course.bookingUrl}*`
       );
       expect(backgroundSource).toContain(courseKey);
       expect(backgroundSource).toContain(`"${course.courseName}"`);
@@ -219,108 +186,83 @@ describe("local Chrome reader contract", () => {
   it("accepts future signed CPS jobs while rejecting unsafe hosts and routes", () => {
     const job = dynamicCpsJob();
 
-    expect(getLocalReaderCourseKey(job.bookingUrl)).toBe(
-      "cps:future-public.cps.golf",
-    );
+    expect(getLocalReaderCourseKey(job.bookingUrl)).toBe("cps:future-public.cps.golf");
     expect(localReaderJobSchema.parse(job)).toMatchObject({
       courseKey: "cps:future-public.cps.golf",
-      courseName: "Future Public Golf Course",
+      courseName: "Future Public Golf Course"
     });
+    expect(loadReader().isAllowedPageUrl(job, `${job.bookingUrl}?TeeOffTimeMin=0`)).toBe(true);
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl: "https://evil.example/onlineresweb/search-teetime"
+      })
+    ).toThrow(/not allowlisted/u);
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl: `${job.bookingUrl}/checkout`
+      })
+    ).toThrow(/not allowlisted/u);
     expect(
-      loadReader().isAllowedPageUrl(
-        job,
-        `${job.bookingUrl}?TeeOffTimeMin=0`,
-      ),
-    ).toBe(true);
-    expect(() =>
-      localReaderJobSchema.parse({
-        ...job,
-        bookingUrl: "https://evil.example/onlineresweb/search-teetime",
-      }),
-    ).toThrow(/not allowlisted/u);
-    expect(() =>
-      localReaderJobSchema.parse({
-        ...job,
-        bookingUrl: `${job.bookingUrl}/checkout`,
-      }),
-    ).toThrow(/not allowlisted/u);
-    expect(getLocalReaderCourseKey("https://nested.future.cps.golf/onlineresweb/search-teetime")).toBeNull();
+      getLocalReaderCourseKey("https://nested.future.cps.golf/onlineresweb/search-teetime")
+    ).toBeNull();
   });
 
   it("accepts exact TenFore tenant jobs and rejects unsafe paths and query data", () => {
     const job = dynamicTenForeJob();
 
-    expect(
-      getLocalReaderCourseKey(
-        "https://fox.tenfore.golf/gainfieldfarms",
-      ),
-    ).toBe("tenfore:gainfieldfarms");
+    expect(getLocalReaderCourseKey("https://fox.tenfore.golf/gainfieldfarms")).toBe(
+      "tenfore:gainfieldfarms"
+    );
     expect(localReaderJobSchema.parse(job)).toMatchObject({
       courseKey: "tenfore:gainfieldfarms",
-      courseName: "Gainfield Farms Golf Course",
+      courseName: "Gainfield Farms Golf Course"
     });
-    expect(
-      loadTenForeReader().isAllowedPageUrl(job, job.bookingUrl),
-    ).toBe(true);
+    expect(loadTenForeReader().isAllowedPageUrl(job, job.bookingUrl)).toBe(true);
     expect(loadTenForeReader()).toMatchObject({
       SKIP_DATE_SELECTION: true,
-      SKIP_PLAYER_SELECTION: true,
+      SKIP_PLAYER_SELECTION: true
     });
     expect(() =>
       localReaderJobSchema.parse({
         ...job,
-        bookingUrl:
-          "https://fox.tenfore.golf/gainfieldfarms/checkout?date=2026-07-29",
-      }),
+        bookingUrl: "https://fox.tenfore.golf/gainfieldfarms/checkout?date=2026-07-29"
+      })
     ).toThrow(/not allowlisted/u);
     expect(() =>
       localReaderJobSchema.parse({
         ...job,
-        bookingUrl:
-          "https://fox.tenfore.golf/other-course?date=2026-07-29",
-      }),
+        bookingUrl: "https://fox.tenfore.golf/other-course?date=2026-07-29"
+      })
     ).toThrow(/not allowlisted/u);
     expect(
-      getLocalReaderCourseKey(
-        "https://fox.tenfore.golf/gainfieldfarms?token=secret",
-      ),
+      getLocalReaderCourseKey("https://fox.tenfore.golf/gainfieldfarms?token=secret")
     ).toBeNull();
   });
 
   it("recognizes only the exact reader-candidate public booking surfaces", () => {
     expect(
-      isLocalReaderCandidateUrl(
-        "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex",
-      ),
+      isLocalReaderCandidateUrl("https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex")
+    ).toBe(true);
+    expect(isLocalReaderCandidateUrl("https://www.simsburyfarms.com/book-a-tee-time")).toBe(true);
+    expect(
+      isLocalReaderCandidateUrl("https://ctguilfordweb.myvscloud.com/webtrac/web/search.html")
     ).toBe(true);
     expect(
-      isLocalReaderCandidateUrl(
-        "https://www.simsburyfarms.com/book-a-tee-time",
-      ),
-    ).toBe(true);
-    expect(
-      isLocalReaderCandidateUrl(
-        "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html",
-      ),
-    ).toBe(true);
-    expect(
-      isLocalReaderCandidateUrl(
-        "https://secure.east.prophetservices.com/OtherCourse/Home/NIndex",
-      ),
+      isLocalReaderCandidateUrl("https://secure.east.prophetservices.com/OtherCourse/Home/NIndex")
     ).toBe(false);
-    expect(
-      isLocalReaderCandidateUrl("https://example.com/book-a-tee-time"),
-    ).toBe(false);
+    expect(isLocalReaderCandidateUrl("https://example.com/book-a-tee-time")).toBe(false);
   });
 
   it("shows the installed manifest version on the extension options page", () => {
     const optionsHtml = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "options.html"),
-      "utf8",
+      "utf8"
     );
     const optionsSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "options.js"),
-      "utf8",
+      "utf8"
     );
 
     expect(optionsHtml).toContain('id="readerVersion"');
@@ -351,11 +293,7 @@ describe("local Chrome reader contract", () => {
     `;
 
     const job = jobFor();
-    const snapshot = loadReader().readSnapshot(
-      document,
-      `${job.bookingUrl}?TeeOffTimeMin=0`,
-      job,
-    );
+    const snapshot = loadReader().readSnapshot(document, `${job.bookingUrl}?TeeOffTimeMin=0`, job);
 
     expect(snapshot).toMatchObject({
       status: "AVAILABLE",
@@ -367,7 +305,7 @@ describe("local Chrome reader contract", () => {
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 7000,
-          cartIncluded: true,
+          cartIncluded: true
         },
         {
           startsAtLocal: "2026-07-25T15:50:00",
@@ -376,9 +314,9 @@ describe("local Chrome reader contract", () => {
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 4300,
-          cartIncluded: false,
-        },
-      ],
+          cartIncluded: false
+        }
+      ]
     });
   });
 
@@ -406,15 +344,11 @@ describe("local Chrome reader contract", () => {
     const datedJob = {
       ...job,
       targetDate: "2026-07-26",
-      bookingUrl: `${job.bookingUrl}?date=2026-07-26&step=teetimes`,
+      bookingUrl: `${job.bookingUrl}?date=2026-07-26&step=teetimes`
     };
 
     expect(
-      loadChronogolfReader().readSnapshot(
-        document,
-        `${datedJob.bookingUrl}&groupSize=2`,
-        datedJob,
-      ),
+      loadChronogolfReader().readSnapshot(document, `${datedJob.bookingUrl}&groupSize=2`, datedJob)
     ).toMatchObject({
       status: "AVAILABLE",
       slots: [
@@ -424,9 +358,9 @@ describe("local Chrome reader contract", () => {
           holes: [9, 18],
           minimumPlayers: 2,
           availableSpots: 4,
-          priceCents: 5000,
-        },
-      ],
+          priceCents: 5000
+        }
+      ]
     });
   });
 
@@ -439,20 +373,17 @@ describe("local Chrome reader contract", () => {
     `;
     const job = jobFor("crystal-lake");
 
-    expect(
-      loadChronogolfReader().readSnapshot(document, job.bookingUrl, job),
-    ).toMatchObject({
+    expect(loadChronogolfReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "READER_ERROR",
       slots: [],
-      readerVersion: "chronogolf-rendered-v1",
+      readerVersion: "chronogolf-rendered-v1"
     });
     expect(
-      loadChronogolfReader().readSnapshot(
-        document,
-        `${job.bookingUrl}/checkout`,
-        job,
-      ),
-    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
+      loadChronogolfReader().readSnapshot(document, `${job.bookingUrl}/checkout`, job)
+    ).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: []
+    });
   });
 
   it("recognizes the official Chanticlair Chronogolf profile", () => {
@@ -460,19 +391,16 @@ describe("local Chrome reader contract", () => {
 
     expect(job).toMatchObject({
       courseName: "Chanticlair Golf Course",
-      bookingUrl: "https://www.chronogolf.com/club/chanticlair-golf-club",
+      bookingUrl: "https://www.chronogolf.com/club/chanticlair-golf-club"
     });
     expect(
-      isAllowedLocalReaderUrl(
-        "chanticlair",
-        `${job.bookingUrl}?date=2026-07-27&step=teetimes`,
-      ),
+      isAllowedLocalReaderUrl("chanticlair", `${job.bookingUrl}?date=2026-07-27&step=teetimes`)
     ).toBe(true);
     expect(
       loadChronogolfReader().isAllowedPageUrl(
         job,
-        `${job.bookingUrl}?date=2026-07-27&step=teetimes`,
-      ),
+        `${job.bookingUrl}?date=2026-07-27&step=teetimes`
+      )
     ).toBe(true);
   });
 
@@ -481,18 +409,16 @@ describe("local Chrome reader contract", () => {
 
     expect(job).toMatchObject({
       courseName: "Hyde Park Golf Club",
-      bookingUrl: "https://www.chronogolf.com/club/hyde-park-golf-club",
+      bookingUrl: "https://www.chronogolf.com/club/hyde-park-golf-club"
     });
-    expect(
-      getLocalReaderCourseKey(
-        `${job.bookingUrl}?date=2026-07-29&step=teetimes`,
-      ),
-    ).toBe("hyde-park");
+    expect(getLocalReaderCourseKey(`${job.bookingUrl}?date=2026-07-29&step=teetimes`)).toBe(
+      "hyde-park"
+    );
     expect(
       loadChronogolfReader().isAllowedPageUrl(
         job,
-        `${job.bookingUrl}?date=2026-07-29&step=teetimes`,
-      ),
+        `${job.bookingUrl}?date=2026-07-29&step=teetimes`
+      )
     ).toBe(true);
   });
 
@@ -515,17 +441,15 @@ describe("local Chrome reader contract", () => {
     const job = {
       ...baseJob,
       targetDate: "2026-07-30",
-      bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2),
+      bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2)
     };
     const pageUrl =
       "https://secure.east.prophetservices.com/FrearParkV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18";
 
     expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("frear-park");
-    expect(
-      loadProphetReader().readSnapshot(document, pageUrl, job),
-    ).toMatchObject({
+    expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      readerVersion: "legacy-prophet-rendered-v1",
+      readerVersion: "legacy-prophet-rendered-v2",
       pageUrl: job.bookingUrl,
       slots: [
         {
@@ -535,9 +459,45 @@ describe("local Chrome reader contract", () => {
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 6200,
-          cartIncluded: true,
-        },
-      ],
+          cartIncluded: true
+        }
+      ]
+    });
+  });
+
+  it("parses Simsbury Farms with its exact public Prophet tenant and course id", () => {
+    document.title = "Simsbury Farms";
+    document.body.innerHTML = `
+      <input id="txtFromDateLarge" value="07/30/2026" />
+      <div class="teeSheet">
+        <a class="teetime">
+          10:20 AM $54.00 Cart Price Included
+          Simsbury Farms Golf Course 1 to 4 Players 18
+        </a>
+      </div>
+    `;
+    const baseJob = jobFor("simsbury-farms");
+    const job = {
+      ...baseJob,
+      targetDate: "2026-07-30",
+      bookingUrl: getLocalReaderJobUrl("simsbury-farms", "2026-07-30", 2)
+    };
+    const pageUrl =
+      "https://secure.east.prophetservices.com/SimsburyFarmsV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18";
+
+    expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("simsbury-farms");
+    expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
+      status: "AVAILABLE",
+      readerVersion: "legacy-prophet-rendered-v2",
+      pageUrl: job.bookingUrl,
+      slots: [
+        {
+          startsAtLocal: "2026-07-30T10:20:00",
+          availableSpots: 4,
+          holes: [18],
+          priceCents: 5400
+        }
+      ]
     });
   });
 
@@ -546,7 +506,7 @@ describe("local Chrome reader contract", () => {
     const job = {
       ...baseJob,
       targetDate: "2026-07-30",
-      bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2),
+      bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2)
     };
     const reader = loadProphetReader();
     const pageUrl =
@@ -558,7 +518,7 @@ describe("local Chrome reader contract", () => {
     `;
     expect(reader.readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "PAGE_MISMATCH",
-      slots: [],
+      slots: []
     });
 
     document.body.innerHTML = `
@@ -567,27 +527,24 @@ describe("local Chrome reader contract", () => {
     `;
     expect(reader.readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "READER_ERROR",
-      slots: [],
+      slots: []
     });
     expect(
       reader.readSnapshot(
         document,
         pageUrl.replace("/Home/NIndex/Home/nIndex", "/Home/Checkout"),
-        job,
-      ),
+        job
+      )
     ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
-    expect(
-      reader.readSnapshot(
-        document,
-        `${pageUrl}&Date=2026-07-31`,
-        job,
-      ),
-    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
+    expect(reader.readSnapshot(document, `${pageUrl}&Date=2026-07-31`, job)).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: []
+    });
     expect(
       isAllowedLocalReaderUrl(
         "frear-park",
-        "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?Date=2026-07-30",
-      ),
+        "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?Date=2026-07-30"
+      )
     ).toBe(false);
   });
 
@@ -602,9 +559,7 @@ describe("local Chrome reader contract", () => {
     `;
     const job = jobFor("overpeck");
 
-    expect(
-      loadReader().readSnapshot(document, job.bookingUrl, job),
-    ).toMatchObject({
+    expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "AVAILABLE",
       slots: [
         {
@@ -612,9 +567,9 @@ describe("local Chrome reader contract", () => {
           holes: [18],
           minimumPlayers: 1,
           availableSpots: 4,
-          priceCents: 5200,
-        },
-      ],
+          priceCents: 5200
+        }
+      ]
     });
   });
 
@@ -628,35 +583,33 @@ describe("local Chrome reader contract", () => {
     `;
     const job = jobFor("candia-woods");
 
-    expect(
-      loadReader().readSnapshot(document, job.bookingUrl, job),
-    ).toMatchObject({
+    expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      slots: [{ startsAtLocal: "2026-07-25T09:10:00" }],
+      slots: [{ startsAtLocal: "2026-07-25T09:10:00" }]
     });
     expect(job.bookingUrl).toContain("candiawoods.cps.golf");
     expect(
       isAllowedLocalReaderUrl(
         "candia-woods",
-        "https://oaksgolflinks.cps.golf/onlineresweb/search-teetime",
-      ),
+        "https://oaksgolflinks.cps.golf/onlineresweb/search-teetime"
+      )
     ).toBe(false);
   });
 
   it("reports challenge and page mismatch states without returning slots", () => {
     document.title = "Just a moment";
-    document.body.innerHTML =
-      "<main>Checking your browser before accessing this site</main>";
+    document.body.innerHTML = "<main>Checking your browser before accessing this site</main>";
     const reader = loadReader();
     const job = jobFor();
 
     expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "ACCESS_CHALLENGE",
-      slots: [],
+      slots: []
     });
-    expect(
-      reader.readSnapshot(document, `${job.bookingUrl}/checkout`, job),
-    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
+    expect(reader.readSnapshot(document, `${job.bookingUrl}/checkout`, job)).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: []
+    });
   });
 
   it("parses rendered TenFore cards without reading challenge-protected requests", () => {
@@ -683,9 +636,7 @@ describe("local Chrome reader contract", () => {
 
     expect(document.querySelectorAll(".text-2xl.font-bold")).toHaveLength(2);
     expect(reader.countRenderedSlots(document)).toBe(2);
-    expect(
-      reader.readSnapshot(document, job.bookingUrl, job),
-    ).toMatchObject({
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "AVAILABLE",
       readerVersion: "tenfore-rendered-v1",
       slots: [
@@ -694,9 +645,9 @@ describe("local Chrome reader contract", () => {
           holes: [18],
           minimumPlayers: 1,
           availableSpots: 4,
-          priceCents: 4200,
-        },
-      ],
+          priceCents: 4200
+        }
+      ]
     });
   });
 
@@ -707,7 +658,7 @@ describe("local Chrome reader contract", () => {
     document.body.innerHTML = "<main>Verify you are human</main>";
     expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "ACCESS_CHALLENGE",
-      slots: [],
+      slots: []
     });
 
     document.body.innerHTML = `
@@ -717,7 +668,7 @@ describe("local Chrome reader contract", () => {
     `;
     expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "PAGE_MISMATCH",
-      slots: [],
+      slots: []
     });
 
     document.body.innerHTML = `
@@ -728,7 +679,7 @@ describe("local Chrome reader contract", () => {
     `;
     expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "READER_ERROR",
-      slots: [],
+      slots: []
     });
   });
 
@@ -741,19 +692,17 @@ describe("local Chrome reader contract", () => {
     `;
     const job = jobFor();
 
-    expect(
-      loadReader().readSnapshot(document, job.bookingUrl, job),
-    ).toMatchObject({
+    expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "READER_ERROR",
       slots: [],
-      readerVersion: "cps-rendered-v1",
+      readerVersion: "cps-rendered-v1"
     });
   });
 
   it("validates jobs and results and rejects malformed availability", () => {
     expect(localReaderJobSchema.parse(jobFor())).toMatchObject({
       courseKey: "grassy-hill",
-      players: 2,
+      players: 2
     });
 
     expect(() =>
@@ -765,8 +714,8 @@ describe("local Chrome reader contract", () => {
         pageUrl: LOCAL_READER_COURSES["grassy-hill"].bookingUrl,
         pageTitle: "Grassy Hill Country Club",
         slots: [],
-        readerVersion: "test",
-      }),
+        readerVersion: "test"
+      })
     ).toThrow(/at least one slot/u);
   });
 
@@ -776,23 +725,21 @@ describe("local Chrome reader contract", () => {
     const signature = signLocalReaderPayload(secret, payload);
 
     expect(verifyLocalReaderSignature(secret, payload, signature)).toBe(true);
-    expect(
-      verifyLocalReaderSignature(secret, '{"jobId":"job-2"}', signature),
-    ).toBe(false);
+    expect(verifyLocalReaderSignature(secret, '{"jobId":"job-2"}', signature)).toBe(false);
   });
 
   it("normalizes copied device tokens before saving and signing", () => {
     const backgroundSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
-      "utf8",
+      "utf8"
     );
     const optionsSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "options.js"),
-      "utf8",
+      "utf8"
     );
 
     expect(backgroundSource).toContain(
-      'deviceToken: (settings.deviceToken || "").replace(/^\\uFEFF/u, "").trim()',
+      'deviceToken: (settings.deviceToken || "").replace(/^\\uFEFF/u, "").trim()'
     );
     expect(optionsSource).toContain('.value.replace(/^\\uFEFF/u, "")');
     expect(optionsSource).toContain(".trim();");
@@ -801,7 +748,7 @@ describe("local Chrome reader contract", () => {
   it("selects courses and local dates without using page locale globals", () => {
     const contentSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
-      "utf8",
+      "utf8"
     );
 
     expect(contentSource).not.toContain("Intl.DateTimeFormat");
@@ -814,27 +761,23 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).toContain("const deadline = Date.now() + 10_000");
     expect(contentSource).toContain("await delay(100)");
     expect(contentSource).toContain(
-      "const [targetYear, targetMonth, targetDayNumber] = targetDate",
+      "const [targetYear, targetMonth, targetDayNumber] = targetDate"
     );
+    expect(contentSource).toContain("const selectionDeadline = Date.now() + 10_000");
+    expect(contentSource).toContain('button.getAttribute("aria-disabled") !== "true"');
     expect(contentSource).toContain(
-      "const selectionDeadline = Date.now() + 10_000",
-    );
-    expect(contentSource).toContain(
-      'button.getAttribute("aria-disabled") !== "true"',
-    );
-    expect(contentSource).toContain(
-      'if (dayNumbers.length > 0) return (visible?.textContent || "").trim()',
+      'if (dayNumbers.length > 0) return (visible?.textContent || "").trim()'
     );
   });
 
   it("surfaces reader setup errors without exposing private browser state", () => {
     const contentSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
-      "utf8",
+      "utf8"
     );
     const backgroundSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
-      "utf8",
+      "utf8"
     );
 
     expect(contentSource).toContain("`Reader error: ${detail}`.slice(0, 200)");
@@ -846,19 +789,17 @@ describe("local Chrome reader contract", () => {
   it("retries fast page loads after the tab-to-job mapping settles", () => {
     const contentSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
-      "utf8",
+      "utf8"
     );
     const backgroundSource = readFileSync(
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
-      "utf8",
+      "utf8"
     );
 
     expect(contentSource).toContain("PENDING_JOB_LOOKUP_LIMIT = 20");
-    expect(contentSource).toContain(
-      "setTimeout(() => void readPendingJob(), 250)",
-    );
+    expect(contentSource).toContain("setTimeout(() => void readPendingJob(), 250)");
     expect(backgroundSource).toContain(
-      'if (changeInfo.status === "complete") void wakePendingTab(tabId)',
+      'if (changeInfo.status === "complete") void wakePendingTab(tabId)'
     );
     expect(backgroundSource).toContain("await wakePendingTab(tab.id)");
   });
@@ -880,20 +821,15 @@ describe("local Chrome reader contract", () => {
           minimumPlayers: 2,
           availableSpots: 4,
           priceCents: 7000,
-          cartIncluded: true,
-        },
+          cartIncluded: true
+        }
       ],
-      readerVersion: "test",
+      readerVersion: "test"
     });
 
-    expect(() => validateLocalReaderResultForJob(job, result)).toThrow(
-      /requested local date/u,
-    );
+    expect(() => validateLocalReaderResultForJob(job, result)).toThrow(/requested local date/u);
     expect(() =>
-      validateLocalReaderResultForJob(
-        { ...job, targetDate: "2026-07-24", players: 1 },
-        result,
-      ),
+      validateLocalReaderResultForJob({ ...job, targetDate: "2026-07-24", players: 1 }, result)
     ).toThrow(/requested players/u);
   });
 });

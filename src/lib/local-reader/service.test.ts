@@ -42,6 +42,7 @@ const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
 const chronogolfBookingUrl = "https://www.chronogolf.com/club/crestbrook-park-golf-course";
 const tenForeBookingUrl = "https://fox.tenfore.golf/gainfieldfarms";
 const frearParkBookingUrl = "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex";
+const simsburyBookingUrl = "https://secure.east.prophetservices.com/SimsburyFarmsV3";
 
 describe("local reader job service", () => {
   beforeEach(() => {
@@ -220,6 +221,29 @@ describe("local reader job service", () => {
           courseKey: "frear-park",
           bookingUrl:
             "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
+        })
+      })
+    );
+  });
+
+  it("queues Simsbury Farms with its exact public Prophet course id", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-simsbury" });
+
+    expect(getLocalReaderCourseKey(simsburyBookingUrl)).toBe("simsbury-farms");
+    await queueLocalReaderCourseVerification({
+      courseId: "course-simsbury",
+      targetDate: "2026-07-30",
+      players: 2,
+      bookingUrl: simsburyBookingUrl
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "simsbury-farms",
+          bookingUrl:
+            "https://secure.east.prophetservices.com/SimsburyFarmsV3?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
         })
       })
     );

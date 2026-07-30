@@ -17,7 +17,8 @@ export const LOCAL_READER_COURSE_KEYS = [
   "chanticlair",
   "lyman-orchards",
   "hyde-park",
-  "frear-park"
+  "frear-park",
+  "simsbury-farms"
 ] as const;
 
 export type StaticLocalReaderCourseKey = (typeof LOCAL_READER_COURSE_KEYS)[number];
@@ -35,6 +36,7 @@ export type LocalReaderCourse = {
   bookingUrl: string;
   cardTextIncludes: readonly string[];
   provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "PROPHET";
+  prophetCourseIds?: string;
 };
 
 const CPS_TENANT_HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u;
@@ -68,7 +70,15 @@ export const LOCAL_READER_COURSES = {
     courseName: "Frear Park Municipal Golf Course",
     bookingUrl: "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex",
     cardTextIncludes: [],
-    provider: "PROPHET"
+    provider: "PROPHET",
+    prophetCourseIds: "1,2"
+  },
+  "simsbury-farms": {
+    courseName: "Simsbury Farms Golf Course",
+    bookingUrl: "https://secure.east.prophetservices.com/SimsburyFarmsV3",
+    cardTextIncludes: [],
+    provider: "PROPHET",
+    prophetCourseIds: "1"
   }
 } as const satisfies Record<StaticLocalReaderCourseKey, LocalReaderCourse>;
 
@@ -171,7 +181,11 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
       url.password === "";
     if (!commonSafeUrl) return false;
     if (course.provider === "PROPHET") {
-      const safePath = /^\/FrearParkV3\/?(?:Home\/NIndex\/?)?$/iu.test(url.pathname);
+      const tenantRoot = expected.pathname.replace(/\/Home\/NIndex\/?$/iu, "");
+      const safePath =
+        url.pathname === expected.pathname ||
+        url.pathname === tenantRoot ||
+        url.pathname === `${tenantRoot}/`;
       const allowedKeys = new Set(["CourseId", "Date", "Time", "Player", "Hole"]);
       const date = url.searchParams.get("Date");
       const player = url.searchParams.get("Player");
@@ -186,7 +200,7 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
           (hasExactJobQuery &&
             /^\d{4}-\d{2}-\d{2}$/u.test(date || "") &&
             /^[1-4]$/u.test(player || "") &&
-            url.searchParams.get("CourseId") === "1,2" &&
+            url.searchParams.get("CourseId") === course.prophetCourseIds &&
             url.searchParams.get("Time") === "AnyTime" &&
             url.searchParams.get("Hole") === "18")) &&
         url.hash === ""
@@ -266,7 +280,7 @@ export function getLocalReaderJobUrl(
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   if (course.provider === "PROPHET") {
-    return `${course.bookingUrl}?CourseId=1,2&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
+    return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
   }
   const url = new URL(course.bookingUrl);
   url.searchParams.set("date", targetDate);

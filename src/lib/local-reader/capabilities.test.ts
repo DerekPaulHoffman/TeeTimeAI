@@ -35,4 +35,15 @@ describe("local reader capabilities", () => {
       parserVersion: 1
     });
   });
+
+  it("requires the expanded Prophet parser for Simsbury Farms", () => {
+    expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
+      key: "PROPHET_FREAR_RENDERED",
+      parserVersion: 1
+    });
+    expect(getRequiredLocalReaderCapability("simsbury-farms")).toEqual({
+      key: "PROPHET_FREAR_RENDERED",
+      parserVersion: 2
+    });
+  });
 });
