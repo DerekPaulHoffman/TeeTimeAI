@@ -46,8 +46,8 @@ export default async function LocationHubPage({ params }: PageProps) {
         <div className="knowledge-hero-inner">
           <nav aria-label="Breadcrumb" className="knowledge-breadcrumbs"><Link href="/">Home</Link><span>/</span>{parentPath ? <><Link href={parentPath}>Connecticut</Link><span>/</span></> : null}<span>{hub.shortName}</span></nav>
           <div className="knowledge-hero-copy">
-            <p className="eyebrow">Free local tee-time alerts</p>
-            <h1>Public golf alerts in {hub.name}</h1>
+            <p className="eyebrow">Free local golf tee time alerts</p>
+            <h1>Golf tee time alerts in {hub.name}</h1>
             <p className="knowledge-lede">{hub.description}</p>
             <div className="knowledge-pills">
               <span className="is-supported">{data.courses.length} public courses covered</span>
@@ -74,7 +74,7 @@ export default async function LocationHubPage({ params }: PageProps) {
         <div className="location-section-heading">
           <div>
             <p className="knowledge-kicker">Courses you can choose</p>
-            <h2>Public courses with tee-time alerts</h2>
+            <h2>Public courses with tee time alerts</h2>
           </div>
           <p>
             Choose from the courses below. We can check their public booking pages and email the

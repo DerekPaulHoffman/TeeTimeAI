@@ -10,9 +10,9 @@ import {
 } from "@/components/editorial-page";
 import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
-const title = "A Guide to Public Golf Booking Windows";
+const title = "When Do Golf Courses Release Tee Times?";
 const description =
-  "Understand how public golf tee-time booking windows work, why release dates and times vary, and how to plan for high-demand rounds.";
+  "Learn when public golf courses release tee times, how booking windows work, and when cancellation alerts can help with high-demand rounds.";
 const path = "/guides/public-golf-booking-windows";
 
 export const metadata = buildPageMetadata({ title, description, path, type: "article" });
@@ -35,7 +35,7 @@ export default function BookingWindowsGuide() {
   return (
     <EditorialPage
       eyebrow="Booking windows"
-      title="The release clock matters before the cancellation watch begins."
+      title="When do golf courses release tee times?"
       intro="A public golf booking window determines how far in advance a golfer can reserve a tee time. Knowing the course's exact rule gives you the best first chance at a high-demand round."
       summary="Booking windows vary by course, player status, season, and booking channel. Confirm the official rule, calculate the release moment in the course's local time, and use alerts as a second chance after the initial inventory is gone."
       updated="July 29, 2026"

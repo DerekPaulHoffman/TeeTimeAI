@@ -14,7 +14,9 @@ describe("public SEO copy", () => {
   it("keeps the homepage direct and links to Connecticut alert coverage", () => {
     const html = renderToStaticMarkup(<HomePage />);
 
-    expect(html).toContain("Free public golf tee-time alerts");
+    expect(html).toContain("Free public golf tee time alerts");
+    expect(html).toContain("Golf tee time alerts for the courses you want to play.");
+    expect(html).toContain("last-minute tee times");
     expect(html).toContain('href="/locations/connecticut"');
     expect(html).not.toMatch(/supported availability|policy-safe|around the clock/i);
   });

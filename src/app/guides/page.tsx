@@ -4,9 +4,9 @@ import { ArrowRight } from "lucide-react";
 import { StructuredData } from "@/components/structured-data";
 import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
-const title = "Public Golf Tee Time Guides";
+const title = "Golf Tee Time Alerts and Booking Guides";
 const description =
-  "Practical guides to public golf booking windows, cancellation alerts, and the difference between tee-time alerts and auto-booking services.";
+  "Practical guides to golf tee time alerts, last-minute tee times, cancellation alerts, public booking windows, and direct booking.";
 const path = "/guides";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -22,7 +22,7 @@ const structuredData = buildPageStructuredData({
 const guides = [
   {
     href: "/guides/tee-time-cancellation-alerts",
-    title: "How tee-time cancellation alerts work",
+    title: "How golf tee time cancellation alerts work",
     description:
       "Why public golf openings reappear, what an alert can observe, and how to act without assuming the slot is guaranteed."
   },
@@ -46,9 +46,10 @@ export default function GuidesPage() {
       <StructuredData data={structuredData} />
       <header className="guide-index-header">
         <p className="eyebrow">The public golf field guide</p>
-        <h1>Book smarter. Refresh less.</h1>
+        <h1>Golf tee time alerts and booking guides.</h1>
         <p>
-          Clear answers about public tee-time releases, cancellations, alerts, and booking tools.
+          Clear answers about public tee time releases, last-minute openings, cancellation alerts,
+          and booking tools.
           Every guide preserves the same boundary: the course controls inventory and the golfer
           completes the booking.
         </p>

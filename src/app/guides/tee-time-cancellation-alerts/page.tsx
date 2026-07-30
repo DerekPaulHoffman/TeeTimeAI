@@ -10,9 +10,9 @@ import {
 } from "@/components/editorial-page";
 import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
-const title = "How Tee Time Cancellation Alerts Work";
+const title = "How Golf Tee Time Cancellation Alerts Work";
 const description =
-  "Learn why public golf tee times reopen after cancellations, how cancellation alerts detect matching availability, and how to respond responsibly.";
+  "Learn why public golf tee times reopen after cancellations, how tee time cancellation alerts detect matching openings, and how to respond.";
 const path = "/guides/tee-time-cancellation-alerts";
 
 export const metadata = buildPageMetadata({ title, description, path, type: "article" });
@@ -35,7 +35,7 @@ export default function CancellationAlertsGuide() {
   return (
     <EditorialPage
       eyebrow="Cancellation alerts"
-      title="How public golf tee times come back—and how alerts help."
+      title="How golf tee time cancellation alerts work."
       intro="A full tee sheet is a snapshot, not always the final answer. Plans change, groups shrink, and individual openings can return to the public booking page."
       summary="A cancellation alert checks public booking pages for your date, time, courses, and group size. When a match appears, it sends the official link. It cannot reserve the opening or guarantee you will get it."
       updated="July 29, 2026"

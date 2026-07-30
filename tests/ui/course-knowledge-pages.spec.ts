@@ -147,10 +147,10 @@ test("renders the exact three qualified Connecticut location hubs", async ({ pag
   for (const path of locationPaths) {
     const response = await page.goto(path, { waitUntil: "networkidle" });
     expect(response?.status(), path).toBe(200);
-    await expect(page.getByRole("heading", { level: 1, name: /Public golf alerts in/ })).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: /Golf tee time alerts in/ })).toBeVisible();
     await expect(page.getByText(/\d+ public courses covered/).first()).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Public courses with tee-time alerts" })).toBeVisible();
-    await expect(page.getByText("Free local tee-time alerts", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Public courses with tee time alerts" })).toBeVisible();
+    await expect(page.getByText("Free local golf tee time alerts", { exact: true })).toBeVisible();
     const publicCopy = await page.locator("main").innerText();
     expect(publicCopy).not.toMatch(
       /Meaningful local coverage|Coverage with substance|source-backed profile|public monitoring path/

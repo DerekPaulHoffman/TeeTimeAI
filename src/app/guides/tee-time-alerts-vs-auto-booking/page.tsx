@@ -12,7 +12,7 @@ import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
 const title = "Tee Time Alerts vs. Auto-Booking";
 const description =
-  "Compare tee-time alert services with auto-booking tools, including control, account access, payment, speed, policy, and cancellation tradeoffs.";
+  "Compare golf tee time alert services with auto-booking tools, including control, account access, payment, speed, and cancellation tradeoffs.";
 const path = "/guides/tee-time-alerts-vs-auto-booking";
 
 export const metadata = buildPageMetadata({ title, description, path, type: "article" });
@@ -35,7 +35,7 @@ export default function AlertsVersusAutoBookingGuide() {
   return (
     <EditorialPage
       eyebrow="Alerts vs. auto-booking"
-      title="Notification and reservation are fundamentally different jobs."
+      title="Tee time alerts vs. auto-booking."
       intro="A tee-time alert tells a golfer that matching public availability was observed. An auto-booking service attempts to take a later step on the golfer's behalf."
       summary="Alerts preserve the final decision, login, policy review, and payment for the golfer. Auto-booking may be faster after detection, but it requires more authority and creates greater account, payment, cancellation, and policy risk."
       updated="July 29, 2026"

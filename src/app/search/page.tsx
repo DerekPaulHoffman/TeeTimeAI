@@ -13,7 +13,7 @@ import "../pricing.css";
 
 const title = "Find Public Golf Tee Times & Set Free Alerts";
 const description =
-  "Search nearby public golf courses, rank up to five, and create a free email alert for your preferred date, time window, and group size.";
+  "Search nearby public golf courses and create free golf tee time alerts for your preferred date, time window, and group size.";
 const path = "/search";
 
 export const metadata = buildPageMetadata({
@@ -49,9 +49,9 @@ export default async function SearchPage() {
           src="https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=2400&q=80"
         />
         <p className="eyebrow">Set up your alert</p>
-        <h1>Tell us where and when you want to play.</h1>
+        <h1>Find public golf tee times and set a free alert.</h1>
         <p className="search-page-header-copy">
-          Search nearby public golf courses and create a free tee-time alert.
+          Search nearby public golf courses and create a free tee time alert.
           When a matching opening appears, we email the official booking link
           and you book directly with the course.
         </p>

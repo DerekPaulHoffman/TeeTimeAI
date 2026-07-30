@@ -11,9 +11,9 @@ import {
 } from "@/components/editorial-page";
 import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
-const title = "How Tee Time Spot Works";
+const title = "How Golf Tee Time Alerts Work";
 const description =
-  "Learn how Tee Time Spot checks public golf booking pages, matches your playing window, and emails official booking links without booking for you.";
+  "Learn how golf tee time alerts watch public booking pages, match your playing window, and email official booking links without booking for you.";
 const path = "/how-it-works";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -29,7 +29,7 @@ export default function HowItWorksPage() {
   return (
     <EditorialPage
       eyebrow="How it works"
-      title="A tee-time alert, not another booking marketplace."
+      title="How golf tee time alerts work."
       intro="Tell us which public courses you prefer and when your group can play. Tee Time Spot checks available public booking pages and emails you when a matching opening appears."
       summary="You set the preferences once. We send an alert when there is a match. The link opens the course's official booking surface, where you review and complete the booking yourself."
       updated="July 29, 2026"

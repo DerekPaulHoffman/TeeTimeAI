@@ -95,14 +95,14 @@ export default function HomePage() {
       <StructuredData data={homeStructuredData} />
       <section className="hero">
         <div className="hero-content">
-          <p className="eyebrow">Free public golf tee-time alerts</p>
+          <p className="eyebrow">Free public golf tee time alerts</p>
           <h1>
-            Tee Time Spot finds the opening. <br className="mobile-hero-break" />You book direct.
+            Golf tee time alerts for the courses you want to play.
           </h1>
           <p className="hero-copy">
-            Choose up to five public golf courses and a time window. When a matching tee time
-            opens, we email the official booking link. You review the details and book directly
-            with the course.
+            Choose up to five public golf courses and a time window. When a cancellation or new
+            tee time matches, Tee Time Spot emails the official booking link. You review the
+            details and book directly with the course.
           </p>
           <div className="hero-actions">
             <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
@@ -295,13 +295,13 @@ export default function HomePage() {
               <ArrowRight aria-hidden="true" size={18} />
             </Link>
             <Link href="/locations/connecticut">
-              <strong>Connecticut tee-time alerts</strong>
+              <strong>Connecticut golf tee time alerts</strong>
               <span>Browse public courses where Tee Time Spot can check for matching openings.</span>
               <ArrowRight aria-hidden="true" size={18} />
             </Link>
             <Link href="/guides">
               <strong>Public golf guides</strong>
-              <span>Understand booking windows, cancellation alerts, and booking tools.</span>
+              <span>Learn about booking windows, cancellation alerts, and last-minute tee times.</span>
               <ArrowRight aria-hidden="true" size={18} />
             </Link>
           </div>

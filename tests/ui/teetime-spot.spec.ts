@@ -86,7 +86,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(navDiscordLink).toBeVisible();
     }
     await expect(
-      page.getByRole("heading", { name: "Tee Time Spot finds the opening. You book direct." })
+      page.getByRole("heading", { name: "Golf tee time alerts for the courses you want to play." })
     ).toBeVisible();
     const heroCards = page.locator(".hero-strip-item");
     await expect(heroCards).toHaveCount(3);
@@ -118,7 +118,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       )
     ).toBeVisible();
     await expect(
-      page.getByRole("link", { name: /Connecticut tee-time alerts/ })
+      page.getByRole("link", { name: /Connecticut golf tee time alerts/ })
     ).toHaveAttribute("href", "/locations/connecticut");
     if (testInfo.project.name.includes("mobile")) {
       const [topbarBox, heroHeadingBox] = await Promise.all([
@@ -238,13 +238,13 @@ test.describe("Tee Time Spot UI smoke", () => {
   }, testInfo) => {
     const issues = collectPageIssues(page);
     const publicPages = [
-      ["/how-it-works", "A tee-time alert, not another booking marketplace."],
+      ["/how-it-works", "How golf tee time alerts work."],
       ["/about", "Public golf openings should not require constant refreshing."],
       ["/methodology", "How Tee Time Spot decides where alerts are available."],
-      ["/guides", "Book smarter. Refresh less."],
-      ["/guides/tee-time-cancellation-alerts", "How public golf tee times come back—and how alerts help."],
-      ["/guides/public-golf-booking-windows", "The release clock matters before the cancellation watch begins."],
-      ["/guides/tee-time-alerts-vs-auto-booking", "Notification and reservation are fundamentally different jobs."],
+      ["/guides", "Golf tee time alerts and booking guides."],
+      ["/guides/tee-time-cancellation-alerts", "How golf tee time cancellation alerts work."],
+      ["/guides/public-golf-booking-windows", "When do golf courses release tee times?"],
+      ["/guides/tee-time-alerts-vs-auto-booking", "Tee time alerts vs. auto-booking."],
       ["/contact", "Questions, corrections, and course tips are welcome."],
       ["/privacy", "A plain-language privacy notice for Tee Time Spot."],
       ["/terms", "Terms for an alert service—not a booking transaction."]
@@ -308,7 +308,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page).toHaveURL(/\/search$/);
     expect(new URL(page.url()).search).toBe("");
     await expect(
-      page.getByRole("heading", { name: "Tell us where and when you want to play." })
+      page.getByRole("heading", { name: "Find public golf tee times and set a free alert." })
     ).toBeVisible();
   });
 
@@ -876,7 +876,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
 
     await expect(
-      page.getByRole("heading", { name: /Tell us where and when you want to play/i })
+      page.getByRole("heading", { name: /Find public golf tee times and set a free alert/i })
     ).toBeVisible();
     const timeWindowGroup = page.getByRole("group", {
       name: "Time window",
