@@ -444,12 +444,12 @@ describe("local Chrome reader contract", () => {
       bookingUrl: getLocalReaderJobUrl("frear-park", "2026-07-30", 2)
     };
     const pageUrl =
-      "https://secure.east.prophetservices.com/FrearParkV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18";
+      "https://secure.east.prophetservices.com/FrearParkV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1,2&Date=2026-7-30&Time=AnyTime&Player=2&Hole=18";
 
     expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("frear-park");
     expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      readerVersion: "legacy-prophet-rendered-v2",
+      readerVersion: "legacy-prophet-rendered-v3",
       pageUrl: job.bookingUrl,
       slots: [
         {
@@ -483,12 +483,12 @@ describe("local Chrome reader contract", () => {
       bookingUrl: getLocalReaderJobUrl("simsbury-farms", "2026-07-30", 2)
     };
     const pageUrl =
-      "https://secure.east.prophetservices.com/SimsburyFarmsV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18";
+      "https://secure.east.prophetservices.com/SimsburyFarmsV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1&Date=2026-7-30&Time=AnyTime&Player=2&Hole=18";
 
     expect(getLocalReaderCourseKey(baseJob.bookingUrl)).toBe("simsbury-farms");
     expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      readerVersion: "legacy-prophet-rendered-v2",
+      readerVersion: "legacy-prophet-rendered-v3",
       pageUrl: job.bookingUrl,
       slots: [
         {

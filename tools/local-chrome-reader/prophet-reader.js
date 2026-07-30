@@ -1,7 +1,7 @@
 (function initializeProphetReader(root) {
   "use strict";
 
-  const READER_VERSION = "legacy-prophet-rendered-v2";
+  const READER_VERSION = "legacy-prophet-rendered-v3";
   const HOSTNAME = "secure.east.prophetservices.com";
   const COURSE_CONFIGS = Object.freeze({
     "frear-park": {
@@ -31,6 +31,23 @@
       .trim();
   }
 
+  function normalizeQueryDate(value) {
+    const match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/u.exec(value || "");
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return `${match[1]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
   function isExpectedQuery(url, job, config) {
     const allowedKeys = new Set(["CourseId", "Date", "Time", "Player", "Hole"]);
     return (
@@ -38,7 +55,7 @@
       Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
       Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
       url.searchParams.get("CourseId") === config.courseIds &&
-      url.searchParams.get("Date") === job.targetDate &&
+      normalizeQueryDate(url.searchParams.get("Date")) === job.targetDate &&
       url.searchParams.get("Time") === "AnyTime" &&
       url.searchParams.get("Player") === String(job.players) &&
       url.searchParams.get("Hole") === "18" &&

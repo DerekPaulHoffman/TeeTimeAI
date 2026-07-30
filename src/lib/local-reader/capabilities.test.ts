@@ -36,14 +36,14 @@ describe("local reader capabilities", () => {
     });
   });
 
-  it("requires the expanded Prophet parser for Simsbury Farms", () => {
+  it("requires the corrected Prophet redirect parser for both supported courses", () => {
     expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
       key: "PROPHET_FREAR_RENDERED",
-      parserVersion: 1
+      parserVersion: 3
     });
     expect(getRequiredLocalReaderCapability("simsbury-farms")).toEqual({
       key: "PROPHET_FREAR_RENDERED",
-      parserVersion: 2
+      parserVersion: 3
     });
   });
 });

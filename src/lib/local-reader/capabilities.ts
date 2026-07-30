@@ -50,7 +50,7 @@ export function getRequiredLocalReaderCapability(
     case "PROPHET":
       return {
         key: "PROPHET_FREAR_RENDERED",
-        parserVersion: courseKey === "simsbury-farms" ? 2 : 1
+        parserVersion: 3
       };
   }
 }
