@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-07-30 - Publish Hemlock Ridge Course Guide
+
+- Current primary source: [Hemlock Ridge Golf Course](https://hemlockridgegolfcourse.com/), accessed 2026-07-30 America/New_York. The official page supports a nine-hole course built in 1970, hilly fairways bordered by mature oak, elm, and hemlock trees, water on two holes, carts, daily-fee play, memberships, and phone-reserved weekend tee times. Its par and yardage table does not clearly separate the physical nine-hole layout from an 18-hole playing total, so no structured par was recorded.
+- Evidence and decision: publish Hemlock Ridge as a semi-private nine-hole facility in Fiskdale/Sturbridge with conservative access guidance. Keep its existing contact-only booking disposition, provider state, scheduler behavior, and alert delivery unchanged.
+- SEO practice check: current Google Search Central [title-link guidance](https://developers.google.com/search/docs/appearance/title-link), [snippet guidance](https://developers.google.com/search/docs/appearance/snippet), [canonical guidance](https://developers.google.com/search/docs/crawling-indexing/consolidate-duplicate-urls), and [structured-data policies](https://developers.google.com/search/docs/appearance/structured-data/sd-policies) support descriptive page-specific metadata, useful visible content, self-canonicals, canonical sitemap inclusion, and markup that matches the page. Search Console query and impression evidence remains unavailable because no authorized source is connected.
+- Measured result: the protected draft passed validation and production apply, read back `PUBLISHED`, and recorded only the source-backed nine-hole physical layout. The canonical guide changed from `404` to an indexable public route, and the canonical sitemap baseline was 73 URLs before publication.
+
 ## 2026-07-29 - Publish Rockledge, Franconia, and Grassmere Course Guides
 
 - Current primary sources: the Town of West Hartford's [Rockledge Golf Club page](https://www.westhartfordct.gov/town-departments/leisure-services/rockledge-golf-club), the [Springfield Municipal Golf site](https://vets-franconia-golf.com/), and Grassmere Country Club's [2026 membership program](https://www.grassmerecountryclub.com/Membership%202026.pdf), accessed 2026-07-29 America/New_York.
