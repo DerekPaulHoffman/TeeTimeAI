@@ -294,6 +294,7 @@ async function checkSearch(
     ownerAlerted: boolean;
   }> = [];
   let newlyAlertedMatches = 0;
+  const runtimeVersion = getAutomationRuntimeVersion();
   const requestedLayoutHoles =
     search.requestedLayoutHoles === 9 || search.requestedLayoutHoles === 18
       ? search.requestedLayoutHoles
@@ -793,6 +794,7 @@ async function checkSearch(
           searchId: search.id,
           courseId: course.id,
           automationRunId,
+          runtimeVersion,
           outcome,
           message:
             currentMatches.length > 0
@@ -814,7 +816,7 @@ async function checkSearch(
               currentMatches.length > 0
                 ? "Fresh public monitoring found matching availability."
                 : "Fresh public monitoring completed with no matching availability.",
-            runtimeVersion: getAutomationRuntimeVersion()
+            runtimeVersion
           });
           await resolveCourseSupportIncident({
             courseId: course.id,

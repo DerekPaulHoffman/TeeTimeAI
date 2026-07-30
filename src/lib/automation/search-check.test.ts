@@ -1960,6 +1960,7 @@ describe("runSearchCheck email cadence", () => {
     });
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
+        runtimeVersion: "local",
         rawSummary: expect.objectContaining({
           providerExecution: "LOCAL_BROWSER_READER"
         })
@@ -2032,6 +2033,7 @@ describe("runSearchCheck email cadence", () => {
     });
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
+        runtimeVersion: "local",
         rawSummary: expect.objectContaining({
           providerExecution: "LOCAL_BROWSER_READER"
         })
