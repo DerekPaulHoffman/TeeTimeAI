@@ -548,7 +548,10 @@ export function shouldSleepTechnicalFinalSearch(
     courses.every((course) => {
       const state = course.monitoringStatus?.state;
       return (
-        (state === "FINAL_TECHNICAL" || state === "FINAL_MANUAL" || state === "FINAL_IDENTITY") &&
+        (state === "ENGINEERING_VERIFICATION_NEEDED" ||
+          state === "FINAL_TECHNICAL" ||
+          state === "FINAL_MANUAL" ||
+          state === "FINAL_IDENTITY") &&
         !course.monitoringStatus?.revalidationRequestedAt
       );
     })
@@ -862,7 +865,8 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     }
 
     if (
-      status.state === "AUTO_INVESTIGATING" &&
+      (status.state === "AUTO_INVESTIGATING" ||
+        status.state === "ENGINEERING_VERIFICATION_NEEDED") &&
       incident?.status === "AUTO_INVESTIGATING" &&
       incident.escalationDeadlineAt &&
       incident.escalationDeadlineAt <= now
@@ -894,7 +898,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
             where: {
               courseId: status.courseId,
               revision: status.revision,
-              state: "AUTO_INVESTIGATING"
+              state: status.state
             },
             data: {
               state: "ENGINEERING_VERIFICATION_NEEDED",
@@ -912,7 +916,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
             incidentId: incident.id,
             eventType: "HUMAN_REVIEW_REQUESTED",
             source: "RECOVERY_CRON",
-            fromState: "AUTO_INVESTIGATING",
+            fromState: status.state,
             toState: "ENGINEERING_VERIFICATION_NEEDED",
             failureFingerprint: incident.failureFingerprint,
             message:

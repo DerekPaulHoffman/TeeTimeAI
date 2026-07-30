@@ -3950,6 +3950,9 @@ export async function recoverCourseSupportBatch(input: {
             updatedAt: true,
             incident: {
               select: {
+                status: true,
+                resolution: true,
+                decisionAt: true,
                 updatedAt: true
               }
             }
@@ -3966,10 +3969,173 @@ export async function recoverCourseSupportBatch(input: {
         archiveReason: "Responder recovery needs owner attention."
       };
     }
+    const terminalIncidents = batch.incidents.filter((entry) =>
+      ["NEEDS_HUMAN", "RESOLVED"].includes(entry.incident.status)
+    );
+    if (terminalIncidents.length === batch.incidents.length && batch.incidents.length > 0) {
+      const hasHuman = terminalIncidents.some(
+        (entry) => entry.incident.status === "NEEDS_HUMAN"
+      );
+      const restoredCount = terminalIncidents.filter(
+        (entry) =>
+          entry.incident.status === "RESOLVED" &&
+          entry.incident.resolution === "MONITORING_RESTORED"
+      ).length;
+      const finalCount = terminalIncidents.filter(
+        (entry) =>
+          entry.incident.status === "RESOLVED" &&
+          entry.incident.resolution !== "MONITORING_RESTORED"
+      ).length;
+      const derivedOutcome = hasHuman
+        ? ("needs_human" as const)
+        : restoredCount === terminalIncidents.length
+          ? ("success" as const)
+          : finalCount === terminalIncidents.length
+            ? ("classification_only" as const)
+            : ("partial" as const);
+      const batchStatus: CourseSupportBatchStatus = hasHuman ? "PARTIAL" : "SUCCEEDED";
+      const message =
+        "Expired responder ownership was superseded by a later durable course decision.";
+      const summary = asJsonObject(batch.summary);
+      await prisma.$transaction(
+        async (tx) => {
+          const currentIncidents = await tx.courseSupportIncident.findMany({
+            where: {
+              id: { in: terminalIncidents.map((entry) => entry.incidentId) },
+              status: { in: ["NEEDS_HUMAN", "RESOLVED"] }
+            },
+            select: {
+              id: true,
+              status: true,
+              resolution: true,
+              decisionAt: true,
+              updatedAt: true
+            }
+          });
+          const currentById = new Map(currentIncidents.map((incident) => [incident.id, incident]));
+          const terminalEvidenceStillMatches = terminalIncidents.every((entry) => {
+            const current = currentById.get(entry.incidentId);
+            return (
+              current &&
+              current.status === entry.incident.status &&
+              current.resolution === entry.incident.resolution &&
+              current.decisionAt?.getTime() === entry.incident.decisionAt?.getTime() &&
+              current.updatedAt.getTime() === entry.incident.updatedAt.getTime()
+            );
+          });
+          if (!terminalEvidenceStillMatches) {
+            throw new Error("The superseding course decision changed during responder recovery.");
+          }
+
+          const batchUpdated = await tx.courseSupportBatch.updateMany({
+            where: {
+              id: batch.id,
+              status: batch.status,
+              revision: batch.revision,
+              leaseExpiresAt: { lte: now },
+              completedAt: null
+            },
+            data: {
+              status: batchStatus,
+              completedAt: now,
+              heartbeatAt: now,
+              leaseExpiresAt: now,
+              summary: {
+                ...summary,
+                closeout: {
+                  outcome: derivedOutcome,
+                  derivedOutcome,
+                  terminalCount: restoredCount + finalCount,
+                  retryCount: 0,
+                  needsHumanCount: terminalIncidents.length - restoredCount - finalCount,
+                  reason: "superseded_by_durable_course_decision"
+                }
+              } as Prisma.InputJsonValue,
+              revision: { increment: 1 }
+            }
+          });
+          if (batchUpdated.count !== 1) {
+            throw new Error("Expired responder ownership changed during terminal reconciliation.");
+          }
+
+          for (const entry of terminalIncidents) {
+            const result =
+              entry.incident.status === "NEEDS_HUMAN"
+                ? ("NEEDS_HUMAN" as const)
+                : entry.incident.resolution === "MONITORING_RESTORED"
+                  ? ("RESTORED" as const)
+                  : ("FINAL_DISPOSITION" as const);
+            const entryUpdated = await tx.courseSupportBatchIncident.updateMany({
+              where: {
+                id: entry.id,
+                result: entry.result,
+                updatedAt: entry.updatedAt
+              },
+              data: { result, message }
+            });
+            if (entryUpdated.count !== 1) {
+              throw new Error("Expired responder evidence changed during terminal reconciliation.");
+            }
+          }
+
+          await tx.courseSupportVerificationRequest.updateMany({
+            where: {
+              batchIncident: { batchId: batch.id },
+              status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
+            },
+            data: {
+              status: "STALE",
+              revision: { increment: 1 },
+              leaseToken: null,
+              leaseExpiresAt: null,
+              nextAttemptAt: null,
+              completedAt: now,
+              lastError: "batch_superseded",
+              updatedAt: now
+            }
+          });
+
+          if (batch.ownerAutomationRunId) {
+            await tx.automationRun.updateMany({
+              where: { id: batch.ownerAutomationRunId, completedAt: null },
+              data: {
+                completedAt: now,
+                outcome: derivedOutcome,
+                notes: JSON.stringify({
+                  schemaVersion: 1,
+                  lifecycle: "closeout",
+                  status: batchStatus,
+                  outcome: derivedOutcome,
+                  derivedOutcome,
+                  terminalCount: restoredCount + finalCount,
+                  retryCount: 0,
+                  needsHumanCount: terminalIncidents.length - restoredCount - finalCount,
+                  reason: "superseded_by_durable_course_decision"
+                })
+              }
+            });
+          }
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      );
+      return {
+        outcome: derivedOutcome,
+        recovered: false,
+        superseded: true,
+        durableCloseoutRecorded: true,
+        reasons: [message],
+        ...getResponderThreadPolicy({
+          outcome: derivedOutcome,
+          durableCloseoutRecorded: true,
+          now
+        })
+      };
+    }
     const otherBatch = await prisma.courseSupportBatch.findFirst({
       where: {
         id: { not: batch.id },
-        status: { in: ACTIVE_BATCH_STATUSES }
+        status: { in: ACTIVE_BATCH_STATUSES },
+        leaseExpiresAt: { gt: now }
       },
       select: { id: true }
     });

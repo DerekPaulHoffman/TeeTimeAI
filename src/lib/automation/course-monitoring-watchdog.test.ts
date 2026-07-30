@@ -180,6 +180,58 @@ describe("course monitoring watchdog", () => {
     );
   });
 
+  it("escalates an expired incident when the course status already advanced to review", async () => {
+    const mismatchedIncident = incident({
+      confirmedAt: new Date("2026-07-27T15:00:00.000Z"),
+      escalationDeadlineAt: new Date("2026-07-27T15:30:00.000Z")
+    });
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        firstDegradedAt: new Date("2026-07-27T15:00:00.000Z"),
+        failureFingerprint: "SOURCE_MISSING:UNKNOWN",
+        nextAutomaticAttemptAt: null,
+        revision: 7,
+        course: course(mismatchedIncident)
+      }
+    ]);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      checked: 1,
+      scheduled: 0,
+      escalated: 1
+    });
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          nextAttemptAt: null
+        })
+      })
+    );
+    expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          state: "ENGINEERING_VERIFICATION_NEEDED"
+        }),
+        data: expect.objectContaining({
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          nextAutomaticAttemptAt: null
+        })
+      })
+    );
+    expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          fromState: "ENGINEERING_VERIFICATION_NEEDED",
+          toState: "ENGINEERING_VERIFICATION_NEEDED"
+        })
+      })
+    );
+  });
+
   it("keeps a due review visible without sending an operator reminder", async () => {
     const humanIncident = incident({
       status: "NEEDS_HUMAN",

@@ -2375,6 +2375,64 @@ describe("runSearchCheck email cadence", () => {
     expect(result.newlyAlertedMatches).toBe(0);
   });
 
+  it("does not re-run a provider while the course is waiting for human review", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            detectedBookingUrl:
+              "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+            automationEligibility: "NEEDS_REVIEW",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            monitoringStatus: {
+              state: "ENGINEERING_VERIFICATION_NEEDED",
+              nextAutomaticAttemptAt: null,
+              revalidationRequestedAt: null
+            },
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith({
+      searchId: "search-1",
+      alertGeneration: 0,
+      checkLeaseToken: "check-lease",
+      courseId: "course-1",
+      date: "2026-07-12",
+      timeZone: "America/New_York",
+      confirmedMatches: []
+    });
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "NEEDS_ADAPTER",
+        rawSummary: {
+          monitoringDisposition: "HUMAN_REVIEW_PENDING"
+        }
+      })
+    );
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "NEEDS_ADAPTER",
+      supportStatus: "IN_OPERATOR_QUEUE"
+    });
+  });
+
   it("reconciles historical matches gone when a course is identity final", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,

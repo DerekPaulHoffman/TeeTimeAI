@@ -308,6 +308,48 @@ async function checkSearch(
       await maintainSearchCheckLease(lease);
       const course = preference.course as AutomationCourse;
       const customerBookingUrl = getCustomerBookingUrl(course);
+      const waitingForHumanReview =
+        course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED" &&
+        !course.monitoringStatus.revalidationRequestedAt;
+      if (waitingForHumanReview) {
+        const message =
+          "Tee Time Spot finished its automatic checks for this course and is waiting for a monitoring review. Other selected courses will continue to be checked.";
+        await markMissingMatchesUnavailable({
+          searchId: search.id,
+          alertGeneration: search.alertGeneration,
+          checkLeaseToken: lease.token,
+          courseId: course.id,
+          date: searchWindow.date,
+          timeZone: course.timeZone,
+          confirmedMatches: []
+        });
+        await recordCourseProbeIfChanged({
+          searchId: search.id,
+          courseId: course.id,
+          automationRunId,
+          runtimeVersion,
+          outcome: "NEEDS_ADAPTER",
+          message,
+          rawSummary: {
+            monitoringDisposition: "HUMAN_REVIEW_PENDING"
+          }
+        });
+        courseResults.push({
+          courseId: course.id,
+          courseName: course.name,
+          timeZone: course.timeZone,
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          message,
+          bookingUrl: customerBookingUrl,
+          phone: course.bookingPhone ?? course.phone ?? undefined,
+          bookingMethod: course.bookingMethod,
+          bookingAccessMode: course.bookingAccessMode,
+          bookingAccess: getCourseBookingAccess(course),
+          supportStatus: "IN_OPERATOR_QUEUE"
+        });
+        return;
+      }
       const localReaderAllowed =
         course.monitoringMode !== "SERVER_ONLY" && course.monitoringMode !== "CONTACT_ONLY";
       const localReaderEligible =

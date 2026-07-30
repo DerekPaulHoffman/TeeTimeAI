@@ -137,6 +137,16 @@ describe("course monitoring lifecycle", () => {
       shouldSleepTechnicalFinalSearch([
         {
           monitoringStatus: {
+            state: "ENGINEERING_VERIFICATION_NEEDED",
+            revalidationRequestedAt: null
+          }
+        }
+      ])
+    ).toBe(true);
+    expect(
+      shouldSleepTechnicalFinalSearch([
+        {
+          monitoringStatus: {
             state: "REVALIDATING_FINAL",
             revalidationRequestedAt: new Date()
           }
