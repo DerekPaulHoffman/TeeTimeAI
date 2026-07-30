@@ -345,6 +345,7 @@ describe("operator course monitoring mutations", () => {
           statusRevision: 4,
           incidentCycle: 2,
           incidentRevision: 7,
+          providerFamilyKey: "FOREUP",
           website: "https://new-course.example",
           bookingUrl: "https://new-course.example/tee-times",
           idempotencyKey: "operator-links-123456789"
@@ -362,6 +363,7 @@ describe("operator course monitoring mutations", () => {
       data: expect.objectContaining({
         website: "https://new-course.example/",
         detectedBookingUrl: "https://new-course.example/tee-times",
+        providerFamilyKey: "FOREUP",
         automationEligibility: "NEEDS_REVIEW"
       })
     });
@@ -380,6 +382,47 @@ describe("operator course monitoring mutations", () => {
       data: expect.objectContaining({
         eventType: "REVALIDATION_REQUESTED",
         evidenceUrl: "https://new-course.example/tee-times"
+      })
+    });
+  });
+
+  it("keeps a manually selected provider and queues verification when only it changes", async () => {
+    await expect(
+      updateOperatorCourseOfficialLinks(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          providerFamilyKey: "CPS",
+          website: "https://course.example",
+          bookingUrl: "https://course.example/book",
+          idempotencyKey: "operator-provider-123456"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "update_official_links",
+      providerFamilyKey: "CPS",
+      applied: true
+    });
+
+    expect(transactionMocks.course.update).toHaveBeenCalledWith({
+      where: { id: "course-1" },
+      data: expect.objectContaining({
+        providerFamilyKey: "CPS",
+        detectedPlatform: "CUSTOM",
+        automationEligibility: "NEEDS_REVIEW"
+      })
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 4
+      },
+      data: expect.objectContaining({
+        state: "AUTO_INVESTIGATING",
+        revalidationRequestedAt: expect.any(Date)
       })
     });
   });

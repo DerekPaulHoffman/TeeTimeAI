@@ -3043,6 +3043,13 @@ button {
   gap: 6px;
 }
 
+.operator-official-links label small {
+  color: #748079;
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .operator-action-card input,
 .operator-action-card select,
 .operator-action-card textarea,
@@ -3087,6 +3094,26 @@ button {
   line-height: 1.5;
   margin: 0;
   padding: 10px 12px;
+}
+
+.operator-provider-handling {
+  background: #f3f7f4;
+  border-left: 3px solid var(--fairway);
+  color: #435249;
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+}
+
+.operator-provider-handling strong {
+  font-size: 0.74rem;
+}
+
+.operator-provider-handling p {
+  color: #5b6961;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  margin: 0;
 }
 
 .operator-timeline {

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Link2, ShieldCheck } from "lucide-react";
 
 import type { OperatorCourseDecision } from "@/lib/operator/course-monitoring";
+import type { ProviderHandling } from "@/lib/operator/provider-handling";
 
 import {
   setCourseOutcomeAction,
@@ -29,8 +30,11 @@ type OfficialLinksFormProps = MutationIdentity & {
   website: string | null;
   bookingUrl: string | null;
   provider: string;
+  providerLabel: string;
+  providerOptions: string[];
   platform: string;
   monitoringPath: string;
+  providerHandling: ProviderHandling;
 };
 
 export function OfficialLinksForm({
@@ -42,14 +46,19 @@ export function OfficialLinksForm({
   website,
   bookingUrl,
   provider,
+  providerLabel,
+  providerOptions,
   platform,
-  monitoringPath
+  monitoringPath,
+  providerHandling
 }: OfficialLinksFormProps) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState(updateOfficialLinksAction, initialState);
   const [websiteValue, setWebsiteValue] = useState(website ?? "");
   const [bookingUrlValue, setBookingUrlValue] = useState(bookingUrl ?? "");
+  const [providerValue, setProviderValue] = useState(provider);
   const changed =
+    providerValue.trim() !== provider ||
     websiteValue.trim() !== (website ?? "") ||
     bookingUrlValue.trim() !== (bookingUrl ?? "");
 
@@ -65,15 +74,18 @@ export function OfficialLinksForm({
         <div>
           <h2>
             <Link2 size={18} />
-            Official links
+            Provider and official links
           </h2>
-          <p>Change either URL, then save once. Verification and a fresh check start automatically.</p>
+          <p>
+            Change the provider or either URL, then save once. Verification and a fresh check start
+            automatically.
+          </p>
         </div>
         <span className="operator-link-status">Editable</span>
       </div>
 
       <div className="operator-link-context" aria-label="Current monitoring route">
-        <span>{provider}</span>
+        <span>{providerLabel}</span>
         <span>{platform}</span>
         <span>{monitoringPath}</span>
       </div>
@@ -85,6 +97,24 @@ export function OfficialLinksForm({
         reference={reference}
         statusRevision={statusRevision}
       />
+      <label>
+        Tee-time provider
+        <input
+          aria-label="Tee-time provider"
+          autoComplete="off"
+          list="operator-provider-families"
+          name="providerFamilyKey"
+          onChange={(event) => setProviderValue(event.target.value)}
+          placeholder="FOREUP or booking.example.com"
+          value={providerValue}
+        />
+        <small>Use a known provider name or the provider&apos;s booking hostname.</small>
+      </label>
+      <datalist id="operator-provider-families">
+        {providerOptions.map((family) => (
+          <option key={family} value={family} />
+        ))}
+      </datalist>
       <label>
         Official course site
         <input
@@ -107,9 +137,13 @@ export function OfficialLinksForm({
           value={bookingUrlValue}
         />
       </label>
+      <div className="operator-provider-handling" aria-label="Current provider handling">
+        <strong>{providerHandling.title}</strong>
+        <p>{providerHandling.description}</p>
+      </div>
       <FormMessage state={state} />
       <button disabled={pending || !changed} type="submit">
-        {pending ? "Saving and queueing…" : "Save links and recheck"}
+        {pending ? "Saving and queueing…" : "Save provider and links"}
       </button>
     </form>
   );

@@ -15,8 +15,10 @@ import {
 } from "lucide-react";
 
 import { hasClerkConfig } from "@/lib/env";
+import { KNOWN_PROVIDER_FAMILIES } from "@/lib/automation/provider-capabilities";
 import { getCurrentOperator } from "@/lib/operator/auth";
 import { loadOperatorCourseMonitoringDetail } from "@/lib/operator/course-monitoring";
+import { getProviderHandling } from "@/lib/operator/provider-handling";
 
 import { CourseOutcomeForm, OfficialLinksForm } from "./operator-course-controls";
 import { OperatorRecheckForm } from "./operator-recheck-form";
@@ -138,7 +140,15 @@ export default async function OperatorCoursePage({
           incidentRevision={detail.incident?.revision ?? null}
           monitoringPath={formatEnum(detail.course.monitoringMode)}
           platform={formatEnum(detail.course.detectedPlatform)}
-          provider={formatEnum(detail.course.providerFamilyKey)}
+          provider={detail.course.providerFamilyKey}
+          providerHandling={getProviderHandling({
+            providerFamilyKey: detail.course.providerFamilyKey,
+            monitoringMode: detail.course.monitoringMode,
+            automationEligibility: detail.course.automationEligibility,
+            bookingMethod: detail.course.bookingMethod
+          })}
+          providerLabel={formatEnum(detail.course.providerFamilyKey)}
+          providerOptions={[...KNOWN_PROVIDER_FAMILIES]}
           reference={detail.reference}
           statusRevision={detail.revision}
           website={detail.course.website}

@@ -4,7 +4,8 @@ const mocks = vi.hoisted(() => ({
   assertSameOriginOperatorMutation: vi.fn(),
   getCurrentOperator: vi.fn(),
   revalidatePath: vi.fn(),
-  requestOperatorCourseRecheck: vi.fn()
+  requestOperatorCourseRecheck: vi.fn(),
+  updateOperatorCourseOfficialLinks: vi.fn()
 }));
 
 vi.mock("next/headers", () => ({
@@ -27,10 +28,11 @@ vi.mock("@/lib/operator/course-monitoring", () => ({
   correctOperatorCourseBookingLink: vi.fn(),
   humanReviewReasonSchema: { parse: vi.fn((value: string) => value) },
   reopenOperatorCourseTechnicalFinal: vi.fn(),
-  requestOperatorCourseRecheck: mocks.requestOperatorCourseRecheck
+  requestOperatorCourseRecheck: mocks.requestOperatorCourseRecheck,
+  updateOperatorCourseOfficialLinks: mocks.updateOperatorCourseOfficialLinks
 }));
 
-import { requestRecheckAction } from "./actions";
+import { requestRecheckAction, updateOfficialLinksAction } from "./actions";
 
 const idleState = {
   status: "idle" as const,
@@ -45,6 +47,19 @@ function recheckFormData() {
   formData.set("incidentRevision", "7");
   formData.set("note", "Verify the current signed-out booking surface.");
   formData.set("idempotencyKey", "operator-recheck-123456");
+  return formData;
+}
+
+function officialLinksFormData() {
+  const formData = new FormData();
+  formData.set("reference", "cm_123456789012345678901234");
+  formData.set("statusRevision", "4");
+  formData.set("incidentCycle", "2");
+  formData.set("incidentRevision", "7");
+  formData.set("providerFamilyKey", "FOREUP");
+  formData.set("website", "https://course.example");
+  formData.set("bookingUrl", "https://course.example/book");
+  formData.set("idempotencyKey", "operator-links-123456");
   return formData;
 }
 
@@ -85,5 +100,40 @@ describe("requestRecheckAction", () => {
         "Course monitoring changed while this form was open. Refresh and review the newest evidence."
     });
     expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+});
+
+describe("updateOfficialLinksAction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getCurrentOperator.mockResolvedValue({
+      clerkUserId: "operator-user"
+    });
+  });
+
+  it("saves the provider with the links and queues verification", async () => {
+    mocks.updateOperatorCourseOfficialLinks.mockResolvedValue({
+      action: "update_official_links",
+      applied: true
+    });
+
+    await expect(
+      updateOfficialLinksAction(idleState, officialLinksFormData())
+    ).resolves.toEqual({
+      status: "success",
+      message:
+        "Provider and official links saved. Verification and a fresh monitoring check are queued."
+    });
+    expect(mocks.updateOperatorCourseOfficialLinks).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerFamilyKey: "FOREUP",
+        website: "https://course.example",
+        bookingUrl: "https://course.example/book"
+      }),
+      expect.objectContaining({
+        apply: true,
+        dispatchSearches: true
+      })
+    );
   });
 });

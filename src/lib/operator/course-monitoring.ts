@@ -8,6 +8,7 @@ import {
 } from "@/lib/automation/course-monitoring";
 import {
   buildProviderFailureFingerprint,
+  normalizeProviderFamilyKey,
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
@@ -320,6 +321,7 @@ export async function updateOperatorCourseOfficialLinks(
     statusRevision: number;
     incidentCycle: number | null;
     incidentRevision: number | null;
+    providerFamilyKey: string;
     website: string | null;
     bookingUrl: string | null;
     idempotencyKey: string;
@@ -332,6 +334,7 @@ export async function updateOperatorCourseOfficialLinks(
       statusRevision: revisionSchema,
       incidentCycle: cycleSchema,
       incidentRevision: revisionSchema.nullable(),
+      providerFamilyKey: z.string().trim().min(1).max(253),
       website: z.string().trim().max(1000).nullable(),
       bookingUrl: z.string().trim().max(1000).nullable(),
       idempotencyKey: idempotencyKeySchema
@@ -339,6 +342,13 @@ export async function updateOperatorCourseOfficialLinks(
     .parse(rawInput);
   const website = optionalSafeHttpsUrl(input.website, "official course site");
   const bookingUrl = optionalSafeHttpsUrl(input.bookingUrl, "official booking page");
+  const providerFamilyKey = normalizeProviderFamilyKey(input.providerFamilyKey);
+  if (
+    providerFamilyKey === "SOURCE_MISSING" &&
+    input.providerFamilyKey.toUpperCase() !== "SOURCE_MISSING"
+  ) {
+    throw new Error("Enter a known provider name or a valid booking hostname.");
+  }
   if (!website && !bookingUrl) {
     throw new Error("Enter an official course site or booking page.");
   }
@@ -351,14 +361,19 @@ export async function updateOperatorCourseOfficialLinks(
   );
   if (
     website === current.status.course.website &&
-    bookingUrl === current.status.course.detectedBookingUrl
+    bookingUrl === current.status.course.detectedBookingUrl &&
+    providerFamilyKey === current.status.course.providerFamilyKey
   ) {
-    throw new Error("Change at least one official link before saving.");
+    throw new Error("Change the provider or at least one official link before saving.");
   }
-  const provider = resolveProviderCapability({
-    website,
-    detectedBookingUrl: bookingUrl
-  });
+  const provider = resolveProviderCapability(
+    providerFamilyKey === "SOURCE_MISSING"
+      ? {
+          website,
+          detectedBookingUrl: bookingUrl
+        }
+      : { providerFamilyKey }
+  );
   const evidenceUrl = bookingUrl ?? website!;
   const preview = {
     action: "update_official_links" as const,
@@ -371,7 +386,8 @@ export async function updateOperatorCourseOfficialLinks(
   }
 
   const now = new Date();
-  const message = "Official links changed. Link verification and a fresh monitoring check were queued.";
+  const message =
+    "Provider or official links changed. Provider verification and a fresh monitoring check were queued.";
   await prisma.$transaction(
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);

@@ -63,6 +63,7 @@ export async function updateOfficialLinksAction(
         statusRevision: readInteger(formData, "statusRevision"),
         incidentCycle: readOptionalInteger(formData, "incidentCycle"),
         incidentRevision: readOptionalRevision(formData, "incidentRevision"),
+        providerFamilyKey: readField(formData, "providerFamilyKey"),
         website: readOptionalField(formData, "website"),
         bookingUrl: readOptionalField(formData, "bookingUrl"),
         idempotencyKey: readField(formData, "idempotencyKey")
@@ -77,7 +78,8 @@ export async function updateOfficialLinksAction(
     revalidateOperatorCourse(reference);
     return {
       status: "success",
-      message: "Official links saved. Verification and a fresh monitoring check are queued."
+      message:
+        "Provider and official links saved. Verification and a fresh monitoring check are queued."
     };
   } catch (error) {
     console.error("[operator:update-official-links]", {
@@ -304,6 +306,7 @@ function getOperatorActionErrorMessage(error: unknown) {
     (error.message.includes("official course site") ||
       error.message.includes("official booking page") ||
       error.message.includes("official link") ||
+      error.message.includes("provider") ||
       error.message.includes("Change at least one"))
   ) {
     return error.message;

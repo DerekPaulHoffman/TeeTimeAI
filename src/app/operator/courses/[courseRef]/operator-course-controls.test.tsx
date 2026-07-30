@@ -29,13 +29,20 @@ describe("operator course controls", () => {
         bookingUrl="https://course.example/book"
         monitoringPath="Automatic"
         platform="Unknown"
-        provider="Source missing"
+        provider="SOURCE_MISSING"
+        providerHandling={{
+          title: "AI is identifying the provider",
+          description: "The AI checks the official links."
+        }}
+        providerLabel="Source missing"
+        providerOptions={["FOREUP", "CPS"]}
         website="https://course.example"
       />
     );
 
-    const save = screen.getByRole("button", { name: "Save links and recheck" });
+    const save = screen.getByRole("button", { name: "Save provider and links" });
     expect((save as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByLabelText("Tee-time provider")).toBeTruthy();
     expect(screen.getByLabelText("Official course site")).toBeTruthy();
     expect(screen.getByLabelText("Official booking page")).toBeTruthy();
     expect(screen.queryByLabelText("Official evidence")).toBeNull();
@@ -48,6 +55,33 @@ describe("operator course controls", () => {
     expect(
       screen.getByText(/Verification and a fresh check start automatically/)
     ).toBeTruthy();
+    expect(screen.getByText("AI is identifying the provider")).toBeTruthy();
+  });
+
+  it("keeps the provider editable and enables verification when it changes", () => {
+    render(
+      <OfficialLinksForm
+        {...identity}
+        bookingUrl="https://course.example/book"
+        monitoringPath="Automatic"
+        platform="Unknown"
+        provider="SOURCE_MISSING"
+        providerHandling={{
+          title: "AI is identifying the provider",
+          description: "The AI checks the official links."
+        }}
+        providerLabel="Source missing"
+        providerOptions={["FOREUP", "CPS"]}
+        website="https://course.example"
+      />
+    );
+
+    const save = screen.getByRole("button", { name: "Save provider and links" });
+    fireEvent.change(screen.getByLabelText("Tee-time provider"), {
+      target: { value: "FOREUP" }
+    });
+
+    expect((save as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("offers concrete private, local-reader, and manual outcomes without evidence fields", () => {
