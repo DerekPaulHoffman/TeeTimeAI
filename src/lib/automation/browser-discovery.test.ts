@@ -4449,6 +4449,107 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("accepts a colon between the official call instruction and reservation phone", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "colon-phone-reservation-contact",
+      courseName: "Cedar Knob Golf Course",
+      sourceUrl: "https://cedarknobgolfcourse.example/",
+      finalUrl: "https://cedarknobgolfcourse.example/",
+      officialCourseWebsite: "http://www.cedarknobgolfcourse.example/",
+      observedUrls: ["https://cedarknobgolfcourse.example/"],
+      linkCandidates: [],
+      visibleText:
+        "Cedar Knob Golf Course. Call: (860) 555-0142 to book your tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: "https://cedarknobgolfcourse.example/",
+      bookingUrl: "https://cedarknobgolfcourse.example/",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "(860) 555-0142",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.92,
+      evidence: {
+        finalUrl: "https://cedarknobgolfcourse.example/",
+        learnedFrom: "official-phone-reservation-contact"
+      }
+    });
+  });
+
+  it("uses matching same-site official-page identity for a distant call instruction", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "official-page-colon-phone-contact",
+      courseName: "Cedar Knob Golf Course",
+      sourceUrl: "https://cedarknobgolfcourse.example/",
+      finalUrl: "https://cedarknobgolfcourse.example/",
+      observedUrls: ["https://cedarknobgolfcourse.example/"],
+      linkCandidates: [],
+      officialPage: {
+        url: "https://cedarknobgolfcourse.example/",
+        courseName: "Cedar Knob Golf Course",
+        linkCandidates: [],
+        visibleText: `Cedar Knob Golf Course. ${"Course information. ".repeat(80)} Call: (860) 555-0142 to book your tee time.`
+      },
+      visibleText: `Cedar Knob Golf Course. ${"Course information. ".repeat(80)} Call: (860) 555-0142 to book your tee time.`
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "CONTACT_COURSE",
+      bookingPhone: "(860) 555-0142",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-phone-reservation-contact" }
+    });
+  });
+
+  it("rejects a distant call instruction from a mismatched official-page identity", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "mismatched-official-page-phone-contact",
+      courseName: "Cedar Knob Golf Course",
+      sourceUrl: "https://cedarknobgolfcourse.example/",
+      finalUrl: "https://cedarknobgolfcourse.example/",
+      observedUrls: ["https://cedarknobgolfcourse.example/"],
+      linkCandidates: [],
+      officialPage: {
+        url: "https://cedarknobgolfcourse.example/",
+        courseName: "Sibling Hills Golf Course",
+        linkCandidates: [],
+        visibleText: `${"Course information. ".repeat(80)} Call: (860) 555-0142 to book your tee time.`
+      },
+      visibleText: `${"Course information. ".repeat(80)} Call: (860) 555-0142 to book your tee time.`
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
+  it("keeps colon-delimited phone evidence actionable when an online tee-time link exists", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "colon-phone-online-booking",
+      courseName: "Cedar Knob Golf Course",
+      sourceUrl: "https://cedarknobgolfcourse.example/",
+      finalUrl: "https://cedarknobgolfcourse.example/",
+      observedUrls: [
+        "https://cedarknobgolfcourse.example/",
+        "https://booking.example/tee-times"
+      ],
+      linkCandidates: [
+        {
+          url: "https://booking.example/tee-times",
+          label: "Book Tee Times Online"
+        }
+      ],
+      visibleText:
+        "Cedar Knob Golf Course. Call: (860) 555-0142 to book your tee time."
+    });
+
+    expect(discovery.status).toBe("INSPECTED");
+    expect(discovery.bookingMethod).toBeUndefined();
+  });
+
   it("recognizes an official clubhouse number listed after the reservation instruction", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "dutcher-golf-course",
