@@ -163,6 +163,10 @@ describe("local Chrome reader contract", () => {
     expect(contentMatches).toContain("https://fox.tenfore.golf/*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedTenForeJob(job)");
+    expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
+    expect(backgroundSource).toContain("pending.result = result");
+    expect(backgroundSource).toContain('"RESULT_RETRY_PENDING"');
+    expect(backgroundSource).toContain("pending.job?.leaseExpiresAt");
     expect(backgroundSource).toContain(
       "/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u"
     );

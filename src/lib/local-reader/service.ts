@@ -295,6 +295,7 @@ export async function claimNextLocalReaderJob(input: string | LocalReaderAgentHa
     players: candidate.players,
     requestedAt: candidate.createdAt.toISOString(),
     expiresAt: candidate.jobExpiresAt.toISOString(),
+    leaseExpiresAt: leaseExpiresAt.toISOString(),
     courseName: readerCourse.courseName,
     bookingUrl: candidate.bookingUrl,
     cardTextIncludes: [...readerCourse.cardTextIncludes],

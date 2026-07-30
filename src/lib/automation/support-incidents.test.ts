@@ -543,6 +543,87 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
   });
 
+  it("keeps an unchanged contact-only decision resolved", async () => {
+    const finalIncident = incident({
+      status: "RESOLVED",
+      resolution: "DIRECT_BOOKING_CLASSIFIED",
+      providerFamilyKey: "example.com",
+      platformSnapshot: "UNKNOWN",
+      bookingUrlSnapshot: "https://example.com/",
+      resolvedAt: new Date("2026-07-20T12:00:00.000Z")
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(finalIncident);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Contact Course",
+          timeZone: "America/New_York",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://example.com/",
+          providerFamilyKey: "example.com"
+        },
+        searchId: "search-1",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "UNRECORDED"
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: "RESOLVED" }),
+        data: expect.not.objectContaining({ status: "AUTO_INVESTIGATING" })
+      })
+    );
+  });
+
+  it("keeps unchanged human review terminal", async () => {
+    const humanIncident = incident({
+      status: "NEEDS_HUMAN",
+      providerFamilyKey: "example.com",
+      platformSnapshot: "UNKNOWN",
+      bookingUrlSnapshot: "https://example.com/",
+      humanReviewReason: "SOURCE_UNVERIFIED",
+      nextAttemptAt: null
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(humanIncident);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Human Review Course",
+          timeZone: "America/New_York",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://example.com/",
+          providerFamilyKey: "example.com"
+        },
+        searchId: "search-1",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "NEEDS_HUMAN"
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({ status: "AUTO_INVESTIGATING" })
+      })
+    );
+  });
+
   it("promotes same-local-day western demand after UTC midnight", async () => {
     const transitionNow = new Date("2026-07-21T01:00:00.000Z");
     const nextAttemptAt = new Date("2026-07-21T07:00:00.000Z");

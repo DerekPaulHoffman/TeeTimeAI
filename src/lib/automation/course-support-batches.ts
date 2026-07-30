@@ -22,7 +22,7 @@ import {
   getEligibleCourseSupportVerificationProof,
   scheduleCourseSupportVerificationRequests
 } from "./course-support-verification";
-import { getHumanReviewRetryAt, inferHumanReviewReason } from "./course-monitoring";
+import { inferHumanReviewReason } from "./course-monitoring";
 import { enqueueRemediatedCourseRechecks } from "./search-recheck-queue";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
@@ -3568,6 +3568,7 @@ export async function closeoutCourseSupportBatch(input: {
               resolvedAt: now,
               resolution: "MONITORING_RESTORED",
               resolutionMessage: message,
+              nextAction: null,
               lastSeenAt: now,
               revision: { increment: 1 }
             }
@@ -3632,6 +3633,7 @@ export async function closeoutCourseSupportBatch(input: {
               resolvedAt: now,
               resolution,
               resolutionMessage: message,
+              nextAction: null,
               lastSeenAt: now,
               revision: { increment: 1 }
             }
@@ -3680,7 +3682,6 @@ export async function closeoutCourseSupportBatch(input: {
             bookingAccessMode: entry.course.bookingAccessMode,
             automationReason: entry.course.automationReason
           });
-          const nextAttemptAt = getHumanReviewRetryAt(now, entry.incident.activeRealSearchCount);
           incidentUpdated = await tx.courseSupportIncident.updateMany({
             where: {
               id: entry.incidentId,
@@ -3692,7 +3693,7 @@ export async function closeoutCourseSupportBatch(input: {
             data: {
               status: "NEEDS_HUMAN",
               activeBatchId: null,
-              nextAttemptAt,
+              nextAttemptAt: null,
               humanReviewReason,
               nextReminderAt: now,
               escalatedAt: entry.incident.escalatedAt ?? now,
@@ -3706,7 +3707,7 @@ export async function closeoutCourseSupportBatch(input: {
               where: { courseId: entry.courseId },
               data: {
                 state: "ENGINEERING_VERIFICATION_NEEDED",
-                nextAutomaticAttemptAt: nextAttemptAt,
+                nextAutomaticAttemptAt: null,
                 revalidationRequestedAt: null,
                 stateChangedAt: now,
                 revision: { increment: 1 }

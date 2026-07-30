@@ -151,7 +151,7 @@ describe("course monitoring watchdog", () => {
     );
   });
 
-  it("requeues a due safe retry while keeping the human reason", async () => {
+  it("keeps a due human decision terminal instead of requeueing it", async () => {
     const humanIncident = incident({
       status: "NEEDS_HUMAN",
       confirmedAt: new Date("2026-07-27T10:00:00.000Z"),
@@ -172,16 +172,11 @@ describe("course monitoring watchdog", () => {
 
     await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
       checked: 1,
-      scheduled: 1,
+      scheduled: 0,
       remindersSent: 0
     });
-    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: "AUTO_INVESTIGATING",
-          nextAttemptAt: now
-        })
-      })
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "AUTO_INVESTIGATING" }) })
     );
   });
 

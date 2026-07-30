@@ -3,17 +3,23 @@ import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 const requestedCheckout = process.env.TEE_TIME_SPOT_RESPONDER_CHECKOUT?.trim();
-const candidates = [
+const worktreeCandidates = git(["worktree", "list", "--porcelain"], process.cwd())
+  ?.split(/\r?\n/u)
+  .filter((line) => line.startsWith("worktree "))
+  .map((line) => line.slice("worktree ".length).trim()) ?? [];
+const candidates = [...new Set([
   requestedCheckout,
   "C:\\dev\\TeeTimeAI-responder-throughput",
-  "C:\\dev\\TeeTimeAi-CourseSupportResponder"
-].filter(Boolean);
+  "C:\\dev\\TeeTimeAi-CourseSupportResponder",
+  ...worktreeCandidates
+].filter(Boolean))];
 
 const preparedCheckouts = candidates.filter(
   (candidate) =>
     existsSync(resolve(candidate, "package.json")) &&
     existsSync(resolve(candidate, "node_modules")) &&
-    existsSync(resolve(candidate, ".vercel", "project.json"))
+    existsSync(resolve(candidate, ".vercel", "project.json")) &&
+    git(["status", "--porcelain"], realpathSync(candidate)) === ""
 );
 const currentMain = git(["rev-parse", "origin/main"], process.cwd());
 const checkout = preparedCheckouts.find(

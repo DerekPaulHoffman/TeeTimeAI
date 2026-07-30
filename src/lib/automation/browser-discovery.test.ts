@@ -5980,6 +5980,38 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official daily-fee course with only pro-shop contact as contact-only", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "school-daily-fee-course",
+      courseName: "Example Executive Golf Course",
+      sourceUrl: "https://example-golf.test/",
+      finalUrl: "https://example-golf.test/rates/",
+      observedUrls: ["https://example-golf.test/", "https://example-golf.test/rates/"],
+      visibleText:
+        "Example Executive Golf Course is a Nine Hole Golf Course open to the public. Prices Adult Weekdays - $25.00 and Adult Weekends - $40.00. Please call the Pro Shop at 860-555-0134 if you have any questions."
+    });
+
+    expect(discovery).toMatchObject({
+      bookingMethod: "CONTACT_COURSE",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-contact-only-course-access" }
+    });
+  });
+
+  it("does not treat generic school contact copy as golf access evidence", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "school-contact-page",
+      courseName: "Example School Golf Course",
+      sourceUrl: "https://example-school.test/contact",
+      finalUrl: "https://example-school.test/contact",
+      observedUrls: ["https://example-school.test/contact"],
+      visibleText:
+        "Example School Golf Course alumni news. Please call the Pro Shop at 860-555-0134 if you have any questions."
+    });
+
+    expect(discovery.bookingMethod).not.toBe("CONTACT_COURSE");
+  });
+
   it("requires the final phone-reservation evidence page to stay on the official host", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "cross-host-phone-copy",

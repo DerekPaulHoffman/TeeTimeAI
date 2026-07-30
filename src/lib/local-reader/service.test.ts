@@ -381,6 +381,7 @@ describe("local reader job service", () => {
       courseName: "Grassy Hill Country Club",
       bookingUrl,
       cardTextIncludes: [],
+      leaseExpiresAt: "2026-07-24T16:03:00.000Z",
       leaseToken: expect.any(String)
     });
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith(

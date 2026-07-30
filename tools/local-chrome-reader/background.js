@@ -363,6 +363,7 @@ async function cleanStalePendingJobs(jobs) {
   for (const [tabId, pending] of Object.entries(jobs)) {
     const openedAt = Date.parse(pending.openedAt || "");
     const expiresAt = Date.parse(pending.job?.expiresAt || "");
+    const leaseExpiresAt = Date.parse(pending.job?.leaseExpiresAt || "");
     let tabExists = true;
     try {
       await chrome.tabs.get(Number(tabId));
@@ -370,8 +371,11 @@ async function cleanStalePendingJobs(jobs) {
       tabExists = false;
     }
     if (
-      !tabExists ||
-      (Number.isFinite(openedAt) && openedAt + 2 * 60_000 <= now) ||
+      (!tabExists && !pending.result) ||
+      (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) ||
+      (!Number.isFinite(leaseExpiresAt) &&
+        Number.isFinite(openedAt) &&
+        openedAt + 170_000 <= now) ||
       (Number.isFinite(expiresAt) && expiresAt <= now)
     ) {
       delete jobs[tabId];
@@ -390,34 +394,46 @@ async function closePendingTab(tabId) {
   }
 }
 
+async function submitPendingResult(tabId, pending) {
+  const result = pending.result;
+  if (!result) return false;
+  const body = JSON.stringify({ ...result, jobId: pending.job.id });
+  const path = `/api/local-reader/jobs/${encodeURIComponent(pending.job.id)}/result`;
+  const response = await signedFetch(path, {
+    method: "POST",
+    body,
+    leaseToken: pending.job.leaseToken
+  });
+  if (!response.ok) {
+    throw new Error(`Result API returned ${response.status}`);
+  }
+  const jobs = await pendingJobs();
+  if (jobs[String(tabId)]?.job?.id === pending.job.id) {
+    delete jobs[String(tabId)];
+    await savePendingJobs(jobs);
+  }
+  const resultDetail =
+    result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+      ? `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
+      : `${pending.job.courseKey} ${pending.job.targetDate}: ${result.pageTitle}`;
+  await setLastStatus(
+    result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+      ? "COMPLETED"
+      : result.status,
+    resultDetail
+  );
+  return true;
+}
+
 async function finishJob(tabId, result) {
   const jobs = await pendingJobs();
   const pending = jobs[String(tabId)];
   if (!pending) return;
-  delete jobs[String(tabId)];
+  pending.result = result;
   await savePendingJobs(jobs);
 
   try {
-    const body = JSON.stringify({ ...result, jobId: pending.job.id });
-    const path = `/api/local-reader/jobs/${encodeURIComponent(pending.job.id)}/result`;
-    const response = await signedFetch(path, {
-      method: "POST",
-      body,
-      leaseToken: pending.job.leaseToken
-    });
-    if (!response.ok) {
-      throw new Error(`Result API returned ${response.status}`);
-    }
-    const resultDetail =
-      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
-        ? `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
-        : `${pending.job.courseKey} ${pending.job.targetDate}: ${result.pageTitle}`;
-    await setLastStatus(
-      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
-        ? "COMPLETED"
-        : result.status,
-      resultDetail
-    );
+    await submitPendingResult(tabId, pending);
   } catch (error) {
     await setLastStatus("RESULT_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
@@ -435,7 +451,18 @@ async function poll() {
     }
     const jobs = await pendingJobs();
     await cleanStalePendingJobs(jobs);
-    if (Object.keys(jobs).length > 0) return;
+    for (const [tabId, pending] of Object.entries(jobs)) {
+      if (!pending.result) continue;
+      try {
+        await submitPendingResult(Number(tabId), pending);
+      } catch (error) {
+        await setLastStatus(
+          "RESULT_RETRY_PENDING",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    }
+    if (Object.keys(await pendingJobs()).length > 0) return;
 
     const readerVersion = chrome.runtime.getManifest().version;
     const capabilities = READER_CAPABILITIES.map(

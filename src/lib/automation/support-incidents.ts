@@ -229,6 +229,17 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
     httpStatus: failure.httpStatus
   });
+  const materialAccessEvidenceChanged = Boolean(
+    existing &&
+      (existing.providerFamilyKey !== provider.providerFamilyKey ||
+        existing.platformSnapshot !== input.course.detectedPlatform ||
+        existing.bookingUrlSnapshot !== bookingUrl)
+  );
+  const resolvedFinalDecision = Boolean(
+    existing?.status === "RESOLVED" &&
+      existing.resolution &&
+      existing.resolution !== "MONITORING_RESTORED"
+  );
 
   if (disposableSyntheticSearch) {
     if (
@@ -280,6 +291,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           : "TYPED_PROVIDER_ADAPTER"),
     message: safeMessage,
     activeRealSearchCount,
+    materialEvidenceChanged: materialAccessEvidenceChanged,
     now
   });
 
@@ -288,6 +300,43 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       incidentId: existing?.id ?? null,
       status: "UNRECORDED",
       ownerAlerted: false
+    } satisfies CourseSupportIssueState;
+  }
+
+  if (
+    existing &&
+    !existing.activeBatchId &&
+    !materialAccessEvidenceChanged &&
+    (resolvedFinalDecision || existing.status === "NEEDS_HUMAN")
+  ) {
+    await prisma.courseSupportIncident.updateMany({
+      where: {
+        id: existing.id,
+        cycle: existing.cycle,
+        status: existing.status,
+        activeBatchId: null,
+        updatedAt: existing.updatedAt
+      },
+      data: {
+        affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
+        occurrenceCount: { increment: 1 },
+        engineeringOnly:
+          existing.engineeringOnly && engineeringOnlySource && activeRealSearchCount === 0,
+        activeRealSearchCount: Math.max(existing.activeRealSearchCount, activeRealSearchCount),
+        earliestTargetDate:
+          existing.earliestTargetDate && earliestTargetDate
+            ? new Date(
+                Math.min(existing.earliestTargetDate.getTime(), earliestTargetDate.getTime())
+              )
+            : (existing.earliestTargetDate ?? earliestTargetDate),
+        lastSeenAt: now,
+        revision: { increment: 1 }
+      }
+    });
+    return {
+      incidentId: existing.id,
+      status: existing.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "UNRECORDED",
+      ownerAlerted: Boolean(existing.ownerNotifiedAt || existing.escalationNotifiedAt)
     } satisfies CourseSupportIssueState;
   }
 
@@ -541,6 +590,7 @@ async function resolveCourseSupportIncidentWithLease(input: {
         resolvedAt: now,
         resolution: input.resolution,
         resolutionMessage: sanitizeResponderText(input.message).slice(0, 500),
+        nextAction: null,
         lastSeenAt: now,
         nextAttemptAt: null,
         activeBatchId: null,

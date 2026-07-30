@@ -5085,10 +5085,10 @@ function learnOfficialContactOnlyClassification(
       scopedText
     ) || /\bpar\s*3\s+golf course\b/i.test(scopedText);
   const postsPublicPrice =
-    /\bprices?\b/i.test(scopedText) &&
-    /\b(?:adult|senior|junior|weekdays?|weekends?|holidays?)\b[^$]{0,80}\$\s*\d/i.test(
+    /\b(?:prices?|fees?)\b/i.test(scopedText) &&
+    (/\b(?:adult|senior|junior|weekdays?|weekends?|holidays?)\b[^$]{0,80}\$\s*\d/i.test(
       scopedText
-    );
+    ) || /\b(?:daily|green|public)\s+fees?\b[^$]{0,160}\$\s*\d/i.test(scopedText));
 
   if (!identifiesPhysicalCourse || !postsPublicPrice) {
     return null;
@@ -5141,7 +5141,7 @@ function findTargetCourseContactEvidence(courseName: string, visibleText: string
   const normalizedText = visibleText.toLocaleLowerCase("en-US");
   const contactMatches = [
     ...visibleText.matchAll(
-      /\bhours? of operation may vary by season\b[^.]{0,180}\bplease contact us for details\b|\bplease contact us for (?:current )?(?:hours?|details|availability)\b/gi
+      /\bhours? of operation may vary by season\b[^.]{0,180}\bplease contact us for details\b|\bplease contact us for (?:current )?(?:hours?|details|availability)\b|\bplease call the (?:pro|golf) shop\b[^.]{0,160}\b(?:questions?|availability|tee times?)\b/gi
     )
   ];
   const phoneMatches = [

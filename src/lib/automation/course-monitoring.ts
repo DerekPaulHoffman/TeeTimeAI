@@ -130,21 +130,28 @@ export async function recordCourseMonitoringFailure(input: {
       }
     });
 
-    const retainingApprovedFinal = Boolean(
-      current.state === "REVALIDATING_FINAL" &&
+    const retainedFinalState =
       incident?.status === "RESOLVED" &&
-      incident.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION" &&
-      incident.failureFingerprint === failureFingerprint &&
-      !input.materialEvidenceChanged
-    );
-    if (retainingApprovedFinal) {
+      incident.resolution &&
+      incident.resolution !== "MONITORING_RESTORED" &&
+      !input.materialEvidenceChanged &&
+      ["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY", "REVALIDATING_FINAL"].includes(
+        current.state
+      )
+        ? incident.resolution === "DIRECT_BOOKING_CLASSIFIED"
+          ? ("FINAL_MANUAL" as const)
+          : incident.resolution === "IDENTITY_CLASSIFIED"
+            ? ("FINAL_IDENTITY" as const)
+            : ("FINAL_TECHNICAL" as const)
+        : null;
+    if (retainedFinalState) {
       const status = await transaction.courseMonitoringStatus.update({
         where: {
           courseId: input.courseId,
           revision: current.revision
         },
         data: {
-          state: "FINAL_TECHNICAL",
+          state: retainedFinalState,
           lastFailureAt: now,
           consecutiveFailures: { increment: 1 },
           failureFingerprint,
@@ -164,11 +171,12 @@ export async function recordCourseMonitoringFailure(input: {
         outcome: input.outcome,
         failureFingerprint,
         readPath,
-        message: safeMessage ?? "The engineer-approved technical limitation was reconfirmed.",
+        message: safeMessage ?? "The existing final monitoring decision was reconfirmed.",
         runtimeVersion: input.runtimeVersion,
         occurredAt: now,
         audit: {
-          retainedEngineerDecision: true,
+          retainedFinalDecision: true,
+          resolution: incident?.resolution ?? null,
           customerDataIncluded: false
         }
       });
@@ -183,7 +191,6 @@ export async function recordCourseMonitoringFailure(input: {
     }
 
     if (current.state === "ENGINEERING_VERIFICATION_NEEDED" && !input.materialEvidenceChanged) {
-      const nextAttemptAt = getHumanReviewRetryAt(now, input.activeRealSearchCount);
       const status = await transaction.courseMonitoringStatus.update({
         where: {
           courseId: input.courseId,
@@ -194,7 +201,7 @@ export async function recordCourseMonitoringFailure(input: {
           consecutiveFailures:
             current.failureFingerprint === failureFingerprint ? { increment: 1 } : 1,
           failureFingerprint,
-          nextAutomaticAttemptAt: nextAttemptAt,
+          nextAutomaticAttemptAt: null,
           revision: { increment: 1 }
         }
       });
@@ -225,7 +232,7 @@ export async function recordCourseMonitoringFailure(input: {
         retainedHumanFinal: false,
         independentPathCount: 1,
         samePathCount: Math.max(status.consecutiveFailures, 1),
-        nextAttemptAt
+        nextAttemptAt: null
       };
     }
 
@@ -855,39 +862,6 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     }
 
     if (
-      status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
-      incident?.status === "NEEDS_HUMAN" &&
-      status.nextAutomaticAttemptAt &&
-      status.nextAutomaticAttemptAt <= now &&
-      !(incident.nextReminderAt && incident.nextReminderAt <= now) &&
-      !incident.activeBatchId
-    ) {
-      const requeued = await prisma.courseSupportIncident.updateMany({
-        where: {
-          id: incident.id,
-          revision: incident.revision,
-          status: "NEEDS_HUMAN",
-          activeBatchId: null
-        },
-        data: {
-          status: "AUTO_INVESTIGATING",
-          nextAttemptAt: now,
-          latestMessage: "A scheduled safe recheck is due while the human review remains open.",
-          revision: { increment: 1 }
-        }
-      });
-      if (requeued.count === 1) {
-        incident = {
-          ...incident,
-          status: "AUTO_INVESTIGATING",
-          nextAttemptAt: now,
-          revision: incident.revision + 1
-        };
-        scheduled += 1;
-      }
-    }
-
-    if (
       status.state === "AUTO_INVESTIGATING" &&
       incident?.status === "AUTO_INVESTIGATING" &&
       incident.escalationDeadlineAt &&
@@ -899,7 +873,6 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
         bookingAccessMode: status.course.bookingAccessMode,
         automationReason: status.course.automationReason
       });
-      const retryAt = getHumanReviewRetryAt(now, incident.activeRealSearchCount);
       const escalatedRows = await prisma.$transaction(
         async (transaction) => {
           const incidentUpdated = await transaction.courseSupportIncident.updateMany({
@@ -913,7 +886,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
               humanReviewReason: reason,
               escalatedAt: incident.escalatedAt ?? now,
               nextReminderAt: now,
-              nextAttemptAt: retryAt,
+              nextAttemptAt: null,
               revision: { increment: 1 }
             }
           });
@@ -925,7 +898,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
             },
             data: {
               state: "ENGINEERING_VERIFICATION_NEEDED",
-              nextAutomaticAttemptAt: retryAt,
+              nextAutomaticAttemptAt: null,
               revalidationRequestedAt: null,
               stateChangedAt: now,
               revision: { increment: 1 }
@@ -968,10 +941,11 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
       (incident?.humanReviewReason && incident.nextReminderAt)
     );
     if (!ownsAutomatedAttempt) {
+      if (status.state === "ENGINEERING_VERIFICATION_NEEDED") {
+        continue;
+      }
       const retryAt =
-        status.state === "ENGINEERING_VERIFICATION_NEEDED"
-          ? getHumanReviewRetryAt(now, incident?.activeRealSearchCount ?? 0)
-          : now;
+        now;
       await prisma.courseMonitoringStatus.updateMany({
         where: {
           courseId: status.courseId,
