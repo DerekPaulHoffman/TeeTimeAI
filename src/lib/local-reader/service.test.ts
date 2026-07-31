@@ -336,6 +336,36 @@ describe("local reader job service", () => {
     });
   });
 
+  it("forces an explicit operator retry after a completed verification", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-completed",
+      status: "COMPLETED",
+      leaseExpiresAt: null,
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z")
+    });
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-retried", status: "PENDING" });
+
+    await expect(
+      queueLocalReaderCourseVerification({
+        courseId: "course-ezlinks",
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl: ezLinksBookingUrl,
+        force: true
+      })
+    ).resolves.toMatchObject({ id: "job-retried", status: "PENDING" });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          status: "PENDING",
+          completedAt: null,
+          readerVersion: null
+        })
+      })
+    );
+  });
+
   it("reuses a pending job from an earlier schedule version", async () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
       id: "job-earlier-version",

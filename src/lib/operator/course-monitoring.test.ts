@@ -333,7 +333,8 @@ describe("operator course monitoring mutations", () => {
       courseId: "course-1",
       targetDate: "2026-08-02",
       players: 3,
-      bookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime"
+      bookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime",
+      force: true
     });
   });
 
@@ -598,7 +599,8 @@ describe("operator course monitoring mutations", () => {
       courseId: "course-1",
       targetDate: expect.any(String),
       players: 2,
-      bookingUrl: "https://course.example/book"
+      bookingUrl: "https://course.example/book",
+      force: true
     });
   });
 
@@ -623,7 +625,8 @@ describe("operator course monitoring mutations", () => {
       courseId: "course-1",
       targetDate: expect.any(String),
       players: 2,
-      bookingUrl: "https://course.example/book"
+      bookingUrl: "https://course.example/book",
+      force: true
     });
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
     expect(transactionMocks.course.update).not.toHaveBeenCalled();

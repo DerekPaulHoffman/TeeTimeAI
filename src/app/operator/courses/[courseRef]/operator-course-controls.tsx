@@ -149,7 +149,9 @@ export function OfficialLinksForm({
   );
 }
 
-type CourseOutcomeFormProps = MutationIdentity;
+type CourseOutcomeFormProps = MutationIdentity & {
+  recommendLocalReader?: boolean;
+};
 
 const outcomeHelp: Record<OperatorCourseDecision, string> = {
   LOCAL_READER:
@@ -168,10 +170,12 @@ const outcomeHelp: Record<OperatorCourseDecision, string> = {
     "Close monitoring with a confirmed technical limitation that does not fit another choice."
 };
 
-export function CourseOutcomeForm(props: CourseOutcomeFormProps) {
+export function CourseOutcomeForm({ recommendLocalReader = false, ...props }: CourseOutcomeFormProps) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState(setCourseOutcomeAction, initialState);
-  const [decision, setDecision] = useState<OperatorCourseDecision | "">("");
+  const [decision, setDecision] = useState<OperatorCourseDecision | "">(
+    recommendLocalReader ? "LOCAL_READER" : ""
+  );
   const help = useMemo(() => (decision ? outcomeHelp[decision] : null), [decision]);
 
   useEffect(() => {
@@ -190,6 +194,12 @@ export function CourseOutcomeForm(props: CourseOutcomeFormProps) {
         Choose what this course actually is or which monitoring path it needs. No separate evidence
         link or decision note is required.
       </p>
+      {recommendLocalReader ? (
+        <p className="operator-outcome-help">
+          This booking page is compatible with the local reader. Use the recommended action below
+          to queue a fresh signed verification automatically.
+        </p>
+      ) : null}
       <MutationFields {...props} />
       <label>
         Course outcome or monitoring path

@@ -114,4 +114,20 @@ describe("operator course controls", () => {
     expect(screen.getByText(/Keep the alert active/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Set temporary status" })).toBeTruthy();
   });
+
+  it("preselects the one-click local-reader action for compatible EZLinks courses", () => {
+    render(<CourseOutcomeForm {...identity} recommendLocalReader />);
+
+    expect(
+      screen.getByText(/This booking page is compatible with the local reader/)
+    ).toBeTruthy();
+    expect(
+      (screen.getByLabelText("Course outcome or monitoring path") as HTMLSelectElement).value
+    ).toBe("LOCAL_READER");
+    expect(
+      (screen.getByRole("button", {
+        name: "Use local reader and recheck"
+      }) as HTMLButtonElement).disabled
+    ).toBe(false);
+  });
 });

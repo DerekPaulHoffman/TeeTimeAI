@@ -46,6 +46,7 @@ export async function queueLocalReaderCourseVerification(input: {
   targetDate: string;
   players: number;
   bookingUrl: string;
+  force?: boolean;
 }) {
   const courseKey = getLocalReaderCourseKey(input.bookingUrl);
   if (!courseKey) return null;
@@ -68,7 +69,7 @@ export async function queueLocalReaderCourseVerification(input: {
       (existing.status === "LEASED" &&
         existing.leaseExpiresAt !== null &&
         existing.leaseExpiresAt > now) ||
-      existing.status === "COMPLETED")
+      (existing.status === "COMPLETED" && !input.force))
   ) {
     return existing;
   }

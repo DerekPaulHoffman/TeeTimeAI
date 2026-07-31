@@ -1292,7 +1292,8 @@ async function queueOperatorLocalReaderRecheck(
       courseId: current.status.courseId,
       targetDate: (activeSearch?.date ?? fallbackDate).toISOString().slice(0, 10),
       players: activeSearch?.players ?? 2,
-      bookingUrl
+      bookingUrl,
+      force: true
     });
   } catch {
     console.error("[operator:course-recheck-local-reader]", {

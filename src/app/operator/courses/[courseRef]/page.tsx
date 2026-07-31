@@ -19,6 +19,7 @@ import { KNOWN_PROVIDER_FAMILIES } from "@/lib/automation/provider-capabilities"
 import { getCurrentOperator } from "@/lib/operator/auth";
 import { loadOperatorCourseMonitoringDetail } from "@/lib/operator/course-monitoring";
 import { getProviderHandling } from "@/lib/operator/provider-handling";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
 
 import { CourseOutcomeForm, OfficialLinksForm } from "./operator-course-controls";
 import { OperatorRecheckForm } from "./operator-recheck-form";
@@ -60,6 +61,9 @@ export default async function OperatorCoursePage({
   }
   const stateLabel = getCourseStateLabel(detail);
   const isFinal = detail.state.startsWith("FINAL_");
+  const recommendLocalReader =
+    detail.course.providerFamilyKey === "EZLINKS" &&
+    Boolean(getLocalReaderCourseKey(detail.course.detectedBookingUrl));
 
   return (
     <main className="operator-page operator-course-detail">
@@ -208,6 +212,7 @@ export default async function OperatorCoursePage({
               idempotencyKey={`outcome:${randomUUID()}`}
               incidentCycle={detail.incident.cycle}
               incidentRevision={detail.incident.revision}
+              recommendLocalReader={recommendLocalReader}
               reference={detail.reference}
               statusRevision={detail.revision}
             />
