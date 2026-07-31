@@ -8,6 +8,7 @@ const READER_CAPABILITIES = Object.freeze([
   ["CHRONOGOLF_RENDERED", 1],
   ["TENFORE_RENDERED", 1],
   ["EZLINKS_RENDERED", 1],
+  ["WEBTRAC_RENDERED", 1],
   ["PROPHET_FREAR_RENDERED", 4]
 ]);
 const ALLOWED_COURSES = Object.freeze({
@@ -255,6 +256,63 @@ function isAllowlistedEzLinksJob(job) {
   }
 }
 
+function isAllowlistedWebTracJob(job) {
+  try {
+    if (
+      !/^webtrac:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myvscloud\.com$/u.test(
+        job?.courseKey || ""
+      ) ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "") ||
+      !Number.isInteger(job.players) ||
+      job.players < 1 ||
+      job.players > 4
+    ) {
+      return false;
+    }
+    const hostname = job.courseKey.slice("webtrac:".length);
+    const url = new URL(job.bookingUrl);
+    const allowedKeys = new Set([
+      "Action",
+      "begindate",
+      "begintime",
+      "display",
+      "grwebsearch_buttonsearch",
+      "module",
+      "numberofplayers",
+      "page",
+      "search"
+    ]);
+    const [year, month, day] = job.targetDate.split("-");
+    return (
+      url.protocol === "https:" &&
+      url.hostname === hostname &&
+      url.pathname === "/webtrac/web/search.html" &&
+      url.searchParams.size === allowedKeys.size &&
+      Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
+      Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
+      url.searchParams.get("Action") === "Start" &&
+      url.searchParams.get("begindate") === `${month}/${day}/${year}` &&
+      url.searchParams.get("begintime") === "12:00 am" &&
+      url.searchParams.get("display") === "Detail" &&
+      url.searchParams.get("grwebsearch_buttonsearch") === "yes" &&
+      url.searchParams.get("module") === "GR" &&
+      url.searchParams.get("numberofplayers") === String(job.players) &&
+      url.searchParams.get("page") === "1" &&
+      url.searchParams.get("search") === "yes" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedProphetJob(job) {
   try {
     const config = PROPHET_COURSES[job?.courseKey];
@@ -310,6 +368,7 @@ function isAllowlistedJob(job) {
     if (isAllowlistedChronogolfJob(job)) return true;
     if (isAllowlistedTenForeJob(job)) return true;
     if (isAllowlistedEzLinksJob(job)) return true;
+    if (isAllowlistedWebTracJob(job)) return true;
     if (isAllowlistedProphetJob(job)) return true;
     const allowed = ALLOWED_COURSES[job?.courseKey];
     if (!allowed) return false;

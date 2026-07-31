@@ -48,6 +48,18 @@ describe("local reader capabilities", () => {
     });
   });
 
+  it("routes safe MyVSCloud WebTrac tenants to the rendered parser", () => {
+    expect(
+      getRequiredLocalReaderCapability(
+        "webtrac:ctguilfordweb.myvscloud.com",
+        "Guilford Lakes Golf Course"
+      )
+    ).toEqual({
+      key: "WEBTRAC_RENDERED",
+      parserVersion: 1
+    });
+  });
+
   it("requires the corrected Prophet redirect parser for both supported courses", () => {
     expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
       key: "PROPHET_FREAR_RENDERED",

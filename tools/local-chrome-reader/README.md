@@ -8,8 +8,9 @@ signed backend job -> local Chrome page -> normalized slots -> signed backend re
 
 It reads only signed backend jobs for exact, signed-out CPS tee-time search
 routes, exact TenFore tenant routes, safe public Chronogolf club profiles,
-safe one-label EZLinks tenant search pages, and the exact Frear Park and
-Simsbury Farms legacy Prophet tee sheets. CPS
+safe one-label EZLinks tenant search pages, safe one-label MyVSCloud WebTrac
+golf-search pages, and the exact Frear Park and Simsbury Farms legacy Prophet
+tee sheets. CPS
 tenants are accepted automatically only when the URL
 is HTTPS, uses one `*.cps.golf` tenant host, and stays on
 `/onlineresweb/search-teetime`. TenFore tenants are accepted only on
@@ -42,6 +43,13 @@ public date and player controls, verifies the rendered course and date, and
 normalizes only the visible result cards. Cloudflare verification is never
 bypassed: a challenge remains an explicit access result, and the reader never
 calls or replays transaction endpoints.
+
+MyVSCloud WebTrac pages are accepted only on an HTTPS, one-label
+`*.myvscloud.com` tenant and the exact `/webtrac/web/search.html` route. The
+signed job supplies only the target date, public player count, detail display,
+and golf-search parameters. The reader normalizes visible result-table rows,
+returns the stable public search URL, and never clicks Add To Cart or reads a
+session token.
 
 Legacy Prophet jobs use only the exact public rendered tee sheet, course IDs,
 date, player count, and 18-hole filter recorded for Frear Park or Simsbury

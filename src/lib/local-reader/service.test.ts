@@ -42,6 +42,7 @@ const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
 const chronogolfBookingUrl = "https://www.chronogolf.com/club/crestbrook-park-golf-course";
 const tenForeBookingUrl = "https://fox.tenfore.golf/gainfieldfarms";
 const ezLinksBookingUrl = "https://ballysapi.ezlinksgolf.com/";
+const webTracBookingUrl = "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
 const frearParkBookingUrl = "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex";
 const simsburyBookingUrl = "https://secure.east.prophetservices.com/SimsburyFarmsV3";
 
@@ -160,6 +161,42 @@ describe("local reader job service", () => {
         })
       })
     );
+  });
+
+  it("queues a safe MyVSCloud WebTrac tenant with the exact public search parameters", async () => {
+    prismaMocks.course.findUnique.mockResolvedValue({
+      name: "Guilford Lakes Golf Course"
+    });
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-webtrac" });
+
+    await queueLocalReaderCourseVerification({
+      courseId: "course-webtrac",
+      targetDate: "2026-08-01",
+      players: 2,
+      bookingUrl: webTracBookingUrl,
+      force: true
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "webtrac:ctguilfordweb.myvscloud.com",
+          bookingUrl: expect.stringContaining(
+            "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?"
+          ),
+          requiredCapabilityKey: "WEBTRAC_RENDERED",
+          requiredParserVersion: 1
+        })
+      })
+    );
+    const create = prismaMocks.localReaderJob.upsert.mock.calls.at(-1)?.[0].create;
+    const url = new URL(create.bookingUrl);
+    expect(url.searchParams.get("begindate")).toBe("08/01/2026");
+    expect(url.searchParams.get("numberofplayers")).toBe("2");
+    expect(url.searchParams.get("module")).toBe("GR");
+    expect(url.pathname).toBe("/webtrac/web/search.html");
   });
 
   it("allowlists only the exact supported public Chronogolf profiles", () => {

@@ -26,18 +26,20 @@ export type DynamicCpsCourseKey = `cps:${string}.cps.golf`;
 export type DynamicChronogolfCourseKey = `chronogolf:${string}`;
 export type DynamicTenForeCourseKey = `tenfore:${string}`;
 export type DynamicEzLinksCourseKey = `ezlinks:${string}.ezlinksgolf.com`;
+export type DynamicWebTracCourseKey = `webtrac:${string}.myvscloud.com`;
 export type LocalReaderCourseKey =
   | StaticLocalReaderCourseKey
   | DynamicCpsCourseKey
   | DynamicChronogolfCourseKey
   | DynamicTenForeCourseKey
-  | DynamicEzLinksCourseKey;
+  | DynamicEzLinksCourseKey
+  | DynamicWebTracCourseKey;
 
 export type LocalReaderCourse = {
   courseName: string;
   bookingUrl: string;
   cardTextIncludes: readonly string[];
-  provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "EZLINKS" | "PROPHET";
+  provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "EZLINKS" | "WEBTRAC" | "PROPHET";
   prophetCourseIds?: string;
 };
 
@@ -47,6 +49,8 @@ const CPS_DISCOVERY_PATH = /^\/(?:onlineresweb(?:\/search-teetime)?\/?)?$/u;
 const TENFORE_TENANT_PATH = /^\/([a-z0-9][a-z0-9-]{0,127})\/?$/u;
 const EZLINKS_TENANT_HOSTNAME =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u;
+const WEBTRAC_TENANT_HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myvscloud\.com$/u;
+const WEBTRAC_SEARCH_PATH = /^\/webtrac\/web\/search\.html\/?$/u;
 const EZLINKS_BLOCKED_TENANT_LABELS = new Set([
   "admin",
   "api",
@@ -117,6 +121,9 @@ export function getLocalReaderCourseKey(
     if (isSafeEzLinksTenantHostname(hostname) && isEzLinksSearchLanding(url)) {
       return `ezlinks:${hostname}` as DynamicEzLinksCourseKey;
     }
+    if (WEBTRAC_TENANT_HOSTNAME.test(hostname) && isWebTracSearchLanding(url)) {
+      return `webtrac:${hostname}` as DynamicWebTracCourseKey;
+    }
     const tenForeTenant = getTenForeTenant(url);
     if (tenForeTenant) {
       return `tenfore:${tenForeTenant}` as DynamicTenForeCourseKey;
@@ -149,8 +156,9 @@ export function isLocalReaderCandidateUrl(bookingUrl: string | null | undefined)
       (url.hostname === "secure.east.prophetservices.com" &&
         url.pathname.startsWith("/FrearParkV3")) ||
       (url.hostname === "www.simsburyfarms.com" && url.pathname === "/book-a-tee-time") ||
-      (url.hostname === "ctguilfordweb.myvscloud.com" &&
-        url.pathname === "/webtrac/web/search.html")
+      (WEBTRAC_TENANT_HOSTNAME.test(url.hostname) &&
+        WEBTRAC_SEARCH_PATH.test(url.pathname) &&
+        isWebTracSearchLanding(url))
     );
   } catch {
     return false;
@@ -203,6 +211,19 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
         isEzLinksSearchLanding(url) &&
         url.username === "" &&
         url.password === ""
+      );
+    }
+    if (isDynamicWebTracCourseKey(courseKey)) {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.hostname === courseKey.slice("webtrac:".length) &&
+        WEBTRAC_TENANT_HOSTNAME.test(url.hostname) &&
+        WEBTRAC_SEARCH_PATH.test(url.pathname) &&
+        isWebTracSearchLanding(url) &&
+        url.username === "" &&
+        url.password === "" &&
+        url.hash === ""
       );
     }
     const course = LOCAL_READER_COURSES[courseKey];
@@ -314,6 +335,20 @@ export function getLocalReaderJobUrl(
   if (isDynamicEzLinksCourseKey(courseKey)) {
     return `https://${courseKey.slice("ezlinks:".length)}/index.html#!/search`;
   }
+  if (isDynamicWebTracCourseKey(courseKey)) {
+    const [year, month, day] = targetDate.split("-");
+    const url = new URL(`https://${courseKey.slice("webtrac:".length)}/webtrac/web/search.html`);
+    url.searchParams.set("Action", "Start");
+    url.searchParams.set("begindate", `${month}/${day}/${year}`);
+    url.searchParams.set("begintime", "12:00 am");
+    url.searchParams.set("display", "Detail");
+    url.searchParams.set("grwebsearch_buttonsearch", "yes");
+    url.searchParams.set("module", "GR");
+    url.searchParams.set("numberofplayers", String(Math.max(1, Math.min(4, players))));
+    url.searchParams.set("page", "1");
+    url.searchParams.set("search", "yes");
+    return url.toString();
+  }
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   if (course.provider === "PROPHET") {
@@ -350,6 +385,12 @@ export function isDynamicEzLinksCourseKey(value: string): value is DynamicEzLink
   );
 }
 
+export function isDynamicWebTracCourseKey(value: string): value is DynamicWebTracCourseKey {
+  return (
+    value.startsWith("webtrac:") && WEBTRAC_TENANT_HOSTNAME.test(value.slice("webtrac:".length))
+  );
+}
+
 export function getLocalReaderCourse(
   courseKey: LocalReaderCourseKey,
   courseName?: string
@@ -358,13 +399,16 @@ export function getLocalReaderCourse(
     isDynamicCpsCourseKey(courseKey) ||
     isDynamicChronogolfCourseKey(courseKey) ||
     isDynamicTenForeCourseKey(courseKey) ||
-    isDynamicEzLinksCourseKey(courseKey)
+    isDynamicEzLinksCourseKey(courseKey) ||
+    isDynamicWebTracCourseKey(courseKey)
   ) {
     const normalizedCourseName = courseName?.trim();
     if (!normalizedCourseName) return null;
     return {
       courseName: normalizedCourseName,
-      bookingUrl: getLocalReaderJobUrl(courseKey, ""),
+      bookingUrl: isDynamicWebTracCourseKey(courseKey)
+        ? `https://${courseKey.slice("webtrac:".length)}/webtrac/web/search.html?module=GR`
+        : getLocalReaderJobUrl(courseKey, ""),
       cardTextIncludes: [],
       provider: isDynamicCpsCourseKey(courseKey)
         ? "CPS"
@@ -372,7 +416,9 @@ export function getLocalReaderCourse(
           ? "CHRONOGOLF"
           : isDynamicTenForeCourseKey(courseKey)
             ? "TENFORE"
-            : "EZLINKS"
+            : isDynamicEzLinksCourseKey(courseKey)
+              ? "EZLINKS"
+              : "WEBTRAC"
     };
   }
   return LOCAL_READER_COURSES[courseKey];
@@ -418,5 +464,46 @@ function isEzLinksSearchLanding(url: URL) {
   return (
     url.pathname === "/index.html" &&
     (url.hash === "" || url.hash === "#/search" || url.hash === "#!/search")
+  );
+}
+
+function isWebTracSearchLanding(url: URL) {
+  if (!WEBTRAC_SEARCH_PATH.test(url.pathname) || url.hash !== "") return false;
+  if (url.searchParams.size === 0) return true;
+
+  const normalizedEntries = [...url.searchParams.entries()].map(
+    ([key, value]) => [key.toLowerCase(), value] as const
+  );
+  const keys = new Set(normalizedEntries.map(([key]) => key));
+  if (keys.size !== normalizedEntries.length) return false;
+  if (keys.size === 1) {
+    return keys.has("module") && url.searchParams.get("module")?.toUpperCase() === "GR";
+  }
+
+  const requiredKeys = new Set([
+    "action",
+    "begindate",
+    "begintime",
+    "display",
+    "grwebsearch_buttonsearch",
+    "module",
+    "numberofplayers",
+    "page",
+    "search"
+  ]);
+  if (keys.size !== requiredKeys.size || ![...requiredKeys].every((key) => keys.has(key))) {
+    return false;
+  }
+  const values = new Map(normalizedEntries);
+  return (
+    values.get("action")?.toLowerCase() === "start" &&
+    /^\d{2}\/\d{2}\/\d{4}$/u.test(values.get("begindate") || "") &&
+    /^\d{1,2}:\d{2}\s*(?:am|pm)$/iu.test(values.get("begintime") || "") &&
+    values.get("display")?.toLowerCase() === "detail" &&
+    values.get("grwebsearch_buttonsearch")?.toLowerCase() === "yes" &&
+    values.get("module")?.toUpperCase() === "GR" &&
+    /^[1-4]$/u.test(values.get("numberofplayers") || "") &&
+    values.get("page") === "1" &&
+    values.get("search")?.toLowerCase() === "yes"
   );
 }

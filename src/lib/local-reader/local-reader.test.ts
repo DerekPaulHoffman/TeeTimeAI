@@ -91,6 +91,20 @@ function dynamicEzLinksJob(hostname = "ballysapi.ezlinksgolf.com"): LocalReaderJ
   };
 }
 
+function dynamicWebTracJob(hostname = "ctguilfordweb.myvscloud.com"): LocalReaderJob {
+  return {
+    id: "job-webtrac",
+    courseKey: `webtrac:${hostname}`,
+    targetDate: "2026-07-31",
+    players: 2,
+    requestedAt: "2026-07-31T12:00:00.000Z",
+    expiresAt: "2026-07-31T12:05:00.000Z",
+    courseName: "Guilford Lakes Golf Course",
+    bookingUrl: getLocalReaderJobUrl(`webtrac:${hostname}`, "2026-07-31", 2),
+    cardTextIncludes: []
+  };
+}
+
 function loadReader() {
   const source = readFileSync(
     resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
@@ -133,6 +147,17 @@ function loadEzLinksReader() {
   context.globalThis = context;
   runInNewContext(source, context);
   return context.TeeTimeSpotEzLinksReader as Reader;
+}
+
+function loadWebTracReader() {
+  const source = readFileSync(
+    resolve(process.cwd(), "tools", "local-chrome-reader", "webtrac-reader.js"),
+    "utf8"
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotWebTracReader as Reader;
 }
 
 function loadProphetReader() {
@@ -192,10 +217,14 @@ describe("local Chrome reader contract", () => {
     expect(contentMatches).toContain("https://fox.tenfore.golf/*");
     expect(manifest.host_permissions).toContain("https://*.ezlinksgolf.com/*");
     expect(contentMatches).toContain("https://*.ezlinksgolf.com/*");
+    expect(manifest.host_permissions).toContain("https://*.myvscloud.com/*");
+    expect(contentMatches).toContain("https://*.myvscloud.com/webtrac/web/search.html*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedTenForeJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedEzLinksJob(job)");
+    expect(backgroundSource).toContain("function isAllowlistedWebTracJob(job)");
     expect(backgroundSource).toContain('["EZLINKS_RENDERED", 1]');
+    expect(backgroundSource).toContain('["WEBTRAC_RENDERED", 1]');
     expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
     expect(backgroundSource).toContain("pending.result = result");
     expect(backgroundSource).toContain('"RESULT_RETRY_PENDING"');
@@ -203,6 +232,7 @@ describe("local Chrome reader contract", () => {
       "const pending = tabId ? stored.pendingJobs?.[tabId] : null;"
     );
     expect(contentSource).not.toContain("entries.length === 1");
+    expect(contentSource).toContain("globalThis.TeeTimeSpotWebTracReader");
     expect(backgroundSource).toContain("pending.job?.leaseExpiresAt");
     expect(backgroundSource).toContain(
       "/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u"
@@ -316,6 +346,39 @@ describe("local Chrome reader contract", () => {
     ).toThrow(/not allowlisted/u);
   });
 
+  it("accepts signed MyVSCloud WebTrac jobs while rejecting unsafe hosts and routes", () => {
+    const job = dynamicWebTracJob();
+
+    expect(
+      getLocalReaderCourseKey(
+        "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR"
+      )
+    ).toBe("webtrac:ctguilfordweb.myvscloud.com");
+    expect(localReaderJobSchema.parse(job)).toMatchObject({
+      courseKey: "webtrac:ctguilfordweb.myvscloud.com",
+      courseName: "Guilford Lakes Golf Course"
+    });
+    expect(loadWebTracReader()).toMatchObject({
+      SKIP_DATE_SELECTION: true,
+      SKIP_PLAYER_SELECTION: true
+    });
+    expect(loadWebTracReader().isAllowedPageUrl(job, job.bookingUrl)).toBe(true);
+    expect(
+      getLocalReaderCourseKey(
+        "https://nested.ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR"
+      )
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey("https://ctguilfordweb.myvscloud.com/webtrac/web/cart.html?module=GR")
+    ).toBeNull();
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl: job.bookingUrl.replace("/search.html?", "/cart.html?")
+      })
+    ).toThrow(/not allowlisted/u);
+  });
+
   it("recognizes only the exact reader-candidate public booking surfaces", () => {
     expect(
       isLocalReaderCandidateUrl("https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex")
@@ -393,6 +456,73 @@ describe("local Chrome reader contract", () => {
         }
       ]
     });
+  });
+
+  it("parses Guilford's signed-out WebTrac result rows without entering cart", () => {
+    document.title = "Guilford Lakes Golf Course";
+    document.body.innerHTML = `
+      <h1>Guilford Lakes Golf Course</h1>
+      <button>Date 07/31/2026</button>
+      <table>
+        <tr>
+          <td data-title="Item Action"><button>Add To Cart</button></td>
+          <td data-title="Time">4:20 pm</td>
+          <td data-title="Date">07/31/2026</td>
+          <td data-title="Holes">9 (Front)</td>
+          <td data-title="Course">Guilford Lakes Golf Course</td>
+          <td data-title="Open Slots">4</td>
+        </tr>
+        <tr>
+          <td data-title="Item Action"><button>Add To Cart</button></td>
+          <td data-title="Time">4:30 pm</td>
+          <td data-title="Date">07/31/2026</td>
+          <td data-title="Holes">9 (Front)</td>
+          <td data-title="Course">Guilford Lakes Golf Course</td>
+          <td data-title="Open Slots">1</td>
+        </tr>
+      </table>
+    `;
+    const job = dynamicWebTracJob();
+    const snapshot = loadWebTracReader().readSnapshot(document, job.bookingUrl, job);
+
+    expect(snapshot).toMatchObject({
+      status: "AVAILABLE",
+      readerVersion: "webtrac-rendered-v1",
+      slots: [
+        {
+          startsAtLocal: "2026-07-31T16:20:00",
+          timeLabel: "4:20 PM",
+          holes: [9],
+          minimumPlayers: 1,
+          availableSpots: 4,
+          priceCents: null,
+          cartIncluded: false
+        }
+      ]
+    });
+  });
+
+  it("fails WebTrac closed on a challenge, unsafe route, or changed row shape", () => {
+    const reader = loadWebTracReader();
+    const job = dynamicWebTracJob();
+
+    document.body.innerHTML = "<main>Checking your browser before accessing this site</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "ACCESS_CHALLENGE",
+      slots: []
+    });
+
+    document.body.innerHTML = `
+      <div>07/31/2026</div>
+      <table><tr><td data-title="Time">Loading</td><td data-title="Date">07/31/2026</td></tr></table>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: []
+    });
+    expect(
+      reader.readSnapshot(document, job.bookingUrl.replace("/search.html?", "/cart.html?"), job)
+    ).toMatchObject({ status: "PAGE_MISMATCH", slots: [] });
   });
 
   it("parses current signed-out Chronogolf tee-time cards", () => {
