@@ -133,10 +133,10 @@ function OperatorDashboard({
         className="operator-section operator-course-command"
       >
         <SectionHeading
-          eyebrow="Developer work queue"
+          eyebrow="Monitoring work queue"
           id="course-work-heading"
-          title="Courses to address"
-          supporting="Active customer demand is first. Then come broken monitoring, provider work, stale checks, and records that still need a reliable source."
+          title="What needs attention"
+          supporting="Start with golfer impact, then see each course's current state and whether automation or a person acts next."
         />
         <CourseFleetSummary overview={overview} />
         <CourseDiagnosticBreakdown
@@ -571,46 +571,78 @@ function OperatorDashboard({
 function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
   const { counts } = overview.courseFleet;
   const summaryCopy = getCourseSummaryCopy(counts);
+  const attentionCourses = overview.courseFleet.courses.filter(
+    (course) => course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH"
+  );
+  const affectedActiveAlerts = attentionCourses.reduce(
+    (total, course) => total + course.activeAlertCount,
+    0
+  );
+
   return (
     <>
+      <div
+        className={`operator-course-impact ${affectedActiveAlerts > 0 ? "is-urgent" : "is-clear"}`}
+      >
+        {affectedActiveAlerts > 0 ? <BellRing size={18} /> : <CheckCircle2 size={18} />}
+        <div>
+          <strong>
+            {affectedActiveAlerts > 0
+              ? `${affectedActiveAlerts} active golfer ${
+                  affectedActiveAlerts === 1 ? "alert depends" : "alerts depend"
+                } on attention items.`
+              : "No active golfer alerts are waiting on these attention items."}
+          </strong>
+          <span>
+            {affectedActiveAlerts > 0
+              ? "Handle those courses first; the queue below is already sorted by demand."
+              : "They are maintenance or review work, not current golfer emergencies."}
+          </span>
+        </div>
+      </div>
       <div className="operator-automation-summary-heading">
-        <strong>Monitoring lifecycle</strong>
+        <strong>1. What state is each course in?</strong>
         <span>{summaryCopy.lifecycle}</span>
       </div>
       <div className="operator-course-summary" aria-label="Monitoring lifecycle totals">
         <CourseFleetCount
           count={counts.action}
           icon={<ShieldAlert size={17} />}
-          label="Fix now"
-          tone="critical"
+          label="Needs attention"
+          detail="A decision or repair is needed"
+          tone={affectedActiveAlerts > 0 ? "critical" : "warning"}
         />
         <CourseFleetCount
           count={counts.watch}
           icon={<Wrench size={17} />}
-          label="Investigate"
+          label="Investigate next"
+          detail="Important, but no urgent impact"
           tone="warning"
         />
         <CourseFleetCount
           count={counts.limitations}
           icon={<AlertTriangle size={17} />}
           label="Known limitations"
+          detail="Finished, evidence-backed outcome"
           tone="neutral"
         />
         <CourseFleetCount
           count={counts.unchecked}
           icon={<Search size={17} />}
-          label="Not checked"
+          label="Verify when needed"
+          detail="No monitoring result yet"
           tone="neutral"
         />
         <CourseFleetCount
           count={counts.working}
           icon={<CheckCircle2 size={17} />}
-          label="Working"
+          label="Monitoring works"
+          detail="Healthy latest result"
           tone="positive"
         />
       </div>
       <div className="operator-automation-summary-heading">
-        <strong>Next owner</strong>
+        <strong>2. Who acts next on the attention courses?</strong>
         <span>{summaryCopy.execution}</span>
       </div>
       <div
@@ -620,26 +652,30 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
         <CourseFleetCount
           count={counts.dueNow}
           icon={<ShieldAlert size={17} />}
-          label="Due now"
+          label="Automation ready"
+          detail="Can be claimed now"
           tone="critical"
         />
         <CourseFleetCount
           count={counts.inProgress}
           icon={<Activity size={17} />}
-          label="In progress"
+          label="Automation working"
+          detail="Currently owned"
           tone="warning"
         />
         <CourseFleetCount
           count={counts.scheduledRetry}
           icon={<Clock3 size={17} />}
-          label="Scheduled retry"
+          label="Automation waiting"
+          detail="Will retry on schedule"
           tone="neutral"
         />
         <CourseFleetCount
           count={counts.needsHuman}
           icon={<Wrench size={17} />}
-          label="Needs human"
-          tone="critical"
+          label="Human review"
+          detail="No automated work is active"
+          tone={affectedActiveAlerts > 0 ? "critical" : "neutral"}
         />
       </div>
     </>
@@ -650,11 +686,13 @@ function CourseFleetCount({
   count,
   icon,
   label,
+  detail,
   tone
 }: {
   count: number;
   icon: React.ReactNode;
   label: string;
+  detail: string;
   tone: "critical" | "warning" | "neutral" | "positive";
 }) {
   return (
@@ -662,6 +700,7 @@ function CourseFleetCount({
       <span>{icon}</span>
       <strong>{count}</strong>
       <small>{label}</small>
+      <p>{detail}</p>
     </div>
   );
 }
@@ -762,6 +801,7 @@ function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]
         return (
           <article className={`operator-course-work-row is-${course.tone}`} key={course.id}>
             <div className="operator-course-work-priority">
+              <small>Next owner</small>
               <span>
                 {formatAutomationQueueState(course.automationQueueState) ??
                   formatPriority(course.priorityGroup)}
@@ -858,25 +898,24 @@ function CourseFilters({
         />
       </label>
       <label>
-        <span>Priority</span>
+        <span>Monitoring state</span>
         <select defaultValue={filters.view} name="courseView">
           <option value="all">All courses</option>
-          <option value="fix-now">
-            Fix now ({diagnostics.find((group) => group.key === "ACTION")?.count ?? 0})
-          </option>
-          <option value="investigate">
-            Investigate ({diagnostics.find((group) => group.key === "WATCH")?.count ?? 0})
-          </option>
-          <option value="limitations">
-            Known limitations ({diagnostics.find((group) => group.key === "LIMITATION")?.count ?? 0}
-            )
-          </option>
-          <option value="unchecked">
-            Not checked ({diagnostics.find((group) => group.key === "UNCHECKED")?.count ?? 0})
-          </option>
-          <option value="working">
-            Working ({diagnostics.find((group) => group.key === "WORKING")?.count ?? 0})
-          </option>
+          <option value="fix-now">{`Needs attention (${
+            diagnostics.find((group) => group.key === "ACTION")?.count ?? 0
+          })`}</option>
+          <option value="investigate">{`Investigate next (${
+            diagnostics.find((group) => group.key === "WATCH")?.count ?? 0
+          })`}</option>
+          <option value="limitations">{`Known limitations (${
+            diagnostics.find((group) => group.key === "LIMITATION")?.count ?? 0
+          })`}</option>
+          <option value="unchecked">{`Verify when needed (${
+            diagnostics.find((group) => group.key === "UNCHECKED")?.count ?? 0
+          })`}</option>
+          <option value="working">{`Monitoring works (${
+            diagnostics.find((group) => group.key === "WORKING")?.count ?? 0
+          })`}</option>
         </select>
       </label>
       <label>
@@ -1098,18 +1137,18 @@ function CourseDeepLinks({
 }
 
 function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
-  if (value === "ACTION") return "Fix now";
-  if (value === "WATCH") return "Investigate";
+  if (value === "ACTION") return "Needs attention";
+  if (value === "WATCH") return "Investigate next";
   if (value === "LIMITATION") return "Known limitation";
   if (value === "UNCHECKED") return "Verify when needed";
-  return "Healthy";
+  return "Monitoring works";
 }
 
 function formatAutomationQueueState(value: CourseInventoryItem["automationQueueState"]) {
   if (value === "DUE_NOW") return "Due now";
   if (value === "IN_PROGRESS") return "In progress";
   if (value === "SCHEDULED_RETRY") return "Scheduled retry";
-  if (value === "NEEDS_HUMAN") return "Needs human";
+  if (value === "NEEDS_HUMAN") return "Human review";
   return null;
 }
 

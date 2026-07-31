@@ -2328,6 +2328,44 @@ button {
   padding-top: 30px;
 }
 
+.operator-course-impact {
+  align-items: flex-start;
+  border-bottom: 1px solid #dce5df;
+  border-top: 1px solid #dce5df;
+  display: flex;
+  gap: 11px;
+  margin-top: 20px;
+  padding: 15px 2px;
+}
+
+.operator-course-impact > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.operator-course-impact > div {
+  display: grid;
+  gap: 3px;
+}
+
+.operator-course-impact strong {
+  font-size: 0.82rem;
+}
+
+.operator-course-impact span {
+  color: #6b7871;
+  font-size: 0.72rem;
+}
+
+.operator-course-impact.is-clear > svg {
+  color: #187143;
+}
+
+.operator-course-impact.is-urgent > svg,
+.operator-course-impact.is-urgent strong {
+  color: #a43e31;
+}
+
 .operator-course-summary {
   border-bottom: 1px solid #dce5df;
   border-top: 1px solid #dce5df;
@@ -2369,7 +2407,7 @@ button {
   background: #edf2ee;
   border-radius: 999px;
   display: inline-flex;
-  grid-row: 1 / span 2;
+  grid-row: 1 / span 3;
   height: 34px;
   justify-content: center;
   width: 34px;
@@ -2383,6 +2421,15 @@ button {
 .operator-course-count small {
   color: #6b7871;
   font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.operator-course-count p {
+  color: #7c8781;
+  font-size: 0.64rem;
+  grid-column: 2;
+  line-height: 1.35;
+  margin: 1px 0 0;
 }
 
 .operator-course-count.is-critical > span {
@@ -2555,6 +2602,14 @@ button {
 .operator-course-work-priority {
   display: grid;
   gap: 6px;
+}
+
+.operator-course-work-priority small {
+  color: #8b9690;
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .operator-course-work-priority span {

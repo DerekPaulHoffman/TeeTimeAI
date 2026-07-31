@@ -296,14 +296,24 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
   };
 }
 
-export function getCourseSummaryCopy(counts: { action: number; watch: number }) {
-  const actionableCount = counts.action + counts.watch;
+export function getCourseSummaryCopy(counts: {
+  action: number;
+  watch: number;
+  limitations: number;
+  unchecked: number;
+  working: number;
+}) {
+  const totalCount =
+    counts.action + counts.watch + counts.limitations + counts.unchecked + counts.working;
+  const attentionCount = counts.action + counts.watch;
 
   return {
-    lifecycle: "Every course appears once, based on its latest monitoring outcome.",
+    lifecycle:
+      `${totalCount} courses appear once by current state. ` +
+      "Known limitations are finished decisions, not active failures.",
     execution:
-      `The same ${actionableCount} Fix now and Investigate courses are regrouped here by next owner. ` +
-      "If automation reaches its safety limit, an Auto investigating course appears under Needs human."
+      `The same ${attentionCount} attention ${attentionCount === 1 ? "course appears" : "courses appear"} ` +
+      "again here exactly once under automation or a person. These are not additional issues."
   };
 }
 
@@ -1015,5 +1025,7 @@ function deriveAutomationQueueState(
       course.incident?.nextAttemptAt ?? course.monitoringStatus?.nextAutomaticAttemptAt ?? null;
     return nextAttemptAt && nextAttemptAt > now ? "SCHEDULED_RETRY" : "DUE_NOW";
   }
-  return course.priorityGroup === "ACTION" ? "NEEDS_HUMAN" : null;
+  return course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH"
+    ? "NEEDS_HUMAN"
+    : null;
 }

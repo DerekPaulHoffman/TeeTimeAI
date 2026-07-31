@@ -725,11 +725,37 @@ describe("operator course inventory", () => {
   });
 
   it("explains that lifecycle courses are regrouped by next owner", () => {
-    expect(getCourseSummaryCopy({ action: 17, watch: 5 })).toEqual({
-      lifecycle: "Every course appears once, based on its latest monitoring outcome.",
+    expect(
+      getCourseSummaryCopy({
+        action: 17,
+        watch: 5,
+        limitations: 66,
+        unchecked: 2,
+        working: 127
+      })
+    ).toEqual({
+      lifecycle:
+        "217 courses appear once by current state. Known limitations are finished decisions, not active failures.",
       execution:
-        "The same 22 Fix now and Investigate courses are regrouped here by next owner. " +
-        "If automation reaches its safety limit, an Auto investigating course appears under Needs human."
+        "The same 22 attention courses appear again here exactly once under automation or a person. " +
+        "These are not additional issues."
+    });
+  });
+
+  it("assigns watch-only investigation work to a person when automation has no claim", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          coverageCategory: "SOURCE_UNVERIFIED",
+          detectedBookingUrl: null
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      priorityGroup: "WATCH",
+      automationQueueState: "NEEDS_HUMAN"
     });
   });
 });
