@@ -189,6 +189,34 @@ describe("operator course inventory", () => {
     expect(result.recommendedAction).not.toContain("keep investigating");
   });
 
+  it("keeps an unsupported local-reader parser with engineering instead of human review", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          localReaderSupported: false,
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-reader-parser",
+            status: "NEEDS_HUMAN",
+            kind: "READER_CANDIDATE",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-30T18:00:00.000Z"),
+            latestMessage: "Use the local tee-time reader for this course.",
+            nextAction: "Implement a compatible reader parser.",
+            failureClass: "READER_PARSER_MISSING"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusLabel: "Engineering verification needed",
+      automationQueueState: "ENGINEERING_NEEDED",
+      priorityGroup: "ACTION"
+    });
+  });
+
   it("uses a restored incident over a stale auto-investigating lifecycle row", () => {
     const [result] = buildCourseInventory(
       [
@@ -639,6 +667,21 @@ describe("operator course inventory", () => {
         course({
           id: "human",
           monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED")
+        }),
+        course({
+          id: "engineering",
+          localReaderSupported: false,
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-engineering",
+            status: "NEEDS_HUMAN",
+            kind: "READER_CANDIDATE",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "Reader parser missing.",
+            nextAction: "Implement the parser.",
+            failureClass: "READER_PARSER_MISSING"
+          }
         })
       ],
       NOW
@@ -648,6 +691,7 @@ describe("operator course inventory", () => {
       dueNow: 1,
       inProgress: 1,
       scheduledRetry: 1,
+      engineeringNeeded: 1,
       needsHuman: 1
     });
   });

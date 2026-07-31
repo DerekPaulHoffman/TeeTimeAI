@@ -153,7 +153,7 @@ type CourseOutcomeFormProps = MutationIdentity;
 
 const outcomeHelp: Record<OperatorCourseDecision, string> = {
   LOCAL_READER:
-    "Route public tee-time checks through the local reader and queue a fresh reader job.",
+    "Queue a compatible local-reader check first. If this booking page does not have a reader parser yet, engineering keeps ownership and the course state is left unchanged.",
   WEBSITE_TEMPORARILY_UNAVAILABLE:
     "Keep the alert active, tell golfers the course website is not working correctly, and schedule a future check.",
   PRIVATE_COURSE:

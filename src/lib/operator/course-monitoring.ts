@@ -753,6 +753,12 @@ export async function applyOperatorCourseDecision(
 
   if (input.decision === "LOCAL_READER") {
     const message = "Use the local tee-time reader for this course.";
+    const localReaderJob = await queueOperatorLocalReaderRecheck(current, now);
+    if (!localReaderJob) {
+      throw new Error(
+        "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed."
+      );
+    }
     const failureFingerprint = buildProviderFailureFingerprint({
       providerFamilyKey: current.status.course.providerFamilyKey,
       failureClass: "READER_PARSER_MISSING",
@@ -848,14 +854,13 @@ export async function applyOperatorCourseDecision(
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
     );
-    const localReaderJob = await queueOperatorLocalReaderRecheck(current, now);
     await dispatchAffectedSearches(
       current.activeSearches.map((search) => search.id),
       context.dispatchSearches
     );
     return {
       ...preview,
-      localReaderQueued: localReaderJob !== null,
+      localReaderQueued: true,
       applied: true,
       replayed: false
     };

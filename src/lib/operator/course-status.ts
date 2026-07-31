@@ -134,7 +134,11 @@ export type CourseDiagnosticKey =
   CourseStatusKey | "TECHNICAL_ACCESS" | "NO_PUBLIC_ONLINE" | "PRIVATE_OR_INVALID";
 export type CourseStatusTone = "critical" | "warning" | "neutral" | "positive";
 export type CourseAutomationQueueState =
-  "DUE_NOW" | "IN_PROGRESS" | "SCHEDULED_RETRY" | "NEEDS_HUMAN";
+  | "DUE_NOW"
+  | "IN_PROGRESS"
+  | "SCHEDULED_RETRY"
+  | "ENGINEERING_NEEDED"
+  | "NEEDS_HUMAN";
 
 export type CourseStatusInput = {
   id: string;
@@ -292,6 +296,9 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
     inProgress: courses.filter((course) => course.automationQueueState === "IN_PROGRESS").length,
     scheduledRetry: courses.filter((course) => course.automationQueueState === "SCHEDULED_RETRY")
       .length,
+    engineeringNeeded: courses.filter(
+      (course) => course.automationQueueState === "ENGINEERING_NEEDED"
+    ).length,
     needsHuman: courses.filter((course) => course.automationQueueState === "NEEDS_HUMAN").length
   };
 }
@@ -1003,6 +1010,13 @@ function deriveAutomationQueueState(
     course.priorityGroup === "UNCHECKED"
   ) {
     return null;
+  }
+  if (
+    course.incident?.status === "NEEDS_HUMAN" &&
+    course.incident.failureClass === "READER_PARSER_MISSING" &&
+    !course.localReaderSupported
+  ) {
+    return "ENGINEERING_NEEDED";
   }
   if (
     course.incident?.status === "NEEDS_HUMAN" ||

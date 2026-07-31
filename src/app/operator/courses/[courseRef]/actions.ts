@@ -308,6 +308,7 @@ function getOperatorActionErrorMessage(error: unknown) {
     (error.message.includes("official course site") ||
       error.message.includes("official booking page") ||
       error.message.includes("official link") ||
+      error.message.includes("local tee-time reader") ||
       error.message.includes("provider") ||
       error.message.includes("Change at least one"))
   ) {

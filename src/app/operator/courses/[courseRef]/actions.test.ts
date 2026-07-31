@@ -81,6 +81,13 @@ function temporaryOutcomeFormData() {
   return formData;
 }
 
+function localReaderOutcomeFormData() {
+  const formData = temporaryOutcomeFormData();
+  formData.set("decision", "LOCAL_READER");
+  formData.set("idempotencyKey", "operator-local-reader-123456");
+  return formData;
+}
+
 describe("requestRecheckAction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -186,5 +193,22 @@ describe("setCourseOutcomeAction", () => {
         dispatchSearches: false
       })
     );
+  });
+
+  it("explains when the booking page has no compatible local reader", async () => {
+    mocks.applyOperatorCourseDecision.mockRejectedValue(
+      new Error(
+        "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed."
+      )
+    );
+
+    await expect(
+      setCourseOutcomeAction(idleState, localReaderOutcomeFormData())
+    ).resolves.toEqual({
+      status: "error",
+      message:
+        "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed."
+    });
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
   });
 });

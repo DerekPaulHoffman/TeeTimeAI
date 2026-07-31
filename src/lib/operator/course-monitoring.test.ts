@@ -601,4 +601,33 @@ describe("operator course monitoring mutations", () => {
       bookingUrl: "https://course.example/book"
     });
   });
+
+  it("keeps engineering ownership when no compatible local reader job can be queued", async () => {
+    localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue(null);
+
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "LOCAL_READER",
+          idempotencyKey: "operator-reader-unsupported"
+        },
+        context
+      )
+    ).rejects.toThrow("not supported by the local tee-time reader yet");
+
+    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
+      courseId: "course-1",
+      targetDate: expect.any(String),
+      players: 2,
+      bookingUrl: "https://course.example/book"
+    });
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
+    expect(transactionMocks.course.update).not.toHaveBeenCalled();
+    expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
+    expect(transactionMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+  });
 });

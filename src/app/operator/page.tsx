@@ -671,8 +671,15 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
           tone="neutral"
         />
         <CourseFleetCount
-          count={counts.needsHuman}
+          count={counts.engineeringNeeded}
           icon={<Wrench size={17} />}
+          label="Engineering work"
+          detail="Reader implementation needed"
+          tone="warning"
+        />
+        <CourseFleetCount
+          count={counts.needsHuman}
+          icon={<ShieldAlert size={17} />}
           label="Human review"
           detail="No automated work is active"
           tone={affectedActiveAlerts > 0 ? "critical" : "neutral"}
@@ -1148,6 +1155,7 @@ function formatAutomationQueueState(value: CourseInventoryItem["automationQueueS
   if (value === "DUE_NOW") return "Due now";
   if (value === "IN_PROGRESS") return "In progress";
   if (value === "SCHEDULED_RETRY") return "Scheduled retry";
+  if (value === "ENGINEERING_NEEDED") return "Engineering work";
   if (value === "NEEDS_HUMAN") return "Human review";
   return null;
 }
