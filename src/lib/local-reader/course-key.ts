@@ -417,6 +417,6 @@ function isEzLinksSearchLanding(url: URL) {
   if (url.pathname === "/") return url.hash === "";
   return (
     url.pathname === "/index.html" &&
-    (url.hash === "" || url.hash === "#!/search")
+    (url.hash === "" || url.hash === "#/search" || url.hash === "#!/search")
   );
 }

@@ -135,6 +135,33 @@ describe("local reader job service", () => {
     );
   });
 
+  it("normalizes a legacy EZLinks search hash before queueing the reader", async () => {
+    prismaMocks.course.findUnique.mockResolvedValue({
+      name: "Harbor Golf Course"
+    });
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-harbor" });
+
+    await queueLocalReaderCourseVerification({
+      courseId: "course-harbor",
+      targetDate: "2026-08-01",
+      players: 2,
+      bookingUrl: "https://wilddunes.ezlinksgolf.com/index.html#/search",
+      force: true
+    });
+
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          courseKey: "ezlinks:wilddunes.ezlinksgolf.com",
+          bookingUrl: "https://wilddunes.ezlinksgolf.com/index.html#!/search",
+          requiredCapabilityKey: "EZLINKS_RENDERED"
+        })
+      })
+    );
+  });
+
   it("allowlists only the exact supported public Chronogolf profiles", () => {
     expect(getLocalReaderCourseKey(chronogolfBookingUrl)).toBe("crestbrook");
     expect(

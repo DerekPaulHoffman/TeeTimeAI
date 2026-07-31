@@ -307,7 +307,7 @@ describe("local Chrome reader contract", () => {
     ).toBeNull();
     expect(
       getLocalReaderCourseKey("https://ballysapi.ezlinksgolf.com/index.html#/search")
-    ).toBeNull();
+    ).toBe("ezlinks:ballysapi.ezlinksgolf.com");
     expect(() =>
       localReaderJobSchema.parse({
         ...job,
