@@ -8,7 +8,8 @@ signed backend job -> local Chrome page -> normalized slots -> signed backend re
 
 It reads only signed backend jobs for exact, signed-out CPS tee-time search
 routes, exact TenFore tenant routes, safe public Chronogolf club profiles,
-and the exact Frear Park and Simsbury Farms legacy Prophet tee sheets. CPS
+safe one-label EZLinks tenant search pages, and the exact Frear Park and
+Simsbury Farms legacy Prophet tee sheets. CPS
 tenants are accepted automatically only when the URL
 is HTTPS, uses one `*.cps.golf` tenant host, and stays on
 `/onlineresweb/search-teetime`. TenFore tenants are accepted only on
@@ -34,6 +35,13 @@ route with one safe slug. Those pages are opened with a date, tee-time step,
 and public player-count selection; unrelated paths and unexpected page shapes
 fail closed. A newly discovered safe public club profile can therefore use the
 existing generic parser without a course-specific extension release.
+
+EZLinks pages are accepted only on an HTTPS, one-label `*.ezlinksgolf.com`
+tenant and the exact rendered `index.html#!/search` route. The reader uses the
+public date and player controls, verifies the rendered course and date, and
+normalizes only the visible result cards. Cloudflare verification is never
+bypassed: a challenge remains an explicit access result, and the reader never
+calls or replays transaction endpoints.
 
 Legacy Prophet jobs use only the exact public rendered tee sheet, course IDs,
 date, player count, and 18-hole filter recorded for Frear Park or Simsbury
@@ -69,7 +77,8 @@ alerts. POST `/jobs` accepts `courseKey`, `targetDate`, and `players`;
 The worker reports its build and parser capabilities with every poll. The
 backend leases only compatible work and automatically requeues exact
 verification when a required capability appears. New CPS, TenFore, and safe
-public Chronogolf profiles that fit an existing parser do not require a reload.
+public Chronogolf or EZLinks profiles that fit an existing parser do not require
+a course-specific allowlist entry.
 An actual parser or manifest change to this unpacked development extension
 still requires Chrome's **Reload** action; unattended binary updates require a
 separately signed Web Store or enterprise-managed extension package.

@@ -17,6 +17,7 @@ import {
   type LocalReaderResult,
 } from "../../src/lib/local-reader/contracts";
 import { getLocalReaderCourse } from "../../src/lib/local-reader/course-key";
+import { getRequiredLocalReaderCapability } from "../../src/lib/local-reader/capabilities";
 
 const host = "127.0.0.1";
 const port = Number(process.env.LOCAL_READER_MOCK_PORT || 4317);
@@ -117,6 +118,7 @@ const server = createServer(async (request, response) => {
         courseName: course.courseName,
         bookingUrl: course.bookingUrl,
         cardTextIncludes: [...course.cardTextIncludes],
+        requiredCapability: getRequiredLocalReaderCapability(courseKey, course.courseName),
       });
       jobs.set(job.id, {
         job,

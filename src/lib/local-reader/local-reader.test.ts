@@ -77,6 +77,20 @@ function dynamicTenForeJob(tenant = "gainfieldfarms"): LocalReaderJob {
   };
 }
 
+function dynamicEzLinksJob(hostname = "ballysapi.ezlinksgolf.com"): LocalReaderJob {
+  return {
+    id: "job-ezlinks",
+    courseKey: `ezlinks:${hostname}`,
+    targetDate: "2026-07-31",
+    players: 3,
+    requestedAt: "2026-07-31T12:00:00.000Z",
+    expiresAt: "2026-07-31T12:05:00.000Z",
+    courseName: "Bally's Golf Links at Ferry Point",
+    bookingUrl: `https://${hostname}/index.html#!/search`,
+    cardTextIncludes: []
+  };
+}
+
 function loadReader() {
   const source = readFileSync(
     resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
@@ -108,6 +122,17 @@ function loadTenForeReader() {
   context.globalThis = context;
   runInNewContext(source, context);
   return context.TeeTimeSpotTenForeReader as Reader;
+}
+
+function loadEzLinksReader() {
+  const source = readFileSync(
+    resolve(process.cwd(), "tools", "local-chrome-reader", "ezlinks-reader.js"),
+    "utf8"
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotEzLinksReader as Reader;
 }
 
 function loadProphetReader() {
@@ -155,17 +180,29 @@ describe("local Chrome reader contract", () => {
       resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
       "utf8"
     );
+    const contentSource = readFileSync(
+      resolve(process.cwd(), "tools", "local-chrome-reader", "content.js"),
+      "utf8"
+    );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://fox.tenfore.golf/*");
     expect(contentMatches).toContain("https://fox.tenfore.golf/*");
+    expect(manifest.host_permissions).toContain("https://*.ezlinksgolf.com/*");
+    expect(contentMatches).toContain("https://*.ezlinksgolf.com/*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedTenForeJob(job)");
+    expect(backgroundSource).toContain("function isAllowlistedEzLinksJob(job)");
+    expect(backgroundSource).toContain('["EZLINKS_RENDERED", 1]');
     expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
     expect(backgroundSource).toContain("pending.result = result");
     expect(backgroundSource).toContain('"RESULT_RETRY_PENDING"');
+    expect(contentSource).toContain(
+      "const pending = tabId ? stored.pendingJobs?.[tabId] : null;"
+    );
+    expect(contentSource).not.toContain("entries.length === 1");
     expect(backgroundSource).toContain("pending.job?.leaseExpiresAt");
     expect(backgroundSource).toContain(
       "/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u"
@@ -243,6 +280,40 @@ describe("local Chrome reader contract", () => {
     expect(
       getLocalReaderCourseKey("https://fox.tenfore.golf/gainfieldfarms?token=secret")
     ).toBeNull();
+  });
+
+  it("accepts signed EZLinks tenant jobs while rejecting infrastructure and transaction paths", () => {
+    const job = dynamicEzLinksJob();
+
+    expect(getLocalReaderCourseKey("https://ballysapi.ezlinksgolf.com/")).toBe(
+      "ezlinks:ballysapi.ezlinksgolf.com"
+    );
+    expect(localReaderJobSchema.parse(job)).toMatchObject({
+      courseKey: "ezlinks:ballysapi.ezlinksgolf.com",
+      courseName: "Bally's Golf Links at Ferry Point"
+    });
+    expect(loadEzLinksReader().isAllowedPageUrl(job, job.bookingUrl)).toBe(true);
+    expect(
+      getLocalReaderCourseKey("https://api.ezlinksgolf.com/index.html#!/search")
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey("https://nested.ballysapi.ezlinksgolf.com/index.html#!/search")
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey("https://ballysapi.ezlinksgolf.com/checkout")
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey("https://ballysapi.ezlinksgolf.com/index.htm#!/search")
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey("https://ballysapi.ezlinksgolf.com/index.html#/search")
+    ).toBeNull();
+    expect(() =>
+      localReaderJobSchema.parse({
+        ...job,
+        bookingUrl: "https://ballysapi.ezlinksgolf.com/index.html#!/checkout"
+      })
+    ).toThrow(/not allowlisted/u);
   });
 
   it("recognizes only the exact reader-candidate public booking surfaces", () => {
@@ -685,6 +756,134 @@ describe("local Chrome reader contract", () => {
       status: "READER_ERROR",
       slots: []
     });
+  });
+
+  it("parses the current signed-out EZLinks result cards", () => {
+    document.title = "Find Tee Times - Bally's (App)";
+    document.body.innerHTML = `
+      <input id="pickerDate" value="07/31/2026" />
+      <div class="search-result-data">
+        <strong>07/31/2026 / 3 players</strong>
+        <strong>3 tee times</strong>
+        <span>Course: Bally's Golf Links at Ferry Point</span>
+      </div>
+      <ul class="tee-time-block">
+        <li>
+          <span class="time">11:40 AM</span>
+          <div class="price"><strong>$283.00</strong></div>
+          <div title="18 holes"><img alt="Tee Time feature: 18 holes" /></div>
+          <div title="Walking"><img alt="Tee Time feature: Walking" /></div>
+          <span class="players">2–4 Players</span>
+        </li>
+        <li>
+          <span class="time">2:30 PM</span>
+          <div class="price"><strong>$225.00</strong></div>
+          <div title="18 holes"><img alt="Tee Time feature: 18 holes" /></div>
+          <span class="players">2 Players</span>
+        </li>
+        <li>
+          <span class="time">4:10 PM</span>
+          <div class="price"><strong>$199</strong></div>
+          <div title="9 holes"><img alt="Tee Time feature: 9 holes" /></div>
+          <div title="Include Cart"><img alt="Tee Time feature: Include Cart" /></div>
+          <span class="players">3 Players</span>
+        </li>
+      </ul>
+    `;
+    const job = dynamicEzLinksJob();
+
+    expect(loadEzLinksReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "AVAILABLE",
+      slots: [
+        {
+          startsAtLocal: "2026-07-31T11:40:00",
+          timeLabel: "11:40 AM",
+          holes: [18],
+          minimumPlayers: 2,
+          availableSpots: 4,
+          priceCents: 28300,
+          cartIncluded: false
+        },
+        {
+          startsAtLocal: "2026-07-31T16:10:00",
+          timeLabel: "4:10 PM",
+          holes: [9],
+          minimumPlayers: 3,
+          availableSpots: 3,
+          priceCents: 19900,
+          cartIncluded: true
+        }
+      ]
+    });
+  });
+
+  it("fails EZLinks closed on the wrong course, wrong date, challenge, or changed cards", () => {
+    const reader = loadEzLinksReader();
+    const job = dynamicEzLinksJob();
+    document.title = "Find Tee Times";
+    document.body.innerHTML = `
+      <input id="pickerDate" value="08/01/2026" />
+      <div class="search-result-data">0 tee times Course: Bally's Golf Links at Ferry Point</div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH"
+    });
+
+    document.body.innerHTML = `
+      <input id="pickerDate" value="07/31/2026" />
+      <div class="search-result-data">0 tee times Course: Other Golf Course</div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH"
+    });
+
+    document.body.innerHTML = "<main>Just a moment... verify you are human</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "ACCESS_CHALLENGE"
+    });
+
+    document.body.innerHTML = "<main>Performing security verification</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "ACCESS_CHALLENGE"
+    });
+
+    document.body.innerHTML = `
+      <input id="pickerDate" value="07/31/2026" />
+      <div class="search-result-data">1 tee time Course: Bally's Golf Links at Ferry Point</div>
+      <ul class="tee-time-block"><li><span>Changed result</span></li></ul>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR"
+    });
+
+    document.body.innerHTML = `
+      <input id="pickerDate" value="07/31/2026" />
+      <div class="search-result-data">2 tee times Course: Bally's Golf Links at Ferry Point</div>
+      <ul class="tee-time-block">
+        <li>
+          <span class="time">11:40 AM</span>
+          <div title="18 holes"></div>
+          <span class="players">2-4 Players</span>
+        </li>
+      </ul>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: []
+    });
+
+    document.body.innerHTML = `
+      <input id="pickerDate" value="07/31/2026" />
+      <div class="search-result-data">0 tee times Course: Bally's Golf Links at Ferry Point</div>
+      <div>Please Wait...</div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: []
+    });
+    expect(
+      reader.readSnapshot(document, "https://ballysapi.ezlinksgolf.com/checkout", job)
+    ).toMatchObject({ status: "PAGE_MISMATCH" });
   });
 
   it("fails closed when tee cards are visible but cannot be parsed", () => {

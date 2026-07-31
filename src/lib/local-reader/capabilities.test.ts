@@ -36,6 +36,18 @@ describe("local reader capabilities", () => {
     });
   });
 
+  it("routes safe EZLinks tenants to the rendered parser", () => {
+    expect(
+      getRequiredLocalReaderCapability(
+        "ezlinks:ballysapi.ezlinksgolf.com",
+        "Bally's Golf Links at Ferry Point"
+      )
+    ).toEqual({
+      key: "EZLINKS_RENDERED",
+      parserVersion: 1
+    });
+  });
+
   it("requires the corrected Prophet redirect parser for both supported courses", () => {
     expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
       key: "PROPHET_FREAR_RENDERED",

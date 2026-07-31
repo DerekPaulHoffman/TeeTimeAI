@@ -25,17 +25,19 @@ export type StaticLocalReaderCourseKey = (typeof LOCAL_READER_COURSE_KEYS)[numbe
 export type DynamicCpsCourseKey = `cps:${string}.cps.golf`;
 export type DynamicChronogolfCourseKey = `chronogolf:${string}`;
 export type DynamicTenForeCourseKey = `tenfore:${string}`;
+export type DynamicEzLinksCourseKey = `ezlinks:${string}.ezlinksgolf.com`;
 export type LocalReaderCourseKey =
   | StaticLocalReaderCourseKey
   | DynamicCpsCourseKey
   | DynamicChronogolfCourseKey
-  | DynamicTenForeCourseKey;
+  | DynamicTenForeCourseKey
+  | DynamicEzLinksCourseKey;
 
 export type LocalReaderCourse = {
   courseName: string;
   bookingUrl: string;
   cardTextIncludes: readonly string[];
-  provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "PROPHET";
+  provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "EZLINKS" | "PROPHET";
   prophetCourseIds?: string;
 };
 
@@ -43,6 +45,24 @@ const CPS_TENANT_HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u
 const CPS_SEARCH_PATH = /^\/onlineresweb\/search-teetime\/?$/u;
 const CPS_DISCOVERY_PATH = /^\/(?:onlineresweb(?:\/search-teetime)?\/?)?$/u;
 const TENFORE_TENANT_PATH = /^\/([a-z0-9][a-z0-9-]{0,127})\/?$/u;
+const EZLINKS_TENANT_HOSTNAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u;
+const EZLINKS_BLOCKED_TENANT_LABELS = new Set([
+  "admin",
+  "api",
+  "auth",
+  "blog",
+  "careers",
+  "config",
+  "contact",
+  "corporate",
+  "dev",
+  "help",
+  "marketing",
+  "shop",
+  "store",
+  "support"
+]);
 
 export const LOCAL_READER_COURSES = {
   "grassy-hill": course("Grassy Hill Country Club", "grassyhill.cps.golf"),
@@ -93,6 +113,9 @@ export function getLocalReaderCourseKey(
     const hostname = url.hostname.toLowerCase();
     if (CPS_TENANT_HOSTNAME.test(hostname) && CPS_DISCOVERY_PATH.test(url.pathname)) {
       return `cps:${hostname}` as DynamicCpsCourseKey;
+    }
+    if (isSafeEzLinksTenantHostname(hostname) && isEzLinksSearchLanding(url)) {
+      return `ezlinks:${hostname}` as DynamicEzLinksCourseKey;
     }
     const tenForeTenant = getTenForeTenant(url);
     if (tenForeTenant) {
@@ -167,6 +190,17 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
         url.protocol === "https:" &&
         url.hostname === "www.chronogolf.com" &&
         getChronogolfSlug(url) === courseKey.slice("chronogolf:".length) &&
+        url.username === "" &&
+        url.password === ""
+      );
+    }
+    if (isDynamicEzLinksCourseKey(courseKey)) {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.hostname === courseKey.slice("ezlinks:".length) &&
+        isSafeEzLinksTenantHostname(url.hostname) &&
+        isEzLinksSearchLanding(url) &&
         url.username === "" &&
         url.password === ""
       );
@@ -277,6 +311,9 @@ export function getLocalReaderJobUrl(
     url.searchParams.set("step", "teetimes");
     return url.toString();
   }
+  if (isDynamicEzLinksCourseKey(courseKey)) {
+    return `https://${courseKey.slice("ezlinks:".length)}/index.html#!/search`;
+  }
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   if (course.provider === "PROPHET") {
@@ -306,6 +343,13 @@ export function isDynamicChronogolfCourseKey(value: string): value is DynamicChr
   );
 }
 
+export function isDynamicEzLinksCourseKey(value: string): value is DynamicEzLinksCourseKey {
+  return (
+    value.startsWith("ezlinks:") &&
+    isSafeEzLinksTenantHostname(value.slice("ezlinks:".length))
+  );
+}
+
 export function getLocalReaderCourse(
   courseKey: LocalReaderCourseKey,
   courseName?: string
@@ -313,7 +357,8 @@ export function getLocalReaderCourse(
   if (
     isDynamicCpsCourseKey(courseKey) ||
     isDynamicChronogolfCourseKey(courseKey) ||
-    isDynamicTenForeCourseKey(courseKey)
+    isDynamicTenForeCourseKey(courseKey) ||
+    isDynamicEzLinksCourseKey(courseKey)
   ) {
     const normalizedCourseName = courseName?.trim();
     if (!normalizedCourseName) return null;
@@ -325,7 +370,9 @@ export function getLocalReaderCourse(
         ? "CPS"
         : isDynamicChronogolfCourseKey(courseKey)
           ? "CHRONOGOLF"
-          : "TENFORE"
+          : isDynamicTenForeCourseKey(courseKey)
+            ? "TENFORE"
+            : "EZLINKS"
     };
   }
   return LOCAL_READER_COURSES[courseKey];
@@ -357,4 +404,19 @@ function getChronogolfSlug(url: URL) {
   if (date && !/^\d{4}-\d{2}-\d{2}$/u.test(date)) return null;
   if (step && step !== "teetimes") return null;
   return /^\/club\/([a-z0-9][a-z0-9-]{0,127})\/?$/u.exec(url.pathname)?.[1] ?? null;
+}
+
+function isSafeEzLinksTenantHostname(hostname: string) {
+  if (!EZLINKS_TENANT_HOSTNAME.test(hostname)) return false;
+  const tenant = hostname.slice(0, -".ezlinksgolf.com".length);
+  return !EZLINKS_BLOCKED_TENANT_LABELS.has(tenant);
+}
+
+function isEzLinksSearchLanding(url: URL) {
+  if (url.search !== "") return false;
+  if (url.pathname === "/") return url.hash === "";
+  return (
+    url.pathname === "/index.html" &&
+    (url.hash === "" || url.hash === "#!/search")
+  );
 }

@@ -8,6 +8,7 @@ export const localReaderCapabilitySchema = z
       "CPS_RENDERED",
       "CHRONOGOLF_RENDERED",
       "TENFORE_RENDERED",
+      "EZLINKS_RENDERED",
       "PROPHET_FREAR_RENDERED"
     ]),
     parserVersion: z.number().int().min(1).max(1000)
@@ -47,6 +48,8 @@ export function getRequiredLocalReaderCapability(
       return { key: "CHRONOGOLF_RENDERED", parserVersion: 1 };
     case "TENFORE":
       return { key: "TENFORE_RENDERED", parserVersion: 1 };
+    case "EZLINKS":
+      return { key: "EZLINKS_RENDERED", parserVersion: 1 };
     case "PROPHET":
       return {
         key: "PROPHET_FREAR_RENDERED",

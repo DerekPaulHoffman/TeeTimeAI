@@ -28,7 +28,7 @@
     ]),
   );
   const CHALLENGE_TEXT =
-    /\b(?:just a moment|verify you are human|checking your browser|captcha|turnstile|waiting room)\b/i;
+    /\b(?:just a moment|verify you are human|checking your browser|performing security verification|security verification|captcha|turnstile|waiting room)\b/i;
 
   function delay(milliseconds) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -194,6 +194,40 @@
     } catch {
       // Continue with the rendered date controls.
     }
+    if (location.hostname.endsWith(".ezlinksgolf.com")) {
+      if (getDisplayedDate() === targetDate) return;
+      const [targetYear, targetMonth, targetDay] = targetDate.split("-").map(Number);
+      document.querySelector("button.ui-datepicker-trigger")?.click();
+      await delay(300);
+      const month = document.querySelector("#ui-datepicker-div .ui-datepicker-month");
+      const year = document.querySelector("#ui-datepicker-div .ui-datepicker-year");
+      if (!(month instanceof HTMLSelectElement) || !(year instanceof HTMLSelectElement)) {
+        throw new Error("The EZLinks public date picker did not render.");
+      }
+      year.value = String(targetYear);
+      year.dispatchEvent(new Event("change", { bubbles: true }));
+      await delay(200);
+      const refreshedMonth = document.querySelector("#ui-datepicker-div .ui-datepicker-month");
+      if (!(refreshedMonth instanceof HTMLSelectElement)) {
+        throw new Error("The EZLinks public month picker did not render.");
+      }
+      refreshedMonth.value = String(targetMonth - 1);
+      refreshedMonth.dispatchEvent(new Event("change", { bubbles: true }));
+      await delay(200);
+      const day = document.querySelector(
+        `#ui-datepicker-div td[data-handler='selectDay'][data-year='${targetYear}'][data-month='${targetMonth - 1}'] a[data-date='${targetDay}']`,
+      );
+      if (!(day instanceof HTMLElement)) {
+        throw new Error(`Target date ${targetDate} is outside the public EZLinks booking window.`);
+      }
+      day.click();
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        if (getDisplayedDate() === targetDate) return;
+        await delay(100);
+      }
+      throw new Error(`Target date ${targetDate} did not become selectable.`);
+    }
     if (
       document.querySelector(`time[datetime^="${CSS.escape(targetDate)}T"]`)
     ) {
@@ -279,6 +313,35 @@
   }
 
   async function choosePlayers(players) {
+    if (location.hostname.endsWith(".ezlinksgolf.com")) {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        const body = document.body?.innerText || "";
+        if (CHALLENGE_TEXT.test(body)) {
+          throw new Error("The public page displayed an access challenge.");
+        }
+        const selected = document.querySelector("#players-button");
+        if (!selected) {
+          await delay(200);
+          continue;
+        }
+        if (String(selected.textContent || "").trim() === String(players)) return;
+        if (selected.getAttribute("aria-expanded") !== "true") selected.click();
+        await delay(200);
+        const options = Array.from(
+          document.querySelectorAll("[aria-labelledby='players-button'] [role='menuitem']"),
+        );
+        const option = options.find(
+          (candidate) => String(candidate.textContent || "").trim() === String(players),
+        );
+        if (option) {
+          option.click();
+          await delay(500);
+          return;
+        }
+      }
+      throw new Error(`Group size ${players} is not offered by this EZLinks course.`);
+    }
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       const button = Array.from(
@@ -359,13 +422,21 @@
       }
       const targetDateVisible =
         body.includes(expectedLabel) || getDisplayedDate() === targetDate;
+      const ezLinksStillLoading =
+        location.hostname.endsWith(".ezlinksgolf.com") &&
+        /\bplease wait\.\.\./i.test(body);
       if (
         targetDateVisible &&
+        !ezLinksStillLoading &&
         /\b(?:no tee times|no availability|no results)\b/i.test(body)
       ) {
         emptyStableSince ??= now;
         if (now - emptyStableSince >= 5_000) return;
-      } else if (targetDateVisible && currentSlotCount === 0) {
+      } else if (
+        targetDateVisible &&
+        currentSlotCount === 0 &&
+        !ezLinksStillLoading
+      ) {
         emptyStableSince ??= now;
         if (now - emptyStableSince >= 8_000) return;
       } else {
@@ -386,14 +457,12 @@
           .catch(() => null)
       )?.tabId || "",
     );
-    const entries = Object.entries(stored.pendingJobs || {});
-    const pending =
-      (tabId && stored.pendingJobs?.[tabId]) ||
-      (entries.length === 1 ? entries[0][1] : null);
+    const pending = tabId ? stored.pendingJobs?.[tabId] : null;
     const reader = [
       globalThis.TeeTimeSpotCpsReader,
       globalThis.TeeTimeSpotChronogolfReader,
       globalThis.TeeTimeSpotTenForeReader,
+      globalThis.TeeTimeSpotEzLinksReader,
       globalThis.TeeTimeSpotProphetReader,
     ].find((candidate) =>
       candidate?.isAllowedPageUrl(pending?.job, location.href),
@@ -420,6 +489,9 @@
         await chooseTargetDate(pending.job.targetDate);
       }
       await waitForTargetPage(pending.job.targetDate, reader);
+      if (typeof reader.prepareRenderedResults === "function") {
+        await reader.prepareRenderedResults(document, window);
+      }
       const snapshot = reader.readSnapshot(
         document,
         location.href,

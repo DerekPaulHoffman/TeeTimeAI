@@ -8,6 +8,7 @@ import {
   isAllowedLocalReaderUrl,
   type DynamicCpsCourseKey,
   type DynamicChronogolfCourseKey,
+  type DynamicEzLinksCourseKey,
   type DynamicTenForeCourseKey
 } from "./course-key";
 
@@ -30,11 +31,19 @@ const dynamicChronogolfCourseKeySchema = z.custom<DynamicChronogolfCourseKey>(
   "Expected a safe Chronogolf club key"
 );
 
+const dynamicEzLinksCourseKeySchema = z.custom<DynamicEzLinksCourseKey>(
+  (value) =>
+    typeof value === "string" &&
+    /^ezlinks:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u.test(value),
+  "Expected a safe EZLinks tenant key"
+);
+
 export const localReaderCourseKeySchema = z.union([
   z.enum(LOCAL_READER_COURSE_KEYS),
   dynamicCpsCourseKeySchema,
   dynamicChronogolfCourseKeySchema,
-  dynamicTenForeCourseKeySchema
+  dynamicTenForeCourseKeySchema,
+  dynamicEzLinksCourseKeySchema
 ]);
 
 const localDateSchema = z

@@ -7,6 +7,7 @@ const READER_CAPABILITIES = Object.freeze([
   ["CPS_RENDERED", 1],
   ["CHRONOGOLF_RENDERED", 1],
   ["TENFORE_RENDERED", 1],
+  ["EZLINKS_RENDERED", 1],
   ["PROPHET_FREAR_RENDERED", 4]
 ]);
 const ALLOWED_COURSES = Object.freeze({
@@ -199,6 +200,61 @@ function isAllowlistedChronogolfJob(job) {
   }
 }
 
+function isSafeEzLinksHostname(hostname) {
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u.test(hostname)) {
+    return false;
+  }
+  const tenant = hostname.slice(0, -".ezlinksgolf.com".length);
+  return !new Set([
+    "admin",
+    "api",
+    "auth",
+    "blog",
+    "careers",
+    "config",
+    "contact",
+    "corporate",
+    "dev",
+    "help",
+    "marketing",
+    "shop",
+    "store",
+    "support"
+  ]).has(tenant);
+}
+
+function isAllowlistedEzLinksJob(job) {
+  try {
+    if (
+      !/^ezlinks:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u.test(
+        job?.courseKey || ""
+      ) ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "")
+    ) {
+      return false;
+    }
+    const hostname = job.courseKey.slice("ezlinks:".length);
+    const url = new URL(job.bookingUrl);
+    return (
+      isSafeEzLinksHostname(hostname) &&
+      url.protocol === "https:" &&
+      url.hostname === hostname &&
+      url.pathname === "/index.html" &&
+      url.search === "" &&
+      url.hash === "#!/search" &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedProphetJob(job) {
   try {
     const config = PROPHET_COURSES[job?.courseKey];
@@ -253,6 +309,7 @@ function isAllowlistedJob(job) {
     if (isAllowlistedCpsJob(job)) return true;
     if (isAllowlistedChronogolfJob(job)) return true;
     if (isAllowlistedTenForeJob(job)) return true;
+    if (isAllowlistedEzLinksJob(job)) return true;
     if (isAllowlistedProphetJob(job)) return true;
     const allowed = ALLOWED_COURSES[job?.courseKey];
     if (!allowed) return false;
