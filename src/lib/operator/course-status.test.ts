@@ -448,6 +448,7 @@ describe("operator course inventory", () => {
       (group) => group.key === "WATCH"
     );
     expect(investigate).toMatchObject({
+      label: "Investigate next",
       count: 3,
       subcategories: [
         { key: "SOURCE_MISSING", count: 2 },

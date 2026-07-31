@@ -319,11 +319,11 @@ export function getCourseSummaryCopy(counts: {
 
 export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
   const groups = [
-    { key: "ACTION", label: "Fix now" },
-    { key: "WATCH", label: "Investigate" },
+    { key: "ACTION", label: "Needs attention" },
+    { key: "WATCH", label: "Investigate next" },
     { key: "LIMITATION", label: "Known limitations" },
-    { key: "UNCHECKED", label: "Not checked" },
-    { key: "WORKING", label: "Working" }
+    { key: "UNCHECKED", label: "Verify when needed" },
+    { key: "WORKING", label: "Monitoring works" }
   ] as const;
 
   return groups.map((group) => {

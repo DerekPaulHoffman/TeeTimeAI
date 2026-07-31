@@ -724,9 +724,9 @@ function CourseDiagnosticBreakdown({
     <div className="operator-diagnostic-section">
       <div className="operator-diagnostic-heading">
         <div>
-          <strong>Largest issue groups</strong>
+          <strong>Course outcome groups</strong>
           <span>
-            Counts are grouped by the next operational decision
+            Counts are grouped by the current outcome and any remaining decision
             {state === "all" ? "." : ` in ${state}.`}
           </span>
         </div>
@@ -788,11 +788,11 @@ function CourseDiagnosticBreakdown({
 
 function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]["courses"] }) {
   const work = courses
-    .filter((course) => course.priorityGroup !== "WORKING" && course.priorityGroup !== "UNCHECKED")
+    .filter((course) => course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH")
     .slice(0, 15);
 
   if (work.length === 0) {
-    return <EmptyState>No known course repair work.</EmptyState>;
+    return <EmptyState>No courses currently need action.</EmptyState>;
   }
 
   return (
