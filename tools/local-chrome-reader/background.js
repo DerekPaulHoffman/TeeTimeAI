@@ -473,6 +473,39 @@ async function wakePendingTab(tabId) {
   }
 }
 
+function isReusableEzLinksTab(job, tab) {
+  try {
+    if (!isAllowlistedEzLinksJob(job) || !tab?.id || !tab.url) return false;
+    const hostname = job.courseKey.slice("ezlinks:".length);
+    const url = new URL(tab.url);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === hostname &&
+      url.pathname === "/index.html" &&
+      url.hash === "#!/search" &&
+      url.username === "" &&
+      url.password === "" &&
+      [...url.searchParams.keys()].every((key) =>
+        key.startsWith("__cf_chl_"),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function findReusableEzLinksTab(job) {
+  if (!isAllowlistedEzLinksJob(job)) return null;
+  const hostname = job.courseKey.slice("ezlinks:".length);
+  const tabs = await chrome.tabs.query({ url: `https://${hostname}/*` });
+  return (
+    tabs
+      .filter((tab) => isReusableEzLinksTab(job, tab))
+      .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0] ||
+    null
+  );
+}
+
 async function cleanStalePendingJobs(jobs) {
   const now = Date.now();
   let changed = false;
@@ -498,7 +531,9 @@ async function cleanStalePendingJobs(jobs) {
       delete jobs[tabId];
       changed = true;
       removedCount += 1;
-      if (tabExists) await closePendingTab(Number(tabId));
+      if (tabExists && pending.closeTabOnFinish !== false) {
+        await closePendingTab(Number(tabId));
+      }
     }
   }
   if (changed) await savePendingJobs(jobs);
@@ -556,7 +591,7 @@ async function finishJob(tabId, result) {
   } catch (error) {
     await setLastStatus("RESULT_FAILED", error instanceof Error ? error.message : String(error));
   } finally {
-    await closePendingTab(tabId);
+    if (pending.closeTabOnFinish !== false) await closePendingTab(tabId);
   }
 }
 
@@ -610,14 +645,18 @@ async function poll() {
     if (!isAllowlistedJob(payload.job)) {
       throw new Error("The backend returned a non-allowlisted reader job.");
     }
-    const tab = await chrome.tabs.create({
-      url: payload.job.bookingUrl,
-      active: false
-    });
+    const reusableTab = await findReusableEzLinksTab(payload.job);
+    const tab =
+      reusableTab ||
+      (await chrome.tabs.create({
+        url: payload.job.bookingUrl,
+        active: false
+      }));
     if (!tab.id) throw new Error("Chrome did not create a worker tab.");
     jobs[String(tab.id)] = {
       job: payload.job,
-      openedAt: new Date().toISOString()
+      openedAt: new Date().toISOString(),
+      closeTabOnFinish: reusableTab === null
     };
     await savePendingJobs(jobs);
     await setLastStatus("READING", `${payload.job.courseKey} ${payload.job.targetDate}`);

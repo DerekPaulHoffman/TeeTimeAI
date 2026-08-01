@@ -458,16 +458,21 @@
       )?.tabId || "",
     );
     const pending = tabId ? stored.pendingJobs?.[tabId] : null;
-    const reader = [
+    const readers = [
       globalThis.TeeTimeSpotCpsReader,
       globalThis.TeeTimeSpotChronogolfReader,
       globalThis.TeeTimeSpotTenForeReader,
       globalThis.TeeTimeSpotEzLinksReader,
       globalThis.TeeTimeSpotWebTracReader,
       globalThis.TeeTimeSpotProphetReader,
-    ].find((candidate) =>
-      candidate?.isAllowedPageUrl(pending?.job, location.href),
-    );
+    ];
+    const reader =
+      readers.find((candidate) =>
+        candidate?.isAllowedPageUrl(pending?.job, location.href),
+      ) ||
+      readers.find((candidate) =>
+        candidate?.isExpectedChallengePage?.(pending?.job, location.href),
+      );
     if (!pending?.job) {
       if (pendingJobLookupAttempts < PENDING_JOB_LOOKUP_LIMIT) {
         pendingJobLookupAttempts += 1;
@@ -482,6 +487,20 @@
 
     running = true;
     try {
+      if (typeof reader.waitForPassiveChallengeClearance === "function") {
+        const cleared = await reader.waitForPassiveChallengeClearance(
+          document,
+          window,
+        );
+        if (!cleared) {
+          throw new Error("The public page displayed an access challenge.");
+        }
+      }
+      if (!reader.isAllowedPageUrl(pending.job, location.href)) {
+        throw new Error(
+          "The public page did not return to the allowlisted search route.",
+        );
+      }
       await chooseCourse(pending.job);
       if (reader.SKIP_PLAYER_SELECTION !== true) {
         await choosePlayers(pending.job.players);

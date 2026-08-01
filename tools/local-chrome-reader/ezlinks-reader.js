@@ -9,6 +9,7 @@
   const PLAYERS_PATTERN = /^([1-4])(?:\s*[–-]\s*([1-4]))?\s+Players?$/i;
   const CHALLENGE_TEXT =
     /\b(?:just a moment|verify you are human|checking your browser|performing security verification|security verification|captcha|turnstile|waiting room)\b/i;
+  const PASSIVE_CHALLENGE_WAIT_MS = 45_000;
   const BLOCKED_TENANTS = new Set([
     "admin",
     "api",
@@ -74,6 +75,56 @@
     } catch {
       return false;
     }
+  }
+
+  function isExpectedChallengePage(job, value) {
+    try {
+      if (
+        !/^ezlinks:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u.test(
+          job?.courseKey || "",
+        ) ||
+        !LOCAL_DATE.test(job?.targetDate || "")
+      ) {
+        return false;
+      }
+      const hostname = job.courseKey.slice("ezlinks:".length);
+      const url = new URL(value);
+      return (
+        isSafeTenant(hostname) &&
+        url.protocol === "https:" &&
+        url.hostname === hostname &&
+        url.pathname === "/index.html" &&
+        url.hash === "#!/search" &&
+        url.username === "" &&
+        url.password === "" &&
+        [...url.searchParams.keys()].every((key) =>
+          key.startsWith("__cf_chl_"),
+        )
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function hasAccessChallenge(documentRoot) {
+    const bodyText = normalizeText(
+      documentRoot.body?.innerText || documentRoot.body?.textContent,
+    );
+    return CHALLENGE_TEXT.test(bodyText);
+  }
+
+  async function waitForPassiveChallengeClearance(
+    documentRoot,
+    windowRoot = root,
+    maxWaitMilliseconds = PASSIVE_CHALLENGE_WAIT_MS,
+  ) {
+    if (!hasAccessChallenge(documentRoot)) return true;
+    const deadline = Date.now() + Math.max(0, maxWaitMilliseconds);
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => windowRoot.setTimeout(resolve, 500));
+      if (!hasAccessChallenge(documentRoot)) return true;
+    }
+    return false;
   }
 
   function parseDisplayedDate(value) {
@@ -258,7 +309,9 @@
     READER_VERSION,
     countRenderedSlots,
     isAllowedPageUrl,
+    isExpectedChallengePage,
     prepareRenderedResults,
     readSnapshot,
+    waitForPassiveChallengeClearance,
   };
 })(globalThis);

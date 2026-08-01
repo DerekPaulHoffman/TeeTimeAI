@@ -24,6 +24,12 @@ import {
 type Reader = {
   SKIP_DATE_SELECTION?: boolean;
   SKIP_PLAYER_SELECTION?: boolean;
+  isExpectedChallengePage?: (job: LocalReaderJob, pageUrl: string) => boolean;
+  waitForPassiveChallengeClearance?: (
+    documentRoot: Document,
+    windowRoot: { setTimeout: (callback: () => void, delay: number) => unknown },
+    maxWaitMilliseconds?: number
+  ) => Promise<boolean>;
   readSnapshot: (
     documentRoot: Document,
     pageUrl: string,
@@ -233,7 +239,13 @@ describe("local Chrome reader contract", () => {
     );
     expect(contentSource).not.toContain("entries.length === 1");
     expect(contentSource).toContain("globalThis.TeeTimeSpotWebTracReader");
+    expect(contentSource).toContain("waitForPassiveChallengeClearance");
+    expect(contentSource).toContain(
+      "The public page did not return to the allowlisted search route."
+    );
     expect(backgroundSource).toContain("pending.job?.leaseExpiresAt");
+    expect(backgroundSource).toContain("findReusableEzLinksTab(payload.job)");
+    expect(backgroundSource).toContain("pending.closeTabOnFinish !== false");
     expect(backgroundSource).toContain("expired reader job");
     expect(backgroundSource).toContain("requesting fresh signed work");
     expect(backgroundSource).toContain(
@@ -1049,6 +1061,42 @@ describe("local Chrome reader contract", () => {
     expect(
       reader.readSnapshot(document, "https://ballysapi.ezlinksgolf.com/checkout", job)
     ).toMatchObject({ status: "PAGE_MISMATCH" });
+  });
+
+  it("waits passively for an exact EZLinks Cloudflare challenge to clear", async () => {
+    const reader = loadEzLinksReader();
+    const job = dynamicEzLinksJob("lakeofislesbest.ezlinksgolf.com");
+    const challengeUrl =
+      "https://lakeofislesbest.ezlinksgolf.com/index.html?__cf_chl_rt_tk=temporary#!/search";
+    expect(reader.isExpectedChallengePage?.(job, challengeUrl)).toBe(true);
+    expect(
+      reader.isExpectedChallengePage?.(
+        job,
+        "https://lakeofislesbest.ezlinksgolf.com/index.html?redirect=checkout#!/search"
+      )
+    ).toBe(false);
+
+    document.body.innerHTML = "<main>Performing security verification</main>";
+    let waits = 0;
+    const passiveWindow = {
+      setTimeout(callback: () => void) {
+        waits += 1;
+        if (waits === 2) {
+          document.body.innerHTML = '<input id="pickerDate" value="07/31/2026" />';
+        }
+        callback();
+        return waits;
+      }
+    };
+    await expect(
+      reader.waitForPassiveChallengeClearance?.(document, passiveWindow, 1_000)
+    ).resolves.toBe(true);
+    expect(waits).toBe(2);
+
+    document.body.innerHTML = "<main>Performing security verification</main>";
+    await expect(
+      reader.waitForPassiveChallengeClearance?.(document, passiveWindow, 0)
+    ).resolves.toBe(false);
   });
 
   it("fails closed when tee cards are visible but cannot be parsed", () => {
