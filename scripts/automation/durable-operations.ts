@@ -17,6 +17,7 @@ import {
   classifyAutomationRunKind,
   parseAutomationRunAudit
 } from "@/lib/automation/db-service";
+import { getOperatorCourseEvidenceReviewAt } from "@/lib/automation/operator-evidence-lifecycle";
 import { bootstrapAutomationWorkers } from "@/lib/automation/worker-state";
 import { prisma } from "@/lib/prisma";
 
@@ -211,6 +212,8 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
     select: { id: true, updatedAt: true }
   });
   if (!course) throw new Error("No course matched the supplied Google Place ID.");
+  const observedAt = new Date();
+  const reviewAt = getOperatorCourseEvidenceReviewAt(observedAt);
 
   if (apply) {
     await prisma.$transaction(async (tx) => {
@@ -228,7 +231,8 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
             (input.bookingMetadata as Prisma.InputJsonValue | undefined) ??
             Prisma.DbNull,
           policyNotes: input.policyNotes,
-          intelligenceVerifiedAt: new Date(),
+          intelligenceVerifiedAt: observedAt,
+          intelligenceReviewAt: reviewAt,
           intelligenceConfidence: input.confidence
         }
       });
@@ -251,7 +255,10 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
             (input.bookingMetadata as Prisma.InputJsonValue | undefined) ??
             Prisma.DbNull,
           confidence: input.confidence,
-          evidence: { learnedFrom: "validated-operator-course-evidence" }
+          evidence: {
+            learnedFrom: "validated-operator-course-evidence",
+            reviewAt: reviewAt.toISOString()
+          }
         }
       });
     });

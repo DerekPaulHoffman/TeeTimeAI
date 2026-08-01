@@ -316,6 +316,7 @@ describe("executeCourseSupportVerificationStep", () => {
     prismaMocks.courseFindUnique.mockResolvedValue({
       ...course,
       intelligenceVerifiedAt: new Date("2026-07-21T11:30:00.000Z"),
+      intelligenceReviewAt: new Date("2026-08-20T12:00:00.000Z"),
       intelligenceConfidence: 0.95
     });
     discoveryMocks.prepareCourseSupportVerificationMonitoring.mockResolvedValue({
