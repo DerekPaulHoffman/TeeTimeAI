@@ -994,6 +994,36 @@ describe("local Chrome reader contract", () => {
     });
   });
 
+  it("accepts an EZLinks facility name followed by its provider course suffix", () => {
+    const reader = loadEzLinksReader();
+    const job = {
+      ...dynamicEzLinksJob("lakeofislesbest.ezlinksgolf.com"),
+      targetDate: "2026-08-02",
+      courseName: "Lake of Isles"
+    };
+    document.title = "Find Tee Times - Lake of Isles Best Available";
+    document.body.innerHTML = `
+      <input id="pickerDate" value="08/02/2026" />
+      <div class="search-result-data">
+        <strong>08/02/2026 / 2 players</strong>
+        <strong>0 tee times</strong>
+        <span>Course: Lake of Isles - North Course (Resort)</span>
+      </div>
+    `;
+
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "NO_AVAILABILITY",
+      slots: []
+    });
+
+    document.querySelector(".search-result-data span")!.textContent =
+      "Course: Lake of Isles Resort";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: []
+    });
+  });
+
   it("fails EZLinks closed on the wrong course, wrong date, challenge, or changed cards", () => {
     const reader = loadEzLinksReader();
     const job = dynamicEzLinksJob();

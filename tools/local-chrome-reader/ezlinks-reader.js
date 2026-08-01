@@ -145,6 +145,14 @@
     return `${targetDate}T${String(hour).padStart(2, "0")}:${match[2]}:00`;
   }
 
+  function courseReadoutMatchesJob(courseReadout, job) {
+    const actual = normalizeText(courseReadout).toLocaleLowerCase("en-US");
+    const expected = normalizeText(job?.courseName).toLocaleLowerCase("en-US");
+    return Boolean(
+      expected && (actual === expected || actual.startsWith(`${expected} - `)),
+    );
+  }
+
   function parseCard(card, job) {
     const timeLabel = normalizeText(card.querySelector(".time")?.textContent);
     const startsAtLocal = toLocalDateTime(job.targetDate, timeLabel);
@@ -256,11 +264,7 @@
       return result(courseKey, "READER_ERROR", pageUrl, pageTitle, []);
     }
     const courseReadout = /\bCourse:\s*(.+)$/iu.exec(resultHeader)?.[1];
-    if (
-      !courseReadout ||
-      normalizeText(courseReadout).toLocaleLowerCase("en-US") !==
-        normalizeText(job.courseName).toLocaleLowerCase("en-US")
-    ) {
+    if (!courseReadoutMatchesJob(courseReadout, job)) {
       return result(courseKey, "PAGE_MISMATCH", pageUrl, pageTitle, []);
     }
 
