@@ -35,9 +35,9 @@ import {
 } from "lucide-react";
 
 import {
-  addLocalDays,
-  formatDateInputValue,
-  getNextSaturdayDateInputValue
+  getMinimumSearchDateInputValue,
+  getNextSaturdayDateInputValue,
+  reconcileFutureSearchDateInputValue
 } from "@/lib/dates/local-date";
 import {
   getAlertSupportDescription,
@@ -199,10 +199,6 @@ type GoogleMapsClassicMarker = {
 
 type GoogleMapsMarker = GoogleMapsAdvancedMarker | GoogleMapsClassicMarker;
 
-const tomorrow = () => {
-  return formatDateInputValue(addLocalDays(new Date(), 1));
-};
-
 function formatAlertDate(value: string) {
   const [year, month, day] = value.split("-").map(Number);
   if (!year || !month || !day) {
@@ -289,6 +285,9 @@ function TeeTimeIntakeContent({
   const [date, setDate] = useState(
     () => initialValues.date ?? getNextSaturdayDateInputValue()
   );
+  const [minSearchDate, setMinSearchDate] = useState(() =>
+    getMinimumSearchDateInputValue()
+  );
   const [startTime, setStartTime] = useState(initialValues.startTime ?? "09:00");
   const [endTime, setEndTime] = useState(initialValues.endTime ?? "18:00");
   const [players, setPlayers] = useState(initialValues.players ?? 4);
@@ -331,8 +330,10 @@ function TeeTimeIntakeContent({
   const reportedCourseLookupMissesRef = useRef(new Set<string>());
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
   const shouldRefreshRestoredCoursesRef = useRef(false);
+  const dateWasEditedRef = useRef(false);
 
   function reconcileDateFromControl(event: SyntheticEvent<HTMLInputElement>) {
+    dateWasEditedRef.current = true;
     setDate(event.currentTarget.value);
   }
 
@@ -417,7 +418,57 @@ function TeeTimeIntakeContent({
     startTime
   ]);
 
-  const minSearchDate = tomorrow();
+  useEffect(() => {
+    if (!draftReady) {
+      return;
+    }
+
+    let rolloverTimer: number | undefined;
+
+    const synchronizeLocalDate = () => {
+      const now = new Date();
+      const nextMinimum = getMinimumSearchDateInputValue(now);
+      setMinSearchDate(nextMinimum);
+      if (!dateWasEditedRef.current) {
+        setDate((current) => reconcileFutureSearchDateInputValue(current, now));
+      }
+    };
+
+    const scheduleNextRollover = () => {
+      const now = new Date();
+      const nextLocalDay = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        0,
+        0,
+        1
+      );
+      rolloverTimer = window.setTimeout(() => {
+        synchronizeLocalDate();
+        scheduleNextRollover();
+      }, nextLocalDay.getTime() - now.getTime());
+    };
+
+    const synchronizeWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        synchronizeLocalDate();
+      }
+    };
+
+    synchronizeLocalDate();
+    scheduleNextRollover();
+    window.addEventListener("focus", synchronizeLocalDate);
+    document.addEventListener("visibilitychange", synchronizeWhenVisible);
+
+    return () => {
+      if (rolloverTimer !== undefined) {
+        window.clearTimeout(rolloverTimer);
+      }
+      window.removeEventListener("focus", synchronizeLocalDate);
+      document.removeEventListener("visibilitychange", synchronizeWhenVisible);
+    };
+  }, [draftReady]);
 
   const selectedIds = useMemo(
     () => new Set(selected.map((course) => course.googlePlaceId)),

@@ -15,3 +15,13 @@ export function getNextSaturdayDateInputValue(from = new Date()) {
   const daysUntilSaturday = (6 - from.getDay() + 7) % 7 || 7;
   return formatDateInputValue(addLocalDays(from, daysUntilSaturday));
 }
+
+export function getMinimumSearchDateInputValue(from = new Date()) {
+  return formatDateInputValue(addLocalDays(from, 1));
+}
+
+export function reconcileFutureSearchDateInputValue(value: string, from = new Date()) {
+  return value >= getMinimumSearchDateInputValue(from)
+    ? value
+    : getNextSaturdayDateInputValue(from);
+}

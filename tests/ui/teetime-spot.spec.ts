@@ -1511,6 +1511,47 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expectNoPageIssues(issues, testInfo);
   });
 
+  test("keeps the untouched alert date valid across a local-day rollover", async ({
+    page
+  }, testInfo) => {
+    const issues = collectPageIssues(page);
+    await page.goto("/search");
+    const dateInput = page.getByLabel("Date");
+    const originalDate = await dateInput.inputValue();
+    const futureTime = await page.evaluate(() => Date.now() + 14 * 24 * 60 * 60 * 1_000);
+
+    await page.clock.setFixedTime(futureTime);
+    const expected = await page.evaluate(() => {
+      const format = (value: Date) => {
+        const year = value.getFullYear();
+        const month = String(value.getMonth() + 1).padStart(2, "0");
+        const day = String(value.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+      };
+      const now = new Date();
+      const minimum = new Date(now);
+      minimum.setDate(minimum.getDate() + 1);
+      const nextSaturday = new Date(now);
+      nextSaturday.setDate(
+        nextSaturday.getDate() + ((6 - nextSaturday.getDay() + 7) % 7 || 7)
+      );
+      return {
+        minimum: format(minimum),
+        nextSaturday: format(nextSaturday)
+      };
+    });
+
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+    await expect(dateInput).toHaveAttribute("min", expected.minimum);
+    await expect(dateInput).toHaveValue(expected.nextSaturday);
+    expect(await dateInput.inputValue()).not.toBe(originalDate);
+    expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(
+      true
+    );
+    await expectNoPageIssues(issues, testInfo);
+  });
+
   test("dashboard access state is clear and layout is stable", async ({ page }, testInfo) => {
     const issues = collectPageIssues(page);
 
