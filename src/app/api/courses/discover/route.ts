@@ -13,6 +13,7 @@ import { searchNearbyGolfCourses } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
+import { findPersistedNearbyCourseCandidates } from "@/lib/places/persisted-course-fallback";
 import { enrichCoursesWithBookingEvidence } from "@/lib/pricing/course-price-enrichment";
 
 export async function GET(request: NextRequest) {
@@ -21,6 +22,7 @@ export async function GET(request: NextRequest) {
   const radiusMeters = normalizeCourseSearchRadiusMeters(
     request.nextUrl.searchParams.get("radiusMeters")
   );
+  const cacheKey = getCourseDiscoveryCacheKey({ latitude, longitude, radiusMeters });
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return NextResponse.json({ error: "Latitude and longitude are required" }, { status: 400 });
@@ -41,7 +43,6 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const cacheKey = getCourseDiscoveryCacheKey({ latitude, longitude, radiusMeters });
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
       return NextResponse.json(
@@ -84,6 +85,29 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { error: "Course discovery is temporarily unavailable. Try again in a moment." },
         { status: 503 }
+      );
+    }
+
+    try {
+      const persistedCourses = await findPersistedNearbyCourseCandidates({
+        latitude,
+        longitude,
+        radiusMeters
+      });
+      if (persistedCourses.length > 0) {
+        const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
+        const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
+        const coursesWithPrices = await enrichCoursesWithBookingEvidence(coursesWithLayouts);
+        await writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery");
+        return NextResponse.json(
+          { courses: coursesWithPrices, demo: false },
+          { headers: courseDataSuccessCacheHeaders }
+        );
+      }
+    } catch (fallbackError) {
+      console.warn(
+        "Persisted course discovery fallback unavailable",
+        fallbackError instanceof Error ? fallbackError.message : "Unknown fallback error"
       );
     }
 

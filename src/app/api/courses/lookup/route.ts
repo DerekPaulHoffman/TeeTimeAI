@@ -10,6 +10,7 @@ import {
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
+import { findPersistedCourseCandidatesByName } from "@/lib/places/persisted-course-fallback";
 
 const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 120;
@@ -51,8 +52,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  const cacheKey = getCourseLookupCacheKey({ query, latitude, longitude });
+
   try {
-    const cacheKey = getCourseLookupCacheKey({ query, latitude, longitude });
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
       return NextResponse.json(
@@ -88,6 +90,26 @@ export async function GET(request: NextRequest) {
       "Course lookup failed",
       error instanceof Error ? error.message : "Unknown course lookup error"
     );
+    if (!(error instanceof GooglePlaceReviewsUnavailableError)) {
+      try {
+        const persistedCourses = await findPersistedCourseCandidatesByName(query);
+        if (persistedCourses.length > 0) {
+          const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
+          const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
+          await writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup");
+          return NextResponse.json(
+            { courses: coursesWithLayouts },
+            { headers: courseDataSuccessCacheHeaders }
+          );
+        }
+      } catch (fallbackError) {
+        console.warn(
+          "Persisted course lookup fallback unavailable",
+          fallbackError instanceof Error ? fallbackError.message : "Unknown fallback error"
+        );
+      }
+    }
+
     const status = error instanceof GooglePlaceReviewsUnavailableError ? 503 : 502;
     return NextResponse.json(
       { error: "Course lookup is temporarily unavailable. Try again in a moment." },

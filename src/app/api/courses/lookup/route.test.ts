@@ -9,6 +9,7 @@ import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
+  findPersistedCourseCandidatesByName: vi.fn(),
   getGooglePlacesApiKey: vi.fn(),
   readCourseRuntimeCache: vi.fn(),
   searchGolfCoursesByName: vi.fn(),
@@ -34,10 +35,15 @@ vi.mock("@/lib/places/course-runtime-cache", () => ({
   writeCourseRuntimeCache: mocks.writeCourseRuntimeCache
 }));
 
+vi.mock("@/lib/places/persisted-course-fallback", () => ({
+  findPersistedCourseCandidatesByName: mocks.findPersistedCourseCandidatesByName
+}));
+
 describe("GET /api/courses/lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    mocks.findPersistedCourseCandidatesByName.mockResolvedValue([]);
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
@@ -126,6 +132,33 @@ describe("GET /api/courses/lookup", () => {
       courses: [{ googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }]
     });
     expect(mocks.searchGolfCoursesByName).not.toHaveBeenCalled();
+  });
+
+  it("returns known persisted courses when the Google quota is exhausted", async () => {
+    mocks.searchGolfCoursesByName.mockRejectedValue(
+      new Error("Google Places course search failed with 429")
+    );
+    mocks.findPersistedCourseCandidatesByName.mockResolvedValue([
+      { googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }
+    ]);
+
+    const response = await GET(request("?q=Bethpage%20Black"));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      courses: [
+        {
+          googlePlaceId: "bethpage-black",
+          name: "Bethpage Black Course",
+          layoutHolesStatus: "UNVERIFIED"
+        }
+      ]
+    });
+    expect(mocks.writeCourseRuntimeCache).toHaveBeenCalledWith(
+      "lookup-key",
+      [expect.objectContaining({ googlePlaceId: "bethpage-black" })],
+      "course-lookup"
+    );
   });
 
   it("returns a generic 503 when durable place reviews cannot be read", async () => {

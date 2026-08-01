@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
   enrichCoursesWithBookingEvidence: vi.fn(),
+  findPersistedNearbyCourseCandidates: vi.fn(),
   readCourseRuntimeCache: vi.fn(),
   searchNearbyGolfCourses: vi.fn(),
   writeCourseRuntimeCache: vi.fn()
@@ -37,6 +38,10 @@ vi.mock("@/lib/places/course-runtime-cache", () => ({
   writeCourseRuntimeCache: mocks.writeCourseRuntimeCache
 }));
 
+vi.mock("@/lib/places/persisted-course-fallback", () => ({
+  findPersistedNearbyCourseCandidates: mocks.findPersistedNearbyCourseCandidates
+}));
+
 const originalEnv = {
   GOOGLE_PLACES_API_KEY: process.env.GOOGLE_PLACES_API_KEY,
   VERCEL_ENV: process.env.VERCEL_ENV
@@ -50,6 +55,7 @@ describe("GET /api/courses/discover provider configuration", () => {
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithBookingEvidence.mockImplementation(async (courses) => courses);
+    mocks.findPersistedNearbyCourseCandidates.mockResolvedValue([]);
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
   });
@@ -128,6 +134,29 @@ describe("GET /api/courses/discover provider configuration", () => {
       demo: false
     });
     expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+  });
+
+  it("returns known persisted courses when the Google quota is exhausted", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    mocks.searchNearbyGolfCourses.mockRejectedValue(
+      new Error("Google Places nearby search failed with 429")
+    );
+    mocks.findPersistedNearbyCourseCandidates.mockResolvedValue([
+      { googlePlaceId: "course-1", name: "Known Public Course" }
+    ]);
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      courses: [{ googlePlaceId: "course-1", name: "Known Public Course" }],
+      demo: false
+    });
+    expect(mocks.writeCourseRuntimeCache).toHaveBeenCalledWith(
+      "discover-key",
+      [expect.objectContaining({ googlePlaceId: "course-1" })],
+      "course-discovery"
+    );
   });
 });
 
