@@ -711,6 +711,36 @@ describe("local Chrome reader contract", () => {
     });
   });
 
+  it("accepts Simsbury's visible week label when its public empty sheet omits the date input", () => {
+    document.title = "Simsbury Farms Golf Course";
+    document.body.innerHTML = `
+      <table><tr><td>Thursday July 30</td><td>Friday July 31</td></tr></table>
+      <div>No tee times available, please try different criteria.</div>
+    `;
+    const baseJob = jobFor("simsbury-farms");
+    const job = {
+      ...baseJob,
+      targetDate: "2026-07-30",
+      bookingUrl: getLocalReaderJobUrl("simsbury-farms", "2026-07-30", 2)
+    };
+    const pageUrl =
+      "https://secure.east.prophetservices.com/SimsburyFarmsV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1&Date=2026-7-30&Time=AnyTime&Player=2&Hole=18";
+
+    expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
+      status: "NO_AVAILABILITY",
+      slots: []
+    });
+
+    document.body.innerHTML = `
+      <table><tr><td>Friday July 31</td></tr></table>
+      <div>No tee times available, please try different criteria.</div>
+    `;
+    expect(loadProphetReader().readSnapshot(document, pageUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH",
+      slots: []
+    });
+  });
+
   it("fails Frear Park closed on a changed date, route, or card shape", () => {
     const baseJob = jobFor("frear-park");
     const job = {

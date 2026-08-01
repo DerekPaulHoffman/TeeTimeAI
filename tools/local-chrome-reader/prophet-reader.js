@@ -108,6 +108,29 @@
     return match ? `${match[3]}-${match[1]}-${match[2]}` : null;
   }
 
+  function isTargetDateDisplayed(documentRoot, job) {
+    const inputDate = displayedDate(documentRoot);
+    if (inputDate) return inputDate === job.targetDate;
+    if (job.courseKey !== "simsbury-farms") return false;
+
+    const [year, month, day] = job.targetDate.split("-").map(Number);
+    const targetDate = new Date(Date.UTC(year, month - 1, day));
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      weekday: "long",
+      timeZone: "UTC"
+    }).format(targetDate);
+    const monthName = new Intl.DateTimeFormat("en-US", {
+      month: "long",
+      timeZone: "UTC"
+    }).format(targetDate);
+    const visibleText = normalizeText(
+      Array.from(documentRoot.querySelectorAll("td"))
+        .map((cell) => cell.innerText || cell.textContent)
+        .join(" ")
+    );
+    return new RegExp(`\\b${weekday}\\s+${monthName}\\s+0?${day}\\b`, "i").test(visibleText);
+  }
+
   function toLocalDateTime(targetDate, timeLabel) {
     const match = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(timeLabel);
     if (!match) return null;
@@ -157,7 +180,7 @@
     if (CHALLENGE_TEXT.test(bodyText)) {
       return result("ACCESS_CHALLENGE", job, pageTitle || "Frear Park access challenge", []);
     }
-    if (displayedDate(documentRoot) !== job.targetDate) {
+    if (!isTargetDateDisplayed(documentRoot, job)) {
       return result("PAGE_MISMATCH", job, pageTitle, []);
     }
 
@@ -175,6 +198,9 @@
         ? "AVAILABLE"
         : cards.length > 0 && parsed.every((slot) => slot === null)
           ? "READER_ERROR"
+          : job.courseKey === "simsbury-farms" &&
+              !/\bNo tee times available\b/i.test(bodyText)
+            ? "READER_ERROR"
           : "NO_AVAILABILITY";
     return result(status, job, pageTitle || config.title, slots);
   }
