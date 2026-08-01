@@ -556,6 +556,9 @@ export async function requestOperatorCourseRecheck(
                   )
                 }
               : {}),
+            ...(hasClosedResponderBatch(current.incident)
+              ? { activeBatchId: null }
+              : {}),
             lastSeenAt: now,
             nextAction: input.note,
             revision: { increment: 1 }
@@ -1235,7 +1238,11 @@ async function requireMutationTarget(
           isPublic: true,
           monitoringMode: true,
           bookingMethod: true,
-          supportIncident: true
+          supportIncident: {
+            include: {
+              activeBatch: { select: { status: true } }
+            }
+          }
         }
       }
     }
@@ -1269,6 +1276,17 @@ async function requireMutationTarget(
     activeSearches,
     replayed: Boolean(replayed)
   };
+}
+
+function hasClosedResponderBatch(incident: {
+  activeBatchId: string | null;
+  activeBatch?: { status: string } | null;
+}) {
+  return Boolean(
+    incident.activeBatchId &&
+    incident.activeBatch &&
+    !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(incident.activeBatch.status)
+  );
 }
 
 async function queueOperatorLocalReaderRecheck(

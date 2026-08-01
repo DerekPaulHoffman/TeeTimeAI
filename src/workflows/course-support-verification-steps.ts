@@ -134,6 +134,11 @@ export async function executeCourseSupportVerificationStep(
   const localReaderOnly =
     courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY" ||
     courseBeforeDiscovery.monitoringMode === "BROWSER_ONLY";
+  const persistedRunnableEvidence = canUsePersistedRunnableEvidence(
+    courseBeforeDiscovery,
+    beforeDiscoveryGate.adapterAllowed,
+    beforeDiscoveryGate.currentEvidence
+  );
   if (localReaderOnly && !beforeDiscoveryReaderEligible) {
     return failVerification({
       input,
@@ -188,7 +193,8 @@ export async function executeCourseSupportVerificationStep(
       forceFreshDiscovery = true;
     }
 
-    let discovery: Awaited<ReturnType<typeof prepareCourseSupportVerificationMonitoring>>;
+    let discovery: Awaited<ReturnType<typeof prepareCourseSupportVerificationMonitoring>> | null =
+      null;
     try {
       discovery = await prepareCourseSupportVerificationMonitoring(
         ownedCourseId,
@@ -197,18 +203,21 @@ export async function executeCourseSupportVerificationStep(
         { forceFresh: forceFreshDiscovery }
       );
     } catch {
-      return failVerification({
-        input,
-        revision,
-        runtimeVersion,
-        failureClass: "NETWORK",
-        providerExecution: false,
-        message: "Official-source verification discovery failed.",
-        retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
-      });
+      if (!persistedRunnableEvidence) {
+        return failVerification({
+          input,
+          revision,
+          runtimeVersion,
+          failureClass: "NETWORK",
+          providerExecution: false,
+          message: "Official-source verification discovery failed.",
+          retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+        });
+      }
+      discoveryCompletedThisRun = true;
     }
 
-    if (discovery.deferredCourseIds.includes(ownedCourseId)) {
+    if (discovery?.deferredCourseIds.includes(ownedCourseId)) {
       return failVerification({
         input,
         revision,
@@ -219,18 +228,25 @@ export async function executeCourseSupportVerificationStep(
         retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
       });
     }
-    if (discovery.failedCourseIds.includes(ownedCourseId)) {
-      return failVerification({
-        input,
-        revision,
-        runtimeVersion,
-        failureClass: "NETWORK",
-        providerExecution: false,
-        message: "Official-source verification discovery failed.",
-        retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
-      });
+    if (discovery?.failedCourseIds.includes(ownedCourseId)) {
+      if (!persistedRunnableEvidence) {
+        return failVerification({
+          input,
+          revision,
+          runtimeVersion,
+          failureClass: "NETWORK",
+          providerExecution: false,
+          message: "Official-source verification discovery failed.",
+          retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+        });
+      }
+      discoveryCompletedThisRun = true;
     }
-    if (!discovery.attemptedCourseIds.includes(ownedCourseId)) {
+    if (
+      discovery &&
+      !discovery.failedCourseIds.includes(ownedCourseId) &&
+      !discovery.attemptedCourseIds.includes(ownedCourseId)
+    ) {
       const cappedRetry = discovery.retryCourseIds.includes(ownedCourseId);
       return failVerification({
         input,
@@ -244,7 +260,9 @@ export async function executeCourseSupportVerificationStep(
         retryAt: cappedRetry ? new Date(Date.now() + TRANSIENT_RETRY_MS) : undefined
       });
     }
-    discoveryCompletedThisRun = true;
+    if (discovery?.attemptedCourseIds.includes(ownedCourseId)) {
+      discoveryCompletedThisRun = true;
+    }
   }
 
   const afterDiscovery = await attachCourseSupportVerificationProviderSnapshot({
@@ -542,6 +560,39 @@ export async function executeCourseSupportVerificationStep(
 
 function hasCoherentDiscoveryProof(attemptedAt: Date | null, verifiedAt: Date | null) {
   return Boolean(attemptedAt && verifiedAt && attemptedAt.getTime() <= verifiedAt.getTime());
+}
+
+function canUsePersistedRunnableEvidence(
+  course: {
+    providerFamilyKey: string;
+    detectedPlatform: string;
+    detectedBookingUrl: string | null;
+    website: string | null;
+    bookingMetadata: unknown;
+    bookingMethod: string;
+    automationEligibility: string;
+    automationReason: string;
+    monitoringMode: string;
+    isPublic: boolean | null;
+    intelligenceVerifiedAt: Date | null;
+    intelligenceConfidence: number | null;
+  },
+  adapterAllowed: boolean,
+  currentEvidence: boolean
+) {
+  const capability = resolveProviderCapability(course);
+  return Boolean(
+    adapterAllowed &&
+    currentEvidence &&
+    capability.isRunnable &&
+    capability.metadataReady &&
+    !capability.evidenceConflict &&
+    course.isPublic !== false &&
+    course.bookingMethod === "PUBLIC_ONLINE" &&
+    course.automationEligibility === "ALLOWED" &&
+    course.intelligenceVerifiedAt &&
+    (course.intelligenceConfidence ?? 0) >= 0.9
+  );
 }
 
 function getMonitoringGateFailureClass(course: {

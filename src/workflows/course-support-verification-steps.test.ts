@@ -311,6 +311,37 @@ describe("executeCourseSupportVerificationStep", () => {
     }
   );
 
+  it("uses high-confidence runnable provider evidence when fresh official discovery has a network failure", async () => {
+    allowOwnedExecution();
+    prismaMocks.courseFindUnique.mockResolvedValue({
+      ...course,
+      intelligenceVerifiedAt: new Date("2026-07-21T11:30:00.000Z"),
+      intelligenceConfidence: 0.95
+    });
+    discoveryMocks.prepareCourseSupportVerificationMonitoring.mockResolvedValue({
+      attemptedCourseIds: ["course-1"],
+      appliedCourseIds: [],
+      failedCourseIds: ["course-1"],
+      deferredCourseIds: [],
+      retryCourseIds: ["course-1"]
+    });
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [slot()],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "MATCH_FOUND"
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalled();
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified
+    ).toHaveBeenCalled();
+  });
+
   it("uses the normal capped discovery path after the one-shot attempt is persisted", async () => {
     verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce({
       attached: true,

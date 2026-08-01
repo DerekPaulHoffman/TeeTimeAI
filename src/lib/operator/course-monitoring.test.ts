@@ -250,6 +250,67 @@ describe("operator course monitoring mutations", () => {
     });
   });
 
+  it("releases a responder batch that was already closed before an operator recheck", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        supportIncident: {
+          ...status().course.supportIncident,
+          activeBatchId: "batch-closed",
+          activeBatch: { status: "PARTIAL" }
+        }
+      }
+    });
+
+    await requestOperatorCourseRecheck(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        note: "Retry the current public signed-out course surface.",
+        idempotencyKey: "operator-recheck-closed-batch"
+      },
+      context
+    );
+
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ activeBatchId: null })
+      })
+    );
+  });
+
+  it("does not release a responder batch that is still active", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        supportIncident: {
+          ...status().course.supportIncident,
+          activeBatchId: "batch-live",
+          activeBatch: { status: "VERIFYING" }
+        }
+      }
+    });
+
+    await requestOperatorCourseRecheck(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        note: "Retry the current public signed-out course surface.",
+        idempotencyKey: "operator-recheck-live-batch"
+      },
+      context
+    );
+
+    const update = transactionMocks.courseSupportIncident.update.mock.calls.at(-1)?.[0];
+    expect(update.data).not.toHaveProperty("activeBatchId");
+  });
+
   it("preserves a resolved final incident while requesting its bounded revalidation", async () => {
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
       ...status(),
