@@ -573,7 +573,7 @@ async function poll() {
     if (removedStaleJobs > 0) {
       await setLastStatus(
         "RETRYING",
-        "Expired reader work was cleared; requesting a fresh signed job."
+        `${removedStaleJobs} expired reader job${removedStaleJobs === 1 ? "" : "s"} cleared; requesting fresh signed work.`
       );
     }
     for (const [tabId, pending] of Object.entries(jobs)) {

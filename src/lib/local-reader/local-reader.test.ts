@@ -234,7 +234,8 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).not.toContain("entries.length === 1");
     expect(contentSource).toContain("globalThis.TeeTimeSpotWebTracReader");
     expect(backgroundSource).toContain("pending.job?.leaseExpiresAt");
-    expect(backgroundSource).toContain("Expired reader work was cleared");
+    expect(backgroundSource).toContain("expired reader job");
+    expect(backgroundSource).toContain("requesting fresh signed work");
     expect(backgroundSource).toContain(
       "/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.cps\\.golf$/u"
     );
