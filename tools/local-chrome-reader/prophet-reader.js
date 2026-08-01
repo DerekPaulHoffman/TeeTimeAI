@@ -14,7 +14,7 @@
     },
     "simsbury-farms": {
       courseName: "Simsbury Farms Golf Course",
-      jobPath: "/SimsburyFarmsV3/",
+      jobPath: "/SimsburyFarmsV3/Home/NIndex",
       courseIds: "1",
       renderedPath:
         /^\/SimsburyFarmsV3\/(?:\(S\([A-Za-z0-9_-]{1,128}\)\)\/)?(?:Home\/NIndex(?:\/Home\/nIndex)?)?\/?$/i,

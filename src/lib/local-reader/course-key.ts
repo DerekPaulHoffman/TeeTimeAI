@@ -99,7 +99,7 @@ export const LOCAL_READER_COURSES = {
   },
   "simsbury-farms": {
     courseName: "Simsbury Farms Golf Course",
-    bookingUrl: "https://secure.east.prophetservices.com/SimsburyFarmsV3",
+    bookingUrl: "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/NIndex",
     cardTextIncludes: [],
     provider: "PROPHET",
     prophetCourseIds: "1"
@@ -352,12 +352,7 @@ export function getLocalReaderJobUrl(
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   if (course.provider === "PROPHET") {
-    const bookingPath = new URL(course.bookingUrl).pathname;
-    const queryBase =
-      /^\/[^/]+$/u.test(bookingPath) && !course.bookingUrl.endsWith("/")
-        ? `${course.bookingUrl}/`
-        : course.bookingUrl;
-    return `${queryBase}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
+    return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
   }
   const url = new URL(course.bookingUrl);
   url.searchParams.set("date", targetDate);
