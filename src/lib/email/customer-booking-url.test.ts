@@ -149,6 +149,7 @@ describe("getSafeCustomerBookingUrl", () => {
     "https://course.example/tee-times?redirect=/tee-times?date=2026-07-16",
     "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
     "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d",
+    "https://sgnavigator.app/portal/gillette-ridge-golf-club/book/66?day=2026-08-02",
     "https://myffr.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25"
   ])("keeps a credential-free public booking URL: %s", (url) => {
     expect(getSafeCustomerBookingUrl(url)).toBe(url);

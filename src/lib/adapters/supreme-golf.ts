@@ -75,6 +75,7 @@ export async function fetchSupremeGolfTeeSheet(
     `/portal/${metadataMatch[1]}/book/${routeId}`,
     metadataUrl.origin
   );
+  const resolvedBookingUrl = datedUrl.toString();
   datedUrl.searchParams.set("day", targetDate);
   const html = await fetchHtml(datedUrl, "Supreme Golf tee times", fetchImpl);
   const slots = parseSlots(html, {
@@ -82,7 +83,7 @@ export async function fetchSupremeGolfTeeSheet(
     players: input.players,
     routeId,
     targetDate,
-    bookingUrl: input.metadata.bookingBaseUrl,
+    bookingUrl: resolvedBookingUrl,
     evidenceUrl: datedUrl.toString()
   });
 

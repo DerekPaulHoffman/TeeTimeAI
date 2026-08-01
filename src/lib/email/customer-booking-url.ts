@@ -134,7 +134,8 @@ function hasSensitiveUrlState(url: URL, nestingDepth: number) {
     return (
       segments.some(isRestrictedPathSegment) ||
       hasRestrictedAdjacentPathSegments(segments) ||
-      hasRestrictedBookingPathSegments(segments) ||
+      (hasRestrictedBookingPathSegments(segments) &&
+        !isAllowlistedPublicProviderBookingPath(url)) ||
       segments.some(
         (segment, index) =>
           (isOpaqueCredentialValue(segment) ||
@@ -143,6 +144,16 @@ function hasSensitiveUrlState(url: URL, nestingDepth: number) {
       )
     );
   });
+}
+
+function isAllowlistedPublicProviderBookingPath(url: URL) {
+  return Boolean(
+    url.protocol === "https:" &&
+    url.hostname.toLowerCase() === "sgnavigator.app" &&
+    /^\/portal\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/book(?:\/[1-9]\d{0,9})?\/?$/iu.test(
+      url.pathname
+    )
+  );
 }
 
 function hasRestrictedBookingPathSegments(segments: string[]) {

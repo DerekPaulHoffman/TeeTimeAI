@@ -53,7 +53,8 @@ describe("Supreme Golf adapter", () => {
       sourceId: "supreme-golf-66-1559",
       startsAt: "2026-07-29T15:59",
       availableSpots: 4,
-      priceCents: 6000
+      priceCents: 6000,
+      bookingUrl: "https://sgnavigator.app/portal/gillette-ridge-golf-club/book/66"
     })]);
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
