@@ -352,7 +352,12 @@ export function getLocalReaderJobUrl(
   const course = LOCAL_READER_COURSES[courseKey];
   if (course.provider === "CPS") return course.bookingUrl;
   if (course.provider === "PROPHET") {
-    return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
+    const bookingPath = new URL(course.bookingUrl).pathname;
+    const queryBase =
+      /^\/[^/]+$/u.test(bookingPath) && !course.bookingUrl.endsWith("/")
+        ? `${course.bookingUrl}/`
+        : course.bookingUrl;
+    return `${queryBase}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
   }
   const url = new URL(course.bookingUrl);
   url.searchParams.set("date", targetDate);

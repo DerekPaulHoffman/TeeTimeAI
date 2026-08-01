@@ -687,6 +687,9 @@ describe("local Chrome reader contract", () => {
       targetDate: "2026-07-30",
       bookingUrl: getLocalReaderJobUrl("simsbury-farms", "2026-07-30", 2)
     };
+    expect(job.bookingUrl).toBe(
+      "https://secure.east.prophetservices.com/SimsburyFarmsV3/?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
+    );
     const pageUrl =
       "https://secure.east.prophetservices.com/SimsburyFarmsV3/(S(publicsession))/Home/NIndex/Home/nIndex?CourseId=1&Date=2026-7-30&Time=AnyTime&Player=2&Hole=18";
 

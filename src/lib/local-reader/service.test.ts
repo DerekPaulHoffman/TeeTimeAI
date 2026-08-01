@@ -337,7 +337,7 @@ describe("local reader job service", () => {
         create: expect.objectContaining({
           courseKey: "simsbury-farms",
           bookingUrl:
-            "https://secure.east.prophetservices.com/SimsburyFarmsV3?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
+            "https://secure.east.prophetservices.com/SimsburyFarmsV3/?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
         })
       })
     );

@@ -110,7 +110,7 @@ const ALLOWED_COURSES = Object.freeze({
 });
 const PROPHET_COURSES = Object.freeze({
   "frear-park": ["Frear Park Municipal Golf Course", "/FrearParkV3/Home/NIndex", "1,2"],
-  "simsbury-farms": ["Simsbury Farms Golf Course", "/SimsburyFarmsV3", "1"]
+  "simsbury-farms": ["Simsbury Farms Golf Course", "/SimsburyFarmsV3/", "1"]
 });
 let pollInProgress = false;
 
