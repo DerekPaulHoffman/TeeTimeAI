@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
+import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
@@ -63,7 +64,10 @@ export async function GET(request: NextRequest) {
         return coursesWithSupport;
       }
     );
-    return NextResponse.json({ courses: coursesWithLayouts });
+    return NextResponse.json(
+      { courses: coursesWithLayouts },
+      { headers: courseDataSuccessCacheHeaders }
+    );
   } catch (error) {
     console.error(
       "Course lookup failed",

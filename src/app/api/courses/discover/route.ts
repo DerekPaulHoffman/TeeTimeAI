@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasGooglePlacesConfig, isVercelProduction } from "@/lib/env";
 import { demoCourses } from "@/lib/places/demo-courses";
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
+import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
@@ -28,7 +29,10 @@ export async function GET(request: NextRequest) {
   }
 
   if (!hasGooglePlacesConfig()) {
-    return NextResponse.json({ courses: demoCourses, demo: true });
+    return NextResponse.json(
+      { courses: demoCourses, demo: true },
+      { headers: courseDataSuccessCacheHeaders }
+    );
   }
 
   try {
@@ -56,7 +60,10 @@ export async function GET(request: NextRequest) {
       );
       return coursesWithLayouts;
     });
-    return NextResponse.json({ courses: coursesWithPrices, demo: false });
+    return NextResponse.json(
+      { courses: coursesWithPrices, demo: false },
+      { headers: courseDataSuccessCacheHeaders }
+    );
   } catch (error) {
     if (error instanceof GooglePlaceReviewsUnavailableError) {
       return NextResponse.json(

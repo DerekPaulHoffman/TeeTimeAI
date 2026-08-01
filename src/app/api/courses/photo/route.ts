@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getGooglePlacesApiKey } from "@/lib/places/google";
+import {
+  coursePhotoFallbackCacheHeaders,
+  coursePhotoSuccessCacheHeaders
+} from "@/lib/places/course-data-cache";
 
 const photoReferencePattern = /^places\/[^/]+\/photos\/[^/]+$/;
 const rateLimitedPhotoFallback = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" role="img" aria-label="Golf course photo unavailable">
@@ -27,14 +31,13 @@ export async function GET(request: NextRequest) {
   const photoUrl = new URL(`https://places.googleapis.com/v1/${photoReference}/media`);
   photoUrl.searchParams.set("maxWidthPx", "480");
   photoUrl.searchParams.set("maxHeightPx", "360");
-  photoUrl.searchParams.set("skipHttpRedirect", "true");
   photoUrl.searchParams.set("key", apiKey);
 
-  const response = await fetch(photoUrl, { cache: "no-store" });
+  const response = await fetch(photoUrl);
   if (response.status === 429) {
     return new NextResponse(rateLimitedPhotoFallback, {
       headers: {
-        "Cache-Control": "no-store",
+        ...coursePhotoFallbackCacheHeaders,
         "Content-Type": "image/svg+xml; charset=utf-8",
         "X-Course-Photo-Fallback": "rate-limited"
       },
@@ -46,16 +49,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Could not load course photo" }, { status: response.status });
   }
 
-  const payload = (await response.json()) as { photoUri?: string };
-  if (!payload.photoUri) {
-    return NextResponse.json({ error: "Course photo is unavailable" }, { status: 404 });
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.toLowerCase().startsWith("image/")) {
+    return NextResponse.json({ error: "Course photo is unavailable" }, { status: 502 });
   }
 
-  if (!payload.photoUri.startsWith("https://")) {
-    return NextResponse.json({ error: "Course photo URL is invalid" }, { status: 502 });
-  }
-
-  const redirect = NextResponse.redirect(payload.photoUri, 302);
-  redirect.headers.set("Cache-Control", "no-store");
-  return redirect;
+  return new NextResponse(await response.arrayBuffer(), {
+    headers: {
+      ...coursePhotoSuccessCacheHeaders,
+      "Content-Type": contentType,
+      "X-Content-Type-Options": "nosniff"
+    },
+    status: 200
+  });
 }

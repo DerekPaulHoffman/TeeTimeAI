@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 
 import { GET } from "./route";
+import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 
 const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
@@ -38,6 +39,9 @@ describe("GET /api/courses/discover provider configuration", () => {
     vi.clearAllMocks();
     delete process.env.GOOGLE_PLACES_API_KEY;
     delete process.env.VERCEL_ENV;
+    mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
+    mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) => courses);
+    mocks.enrichCoursesWithBookingEvidence.mockImplementation(async (courses) => courses);
   });
 
   afterEach(() => {
@@ -81,6 +85,23 @@ describe("GET /api/courses/discover provider configuration", () => {
     await expect(response.json()).resolves.toEqual({
       error: "Course discovery is temporarily unavailable. Try again in a moment."
     });
+  });
+
+  it("shares successful course discovery while keeping provider failures uncached", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    mocks.searchNearbyGolfCourses.mockResolvedValue([
+      { googlePlaceId: "course-1", name: "Public Course" }
+    ]);
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe(
+      courseDataSuccessCacheHeaders["Cache-Control"]
+    );
+    expect(response.headers.get("vercel-cdn-cache-control")).toBe(
+      courseDataSuccessCacheHeaders["Vercel-CDN-Cache-Control"]
+    );
   });
 });
 

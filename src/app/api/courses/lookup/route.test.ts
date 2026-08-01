@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 
 import { GET } from "./route";
+import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 
 const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
@@ -73,6 +74,12 @@ describe("GET /api/courses/lookup", () => {
     expect(mocks.enrichCoursesWithHoleLayouts).toHaveBeenCalledWith([
       expect.objectContaining({ googlePlaceId: "bethpage-black" })
     ]);
+    expect(response.headers.get("cache-control")).toBe(
+      courseDataSuccessCacheHeaders["Cache-Control"]
+    );
+    expect(response.headers.get("vercel-cdn-cache-control")).toBe(
+      courseDataSuccessCacheHeaders["Vercel-CDN-Cache-Control"]
+    );
   });
 
   it("rejects short queries and incomplete coordinates", async () => {
