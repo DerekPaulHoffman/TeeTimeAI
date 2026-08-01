@@ -476,6 +476,7 @@ async function wakePendingTab(tabId) {
 async function cleanStalePendingJobs(jobs) {
   const now = Date.now();
   let changed = false;
+  let removedCount = 0;
   for (const [tabId, pending] of Object.entries(jobs)) {
     const openedAt = Date.parse(pending.openedAt || "");
     const expiresAt = Date.parse(pending.job?.expiresAt || "");
@@ -496,10 +497,12 @@ async function cleanStalePendingJobs(jobs) {
     ) {
       delete jobs[tabId];
       changed = true;
+      removedCount += 1;
       if (tabExists) await closePendingTab(Number(tabId));
     }
   }
   if (changed) await savePendingJobs(jobs);
+  return removedCount;
 }
 
 async function closePendingTab(tabId) {
@@ -566,7 +569,13 @@ async function poll() {
       return;
     }
     const jobs = await pendingJobs();
-    await cleanStalePendingJobs(jobs);
+    const removedStaleJobs = await cleanStalePendingJobs(jobs);
+    if (removedStaleJobs > 0) {
+      await setLastStatus(
+        "RETRYING",
+        "Expired reader work was cleared; requesting a fresh signed job."
+      );
+    }
     for (const [tabId, pending] of Object.entries(jobs)) {
       if (!pending.result) continue;
       try {
