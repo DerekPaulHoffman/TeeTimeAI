@@ -5,6 +5,11 @@ import {
   coursePhotoFallbackCacheHeaders,
   coursePhotoSuccessCacheHeaders
 } from "@/lib/places/course-data-cache";
+import {
+  getCoursePhotoCacheKey,
+  readCourseRuntimeCache,
+  writeCourseRuntimeCache
+} from "@/lib/places/course-runtime-cache";
 
 const photoReferencePattern = /^places\/[^/]+\/photos\/[^/]+$/;
 const rateLimitedPhotoFallback = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 360" role="img" aria-label="Golf course photo unavailable">
@@ -15,6 +20,12 @@ const rateLimitedPhotoFallback = `<svg xmlns="http://www.w3.org/2000/svg" viewBo
   <path d="M270 148v91" stroke="#fff" stroke-width="6"/>
   <path d="m273 151 57 20-57 21Z" fill="#df6f4c"/>
 </svg>`;
+const MAX_RUNTIME_CACHED_PHOTO_BYTES = 1_900_000;
+
+type CachedCoursePhoto = {
+  contentType: string;
+  data: string;
+};
 
 export async function GET(request: NextRequest) {
   const apiKey = getGooglePlacesApiKey();
@@ -26,6 +37,12 @@ export async function GET(request: NextRequest) {
 
   if (!photoReference || !photoReferencePattern.test(photoReference)) {
     return NextResponse.json({ error: "Invalid photo reference" }, { status: 400 });
+  }
+
+  const cacheKey = getCoursePhotoCacheKey(photoReference);
+  const cachedPhoto = await readCourseRuntimeCache<CachedCoursePhoto>(cacheKey);
+  if (isCachedCoursePhoto(cachedPhoto)) {
+    return coursePhotoResponse(Buffer.from(cachedPhoto.data, "base64"), cachedPhoto.contentType);
   }
 
   const photoUrl = new URL(`https://places.googleapis.com/v1/${photoReference}/media`);
@@ -54,7 +71,24 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Course photo is unavailable" }, { status: 502 });
   }
 
-  return new NextResponse(await response.arrayBuffer(), {
+  const photo = Buffer.from(await response.arrayBuffer());
+  if (photo.byteLength <= MAX_RUNTIME_CACHED_PHOTO_BYTES) {
+    await writeCourseRuntimeCache(
+      cacheKey,
+      { contentType, data: photo.toString("base64") } satisfies CachedCoursePhoto,
+      "course-photo"
+    );
+  }
+
+  return coursePhotoResponse(photo, contentType);
+}
+
+function coursePhotoResponse(photo: Buffer, contentType: string) {
+  const body = photo.buffer.slice(
+    photo.byteOffset,
+    photo.byteOffset + photo.byteLength
+  ) as ArrayBuffer;
+  return new NextResponse(body, {
     headers: {
       ...coursePhotoSuccessCacheHeaders,
       "Content-Type": contentType,
@@ -62,4 +96,14 @@ export async function GET(request: NextRequest) {
     },
     status: 200
   });
+}
+
+function isCachedCoursePhoto(value: CachedCoursePhoto | null): value is CachedCoursePhoto {
+  return Boolean(
+    value &&
+      typeof value.data === "string" &&
+      value.data.length > 0 &&
+      typeof value.contentType === "string" &&
+      value.contentType.toLowerCase().startsWith("image/")
+  );
 }

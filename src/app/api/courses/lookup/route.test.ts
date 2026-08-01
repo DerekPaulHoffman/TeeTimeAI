@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
   getGooglePlacesApiKey: vi.fn(),
-  searchGolfCoursesByName: vi.fn()
+  readCourseRuntimeCache: vi.fn(),
+  searchGolfCoursesByName: vi.fn(),
+  writeCourseRuntimeCache: vi.fn()
 }));
 
 vi.mock("@/lib/places/alert-support", () => ({
@@ -26,10 +28,18 @@ vi.mock("@/lib/places/google", () => ({
   searchGolfCoursesByName: mocks.searchGolfCoursesByName
 }));
 
+vi.mock("@/lib/places/course-runtime-cache", () => ({
+  getCourseLookupCacheKey: vi.fn(() => "lookup-key"),
+  readCourseRuntimeCache: mocks.readCourseRuntimeCache,
+  writeCourseRuntimeCache: mocks.writeCourseRuntimeCache
+}));
+
 describe("GET /api/courses/lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    mocks.readCourseRuntimeCache.mockResolvedValue(null);
+    mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) =>
       courses.map((course: object) => ({
@@ -102,6 +112,20 @@ describe("GET /api/courses/lookup", () => {
     expect(await response.json()).toEqual({
       error: "Course lookup is temporarily unavailable. Try the nearby search instead."
     });
+  });
+
+  it("serves year-cached lookup results without another Google search", async () => {
+    mocks.readCourseRuntimeCache.mockResolvedValue([
+      { googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }
+    ]);
+
+    const response = await GET(request("?q=Bethpage%20Black"));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      courses: [{ googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }]
+    });
+    expect(mocks.searchGolfCoursesByName).not.toHaveBeenCalled();
   });
 
   it("returns a generic 503 when durable place reviews cannot be read", async () => {

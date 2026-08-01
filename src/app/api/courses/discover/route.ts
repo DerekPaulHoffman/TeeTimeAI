@@ -4,6 +4,11 @@ import { hasGooglePlacesConfig, isVercelProduction } from "@/lib/env";
 import { demoCourses } from "@/lib/places/demo-courses";
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
+import {
+  getCourseDiscoveryCacheKey,
+  readCourseRuntimeCache,
+  writeCourseRuntimeCache
+} from "@/lib/places/course-runtime-cache";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
@@ -36,6 +41,15 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const cacheKey = getCourseDiscoveryCacheKey({ latitude, longitude, radiusMeters });
+    const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
+    if (Array.isArray(cachedCourses)) {
+      return NextResponse.json(
+        { courses: cachedCourses, demo: false },
+        { headers: courseDataSuccessCacheHeaders }
+      );
+    }
+
     const courses = await searchNearbyGolfCourses({ latitude, longitude, radiusMeters });
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
@@ -60,6 +74,7 @@ export async function GET(request: NextRequest) {
       );
       return coursesWithLayouts;
     });
+    await writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery");
     return NextResponse.json(
       { courses: coursesWithPrices, demo: false },
       { headers: courseDataSuccessCacheHeaders }

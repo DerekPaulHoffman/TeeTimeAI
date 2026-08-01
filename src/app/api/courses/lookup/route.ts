@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
+import {
+  getCourseLookupCacheKey,
+  readCourseRuntimeCache,
+  writeCourseRuntimeCache
+} from "@/lib/places/course-runtime-cache";
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
 import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
@@ -47,6 +52,15 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const cacheKey = getCourseLookupCacheKey({ query, latitude, longitude });
+    const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
+    if (Array.isArray(cachedCourses)) {
+      return NextResponse.json(
+        { courses: cachedCourses },
+        { headers: courseDataSuccessCacheHeaders }
+      );
+    }
+
     const courses = await searchGolfCoursesByName({ query, latitude, longitude });
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
@@ -64,6 +78,7 @@ export async function GET(request: NextRequest) {
         return coursesWithSupport;
       }
     );
+    await writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup");
     return NextResponse.json(
       { courses: coursesWithLayouts },
       { headers: courseDataSuccessCacheHeaders }

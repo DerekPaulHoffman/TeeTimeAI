@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
   enrichCoursesWithBookingEvidence: vi.fn(),
-  searchNearbyGolfCourses: vi.fn()
+  readCourseRuntimeCache: vi.fn(),
+  searchNearbyGolfCourses: vi.fn(),
+  writeCourseRuntimeCache: vi.fn()
 }));
 
 vi.mock("@/lib/places/alert-support", () => ({
@@ -29,6 +31,12 @@ vi.mock("@/lib/places/google", () => ({
   searchNearbyGolfCourses: mocks.searchNearbyGolfCourses
 }));
 
+vi.mock("@/lib/places/course-runtime-cache", () => ({
+  getCourseDiscoveryCacheKey: vi.fn(() => "discover-key"),
+  readCourseRuntimeCache: mocks.readCourseRuntimeCache,
+  writeCourseRuntimeCache: mocks.writeCourseRuntimeCache
+}));
+
 const originalEnv = {
   GOOGLE_PLACES_API_KEY: process.env.GOOGLE_PLACES_API_KEY,
   VERCEL_ENV: process.env.VERCEL_ENV
@@ -42,6 +50,8 @@ describe("GET /api/courses/discover provider configuration", () => {
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithBookingEvidence.mockImplementation(async (courses) => courses);
+    mocks.readCourseRuntimeCache.mockResolvedValue(null);
+    mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -102,6 +112,22 @@ describe("GET /api/courses/discover provider configuration", () => {
     expect(response.headers.get("vercel-cdn-cache-control")).toBe(
       courseDataSuccessCacheHeaders["Vercel-CDN-Cache-Control"]
     );
+  });
+
+  it("serves year-cached discovery without another Google search", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    mocks.readCourseRuntimeCache.mockResolvedValue([
+      { googlePlaceId: "course-1", name: "Cached Public Course" }
+    ]);
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      courses: [{ googlePlaceId: "course-1", name: "Cached Public Course" }],
+      demo: false
+    });
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
   });
 });
 

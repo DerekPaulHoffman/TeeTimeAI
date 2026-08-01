@@ -8,17 +8,27 @@ import {
 } from "@/lib/places/course-data-cache";
 
 const mocks = vi.hoisted(() => ({
-  getGooglePlacesApiKey: vi.fn()
+  getGooglePlacesApiKey: vi.fn(),
+  readCourseRuntimeCache: vi.fn(),
+  writeCourseRuntimeCache: vi.fn()
 }));
 
 vi.mock("@/lib/places/google", () => ({
   getGooglePlacesApiKey: mocks.getGooglePlacesApiKey
 }));
 
+vi.mock("@/lib/places/course-runtime-cache", () => ({
+  getCoursePhotoCacheKey: vi.fn((photoReference: string) => `photo:${photoReference}`),
+  readCourseRuntimeCache: mocks.readCourseRuntimeCache,
+  writeCourseRuntimeCache: mocks.writeCourseRuntimeCache
+}));
+
 describe("GET /api/courses/photo", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    mocks.readCourseRuntimeCache.mockResolvedValue(null);
+    mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
   });
 
   it("proxies successful photos with long-lived shared caching", async () => {
@@ -61,6 +71,20 @@ describe("GET /api/courses/photo", () => {
     );
     expect(response.headers.get("x-course-photo-fallback")).toBe("rate-limited");
     await expect(response.text()).resolves.toContain("<svg");
+  });
+
+  it("serves a runtime-cached photo without another Google request", async () => {
+    mocks.readCourseRuntimeCache.mockResolvedValue({
+      contentType: "image/jpeg",
+      data: Buffer.from([255, 216, 255]).toString("base64")
+    });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/jpeg");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("preserves non-rate-limit provider failures for diagnosis", async () => {
