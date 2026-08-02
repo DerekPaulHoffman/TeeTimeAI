@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 
 import {
-  evaluateProductionAlias,
+  evaluateProductionAliasTargets,
   isFailedDeploymentState,
   selectGitProductionDeployment,
   type VercelDeploymentInspection,
@@ -14,7 +14,9 @@ const branch = readOption(args, "--production-branch") ?? "main";
 const domain = readOption(args, "--domain") ?? "teetimespot.com";
 const timeoutSeconds = readPositiveNumber(args, "--timeout-seconds", 900);
 const pollSeconds = readPositiveNumber(args, "--poll-seconds", 10);
-const requiredAliases = ["teetimespot.com", "www.teetimespot.com"];
+const requiredAliases = Array.from(
+  new Set([domain, domain.startsWith("www.") ? domain.slice(4) : `www.${domain}`])
+);
 const deadline = Date.now() + timeoutSeconds * 1000;
 
 validateInputs();
@@ -55,22 +57,26 @@ async function waitForGitDeployment() {
           `git_deployment_${(deployment.state ?? "pending").toLowerCase()}`
         );
       } else {
-        const inspection = runVercelJson<VercelDeploymentInspection>([
-          "inspect",
-          domain,
-          "--format",
-          "json"
-        ]);
-        const aliasState = evaluateProductionAlias(inspection, {
+        const aliasInspections = requiredAliases.map((alias) => ({
+          alias,
+          inspection: runVercelJson<VercelDeploymentInspection>([
+            "inspect",
+            alias,
+            "--format",
+            "json"
+          ])
+        }));
+        const aliasState = evaluateProductionAliasTargets(aliasInspections, {
           deploymentUrl: deployment.url!,
           requiredAliases
         });
 
         if (aliasState.verified) {
+          const inspection = aliasInspections[0].inspection;
           console.log(
             JSON.stringify(
               {
-                aliases: inspection.aliases?.filter((alias) => requiredAliases.includes(alias)),
+                aliases: requiredAliases,
                 branch,
                 commitSha,
                 deploymentId: inspection.id,

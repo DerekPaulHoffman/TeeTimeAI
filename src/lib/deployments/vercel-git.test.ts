@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  evaluateProductionAlias,
+  evaluateProductionAliasTargets,
   isFailedDeploymentState,
   selectGitProductionDeployment
 } from "./vercel-git";
@@ -61,14 +61,19 @@ describe("deployment verification", () => {
     expect(isFailedDeploymentState("BUILDING")).toBe(false);
   });
 
-  it("requires Ready, exact deployment ownership, and both production aliases", () => {
+  it("requires each production alias to resolve Ready to the exact Git deployment", () => {
     expect(
-      evaluateProductionAlias(
-        {
-          aliases: ["teetimespot.com", "www.teetimespot.com"],
-          readyState: "READY",
-          url: "git.vercel.app"
-        },
+      evaluateProductionAliasTargets(
+        [
+          {
+            alias: "teetimespot.com",
+            inspection: { readyState: "READY", url: "git.vercel.app" }
+          },
+          {
+            alias: "www.teetimespot.com",
+            inspection: { readyState: "READY", url: "git.vercel.app" }
+          }
+        ],
         {
           deploymentUrl: "git.vercel.app",
           requiredAliases: ["teetimespot.com", "www.teetimespot.com"]
@@ -76,24 +81,47 @@ describe("deployment verification", () => {
       )
     ).toEqual({
       missingAliases: [],
-      pointsToDeployment: true,
-      ready: true,
+      mismatchedAliases: [],
+      notReadyAliases: [],
       verified: true
     });
 
     expect(
-      evaluateProductionAlias(
-        {
-          aliases: ["teetimespot.com"],
-          readyState: "READY",
-          url: "manual.vercel.app"
-        },
+      evaluateProductionAliasTargets(
+        [
+          {
+            alias: "teetimespot.com",
+            inspection: { readyState: "READY", url: "manual.vercel.app" }
+          }
+        ],
         {
           deploymentUrl: "git.vercel.app",
           requiredAliases: ["teetimespot.com", "www.teetimespot.com"]
         }
       ).verified
     ).toBe(false);
+  });
+
+  it("rejects an alias that resolves to the deployment before it is Ready", () => {
+    expect(
+      evaluateProductionAliasTargets(
+        [
+          {
+            alias: "teetimespot.com",
+            inspection: { readyState: "BUILDING", url: "git.vercel.app" }
+          }
+        ],
+        {
+          deploymentUrl: "git.vercel.app",
+          requiredAliases: ["teetimespot.com"]
+        }
+      )
+    ).toEqual({
+      missingAliases: [],
+      mismatchedAliases: [],
+      notReadyAliases: ["teetimespot.com"],
+      verified: false
+    });
   });
 });
 

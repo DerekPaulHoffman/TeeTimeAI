@@ -45,19 +45,30 @@ export function isFailedDeploymentState(state: string | undefined) {
   return FAILED_DEPLOYMENT_STATES.has(state ?? "");
 }
 
-export function evaluateProductionAlias(
-  inspection: VercelDeploymentInspection,
+export function evaluateProductionAliasTargets(
+  inspections: Array<{ alias: string; inspection: VercelDeploymentInspection }>,
   options: { deploymentUrl: string; requiredAliases: string[] }
 ) {
-  const aliases = new Set(inspection.aliases ?? []);
-  const missingAliases = options.requiredAliases.filter((alias) => !aliases.has(alias));
-  const pointsToDeployment = inspection.url === options.deploymentUrl;
-  const ready = inspection.readyState === "READY";
+  const inspectionsByAlias = new Map(
+    inspections.map(({ alias, inspection }) => [alias, inspection])
+  );
+  const missingAliases = options.requiredAliases.filter(
+    (alias) => !inspectionsByAlias.has(alias)
+  );
+  const notReadyAliases = options.requiredAliases.filter(
+    (alias) => inspectionsByAlias.get(alias)?.readyState !== "READY"
+  );
+  const mismatchedAliases = options.requiredAliases.filter(
+    (alias) => inspectionsByAlias.get(alias)?.url !== options.deploymentUrl
+  );
 
   return {
     missingAliases,
-    pointsToDeployment,
-    ready,
-    verified: ready && pointsToDeployment && missingAliases.length === 0
+    mismatchedAliases,
+    notReadyAliases,
+    verified:
+      missingAliases.length === 0 &&
+      notReadyAliases.length === 0 &&
+      mismatchedAliases.length === 0
   };
 }
