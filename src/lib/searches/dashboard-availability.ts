@@ -11,6 +11,24 @@ export type DashboardAvailabilityView = {
   tone: "matching" | "available" | "empty" | "scheduled" | "unavailable" | "pending";
 };
 
+const NEW_COURSE_INCIDENT_WINDOW_MS = 2 * 60 * 1000;
+
+export function isDashboardMonitoringSetupInProgress(input: {
+  courseCreatedAt: Date;
+  latestOutcome?: string | null;
+  incident?: {
+    status: string;
+    firstSeenAt: Date;
+  } | null;
+}) {
+  return (
+    input.latestOutcome === "NEEDS_ADAPTER" &&
+    input.incident?.status === "AUTO_INVESTIGATING" &&
+    Math.abs(input.incident.firstSeenAt.getTime() - input.courseCreatedAt.getTime()) <=
+      NEW_COURSE_INCIDENT_WINDOW_MS
+  );
+}
+
 export function readDashboardAvailabilitySnapshot(
   rawSummary: unknown
 ): DashboardAvailabilitySnapshot | null {
@@ -47,6 +65,7 @@ export function getDashboardAvailabilityView(input: {
   startTime: string;
   endTime: string;
   bookingOpensLabel?: string | null;
+  monitoringSetupInProgress?: boolean;
 }): DashboardAvailabilityView {
   const snapshot = readDashboardAvailabilitySnapshot(input.rawSummary);
   const golferLabel = `${input.players} ${
@@ -69,6 +88,15 @@ export function getDashboardAvailabilityView(input: {
     return {
       label: "Booking not open yet",
       detail: `Tee times are expected to appear ${input.bookingOpensLabel}. We'll start checking at the useful release time.`,
+      tone: "scheduled"
+    };
+  }
+
+  if (input.monitoringSetupInProgress) {
+    return {
+      label: "Monitoring setup in progress",
+      detail:
+        "We haven't connected to this course's public tee sheet yet. Use the official course site for current availability while Tee Time Spot works on alert coverage.",
       tone: "scheduled"
     };
   }

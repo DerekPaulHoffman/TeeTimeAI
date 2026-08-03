@@ -45,6 +45,7 @@ import {
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import {
   getDashboardAvailabilityView,
+  isDashboardMonitoringSetupInProgress,
   readDashboardAvailabilitySnapshot
 } from "@/lib/searches/dashboard-availability";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
@@ -447,6 +448,11 @@ function DashboardSearchCard({
             const latestProbe = search.probes.find(
               (probe) => probe.courseId === preference.course.id
             );
+            const monitoringSetupInProgress = isDashboardMonitoringSetupInProgress({
+              courseCreatedAt: preference.course.createdAt,
+              latestOutcome: latestProbe?.outcome,
+              incident: preference.course.supportIncident
+            });
             const courseMatches = availableSearchMatches.filter(
               (match) => match.courseId === preference.course.id
             );
@@ -457,6 +463,7 @@ function DashboardSearchCard({
               players: search.players,
               startTime: search.startTime,
               endTime: search.endTime,
+              monitoringSetupInProgress,
               bookingOpensLabel: upcomingBookingWindow
                 ? upcomingBookingWindow.exactTime
                   ? `when booking opens ${formatBookingWindowRelease(
@@ -471,6 +478,7 @@ function DashboardSearchCard({
               automationReason: preference.course.automationReason,
               latestProbe,
               upcomingBookingWindow,
+              monitoringSetupInProgress,
               firstTimeLookup:
                 Math.abs(
                   preference.course.createdAt.getTime() - search.createdAt.getTime()
@@ -721,6 +729,7 @@ function getDashboardMonitoringVerdict(input: {
     observedAt: Date;
   };
   upcomingBookingWindow: ReturnType<typeof getBookingWindowForTargetDate>;
+  monitoringSetupInProgress: boolean;
   firstTimeLookup: boolean;
 }) {
   if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
@@ -740,6 +749,15 @@ function getDashboardMonitoringVerdict(input: {
       detail: "The latest check completed successfully.",
       icon: "watching" as const,
       className: "is-public"
+    };
+  }
+  if (input.monitoringSetupInProgress) {
+    return {
+      label: "Monitoring setup in progress",
+      detail:
+        "Your alert is active. Tee Time Spot is setting up automated checks for this course; use the official site for current availability in the meantime.",
+      icon: "scheduled" as const,
+      className: "is-detail"
     };
   }
   if (

@@ -759,6 +759,12 @@ const searchListInclude = {
               canonicalSlug: true,
               status: true
             }
+          },
+          supportIncident: {
+            select: {
+              status: true,
+              firstSeenAt: true
+            }
           }
         }
       }
