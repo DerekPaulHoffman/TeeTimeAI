@@ -2,7 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { Prisma } from "@prisma/client";
 
-import { recordCourseMonitoringSuccess } from "@/lib/automation/course-monitoring";
+import {
+  getCourseMonitoringEscalationDeadline,
+  recordCourseMonitoringSuccess
+} from "@/lib/automation/course-monitoring";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { prisma } from "@/lib/prisma";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
@@ -478,11 +481,24 @@ async function recordReaderHeartbeat(handshake: LocalReaderAgentHandshake, now: 
   const model = (
     prisma as typeof prisma & {
       localReaderAgent?: {
+        findUnique: (input: unknown) => Promise<{
+          readerVersion: string;
+          buildId: string;
+          capabilities: Prisma.JsonValue;
+        } | null>;
         upsert: (input: unknown) => Promise<unknown>;
       };
     }
   ).localReaderAgent;
   if (!model) return;
+  const previous = await model.findUnique({
+    where: { deviceId: handshake.deviceId },
+    select: {
+      readerVersion: true,
+      buildId: true,
+      capabilities: true
+    }
+  });
   await model.upsert({
     where: { deviceId: handshake.deviceId },
     create: {
@@ -499,7 +515,41 @@ async function recordReaderHeartbeat(handshake: LocalReaderAgentHandshake, now: 
       lastSeenAt: now
     }
   });
-  await requeueReaderBlockedIncidents(handshake.capabilities, now);
+  const previousCapabilities = previous
+    ? localReaderCapabilitiesSchema.safeParse(previous.capabilities)
+    : null;
+  const readerDeploymentChanged =
+    !previous ||
+    previous.readerVersion !== handshake.readerVersion ||
+    previous.buildId !== handshake.buildId;
+  if (
+    !readerDeploymentChanged &&
+    previousCapabilities?.success &&
+    haveSameCapabilities(previousCapabilities.data, handshake.capabilities)
+  ) {
+    return;
+  }
+  await requeueReaderBlockedIncidents({
+    capabilities: handshake.capabilities,
+    previousCapabilities: previousCapabilities?.success ? previousCapabilities.data : null,
+    readerDeploymentChanged,
+    readerVersion: handshake.readerVersion,
+    buildId: handshake.buildId,
+    now
+  });
+}
+
+function haveSameCapabilities(
+  left: LocalReaderAgentHandshake["capabilities"],
+  right: LocalReaderAgentHandshake["capabilities"]
+) {
+  if (left.length !== right.length) return false;
+  return left.every((capability) =>
+    right.some(
+      (candidate) =>
+        candidate.key === capability.key && candidate.parserVersion === capability.parserVersion
+    )
+  );
 }
 
 async function recordReaderSuccess(input: {
@@ -528,10 +578,14 @@ async function recordReaderSuccess(input: {
   });
 }
 
-async function requeueReaderBlockedIncidents(
-  capabilities: LocalReaderAgentHandshake["capabilities"],
-  now: Date
-) {
+async function requeueReaderBlockedIncidents(input: {
+  capabilities: LocalReaderAgentHandshake["capabilities"];
+  previousCapabilities: LocalReaderAgentHandshake["capabilities"] | null;
+  readerDeploymentChanged: boolean;
+  readerVersion: string;
+  buildId: string;
+  now: Date;
+}) {
   const incidents = await prisma.courseSupportIncident.findMany({
     where: {
       status: "NEEDS_HUMAN",
@@ -542,6 +596,7 @@ async function requeueReaderBlockedIncidents(
       id: true,
       revision: true,
       courseId: true,
+      activeRealSearchCount: true,
       course: {
         select: {
           name: true,
@@ -560,7 +615,18 @@ async function requeueReaderBlockedIncidents(
     );
     if (!courseKey) continue;
     const required = getRequiredLocalReaderCapability(courseKey, incident.course.name);
-    if (!readerSupportsCapability(capabilities, required.key, required.parserVersion)) {
+    if (!readerSupportsCapability(input.capabilities, required.key, required.parserVersion)) {
+      continue;
+    }
+    if (
+      !input.readerDeploymentChanged &&
+      input.previousCapabilities &&
+      readerSupportsCapability(
+        input.previousCapabilities,
+        required.key,
+        required.parserVersion
+      )
+    ) {
       continue;
     }
     await prisma.$transaction(async (transaction) => {
@@ -575,7 +641,11 @@ async function requeueReaderBlockedIncidents(
           status: "AUTO_INVESTIGATING",
           humanReviewReason: null,
           nextReminderAt: null,
-          nextAttemptAt: now,
+          nextAttemptAt: input.now,
+          escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+            input.now,
+            incident.activeRealSearchCount
+          ),
           latestMessage:
             "A compatible signed local reader is online; exact public-page revalidation was requeued.",
           revision: { increment: 1 }
@@ -590,9 +660,9 @@ async function requeueReaderBlockedIncidents(
           },
           data: {
             state: "AUTO_INVESTIGATING",
-            nextAutomaticAttemptAt: now,
-            revalidationRequestedAt: now,
-            stateChangedAt: now,
+            nextAutomaticAttemptAt: input.now,
+            revalidationRequestedAt: input.now,
+            stateChangedAt: input.now,
             revision: { increment: 1 }
           }
         });
@@ -608,9 +678,11 @@ async function requeueReaderBlockedIncidents(
           readPath: required.key,
           message:
             "A compatible reader capability came online, so exact runtime verification was requeued.",
-          occurredAt: now,
+          occurredAt: input.now,
           audit: {
             parserVersion: required.parserVersion,
+            readerVersion: input.readerVersion,
+            buildId: input.buildId,
             customerDataIncluded: false
           }
         }

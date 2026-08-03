@@ -11,17 +11,34 @@ const prismaMocks = vi.hoisted(() => ({
     upsert: vi.fn()
   },
   courseSupportIncident: {
-    findUnique: vi.fn()
-  }
+    findUnique: vi.fn(),
+    findMany: vi.fn(),
+    updateMany: vi.fn()
+  },
+  localReaderAgent: {
+    findUnique: vi.fn(),
+    upsert: vi.fn(),
+    updateMany: vi.fn()
+  },
+  courseMonitoringStatus: {
+    updateMany: vi.fn()
+  },
+  courseMonitoringEvent: {
+    create: vi.fn()
+  },
+  $transaction: vi.fn()
 }));
 
 const monitoringMocks = vi.hoisted(() => ({
+  getCourseMonitoringEscalationDeadline: vi.fn(),
   recordCourseMonitoringSuccess: vi.fn(),
   resolveCourseSupportIncident: vi.fn()
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 vi.mock("@/lib/automation/course-monitoring", () => ({
+  getCourseMonitoringEscalationDeadline:
+    monitoringMocks.getCourseMonitoringEscalationDeadline,
   recordCourseMonitoringSuccess: monitoringMocks.recordCourseMonitoringSuccess
 }));
 vi.mock("@/lib/automation/support-incidents", () => ({
@@ -54,7 +71,13 @@ describe("local reader job service", () => {
     prismaMocks.course.findUnique.mockResolvedValue({
       name: "Grassy Hill Country Club"
     });
+    prismaMocks.localReaderAgent.findUnique.mockResolvedValue(null);
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+    prismaMocks.$transaction.mockImplementation(async (callback) => callback(prismaMocks));
+    monitoringMocks.getCourseMonitoringEscalationDeadline.mockReturnValue(
+      new Date("2026-07-24T16:30:00.000Z")
+    );
   });
 
   afterEach(() => {
@@ -514,6 +537,94 @@ describe("local reader job service", () => {
           status: "LEASED",
           claimedAt: new Date("2026-07-24T16:00:00.000Z"),
           deviceId: "chrome-home"
+        })
+      })
+    );
+  });
+
+  it("does not reopen reader incidents for an unchanged heartbeat", async () => {
+    const capabilities = [{ key: "EZLINKS_RENDERED" as const, parserVersion: 1 }];
+    prismaMocks.localReaderAgent.findUnique.mockResolvedValue({
+      readerVersion: "1.7.0",
+      buildId: "reader-build-7",
+      capabilities
+    });
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 0 });
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+
+    await expect(
+      claimNextLocalReaderJob({
+        deviceId: "reader-home",
+        readerVersion: "1.7.0",
+        buildId: "reader-build-7",
+        capabilities
+      })
+    ).resolves.toBeNull();
+
+    expect(prismaMocks.localReaderAgent.upsert).toHaveBeenCalledOnce();
+    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("gives a new compatible reader build a fresh investigation deadline", async () => {
+    const capabilities = [{ key: "EZLINKS_RENDERED" as const, parserVersion: 1 }];
+    prismaMocks.localReaderAgent.findUnique.mockResolvedValue({
+      readerVersion: "1.6.0",
+      buildId: "reader-build-6",
+      capabilities
+    });
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([
+      {
+        id: "incident-harbor",
+        revision: 83,
+        courseId: "course-harbor",
+        activeRealSearchCount: 0,
+        course: {
+          name: "Harbor Golf Course",
+          detectedBookingUrl: "https://wilddunes.ezlinksgolf.com/index.html",
+          website: "https://www.wilddunesresort.com/activities/golf/golf-courses/harbor-course/",
+          monitoringStatus: { revision: 91 }
+        }
+      }
+    ]);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 0 });
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+
+    await expect(
+      claimNextLocalReaderJob({
+        deviceId: "reader-home",
+        readerVersion: "1.7.0",
+        buildId: "reader-build-7",
+        capabilities
+      })
+    ).resolves.toBeNull();
+
+    expect(monitoringMocks.getCourseMonitoringEscalationDeadline).toHaveBeenCalledWith(
+      new Date("2026-07-24T16:00:00.000Z"),
+      0
+    );
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          escalationDeadlineAt: new Date("2026-07-24T16:30:00.000Z")
+        })
+      })
+    );
+    expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          courseId: "course-harbor",
+          eventType: "REVALIDATION_REQUESTED",
+          audit: {
+            parserVersion: 1,
+            readerVersion: "1.7.0",
+            buildId: "reader-build-7",
+            customerDataIncluded: false
+          }
         })
       })
     );
