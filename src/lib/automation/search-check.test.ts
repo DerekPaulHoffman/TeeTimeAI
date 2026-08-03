@@ -2597,6 +2597,44 @@ describe("runSearchCheck email cadence", () => {
     });
   });
 
+  it("preserves a durable manual decision after raw intelligence ages out", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMethod: "PHONE_ONLY",
+            bookingPhone: "(860) 555-0102",
+            automationEligibility: "BLOCKED",
+            automationReason: "NO_ONLINE_BOOKING",
+            intelligenceVerifiedAt: null,
+            intelligenceReviewAt: null,
+            intelligenceConfidence: null,
+            monitoringStatus: { state: "FINAL_MANUAL" }
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "MANUAL_DIRECT",
+      automationReason: "NO_ONLINE_BOOKING",
+      bookingAccess: "PHONE_ONLY",
+      monitoringDisposition: "MANUAL_FINAL"
+    });
+  });
+
   it("revalidates stale raw manual metadata through the runnable adapter", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,

@@ -37,7 +37,10 @@ import {
   type AutomationCourseProviderRead,
   type CourseTeeSheetResult
 } from "@/lib/automation/course-provider-read";
-import { evaluateMonitoringGate } from "@/lib/automation/policy";
+import {
+  evaluateMonitoringGate,
+  isCoherentManualDisposition
+} from "@/lib/automation/policy";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
@@ -362,7 +365,17 @@ async function checkSearch(
         localReaderEligible && providerFamilyKey === "CHRONOGOLF";
       const supportedAdapterAvailable = hasSupportedAdapter(course);
 
-      const monitoringGate = evaluateMonitoringGate(course);
+      const monitoringGate =
+        course.monitoringStatus?.state === "FINAL_MANUAL" &&
+        isCoherentManualDisposition(course)
+          ? {
+              disposition: "MANUAL_FINAL" as const,
+              adapterAllowed: false,
+              requiresRevalidation: false,
+              currentEvidence: true,
+              reason: "A durable operator decision confirmed the manual booking method."
+            }
+          : evaluateMonitoringGate(course);
       const engineerApprovedTechnicalFinal = course.monitoringStatus?.state === "FINAL_TECHNICAL";
       const technicalRevalidationRunning = course.monitoringStatus?.state === "REVALIDATING_FINAL";
       const automatedTechnicalClassification =
