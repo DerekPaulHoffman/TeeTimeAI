@@ -948,6 +948,39 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("learns a clean TeeItUp booking root from an official iframe with a GA linker", () => {
+    const trackedBookingUrl =
+      "https://wintonbury-hills-golf-course.book.teeitup.golf/?_ga=tracking";
+    const discovery = buildBrowserDiscovery({
+      courseId: "wintonbury-hills",
+      courseName: "Wintonbury Hills Golf Course",
+      sourceUrl: "https://www.wintonburyhillsgolf.com/book-a-tee-time/",
+      finalUrl: "https://www.wintonburyhillsgolf.com/book-a-tee-time/",
+      observedUrls: [trackedBookingUrl],
+      officialPage: {
+        url: "https://www.wintonburyhillsgolf.com/book-a-tee-time/",
+        courseName: "Wintonbury Hills Golf Course",
+        linkCandidates: [
+          { url: trackedBookingUrl, label: "Embedded tee-time booking" }
+        ]
+      },
+      visibleText: "Wintonbury Hills Golf Course Book A Tee Time"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl:
+        "https://wintonbury-hills-golf-course.book.teeitup.golf/",
+      apiMetadata: {
+        aliases: ["wintonbury-hills-golf-course"],
+        bookingBaseUrl:
+          "https://wintonbury-hills-golf-course.book.teeitup.golf/"
+      },
+      evidence: { learnedFrom: "teeitup-booking-url" }
+    });
+  });
+
   it("prefers a target-scoped General Public TeeItUp link and preserves its facility selector", () => {
     const publicBookingUrl =
       "https://play-dc-golf-public.book.teeitup.com/?course=24680";

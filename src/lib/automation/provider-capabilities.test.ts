@@ -207,6 +207,7 @@ describe("provider capability registry", () => {
     "https://capitalhillsny.cps.golf/onlineresweb/search-teetime?CourseId=7&utm_source=course",
     "https://public.navyaims.com/navyeast/webtrac/web/search.html?module=GR&secondarycode=25&gclid=tracking",
     "https://public-course.book.teeitup.golf/?course=24680&date=2026-07-24&fbclid=tracking",
+    "https://public-course.book.teeitup.golf/?_ga=tracking",
     "https://fox.tenfore.golf/gainfieldfarms?utm_campaign=summer",
     "https://dennis.chelseareservations.com/GPInprocess?_gl=tracking"
   ])("ignores tracking-only query parameters on a valid provider landing %s", (url) => {

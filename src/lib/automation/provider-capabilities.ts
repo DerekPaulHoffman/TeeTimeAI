@@ -484,7 +484,7 @@ const PROVIDER_INFRASTRUCTURE_TOKENS = new Set([
 ]);
 
 export function isProviderTrackingQueryParameter(key: string) {
-  return /^(?:utm_(?:campaign|content|id|medium|source|term)|_gl|dclid|fbclid|gclid|mc_cid|mc_eid|msclkid)$/iu.test(
+  return /^(?:utm_(?:campaign|content|id|medium|source|term)|_ga|_gl|dclid|fbclid|gclid|mc_cid|mc_eid|msclkid)$/iu.test(
     key
   );
 }
