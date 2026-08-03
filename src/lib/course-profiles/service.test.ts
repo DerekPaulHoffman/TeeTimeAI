@@ -7,6 +7,7 @@ import {
   ensurePendingCourseProfile,
   getPublishedCourseProfile,
   getRelatedSupportedCourses,
+  listPublishedDirectCourseProfiles,
   listCourseProfileLocationEnrichmentQueue,
   listCourseProfileQueue,
   queuePendingCourseProfiles
@@ -18,6 +19,7 @@ vi.mock("@/lib/prisma", () => ({
     courseProfile: {
       create: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn()
     },
@@ -130,6 +132,24 @@ describe("course profile service", () => {
       valid: true,
       canonicalSlug: "phone-only-golf-course-example-ct"
     });
+  });
+
+  it("lists public Course Guides without automatic alert support separately", async () => {
+    mockedPrisma.courseProfile.findMany.mockResolvedValue([]);
+
+    await listPublishedDirectCourseProfiles();
+
+    expect(mockedPrisma.courseProfile.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          status: { in: ["PUBLISHED", "STALE"] },
+          course: {
+            isPublic: true,
+            automationEligibility: { not: "ALLOWED" }
+          }
+        }
+      })
+    );
   });
 
   it("keeps an existing canonical slug immutable when location copy changes", async () => {

@@ -341,6 +341,35 @@ export async function listPublishedCourseAlertProfiles() {
   });
 }
 
+export async function listPublishedDirectCourseProfiles() {
+  return prisma.courseProfile.findMany({
+    where: {
+      status: { in: [...PUBLIC_COURSE_PROFILE_STATUSES] },
+      course: {
+        isPublic: true,
+        automationEligibility: { not: "ALLOWED" }
+      }
+    },
+    orderBy: [
+      { course: { stateCode: "asc" } },
+      { course: { city: "asc" } },
+      { course: { name: "asc" } }
+    ],
+    select: {
+      canonicalSlug: true,
+      accessSummary: true,
+      updatedAt: true,
+      course: {
+        select: {
+          name: true,
+          city: true,
+          stateCode: true
+        }
+      }
+    }
+  });
+}
+
 export async function createCourseProfileSlugAlias(courseId: string, slug: string, apply = false) {
   const normalizedSlug = slug.trim().toLowerCase();
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalizedSlug) || normalizedSlug.length > 120) {

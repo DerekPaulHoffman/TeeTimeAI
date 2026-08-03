@@ -29,7 +29,9 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const { course, overview } = result.profile;
   const place = [course.city, course.stateCode].filter(Boolean).join(", ");
   return buildPageMetadata({
-    title: `${course.name} Tee Time Alerts${place ? ` in ${place}` : ""}`,
+    title: course.automationEligibility === "ALLOWED"
+      ? `${course.name} Tee Time Alerts${place ? ` in ${place}` : ""}`
+      : `${course.name} Course Guide${place ? ` in ${place}` : ""}`,
     description: course.automationEligibility === "ALLOWED"
       ? `Get free email alerts when public tee times open at ${course.name}${place ? ` in ${place}` : ""}. Choose your time window, then book on the official course site.`
       : overview?.slice(0, 155) ?? `Public-access and tee-time details for ${course.name}.`,
@@ -148,7 +150,7 @@ export default async function CourseProfilePage({ params }: PageProps) {
         "@type": "WebPage",
         "@id": `${absoluteUrl(path)}#webpage`,
         url: absoluteUrl(path),
-        name: `${course.name} tee time alerts`,
+        name: supported ? `${course.name} tee time alerts` : `${course.name} Course Guide`,
         description: profile.overview,
         datePublished: profile.publishedAt?.toISOString(),
         dateModified: profile.updatedAt.toISOString(),
@@ -160,7 +162,7 @@ export default async function CourseProfilePage({ params }: PageProps) {
         "@id": `${absoluteUrl(path)}#breadcrumbs`,
         itemListElement: [
           { "@type": "ListItem", position: 1, name: "Home", item: absoluteUrl("/") },
-          { "@type": "ListItem", position: 2, name: "Course tee time alerts", item: absoluteUrl("/courses") },
+          { "@type": "ListItem", position: 2, name: "Public course directory", item: absoluteUrl("/courses") },
           ...(hasConnecticutHub ? [{ "@type": "ListItem", position: 3, name: "Connecticut courses", item: absoluteUrl("/locations/connecticut") }] : []),
           { "@type": "ListItem", position: hasConnecticutHub ? 4 : 3, name: course.name, item: absoluteUrl(path) }
         ]
@@ -187,11 +189,11 @@ export default async function CourseProfilePage({ params }: PageProps) {
       <section className="knowledge-hero course-hero">
         <div className="knowledge-hero-inner">
           <nav aria-label="Breadcrumb" className="knowledge-breadcrumbs">
-            <Link href="/">Home</Link><span>/</span><Link href="/courses">Course alerts</Link><span>/</span>{hasConnecticutHub ? <><Link href="/locations/connecticut">Connecticut</Link><span>/</span></> : null}<span>{course.name}</span>
+            <Link href="/">Home</Link><span>/</span><Link href="/courses">Public courses</Link><span>/</span>{hasConnecticutHub ? <><Link href="/locations/connecticut">Connecticut</Link><span>/</span></> : null}<span>{course.name}</span>
           </nav>
           <div className="knowledge-hero-copy">
-            <p className="eyebrow">Public golf tee time alerts</p>
-            <h1>{course.name} tee time alerts</h1>
+            <p className="eyebrow">{supported ? "Public golf tee time alerts" : "Public golf Course Guide"}</p>
+            <h1>{supported ? `${course.name} tee time alerts` : `${course.name} Course Guide`}</h1>
             <p className="knowledge-location"><MapPin aria-hidden="true" size={17} />{location}</p>
             <p className="knowledge-lede">{supported
               ? `Get a free email when a public tee time matches your date, time window, and group size. You book directly with ${course.name}.`

@@ -1,22 +1,32 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowRight, Bell } from "lucide-react";
+import { ArrowRight, Bell, BookOpen } from "lucide-react";
 
 import "../knowledge.css";
 import { StructuredData } from "@/components/structured-data";
-import { listPublishedCourseAlertProfiles } from "@/lib/course-profiles/service";
+import {
+  listPublishedCourseAlertProfiles,
+  listPublishedDirectCourseProfiles
+} from "@/lib/course-profiles/service";
 import { absoluteUrl, buildPageMetadata } from "@/lib/seo";
 
 const title = "Public Golf Course Tee Time Alerts";
 const description =
-  "Browse public golf courses with free tee time alerts. Choose a course, date, time window, and group size, then book directly on the official course site.";
+  "Browse public golf courses with free tee time alerts and practical Course Guides. Choose an alert course or continue directly to an official course site.";
 const path = "/courses";
 
 export const metadata: Metadata = buildPageMetadata({ title, description, path });
 export const dynamic = "force-dynamic";
 
 export default async function CourseAlertsPage() {
-  const profiles = await listPublishedCourseAlertProfiles();
+  const [profiles, directProfiles] = await Promise.all([
+    listPublishedCourseAlertProfiles(),
+    listPublishedDirectCourseProfiles()
+  ]);
+  const listedProfiles = [
+    ...profiles.map((profile) => ({ profile, supportsAlerts: true })),
+    ...directProfiles.map((profile) => ({ profile, supportsAlerts: false }))
+  ];
   const structuredData = {
     "@context": "https://schema.org",
     "@graph": [
@@ -31,11 +41,13 @@ export default async function CourseAlertsPage() {
       {
         "@type": "ItemList",
         "@id": `${absoluteUrl(path)}#course-list`,
-        numberOfItems: profiles.length,
-        itemListElement: profiles.map((profile, index) => ({
+        numberOfItems: listedProfiles.length,
+        itemListElement: listedProfiles.map(({ profile, supportsAlerts }, index) => ({
           "@type": "ListItem",
           position: index + 1,
-          name: `${profile.course.name} tee time alerts`,
+          name: supportsAlerts
+            ? `${profile.course.name} tee time alerts`
+            : `${profile.course.name} Course Guide`,
           url: absoluteUrl(`/courses/${profile.canonicalSlug}`)
         }))
       },
@@ -99,6 +111,36 @@ export default async function CourseAlertsPage() {
           ))}
         </div>
       </section>
+
+      {directProfiles.length > 0 ? (
+        <section className="location-course-section">
+          <div className="location-section-heading">
+            <div>
+              <p className="knowledge-kicker">More public course guides</p>
+              <h2>Explore public courses without alerts</h2>
+            </div>
+            <p>
+              These public courses do not currently offer Tee Time Spot alerts. Use each
+              guide to review access details, then continue to the official course or booking
+              page.
+            </p>
+          </div>
+          <div className="location-course-list">
+            {directProfiles.map((profile, index) => (
+              <Link href={`/courses/${profile.canonicalSlug}`} key={profile.canonicalSlug}>
+                <span className="location-course-number">{String(index + 1).padStart(2, "0")}</span>
+                <span>
+                  <small>{[profile.course.city, profile.course.stateCode].filter(Boolean).join(", ")}</small>
+                  <strong>{profile.course.name} Course Guide</strong>
+                  <p>{profile.accessSummary}</p>
+                </span>
+                <span className="location-course-status"><BookOpen aria-hidden="true" size={13} /> Guide only</span>
+                <ArrowRight aria-hidden="true" size={18} />
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </main>
   );
 }

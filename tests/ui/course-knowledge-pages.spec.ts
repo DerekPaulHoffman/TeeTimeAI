@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 const coursePath = "/courses/tashua-knolls-golf-course-trumbull-ct";
 const knownBookingWindowCoursePath = "/courses/cedar-ridge-golf-course-east-lyme-ct";
+const directCoursePath = "/courses/goose-run-golf-course-groton-ct";
 const locationPaths = [
   "/locations/connecticut",
   "/locations/connecticut/fairfield-county",
@@ -59,8 +60,29 @@ test("renders the public course alert directory with indexable course links", as
   await expect(page.getByRole("heading", { level: 1, name: "Public golf course tee time alerts" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Find tee time alerts by course" })).toBeVisible();
   await expect(page.getByRole("link", { name: /Tashua Knolls Golf Course tee time alerts/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Explore public courses without alerts" })).toBeVisible();
+  await expect(page.getByText("These public courses do not currently offer Tee Time Spot alerts.")).toBeVisible();
+  await expect(page.getByRole("link", { name: /Goose Run Golf Course Course Guide/ })).toHaveAttribute(
+    "href",
+    directCoursePath
+  );
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", /\/courses$/);
   expect(await structuredDataTypes(page)).toEqual(expect.arrayContaining(["CollectionPage", "ItemList", "BreadcrumbList"]));
+  await expectNoOverflowOrOverlay(page);
+  expect(errors).toEqual([]);
+});
+
+test("labels a direct-only public course as a Course Guide without promising alerts", async ({ page }) => {
+  const errors = watchForBrowserErrors(page);
+  const response = await page.goto(directCoursePath, { waitUntil: "networkidle" });
+
+  expect(response?.status()).toBe(200);
+  await expect(page).toHaveTitle(/Goose Run Golf Course Course Guide in Groton, CT/);
+  await expect(page.getByRole("heading", { level: 1, name: "Goose Run Golf Course Course Guide" })).toBeVisible();
+  await expect(page.getByText("Public golf Course Guide", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create an alert here" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Browse courses with alerts" }).first()).toBeVisible();
+  expect(await structuredDataTypes(page)).toEqual(expect.arrayContaining(["GolfCourse", "WebPage", "BreadcrumbList", "FAQPage"]));
   await expectNoOverflowOrOverlay(page);
   expect(errors).toEqual([]);
 });
