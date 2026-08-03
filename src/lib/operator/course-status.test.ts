@@ -274,6 +274,38 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("keeps a final manual operator decision out of the investigation queue", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("FINAL_MANUAL"),
+          coverageCategory: "UNSUPPORTED_FAMILY",
+          bookingAccessMode: "PHONE_ONLY",
+          incident: {
+            id: "incident-final-manual",
+            status: "RESOLVED",
+            resolution: "DIRECT_BOOKING_CLASSIFIED",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "Tee times require a manual course process.",
+            nextAction: "Review the old provider investigation.",
+            failureClass: "UNSUPPORTED_FAMILY"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "DIRECT_SITE_ONLY",
+      diagnosticKey: "NO_PUBLIC_ONLINE",
+      statusLabel: "Phone or manual booking",
+      priorityGroup: "LIMITATION",
+      automationQueueState: null
+    });
+  });
+
   it("shows an operator-classified private course as a final identity", () => {
     const [result] = buildCourseInventory(
       [

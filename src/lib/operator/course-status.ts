@@ -498,6 +498,20 @@ function classifyCourseStatus(
     }
   }
 
+  if (course.monitoringStatus?.state === "FINAL_MANUAL") {
+    return withStatus(course, "DIRECT_SITE_ONLY", {
+      priorityGroup: "LIMITATION",
+      priorityScore: 3,
+      tone: "neutral",
+      diagnosticKeyOverride: "NO_PUBLIC_ONLINE",
+      labelOverride: "Phone or manual booking",
+      meaningOverride:
+        "An operator confirmed that tee times require a phone call, account, or another manual course process.",
+      actionOverride:
+        "No automated investigation is running. Keep the official course details available to golfers and re-check only when stronger public booking evidence appears."
+    });
+  }
+
   const latestSuccessfulEvidence = getLatestSuccessfulEvidence(course);
   if (
     latestSuccessfulEvidence &&
