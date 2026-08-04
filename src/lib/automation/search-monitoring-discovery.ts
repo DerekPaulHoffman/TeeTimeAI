@@ -3877,7 +3877,18 @@ function decodeHtmlEntities(value: string) {
     .replaceAll("&quot;", '"')
     .replaceAll("&#39;", "'")
     .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">");
+    .replaceAll("&gt;", ">")
+    .replace(/&#(?:x([0-9a-f]+)|(\d+));/gi, (entity, hexadecimal, decimal) => {
+      const codePoint = Number.parseInt(hexadecimal ?? decimal, hexadecimal ? 16 : 10);
+      if (!Number.isSafeInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        return entity;
+      }
+      try {
+        return String.fromCodePoint(codePoint);
+      } catch {
+        return entity;
+      }
+    });
 }
 
 function decodeEmbeddedContent(value: string) {

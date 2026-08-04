@@ -771,6 +771,86 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("repairs TeeItUp metadata when an official link double-encodes numeric ampersands", async () => {
+    const officialUrl = "https://farmingbury.example/";
+    const teeTimesUrl = "https://farmingbury.example/tee-times/";
+    const encodedBookingUrl =
+      "https://farmingbury-hills-golf-course.book.teeitup.com/?course=15797&amp;#038;date=2025-03-26&amp;#038;max=9999";
+    const fetchedBookingUrl =
+      "https://farmingbury-hills-golf-course.book.teeitup.com/?course=15797&date=2025-03-26&max=9999";
+    const canonicalBookingUrl =
+      "https://farmingbury-hills-golf-course.book.teeitup.com/?course=15797";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      switch (url.toString()) {
+        case officialUrl:
+          return new Response(
+            `<html><title>Farmingbury Hills Golf Course</title><a href="${teeTimesUrl}">Tee Times</a><a href="${encodedBookingUrl}">Book a Tee Time</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case teeTimesUrl:
+          return new Response(
+            `<html><title>Farmingbury Hills Golf Course Tee Times</title><a href="${encodedBookingUrl}">Book a Tee Time</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        case fetchedBookingUrl:
+          return new Response("<html><title>Tee Times</title></html>", {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          });
+        default:
+          throw new Error(`Unexpected URL ${url.toString()}`);
+      }
+    });
+    const search = {
+      preferences: [{
+        rank: 1,
+        course: {
+          id: "farmingbury-hills",
+          name: "Farmingbury Hills Golf Course",
+          website: officialUrl,
+          detectedBookingUrl:
+            "https://farmingbury-hills-golf-course.book.teeitup.com/?course=15797&date=2022-11-16",
+          detectedPlatform: "TEEITUP",
+          automationEligibility: "ALLOWED",
+          bookingMethod: "PUBLIC_ONLINE",
+          bookingMetadata: null
+        }
+      }]
+    } as never;
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      officialUrl,
+      teeTimesUrl
+    ]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "farmingbury-hills",
+        status: "LEARNED",
+        detectedPlatform: "TEEITUP",
+        bookingUrl: canonicalBookingUrl,
+        apiMetadata: {
+          aliases: ["farmingbury-hills-golf-course"],
+          bookingBaseUrl: canonicalBookingUrl,
+          facilityIds: [15797]
+        }
+      })
+    );
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
+    expect(result).toEqual({
+      attemptedCourseIds: ["farmingbury-hills"],
+      appliedCourseIds: ["farmingbury-hills"],
+      failedCourseIds: [],
+      deferredCourseIds: [],
+      retryCourseIds: ["farmingbury-hills"]
+    });
+  });
+
   it("learns TeeItUp metadata from a course-owned legacy play embed", async () => {
     const officialUrl =
       "https://www.wampanoaggolfcourseswansea.com/";
