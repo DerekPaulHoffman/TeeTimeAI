@@ -45,6 +45,7 @@ import {
   isDashboardMonitoringSetupInProgress,
   readDashboardAvailabilitySnapshot
 } from "@/lib/searches/dashboard-availability";
+import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { formatCourseDistance } from "@/lib/email/course-facts";
@@ -442,6 +443,7 @@ function DashboardSearchCard({
             });
             const monitoringVerdict = getDashboardMonitoringVerdict({
               alertSupport,
+              bookingPhone,
               automationEligibility: preference.course.automationEligibility,
               automationReason: preference.course.automationReason,
               latestProbe,
@@ -460,12 +462,16 @@ function DashboardSearchCard({
               ? {
                   label: monitoringVerdict.label,
                   detail: monitoringVerdict.detail,
+                  emoji: monitoringVerdict.emoji,
                   tone:
                     monitoringVerdict.icon === "unavailable"
                       ? "unavailable"
                       : "scheduled"
                 }
-              : availabilityView;
+              : {
+                  ...availabilityView,
+                  emoji: getCourseStatusEmoji(availabilityView.tone)
+                };
             const bookingEvidence = {
               bookingFacts: preference.course.bookingFacts,
               probes: [],
@@ -574,7 +580,7 @@ function DashboardSearchCard({
                         aria-hidden="true"
                         className="watch-course-status-emoji"
                       >
-                        {getCourseStatusEmoji(courseStatus.tone)}
+                        {courseStatus.emoji}
                       </span>
                       <strong>{courseStatus.label}</strong>
                     </div>
@@ -647,7 +653,7 @@ function DashboardSearchCard({
                   ) : null}
                   {bookingPhone ? (
                     <a href={`tel:${formatTelephoneHref(bookingPhone)}`}>
-                      Call course
+                      Call {bookingPhone}
                     </a>
                   ) : null}
                 </div>
@@ -683,6 +689,7 @@ function formatObservationDate(value: Date | string | undefined) {
 
 function getDashboardMonitoringVerdict(input: {
   alertSupport: ReturnType<typeof getCourseAlertSupport> | null;
+  bookingPhone?: string | null;
   automationEligibility: string;
   automationReason: string;
   latestProbe?: {
@@ -707,6 +714,7 @@ function getDashboardMonitoringVerdict(input: {
     return {
       label: "Checks start when booking opens",
       detail: "We will begin checking at the course's useful booking release time.",
+      emoji: "📅",
       icon: "scheduled" as const,
       className: "is-detail"
     };
@@ -718,6 +726,7 @@ function getDashboardMonitoringVerdict(input: {
     return {
       label: "Tee-time alerts available",
       detail: "The latest check completed successfully.",
+      emoji: "✅",
       icon: "watching" as const,
       className: "is-public"
     };
@@ -727,6 +736,7 @@ function getDashboardMonitoringVerdict(input: {
       label: "Monitoring setup in progress",
       detail:
         "Your alert is active. Tee Time Spot is setting up automated checks for this course; use the official site for current availability in the meantime.",
+      emoji: "🛠️",
       icon: "scheduled" as const,
       className: "is-detail"
     };
@@ -737,9 +747,10 @@ function getDashboardMonitoringVerdict(input: {
     input.latestProbe?.outcome === "BLOCKED_TOOLING"
   ) {
     return {
-      label: "Temporarily unavailable",
+      label: "Check the official site for now",
       detail:
         "The course's public tee-time service isn't responding to our checks. Your alert is still active; use the official site while Tee Time Spot retries and we'll email you when checks resume.",
+      emoji: "🔄",
       icon: "unavailable" as const,
       className: "is-official-site-only"
     };
@@ -753,10 +764,20 @@ function getDashboardMonitoringVerdict(input: {
     input.latestProbe?.outcome === "IDENTITY_FINAL" ||
     input.latestProbe?.outcome === "IDENTITY_RECHECK"
   ) {
+    if (input.alertSupport) {
+      const action = getDashboardCourseAction(input.alertSupport, input.bookingPhone);
+      return {
+        ...action,
+        icon: "unavailable" as const,
+        className: "is-official-site-only"
+      };
+    }
+
     return {
-      label: "Tee-time alerts unavailable",
+      label: "Check the official course site",
       detail:
-        "Use the official course site for current availability. Tee Time Spot may continue working to add alerts in the background.",
+        "Use the official course site for current availability while Tee Time Spot works to add alerts.",
+      emoji: "🌐",
       icon: "unavailable" as const,
       className: "is-official-site-only"
     };
@@ -769,6 +790,7 @@ function getDashboardMonitoringVerdict(input: {
         : input.firstTimeLookup
           ? "Tee Time Spot hasn't checked this course before. We'll email whether alerts are available after the first check, usually within 10 minutes."
           : "We’ll email whether tee-time alerts are available after the first check, usually within 10 minutes.",
+    emoji: "⏳",
     icon: "scheduled" as const,
     className: "is-detail"
   };
