@@ -651,6 +651,35 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("shows a final identity lifecycle as a known private or invalid limitation", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          monitoringStatus: monitoringStatus("FINAL_IDENTITY"),
+          incident: {
+            id: "incident-final-identity",
+            status: "RESOLVED",
+            resolution: "IDENTITY_CLASSIFIED",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T12:00:00.000Z"),
+            latestMessage: "Exact identity review confirmed a non-course listing.",
+            nextAction: null,
+            failureClass: "UNSUPPORTED_FAMILY"
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "PRIVATE_OR_INVALID",
+      statusLabel: "Private or invalid course record",
+      priorityGroup: "LIMITATION",
+      automationQueueState: null
+    });
+  });
+
   it("uses the durable monitoring success when the newest probe is an older failure", () => {
     const [result] = buildCourseInventory(
       [

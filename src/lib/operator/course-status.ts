@@ -506,6 +506,18 @@ function classifyCourseStatus(
     }
   }
 
+  if (course.monitoringStatus?.state === "FINAL_IDENTITY") {
+    return withStatus(course, "PRIVATE_OR_INVALID", {
+      priorityGroup: "LIMITATION",
+      priorityScore: 3,
+      tone: "neutral",
+      labelOverride: "Private or invalid course record",
+      meaningOverride:
+        "Current exact identity evidence shows that this is private, not a playable public course, or no longer a valid course record.",
+      actionOverride: "No further monitoring work is scheduled."
+    });
+  }
+
   if (course.monitoringStatus?.state === "FINAL_MANUAL") {
     return withStatus(course, "DIRECT_SITE_ONLY", {
       priorityGroup: "LIMITATION",
