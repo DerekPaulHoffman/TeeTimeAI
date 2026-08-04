@@ -194,7 +194,8 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
         activeBatch: {
           select: {
             reference: true,
-            status: true
+            status: true,
+            leaseExpiresAt: true
           }
         }
       }
@@ -404,6 +405,12 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
             failureClass: true,
             nextAttemptAt: true,
             activeBatchId: true,
+            activeBatch: {
+              select: {
+                status: true,
+                leaseExpiresAt: true
+              }
+            },
             attemptCount: true
           }
         },

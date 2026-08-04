@@ -6839,20 +6839,81 @@ function uniqueTeeItUpLinkCandidates(
   candidates: Array<{ url: string; label: string }>
 ) {
   const seen = new Set<string>();
-  return candidates.filter((candidate) => {
-    if (
-      !isTeeItUpBookingUrl(candidate.url) ||
-      !isTeeItUpPublicLandingCandidate(candidate.url)
-    ) {
-      return false;
+  return candidates.flatMap((candidate) => {
+    const canonicalUrl = canonicalizeTeeItUpLandingCandidate(candidate.url);
+    if (!canonicalUrl) {
+      return [];
     }
-    const key = `${candidate.url}\u0000${candidate.label}`;
+    const key = `${canonicalUrl}\u0000${candidate.label}`;
     if (seen.has(key)) {
-      return false;
+      return [];
     }
     seen.add(key);
-    return true;
+    return [{ ...candidate, url: canonicalUrl }];
   });
+}
+
+function canonicalizeTeeItUpLandingCandidate(value: string) {
+  const url = parseUrl(value);
+  if (
+    !url ||
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    (url.port &&
+      !(
+        (url.protocol === "http:" && url.port === "80") ||
+        (url.protocol === "https:" && url.port === "443")
+      )) ||
+    !isTeeItUpBookingUrl(url.toString()) ||
+    isLegacyTeeItUpPlayUrl(url.toString())
+  ) {
+    return isLegacyTeeItUpPlayUrl(value) ? value : null;
+  }
+
+  const allowedKeys = new Set(["course", "date", "holes", "max", "players"]);
+  const courseValues: string[] = [];
+  for (const [key, entry] of url.searchParams) {
+    if (isProviderTrackingQueryParameter(key)) {
+      continue;
+    }
+    const normalizedKey = key.toLocaleLowerCase("en-US");
+    if (!allowedKeys.has(normalizedKey)) {
+      return null;
+    }
+    if (normalizedKey === "course") {
+      courseValues.push(entry);
+    }
+  }
+  if (
+    courseValues.length > 1 ||
+    (courseValues.length === 1 &&
+      !readPositiveBoundedTeeItUpSelector(courseValues[0]))
+  ) {
+    return null;
+  }
+
+  const canonicalUrl = new URL(url.toString());
+  canonicalUrl.protocol = "https:";
+  canonicalUrl.port = "";
+  canonicalUrl.search = "";
+  if (courseValues[0]) {
+    canonicalUrl.searchParams.set("course", courseValues[0]);
+  }
+  return isProviderPublicBookingLandingUrl(canonicalUrl)
+    ? canonicalUrl.toString()
+    : null;
+}
+
+function readPositiveBoundedTeeItUpSelector(value: string) {
+  if (!/^[1-9]\d{0,9}$/u.test(value)) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= 2_147_483_647
+    ? parsed
+    : null;
 }
 
 function isGeneralPublicTeeItUpLabel(label: string) {

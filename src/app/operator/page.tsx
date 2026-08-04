@@ -664,6 +664,13 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
           tone="warning"
         />
         <CourseFleetCount
+          count={counts.recoveryRequired}
+          icon={<ShieldAlert size={17} />}
+          label="Automation recovery"
+          detail="Expired work must be recovered"
+          tone="critical"
+        />
+        <CourseFleetCount
           count={counts.scheduledRetry}
           icon={<Clock3 size={17} />}
           label="Automation waiting"
@@ -1154,6 +1161,7 @@ function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
 function formatAutomationQueueState(value: CourseInventoryItem["automationQueueState"]) {
   if (value === "DUE_NOW") return "Due now";
   if (value === "IN_PROGRESS") return "In progress";
+  if (value === "RECOVERY_REQUIRED") return "Recovery required";
   if (value === "SCHEDULED_RETRY") return "Scheduled retry";
   if (value === "ENGINEERING_NEEDED") return "Engineering work";
   if (value === "NEEDS_HUMAN") return "Human review";
@@ -1308,11 +1316,25 @@ function IncidentQueueState({
   generatedAt: Date;
   incident: OperatorOverview["incidents"][number];
 }) {
-  if (incident.activeBatchId) {
+  const activeBatchIsLive = Boolean(
+    incident.activeBatchId &&
+      incident.activeBatch &&
+      ["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(incident.activeBatch.status) &&
+      incident.activeBatch.leaseExpiresAt.getTime() > generatedAt.getTime()
+  );
+  if (activeBatchIsLive) {
     return (
       <span className="operator-queue-label is-active">
         <Activity size={14} />
         In progress
+      </span>
+    );
+  }
+  if (incident.activeBatchId) {
+    return (
+      <span className="operator-queue-label is-warning">
+        <ShieldAlert size={14} />
+        Recovery required
       </span>
     );
   }

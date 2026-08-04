@@ -688,7 +688,39 @@ describe("operator course inventory", () => {
         }),
         course({
           id: "progress",
-          monitoringStatus: monitoringStatus("DEGRADED_RETRYING")
+          incident: {
+            id: "incident-progress",
+            status: "AUTO_INVESTIGATING",
+            kind: "FETCH_FAILED",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "Verification is running.",
+            nextAction: "Wait for exact runtime proof.",
+            failureClass: "UNKNOWN",
+            activeBatchId: "batch-live",
+            activeBatch: {
+              status: "VERIFYING",
+              leaseExpiresAt: new Date("2026-07-24T18:15:00.000Z")
+            }
+          }
+        }),
+        course({
+          id: "recovery",
+          incident: {
+            id: "incident-recovery",
+            status: "AUTO_INVESTIGATING",
+            kind: "FETCH_FAILED",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "Verification ownership expired.",
+            nextAction: "Recover the sealed verification batch.",
+            failureClass: "UNKNOWN",
+            activeBatchId: "batch-expired",
+            activeBatch: {
+              status: "VERIFYING",
+              leaseExpiresAt: new Date("2026-07-24T17:45:00.000Z")
+            }
+          }
         }),
         course({
           id: "scheduled",
@@ -722,6 +754,7 @@ describe("operator course inventory", () => {
     expect(summarizeCourseInventory(inventory)).toMatchObject({
       dueNow: 1,
       inProgress: 1,
+      recoveryRequired: 1,
       scheduledRetry: 1,
       engineeringNeeded: 1,
       needsHuman: 1

@@ -1205,8 +1205,7 @@ describe("buildBrowserDiscovery", () => {
 
   it.each([
     "https://shared-public.book.teeitup.com/?course=2147483648",
-    "https://shared-public.book.teeitup.com/?course=24680&unexpected=value",
-    "https://shared-public.book.teeitup.com/?course=24680&date=2026-99-99"
+    "https://shared-public.book.teeitup.com/?course=24680&unexpected=value"
   ])("does not learn target-scoped TeeItUp metadata from an invalid landing %s", (invalidUrl) => {
     const officialUrl = "https://shared.example/tee-times";
     const discovery = buildBrowserDiscovery({
@@ -1228,6 +1227,37 @@ describe("buildBrowserDiscovery", () => {
       bookingUrl: officialUrl
     });
     expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("strips stale TeeItUp display filters while preserving the facility selector", () => {
+    const officialUrl = "https://farmingbury.example/tee-times";
+    const staleBookingUrl =
+      "https://farmingbury-hills-golf-course.book.teeitup.com/?course=15797&date=2022-11-16&players=999999999&holes=999&max=999999999";
+    const canonicalBookingUrl =
+      "https://farmingbury-hills-golf-course.book.teeitup.com/?course=15797";
+    const discovery = buildBrowserDiscovery({
+      courseId: "farmingbury-hills",
+      courseName: "Farmingbury Hills Golf Course",
+      sourceUrl: officialUrl,
+      observedUrls: [staleBookingUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Farmingbury Hills Golf Course",
+        linkCandidates: [{ url: staleBookingUrl, label: "Book Tee Times" }]
+      },
+      visibleText: "Farmingbury Hills Golf Course tee times"
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: canonicalBookingUrl,
+      apiMetadata: {
+        aliases: ["farmingbury-hills-golf-course"],
+        facilityIds: [15797],
+        bookingBaseUrl: canonicalBookingUrl
+      }
+    });
   });
 
   it("suppresses an ambiguous provider booking URL when no official course page is known", () => {

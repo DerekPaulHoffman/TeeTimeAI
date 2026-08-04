@@ -136,6 +136,7 @@ export type CourseStatusTone = "critical" | "warning" | "neutral" | "positive";
 export type CourseAutomationQueueState =
   | "DUE_NOW"
   | "IN_PROGRESS"
+  | "RECOVERY_REQUIRED"
   | "SCHEDULED_RETRY"
   | "ENGINEERING_NEEDED"
   | "NEEDS_HUMAN";
@@ -181,6 +182,10 @@ export type CourseStatusInput = {
     failureClass: string | null;
     nextAttemptAt?: Date | null;
     activeBatchId?: string | null;
+    activeBatch?: {
+      status: string;
+      leaseExpiresAt: Date;
+    } | null;
     attemptCount?: number;
   } | null;
   latestProbe: {
@@ -294,6 +299,9 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
     working: courses.filter((course) => course.priorityGroup === "WORKING").length,
     dueNow: courses.filter((course) => course.automationQueueState === "DUE_NOW").length,
     inProgress: courses.filter((course) => course.automationQueueState === "IN_PROGRESS").length,
+    recoveryRequired: courses.filter(
+      (course) => course.automationQueueState === "RECOVERY_REQUIRED"
+    ).length,
     scheduledRetry: courses.filter((course) => course.automationQueueState === "SCHEDULED_RETRY")
       .length,
     engineeringNeeded: courses.filter(
@@ -1038,8 +1046,15 @@ function deriveAutomationQueueState(
   ) {
     return "NEEDS_HUMAN";
   }
+  if (course.incident?.activeBatchId) {
+    const batch = course.incident.activeBatch;
+    return batch &&
+      ["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(batch.status) &&
+      batch.leaseExpiresAt > now
+      ? "IN_PROGRESS"
+      : "RECOVERY_REQUIRED";
+  }
   if (
-    course.incident?.activeBatchId ||
     course.monitoringStatus?.state === "DEGRADED_RETRYING" ||
     course.monitoringStatus?.state === "REVALIDATING_FINAL"
   ) {
