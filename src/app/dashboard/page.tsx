@@ -414,6 +414,13 @@ function DashboardSearchCard({
             const officialCourseUrl = isPublicCourse
               ? preference.course.detectedBookingUrl ?? preference.course.website
               : preference.course.website;
+            const officialCourseLinkLabel = !isPublicCourse
+              ? "Course information"
+              : preference.course.detectedBookingUrl
+                ? preference.course.bookingMethod === "CONTACT_COURSE"
+                  ? "Official request page"
+                  : "Official booking page"
+                : "Official site";
             const latestProbe = search.probes.find(
               (probe) => probe.courseId === preference.course.id
             );
@@ -642,7 +649,7 @@ function DashboardSearchCard({
                       rel="noreferrer"
                       target="_blank"
                     >
-                      {isPublicCourse ? "Official site" : "Course information"}{" "}
+                      {officialCourseLinkLabel}{" "}
                       <ExternalLink size={11} />
                     </a>
                   ) : null}

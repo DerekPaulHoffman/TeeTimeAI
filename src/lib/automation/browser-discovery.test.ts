@@ -2052,6 +2052,38 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.automationEligibility).toBeUndefined();
   });
 
+  it("preserves the explicitly labeled public booking page among sibling provider tenants", () => {
+    const publicUrl = "https://ridgefield.ezlinksgolf.com/index.html";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ridgefield",
+      courseName: "Ridgefield Golf Course",
+      sourceUrl: "https://www.ridgefieldgc.com/",
+      finalUrl: "https://www.ridgefieldgc.com/tee-times/",
+      observedUrls: [
+        publicUrl,
+        "https://ridgefieldsilver.ezlinksgolf.com/index.html",
+        "https://ridgefieldgold.ezlinksgolf.com/index.html",
+        "https://ridgefieldmember.ezlinksgolf.com/index.html"
+      ],
+      linkCandidates: [
+        { url: publicUrl, label: "Public Tee Times" },
+        { url: "https://ridgefieldsilver.ezlinksgolf.com/index.html", label: "Silver Members" },
+        { url: "https://ridgefieldgold.ezlinksgolf.com/index.html", label: "Gold Members" },
+        { url: "https://ridgefieldmember.ezlinksgolf.com/index.html", label: "Member Tee Times" }
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: publicUrl,
+      evidence: {
+        learnedFrom: "provider-evidence-conflict:explicit-public-booking-link"
+      }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it.each([
     [
       "FOREUP",
@@ -4304,6 +4336,32 @@ describe("buildBrowserDiscovery", () => {
       automationReason: "NO_ONLINE_BOOKING",
       confidence: 0.9,
       evidence: { learnedFrom: "official-contact-only-course-access" }
+    });
+  });
+
+  it("preserves an official public-play request form when no live tee sheet exists", () => {
+    const requestUrl = "https://greatrivergolfclub.com/member-for-a-day/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "great-river",
+      courseName: "Great River Golf Club",
+      sourceUrl: "https://greatrivergolfclub.com/",
+      finalUrl: requestUrl,
+      officialCourseWebsite: "https://greatrivergolfclub.com/",
+      observedUrls: ["https://greatrivergolfclub.com/", requestUrl],
+      linkCandidates: [{ url: requestUrl, label: "Member for a Day" }],
+      visibleText:
+        "Great River Golf Club Member for a Day. Public play is available by request. Submit your tee time request form and our golf staff will contact you."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingUrl: requestUrl,
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.95,
+      evidence: { learnedFrom: "official-public-play-request-form" }
     });
   });
 

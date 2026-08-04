@@ -3021,6 +3021,14 @@ function scoreBookingCandidate(
   if (/book|reserve|reservation/i.test(searchable)) {
     score += 15;
   }
+  if (
+    parsed.origin === new URL(currentUrl).origin &&
+    /\b(?:member\s+for\s+(?:a\s+)?day|public\s+play|guest\s+play)\b/i.test(
+      `${candidate.label} ${parsed.pathname.replace(/[-_]+/g, " ")}`
+    )
+  ) {
+    score += 20;
+  }
   if (courseName && candidate.label && haveCompatibleCourseNames(courseName, candidate.label)) {
     score += 80;
   }

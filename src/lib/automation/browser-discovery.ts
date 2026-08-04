@@ -709,6 +709,15 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return withCourseIdentityCorroboration(walkInClassification, evidence);
   }
 
+  const requestOnlyClassification = learnOfficialRequestOnlyClassification(
+    evidence,
+    observedUrls
+  );
+
+  if (requestOnlyClassification) {
+    return withCourseIdentityCorroboration(requestOnlyClassification, evidence);
+  }
+
   const contactOnlyClassification = learnOfficialContactOnlyClassification(
     evidence,
     observedUrls
@@ -719,18 +728,28 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   }
 
   if (hasUnresolvedProviderEvidenceConflict(providerEvidence)) {
+    const explicitPublicBookingUrl = findExplicitPublicProviderBookingUrl(
+      providerEvidence
+    );
     return withCourseIdentityCorroboration(
       {
         courseId: evidence.courseId,
         status: "INSPECTED",
-        detectedPlatform: "UNKNOWN",
+        detectedPlatform: explicitPublicBookingUrl
+          ? detectPlatform([explicitPublicBookingUrl])
+          : "UNKNOWN",
         sourceUrl: providerEvidence.sourceUrl,
-        confidence: 0.2,
+        ...(explicitPublicBookingUrl
+          ? { bookingUrl: explicitPublicBookingUrl }
+          : {}),
+        confidence: explicitPublicBookingUrl ? 0.45 : 0.2,
         evidence: {
           finalUrl: providerEvidence.finalUrl,
           observedUrls: providerObservedUrls,
           visibleText: summarizeVisibleText(providerEvidence.visibleText),
-          learnedFrom: "provider-evidence-conflict"
+          learnedFrom: explicitPublicBookingUrl
+            ? "provider-evidence-conflict:explicit-public-booking-link"
+            : "provider-evidence-conflict"
         }
       },
       evidence
@@ -3434,6 +3453,99 @@ function findSingleOfficialPhoneNumber(value: string) {
     }
   }
   return phones.size === 1 ? [...phones.values()][0] : null;
+}
+
+function findExplicitPublicProviderBookingUrl(
+  evidence: BrowserDiscoveryEvidence
+) {
+  const candidates = [
+    ...(evidence.officialPage?.linkCandidates ?? []),
+    ...(evidence.linkCandidates ?? [])
+  ].filter((candidate) => {
+    const normalizedLabel = normalizeTeeTimeTypography(candidate.label)
+      .replace(/\s+/gu, " ")
+      .trim();
+    const url = parseUrl(candidate.url);
+    return Boolean(
+      url &&
+      isProviderPublicBookingLandingUrl(url) &&
+      /^(?:(?:general\s+)?public)(?:\s+(?:book(?:ing)?|tee\s*times?|reservations?))?$/iu.test(
+        normalizedLabel
+      )
+    );
+  });
+  const uniqueCandidates = uniqueUrls(candidates.map(({ url }) => url));
+  return uniqueCandidates.length === 1 ? uniqueCandidates[0] : null;
+}
+
+function learnOfficialRequestOnlyClassification(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const visibleText = evidence.visibleText?.replace(/\s+/gu, " ").trim() ?? "";
+  if (
+    !hasTargetCourseIdentity(visibleText, evidence.courseName ?? "") ||
+    !/\b(?:member\s+for\s+(?:a\s+)?day|public\s+play|guest\s+play)\b/iu.test(
+      visibleText
+    ) ||
+    !/\b(?:request\s+form|submit\s+(?:a\s+)?request|tee\s*time\s+request)\b/iu.test(
+      visibleText
+    ) ||
+    /\b(?:search|view|show|browse)\b.{0,50}\bavailable\s+tee\s*times?\b/iu.test(
+      visibleText
+    )
+  ) {
+    return null;
+  }
+
+  const official = parseUrl(evidence.officialPage?.url ?? evidence.sourceUrl);
+  if (!official) {
+    return null;
+  }
+  const requestCandidates = uniqueUrls(
+    [
+      ...(evidence.officialPage?.linkCandidates ?? []),
+      ...(evidence.linkCandidates ?? [])
+    ]
+      .filter((candidate) => {
+        const url = parseUrl(candidate.url);
+        return Boolean(
+          url &&
+          haveSamePublicWebsiteOrigin(official.toString(), url.toString()) &&
+          /\b(?:member\s+for\s+(?:a\s+)?day|request)\b/iu.test(
+            `${candidate.label} ${url.pathname.replace(/[-_]+/gu, " ")}`
+          )
+        );
+      })
+      .map(({ url }) => url)
+  );
+  if (requestCandidates.length !== 1) {
+    return null;
+  }
+
+  const bookingPhone = findSingleOfficialPhoneNumber(visibleText) ?? undefined;
+  return {
+    courseId: evidence.courseId,
+    status: "VERIFIED",
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: official.toString(),
+    bookingUrl: requestCandidates[0],
+    bookingMethod: "CONTACT_COURSE",
+    ...(bookingPhone ? { bookingPhone } : {}),
+    automationEligibility: "BLOCKED",
+    automationReason: "NO_ONLINE_BOOKING",
+    bookingAccessMode: "CONTACT_COURSE",
+    policyNotes:
+      "The official course site offers public play through a request form rather than a live public tee sheet. Tee Time Spot directs golfers to that official request page and does not present automatic availability alerts.",
+    intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    confidence: 0.95,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls: uniqueUrls([...observedUrls, requestCandidates[0]]),
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "official-public-play-request-form"
+    }
+  };
 }
 
 function hasStrongCourseIdentityEvidence(

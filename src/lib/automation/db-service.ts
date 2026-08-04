@@ -733,6 +733,12 @@ export async function applyBrowserDiscoveryToCourse(
   const manualOnly =
     automationEligibility === "BLOCKED" &&
     ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(bookingMethod);
+  const officialRequestUrl =
+    bookingMethod === "CONTACT_COURSE" &&
+    input.bookingUrl &&
+    input.bookingUrl !== input.sourceUrl
+      ? input.bookingUrl
+      : null;
 
   const current = await prisma.course.findUnique({
     where: { id: input.courseId },
@@ -851,7 +857,7 @@ export async function applyBrowserDiscoveryToCourse(
             detectedPlatform: input.detectedPlatform,
             providerFamilyKey: provider.providerFamilyKey,
             automationEligibility,
-            detectedBookingUrl: manualOnly ? null : input.bookingUrl,
+            detectedBookingUrl: manualOnly ? officialRequestUrl : input.bookingUrl,
             bookingMetadata: manualOnly
               ? Prisma.DbNull
               : (input.apiMetadata as Prisma.InputJsonValue),

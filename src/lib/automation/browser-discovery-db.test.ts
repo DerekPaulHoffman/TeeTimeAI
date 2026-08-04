@@ -498,6 +498,50 @@ describe("browser discovery persistence", () => {
     });
   });
 
+  it("preserves an official request page for a contact-course finding", async () => {
+    const updatedAt = new Date("2026-08-04T12:00:00.000Z");
+    const requestUrl = "https://greatrivergolfclub.com/member-for-a-day/";
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "greatrivergolfclub.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://greatrivergolfclub.com/",
+        bookingMetadata: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "great-river" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await applyBrowserDiscoveryToCourse({
+      courseId: "great-river",
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingUrl: requestUrl,
+      bookingMethod: "CONTACT_COURSE",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      sourceUrl: "https://greatrivergolfclub.com/",
+      intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "official-public-play-request-form",
+        observedUrls: [requestUrl]
+      }
+    });
+
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "great-river", updatedAt },
+      data: expect.objectContaining({
+        detectedBookingUrl: requestUrl,
+        bookingMethod: "CONTACT_COURSE",
+        bookingAccessMode: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING"
+      })
+    });
+  });
+
   it("records technical evidence without overwriting a previously runnable course as blocked", async () => {
     const updatedAt = new Date("2026-07-16T12:05:00.000Z");
     mockedPrisma.course.findUnique.mockResolvedValueOnce({

@@ -4582,6 +4582,42 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("follows a same-site public-play request page", async () => {
+    const sourceUrl = "https://great-river.example/";
+    const requestUrl = "https://great-river.example/member-for-a-day/";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Great River Golf Club</title><a href="${requestUrl}">Member for a Day</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (url.toString() === requestUrl) {
+        return new Response(
+          "<html><title>Great River Golf Club Member for a Day</title><p>Public play is available by request.</p><form><button>Submit tee time request</button></form></html>",
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${url.toString()}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Great River Golf Club"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      requestUrl
+    ]);
+    expect(evidence.linkCandidates).toContainEqual({
+      url: requestUrl,
+      label: "Member for a Day"
+    });
+    expect(evidence.visibleText).toContain("Submit tee time request");
+  });
+
   it("rejects unsafe or ambiguous legacy Prophet widget roots", async () => {
     const sourceUrl = "https://course.example/book";
     const configs = [
