@@ -869,7 +869,7 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
   return Boolean(
     input.leaseExpiresAt.getTime() <= now.getTime() &&
     (!input.releaseSha || input.releaseSha === input.baseSha || !input.releaseIsPublished) &&
-    !input.deployedAt &&
+    (!input.deployedAt || input.releaseSha === input.baseSha) &&
     (!hasRecheckDispatch || hasOnlyStaleEvidence) &&
     input.dirtyPaths.length === 0 &&
     input.incidentResults.length > 0 &&
@@ -4209,7 +4209,7 @@ export async function recoverCourseSupportBatch(input: {
                 revision: batch.revision,
                 leaseExpiresAt: { lte: now },
                 releaseSha: batch.releaseSha,
-                deployedAt: null,
+                deployedAt: batch.deployedAt,
                 recheckDispatchKey: batch.recheckDispatchKey,
                 recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
                 recheckDispatchedAt: batch.recheckDispatchedAt,

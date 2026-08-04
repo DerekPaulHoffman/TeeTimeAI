@@ -2579,9 +2579,18 @@ describe("course-support recovery", () => {
       canSafelyRequeueExpiredCourseSupportBatch({
         ...safeInput,
         releaseSha: safeInput.baseSha,
-        releaseIsPublished: true
+        releaseIsPublished: true,
+        deployedAt: new Date("2026-07-15T19:10:00.000Z")
       })
     ).toBe(true);
+    expect(
+      canSafelyRequeueExpiredCourseSupportBatch({
+        ...safeInput,
+        releaseSha: "a".repeat(40),
+        releaseIsPublished: false,
+        deployedAt: new Date("2026-07-15T19:10:00.000Z")
+      })
+    ).toBe(false);
     expect(
       canSafelyRequeueExpiredCourseSupportBatch({
         ...safeInput,
@@ -2618,15 +2627,16 @@ describe("course-support recovery", () => {
     const candidateReleaseSha = "c".repeat(40);
     const recheckDispatchStartedAt = new Date("2026-07-15T19:15:00.000Z");
     const recheckDispatchedAt = new Date("2026-07-15T19:16:00.000Z");
+    const deployedAt = new Date("2026-07-15T19:05:00.000Z");
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
       status: "VERIFYING",
       leaseExpiresAt: expiredAt,
       ownerThreadId: "old-thread",
       ownerAutomationRunId: "run-1",
-      baseSha: "a".repeat(40),
+      baseSha: candidateReleaseSha,
       releaseSha: candidateReleaseSha,
-      deployedAt: null,
+      deployedAt,
       recheckDispatchKey: "dispatch-key",
       recheckDispatchStartedAt,
       recheckDispatchedAt,
@@ -2676,6 +2686,7 @@ describe("course-support recovery", () => {
           id: "batch-1",
           status: "VERIFYING",
           releaseSha: candidateReleaseSha,
+          deployedAt,
           recheckDispatchKey: "dispatch-key",
           recheckDispatchStartedAt,
           recheckDispatchedAt,
