@@ -9,16 +9,13 @@ import {
   CircleOff,
   CirclePause,
   ChevronDown,
-  Clock3,
   ExternalLink,
-  Flag,
   Mail,
   MapPin,
   Play,
   Plus,
   ShieldAlert,
-  Trees,
-  Users
+  Trees
 } from "lucide-react";
 
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
@@ -29,7 +26,7 @@ import {
   formatBookingWindowRelease,
   getBookingWindowForTargetDate
 } from "@/lib/courses/booking-window";
-import { getAlertSupportLabel, getCourseAlertSupport } from "@/lib/courses/intelligence";
+import { getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 import { formatObservationDateTime } from "@/lib/dates/observation-date-time";
 import {
@@ -341,7 +338,22 @@ function DashboardSearchCard({
           <div className="dashboard-card-main">
         <div className="dashboard-card-topline">
           <div className="dashboard-card-title">
-            <h3>Availability and alert details</h3>
+            <h3>Ranked courses</h3>
+            <p className="dashboard-card-context">
+              {search.requestedLayoutHoles
+                ? `${search.requestedLayoutHoles}-hole courses`
+                : "Any course layout"}
+              {" · "}
+              {showRecipientEmail
+                ? `Alerts to ${search.alertEmail ?? search.user.email}${
+                    search.additionalEmails.length > 0
+                      ? ` +${search.additionalEmails.length} more`
+                      : ""
+                  }`
+                : search.additionalEmails.length > 0
+                  ? `${search.additionalEmails.length + 1} alert recipients`
+                  : "Alerts to you"}
+            </p>
           </div>
           {canManage ? (
             <SearchStatusActions
@@ -370,50 +382,6 @@ function DashboardSearchCard({
           ) : (
             <span className="meta">Sign in to pause, edit, or cancel this alert.</span>
           )}
-        </div>
-        <div className="watch-stat-grid" aria-label="Alert details">
-          <div className="watch-stat">
-            <Clock3 size={16} />
-            <span>Course-local window</span>
-            <strong>{formatTimeLabel(search.startTime)} – {formatTimeLabel(search.endTime)}</strong>
-          </div>
-          <div className="watch-stat">
-            <Users size={16} />
-            <span>Group size</span>
-            <strong>{search.players} {search.players === 1 ? "golfer" : "golfers"}</strong>
-          </div>
-          <div className="watch-stat">
-            <Flag size={16} />
-            <span>Courses / layout</span>
-            <strong>
-              {search.preferences.length} on watch ·{" "}
-              {search.requestedLayoutHoles
-                ? `${search.requestedLayoutHoles}-hole`
-                : "any layout"}
-            </strong>
-          </div>
-          <div className="watch-stat">
-            <Mail size={16} />
-            <span>Emails</span>
-            <strong className="watch-stat-email">
-              <span className="watch-stat-email-full">
-                {showRecipientEmail
-                  ? `${search.alertEmail ?? search.user.email}${
-                      search.additionalEmails.length > 0
-                        ? ` +${search.additionalEmails.length} extra`
-                        : ""
-                    }`
-                  : search.additionalEmails.length > 0
-                    ? `${search.additionalEmails.length + 1} recipients`
-                    : "Just you"}
-              </span>
-              <span className="watch-stat-email-compact">
-                {search.additionalEmails.length > 0
-                  ? `${search.additionalEmails.length + 1} recipients`
-                  : "Just you"}
-              </span>
-            </strong>
-          </div>
         </div>
         <div className="watch-course-list">
           {search.preferences.map((preference) => {
@@ -484,6 +452,20 @@ function DashboardSearchCard({
                   preference.course.createdAt.getTime() - search.createdAt.getTime()
                 ) <= 2 * 60 * 1000
             });
+            const monitoringOverridesAvailability =
+              monitoringVerdict.icon === "unavailable" ||
+              monitoringSetupInProgress ||
+              Boolean(upcomingBookingWindow);
+            const courseStatus = monitoringOverridesAvailability
+              ? {
+                  label: monitoringVerdict.label,
+                  detail: monitoringVerdict.detail,
+                  tone:
+                    monitoringVerdict.icon === "unavailable"
+                      ? "unavailable"
+                      : "scheduled"
+                }
+              : availabilityView;
             const bookingEvidence = {
               bookingFacts: preference.course.bookingFacts,
               probes: [],
@@ -578,21 +560,6 @@ function DashboardSearchCard({
                         {formatCoursePriceRange(headlinePrice.range)}
                       </span>
                     ) : null}
-                    {alertSupport ? (
-                      <span className="figma-course-pill is-official-site-only">
-                        <CircleOff size={11} /> {getAlertSupportLabel(alertSupport)}
-                      </span>
-                    ) : null}
-                    <span className={`figma-course-pill ${monitoringVerdict.className}`}>
-                      {monitoringVerdict.icon === "watching" ? (
-                        <Play size={11} />
-                      ) : monitoringVerdict.icon === "scheduled" ? (
-                        <CalendarClock size={11} />
-                      ) : (
-                        <CircleOff size={11} />
-                      )}
-                      {monitoringVerdict.label}
-                    </span>
                   </div>
                   <strong>{preference.course.name}</strong>
                   <p className="meta">
@@ -600,13 +567,26 @@ function DashboardSearchCard({
                     {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
                   </p>
                   <div
-                    className={`watch-course-availability is-${availabilityView.tone}`}
+                    className={`watch-course-availability is-${courseStatus.tone}`}
                   >
                     <div className="watch-course-availability-heading">
-                      <span aria-hidden="true" />
-                      <strong>{availabilityView.label}</strong>
+                      <span
+                        aria-hidden="true"
+                        className="watch-course-status-emoji"
+                      >
+                        {getCourseStatusEmoji(courseStatus.tone)}
+                      </span>
+                      <strong>{courseStatus.label}</strong>
                     </div>
-                    <p>{availabilityView.detail}</p>
+                    <p>
+                      {courseStatus.detail}
+                      {latestProbe
+                        ? ` Checked ${formatObservationDateTime(
+                            latestProbe.observedAt,
+                            search.userTimeZone
+                          )}.`
+                        : ""}
+                    </p>
                     {courseMatches.length > 0 ? (
                       <details className="watch-course-match-details">
                         <summary>
@@ -641,15 +621,6 @@ function DashboardSearchCard({
                       </details>
                     ) : null}
                   </div>
-                  <p className="watch-course-release">
-                    {monitoringVerdict.detail}
-                    {latestProbe
-                      ? ` Last checked ${formatObservationDateTime(
-                          latestProbe.observedAt,
-                          search.userTimeZone
-                        )}.`
-                      : ""}
-                  </p>
                 </div>
                 <div className="watch-course-links">
                   <a
@@ -854,6 +825,25 @@ function getCompactLocation(address: string | null) {
 
 function formatTelephoneHref(phone: string) {
   return phone.trim().replace(/(?!^\+)[^\d]/g, "");
+}
+
+function getCourseStatusEmoji(tone: string) {
+  switch (tone) {
+    case "matching":
+      return "⛳";
+    case "available":
+      return "👀";
+    case "scheduled":
+      return "🕒";
+    case "unavailable":
+      return "⚠️";
+    case "empty":
+      return "🔎";
+    case "pending":
+      return "⏳";
+    default:
+      return "ℹ️";
+  }
 }
 
 function CourseImage({
