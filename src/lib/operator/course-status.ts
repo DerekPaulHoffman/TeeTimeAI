@@ -1000,6 +1000,12 @@ function getLatestSuccessfulEvidence(course: CourseStatusInput) {
       statusKey: "LOCAL_READER_VERIFIED"
     });
   }
+  if (course.monitoringStatus?.lastSuccessfulAt) {
+    candidates.push({
+      observedAt: course.monitoringStatus.lastSuccessfulAt,
+      statusKey: "MONITORING_RESTORED"
+    });
+  }
   return candidates.sort(
     (left, right) => right.observedAt.getTime() - left.observedAt.getTime()
   )[0];

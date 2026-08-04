@@ -164,7 +164,7 @@ describe("Google Place review operator command", () => {
     });
     expect(mockedResolveCourseSupportIncident).toHaveBeenCalledWith({
       courseId: "harmony-course",
-      resolution: "DIRECT_BOOKING_CLASSIFIED",
+      resolution: "IDENTITY_CLASSIFIED",
       message: "The Harmony Golf Club was verified as a non-course listing (INDOOR_SIMULATOR)."
     });
   });
@@ -213,7 +213,7 @@ describe("Google Place review operator command", () => {
     });
     expect(mockedResolveCourseSupportIncident).toHaveBeenCalledWith({
       courseId: "approach-course",
-      resolution: "DIRECT_BOOKING_CLASSIFIED",
+      resolution: "IDENTITY_CLASSIFIED",
       message:
         "The Approach presented by the Eiras Family was verified as a private course listing (PRIVATE_MEMBER_AMENITY)."
     });

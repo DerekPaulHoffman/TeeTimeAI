@@ -651,6 +651,32 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("uses the durable monitoring success when the newest probe is an older failure", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          coverageCategory: "UNSUPPORTED_FAMILY",
+          latestProbe: probe("FETCH_FAILED", "2026-07-24T17:30:00.000Z"),
+          monitoringStatus: {
+            reference: "MON-1",
+            state: "HEALTHY",
+            lastSuccessfulAt: new Date("2026-07-24T17:45:00.000Z"),
+            lastFailureAt: new Date("2026-07-24T17:30:00.000Z"),
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusKey: "MONITORING_RESTORED",
+      priorityGroup: "WORKING",
+      automationQueueState: null
+    });
+  });
+
   it("keeps a newer failure actionable after an older successful reader result", () => {
     const [result] = buildCourseInventory(
       [

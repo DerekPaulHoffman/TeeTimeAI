@@ -220,7 +220,7 @@ export async function executeGooglePlaceReviewCommand(
       });
       await resolveCourseSupportIncident({
         courseId: course.id,
-        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        resolution: "IDENTITY_CLASSIFIED",
         message: `${course.name} was verified as a ${reviewKind} (${command.review.classification}).`
       });
       return {
