@@ -2589,6 +2589,15 @@ describe("course-support recovery", () => {
     expect(
       canSafelyRequeueExpiredCourseSupportBatch({
         ...safeInput,
+        recheckDispatchKey: "dispatch-key",
+        recheckDispatchStartedAt: new Date("2026-07-15T19:15:00.000Z"),
+        recheckDispatchedAt: new Date("2026-07-15T19:16:00.000Z"),
+        incidentResults: ["STALE_EVIDENCE"]
+      })
+    ).toBe(true);
+    expect(
+      canSafelyRequeueExpiredCourseSupportBatch({
+        ...safeInput,
         incidentResults: ["FINAL_DISPOSITION"]
       })
     ).toBe(false);
@@ -2599,6 +2608,8 @@ describe("course-support recovery", () => {
     const incidentUpdatedAt = new Date("2026-07-15T19:30:00.000Z");
     const batchEntryUpdatedAt = new Date("2026-07-15T19:31:00.000Z");
     const candidateReleaseSha = "c".repeat(40);
+    const recheckDispatchStartedAt = new Date("2026-07-15T19:15:00.000Z");
+    const recheckDispatchedAt = new Date("2026-07-15T19:16:00.000Z");
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
       status: "VERIFYING",
@@ -2608,9 +2619,9 @@ describe("course-support recovery", () => {
       baseSha: "a".repeat(40),
       releaseSha: candidateReleaseSha,
       deployedAt: null,
-      recheckDispatchKey: null,
-      recheckDispatchStartedAt: null,
-      recheckDispatchedAt: null,
+      recheckDispatchKey: "dispatch-key",
+      recheckDispatchStartedAt,
+      recheckDispatchedAt,
       revision: 3,
       summary: {
         branch: "automation/course-support-old",
@@ -2622,7 +2633,7 @@ describe("course-support recovery", () => {
           incidentId: "incident-1",
           courseId: "course-1",
           cycle: 2,
-          result: "PENDING",
+          result: "STALE_EVIDENCE",
           updatedAt: batchEntryUpdatedAt,
           incident: { updatedAt: incidentUpdatedAt }
         }
@@ -2657,6 +2668,9 @@ describe("course-support recovery", () => {
           id: "batch-1",
           status: "VERIFYING",
           releaseSha: candidateReleaseSha,
+          recheckDispatchKey: "dispatch-key",
+          recheckDispatchStartedAt,
+          recheckDispatchedAt,
           completedAt: null
         }),
         data: expect.objectContaining({
@@ -2669,7 +2683,7 @@ describe("course-support recovery", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           id: "batch-entry-1",
-          result: "PENDING",
+          result: "STALE_EVIDENCE",
           updatedAt: batchEntryUpdatedAt
         }),
         data: expect.objectContaining({

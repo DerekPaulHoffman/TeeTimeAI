@@ -857,13 +857,19 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
   now?: Date;
 }) {
   const now = input.now ?? new Date();
+  const hasRecheckDispatch = Boolean(
+    input.recheckDispatchKey ||
+      input.recheckDispatchStartedAt ||
+      input.recheckDispatchedAt
+  );
+  const hasOnlyStaleEvidence =
+    input.incidentResults.length > 0 &&
+    input.incidentResults.every((result) => result === "STALE_EVIDENCE");
   return Boolean(
     input.leaseExpiresAt.getTime() <= now.getTime() &&
     (!input.releaseSha || !input.releaseIsPublished) &&
     !input.deployedAt &&
-    !input.recheckDispatchKey &&
-    !input.recheckDispatchStartedAt &&
-    !input.recheckDispatchedAt &&
+    (!hasRecheckDispatch || hasOnlyStaleEvidence) &&
     input.dirtyPaths.length === 0 &&
     input.incidentResults.length > 0 &&
     input.incidentResults.every((result) => result === "PENDING" || result === "STALE_EVIDENCE")
@@ -4202,9 +4208,9 @@ export async function recoverCourseSupportBatch(input: {
                 leaseExpiresAt: { lte: now },
                 releaseSha: batch.releaseSha,
                 deployedAt: null,
-                recheckDispatchKey: null,
-                recheckDispatchStartedAt: null,
-                recheckDispatchedAt: null,
+                recheckDispatchKey: batch.recheckDispatchKey,
+                recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+                recheckDispatchedAt: batch.recheckDispatchedAt,
                 completedAt: null
               },
               data: {
