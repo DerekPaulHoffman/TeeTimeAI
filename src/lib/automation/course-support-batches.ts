@@ -846,6 +846,7 @@ export function assessCourseSupportRecovery(input: {
 
 export function canSafelyRequeueExpiredCourseSupportBatch(input: {
   leaseExpiresAt: Date;
+  baseSha: string;
   releaseSha: string | null;
   releaseIsPublished: boolean;
   deployedAt: Date | null;
@@ -867,7 +868,7 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
     input.incidentResults.every((result) => result === "STALE_EVIDENCE");
   return Boolean(
     input.leaseExpiresAt.getTime() <= now.getTime() &&
-    (!input.releaseSha || !input.releaseIsPublished) &&
+    (!input.releaseSha || input.releaseSha === input.baseSha || !input.releaseIsPublished) &&
     !input.deployedAt &&
     (!hasRecheckDispatch || hasOnlyStaleEvidence) &&
     input.dirtyPaths.length === 0 &&
@@ -4183,6 +4184,7 @@ export async function recoverCourseSupportBatch(input: {
       if (
         canSafelyRequeueExpiredCourseSupportBatch({
           leaseExpiresAt: batch.leaseExpiresAt,
+          baseSha: batch.baseSha,
           releaseSha: batch.releaseSha,
           releaseIsPublished: input.releaseIsPublished,
           deployedAt: batch.deployedAt,

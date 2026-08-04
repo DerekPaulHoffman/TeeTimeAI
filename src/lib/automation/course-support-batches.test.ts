@@ -2549,6 +2549,7 @@ describe("course-support recovery", () => {
   it("requeues only expired clean work without a published release or terminal evidence", () => {
     const safeInput = {
       leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+      baseSha: "b".repeat(40),
       releaseSha: null,
       releaseIsPublished: false,
       deployedAt: null,
@@ -2574,6 +2575,13 @@ describe("course-support recovery", () => {
         releaseIsPublished: true
       })
     ).toBe(false);
+    expect(
+      canSafelyRequeueExpiredCourseSupportBatch({
+        ...safeInput,
+        releaseSha: safeInput.baseSha,
+        releaseIsPublished: true
+      })
+    ).toBe(true);
     expect(
       canSafelyRequeueExpiredCourseSupportBatch({
         ...safeInput,
