@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
+import { recordCourseMonitoringFinalClassification } from "@/lib/automation/course-monitoring";
 
 import {
   executeGooglePlaceReviewCommand,
@@ -24,9 +25,15 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("@/lib/automation/support-incidents", () => ({
   resolveCourseSupportIncident: vi.fn()
 }));
+vi.mock("@/lib/automation/course-monitoring", () => ({
+  recordCourseMonitoringFinalClassification: vi.fn()
+}));
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 const mockedResolveCourseSupportIncident = vi.mocked(resolveCourseSupportIncident);
+const mockedRecordCourseMonitoringFinalClassification = vi.mocked(
+  recordCourseMonitoringFinalClassification
+);
 
 describe("Google Place review operator command", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -167,6 +174,15 @@ describe("Google Place review operator command", () => {
       resolution: "IDENTITY_CLASSIFIED",
       message: "The Harmony Golf Club was verified as a non-course listing (INDOOR_SIMULATOR)."
     });
+    expect(mockedRecordCourseMonitoringFinalClassification).toHaveBeenCalledWith({
+      courseId: "harmony-course",
+      state: "FINAL_IDENTITY",
+      outcome: "IDENTITY_FINAL",
+      source: "MAINTENANCE",
+      message: "The Harmony Golf Club was verified as a non-course listing (INDOOR_SIMULATOR).",
+      evidenceUrl: "https://theharmonygolfclub.com/",
+      now: new Date("2026-07-15T00:00:00.000Z")
+    });
   });
 
   it("reconciles a verified private review into persisted course and incident state", async () => {
@@ -216,6 +232,16 @@ describe("Google Place review operator command", () => {
       resolution: "IDENTITY_CLASSIFIED",
       message:
         "The Approach presented by the Eiras Family was verified as a private course listing (PRIVATE_MEMBER_AMENITY)."
+    });
+    expect(mockedRecordCourseMonitoringFinalClassification).toHaveBeenCalledWith({
+      courseId: "approach-course",
+      state: "FINAL_IDENTITY",
+      outcome: "IDENTITY_FINAL",
+      source: "MAINTENANCE",
+      message:
+        "The Approach presented by the Eiras Family was verified as a private course listing (PRIVATE_MEMBER_AMENITY).",
+      evidenceUrl: "https://www.deerwoodclub.com/membership",
+      now: new Date("2026-07-15T00:00:00.000Z")
     });
   });
 

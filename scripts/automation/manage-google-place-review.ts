@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { prisma } from "@/lib/prisma";
 import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
+import { recordCourseMonitoringFinalClassification } from "@/lib/automation/course-monitoring";
 import type {
   GooglePlaceAccessOverrideValue,
   GooglePlaceReviewRecord
@@ -222,6 +223,15 @@ export async function executeGooglePlaceReviewCommand(
         courseId: course.id,
         resolution: "IDENTITY_CLASSIFIED",
         message: `${course.name} was verified as a ${reviewKind} (${command.review.classification}).`
+      });
+      await recordCourseMonitoringFinalClassification({
+        courseId: course.id,
+        state: "FINAL_IDENTITY",
+        outcome: "IDENTITY_FINAL",
+        source: "MAINTENANCE",
+        message: `${course.name} was verified as a ${reviewKind} (${command.review.classification}).`,
+        evidenceUrl: command.review.evidenceUrl,
+        now: command.review.reviewedAt
       });
       return {
         mode: "applied",
