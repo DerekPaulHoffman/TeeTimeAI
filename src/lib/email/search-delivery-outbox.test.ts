@@ -242,6 +242,27 @@ describe("search email delivery outbox", () => {
     });
   });
 
+  it("allows bounded delivery reconciliation to exceed Prisma's default transaction timeout", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([]);
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send: vi.fn(),
+        now: () => now
+      })
+    ).resolves.toEqual([]);
+
+    expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { timeout: 15_000 }
+    );
+  });
+
   it("prepares an immutable identical payload and marks exactly one owner recipient", async () => {
     const owner = delivery("delivery-1", "owner@example.com");
     const friend = delivery("delivery-2", "friend@example.com");
