@@ -47,7 +47,7 @@ const DELIVERY_HEARTBEAT_MS = 60 * 1000;
 const DELIVERY_RETRY_BASE_MS = 60 * 1000;
 const DELIVERY_RETRY_MAX_MS = 10 * 60 * 1000;
 const DELIVERY_DAILY_QUOTA_RETRY_MS = 24 * 60 * 60 * 1000;
-const DELIVERY_GROUP_CLAIM_TRANSACTION_TIMEOUT_MS = 15 * 1000;
+const DELIVERY_RECONCILIATION_TRANSACTION_TIMEOUT_MS = 15 * 1000;
 const STALE_STATUS_REPLACEMENT_PENDING = "STATUS_CONTENT_STALE_REPLACEMENT_PENDING";
 const STALE_STATUS_REPLACEMENT_PENDING_AMBIGUOUS =
   "STATUS_CONTENT_STALE_REPLACEMENT_PENDING_AMBIGUOUS";
@@ -965,7 +965,7 @@ export async function finalizeSearchEmailDeliveryGroup(input: {
       retainedMatchCount: outcome.retainedMatchCount,
       sentMatchCount: outcome.ownerSent ? outcome.retainedMatchCount : 0
     };
-  });
+  }, { timeout: DELIVERY_RECONCILIATION_TRANSACTION_TIMEOUT_MS });
 }
 
 async function finalizeOwnerOutcomesForSearch(
@@ -1948,7 +1948,7 @@ async function claimSearchEmailDeliveryGroup(input: {
       })),
       terminalDeliveries
     };
-  }, { timeout: DELIVERY_GROUP_CLAIM_TRANSACTION_TIMEOUT_MS });
+  }, { timeout: DELIVERY_RECONCILIATION_TRANSACTION_TIMEOUT_MS });
 }
 
 async function settleClaimedSearchEmailGroup(input: {

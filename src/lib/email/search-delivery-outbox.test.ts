@@ -674,6 +674,10 @@ describe("search email delivery outbox", () => {
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { timeout: 15_000 }
+    );
   });
 
   it("rewrites one unattempted group atomically before its first send", async () => {
