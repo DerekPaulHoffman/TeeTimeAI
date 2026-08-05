@@ -465,6 +465,10 @@ describe("search email delivery outbox", () => {
       now
     });
 
+    expect(mockedPrisma.$transaction.mock.calls.at(-1)?.[1]).toEqual({
+      timeout: 15_000
+    });
+
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledTimes(2);
     for (const call of mockedPrisma.searchEmailDelivery.create.mock.calls) {
       expect(call[0].data).toEqual(
@@ -870,6 +874,9 @@ describe("search email delivery outbox", () => {
         })
       })
     );
+    expect(mockedPrisma.$transaction.mock.calls.at(-1)?.[1]).toEqual({
+      timeout: 15_000
+    });
   });
 
   it("rejects a changed recipient set for an existing group", async () => {

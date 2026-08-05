@@ -635,7 +635,7 @@ export async function prepareSearchEmailDeliveryGroup(input: {
       });
     }
     return { prepared: true as const, deliveries, continuationGroups };
-  });
+  }, { timeout: DELIVERY_RECONCILIATION_TRANSACTION_TIMEOUT_MS });
 }
 
 export async function prepareRecipientMatchDeliveryGroups(input: {
@@ -748,7 +748,7 @@ export async function prepareRecipientMatchDeliveryGroups(input: {
       groups.push({ groupKey: created.groupKey, recipient });
     }
     return { prepared: true as const, groups, hasExistingObligation };
-  });
+  }, { timeout: DELIVERY_RECONCILIATION_TRANSACTION_TIMEOUT_MS });
 }
 
 export async function listRetryableSearchEmailDeliveryGroups(input: {
