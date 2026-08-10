@@ -1819,7 +1819,6 @@ describe("runSearchCheck email cadence", () => {
     expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
-      scheduleVersion: 1,
       targetDate: "2026-07-12",
       players: 2
     });
@@ -2015,7 +2014,6 @@ describe("runSearchCheck email cadence", () => {
     expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
-      scheduleVersion: 1,
       targetDate: "2026-07-12",
       players: 2
     });
@@ -2092,7 +2090,6 @@ describe("runSearchCheck email cadence", () => {
     expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
-      scheduleVersion: 1,
       targetDate: "2026-07-12",
       players: 2
     });

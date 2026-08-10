@@ -673,7 +673,6 @@ async function checkSearch(
           ? await getFreshLocalReaderObservation({
               searchId: search.id,
               courseId: course.id,
-              scheduleVersion: search.scheduleVersion,
               targetDate: searchWindow.date,
               players: search.players
             })

@@ -694,7 +694,6 @@ async function requeueReaderBlockedIncidents(input: {
 export async function getFreshLocalReaderTeeSheet(input: {
   searchId: string;
   courseId: string;
-  scheduleVersion: number;
   targetDate: string;
   players: number;
 }) {
@@ -704,7 +703,6 @@ export async function getFreshLocalReaderTeeSheet(input: {
 export async function getFreshLocalReaderObservation(input: {
   searchId: string;
   courseId: string;
-  scheduleVersion: number;
   targetDate: string;
   players: number;
 }) {
@@ -712,7 +710,6 @@ export async function getFreshLocalReaderObservation(input: {
     where: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
-      scheduleVersion: input.scheduleVersion,
       targetDate: input.targetDate,
       players: input.players,
       status: "COMPLETED",

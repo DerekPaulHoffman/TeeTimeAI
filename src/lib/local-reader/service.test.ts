@@ -864,7 +864,7 @@ describe("local reader job service", () => {
     expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
-  it("turns only availability results into provider-compatible slots", async () => {
+  it("reuses fresh availability across schedule versions and builds provider-compatible slots", async () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
       result: {
         jobId: "job-1",
@@ -892,7 +892,6 @@ describe("local reader job service", () => {
       getFreshLocalReaderTeeSheet({
         searchId: "search-1",
         courseId: "course-1",
-        scheduleVersion: 4,
         targetDate: "2026-07-25",
         players: 2
       })
@@ -908,8 +907,18 @@ describe("local reader job service", () => {
     });
     expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ scheduleVersion: 4 })
+        where: expect.objectContaining({
+          teeSearchId: "search-1",
+          courseId: "course-1",
+          targetDate: "2026-07-25",
+          players: 2,
+          status: "COMPLETED"
+        }),
+        orderBy: { completedAt: "desc" }
       })
+    );
+    expect(prismaMocks.localReaderJob.findFirst.mock.calls[0]?.[0]?.where).not.toHaveProperty(
+      "scheduleVersion"
     );
   });
 
@@ -931,7 +940,6 @@ describe("local reader job service", () => {
       getFreshLocalReaderObservation({
         searchId: "search-1",
         courseId: "course-1",
-        scheduleVersion: 4,
         targetDate: "2026-07-25",
         players: 2
       })
