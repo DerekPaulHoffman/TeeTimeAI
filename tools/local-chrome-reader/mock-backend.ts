@@ -100,11 +100,15 @@ const server = createServer(async (request, response) => {
         players?: unknown;
       };
       const courseKey = localReaderCourseKeySchema.parse(
-        input.courseKey ?? "grassy-hill",
+        input.courseKey ?? "cps:grassyhill.cps.golf",
       );
       const course = getLocalReaderCourse(
         courseKey,
-        typeof input.courseName === "string" ? input.courseName : undefined,
+        typeof input.courseName === "string"
+          ? input.courseName
+          : courseKey === "cps:grassyhill.cps.golf"
+            ? "Grassy Hill Country Club"
+            : undefined,
       );
       if (!course) throw new Error("The requested local reader course is unavailable");
       const requestedAt = new Date();

@@ -1551,7 +1551,7 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.fetchChronogolfSlots.mockRejectedValue(new Error("Public captcha challenge"));
     localReaderMocks.getLocalReaderCourseKey.mockImplementation((bookingUrl: string | null) =>
-      bookingUrl?.includes("grassyhill") ? "grassy-hill" : null
+      bookingUrl?.includes("grassyhill") ? "cps:grassyhill.cps.golf" : null
     );
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({
       id: "reader-job-1"
@@ -1617,7 +1617,7 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
     adapterMocks.fetchCpsTeeSheet.mockRejectedValue(new Error("CPS configuration returned 403"));
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({
       id: "local-job-1"
     });
@@ -1699,7 +1699,7 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.fetchChronogolfSlots.mockRejectedValue(
       new Error("Chronogolf tee times returned 403")
     );
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("hyde-park");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("chronogolf:hyde-park-golf-club");
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({
       id: "local-job-hyde-park"
     });
@@ -1757,7 +1757,7 @@ describe("runSearchCheck email cadence", () => {
         failureClass: "CHALLENGE"
       })
     );
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({
       id: "local-job-1"
     });
@@ -1807,7 +1807,7 @@ describe("runSearchCheck email cadence", () => {
         }
       ]
     });
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({
       id: "local-job-1"
     });
@@ -1866,7 +1866,7 @@ describe("runSearchCheck email cadence", () => {
         }
       ]
     });
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
       status: "ACCESS_CHALLENGE",
       observedAt: new Date("2026-07-11T12:01:00.000Z"),
@@ -1934,7 +1934,7 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     localReaderMocks.queueLocalReaderJob.mockResolvedValue({
       id: "local-job-only"
     });
@@ -1986,7 +1986,7 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
       status: "AVAILABLE",
       observedAt: new Date("2026-07-11T12:01:00.000Z"),
@@ -2061,7 +2061,7 @@ describe("runSearchCheck email cadence", () => {
     });
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isChronogolfMetadata.mockReturnValue(true);
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("hyde-park");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("chronogolf:hyde-park-golf-club");
     localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
       status: "AVAILABLE",
       observedAt: new Date("2026-07-11T12:01:00.000Z"),
@@ -2378,7 +2378,7 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("reconciles a pending match before reporting a current technical final", async () => {
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:grassyhill.cps.golf");
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [

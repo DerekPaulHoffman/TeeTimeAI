@@ -40,7 +40,7 @@ type Reader = {
   };
 };
 
-function jobFor(courseKey: keyof typeof LOCAL_READER_COURSES = "grassy-hill"): LocalReaderJob {
+function jobFor(courseKey: keyof typeof LOCAL_READER_COURSES = "frear-park"): LocalReaderJob {
   const course = LOCAL_READER_COURSES[courseKey];
   return {
     id: "job-1",
@@ -52,6 +52,23 @@ function jobFor(courseKey: keyof typeof LOCAL_READER_COURSES = "grassy-hill"): L
     courseName: course.courseName,
     bookingUrl: course.bookingUrl,
     cardTextIncludes: [...course.cardTextIncludes]
+  };
+}
+
+function dynamicChronogolfJob(
+  slug = "future-public-golf-course",
+  courseName = "Future Public Golf Course"
+): LocalReaderJob {
+  return {
+    id: "job-chronogolf",
+    courseKey: `chronogolf:${slug}`,
+    targetDate: "2026-07-25",
+    players: 2,
+    requestedAt: "2026-07-24T12:00:00.000Z",
+    expiresAt: "2026-07-24T12:05:00.000Z",
+    courseName,
+    bookingUrl: `https://www.chronogolf.com/club/${slug}`,
+    cardTextIncludes: []
   };
 }
 
@@ -181,22 +198,20 @@ describe("local Chrome reader contract", () => {
   it("accepts every exact allowlisted reader route and rejects other routes", () => {
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
       const course = LOCAL_READER_COURSES[courseKey];
-      const suffix =
-        course.provider === "CPS"
-          ? "?TeeOffTimeMin=0"
-          : course.provider === "PROPHET"
-            ? `?CourseId=${course.prophetCourseIds}&Date=2026-07-25&Time=AnyTime&Player=2&Hole=18`
-            : "?date=2026-07-25&step=teetimes";
+      const suffix = `?CourseId=${course.prophetCourseIds}&Date=2026-07-25&Time=AnyTime&Player=2&Hole=18`;
       expect(isAllowedLocalReaderUrl(courseKey, `${course.bookingUrl}${suffix}`)).toBe(true);
     }
     expect(
       isAllowedLocalReaderUrl(
-        "grassy-hill",
+        "cps:grassyhill.cps.golf",
         "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout"
       )
     ).toBe(false);
     expect(
-      isAllowedLocalReaderUrl("grassy-hill", "https://fenwick.cps.golf/onlineresweb/search-teetime")
+      isAllowedLocalReaderUrl(
+        "cps:grassyhill.cps.golf",
+        "https://fenwick.cps.golf/onlineresweb/search-teetime"
+      )
     ).toBe(false);
   });
 
@@ -204,6 +219,7 @@ describe("local Chrome reader contract", () => {
     const manifest = JSON.parse(
       readFileSync(resolve(process.cwd(), "tools", "local-chrome-reader", "manifest.json"), "utf8")
     ) as {
+      version: string;
       host_permissions: string[];
       content_scripts: Array<{ matches: string[] }>;
     };
@@ -217,6 +233,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
+    expect(manifest.version).toBe("1.10.2");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
@@ -256,20 +273,16 @@ describe("local Chrome reader contract", () => {
 
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
       const course = LOCAL_READER_COURSES[courseKey];
-      if (course.provider === "CPS") continue;
       const hostname = new URL(course.bookingUrl).hostname;
       expect(manifest.host_permissions).toContain(`https://${hostname}/*`);
-      expect(contentMatches).toContain(
-        course.provider === "PROPHET"
-          ? `${course.bookingUrl.replace(/\/Home\/NIndex$/u, "")}/*`
-          : course.provider === "CHRONOGOLF"
-            ? "https://www.chronogolf.com/club/*"
-            : `${course.bookingUrl}*`
-      );
+      expect(contentMatches).toContain(`${course.bookingUrl.replace(/\/Home\/NIndex$/u, "")}/*`);
       expect(backgroundSource).toContain(courseKey);
       expect(backgroundSource).toContain(`"${course.courseName}"`);
       expect(backgroundSource).toContain(`"${hostname}"`);
     }
+    expect(backgroundSource).not.toContain("ALLOWED_COURSES");
+    expect(backgroundSource).not.toContain("grassy-hill");
+    expect(backgroundSource).not.toContain("crestbrook");
   });
 
   it("accepts future signed CPS jobs while rejecting unsafe hosts and routes", () => {
@@ -448,7 +461,7 @@ describe("local Chrome reader contract", () => {
       </button>
     `;
 
-    const job = jobFor();
+    const job = dynamicCpsJob("grassyhill.cps.golf");
     const snapshot = loadReader().readSnapshot(document, `${job.bookingUrl}?TeeOffTimeMin=0`, job);
 
     expect(snapshot).toMatchObject({
@@ -563,7 +576,10 @@ describe("local Chrome reader contract", () => {
         </div>
       </div>
     `;
-    const job = jobFor("crestbrook");
+    const job = dynamicChronogolfJob(
+      "crestbrook-park-golf-course",
+      "Crestbrook Golf Course"
+    );
     const datedJob = {
       ...job,
       targetDate: "2026-07-26",
@@ -594,7 +610,10 @@ describe("local Chrome reader contract", () => {
         <span>Loading tee-time details</span>
       </div>
     `;
-    const job = jobFor("crystal-lake");
+    const job = dynamicChronogolfJob(
+      "crystal-lake-golf-club-rhode-island-mapleville",
+      "Crystal Lake Golf Club"
+    );
 
     expect(loadChronogolfReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "READER_ERROR",
@@ -609,15 +628,18 @@ describe("local Chrome reader contract", () => {
     });
   });
 
-  it("recognizes the official Chanticlair Chronogolf profile", () => {
-    const job = jobFor("chanticlair");
+  it("accepts a database-supplied Chronogolf profile without a course allowlist", () => {
+    const job = dynamicChronogolfJob("new-public-golf-course", "New Public Golf Course");
 
     expect(job).toMatchObject({
-      courseName: "Chanticlair Golf Course",
-      bookingUrl: "https://www.chronogolf.com/club/chanticlair-golf-club"
+      courseName: "New Public Golf Course",
+      bookingUrl: "https://www.chronogolf.com/club/new-public-golf-course"
     });
     expect(
-      isAllowedLocalReaderUrl("chanticlair", `${job.bookingUrl}?date=2026-07-27&step=teetimes`)
+      isAllowedLocalReaderUrl(
+        "chronogolf:new-public-golf-course",
+        `${job.bookingUrl}`
+      )
     ).toBe(true);
     expect(
       loadChronogolfReader().isAllowedPageUrl(
@@ -625,18 +647,22 @@ describe("local Chrome reader contract", () => {
         `${job.bookingUrl}?date=2026-07-27&step=teetimes`
       )
     ).toBe(true);
+    expect(
+      loadChronogolfReader().isAllowedPageUrl(
+        { ...job, courseKey: "chronogolf:different-course" },
+        `${job.bookingUrl}?date=2026-07-27&step=teetimes`
+      )
+    ).toBe(false);
   });
 
   it("recognizes the official Hyde Park Chronogolf profile", () => {
-    const job = jobFor("hyde-park");
+    const job = dynamicChronogolfJob("hyde-park-golf-club", "Hyde Park Golf Club");
 
     expect(job).toMatchObject({
       courseName: "Hyde Park Golf Club",
       bookingUrl: "https://www.chronogolf.com/club/hyde-park-golf-club"
     });
-    expect(getLocalReaderCourseKey(`${job.bookingUrl}?date=2026-07-29&step=teetimes`)).toBe(
-      "hyde-park"
-    );
+    expect(getLocalReaderCourseKey(job.bookingUrl)).toBe("chronogolf:hyde-park-golf-club");
     expect(
       loadChronogolfReader().isAllowedPageUrl(
         job,
@@ -813,7 +839,7 @@ describe("local Chrome reader contract", () => {
         <div>$52</div>
       </mat-card>
     `;
-    const job = jobFor("overpeck");
+    const job = dynamicCpsJob("overpeckgc.cps.golf");
 
     expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "AVAILABLE",
@@ -837,7 +863,7 @@ describe("local Chrome reader contract", () => {
         <div>18 HOLES | 2 - 4 GOLFERS</div>
       </button>
     `;
-    const job = jobFor("candia-woods");
+    const job = dynamicCpsJob("candiawoods.cps.golf");
 
     expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "AVAILABLE",
@@ -846,7 +872,7 @@ describe("local Chrome reader contract", () => {
     expect(job.bookingUrl).toContain("candiawoods.cps.golf");
     expect(
       isAllowedLocalReaderUrl(
-        "candia-woods",
+        "cps:candiawoods.cps.golf",
         "https://oaksgolflinks.cps.golf/onlineresweb/search-teetime"
       )
     ).toBe(false);
@@ -856,7 +882,7 @@ describe("local Chrome reader contract", () => {
     document.title = "Just a moment";
     document.body.innerHTML = "<main>Checking your browser before accessing this site</main>";
     const reader = loadReader();
-    const job = jobFor();
+    const job = dynamicCpsJob("grassyhill.cps.golf");
 
     expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "ACCESS_CHALLENGE",
@@ -1140,7 +1166,7 @@ describe("local Chrome reader contract", () => {
         <div>Loading tee-time details</div>
       </button>
     `;
-    const job = jobFor();
+    const job = dynamicCpsJob("grassyhill.cps.golf");
 
     expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "READER_ERROR",
@@ -1150,18 +1176,18 @@ describe("local Chrome reader contract", () => {
   });
 
   it("validates jobs and results and rejects malformed availability", () => {
-    expect(localReaderJobSchema.parse(jobFor())).toMatchObject({
-      courseKey: "grassy-hill",
+    expect(localReaderJobSchema.parse(dynamicCpsJob("grassyhill.cps.golf"))).toMatchObject({
+      courseKey: "cps:grassyhill.cps.golf",
       players: 2
     });
 
     expect(() =>
       localReaderResultSchema.parse({
         jobId: "job-1",
-        courseKey: "grassy-hill",
+        courseKey: "cps:grassyhill.cps.golf",
         status: "AVAILABLE",
         observedAt: "2026-07-24T12:00:00.000Z",
-        pageUrl: LOCAL_READER_COURSES["grassy-hill"].bookingUrl,
+        pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
         pageTitle: "Grassy Hill Country Club",
         slots: [],
         readerVersion: "test"
@@ -1255,13 +1281,13 @@ describe("local Chrome reader contract", () => {
   });
 
   it("rejects slots for the wrong date or an unsupported player count", () => {
-    const job = localReaderJobSchema.parse(jobFor());
+    const job = localReaderJobSchema.parse(dynamicCpsJob("grassyhill.cps.golf"));
     const result = localReaderResultSchema.parse({
-      jobId: "job-1",
-      courseKey: "grassy-hill",
+      jobId: job.id,
+      courseKey: "cps:grassyhill.cps.golf",
       status: "AVAILABLE",
       observedAt: "2026-07-24T12:01:00.000Z",
-      pageUrl: LOCAL_READER_COURSES["grassy-hill"].bookingUrl,
+      pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
       pageTitle: "Grassy Hill Country Club",
       slots: [
         {

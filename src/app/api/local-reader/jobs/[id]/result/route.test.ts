@@ -25,7 +25,7 @@ import { POST } from "./route";
 
 const result = {
   jobId: "job-1",
-  courseKey: "grassy-hill",
+  courseKey: "cps:grassyhill.cps.golf",
   status: "NO_AVAILABILITY",
   observedAt: "2026-07-27T16:00:00.000Z",
   pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",

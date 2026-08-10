@@ -1,22 +1,4 @@
 export const LOCAL_READER_COURSE_KEYS = [
-  "grassy-hill",
-  "overpeck",
-  "glen-mills",
-  "bayberry-hills",
-  "oak-lane",
-  "candia-woods",
-  "oxford-greens",
-  "shennecossett",
-  "stanley",
-  "colonie",
-  "springfield-township",
-  "pine-hollow",
-  "capital-hills",
-  "crestbrook",
-  "crystal-lake",
-  "chanticlair",
-  "lyman-orchards",
-  "hyde-park",
   "frear-park",
   "simsbury-farms"
 ] as const;
@@ -69,27 +51,6 @@ const EZLINKS_BLOCKED_TENANT_LABELS = new Set([
 ]);
 
 export const LOCAL_READER_COURSES = {
-  "grassy-hill": course("Grassy Hill Country Club", "grassyhill.cps.golf"),
-  overpeck: course("Overpeck Golf Course", "overpeckgc.cps.golf"),
-  "glen-mills": course("The Golf Course at Glen Mills", "golfatglenmills.cps.golf"),
-  "bayberry-hills": course("Bayberry Hills Golf Course", "yarmouthpublic.cps.golf"),
-  "oak-lane": course("The Tradition Golf Club at Oak Lane", "traditionoaklane.cps.golf"),
-  "candia-woods": course("Candia Woods Golf Links", "candiawoods.cps.golf"),
-  "oxford-greens": course("The Golf Club at Oxford Greens", "oxfordgreens.cps.golf"),
-  shennecossett: course("Shennecossett Golf Course", "shennecossett.cps.golf"),
-  stanley: course("Stanley Golf Course SGC", "stanleygolf.cps.golf"),
-  colonie: course("Colonie Golf Course", "colonie.cps.golf"),
-  "springfield-township": course("Springfield Twp Golf Course", "springfield.cps.golf"),
-  "pine-hollow": course("Pine Hollow Golf Club", "pinehollow.cps.golf"),
-  "capital-hills": course("Capital Hills at Albany", "capitalhillsny.cps.golf"),
-  crestbrook: chronogolfCourse("Crestbrook Golf Course", "crestbrook-park-golf-course"),
-  "crystal-lake": chronogolfCourse(
-    "crystal lake golf",
-    "crystal-lake-golf-club-rhode-island-mapleville"
-  ),
-  chanticlair: chronogolfCourse("Chanticlair Golf Course", "chanticlair-golf-club"),
-  "lyman-orchards": chronogolfCourse("Lyman Orchards Golf Club", "lyman-orchards-golf-club"),
-  "hyde-park": chronogolfCourse("Hyde Park Golf Club", "hyde-park-golf-club"),
   "frear-park": {
     courseName: "Frear Park Municipal Golf Course",
     bookingUrl: "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex",
@@ -128,19 +89,20 @@ export function getLocalReaderCourseKey(
     if (tenForeTenant) {
       return `tenfore:${tenForeTenant}` as DynamicTenForeCourseKey;
     }
+    const chronogolfSlug = getChronogolfSlug(url);
+    if (chronogolfSlug) {
+      return `chronogolf:${chronogolfSlug}` as DynamicChronogolfCourseKey;
+    }
     const staticCourseKey =
       LOCAL_READER_COURSE_KEYS.find((courseKey) => {
         const course = LOCAL_READER_COURSES[courseKey];
         const expected = new URL(course.bookingUrl);
         return (
-          course.provider !== "CPS" &&
           url.hostname === expected.hostname &&
           isAllowedLocalReaderUrl(courseKey, url.toString())
         );
       }) ?? null;
-    if (staticCourseKey) return staticCourseKey;
-    const chronogolfSlug = getChronogolfSlug(url);
-    return chronogolfSlug ? (`chronogolf:${chronogolfSlug}` as DynamicChronogolfCourseKey) : null;
+    return staticCourseKey;
   } catch {
     return null;
   }
@@ -235,82 +197,34 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
       url.username === "" &&
       url.password === "";
     if (!commonSafeUrl) return false;
-    if (course.provider === "PROPHET") {
-      const tenantRoot = expected.pathname.replace(/\/Home\/NIndex\/?$/iu, "");
-      const safePath =
-        url.pathname === expected.pathname ||
-        url.pathname === tenantRoot ||
-        url.pathname === `${tenantRoot}/`;
-      const allowedKeys = new Set(["CourseId", "Date", "Time", "Player", "Hole"]);
-      const date = url.searchParams.get("Date");
-      const player = url.searchParams.get("Player");
-      const hasNoQuery = url.searchParams.size === 0;
-      const hasExactJobQuery =
-        url.searchParams.size === allowedKeys.size &&
-        Array.from(allowedKeys).every((key) => url.searchParams.has(key));
-      return (
-        safePath &&
-        Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
-        (hasNoQuery ||
-          (hasExactJobQuery &&
-            /^\d{4}-\d{2}-\d{2}$/u.test(date || "") &&
-            /^[1-4]$/u.test(player || "") &&
-            url.searchParams.get("CourseId") === course.prophetCourseIds &&
-            url.searchParams.get("Time") === "AnyTime" &&
-            url.searchParams.get("Hole") === "18")) &&
-        url.hash === ""
-      );
-    }
-    if (url.pathname !== expected.pathname) return false;
-    if (course.provider === "CPS") {
-      return /^\/onlineresweb\/search-teetime\/?$/u.test(url.pathname);
-    }
-    const allowedSearchParams = new Set([
-      "coursesIds",
-      "date",
-      "deals",
-      "groupSize",
-      "holes",
-      "step"
-    ]);
-    if (!Array.from(url.searchParams.keys()).every((key) => allowedSearchParams.has(key))) {
-      return false;
-    }
-    const date = url.searchParams.get("date");
-    const step = url.searchParams.get("step");
-    const groupSize = url.searchParams.get("groupSize");
-    const deals = url.searchParams.get("deals");
+    const tenantRoot = expected.pathname.replace(/\/Home\/NIndex\/?$/iu, "");
+    const safePath =
+      url.pathname === expected.pathname ||
+      url.pathname === tenantRoot ||
+      url.pathname === `${tenantRoot}/`;
+    const allowedKeys = new Set(["CourseId", "Date", "Time", "Player", "Hole"]);
+    const date = url.searchParams.get("Date");
+    const player = url.searchParams.get("Player");
+    const hasNoQuery = url.searchParams.size === 0;
+    const hasExactJobQuery =
+      url.searchParams.size === allowedKeys.size &&
+      Array.from(allowedKeys).every((key) => url.searchParams.has(key));
     return (
-      (!date || /^\d{4}-\d{2}-\d{2}$/u.test(date)) &&
-      (!step || step === "teetimes") &&
-      (!groupSize || /^[0-4]$/u.test(groupSize)) &&
-      (!deals || deals === "false")
+      course.provider === "PROPHET" &&
+      safePath &&
+      Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
+      (hasNoQuery ||
+        (hasExactJobQuery &&
+          /^\d{4}-\d{2}-\d{2}$/u.test(date || "") &&
+          /^[1-4]$/u.test(player || "") &&
+          url.searchParams.get("CourseId") === course.prophetCourseIds &&
+          url.searchParams.get("Time") === "AnyTime" &&
+          url.searchParams.get("Hole") === "18")) &&
+      url.hash === ""
     );
   } catch {
     return false;
   }
-}
-
-function course(
-  courseName: string,
-  hostname: string,
-  cardTextIncludes: readonly string[] = []
-): LocalReaderCourse {
-  return {
-    courseName,
-    bookingUrl: `https://${hostname}/onlineresweb/search-teetime`,
-    cardTextIncludes,
-    provider: "CPS"
-  };
-}
-
-function chronogolfCourse(courseName: string, slug: string): LocalReaderCourse {
-  return {
-    courseName,
-    bookingUrl: `https://www.chronogolf.com/club/${slug}`,
-    cardTextIncludes: [],
-    provider: "CHRONOGOLF"
-  };
 }
 
 export function getLocalReaderJobUrl(
@@ -350,14 +264,7 @@ export function getLocalReaderJobUrl(
     return url.toString();
   }
   const course = LOCAL_READER_COURSES[courseKey];
-  if (course.provider === "CPS") return course.bookingUrl;
-  if (course.provider === "PROPHET") {
-    return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
-  }
-  const url = new URL(course.bookingUrl);
-  url.searchParams.set("date", targetDate);
-  url.searchParams.set("step", "teetimes");
-  return url.toString();
+  return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
 }
 
 export function isDynamicCpsCourseKey(value: string): value is DynamicCpsCourseKey {
@@ -438,17 +345,29 @@ function getTenForeTenant(url: URL) {
 }
 
 function getChronogolfSlug(url: URL) {
+  const allowedSearchParams = new Set([
+    "coursesIds",
+    "date",
+    "deals",
+    "groupSize",
+    "holes",
+    "step"
+  ]);
   if (
     url.hostname !== "www.chronogolf.com" ||
     url.hash !== "" ||
-    !Array.from(url.searchParams.keys()).every((key) => ["date", "step"].includes(key))
+    !Array.from(url.searchParams.keys()).every((key) => allowedSearchParams.has(key))
   ) {
     return null;
   }
   const date = url.searchParams.get("date");
   const step = url.searchParams.get("step");
+  const groupSize = url.searchParams.get("groupSize");
+  const deals = url.searchParams.get("deals");
   if (date && !/^\d{4}-\d{2}-\d{2}$/u.test(date)) return null;
   if (step && step !== "teetimes") return null;
+  if (groupSize && !/^[0-4]$/u.test(groupSize)) return null;
+  if (deals && deals !== "false") return null;
   return /^\/club\/([a-z0-9][a-z0-9-]{0,127})\/?$/u.exec(url.pathname)?.[1] ?? null;
 }
 

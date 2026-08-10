@@ -71,7 +71,7 @@ The proof backend binds only to `127.0.0.1:4317`. It keeps jobs in memory and
 exists to verify the signed job, lease, rendered-page result, and completion
 flow. It is not a production queue and does not write tee-time matches or send
 alerts. POST `/jobs` accepts `courseKey`, `targetDate`, and `players`;
-`courseKey` defaults to `grassy-hill`.
+`courseKey` defaults to `cps:grassyhill.cps.golf`.
 
 ## Install the production worker
 
@@ -84,9 +84,11 @@ alerts. POST `/jobs` accepts `courseKey`, `targetDate`, and `players`;
 
 The worker reports its build and parser capabilities with every poll. The
 backend leases only compatible work and automatically requeues exact
-verification when a required capability appears. New CPS, TenFore, and safe
-public Chronogolf or EZLinks profiles that fit an existing parser do not require
-a course-specific allowlist entry.
+verification when a required capability appears. CPS, TenFore, Chronogolf,
+EZLinks, and WebTrac course identity and booking URLs come from the signed
+database-backed job and are checked against provider-family host and route
+rules. Courses that fit an existing parser do not require a course-specific
+allowlist entry or extension release.
 An actual parser or manifest change to this unpacked development extension
 still requires Chrome's **Reload** action; unattended binary updates require a
 separately signed Web Store or enterprise-managed extension package.

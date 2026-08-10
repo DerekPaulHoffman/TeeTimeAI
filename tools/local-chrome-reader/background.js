@@ -11,103 +11,6 @@ const READER_CAPABILITIES = Object.freeze([
   ["WEBTRAC_RENDERED", 1],
   ["PROPHET_FREAR_RENDERED", 4]
 ]);
-const ALLOWED_COURSES = Object.freeze({
-  "grassy-hill": [
-    "Grassy Hill Country Club",
-    "grassyhill.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  overpeck: ["Overpeck Golf Course", "overpeckgc.cps.golf", "/onlineresweb/search-teetime", []],
-  "glen-mills": [
-    "The Golf Course at Glen Mills",
-    "golfatglenmills.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  "bayberry-hills": [
-    "Bayberry Hills Golf Course",
-    "yarmouthpublic.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  "oak-lane": [
-    "The Tradition Golf Club at Oak Lane",
-    "traditionoaklane.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  "candia-woods": [
-    "Candia Woods Golf Links",
-    "candiawoods.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  "oxford-greens": [
-    "The Golf Club at Oxford Greens",
-    "oxfordgreens.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  shennecossett: [
-    "Shennecossett Golf Course",
-    "shennecossett.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  stanley: ["Stanley Golf Course SGC", "stanleygolf.cps.golf", "/onlineresweb/search-teetime", []],
-  colonie: ["Colonie Golf Course", "colonie.cps.golf", "/onlineresweb/search-teetime", []],
-  "springfield-township": [
-    "Springfield Twp Golf Course",
-    "springfield.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  "pine-hollow": [
-    "Pine Hollow Golf Club",
-    "pinehollow.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  "capital-hills": [
-    "Capital Hills at Albany",
-    "capitalhillsny.cps.golf",
-    "/onlineresweb/search-teetime",
-    []
-  ],
-  crestbrook: [
-    "Crestbrook Golf Course",
-    "www.chronogolf.com",
-    "/club/crestbrook-park-golf-course",
-    []
-  ],
-  "crystal-lake": [
-    "crystal lake golf",
-    "www.chronogolf.com",
-    "/club/crystal-lake-golf-club-rhode-island-mapleville",
-    []
-  ],
-  chanticlair: ["Chanticlair Golf Course", "www.chronogolf.com", "/club/chanticlair-golf-club", []],
-  "lyman-orchards": [
-    "Lyman Orchards Golf Club",
-    "www.chronogolf.com",
-    "/club/lyman-orchards-golf-club",
-    []
-  ],
-  "hyde-park": ["Hyde Park Golf Club", "www.chronogolf.com", "/club/hyde-park-golf-club", []],
-  "frear-park": [
-    "Frear Park Municipal Golf Course",
-    "secure.east.prophetservices.com",
-    "/FrearParkV3/Home/NIndex",
-    []
-  ],
-  "simsbury-farms": [
-    "Simsbury Farms Golf Course",
-    "secure.east.prophetservices.com",
-    "/SimsburyFarmsV3",
-    []
-  ]
-});
 const PROPHET_COURSES = Object.freeze({
   "frear-park": ["Frear Park Municipal Golf Course", "/FrearParkV3/Home/NIndex", "1,2"],
   "simsbury-farms": ["Simsbury Farms Golf Course", "/SimsburyFarmsV3/Home/NIndex", "1"]
@@ -369,24 +272,7 @@ function isAllowlistedJob(job) {
     if (isAllowlistedTenForeJob(job)) return true;
     if (isAllowlistedEzLinksJob(job)) return true;
     if (isAllowlistedWebTracJob(job)) return true;
-    if (isAllowlistedProphetJob(job)) return true;
-    const allowed = ALLOWED_COURSES[job?.courseKey];
-    if (!allowed) return false;
-    const [courseName, hostname, pathname, cardTextIncludes] = allowed;
-    const url = new URL(job.bookingUrl);
-    const isChronogolf = hostname === "www.chronogolf.com";
-    const date = url.searchParams.get("date");
-    const step = url.searchParams.get("step");
-    return (
-      job.courseName === courseName &&
-      JSON.stringify(job.cardTextIncludes) === JSON.stringify(cardTextIncludes) &&
-      url.protocol === "https:" &&
-      url.hostname === hostname &&
-      url.pathname === pathname &&
-      url.username === "" &&
-      url.password === "" &&
-      (!isChronogolf || (/^\d{4}-\d{2}-\d{2}$/u.test(date || "") && step === "teetimes"))
-    );
+    return isAllowlistedProphetJob(job);
   } catch {
     return false;
   }

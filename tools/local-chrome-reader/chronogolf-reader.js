@@ -2,13 +2,7 @@
   "use strict";
 
   const READER_VERSION = "chronogolf-rendered-v1";
-  const PROFILE_PATHS = new Set([
-    "/club/crestbrook-park-golf-course",
-    "/club/crystal-lake-golf-club-rhode-island-mapleville",
-    "/club/chanticlair-golf-club",
-    "/club/lyman-orchards-golf-club",
-    "/club/hyde-park-golf-club",
-  ]);
+  const COURSE_KEY = /^chronogolf:([a-z0-9][a-z0-9-]{0,127})$/;
   const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
   const CHALLENGE_TEXT =
     /\b(?:just a moment|verify you are human|checking your browser|captcha|turnstile|waiting room)\b/i;
@@ -21,13 +15,14 @@
 
   function isAllowedPageUrl(job, value) {
     try {
-      if (!job?.courseKey || !LOCAL_DATE.test(job.targetDate)) return false;
+      const courseMatch = COURSE_KEY.exec(job?.courseKey || "");
+      if (!courseMatch || !LOCAL_DATE.test(job.targetDate)) return false;
       const expected = new URL(job.bookingUrl);
       const url = new URL(value);
       return (
         expected.protocol === "https:" &&
         expected.hostname === "www.chronogolf.com" &&
-        PROFILE_PATHS.has(expected.pathname) &&
+        expected.pathname === `/club/${courseMatch[1]}` &&
         url.protocol === "https:" &&
         url.hostname === expected.hostname &&
         url.pathname === expected.pathname &&

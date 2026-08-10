@@ -769,7 +769,9 @@ describe("executeCourseSupportVerificationStep", () => {
 
   it("queues an allowlisted local-reader fallback after a server 5xx", async () => {
     allowOwnedExecution();
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("crestbrook");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
+      "chronogolf:crestbrook-park-golf-course"
+    );
     capabilityMocks.resolveProviderCapability.mockReturnValue({
       providerFamilyKey: "CHRONOGOLF",
       isRunnable: true,
@@ -812,7 +814,9 @@ describe("executeCourseSupportVerificationStep", () => {
 
   it("completes detached proof from a fresh signed local-reader result", async () => {
     allowOwnedExecution();
-    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("crestbrook");
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
+      "chronogolf:crestbrook-park-golf-course"
+    );
     localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
       status: "COMPLETED",
       observedAt: new Date("2026-07-21T12:00:30.000Z"),

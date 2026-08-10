@@ -223,11 +223,13 @@ describe("local reader job service", () => {
     expect(url.pathname).toBe("/webtrac/web/search.html");
   });
 
-  it("allowlists only the exact supported public Chronogolf profiles", () => {
-    expect(getLocalReaderCourseKey(chronogolfBookingUrl)).toBe("crestbrook");
+  it("derives safe Chronogolf jobs from database booking URLs", () => {
+    expect(getLocalReaderCourseKey(chronogolfBookingUrl)).toBe(
+      "chronogolf:crestbrook-park-golf-course"
+    );
     expect(
       getLocalReaderCourseKey(`${chronogolfBookingUrl}?date=2026-07-26&step=teetimes&groupSize=2`)
-    ).toBe("crestbrook");
+    ).toBe("chronogolf:crestbrook-park-golf-course");
     expect(getLocalReaderCourseKey("https://www.chronogolf.com/club/unclaimed-course")).toBe(
       "chronogolf:unclaimed-course"
     );
@@ -396,7 +398,7 @@ describe("local reader job service", () => {
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
-          courseKey: "crestbrook",
+          courseKey: "chronogolf:crestbrook-park-golf-course",
           bookingUrl:
             "https://www.chronogolf.com/club/crestbrook-park-golf-course?date=2026-07-26&step=teetimes"
         })
@@ -496,7 +498,7 @@ describe("local reader job service", () => {
         scheduleVersion: null,
         purpose: "COURSE_VERIFICATION",
         verificationKey: expect.stringMatching(/^[a-f0-9]{64}$/u),
-        courseKey: "lyman-orchards",
+        courseKey: "chronogolf:lyman-orchards-golf-club",
         bookingUrl:
           "https://www.chronogolf.com/club/lyman-orchards-golf-club?date=2026-07-26&step=teetimes"
       }),
@@ -596,7 +598,7 @@ describe("local reader job service", () => {
       .mockResolvedValueOnce({ count: 1 });
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
       id: "job-1",
-      courseKey: "grassy-hill",
+      courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       createdAt: new Date("2026-07-24T15:59:00.000Z"),
@@ -606,7 +608,7 @@ describe("local reader job service", () => {
 
     await expect(claimNextLocalReaderJob("chrome-home")).resolves.toMatchObject({
       id: "job-1",
-      courseKey: "grassy-hill",
+      courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       courseName: "Grassy Hill Country Club",
@@ -720,7 +722,7 @@ describe("local reader job service", () => {
       teeSearchId: "search-1",
       purpose: "ALERT_CHECK",
       courseId: "course-1",
-      courseKey: "grassy-hill",
+      courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       createdAt: new Date("2026-07-24T15:59:00.000Z"),
@@ -737,7 +739,7 @@ describe("local reader job service", () => {
         leaseToken: "lease-1",
         result: {
           jobId: "job-1",
-          courseKey: "grassy-hill",
+          courseKey: "cps:grassyhill.cps.golf",
           status: "AVAILABLE",
           observedAt: "2026-07-24T16:00:00.000Z",
           pageUrl: bookingUrl,
@@ -783,7 +785,7 @@ describe("local reader job service", () => {
       teeSearchId: null,
       purpose: "COURSE_VERIFICATION",
       courseId: "course-1",
-      courseKey: "grassy-hill",
+      courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       createdAt: new Date("2026-07-24T15:59:00.000Z"),
@@ -801,7 +803,7 @@ describe("local reader job service", () => {
         leaseToken: "lease-verification",
         result: {
           jobId: "job-verification",
-          courseKey: "grassy-hill",
+          courseKey: "cps:grassyhill.cps.golf",
           status: "NO_AVAILABILITY",
           observedAt: "2026-07-24T16:00:00.000Z",
           pageUrl: bookingUrl,
@@ -838,7 +840,7 @@ describe("local reader job service", () => {
       teeSearchId: null,
       purpose: "COURSE_VERIFICATION",
       courseId: "course-1",
-      courseKey: "grassy-hill",
+      courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       createdAt: new Date("2026-07-24T15:59:00.000Z"),
@@ -858,7 +860,7 @@ describe("local reader job service", () => {
       leaseToken: "lease-verification",
       result: {
         jobId: "job-verification",
-        courseKey: "grassy-hill",
+        courseKey: "cps:grassyhill.cps.golf",
         status: "NO_AVAILABILITY",
         observedAt: "2026-07-24T16:00:00.000Z",
         pageUrl: bookingUrl,
@@ -885,7 +887,7 @@ describe("local reader job service", () => {
       resultExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
       result: {
         jobId: "job-verification",
-        courseKey: "grassy-hill",
+        courseKey: "cps:grassyhill.cps.golf",
         status: "NO_AVAILABILITY",
         observedAt: "2026-07-24T16:01:00.000Z",
         pageUrl: bookingUrl,
@@ -916,7 +918,7 @@ describe("local reader job service", () => {
       teeSearchId: null,
       courseId: "course-1",
       purpose: "COURSE_VERIFICATION",
-      courseKey: "grassy-hill",
+      courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       createdAt: new Date("2026-07-24T15:59:00.000Z"),
@@ -933,7 +935,7 @@ describe("local reader job service", () => {
       leaseToken: "lease-challenge",
       result: {
         jobId: "job-challenge",
-        courseKey: "grassy-hill",
+        courseKey: "cps:grassyhill.cps.golf",
         status: "ACCESS_CHALLENGE",
         observedAt: "2026-07-24T16:00:00.000Z",
         pageUrl: bookingUrl,
@@ -951,7 +953,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
       result: {
         jobId: "job-1",
-        courseKey: "grassy-hill",
+        courseKey: "cps:grassyhill.cps.golf",
         status: "AVAILABLE",
         observedAt: "2026-07-24T16:00:00.000Z",
         pageUrl: bookingUrl,
@@ -981,7 +983,7 @@ describe("local reader job service", () => {
     ).resolves.toMatchObject({
       slots: [
         {
-          sourceId: "local-grassy-hill-2026-07-25T09:02:00",
+          sourceId: "local-cps:grassyhill.cps.golf-2026-07-25T09:02:00",
           holes: 18,
           bookableHoleCounts: [9, 18],
           availableSpots: 4
@@ -1009,7 +1011,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
       result: {
         jobId: "job-challenge",
-        courseKey: "grassy-hill",
+        courseKey: "cps:grassyhill.cps.golf",
         status: "ACCESS_CHALLENGE",
         observedAt: "2026-07-24T16:00:00.000Z",
         pageUrl: bookingUrl,
