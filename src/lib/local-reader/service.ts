@@ -30,6 +30,7 @@ export { getLocalReaderCourseKey } from "./course-key";
 const JOB_LIFETIME_MS = 30 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
+const ALERT_READER_ATTEMPT_LIFETIME_MS = 5 * 60_000;
 
 export type LocalReaderQueueDisposition = "PENDING" | "RETRYING_AFTER_TERMINAL_FAILURE";
 
@@ -124,6 +125,7 @@ export async function queueLocalReaderJob(input: {
   if (!courseKey) return null;
   const requiredCapability = await resolveRequiredCapability(input.courseId, courseKey);
   const now = new Date();
+  const activeAttemptCutoff = new Date(now.getTime() - ALERT_READER_ATTEMPT_LIFETIME_MS);
   const reusableAcrossScheduleVersions = await prisma.localReaderJob.findFirst({
     where: {
       teeSearchId: input.searchId,
@@ -133,10 +135,12 @@ export async function queueLocalReaderJob(input: {
       OR: [
         {
           status: "PENDING",
+          createdAt: { gt: activeAttemptCutoff },
           jobExpiresAt: { gt: now }
         },
         {
           status: "LEASED",
+          createdAt: { gt: activeAttemptCutoff },
           jobExpiresAt: { gt: now },
           leaseExpiresAt: { gt: now }
         },
@@ -169,8 +173,9 @@ export async function queueLocalReaderJob(input: {
   if (
     existing &&
     existing.jobExpiresAt > now &&
-    (existing.status === "PENDING" ||
+    ((existing.status === "PENDING" && existing.createdAt > activeAttemptCutoff) ||
       (existing.status === "LEASED" &&
+        existing.createdAt > activeAttemptCutoff &&
         existing.leaseExpiresAt !== null &&
         existing.leaseExpiresAt > now) ||
       (existing.status === "COMPLETED" &&
@@ -189,7 +194,7 @@ export async function queueLocalReaderJob(input: {
       (existing.status === "LEASED" &&
         (existing.leaseExpiresAt === null || existing.leaseExpiresAt <= now)) ||
       ((existing.status === "PENDING" || existing.status === "LEASED") &&
-        existing.jobExpiresAt <= now));
+        (existing.createdAt <= activeAttemptCutoff || existing.jobExpiresAt <= now)));
   const job = await prisma.localReaderJob.upsert({
     where: {
       teeSearchId_courseId_scheduleVersion_targetDate_players: unique

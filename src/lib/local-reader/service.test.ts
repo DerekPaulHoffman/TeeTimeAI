@@ -241,6 +241,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       status: "LEASED",
+      createdAt: new Date("2026-07-24T15:58:00.000Z"),
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
       jobExpiresAt: new Date("2026-07-24T16:10:00.000Z")
     });
@@ -330,6 +331,49 @@ describe("local reader job service", () => {
           status: "PENDING",
           leaseToken: null,
           leaseExpiresAt: null
+        })
+      })
+    );
+  });
+
+  it("reports a repeatedly renewed reader lease after the customer wait limit", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-renewed",
+      status: "LEASED",
+      createdAt: new Date("2026-07-24T15:54:00.000Z"),
+      leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
+      resultExpiresAt: null
+    });
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({
+      id: "job-renewed",
+      status: "PENDING"
+    });
+
+    await expect(
+      queueLocalReaderJob({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 3,
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl
+      })
+    ).resolves.toMatchObject({
+      id: "job-renewed",
+      status: "PENDING",
+      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE"
+    });
+    expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              status: "LEASED",
+              createdAt: { gt: new Date("2026-07-24T15:55:00.000Z") }
+            })
+          ])
         })
       })
     );
