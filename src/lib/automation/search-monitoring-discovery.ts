@@ -39,6 +39,7 @@ import {
   haveCompatibleCourseNames,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
+import { getGooglePlacesApiKey } from "@/lib/places/google";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
 
@@ -314,6 +315,55 @@ type SearchMonitoringDiscoveryOptions = {
   forceFreshCourseIds?: readonly string[];
 };
 
+type MissingOfficialWebsiteCourse = {
+  id: string;
+  googlePlaceId: string | null;
+  website: string | null;
+  detectedBookingUrl: string | null;
+};
+
+async function refreshMissingOfficialWebsites(
+  courses: MissingOfficialWebsiteCourse[],
+  publicFetch: typeof fetch
+) {
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey) {
+    return;
+  }
+
+  for (const course of courses) {
+    const placeId = course.googlePlaceId?.trim();
+    if (course.website || course.detectedBookingUrl || !placeId) {
+      continue;
+    }
+    const execution = await runWithProviderRequestLease(
+      "SOURCE_MISSING",
+      async () => {
+        const response = await publicFetch(
+          `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
+          {
+            cache: "no-store",
+            headers: {
+              "X-Goog-Api-Key": apiKey,
+              "X-Goog-FieldMask": "websiteUri"
+            }
+          }
+        );
+        if (!response.ok) {
+          return null;
+        }
+        const place = (await response.json()) as { websiteUri?: unknown };
+        return typeof place.websiteUri === "string"
+          ? readSafePublicUrl(place.websiteUri)
+          : null;
+      }
+    );
+    if (execution.acquired && execution.value) {
+      course.website = execution.value;
+    }
+  }
+}
+
 export async function prepareSearchMonitoring(
   search: ActiveAutomationSearch,
   fetchImpl: typeof fetch | undefined = undefined,
@@ -323,6 +373,18 @@ export async function prepareSearchMonitoring(
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   const includeCourseIds = new Set(options.includeCourseIds ?? []);
   const forceFreshCourseIds = new Set(options.forceFreshCourseIds ?? []);
+  const remediationContext = await resolveRemediationDiscoveryContext(search, now);
+  const sourceRefreshCourseIds = new Set([
+    ...includeCourseIds,
+    ...forceFreshCourseIds,
+    ...(remediationContext?.courseIds ?? [])
+  ]);
+  await refreshMissingOfficialWebsites(
+    search.preferences
+      .map((preference) => preference.course)
+      .filter((course) => sourceRefreshCourseIds.has(course.id)),
+    publicFetch
+  );
   const repeatedFailureEvidenceByCourse = await listRepeatedMonitoringFailureEvidence(
     search.preferences.map((preference) => preference.course.id)
   );
@@ -388,7 +450,6 @@ export async function prepareSearchMonitoring(
     };
   }
 
-  const remediationContext = await resolveRemediationDiscoveryContext(search, now);
   const normalLookbackStartedAt = new Date(now.getTime() - DISCOVERY_LOOKBACK_MS);
   const requestedLookbackStartedAt = remediationContext
     ? new Date(

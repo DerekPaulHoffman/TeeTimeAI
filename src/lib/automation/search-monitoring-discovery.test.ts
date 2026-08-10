@@ -19,10 +19,14 @@ const prismaMocks = vi.hoisted(() => ({
 const localReaderMocks = vi.hoisted(() => ({
   getLocalReaderCourseKey: vi.fn()
 }));
+const googlePlacesMocks = vi.hoisted(() => ({
+  getGooglePlacesApiKey: vi.fn()
+}));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
+vi.mock("@/lib/places/google", () => googlePlacesMocks);
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import { buildBrowserDiscovery } from "./browser-discovery";
@@ -114,12 +118,73 @@ describe("search monitoring discovery", () => {
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
     prismaMocks.course.findUnique.mockResolvedValue(null);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue(undefined);
     providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
         acquired: true,
         value: await worker()
       })
     );
+  });
+
+  it("refreshes a missing official website from Google Places before remediation discovery", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(["source-missing-course"])
+    ]);
+    const officialWebsite = "https://municipal.example/golf";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = input.toString();
+      if (url.startsWith("https://places.googleapis.com/")) {
+        return Response.json({ websiteUri: officialWebsite });
+      }
+      expect(url).toBe(officialWebsite);
+      return new Response("<html><h1>Source Missing Golf Course</h1></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const search = remediationSearch(["source-missing-course"], {
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            id: "source-missing-course",
+            googlePlaceId: "place-id",
+            name: "Source Missing Golf Course",
+            website: null,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "SOURCE_MISSING",
+            monitoringMode: "AUTOMATIC",
+            automationEligibility: "UNKNOWN",
+            automationReason: "NONE",
+            bookingMethod: "UNKNOWN",
+            bookingMetadata: null
+          }
+        }
+      ]
+    });
+
+    const result = await prepareSearchMonitoring(
+      search,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0]?.[0].toString()).toContain(
+      "https://places.googleapis.com/v1/places/place-id"
+    );
+    expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({
+      headers: {
+        "X-Goog-Api-Key": "test-key",
+        "X-Goog-FieldMask": "websiteUri"
+      }
+    });
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe(officialWebsite);
+    expect(result.attemptedCourseIds).toEqual(["source-missing-course"]);
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
   });
 
   it("skips provider discovery for a local-reader-only course", async () => {
