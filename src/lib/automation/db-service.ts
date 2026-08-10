@@ -17,6 +17,7 @@ import { zonedDateTimeToDate } from "@/lib/timezones";
 import {
   evaluateBrowserDiscoveryMonitoringGate,
   getBestProbeUrl,
+  getBestUnsupportedCoverageProbeUrl,
   keepPolicyOnlyDiscoveryActionable,
   OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES,
   shouldQueueBrowserProbe,
@@ -417,7 +418,6 @@ async function listExactIncidentBrowserProbeTarget(
       })
     : undefined;
   const probeCourse = course ? { ...course, monitoringFailureEvidence } : null;
-  const probeUrl = probeCourse ? getBestProbeUrl(probeCourse) : null;
   const hasCurrentTechnicalAccessFailure = Boolean(
     course?.supportIncident?.kind === "FETCH_FAILED" &&
     ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? "")
@@ -428,6 +428,11 @@ async function listExactIncidentBrowserProbeTarget(
       course.supportIncident.failureClass ?? ""
     )
   );
+  const probeUrl = probeCourse
+    ? hasCurrentUnsupportedCoverageFailure
+      ? getBestUnsupportedCoverageProbeUrl(probeCourse)
+      : getBestProbeUrl(probeCourse)
+    : null;
   if (
     !course ||
     !probeUrl ||

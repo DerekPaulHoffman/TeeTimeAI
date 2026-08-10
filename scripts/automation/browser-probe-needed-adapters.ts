@@ -407,7 +407,7 @@ async function collectBrowserEvidence(
     });
   }
 
-  await clickLikelyBookingLink(page);
+  await clickLikelyBookingLink(page, input.courseName);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const firstDestinationPageUrl = page.url();
   const firstDestinationPageEvidence = await collectPageEvidence(
@@ -631,7 +631,7 @@ async function collectPageEvidence(
   }, officialCourseName);
 }
 
-async function clickLikelyBookingLink(page: Page) {
+async function clickLikelyBookingLink(page: Page, courseName?: string) {
   const { anchorCandidates, frameCandidateInputs } = await page.evaluate(() => ({
     anchorCandidates:
     Array.from(document.querySelectorAll<HTMLAnchorElement>("a[href]"))
@@ -639,11 +639,7 @@ async function clickLikelyBookingLink(page: Page) {
         href: anchor.href,
         text: anchor.textContent?.replace(/\s+/g, " ").trim() ?? ""
       }))
-      .filter((anchor) =>
-        /tee.?time|book|reserve|reservation|foreup|teeitup|golfnow|cps\.golf/i.test(
-          `${anchor.text} ${anchor.href}`
-        )
-      ),
+      .slice(0, 200),
     frameCandidateInputs: Array.from(
       document.querySelectorAll<HTMLIFrameElement>(
         "iframe[src], iframe[data-src]"
@@ -672,7 +668,8 @@ async function clickLikelyBookingLink(page: Page) {
         text: candidate.label
       }))
     ],
-    page.url()
+    page.url(),
+    courseName
   );
 
   if (!href) {

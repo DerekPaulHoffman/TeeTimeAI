@@ -12,6 +12,7 @@ import {
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
   getBestProbeUrl,
+  getBestUnsupportedCoverageProbeUrl,
   isLegacyProphetPublicBookingLandingUrl,
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
@@ -190,6 +191,54 @@ describe("booking-link selection", () => {
         "https://course.example/"
       )
     ).toBeNull();
+  });
+
+  it("falls back to the same-origin target course page when booking copy is absent", () => {
+    expect(
+      pickLikelyBookingHref(
+        [
+          {
+            href: "https://course.example/club/scripts/public/public.asp?NS=PUBLIC",
+            text: "Joe & Leigh's Pine Oaks Golf Course"
+          },
+          {
+            href: "https://course.example/pro-shop",
+            text: "Joe & Leigh's Discount Golf Pro Shop"
+          },
+          {
+            href: "https://sibling.example/",
+            text: "Pine Oaks Golf Course"
+          },
+          {
+            href: "https://generic-booking.example/book",
+            text: ""
+          }
+        ],
+        "https://course.example/",
+        "Pine Oaks Golf Course"
+      )
+    ).toBe(
+      "https://course.example/club/scripts/public/public.asp?NS=PUBLIC"
+    );
+  });
+
+  it("scopes to a distinct target course page before following provider links", () => {
+    expect(
+      pickLikelyBookingHref(
+        [
+          {
+            href: "https://course.example/golf-course",
+            text: "Pine Oaks Golf Course"
+          },
+          {
+            href: "https://booking.example.net/tee-times",
+            text: "Book Tee Times"
+          }
+        ],
+        "https://course.example/",
+        "Pine Oaks Golf Course"
+      )
+    ).toBe("https://course.example/golf-course");
   });
 });
 
@@ -2893,6 +2942,33 @@ describe("buildBrowserDiscovery", () => {
       officialCourseWebsite: "https://twinlakesgolfclub.example/",
       visibleText:
         "no tee times needed... first come first serve! Come Play Today! We Are Always Open! Twin Lakes Golf Club 241 Twin Lakes Road, North Branford, Connecticut."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-walk-in-access" }
+    });
+  });
+
+  it("classifies official open-access copy that says the public is always welcome", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "pine-oaks",
+      courseName: "Pine Oaks Golf Course",
+      sourceUrl:
+        "https://www.pineoaks.example/club/scripts/public/public.asp?NS=PUBLIC",
+      finalUrl:
+        "https://www.pineoaks.example/club/scripts/public/public.asp?NS=PUBLIC",
+      observedUrls: [
+        "https://www.pineoaks.example/club/scripts/public/public.asp?NS=PUBLIC"
+      ],
+      officialCourseWebsite: "http://www.pineoaks.example/",
+      visibleText:
+        "Pine Oaks Golf Course. Joe & Leigh's Discount Golf Pro Shop. Joe & Leigh's Golf Performance Center. The Public is Always Welcome, No Tee Times Needed. The public is always welcome to play any time of day. There are no Tee Times needed at Pine Oaks."
     });
 
     expect(discovery).toMatchObject({
@@ -6773,6 +6849,23 @@ describe("browser probe target selection", () => {
         detectedBookingUrl: "https://booking.example.com/tee-times"
       })
     ).toBe("https://booking.example.com/tee-times");
+  });
+
+  it("restarts unsupported coverage discovery from the official website", () => {
+    expect(
+      getBestUnsupportedCoverageProbeUrl({
+        website: "http://www.pineoaks.example/",
+        detectedBookingUrl:
+          "https://www.pineoaks.example/stale-tee-time-candidate"
+      })
+    ).toBe("http://www.pineoaks.example/");
+
+    expect(
+      getBestUnsupportedCoverageProbeUrl({
+        website: null,
+        detectedBookingUrl: "https://booking.example/tee-times"
+      })
+    ).toBe("https://booking.example/tee-times");
   });
 
   it("prefers the official course source when a known provider needs discovery", () => {

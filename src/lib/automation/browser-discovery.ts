@@ -830,7 +830,8 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
 export function pickLikelyBookingHref(
   candidates: Array<{ href: string; text: string }>,
-  currentPageUrl: string
+  currentPageUrl: string,
+  courseName?: string
 ) {
   const scored = candidates.flatMap((candidate, index) => {
     const parsed = parseUrl(candidate.href);
@@ -861,6 +862,14 @@ export function pickLikelyBookingHref(
     }
     if (/\b(?:book|reserve|reservation)\b/i.test(searchable)) {
       score += 10;
+    }
+    if (
+      score === 0 &&
+      courseName &&
+      haveSamePublicWebsiteOrigin(candidate.href, currentPageUrl) &&
+      hasTargetCourseIdentity(candidate.text, courseName)
+    ) {
+      score += 150;
     }
     if (haveSameExactUrl(candidate.href, currentPageUrl)) {
       score -= 200;
@@ -2698,24 +2707,39 @@ function learnWalkInClassification(
       statement
     ) ||
     (sourceIsOfficialCourseWebsite &&
-      /\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
-        visibleText.slice(
-          noReservationMatch.index,
-          noReservationMatch.index + 240
-        )
-      ));
+      (/\bfirst[- ]come\s*,?\s*first[- ]serve(?:d)?(?:\s+basis)?\b/i.test(
+          visibleText.slice(
+            noReservationMatch.index,
+            noReservationMatch.index + 240
+          )
+        ) ||
+        /\b(?:the\s+)?public\s+is\s+always\s+welcome\b.{0,160}\bno\s+tee\s+times?\s+(?:are\s+)?needed\b/i.test(
+          courseScopedStatementContext
+        ) ||
+        /\bno\s+tee\s+times?\s+(?:are\s+)?needed\b.{0,160}\b(?:the\s+)?public\s+is\s+always\s+welcome\b/i.test(
+          courseScopedStatementContext
+        )));
   const scopedToNonCourseFacility =
     /\b(?:driving|practice)\s+(?:range|facility|stalls?)\b/i.test(statement);
   const contradictsWalkInOnly =
     /\b(?:book|reserve)\s+(?:a\s+)?tee times?\s+(?:online|now)\b/i.test(statement);
+  const statementNamesTargetCourse = (() => {
+    const namedTarget = statement.match(
+      /\bno\s+tee\s+times?\s+(?:are\s+)?needed\s+at\s+([^.!?;]{2,80})/i
+    )?.[1];
+    return Boolean(
+      namedTarget && isLikelyTargetCourseAlias(namedTarget, evidence.courseName)
+    );
+  })();
 
   if (
     !identifiesTargetCourse ||
     hasDifferentExplicitCourseIdentity(statement, evidence.courseName) ||
-    hasDifferentNoTeeTimeCourseIdentity(
-      courseScopedStatementContext,
-      evidence.courseName
-    ) ||
+    (!statementNamesTargetCourse &&
+      hasDifferentNoTeeTimeCourseIdentity(
+        courseScopedStatementContext,
+        evidence.courseName
+      )) ||
     !explicitlyFirstCome ||
     scopedToNonCourseFacility ||
     contradictsWalkInOnly
@@ -7073,6 +7097,12 @@ export function getBestProbeUrl(
     return website;
   }
   return bookingUrl ?? website;
+}
+
+export function getBestUnsupportedCoverageProbeUrl(
+  course: Parameters<typeof getBestProbeUrl>[0]
+) {
+  return getSafeBrowserProbeUrl(course.website) ?? getBestProbeUrl(course);
 }
 
 type CpsDiscoveryConfiguration = {
