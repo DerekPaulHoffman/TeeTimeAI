@@ -5,6 +5,7 @@ import {
   buildBrowserFrameCandidates,
   buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
+  buildRedirectedProviderBookingCandidate,
   buildBrowserWidgetCandidates,
   finalizeBrowserEvidenceSnapshots,
   hasDistinctProviderBookingCandidate,
@@ -31,6 +32,33 @@ const emptyPage: RawBrowserPageEvidence = {
 };
 
 describe("browser probe evidence pipeline", () => {
+  it("preserves an official booking-subdomain redirect to a public provider landing", () => {
+    expect(
+      buildRedirectedProviderBookingCandidate({
+        officialPageUrl: "https://course.example/",
+        selectedUrl: "https://members.course.example/book-tee-times",
+        selectedLabel: "Book Tee Times",
+        destinationUrl:
+          "https://foreupsoftware.com/index.php/booking/22687/11624#/teetimes"
+      })
+    ).toEqual({
+      url: "https://foreupsoftware.com/index.php/booking/22687/11624#/teetimes",
+      label: "Book Tee Times"
+    });
+  });
+
+  it("rejects redirected provider evidence from an unrelated intermediary", () => {
+    expect(
+      buildRedirectedProviderBookingCandidate({
+        officialPageUrl: "https://course.example/",
+        selectedUrl: "https://unrelated.example/book-tee-times",
+        selectedLabel: "Book Tee Times",
+        destinationUrl:
+          "https://foreupsoftware.com/index.php/booking/22687/11624#/teetimes"
+      })
+    ).toBeNull();
+  });
+
   it("collects a public booking URL from a lazy iframe data source", () => {
     expect(
       buildBrowserFrameCandidates([

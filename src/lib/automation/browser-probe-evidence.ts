@@ -64,6 +64,62 @@ export type BrowserProbeDecisionTrace = {
   publicProviderReadDetected: boolean;
 };
 
+export function buildRedirectedProviderBookingCandidate(input: {
+  officialPageUrl: string;
+  selectedUrl: string;
+  selectedLabel: string;
+  destinationUrl: string;
+}) {
+  let officialPage: URL;
+  let selected: URL;
+  let destination: URL;
+  try {
+    officialPage = new URL(input.officialPageUrl);
+    selected = new URL(input.selectedUrl);
+    destination = new URL(input.destinationUrl);
+  } catch {
+    return null;
+  }
+
+  const officialHostname = officialPage.hostname
+    .toLocaleLowerCase("en-US")
+    .replace(/^www\./u, "");
+  const selectedHostname = selected.hostname
+    .toLocaleLowerCase("en-US")
+    .replace(/^www\./u, "");
+  const selectedBelongsToOfficialWebsite =
+    selectedHostname === officialHostname ||
+    selectedHostname.endsWith(`.${officialHostname}`);
+  const selectedLooksLikeBooking = /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(
+    `${input.selectedLabel} ${selected.pathname}`
+  );
+
+  if (
+    !["http:", "https:"].includes(officialPage.protocol) ||
+    !["http:", "https:"].includes(selected.protocol) ||
+    officialPage.username ||
+    officialPage.password ||
+    selected.username ||
+    selected.password ||
+    !selectedBelongsToOfficialWebsite ||
+    !selectedLooksLikeBooking ||
+    destination.protocol !== "https:" ||
+    destination.username ||
+    destination.password ||
+    destination.port ||
+    !getKnownProviderFamilyForHostname(destination.hostname) ||
+    !isProviderPublicBookingLandingUrl(destination) ||
+    destination.toString() === selected.toString()
+  ) {
+    return null;
+  }
+
+  return {
+    url: destination.toString(),
+    label: input.selectedLabel.replace(/\s+/g, " ").trim() || "Book a tee time"
+  };
+}
+
 const MAX_RAW_VISIBLE_TEXT_LENGTH = 100_000;
 const MAX_PREPARED_VISIBLE_TEXT_LENGTH = 12_000;
 const LEADING_VISIBLE_TEXT_LENGTH = 4_000;

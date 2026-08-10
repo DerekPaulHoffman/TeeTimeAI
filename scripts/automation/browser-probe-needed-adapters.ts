@@ -18,6 +18,7 @@ import {
   buildBrowserFrameCandidates,
   buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
+  buildRedirectedProviderBookingCandidate,
   buildBrowserWidgetCandidates,
   finalizeBrowserEvidenceSnapshots,
   hasDistinctProviderBookingCandidate,
@@ -407,9 +408,30 @@ async function collectBrowserEvidence(
     });
   }
 
-  await clickLikelyBookingLink(page, input.courseName);
+  const selectedBookingLink = await clickLikelyBookingLink(page, input.courseName);
   await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => undefined);
   const firstDestinationPageUrl = page.url();
+  const redirectedBookingCandidate = selectedBookingLink
+    ? buildRedirectedProviderBookingCandidate({
+        officialPageUrl: landingPageUrl,
+        selectedUrl: selectedBookingLink.href,
+        selectedLabel: selectedBookingLink.text,
+        destinationUrl: firstDestinationPageUrl
+      })
+    : null;
+  const scopedLandingPageEvidence = redirectedBookingCandidate
+    ? {
+        ...landingPageEvidence,
+        anchors: [...new Set([
+          ...landingPageEvidence.anchors,
+          redirectedBookingCandidate.url
+        ])],
+        linkCandidates: [
+          ...landingPageEvidence.linkCandidates,
+          redirectedBookingCandidate
+        ]
+      }
+    : landingPageEvidence;
   const firstDestinationPageEvidence = await collectPageEvidence(
     page,
     haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
@@ -465,7 +487,7 @@ async function collectBrowserEvidence(
     accessBarrierUrls,
     accessBarriers,
     landingPageUrl,
-    landingPageEvidence,
+    landingPageEvidence: scopedLandingPageEvidence,
     firstDestinationPageUrl,
     firstDestinationPageEvidence,
     destinationPageUrl,
@@ -673,12 +695,19 @@ async function clickLikelyBookingLink(page: Page, courseName?: string) {
   );
 
   if (!href) {
-    return;
+    return null;
   }
+
+  const selected = [...anchorCandidates, ...frameCandidates].find(
+    (candidate) => candidate.href === href
+  ) ?? staticFrameCandidates
+    .map((candidate) => ({ href: candidate.url, text: candidate.label }))
+    .find((candidate) => candidate.href === href);
 
   await page.goto(href, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT_MS }).catch(
     () => undefined
   );
+  return selected ?? { href, text: "Book a tee time" };
 }
 
 async function collectStaticPageFrameCandidates(page: Page) {
