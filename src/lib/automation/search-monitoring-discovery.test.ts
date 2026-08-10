@@ -3686,7 +3686,7 @@ describe("search monitoring discovery", () => {
     );
   });
 
-  it("upgrades a stale HTTP site and classifies its challenge-protected CPS booking", async () => {
+  it("learns CPS metadata when the public search shell is challenged but configuration is readable", async () => {
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
       {
         courseId: "grassy-hill",
@@ -3724,6 +3724,23 @@ describe("search monitoring discovery", () => {
           }
         });
       }
+      if (
+        value ===
+        "https://grassyhill.cps.golf/onlineresweb/Home/Configuration"
+      ) {
+        return new Response(
+          JSON.stringify({
+            courseId: 0,
+            siteName: "grassyhill",
+            websiteId: "public-website",
+            onlineApi:
+              "https://grassyhill.cps.golf/onlineres/onlineapi/api/v1/onlinereservation",
+            authorityBaseUrl: "https://grassyhill.cps.golf/identityapi",
+            terminalId: 1
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
       throw new Error(`Unexpected URL ${value}`);
     });
     const search = {
@@ -3747,14 +3764,25 @@ describe("search monitoring discovery", () => {
       "https://www.grassyhillcountryclub.com/",
       "https://grassyhillcountryclub.com/",
       "https://secure.east.prophetservices.com/GrassyHillCCV3",
-      "https://grassyhill.cps.golf/"
+      "https://grassyhill.cps.golf/",
+      "https://grassyhill.cps.golf/onlineresweb/Home/Configuration"
     ]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "VERIFIED",
+        status: "LEARNED",
         bookingUrl: "https://grassyhill.cps.golf/",
-        automationEligibility: "BLOCKED",
-        automationReason: "CAPTCHA_OR_QUEUE"
+        automationEligibility: "ALLOWED",
+        automationReason: "NONE",
+        apiMetadata: expect.objectContaining({
+          provider: "CPS",
+          siteName: "grassyhill",
+          bookingBaseUrl: "https://grassyhill.cps.golf/",
+          courseIds: [0],
+          resolvePlaceholderCourseIds: true
+        }),
+        evidence: expect.objectContaining({
+          learnedFrom: "cps-public-configuration"
+        })
       })
     );
   });

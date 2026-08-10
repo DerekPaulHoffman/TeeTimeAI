@@ -1566,6 +1566,43 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("keeps a CPS challenge final when its separate public configuration is also unavailable", async () => {
+    const barrier = { url: "https://grassyhill.cps.golf/", status: 403 as const };
+    const discovery = buildBrowserDiscovery({
+      courseId: "grassy-hill",
+      courseName: "Grassy Hill Country Club",
+      sourceUrl: "https://grassyhillcountryclub.com/",
+      finalUrl: barrier.url,
+      observedUrls: [barrier.url],
+      accessBarriers: [barrier],
+      corroboratedAccessBarrier: barrier,
+      visibleText: "Book Online Tee Times"
+    });
+    const fetchImpl = vi.fn(async () =>
+      new Response("Enable JavaScript and cookies to continue", {
+        status: 403,
+        headers: { "cf-mitigated": "challenge" }
+      })
+    );
+
+    const enriched = await enrichCpsDiscovery(
+      discovery,
+      "Grassy Hill Country Club",
+      fetchImpl as typeof fetch
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(enriched).toMatchObject({
+      status: "VERIFIED",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      evidence: {
+        learnedFrom: "cps-public-configuration-unavailable"
+      }
+    });
+    expect(enriched.apiMetadata).toBeUndefined();
+  });
+
   it("learns reusable GolfBack metadata from an official public course link", () => {
     const bookingUrl =
       "https://golfback.com/#/course/5a90fb0c-b928-43f0-9486-d5d43c03d25d";

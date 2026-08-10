@@ -7142,10 +7142,17 @@ export async function enrichCpsDiscovery(
         !existingMetadata.onlineApi ||
         !existingMetadata.authorityBaseUrl)
   );
+  const challengeProtectedSearchShell = Boolean(
+    bookingBase &&
+      isChallengeProtectedCpsSearchShell(discovery, bookingBase)
+  );
   if (
-    (!missingCourseId && !missingPersistedConfiguration) ||
+    (!missingCourseId &&
+      !missingPersistedConfiguration &&
+      !challengeProtectedSearchShell) ||
     discovery.detectedPlatform !== "CUSTOM" ||
-    Boolean(discovery.evidence.accessBarriers?.length) ||
+    (Boolean(discovery.evidence.accessBarriers?.length) &&
+      !challengeProtectedSearchShell) ||
     !bookingBase ||
     !isStrictCpsTenantRoot(bookingBase)
   ) {
@@ -7194,7 +7201,7 @@ export async function enrichCpsDiscovery(
   const configuration = parseCpsDiscoveryConfiguration(
     rawConfiguration,
     bookingBase,
-    missingCourseId ? courseName : null
+    missingCourseId || challengeProtectedSearchShell ? courseName : null
   );
   if (!configuration) {
     return withCpsConfigurationResult(discovery, "invalid");
@@ -7247,6 +7254,37 @@ export async function enrichCpsDiscovery(
       learnedFrom: "cps-public-configuration"
     }
   };
+}
+
+function isChallengeProtectedCpsSearchShell(
+  discovery: BrowserDiscovery,
+  bookingBase: URL
+) {
+  if (
+    discovery.status !== "VERIFIED" ||
+    discovery.detectedPlatform !== "CUSTOM" ||
+    discovery.bookingMethod !== "PUBLIC_ONLINE" ||
+    discovery.automationEligibility !== "BLOCKED" ||
+    discovery.automationReason !== "CAPTCHA_OR_QUEUE" ||
+    discovery.apiMetadata !== undefined
+  ) {
+    return false;
+  }
+
+  return Boolean(
+    discovery.evidence.accessBarriers?.some((barrier) => {
+      const barrierUrl = parseUrl(barrier.url);
+      return Boolean(
+        barrier.status === 403 &&
+          barrierUrl &&
+          barrierUrl.origin === bookingBase.origin &&
+          !barrierUrl.hash &&
+          /^\/(?:onlineresweb(?:\/search-teetime)?)?\/?$/iu.test(
+            barrierUrl.pathname
+          )
+      );
+    })
+  );
 }
 
 function withCpsConfigurationResult(
