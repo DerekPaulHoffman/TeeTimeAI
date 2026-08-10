@@ -186,6 +186,8 @@ export async function queueLocalReaderJob(input: {
     existing !== null &&
     (existing.status === "FAILED" ||
       existing.status === "EXPIRED" ||
+      (existing.status === "LEASED" &&
+        (existing.leaseExpiresAt === null || existing.leaseExpiresAt <= now)) ||
       ((existing.status === "PENDING" || existing.status === "LEASED") &&
         existing.jobExpiresAt <= now));
   const job = await prisma.localReaderJob.upsert({

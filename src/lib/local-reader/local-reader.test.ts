@@ -219,6 +219,8 @@ describe("local Chrome reader contract", () => {
 
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
+    expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
+    expect(contentMatches).toContain("https://www.chronogolf.com/club/*");
     expect(manifest.host_permissions).toContain("https://fox.tenfore.golf/*");
     expect(contentMatches).toContain("https://fox.tenfore.golf/*");
     expect(manifest.host_permissions).toContain("https://*.ezlinksgolf.com/*");
@@ -260,7 +262,9 @@ describe("local Chrome reader contract", () => {
       expect(contentMatches).toContain(
         course.provider === "PROPHET"
           ? `${course.bookingUrl.replace(/\/Home\/NIndex$/u, "")}/*`
-          : `${course.bookingUrl}*`
+          : course.provider === "CHRONOGOLF"
+            ? "https://www.chronogolf.com/club/*"
+            : `${course.bookingUrl}*`
       );
       expect(backgroundSource).toContain(courseKey);
       expect(backgroundSource).toContain(`"${course.courseName}"`);
