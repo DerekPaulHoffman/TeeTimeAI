@@ -4,6 +4,7 @@ import { hasGooglePlacesConfig, isVercelProduction } from "@/lib/env";
 import { demoCourses } from "@/lib/places/demo-courses";
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
+import { cacheCourseCandidatePhotos } from "@/lib/places/course-photo-metadata";
 import {
   getCourseDiscoveryCacheKey,
   readCourseRuntimeCache,
@@ -45,6 +46,7 @@ export async function GET(request: NextRequest) {
   try {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
+      await cacheCourseCandidatePhotos(cachedCourses);
       return NextResponse.json(
         { courses: cachedCourses, demo: false },
         { headers: courseDataSuccessCacheHeaders }
@@ -75,7 +77,10 @@ export async function GET(request: NextRequest) {
       );
       return coursesWithLayouts;
     });
-    await writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery");
+    await Promise.all([
+      writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery"),
+      cacheCourseCandidatePhotos(coursesWithPrices)
+    ]);
     return NextResponse.json(
       { courses: coursesWithPrices, demo: false },
       { headers: courseDataSuccessCacheHeaders }
@@ -98,7 +103,10 @@ export async function GET(request: NextRequest) {
         const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
         const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
         const coursesWithPrices = await enrichCoursesWithBookingEvidence(coursesWithLayouts);
-        await writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery");
+        await Promise.all([
+          writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery"),
+          cacheCourseCandidatePhotos(coursesWithPrices)
+        ]);
         return NextResponse.json(
           { courses: coursesWithPrices, demo: false },
           { headers: courseDataSuccessCacheHeaders }

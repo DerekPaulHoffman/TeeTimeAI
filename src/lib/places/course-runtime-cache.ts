@@ -21,7 +21,11 @@ export async function readCourseRuntimeCache<T>(key: string): Promise<T | null> 
 export async function writeCourseRuntimeCache(
   key: string,
   value: unknown,
-  name: "course-discovery" | "course-lookup" | "course-photo"
+  name:
+    | "course-discovery"
+    | "course-lookup"
+    | "course-photo"
+    | "course-photo-metadata"
 ) {
   if (process.env.VERCEL_ENV !== "production") {
     return;
@@ -70,6 +74,10 @@ export function getCourseLookupCacheKey(input: {
 
 export function getCoursePhotoCacheKey(photoReference: string) {
   return `photo-v1:${photoReference}`;
+}
+
+export function getCoursePhotoMetadataCacheKey(googlePlaceId: string) {
+  return `photo-metadata-v1:${googlePlaceId.trim()}`;
 }
 
 function getCourseCache() {

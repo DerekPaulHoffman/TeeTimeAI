@@ -19,7 +19,18 @@ import {
   loadActiveGooglePlaceReviewIndex,
   type GooglePlaceReviewIndex
 } from "@/lib/places/google-place-reviews";
+import {
+  cacheGooglePlacePhoto,
+  readCachedGooglePlacePhoto,
+  type CoursePhotoAttribution,
+  type GooglePlacePhoto
+} from "@/lib/places/course-photo-metadata";
 import { getTimeZoneForCoordinates } from "@/lib/timezones";
+
+export type {
+  CoursePhotoAttribution,
+  GooglePlacePhoto
+} from "@/lib/places/course-photo-metadata";
 
 export type GooglePlace = {
   id?: string;
@@ -58,17 +69,6 @@ export type GooglePlace = {
     name?: string;
     id?: string;
   }>;
-};
-
-export type CoursePhotoAttribution = {
-  displayName?: string;
-  uri?: string;
-  photoUri?: string;
-};
-
-export type GooglePlacePhoto = {
-  photoReference: string;
-  authorAttributions: CoursePhotoAttribution[];
 };
 
 export type CourseCandidate = {
@@ -543,9 +543,18 @@ export async function searchGolfCoursesByName(
 export async function getGooglePlacePhoto(
   googlePlaceId: string
 ): Promise<GooglePlacePhoto | null> {
-  const apiKey = getGooglePlacesApiKey();
   const normalizedPlaceId = googlePlaceId.trim();
-  if (!apiKey || !normalizedPlaceId) {
+  if (!normalizedPlaceId) {
+    return null;
+  }
+
+  const cachedPhoto = await readCachedGooglePlacePhoto(normalizedPlaceId);
+  if (cachedPhoto) {
+    return cachedPhoto;
+  }
+
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey) {
     return null;
   }
 
@@ -570,10 +579,10 @@ export async function getGooglePlacePhoto(
       return null;
     }
 
-    return {
+    return cacheGooglePlacePhoto(normalizedPlaceId, {
       photoReference: photo.name,
       authorAttributions: photo.authorAttributions ?? []
-    };
+    });
   } catch {
     return null;
   }

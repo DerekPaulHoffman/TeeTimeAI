@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
+import { cacheCourseCandidatePhotos } from "@/lib/places/course-photo-metadata";
 import {
   getCourseLookupCacheKey,
   readCourseRuntimeCache,
@@ -57,6 +58,7 @@ export async function GET(request: NextRequest) {
   try {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
+      await cacheCourseCandidatePhotos(cachedCourses);
       return NextResponse.json(
         { courses: cachedCourses },
         { headers: courseDataSuccessCacheHeaders }
@@ -80,7 +82,10 @@ export async function GET(request: NextRequest) {
         return coursesWithSupport;
       }
     );
-    await writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup");
+    await Promise.all([
+      writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup"),
+      cacheCourseCandidatePhotos(coursesWithLayouts)
+    ]);
     return NextResponse.json(
       { courses: coursesWithLayouts },
       { headers: courseDataSuccessCacheHeaders }
@@ -96,7 +101,10 @@ export async function GET(request: NextRequest) {
         if (persistedCourses.length > 0) {
           const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
           const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
-          await writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup");
+          await Promise.all([
+            writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup"),
+            cacheCourseCandidatePhotos(coursesWithLayouts)
+          ]);
           return NextResponse.json(
             { courses: coursesWithLayouts },
             { headers: courseDataSuccessCacheHeaders }

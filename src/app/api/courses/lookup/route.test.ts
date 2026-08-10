@@ -7,6 +7,7 @@ import { GET } from "./route";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 
 const mocks = vi.hoisted(() => ({
+  cacheCourseCandidatePhotos: vi.fn(),
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
   findPersistedCourseCandidatesByName: vi.fn(),
@@ -14,6 +15,10 @@ const mocks = vi.hoisted(() => ({
   readCourseRuntimeCache: vi.fn(),
   searchGolfCoursesByName: vi.fn(),
   writeCourseRuntimeCache: vi.fn()
+}));
+
+vi.mock("@/lib/places/course-photo-metadata", () => ({
+  cacheCourseCandidatePhotos: mocks.cacheCourseCandidatePhotos
 }));
 
 vi.mock("@/lib/places/alert-support", () => ({
@@ -43,6 +48,7 @@ describe("GET /api/courses/lookup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    mocks.cacheCourseCandidatePhotos.mockResolvedValue(undefined);
     mocks.findPersistedCourseCandidatesByName.mockResolvedValue([]);
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
@@ -107,6 +113,7 @@ describe("GET /api/courses/lookup", () => {
     expect(shortResponse.status).toBe(400);
     expect(incompleteLocationResponse.status).toBe(400);
     expect(mocks.searchGolfCoursesByName).not.toHaveBeenCalled();
+    expect(mocks.cacheCourseCandidatePhotos).not.toHaveBeenCalled();
   });
 
   it("returns a useful temporary-unavailable response without a provider key", async () => {
@@ -132,6 +139,9 @@ describe("GET /api/courses/lookup", () => {
       courses: [{ googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }]
     });
     expect(mocks.searchGolfCoursesByName).not.toHaveBeenCalled();
+    expect(mocks.cacheCourseCandidatePhotos).toHaveBeenCalledWith([
+      { googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }
+    ]);
   });
 
   it("returns known persisted courses when the Google quota is exhausted", async () => {

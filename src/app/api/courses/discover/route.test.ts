@@ -7,6 +7,7 @@ import { GET } from "./route";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 
 const mocks = vi.hoisted(() => ({
+  cacheCourseCandidatePhotos: vi.fn(),
   enrichCoursesWithAlertSupport: vi.fn(),
   enrichCoursesWithHoleLayouts: vi.fn(),
   enrichCoursesWithBookingEvidence: vi.fn(),
@@ -14,6 +15,10 @@ const mocks = vi.hoisted(() => ({
   readCourseRuntimeCache: vi.fn(),
   searchNearbyGolfCourses: vi.fn(),
   writeCourseRuntimeCache: vi.fn()
+}));
+
+vi.mock("@/lib/places/course-photo-metadata", () => ({
+  cacheCourseCandidatePhotos: mocks.cacheCourseCandidatePhotos
 }));
 
 vi.mock("@/lib/places/alert-support", () => ({
@@ -53,6 +58,7 @@ describe("GET /api/courses/discover provider configuration", () => {
     delete process.env.GOOGLE_PLACES_API_KEY;
     delete process.env.VERCEL_ENV;
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
+    mocks.cacheCourseCandidatePhotos.mockResolvedValue(undefined);
     mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithBookingEvidence.mockImplementation(async (courses) => courses);
     mocks.findPersistedNearbyCourseCandidates.mockResolvedValue([]);
@@ -75,6 +81,7 @@ describe("GET /api/courses/discover provider configuration", () => {
       error: "Course discovery is temporarily unavailable. Try again in a moment."
     });
     expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+    expect(mocks.cacheCourseCandidatePhotos).not.toHaveBeenCalled();
   });
 
   it("preserves demo discovery for Vercel preview smoke tests", async () => {
@@ -134,6 +141,9 @@ describe("GET /api/courses/discover provider configuration", () => {
       demo: false
     });
     expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+    expect(mocks.cacheCourseCandidatePhotos).toHaveBeenCalledWith([
+      { googlePlaceId: "course-1", name: "Cached Public Course" }
+    ]);
   });
 
   it("returns known persisted courses when the Google quota is exhausted", async () => {

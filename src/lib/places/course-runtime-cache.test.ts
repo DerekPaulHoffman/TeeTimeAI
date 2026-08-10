@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getCourseDiscoveryCacheKey,
   getCourseLookupCacheKey,
+  getCoursePhotoMetadataCacheKey,
   readCourseRuntimeCache,
   writeCourseRuntimeCache
 } from "@/lib/places/course-runtime-cache";
@@ -59,6 +60,9 @@ describe("course runtime cache", () => {
     ).toBe("discover-v1:41.242:-73.209:24140");
     expect(getCourseLookupCacheKey({ query: "  Bethpage   BLACK " })).toBe(
       "lookup-v1:bethpage black:none:none"
+    );
+    expect(getCoursePhotoMetadataCacheKey(" course-1 ")).toBe(
+      "photo-metadata-v1:course-1"
     );
   });
 });
