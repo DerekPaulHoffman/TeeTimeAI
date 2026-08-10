@@ -4,6 +4,7 @@ import {
   buildSearchStatusSnapshot,
   getChangedCourseNames,
   getSearchStatusEmailKind,
+  isInitialSearchStatusReportReady,
   renderSearchStatusHtml,
   summarizeSearchStatusAvailability,
   type SearchStatusCourseReport
@@ -39,6 +40,21 @@ const courses: SearchStatusCourseReport[] = [
 ];
 
 describe("search status email cadence", () => {
+  it("waits to finalize the setup report only while a public-page check is active", () => {
+    expect(
+      isInitialSearchStatusReportReady([
+        ...courses,
+        {
+          courseId: "course-pending",
+          courseName: "Pending Course",
+          outcome: "CHECK_PENDING",
+          availableMatches: 0
+        }
+      ])
+    ).toBe(false);
+    expect(isInitialSearchStatusReportReady(courses)).toBe(true);
+  });
+
   it("sends setup once and waits until 8 AM on a new local day for the morning report", () => {
     const lastSentAt = new Date("2026-07-10T03:00:00.000Z"); // Jul 9, 11 PM EDT
 
@@ -92,7 +108,7 @@ describe("search status email cadence", () => {
 });
 
 describe("renderSearchStatusHtml", () => {
-  it("combines openings, terminal contact guidance, and monitoring setup for all five courses", () => {
+  it("combines openings and final current guidance for all five courses", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-five-course-setup",
       to: "player@example.com",
@@ -171,7 +187,8 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("PRIORITY 2");
     expect(html).toContain("AVAILABLE NOW");
     expect(html).toContain("11:04 AM");
-    expect(html.match(/SETTING UP MONITORING/g)).toHaveLength(3);
+    expect(html.match(/AUTOMATIC ALERTS UNAVAILABLE/g)).toHaveLength(3);
+    expect(html).not.toContain("SETTING UP MONITORING");
     expect(html).toContain("Please check directly with the course");
     expect(html).toContain('href="tel:8605550100"');
   });
@@ -226,8 +243,8 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("SETTING UP MONITORING");
-    expect(html).toContain("working on reliable monitoring");
+    expect(html).toContain("AUTOMATIC ALERTS UNAVAILABLE");
+    expect(html).toContain("Use the official site for this course");
     expect(html).toContain("Every selected course has a result below");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we're watching for you");
@@ -319,7 +336,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
-    expect(html).toContain("PRIORITY 2 &middot; SETTING UP MONITORING");
+    expect(html).toContain("PRIORITY 2 &middot; AUTOMATIC ALERTS UNAVAILABLE");
   });
 
   it("revalidates a generic legacy block instead of treating it as final", () => {

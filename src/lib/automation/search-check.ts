@@ -92,6 +92,7 @@ import {
 import {
   buildSearchStatusSnapshot,
   getSearchStatusEmailKind,
+  isInitialSearchStatusReportReady,
   summarizeSearchStatusAvailability,
   type SearchStatusCourseReport,
   type SearchStatusEmailKind
@@ -1258,6 +1259,21 @@ async function checkSearch(
         message: error instanceof Error ? error.message : "Unknown status email failure"
       });
     }
+  } else if (
+    statusEmailKind === "setup" &&
+    !isInitialSearchStatusReportReady(courseResults)
+  ) {
+    const matchDelivery = await sendPendingMatchAlerts(searchId, {
+      searchWindow,
+      courseResults,
+      checkedAt,
+      requestedLayoutHoles,
+      satisfiesStatusReport: false,
+      lease,
+      assertCurrent: () => maintainSearchCheckLease(lease)
+    });
+    newlyAlertedMatches += matchDelivery.ownerSentMatchCount;
+    statusEmailOutcome = "skipped";
   } else if (statusEmailKind === "setup") {
     try {
       const setupPendingMatches = await listPendingMatchAlerts(

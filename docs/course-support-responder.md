@@ -30,6 +30,16 @@ Provider identity and runnable support come from `src/lib/automation/provider-ca
 
 Customer-facing readiness is derived independently from internal engineering state. The canonical dispositions are `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, `BOOKING_NOT_OPEN`, `DIRECT_SITE_ONLY`, `PHONE_OR_WALK_IN`, `ACCOUNT_REQUIRED`, `POLICY_BLOCKED`, `CAPTCHA_OR_QUEUE`, `PRIVATE_OR_INVALID`, `SOURCE_UNVERIFIED`, `RETRYING`, and `ENGINEERING`. Only `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, and `BOOKING_NOT_OPEN` count as effective monitored coverage.
 
+Customer report finality is also independent from engineering resolution. A completed
+`NEEDS_ADAPTER` or `FETCH_FAILED` first check is a final current alert result: tell the
+golfer that automatic alerts are unavailable, provide the safest official action, and
+keep the durable support incident open for remediation. Never relabel that completed
+result as "monitoring setup in progress." Only `CHECK_PENDING` may hold the initial
+status email while a bounded public-page reader job is actually active. Search Workflow
+retries that job every two minutes; after its five-minute attempt window, record the
+failure and deliver the final current setup report. The customer target is one setup
+report covering all selected courses within ten minutes of alert creation.
+
 A responder may close a course automatically without runnable monitoring for authoritative phone/contact/walk-in evidence, a verified invalid/private identity, or a current source-backed technical access limitation after safe read paths are exhausted. Contact-only finalization requires an explicit `CONTACT_ONLY` strategy plus a same-origin HTTPS official source; an old manual flag or third-party URL is insufficient. Account-required and CAPTCHA/queue evidence may become a precise known technical limitation, but the responder must never bypass the restriction. Source-unverified, contradictory, stale, reader-install, and official-link verification failures remain human-review states. `AUTOMATION_PROHIBITED` and policy text are legacy evidence, never terminal monitoring dispositions. Restored runnable monitoring remains stricter and must supersede the newest failure with fresh exact-runtime workflow proof.
 
 ## Durable Monitoring Lifecycle

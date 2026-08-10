@@ -42,7 +42,6 @@ import {
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import {
   getDashboardAvailabilityView,
-  isDashboardMonitoringSetupInProgress,
   readDashboardAvailabilitySnapshot
 } from "@/lib/searches/dashboard-availability";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
@@ -424,11 +423,6 @@ function DashboardSearchCard({
             const latestProbe = search.probes.find(
               (probe) => probe.courseId === preference.course.id
             );
-            const monitoringSetupInProgress = isDashboardMonitoringSetupInProgress({
-              courseCreatedAt: preference.course.createdAt,
-              latestOutcome: latestProbe?.outcome,
-              incident: preference.course.supportIncident
-            });
             const courseMatches = availableSearchMatches.filter(
               (match) => match.courseId === preference.course.id
             );
@@ -439,7 +433,6 @@ function DashboardSearchCard({
               players: search.players,
               startTime: search.startTime,
               endTime: search.endTime,
-              monitoringSetupInProgress,
               bookingOpensLabel: upcomingBookingWindow
                 ? upcomingBookingWindow.exactTime
                   ? `when booking opens ${formatBookingWindowRelease(
@@ -455,7 +448,9 @@ function DashboardSearchCard({
               automationReason: preference.course.automationReason,
               latestProbe,
               upcomingBookingWindow,
-              monitoringSetupInProgress,
+              supportIssueRecorded:
+                preference.course.supportIncident?.status === "AUTO_INVESTIGATING" ||
+                preference.course.supportIncident?.status === "NEEDS_HUMAN",
               firstTimeLookup:
                 Math.abs(
                   preference.course.createdAt.getTime() - search.createdAt.getTime()
@@ -463,7 +458,6 @@ function DashboardSearchCard({
             });
             const monitoringOverridesAvailability =
               monitoringVerdict.icon === "unavailable" ||
-              monitoringSetupInProgress ||
               Boolean(upcomingBookingWindow);
             const courseStatus = monitoringOverridesAvailability
               ? {
@@ -714,7 +708,7 @@ function getDashboardMonitoringVerdict(input: {
     observedAt: Date;
   };
   upcomingBookingWindow: ReturnType<typeof getBookingWindowForTargetDate>;
-  monitoringSetupInProgress: boolean;
+  supportIssueRecorded: boolean;
   firstTimeLookup: boolean;
 }) {
   if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
@@ -736,16 +730,6 @@ function getDashboardMonitoringVerdict(input: {
       emoji: "✅",
       icon: "watching" as const,
       className: "is-public"
-    };
-  }
-  if (input.monitoringSetupInProgress) {
-    return {
-      label: "Monitoring setup in progress",
-      detail:
-        "Your alert is active. Tee Time Spot is setting up automated checks for this course; use the official site for current availability in the meantime.",
-      emoji: "🛠️",
-      icon: "scheduled" as const,
-      className: "is-detail"
     };
   }
   if (
@@ -771,6 +755,17 @@ function getDashboardMonitoringVerdict(input: {
     input.latestProbe?.outcome === "IDENTITY_FINAL" ||
     input.latestProbe?.outcome === "IDENTITY_RECHECK"
   ) {
+    if (input.latestProbe?.outcome === "NEEDS_ADAPTER") {
+      return {
+        label: "Automatic alerts unavailable",
+        detail: input.supportIssueRecorded
+          ? "We recorded this monitoring gap and will keep working on it. Use the official course site for current availability."
+          : "We could not confirm reliable automatic monitoring. Use the official course site for current availability.",
+        emoji: "🌐",
+        icon: "unavailable" as const,
+        className: "is-official-site-only"
+      };
+    }
     if (input.alertSupport) {
       const action = getDashboardCourseAction(input.alertSupport, input.bookingPhone);
       return {

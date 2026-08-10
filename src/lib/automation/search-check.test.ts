@@ -1638,6 +1638,8 @@ describe("runSearchCheck email cadence", () => {
       outcome: "CHECK_PENDING",
       message: expect.stringContaining("in progress")
     });
+    expect(result.statusEmailOutcome).toBe("skipped");
+    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalled();
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
     expect(dbMocks.recordCourseProbe).not.toHaveBeenCalled();
 
@@ -1654,6 +1656,8 @@ describe("runSearchCheck email cadence", () => {
       outcome: "FETCH_FAILED",
       message: expect.stringContaining("did not complete")
     });
+    expect(timedOutResult.statusEmailOutcome).toBe("sent");
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
     expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "FETCH_FAILED",

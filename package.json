@@ -20,6 +20,7 @@
     "automation:preflight": "node scripts/automation/preflight.mjs",
     "automation:improve": "tsx scripts/automation/improvement-loop.ts",
     "automation:inspect": "tsx scripts/automation/inspect-state.ts",
+    "automation:inspect-alert-finality": "tsx scripts/automation/inspect-alert-finality.ts",
     "automation:inspect-storage": "tsx scripts/automation/inspect-postgres-storage.ts",
     "deployment:wait": "tsx scripts/automation/wait-for-git-deployment.ts",
     "preview:validate-url": "tsx scripts/ci/validate-preview-url.ts",

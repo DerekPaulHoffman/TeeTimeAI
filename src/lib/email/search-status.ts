@@ -182,6 +182,12 @@ export function buildSearchStatusSnapshot(
   }));
 }
 
+export function isInitialSearchStatusReportReady(
+  courses: SearchStatusCourseReport[]
+) {
+  return courses.length > 0 && courses.every((course) => course.outcome !== "CHECK_PENDING");
+}
+
 export function getChangedCourseNames(
   current: SearchStatusSnapshot,
   previous: unknown
@@ -285,12 +291,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     .map((course, index) => ({ course, fallbackRank: index + 1 }))
     .filter(({ course }) => !availabilityCourseIds.has(course.courseId))
     .map(({ course, fallbackRank }) =>
-      toMonitoringCourse(
-        course,
-        input.players,
-        course.rank ?? fallbackRank,
-        input.kind
-      )
+      toMonitoringCourse(course, input.players, course.rank ?? fallbackRank)
     );
 
   return renderCustomerEmail({
@@ -321,8 +322,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
 function toMonitoringCourse(
   course: SearchStatusCourseReport,
   players: number,
-  rank: number,
-  emailKind: SearchStatusEmailKind
+  rank: number
 ): CustomerEmailMonitoringCourse {
   const description = describeCourse(course, players);
   const blockedCategory = getBlockedMonitoringCategory(course);
@@ -360,16 +360,6 @@ function toMonitoringCourse(
               badgeLabel: "CHECKING NOW",
               tone: "scheduled" as const,
               detail: `${description.stateLabel}. ${description.detail}`
-            }
-        : course.outcome === "NEEDS_ADAPTER" && emailKind === "setup"
-          ? {
-              badgeLabel: "SETTING UP MONITORING",
-              tone: "adding" as const,
-              detail: course.bookingUrl
-                ? "We're reviewing this course's official booking setup and working on reliable monitoring. Use the official link for current availability while setup continues."
-                : course.phone
-                  ? "We're reviewing this course's availability setup and working on reliable monitoring. Call the course for current availability while setup continues."
-                  : "We're reviewing this course's official availability setup and working on reliable monitoring."
             }
         : course.outcome === "NEEDS_ADAPTER"
           ? {

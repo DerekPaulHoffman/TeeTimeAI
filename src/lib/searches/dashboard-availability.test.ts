@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   getDashboardAvailabilityView,
-  isDashboardMonitoringSetupInProgress,
   readDashboardAvailabilitySnapshot
 } from "./dashboard-availability";
 
@@ -80,48 +79,21 @@ describe("dashboard availability", () => {
     });
   });
 
-  it("shows active monitoring setup as progress instead of a final unavailable state", () => {
+  it("treats a completed unsupported-course check as a current final result", () => {
     expect(
       getDashboardAvailabilityView({
         outcome: "NEEDS_ADAPTER",
-        monitoringSetupInProgress: true,
         qualifyingMatchCount: 0,
         players: 4,
         startTime: "09:00",
         endTime: "18:00"
       })
     ).toEqual({
-      label: "Monitoring setup in progress",
+      label: "Current availability unavailable",
       detail:
-        "We haven't connected to this course's public tee sheet yet. Use the official course site for current availability while Tee Time Spot works on alert coverage.",
-      tone: "scheduled"
+        "We could not confirm the current tee sheet. Use the official course site while Tee Time Spot keeps working on coverage.",
+      tone: "unavailable"
     });
-  });
-
-  it("limits setup-in-progress messaging to incidents opened for a newly introduced course", () => {
-    const courseCreatedAt = new Date("2026-08-03T19:39:07.519Z");
-
-    expect(
-      isDashboardMonitoringSetupInProgress({
-        courseCreatedAt,
-        latestOutcome: "NEEDS_ADAPTER",
-        incident: {
-          status: "AUTO_INVESTIGATING",
-          firstSeenAt: new Date("2026-08-03T19:39:16.602Z")
-        }
-      })
-    ).toBe(true);
-
-    expect(
-      isDashboardMonitoringSetupInProgress({
-        courseCreatedAt,
-        latestOutcome: "NEEDS_ADAPTER",
-        incident: {
-          status: "AUTO_INVESTIGATING",
-          firstSeenAt: new Date("2026-08-04T19:39:16.602Z")
-        }
-      })
-    ).toBe(false);
   });
 
   it("rejects malformed probe summaries", () => {
