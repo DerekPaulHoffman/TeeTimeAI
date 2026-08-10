@@ -287,6 +287,7 @@ describe("course monitoring watchdog", () => {
       {
         courseId: "course-1",
         state: "FINAL_TECHNICAL",
+        stateChangedAt: new Date("2026-07-26T16:00:00.000Z"),
         firstDegradedAt: new Date("2026-07-26T10:00:00.000Z"),
         failureFingerprint: "CPS:CHALLENGE",
         revalidationRequestedAt: null,
@@ -294,7 +295,14 @@ describe("course monitoring watchdog", () => {
         revision: 4,
         course: {
           ...course(humanFinalIncident),
-          preferences: [{ teeSearch: { date: activeDate } }]
+          preferences: [
+            {
+              teeSearch: {
+                date: activeDate,
+                createdAt: new Date("2026-07-27T15:00:00.000Z")
+              }
+            }
+          ]
         }
       }
     ]);
@@ -328,5 +336,45 @@ describe("course monitoring watchdog", () => {
         })
       })
     );
+  });
+
+  it("does not reopen a human-approved final for demand that already existed", async () => {
+    const activeDate = new Date("2026-08-02T00:00:00.000Z");
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        state: "FINAL_TECHNICAL",
+        stateChangedAt: new Date("2026-07-27T15:30:00.000Z"),
+        firstDegradedAt: null,
+        failureFingerprint: null,
+        revalidationRequestedAt: null,
+        nextAutomaticAttemptAt: null,
+        revision: 5,
+        course: {
+          ...course(
+            incident({
+              status: "RESOLVED",
+              resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+              activeRealSearchCount: 1
+            })
+          ),
+          preferences: [
+            {
+              teeSearch: {
+                date: activeDate,
+                createdAt: new Date("2026-07-27T14:00:00.000Z")
+              }
+            }
+          ]
+        }
+      }
+    ]);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      checked: 1,
+      scheduled: 0
+    });
+    expect(prismaMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
   });
 });

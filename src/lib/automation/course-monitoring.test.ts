@@ -116,6 +116,23 @@ describe("course monitoring lifecycle", () => {
     ).toBe("2026-07-27T12:02:00.000Z");
   });
 
+  it("moves stale persisted retries into the future", () => {
+    const now = new Date("2026-07-27T12:00:00.000Z");
+    expect(
+      selectSearchWorkflowMonitoringRetryAt({
+        statuses: [
+          {
+            courseId: "stale-revalidation",
+            state: "REVALIDATING_FINAL",
+            nextAutomaticAttemptAt: new Date("2026-07-27T11:00:00.000Z")
+          }
+        ],
+        transientRetryCourseIds: ["stale-revalidation"],
+        now
+      })?.toISOString()
+    ).toBe("2026-07-27T12:02:00.000Z");
+  });
+
   it("sleeps only when every course is in a final state without revalidation", () => {
     expect(
       shouldSleepTechnicalFinalSearch([

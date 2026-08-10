@@ -48,6 +48,7 @@ vi.mock("@/lib/automation/support-incidents", () => ({
 import {
   claimNextLocalReaderJob,
   completeLocalReaderJob,
+  getFreshLocalReaderObservation,
   getLocalReaderCourseVerification,
   getFreshLocalReaderTeeSheet,
   getLocalReaderCourseKey,
@@ -904,6 +905,40 @@ describe("local reader job service", () => {
           availableSpots: 4
         }
       ]
+    });
+    expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ scheduleVersion: 4 })
+      })
+    );
+  });
+
+  it("returns a fresh access challenge as a terminal reader observation", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      result: {
+        jobId: "job-challenge",
+        courseKey: "grassy-hill",
+        status: "ACCESS_CHALLENGE",
+        observedAt: "2026-07-24T16:00:00.000Z",
+        pageUrl: bookingUrl,
+        pageTitle: "Checking your browser",
+        slots: [],
+        readerVersion: "reader-v1"
+      }
+    });
+
+    await expect(
+      getFreshLocalReaderObservation({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 4,
+        targetDate: "2026-07-25",
+        players: 2
+      })
+    ).resolves.toMatchObject({
+      status: "ACCESS_CHALLENGE",
+      readerVersion: "reader-v1",
+      teeSheet: null
     });
   });
 });

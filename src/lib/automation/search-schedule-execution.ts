@@ -241,11 +241,10 @@ function applySupportDiscoveryRetry(
   if (!supportRetryNeeded) {
     return normalNextCheckAt;
   }
+  const defaultRetryAt = now.getTime() + SUPPORT_DISCOVERY_RETRY_MINUTES * 60 * 1000;
   const supportRetryAt = new Date(
     Math.min(
-      requestedRetryAt
-        ? Math.max(now.getTime(), requestedRetryAt.getTime())
-        : now.getTime() + SUPPORT_DISCOVERY_RETRY_MINUTES * 60 * 1000,
+      requestedRetryAt && requestedRetryAt > now ? requestedRetryAt.getTime() : defaultRetryAt,
       searchExpiresAt.getTime()
     )
   );

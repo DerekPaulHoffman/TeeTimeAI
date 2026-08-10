@@ -698,10 +698,21 @@ export async function getFreshLocalReaderTeeSheet(input: {
   targetDate: string;
   players: number;
 }) {
+  return (await getFreshLocalReaderObservation(input))?.teeSheet ?? null;
+}
+
+export async function getFreshLocalReaderObservation(input: {
+  searchId: string;
+  courseId: string;
+  scheduleVersion: number;
+  targetDate: string;
+  players: number;
+}) {
   const row = await prisma.localReaderJob.findFirst({
     where: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
+      scheduleVersion: input.scheduleVersion,
       targetDate: input.targetDate,
       players: input.players,
       status: "COMPLETED",
@@ -711,14 +722,20 @@ export async function getFreshLocalReaderTeeSheet(input: {
   });
   if (!row?.result) return null;
   const result = localReaderResultSchema.parse(row.result);
-  if (result.status !== "AVAILABLE" && result.status !== "NO_AVAILABILITY") {
-    return null;
-  }
   return {
-    slots: buildLocalReaderSlots(input.courseId, result),
-    targetDateStatus: result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
-    bookingWindowEvidence: null,
-    readerVersion: result.readerVersion
+    status: result.status,
+    observedAt: new Date(result.observedAt),
+    readerVersion: result.readerVersion,
+    teeSheet:
+      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+        ? {
+            slots: buildLocalReaderSlots(input.courseId, result),
+            targetDateStatus:
+              result.status === "AVAILABLE" ? ("OPEN" as const) : ("UNKNOWN" as const),
+            bookingWindowEvidence: null,
+            readerVersion: result.readerVersion
+          }
+        : null
   };
 }
 

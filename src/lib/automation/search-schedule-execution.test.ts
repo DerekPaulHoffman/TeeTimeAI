@@ -281,6 +281,24 @@ describe("calculateNextCheckAt", () => {
     ).toBe("2026-07-13T20:15:00.000Z");
   });
 
+  it("does not turn a stale monitoring retry into an immediate workflow loop", () => {
+    const searchDate = new Date("2026-08-15T00:00:00.000Z");
+    const now = new Date("2026-07-13T20:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        120,
+        now,
+        new Date("2026-08-16T00:00:00.000Z"),
+        [{ timeZone: "America/New_York" }],
+        true,
+        undefined,
+        { supportRetryAt: new Date("2026-07-13T19:00:00.000Z") }
+      )?.toISOString()
+    ).toBe("2026-07-13T20:15:00.000Z");
+  });
+
   it("wakes for the earliest of several course-specific booking windows", () => {
     const searchDate = new Date("2026-08-30T00:00:00.000Z");
     const now = new Date("2026-08-01T12:00:00.000Z");

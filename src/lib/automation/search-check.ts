@@ -23,6 +23,7 @@ import {
 } from "@/lib/automation/db-service";
 import {
   FIRST_FAILURE_RETRY_MS,
+  confirmCourseMonitoringTechnicalFinal,
   getCourseMonitoringRetryAt,
   recordCourseMonitoringFinalClassification,
   recordCourseMonitoringSuccess
@@ -45,7 +46,7 @@ import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
-  getFreshLocalReaderTeeSheet,
+  getFreshLocalReaderObservation,
   getLocalReaderCourseKey,
   queueLocalReaderJob
 } from "@/lib/local-reader/service";
@@ -384,6 +385,7 @@ async function checkSearch(
         !technicalRevalidationRunning;
       const localReaderCanOverrideGate =
         localReaderEligible &&
+        !engineerApprovedTechnicalFinal &&
         monitoringGate.disposition === "TECHNICAL_FINAL" &&
         (localReaderOnly ||
           cpsLocalReaderPreferred ||
@@ -667,8 +669,8 @@ async function checkSearch(
             chronogolfLocalReaderPreferred ||
             localReaderCanOverrideGate ||
             !supportedAdapterAvailable);
-        const localTeeSheet = localReaderShouldRun
-          ? await getFreshLocalReaderTeeSheet({
+        const localReaderObservation = localReaderShouldRun
+          ? await getFreshLocalReaderObservation({
               searchId: search.id,
               courseId: course.id,
               scheduleVersion: search.scheduleVersion,
@@ -676,6 +678,54 @@ async function checkSearch(
               players: search.players
             })
           : null;
+        if (
+          technicalRevalidationRunning &&
+          localReaderObservation?.status === "ACCESS_CHALLENGE"
+        ) {
+          const message =
+            "A fresh public-page check confirmed that this booking site must be opened directly.";
+          await confirmCourseMonitoringTechnicalFinal({
+            courseId: course.id,
+            message,
+            runtimeVersion: localReaderObservation.readerVersion
+          });
+          await markMissingMatchesUnavailable({
+            searchId: search.id,
+            alertGeneration: search.alertGeneration,
+            checkLeaseToken: lease.token,
+            courseId: course.id,
+            date: searchWindow.date,
+            timeZone: course.timeZone,
+            confirmedMatches: []
+          });
+          await recordCourseProbeIfChanged({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId,
+            runtimeVersion: localReaderObservation.readerVersion,
+            outcome: "BLOCKED_AUTH",
+            message,
+            rawSummary: {
+              providerExecution: "LOCAL_BROWSER_READER",
+              readerStatus: "ACCESS_CHALLENGE"
+            }
+          });
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome: "BLOCKED_AUTH",
+            availableMatches: 0,
+            message,
+            bookingUrl: getCustomerBookingUrl(course),
+            phone: course.bookingPhone ?? course.phone ?? undefined,
+            bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
+            bookingAccess: getCourseBookingAccess(course)
+          });
+          return;
+        }
+        const localTeeSheet = localReaderObservation?.teeSheet ?? null;
         let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
         let providerExecutionLabel = "LOCAL_BROWSER_READER";
         if (!teeSheet && localReaderOnly) {

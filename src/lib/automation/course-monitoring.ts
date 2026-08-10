@@ -453,6 +453,58 @@ export async function recordCourseMonitoringFinalClassification(input: {
   });
 }
 
+export async function confirmCourseMonitoringTechnicalFinal(input: {
+  courseId: string;
+  message: string;
+  source?: CourseMonitoringEventSource;
+  now?: Date;
+  runtimeVersion?: string | null;
+}) {
+  const now = input.now ?? new Date();
+  if (!hasMonitoringModels(prisma)) {
+    return null;
+  }
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await ensureMonitoringStatus(transaction, input.courseId, now);
+    if (current.state !== "REVALIDATING_FINAL") {
+      return current;
+    }
+    const status = await transaction.courseMonitoringStatus.update({
+      where: {
+        courseId: input.courseId,
+        revision: current.revision
+      },
+      data: {
+        state: "FINAL_TECHNICAL",
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        stateChangedAt: now,
+        revision: { increment: 1 }
+      }
+    });
+    const incident = await transaction.courseSupportIncident.findUnique({
+      where: { courseId: input.courseId },
+      select: { id: true }
+    });
+    await appendMonitoringEvent(transaction, {
+      courseId: input.courseId,
+      incidentId: incident?.id,
+      eventType: "STATE_CHANGED",
+      source: input.source ?? "LOCAL_READER",
+      fromState: "REVALIDATING_FINAL",
+      toState: "FINAL_TECHNICAL",
+      outcome: "BLOCKED_AUTH",
+      message: sanitizeMonitoringMessage(input.message),
+      runtimeVersion: input.runtimeVersion,
+      occurredAt: now
+    });
+    return status;
+  });
+}
+
 export async function requestTechnicalFinalRevalidationForDemand(input: {
   courseIds: string[];
   source?: CourseMonitoringEventSource;
@@ -624,7 +676,8 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
             select: {
               teeSearch: {
                 select: {
-                  date: true
+                  date: true,
+                  createdAt: true
                 }
               }
             }
@@ -646,6 +699,11 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
       .filter((date) => date >= localBoundary)
       .sort((left, right) => left.getTime() - right.getTime());
     const activeRealSearchCount = realDemandDates.length;
+    const hasDemandCreatedAfterFinal = status.course.preferences.some(
+      (preference) =>
+        preference.teeSearch.date >= localBoundary &&
+        preference.teeSearch.createdAt > status.stateChangedAt
+    );
     if (
       incident &&
       (incident.activeRealSearchCount !== activeRealSearchCount ||
@@ -691,6 +749,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     if (
       status.state === "FINAL_TECHNICAL" &&
       activeRealSearchCount > 0 &&
+      hasDemandCreatedAfterFinal &&
       !status.revalidationRequestedAt
     ) {
       const requested = await prisma.$transaction(
@@ -747,6 +806,10 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
       if (requested) {
         scheduled += 1;
       }
+      continue;
+    }
+
+    if (["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"].includes(status.state)) {
       continue;
     }
 
@@ -1284,7 +1347,11 @@ export function selectSearchWorkflowMonitoringRetryAt(input: {
     ) {
       return [];
     }
-    return [status.nextAutomaticAttemptAt];
+    return [
+      status.nextAutomaticAttemptAt > input.now
+        ? status.nextAutomaticAttemptAt
+        : new Date(input.now.getTime() + FIRST_FAILURE_RETRY_MS)
+    ];
   });
 
   const needsTransientRetry = input.transientRetryCourseIds.some((courseId) => {

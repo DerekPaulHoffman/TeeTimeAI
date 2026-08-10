@@ -81,6 +81,7 @@ const monitoringDiscoveryMocks = vi.hoisted(() => ({
 }));
 
 const courseMonitoringMocks = vi.hoisted(() => ({
+  confirmCourseMonitoringTechnicalFinal: vi.fn(),
   getCourseMonitoringRetryAt: vi.fn(),
   recordCourseMonitoringFinalClassification: vi.fn(),
   recordCourseMonitoringSuccess: vi.fn()
@@ -91,7 +92,7 @@ const providerRequestLeaseMocks = vi.hoisted(() => ({
 }));
 
 const localReaderMocks = vi.hoisted(() => ({
-  getFreshLocalReaderTeeSheet: vi.fn(),
+  getFreshLocalReaderObservation: vi.fn(),
   getLocalReaderCourseKey: vi.fn(),
   queueLocalReaderJob: vi.fn()
 }));
@@ -246,7 +247,7 @@ describe("runSearchCheck email cadence", () => {
         value: await worker()
       })
     );
-    localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue(null);
+    localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue(null);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
     localReaderMocks.queueLocalReaderJob.mockResolvedValue(null);
     dbMocks.recordCourseProbeIfChanged.mockResolvedValue(undefined);
@@ -1815,7 +1816,7 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledWith({
+    expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
       scheduleVersion: 1,
@@ -1838,6 +1839,66 @@ describe("runSearchCheck email cadence", () => {
       expect.objectContaining({ outcome: "BLOCKED_AUTH" })
     );
     expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+  });
+
+  it("reconfirms a human-approved technical final from a fresh reader challenge", async () => {
+    const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Grassy Hill Country Club",
+            isPublic: true,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "UNKNOWN",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "BLOCKED",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            monitoringStatus: {
+              state: "REVALIDATING_FINAL",
+              nextAutomaticAttemptAt: new Date("2026-07-11T12:00:00.000Z"),
+              revalidationRequestedAt: new Date("2026-07-11T12:00:00.000Z")
+            },
+            bookingMetadata: null
+          }
+        }
+      ]
+    });
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
+    localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
+      status: "ACCESS_CHALLENGE",
+      observedAt: new Date("2026-07-11T12:01:00.000Z"),
+      readerVersion: "cps-rendered-v1",
+      teeSheet: null
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(courseMonitoringMocks.confirmCourseMonitoringTechnicalFinal).toHaveBeenCalledWith({
+      courseId: "course-1",
+      message: expect.stringContaining("must be opened directly"),
+      runtimeVersion: "cps-rendered-v1"
+    });
+    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "BLOCKED_AUTH",
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          readerStatus: "ACCESS_CHALLENGE"
+        }
+      })
+    );
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "BLOCKED_AUTH",
+      message: expect.stringContaining("must be opened directly")
+    });
   });
 
   it("uses only the local reader when the persisted monitoring mode requires it", async () => {
@@ -1883,7 +1944,7 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledOnce();
+    expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledOnce();
     expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
@@ -1927,26 +1988,31 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isCpsMetadata.mockReturnValue(true);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
-    localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue({
-      slots: [
-        {
-          sourceId: "local-grassy-hill-2026-07-12T08:10:00-18",
-          courseId: "course-1",
-          startsAt: "2026-07-12T08:10:00",
-          availableSpots: 4,
-          bookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
-          priceCents: 8200,
-          holes: 18,
-          bookableHoleCounts: [9, 18]
-        }
-      ],
-      targetDateStatus: "OPEN",
-      bookingWindowEvidence: null
+    localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
+      status: "AVAILABLE",
+      observedAt: new Date("2026-07-11T12:01:00.000Z"),
+      readerVersion: "cps-rendered-v1",
+      teeSheet: {
+        slots: [
+          {
+            sourceId: "local-grassy-hill-2026-07-12T08:10:00-18",
+            courseId: "course-1",
+            startsAt: "2026-07-12T08:10:00",
+            availableSpots: 4,
+            bookingUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+            priceCents: 8200,
+            holes: 18,
+            bookableHoleCounts: [9, 18]
+          }
+        ],
+        targetDateStatus: "OPEN",
+        bookingWindowEvidence: null
+      }
     });
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledWith({
+    expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
       scheduleVersion: 1,
@@ -1998,27 +2064,32 @@ describe("runSearchCheck email cadence", () => {
     adapterMocks.isForeupMetadata.mockReturnValue(false);
     adapterMocks.isChronogolfMetadata.mockReturnValue(true);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue("hyde-park");
-    localReaderMocks.getFreshLocalReaderTeeSheet.mockResolvedValue({
-      slots: [
-        {
-          sourceId: "local-hyde-park-2026-07-12T09:10:00",
-          courseId: "course-1",
-          startsAt: "2026-07-12T09:10:00",
-          availableSpots: 4,
-          bookingUrl,
-          priceCents: 3900,
-          holes: 18,
-          bookableHoleCounts: [9, 18]
-        }
-      ],
-      targetDateStatus: "OPEN",
-      bookingWindowEvidence: null,
-      readerVersion: "chronogolf-rendered-v1"
+    localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
+      status: "AVAILABLE",
+      observedAt: new Date("2026-07-11T12:01:00.000Z"),
+      readerVersion: "chronogolf-rendered-v1",
+      teeSheet: {
+        slots: [
+          {
+            sourceId: "local-hyde-park-2026-07-12T09:10:00",
+            courseId: "course-1",
+            startsAt: "2026-07-12T09:10:00",
+            availableSpots: 4,
+            bookingUrl,
+            priceCents: 3900,
+            holes: 18,
+            bookableHoleCounts: [9, 18]
+          }
+        ],
+        targetDateStatus: "OPEN",
+        bookingWindowEvidence: null,
+        readerVersion: "chronogolf-rendered-v1"
+      }
     });
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(localReaderMocks.getFreshLocalReaderTeeSheet).toHaveBeenCalledWith({
+    expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledWith({
       searchId: "search-1",
       courseId: "course-1",
       scheduleVersion: 1,
@@ -2310,6 +2381,7 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("reconciles a pending match before reporting a current technical final", async () => {
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("grassy-hill");
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -2342,6 +2414,7 @@ describe("runSearchCheck email cadence", () => {
 
     expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
     expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
+    expect(localReaderMocks.getFreshLocalReaderObservation).not.toHaveBeenCalled();
     expect(dbMocks.markMissingMatchesUnavailable).toHaveBeenCalledWith({
       searchId: "search-1",
       alertGeneration: 0,
