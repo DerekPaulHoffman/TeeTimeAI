@@ -3930,6 +3930,35 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies explicit no-tee-times-needed copy on the official course site", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "official-no-tee-times-needed",
+      courseName: "Jupiter Dunes Golf Club",
+      sourceUrl: "https://www.jupiterdunesgolf.net/",
+      finalUrl: "https://www.jupiterdunesgolf.net/",
+      officialCourseWebsite: "https://www.jupiterdunesgolf.net/",
+      observedUrls: [
+        "https://jupiterdunesgolf.net/",
+        "https://clubcaddie.com/"
+      ],
+      linkCandidates: [
+        { url: "https://clubcaddie.com/", label: "CLUB CADDIE" }
+      ],
+      visibleText:
+        "Jupiter Dunes Golf Club NO TEE TIMES NEEDED! No membership or tee times required. Our golf shop team is here to create a welcoming experience from the moment you arrive. Powered by CLUB CADDIE."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "UNKNOWN",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      confidence: 0.98,
+      evidence: { learnedFrom: "official-no-tee-times-access" }
+    });
+  });
+
   it("classifies the reviewed no-tee-times page without borrowing park or permit content", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "clayton-park",

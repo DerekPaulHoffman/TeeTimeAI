@@ -2719,6 +2719,11 @@ function learnWalkInClassification(
         /\bno\s+tee\s+times?\s+(?:are\s+)?needed\b.{0,160}\b(?:the\s+)?public\s+is\s+always\s+welcome\b/i.test(
           courseScopedStatementContext
         )));
+  const explicitlyNoTeeTimesNeededOnOfficialSource =
+    sourceIsOfficialCourseWebsite &&
+    /\bno\s+tee\s+times?(?:\s+reservations?)?\s+(?:are\s+)?(?:needed|nec{1,2}essary|required)\b/i.test(
+      statement
+    );
   const scopedToNonCourseFacility =
     /\b(?:driving|practice)\s+(?:range|facility|stalls?)\b/i.test(statement);
   const contradictsWalkInOnly =
@@ -2740,7 +2745,7 @@ function learnWalkInClassification(
         courseScopedStatementContext,
         evidence.courseName
       )) ||
-    !explicitlyFirstCome ||
+    (!explicitlyFirstCome && !explicitlyNoTeeTimesNeededOnOfficialSource) ||
     scopedToNonCourseFacility ||
     contradictsWalkInOnly
   ) {
@@ -2763,9 +2768,12 @@ function learnWalkInClassification(
   }
 
   return buildWalkInDiscovery(evidence, manualEvidence, {
-    policyNotes:
-      "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
-    learnedFrom: "official-walk-in-access"
+    policyNotes: explicitlyFirstCome
+      ? "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval."
+      : "The course's official site says tee times are not needed. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+    learnedFrom: explicitlyFirstCome
+      ? "official-walk-in-access"
+      : "official-no-tee-times-access"
   });
 }
 
@@ -4023,7 +4031,25 @@ function hasCurrentOnlineBookingEvidence(
     ...(evidence.linkCandidates ?? []).map(({ url }) => url)
   ]);
   if (
-    allUrls.some((url) => resolveProviderCapability({ detectedBookingUrl: url }).capability)
+    allUrls.some((url) => {
+      if (!resolveProviderCapability({ detectedBookingUrl: url }).capability) {
+        return false;
+      }
+      const parsed = parseUrl(url);
+      const isClubCaddieCorporateAttribution = Boolean(
+        parsed &&
+          normalizeHostname(parsed.hostname) === "clubcaddie.com" &&
+          normalizeManualEvidencePath(parsed.pathname) === "/" &&
+          (evidence.linkCandidates ?? []).some(
+            (candidate) =>
+              haveSameExactUrl(candidate.url, url) &&
+              /^(?:powered\s+by\s+)?club\s+caddie\.?$/iu.test(
+                candidate.label.replace(/\s+/gu, " ").trim()
+              )
+          )
+      );
+      return !isClubCaddieCorporateAttribution;
+    })
   ) {
     return true;
   }
