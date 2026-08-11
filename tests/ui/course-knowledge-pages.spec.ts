@@ -182,6 +182,17 @@ test("renders the exact three qualified Connecticut location hubs", async ({ pag
         "content",
         "Get free email alerts when tee times open at public golf courses in Connecticut. Choose your courses and time window, then book directly on the course's official site."
       );
+      await expect(page.getByRole("heading", { name: "Find public course alerts near you" })).toBeVisible();
+      await expect(page.getByRole("link", { name: /Fairfield County/ })).toHaveAttribute(
+        "href",
+        "/locations/connecticut/fairfield-county"
+      );
+      await expect(page.getByRole("link", { name: /New Haven County/ })).toHaveAttribute(
+        "href",
+        "/locations/connecticut/new-haven-county"
+      );
+    } else {
+      await expect(page.getByRole("heading", { name: "Find public course alerts near you" })).toHaveCount(0);
     }
     expect(await structuredDataTypes(page)).toEqual(expect.arrayContaining(["CollectionPage", "ItemList", "BreadcrumbList"]));
     await expectNoOverflowOrOverlay(page);

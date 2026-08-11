@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import {
+  getChildLocationHubs,
   getLocationHub,
   loadQualifiedLocationHub,
   LOCATION_HUB_MINIMUM_COURSES
@@ -32,6 +33,17 @@ describe("location hub registry", () => {
     );
     expect(getLocationHub(["connecticut", "hartford-county"])).toBeNull();
     expect(getLocationHub(["new-york"])).toBeNull();
+  });
+
+  it("lists the registered county hubs beneath their state page", () => {
+    const connecticut = getLocationHub(["connecticut"]);
+    const fairfield = getLocationHub(["connecticut", "fairfield-county"]);
+
+    expect(connecticut && getChildLocationHubs(connecticut).map((hub) => hub.path)).toEqual([
+      "/locations/connecticut/fairfield-county",
+      "/locations/connecticut/new-haven-county"
+    ]);
+    expect(fairfield && getChildLocationHubs(fairfield)).toEqual([]);
   });
 
   it("keeps a registered hub unpublished below five supported profiles", async () => {

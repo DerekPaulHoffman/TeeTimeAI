@@ -65,6 +65,14 @@ export function getLocationHub(segments: string[]) {
   return LOCATION_HUBS[segments.join("/") as keyof typeof LOCATION_HUBS] ?? null;
 }
 
+export function getChildLocationHubs(parent: LocationHub) {
+  const childPrefix = `${parent.slug}/`;
+  return Object.values(LOCATION_HUBS).filter((hub) => {
+    if (!hub.slug.startsWith(childPrefix)) return false;
+    return !hub.slug.slice(childPrefix.length).includes("/");
+  });
+}
+
 export async function loadQualifiedLocationHub(hub: LocationHub) {
   const courses = await prisma.course.findMany({
     where: {

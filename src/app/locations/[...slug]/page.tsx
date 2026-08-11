@@ -6,7 +6,11 @@ import { ArrowRight, Bell, CalendarClock, MapPin } from "lucide-react";
 
 import { KnowledgePageTracker } from "@/components/knowledge-page-tracker";
 import { StructuredData } from "@/components/structured-data";
-import { getLocationHub, loadQualifiedLocationHub } from "@/lib/course-profiles/locations";
+import {
+  getChildLocationHubs,
+  getLocationHub,
+  loadQualifiedLocationHub
+} from "@/lib/course-profiles/locations";
 import { absoluteUrl, buildPageMetadata } from "@/lib/seo";
 
 type PageProps = { params: Promise<{ slug: string[] }> };
@@ -26,6 +30,17 @@ export default async function LocationHubPage({ params }: PageProps) {
   const data = await loadQualifiedLocationHub(hub);
   if (!data) notFound();
   const parentPath = hub.county ? "/locations/connecticut" : null;
+  const childHubs = (
+    await Promise.all(
+      getChildLocationHubs(hub).map(async (childHub) => ({
+        data: await loadQualifiedLocationHub(childHub),
+        hub: childHub
+      }))
+    )
+  ).flatMap((entry) => {
+    if (!entry.data) return [];
+    return [{ data: entry.data, hub: entry.hub }];
+  });
   const verifiedBookingWindows = data.courses.filter(
     (course) => course.bookingWindowDaysAhead !== null
   );
@@ -69,6 +84,33 @@ export default async function LocationHubPage({ params }: PageProps) {
           </aside>
         </div>
       </section>
+
+      {childHubs.length > 0 ? (
+        <section className="location-region-section">
+          <div className="location-section-heading">
+            <div>
+              <p className="knowledge-kicker">Explore by area</p>
+              <h2>Find public course alerts near you</h2>
+            </div>
+            <p>
+              Browse county pages with enough verified public-course coverage to help you compare
+              local options and create a focused alert.
+            </p>
+          </div>
+          <div className="location-region-list">
+            {childHubs.map(({ data: childData, hub: childHub }) => (
+              <Link href={childHub.path} key={childHub.slug}>
+                <span>
+                  <small>{childData.courses.length} public courses covered</small>
+                  <strong>{childHub.shortName}</strong>
+                  <p>{childHub.description}</p>
+                </span>
+                <ArrowRight aria-hidden="true" size={18} />
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="location-course-section">
         <div className="location-section-heading">
