@@ -173,7 +173,10 @@ function allowOwnedDiscovery() {
   );
 }
 
-function installPlaybookRuntime(seed: AutomationPlaybookEventInput[] = []) {
+function installPlaybookRuntime(
+  seed: AutomationPlaybookEventInput[] = [],
+  afterTransition?: () => void,
+) {
   let ledger: AutomationPlaybookLedger | null = null;
   for (const event of seed) {
     ledger = appendAutomationPlaybookEvent(ledger, event);
@@ -209,6 +212,7 @@ function installPlaybookRuntime(seed: AutomationPlaybookEventInput[] = []) {
       ) {
         runtime.localReaderTechnicalReason = event.technicalReason;
       }
+      afterTransition?.();
       return {
         recorded: true,
         result: {
@@ -898,7 +902,7 @@ describe("executeCourseSupportVerificationStep", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it.each(["lease_lost", "active_demand"] as const)(
+  it.each(["lease_lost"] as const)(
     "honors a post-discovery %s rejection before the adapter request",
     async (reason) => {
       verificationMocks.attachCourseSupportVerificationProviderSnapshot
@@ -1408,8 +1412,11 @@ describe("executeCourseSupportVerificationStep", () => {
     },
   );
 
-  it("records current factual identity proof and final state without running technical stages", async () => {
-    installPlaybookRuntime();
+  it("records current factual identity proof without racing a newer search success", async () => {
+    let newerSearchHealthyCommitted = false;
+    installPlaybookRuntime([], () => {
+      newerSearchHealthyCommitted = true;
+    });
     allowOwnedDiscovery();
     prismaMocks.courseFindUnique.mockResolvedValue({
       ...course,
@@ -1432,11 +1439,10 @@ describe("executeCourseSupportVerificationStep", () => {
         factualDisposition: "IDENTITY_FINAL",
       }),
     );
+    expect(newerSearchHealthyCommitted).toBe(true);
     expect(
       courseMonitoringMocks.recordCourseMonitoringFinalClassification,
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({ state: "FINAL_IDENTITY" }),
-    );
+    ).not.toHaveBeenCalled();
     expect(
       verificationMocks.completeCourseSupportVerificationFactualFinal,
     ).toHaveBeenCalledWith(
@@ -1454,16 +1460,20 @@ describe("executeCourseSupportVerificationStep", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it("exhausts missing reader capability to human review without claiming technical finality", async () => {
+  it("leaves independent confirmation pending when no safe reader capability exists", async () => {
     const runtime = installPlaybookRuntime(
       completedPlaybookSeedThroughBrowserAdapter(),
     );
     allowOwnedDiscovery();
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
 
     await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
       outcome: "failed",
-      retryable: false,
+      retryable: true,
     });
 
     expect(
@@ -1472,15 +1482,184 @@ describe("executeCourseSupportVerificationStep", () => {
       ),
     ).toEqual([
       ["LOCAL_READER", "NOT_APPLICABLE"],
-      ["INDEPENDENT_CONFIRMATION", "NOT_APPLICABLE"],
     ]);
-    expect(runtime.assessment.conclusion).toBe("UNRESOLVED_EXHAUSTED");
+    expect(runtime.assessment.conclusion).toBe("INCOMPLETE");
+    expect(runtime.assessment.nextStage).toBe("INDEPENDENT_CONFIRMATION");
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "MISSING_SOURCE",
+        retryAt: new Date("2026-07-21T12:02:00.000Z"),
+      }),
+    );
     expect(
       localReaderMocks.queueLocalReaderCourseVerification,
     ).not.toHaveBeenCalled();
     expect(
       supportIncidentMocks.resolveCourseSupportIncident,
     ).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { resultStatus: "PAGE_MISMATCH" as const, failureClass: "SCHEMA" },
+    { resultStatus: "READER_ERROR" as const, failureClass: "UNKNOWN" },
+  ])(
+    "leaves independent confirmation pending after terminal reader result $resultStatus",
+    async ({ resultStatus, failureClass }) => {
+      const runtime = installPlaybookRuntime(
+        completedPlaybookSeedThroughBrowserAdapter(),
+      );
+      allowOwnedDiscovery();
+      localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+      localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+        status: "TERMINAL",
+        observedAt: new Date("2026-07-21T12:00:30.000Z"),
+        readerVersion: "reader-v1",
+        resultStatus,
+      });
+      verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+        failed: true,
+        status: "RETRYABLE_FAILED",
+      });
+
+      await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+        outcome: "failed",
+        retryable: true,
+      });
+
+      expect(playbookMocks.recordRuntimePlaybookTransition).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          stage: "LOCAL_READER",
+          transition: "FAILED_TERMINAL",
+          failureClass,
+          runtimeVersion: "reader-v1",
+        }),
+      );
+      expect(
+        playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
+          ([, transition]) =>
+            transition.stage === "INDEPENDENT_CONFIRMATION",
+        ),
+      ).toBe(false);
+      expect(runtime.assessment.conclusion).toBe("INCOMPLETE");
+      expect(runtime.assessment.nextStage).toBe("INDEPENDENT_CONFIRMATION");
+      expect(
+        verificationMocks.failCourseSupportVerificationRequest,
+      ).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          failureClass: "MISSING_SOURCE",
+          retryAt: new Date("2026-07-21T12:02:00.000Z"),
+        }),
+      );
+    },
+  );
+
+  it("records an expired five-minute reader window once and advances to independent confirmation", async () => {
+    vi.setSystemTime(new Date("2026-07-21T12:05:00.000Z"));
+    const runtime = installPlaybookRuntime(
+      completedPlaybookSeedThroughBrowserAdapter(),
+    );
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "TERMINAL",
+      observedAt: new Date("2026-07-21T12:05:00.000Z"),
+      readerVersion: null,
+      resultStatus: "EXPIRED",
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(playbookMocks.recordRuntimePlaybookTransition).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        stage: "LOCAL_READER",
+        transition: "FAILED_TERMINAL",
+        evidenceKind: "TOOLING",
+        failureClass: "TIMEOUT",
+        runtimeVersion,
+        now: new Date("2026-07-21T12:05:00.000Z"),
+      }),
+    );
+    expect(runtime.assessment.nextStage).toBe("INDEPENDENT_CONFIRMATION");
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date("2026-07-21T12:07:00.000Z"));
+    allowOwnedDiscovery();
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(
+      localReaderMocks.getLocalReaderCourseVerification,
+    ).toHaveBeenCalledOnce();
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.filter(
+        ([, transition]) => transition.stage === "LOCAL_READER",
+      ),
+    ).toHaveLength(1);
+    expect(runtime.assessment.nextStage).toBe("INDEPENDENT_CONFIRMATION");
+  });
+
+  it("treats a fresh signed reader availability result as direct monitoring proof", async () => {
+    const runtime = installPlaybookRuntime(
+      completedPlaybookSeedThroughBrowserAdapter(),
+    );
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      readerVersion: "reader-v1",
+      slots: [],
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(playbookMocks.recordRuntimePlaybookTransition).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        stage: "LOCAL_READER",
+        transition: "SUCCEEDED",
+        runtimeVersion: "reader-v1",
+      }),
+    );
+    expect(runtime.assessment.conclusion).toBe("MONITORING_RESTORED");
+    expect(runtime.assessment.nextStage).toBeNull();
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
+        ([, transition]) => transition.stage === "INDEPENDENT_CONFIRMATION",
+      ),
+    ).toBe(false);
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({
+          outcome: "NO_MATCH",
+          adapterKey: "LOCAL_READER:CPS",
+          providerExecution: true,
+        }),
+      }),
+    );
   });
 
   it("keeps a terminal reader challenge unresolved until an independent current observation", async () => {

@@ -18,6 +18,10 @@ import {
   type GooglePlaceReviewIndex
 } from "@/lib/places/google-place-reviews";
 import { prisma } from "@/lib/prisma";
+import {
+  buildAlertGenerationStartMarker,
+  unwrapAlertGenerationStatusSnapshot
+} from "@/lib/searches/generation-clock";
 import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
 import {
   MAX_COURSE_PREFERENCES,
@@ -442,7 +446,10 @@ export async function listTeeSearchesForUser(userId: string) {
   });
 
   if (searches.length === 0) {
-    return searches.map((search) => ({ ...search, probes: [] }));
+    return searches.map((search) => ({
+      ...hideInternalGenerationMarker(search),
+      probes: []
+    }));
   }
 
   const latestProbeIds = await prisma.$queryRaw<Array<{ id: string }>>(
@@ -470,7 +477,7 @@ export async function listTeeSearchesForUser(userId: string) {
   }
 
   return searches.map((search) => ({
-    ...search,
+    ...hideInternalGenerationMarker(search),
     probes: probesBySearch.get(search.id) ?? []
   }));
 }
@@ -491,8 +498,12 @@ export async function updateTeeSearchStatusForUser(
     await assertQueueCapacity(userId, searchId);
   }
 
-  return prisma.$transaction(async (transaction) => {
-    await lockSearchForAlertMutation(transaction, { searchId, userId });
+  const updatedSearch = await prisma.$transaction(async (transaction) => {
+    const lockedSearch = await lockSearchForAlertMutation(transaction, {
+      searchId,
+      userId
+    });
+    const nextAlertGeneration = lockedSearch.alertGeneration + 1;
     return transaction.teeSearch.update({
       where: {
         id: searchId,
@@ -502,6 +513,14 @@ export async function updateTeeSearchStatusForUser(
         status,
         scheduleVersion: { increment: 1 },
         alertGeneration: { increment: 1 },
+        ...(status === "ACTIVE"
+          ? {
+              statusEmailSentAt: null,
+              statusEmailSnapshot: buildAlertGenerationStartMarker({
+                alertGeneration: nextAlertGeneration
+              })
+            }
+          : {}),
         workflowRunId: null,
         checkLeaseToken: null,
         checkLeaseExpiresAt: null,
@@ -510,6 +529,7 @@ export async function updateTeeSearchStatusForUser(
       include: searchInclude
     });
   });
+  return hideInternalGenerationMarker(updatedSearch);
 }
 
 export async function updateTeeSearchForUser(
@@ -544,46 +564,74 @@ export async function updateTeeSearchForUser(
     assertCourseLayoutsCompatible(existingSearch.preferences, input.requestedLayoutHoles);
   }
 
-  const teeSearchData = {
-    scheduleVersion: { increment: 1 } as const,
-    alertGeneration: { increment: 1 } as const,
-    workflowRunId: null,
-    checkLeaseToken: null,
-    checkLeaseExpiresAt: null,
-    recheckRequestedAt: null,
-    ...(input.date ? { date: parseLocalDate(input.date) } : {}),
-    ...(input.startTime ? { startTime: input.startTime } : {}),
-    ...(input.endTime ? { endTime: input.endTime } : {}),
-    ...(input.userTimeZone ? { userTimeZone: normalizeTimeZone(input.userTimeZone) } : {}),
-    ...(input.players ? { players: input.players } : {}),
-    ...(input.requestedLayoutHoles !== undefined
-      ? { requestedLayoutHoles: input.requestedLayoutHoles }
-      : {}),
-    ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
-    ...(input.alertEmail ? { alertEmail: normalizeAlertEmail(input.alertEmail) } : {}),
-    ...(input.additionalEmails
-      ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) }
-      : {}),
-    ...(input.status ? { status: input.status } : {})
+  const buildTeeSearchData = (lockedSearch: {
+    status: string;
+    alertGeneration: number;
+  }) => {
+    const nextStatus = input.status ?? lockedSearch.status;
+    const nextAlertGeneration = lockedSearch.alertGeneration + 1;
+    return {
+      scheduleVersion: { increment: 1 } as const,
+      alertGeneration: { increment: 1 } as const,
+      workflowRunId: null,
+      checkLeaseToken: null,
+      checkLeaseExpiresAt: null,
+      recheckRequestedAt: null,
+      ...(nextStatus === "ACTIVE"
+        ? {
+            statusEmailSentAt: null,
+            statusEmailSnapshot: buildAlertGenerationStartMarker({
+              alertGeneration: nextAlertGeneration
+            })
+          }
+        : {}),
+      ...(input.date ? { date: parseLocalDate(input.date) } : {}),
+      ...(input.startTime ? { startTime: input.startTime } : {}),
+      ...(input.endTime ? { endTime: input.endTime } : {}),
+      ...(input.userTimeZone
+        ? { userTimeZone: normalizeTimeZone(input.userTimeZone) }
+        : {}),
+      ...(input.players ? { players: input.players } : {}),
+      ...(input.requestedLayoutHoles !== undefined
+        ? { requestedLayoutHoles: input.requestedLayoutHoles }
+        : {}),
+      ...(input.cadenceMinutes
+        ? { cadenceMinutes: input.cadenceMinutes }
+        : {}),
+      ...(input.alertEmail
+        ? { alertEmail: normalizeAlertEmail(input.alertEmail) }
+        : {}),
+      ...(input.additionalEmails
+        ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) }
+        : {}),
+      ...(input.status ? { status: input.status } : {})
+    };
   };
   const coursePreferences = normalizeCoursePreferenceRankUpdates(input.coursePreferences);
 
   if (coursePreferences.length === 0) {
-    return prisma.$transaction(async (transaction) => {
-      await lockSearchForAlertMutation(transaction, { searchId, userId });
+    const updatedSearch = await prisma.$transaction(async (transaction) => {
+      const lockedSearch = await lockSearchForAlertMutation(transaction, {
+        searchId,
+        userId
+      });
       return transaction.teeSearch.update({
         where: {
           id: searchId,
           userId
         },
-        data: teeSearchData,
+        data: buildTeeSearchData(lockedSearch),
         include: searchInclude
       });
     });
+    return hideInternalGenerationMarker(updatedSearch);
   }
 
-  return prisma.$transaction(async (transaction) => {
-    await lockSearchForAlertMutation(transaction, { searchId, userId });
+  const updatedSearch = await prisma.$transaction(async (transaction) => {
+    const lockedSearch = await lockSearchForAlertMutation(transaction, {
+      searchId,
+      userId
+    });
     for (const [index, preference] of coursePreferences.entries()) {
       await transaction.coursePreference.updateMany({
         where: {
@@ -607,10 +655,22 @@ export async function updateTeeSearchForUser(
         id: searchId,
         userId
       },
-      data: teeSearchData,
+      data: buildTeeSearchData(lockedSearch),
       include: searchInclude
     });
   });
+  return hideInternalGenerationMarker(updatedSearch);
+}
+
+function hideInternalGenerationMarker<T extends { statusEmailSnapshot?: unknown }>(
+  search: T
+) {
+  const publicSnapshot = unwrapAlertGenerationStatusSnapshot(
+    search.statusEmailSnapshot
+  );
+  return publicSnapshot === search.statusEmailSnapshot
+    ? search
+    : { ...search, statusEmailSnapshot: publicSnapshot };
 }
 
 function normalizeCoursePreferenceRankUpdates(

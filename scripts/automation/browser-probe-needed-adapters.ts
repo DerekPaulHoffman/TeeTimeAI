@@ -1,5 +1,8 @@
 import "./load-local-env";
 
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { chromium, type Page } from "@playwright/test";
 
 import {
@@ -32,25 +35,22 @@ import {
   finishAutomationRun,
   listBrowserProbeTargets,
   recordBrowserDiscovery,
-  recordCourseProbe,
   startAutomationRun,
 } from "@/lib/automation/db-service";
 import {
   buildBrowserPlaybookTransition,
-  canResolveAutomaticBrowserTechnicalFinal,
-  getBrowserFactualFinality,
   loadCourseMonitoringPlaybookRuntime,
   recordRuntimePlaybookTransition,
 } from "@/lib/automation/course-monitoring-playbook-runtime";
 import {
-  confirmCourseMonitoringTechnicalFinal,
-  recordCourseMonitoringFinalClassification,
-} from "@/lib/automation/course-monitoring";
+  runGuardedCourseSupportBrowserMutation,
+  type CourseSupportBrowserPersistenceFence,
+  type CourseSupportBrowserPersistenceGuard,
+} from "@/lib/automation/course-support-browser-stages";
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
-import { resolveCourseSupportIncident } from "@/lib/automation/support-incidents";
 import { shouldStopBrowserDiscovery } from "@/lib/automation/monitoring-strategy";
 import { prisma } from "@/lib/prisma";
 
@@ -58,21 +58,46 @@ const PROMPT_VERSION = "tee-time-spot-browser-probe-v1";
 const DEFAULT_LIMIT = 5;
 const NAVIGATION_TIMEOUT_MS = 20_000;
 
-async function main() {
-  const options = parseOptions(process.argv.slice(2));
+export type BrowserProbeOptions = ReturnType<typeof parseOptions> & {
+  beforePersist?: CourseSupportBrowserPersistenceGuard;
+  persistenceFence?: CourseSupportBrowserPersistenceFence;
+  deferTerminalCloseout?: boolean;
+  persistSearchProbe?: boolean;
+};
+
+export async function runBrowserProbe(options: BrowserProbeOptions) {
+  if (
+    !options.dryRun &&
+    (!options.persistenceFence ||
+      options.deferTerminalCloseout !== true ||
+      options.persistSearchProbe !== false)
+  ) {
+    throw new Error(
+      "Persisted browser progression requires an owned responder batch and deferred closeout.",
+    );
+  }
   const limit = options.limit;
   const requestedCourseName = options.courseName;
+  const requestedCourseId = options.courseId;
+  const runtimeVersion = resolveBrowserProbeRuntimeVersion(
+    getAutomationRuntimeVersion(),
+    options.persistenceFence,
+  );
   const run = options.dryRun ? null : await startAutomationRun(PROMPT_VERSION);
-  const runtimeVersion = getAutomationRuntimeVersion();
   const notes: string[] = [];
   const traces: BrowserProbeDecisionTrace[] = [];
+  let persistedCount = 0;
 
   try {
-    const targets = await listBrowserProbeTargets(limit, requestedCourseName);
+    const targets = await listBrowserProbeTargets(
+      limit,
+      requestedCourseName,
+      requestedCourseId,
+    );
     notes.push(`Selected ${targets.length} browser probe targets.`);
 
     if (targets.length === 0) {
-      if (requestedCourseName) {
+      if (requestedCourseName || requestedCourseId) {
         throw new Error("The requested browser-probe course was not eligible.");
       }
       if (run) {
@@ -82,15 +107,28 @@ async function main() {
         });
       }
       writeDryRunTrace(options, traces);
-      return;
+      return { targetCount: 0, persistedCount: 0 };
     }
 
     const browser = await chromium.launch();
     try {
       for (const target of targets) {
         const page = await browser.newPage();
+        let playbookRuntime: Awaited<
+          ReturnType<typeof loadCourseMonitoringPlaybookRuntime>
+        > = null;
+        const persistBrowserMutation = <T>(
+          requireCurrentStage: boolean,
+          mutate: () => Promise<T>,
+        ) =>
+          runGuardedCourseSupportBrowserMutation({
+            courseId: target.course.id,
+            requireCurrentStage,
+            beforePersist: options.beforePersist,
+            mutate,
+          });
         try {
-          const playbookRuntime = options.dryRun
+          playbookRuntime = options.dryRun
             ? null
             : await loadCourseMonitoringPlaybookRuntime(target.course.id);
           if (
@@ -175,7 +213,13 @@ async function main() {
             continue;
           }
 
-          await recordBrowserDiscovery(discovery);
+          await persistBrowserMutation(true, () =>
+            recordBrowserDiscovery(
+              discovery,
+              options.persistenceFence,
+              runtimeVersion,
+            ),
+          );
           const observedMonitoringGate =
             evaluateBrowserDiscoveryMonitoringGate(discovery);
           const accessControlObserved =
@@ -183,7 +227,14 @@ async function main() {
           // Shared persistence normalizes one technical browser observation
           // to actionable NEEDS_REVIEW while retaining learned metadata. It
           // never persists a BLOCKED technical final from this observation.
-          const appliedCourse = await applyBrowserDiscoveryToCourse(discovery);
+          const appliedCourse = await persistBrowserMutation(true, () =>
+            applyBrowserDiscoveryToCourse(
+              discovery,
+              undefined,
+              options.persistenceFence,
+              runtimeVersion,
+            ),
+          );
           if (!appliedCourse) {
             const currentCourse = await prisma.course.findUnique({
               where: { id: target.course.id },
@@ -218,131 +269,85 @@ async function main() {
               ? ("IDENTITY_FINAL" as const)
               : ("MANUAL_DIRECT" as const)
             : null;
-          const playbookStage = playbookRuntime?.assessment.nextStage;
+          const browserPlaybookRuntime = playbookRuntime;
+          const playbookStage = browserPlaybookRuntime?.assessment.nextStage;
           const playbookResult =
-            playbookRuntime &&
+            browserPlaybookRuntime &&
             (playbookStage === "RENDERED_BROWSER_DISCOVERY" ||
               playbookStage === "INDEPENDENT_CONFIRMATION")
-              ? await recordRuntimePlaybookTransition(playbookRuntime, {
-                  stage: playbookStage,
-                  readPath:
-                    playbookStage === "RENDERED_BROWSER_DISCOVERY"
-                      ? "RENDERED_BROWSER"
-                      : "INDEPENDENT_CONFIRMATION",
-                  runtimeVersion,
-                  source: "COURSE_SUPPORT_RESPONDER",
-                  ...buildBrowserPlaybookTransition({
-                    stage: playbookStage,
-                    technicalReason: browserTechnicalReason,
-                    localReaderTechnicalReason:
-                      playbookRuntime.localReaderTechnicalReason,
-                    factualDisposition: browserFactualDisposition,
-                  }),
-                })
+              ? await persistBrowserMutation(true, () =>
+                  recordRuntimePlaybookTransition(
+                    browserPlaybookRuntime,
+                    {
+                      stage: playbookStage,
+                      readPath:
+                        playbookStage === "RENDERED_BROWSER_DISCOVERY"
+                          ? "RENDERED_BROWSER"
+                          : "INDEPENDENT_CONFIRMATION",
+                      runtimeVersion,
+                      source: "COURSE_SUPPORT_RESPONDER",
+                      ...buildBrowserPlaybookTransition({
+                        stage: playbookStage,
+                        technicalReason: browserTechnicalReason,
+                        localReaderTechnicalReason:
+                          browserPlaybookRuntime.localReaderTechnicalReason,
+                        factualDisposition: browserFactualDisposition,
+                      }),
+                    },
+                    options.persistenceFence,
+                  ),
+                )
               : null;
-          const factualFinalVerified = Boolean(
-            playbookResult?.recorded &&
-            playbookResult.result.assessment.conclusion === "FACTUAL_FINAL",
-          );
-          if (factualFinalVerified && browserFactualDisposition) {
-            const factualFinality = getBrowserFactualFinality(
-              browserFactualDisposition,
-            );
-            const factualMessage =
-              browserFactualDisposition === "IDENTITY_FINAL"
-                ? "Current authoritative rendered-page evidence confirms a non-monitorable course identity."
-                : "Current authoritative rendered-page evidence confirms direct customer action is required instead of online tee-time monitoring.";
-            await recordCourseMonitoringFinalClassification({
-              courseId: target.course.id,
-              state: factualFinality.state,
-              outcome: factualFinality.outcome,
-              source: "COURSE_SUPPORT_RESPONDER",
-              message: factualMessage,
-              evidenceUrl: discovery.bookingUrl,
-              runtimeVersion,
-            });
-            await resolveCourseSupportIncident({
-              courseId: target.course.id,
-              resolution: factualFinality.resolution,
-              message: factualMessage,
-            });
-          }
-          const technicalFinalVerified = Boolean(
-            playbookResult?.recorded &&
-            playbookResult.result.assessment.conclusion === "TECHNICAL_FINAL",
-          );
-          const technicalFinalStatus = technicalFinalVerified
-            ? await confirmCourseMonitoringTechnicalFinal({
-                courseId: target.course.id,
-                message:
-                  "Terminal signed-reader proof and a matching independent public-page observation confirmed the same technical limitation.",
-                source: "COURSE_SUPPORT_RESPONDER",
-                runtimeVersion,
-              })
-            : null;
-          if (
-            canResolveAutomaticBrowserTechnicalFinal({
-              playbookConclusion: playbookResult?.recorded
-                ? playbookResult.result.assessment.conclusion
-                : "INCOMPLETE",
-              monitoringState: technicalFinalStatus?.state,
-            })
-          ) {
-            await resolveCourseSupportIncident({
-              courseId: target.course.id,
-              resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
-              message:
-                "Two current independent public-page observations, including the terminal signed reader result, confirmed the same technical limitation.",
-            });
-          }
-          if (target.searchId) {
-            await recordCourseProbe({
-              searchId: target.searchId,
-              courseId: target.course.id,
-              automationRunId: run!.id,
-              outcome: accessControlObserved
-                ? "BLOCKED_AUTH"
-                : directBookingObserved
-                  ? "MANUAL_DIRECT"
-                  : "NEEDS_ADAPTER",
-              message: directBookingObserved
-                ? "Browser discovery observed current official direct-booking evidence for ordered review."
-                : accessControlObserved
-                  ? technicalFinalVerified
-                    ? technicalFinalStatus?.state === "FINAL_TECHNICAL"
-                      ? "Independent browser confirmation matched the terminal signed reader result."
-                      : "Independent proof is complete and remains queued for guarded final-state reconciliation."
-                    : "Browser discovery observed an access control; the remaining ordered checks stay active."
-                  : discovery.status === "LEARNED"
-                    ? `Browser probe learned ${discovery.detectedPlatform} adapter metadata; rerun the poller to verify tee-sheet retrieval.`
-                    : `Browser probe inspected site but did not learn a reusable adapter yet.`,
-              evidenceUrl: discovery.bookingUrl,
-              rawSummary: {
-                browserProbe: {
-                  status: discovery.status,
-                  detectedPlatform: discovery.detectedPlatform,
-                  apiEndpoint: discovery.apiEndpoint,
-                  automationReason: discovery.automationReason,
-                  confidence: discovery.confidence,
-                  learnedFrom: discovery.evidence.learnedFrom,
-                },
-              },
-            });
+          if (playbookResult?.recorded) {
+            persistedCount += 1;
           }
 
           notes.push(
             `${target.course.name}: ${discovery.status} ${discovery.detectedPlatform} confidence=${discovery.confidence}`,
           );
         } catch (error) {
-          if (!options.dryRun && target.searchId) {
-            await recordCourseProbe({
-              searchId: target.searchId,
-              courseId: target.course.id,
-              automationRunId: run!.id,
-              outcome: "FETCH_FAILED",
-              message:
-                error instanceof Error ? error.message : "Browser probe failed",
-            });
+          if (!options.dryRun) {
+            playbookRuntime ??=
+              await loadCourseMonitoringPlaybookRuntime(target.course.id);
+            const failurePlaybookRuntime = playbookRuntime;
+            const failedStage = failurePlaybookRuntime?.assessment.nextStage;
+            if (
+              failurePlaybookRuntime &&
+              (failedStage === "RENDERED_BROWSER_DISCOVERY" ||
+                failedStage === "INDEPENDENT_CONFIRMATION")
+            ) {
+              const attemptCount =
+                failurePlaybookRuntime.assessment.stages.find(
+                  (stage) => stage.stage === failedStage,
+                )?.attemptCount ?? 0;
+              const failure = await persistBrowserMutation(true, () =>
+                recordRuntimePlaybookTransition(
+                  failurePlaybookRuntime,
+                  {
+                    stage: failedStage,
+                    transition:
+                      attemptCount < 1
+                        ? "FAILED_RETRYABLE"
+                        : "FAILED_TERMINAL",
+                    readPath:
+                      failedStage === "RENDERED_BROWSER_DISCOVERY"
+                        ? "RENDERED_BROWSER"
+                        : "INDEPENDENT_CONFIRMATION",
+                    evidenceKind: "TOOLING",
+                    failureClass:
+                      error instanceof Error && error.name === "TimeoutError"
+                        ? "TIMEOUT"
+                        : "NETWORK",
+                    runtimeVersion,
+                    source: "COURSE_SUPPORT_RESPONDER",
+                  },
+                  options.persistenceFence,
+                ),
+              );
+              if (failure.recorded) {
+                persistedCount += 1;
+              }
+            }
           }
           notes.push(
             `${target.course.name}: failed - ${error instanceof Error ? error.message : "unknown error"}`,
@@ -370,6 +375,10 @@ async function main() {
         notes: notes.join("\n"),
       });
     }
+    return {
+      targetCount: targets.length,
+      persistedCount,
+    };
   } catch (error) {
     if (run) {
       await finishAutomationRun(run.id, {
@@ -386,6 +395,45 @@ async function main() {
     }
     throw error;
   }
+}
+
+export async function runBrowserProbeCli(
+  args: string[],
+  runner: (options: BrowserProbeOptions) => Promise<unknown> = runBrowserProbe,
+) {
+  const options = parseOptions(args);
+  if (!options.dryRun) {
+    throw new Error(
+      "Direct browser probing is diagnostic-only; use --dry-run or the guarded course-support responder.",
+    );
+  }
+  return runner({
+    ...options,
+    deferTerminalCloseout: true,
+    persistSearchProbe: false,
+  });
+}
+
+export function resolveBrowserProbeRuntimeVersion(
+  ambientRuntimeVersion: string,
+  persistenceFence?: CourseSupportBrowserPersistenceFence,
+) {
+  if (!persistenceFence) {
+    return ambientRuntimeVersion;
+  }
+  if (
+    ambientRuntimeVersion !== "local" &&
+    ambientRuntimeVersion !== persistenceFence.runtimeVersion
+  ) {
+    throw new Error(
+      "Browser progression runtime does not match the owned batch release.",
+    );
+  }
+  return persistenceFence.runtimeVersion;
+}
+
+async function main() {
+  return runBrowserProbeCli(process.argv.slice(2));
 }
 
 function getBrowserTechnicalReason(automationReason: string | undefined) {
@@ -411,6 +459,13 @@ function parseOptions(args: string[]) {
   const courseName =
     readOption(args, "--course-name") ??
     process.env.BROWSER_PROBE_COURSE_NAME?.trim();
+  const courseId = readOption(args, "--course-id");
+  if (courseName && courseId) {
+    throw new Error("--course-name and --course-id cannot be combined.");
+  }
+  if (courseId && !/^[A-Za-z0-9_-]{1,80}$/u.test(courseId)) {
+    throw new Error("--course-id is invalid.");
+  }
   const expectedDisposition = readOption(args, "--expect-disposition") as
     BrowserProbeExpectedDisposition | undefined;
   if (
@@ -428,7 +483,14 @@ function parseOptions(args: string[]) {
     throw new Error("--trace-json and --expect-disposition require --dry-run.");
   }
 
-  return { courseName, dryRun, expectedDisposition, limit, traceJson };
+  return {
+    courseName,
+    courseId,
+    dryRun,
+    expectedDisposition,
+    limit,
+    traceJson,
+  };
 }
 
 function readOption(args: string[], name: string) {
@@ -888,15 +950,21 @@ async function trySelectSearchDate(page: Page) {
   await dateInput.fill(value, { timeout: 2_000 }).catch(() => undefined);
 }
 
-main()
-  .catch((error) => {
-    console.error(
-      sanitizeResponderText(
-        error instanceof Error ? error.message : "Browser probe failed.",
-      ),
-    );
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+const directEntry = process.argv[1]
+  ? resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+
+if (directEntry) {
+  main()
+    .catch((error) => {
+      console.error(
+        sanitizeResponderText(
+          error instanceof Error ? error.message : "Browser probe failed.",
+        ),
+      );
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

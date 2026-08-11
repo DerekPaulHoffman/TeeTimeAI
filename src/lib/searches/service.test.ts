@@ -59,7 +59,9 @@ beforeEach(() => {
     (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
   );
   deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({
-    id: "search-1"
+    id: "search-1",
+    status: "ACTIVE",
+    alertGeneration: 2
   });
   courseMonitoringMocks.requestTechnicalFinalRevalidationForDemand.mockResolvedValue({
     requestedCourseIds: []
@@ -67,6 +69,52 @@ beforeEach(() => {
 });
 
 describe("listTeeSearchesForUser", () => {
+  it("keeps the generation clock marker out of the public search shape", async () => {
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-1",
+        statusEmailSnapshot: {
+          schemaVersion: 1,
+          kind: "ALERT_GENERATION_START",
+          alertGeneration: 3,
+          generationStartedAt: "2026-08-11T20:00:00.000Z"
+        },
+        preferences: [],
+        matches: []
+      }
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+    const searches = await listTeeSearchesForUser("user-1");
+
+    expect(searches[0]?.statusEmailSnapshot).toBeNull();
+  });
+
+  it("unwraps a durable generation envelope to the legacy public snapshot", async () => {
+    const courseSnapshot = [
+      { courseId: "course-1", courseName: "Course", state: "checking" }
+    ];
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-1",
+        statusEmailSnapshot: {
+          schemaVersion: 1,
+          kind: "ALERT_GENERATION_STATUS",
+          alertGeneration: 3,
+          generationStartedAt: "2026-08-11T20:00:00.000Z",
+          courseSnapshot
+        },
+        preferences: [],
+        matches: []
+      }
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+    const searches = await listTeeSearchesForUser("user-1");
+
+    expect(searches[0]?.statusEmailSnapshot).toEqual(courseSnapshot);
+  });
+
   it("returns the newest probe for every selected course after repeated multi-course checks", async () => {
     mockedPrisma.teeSearch.findMany.mockResolvedValue([
       {
@@ -1413,10 +1461,20 @@ describe("updateTeeSearchStatusForUser", () => {
 
   it("excludes the current search when enforcing queue capacity on resume", async () => {
     mockedPrisma.teeSearch.update.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
+      statusEmailSnapshot: {
+        schemaVersion: 1,
+        kind: "ALERT_GENERATION_START",
+        alertGeneration: 3,
+        generationStartedAt: "2026-08-11T20:00:00.000Z"
+      }
     } as never);
 
-    await updateTeeSearchStatusForUser("user-1", "search-1", "ACTIVE");
+    const updated = await updateTeeSearchStatusForUser(
+      "user-1",
+      "search-1",
+      "ACTIVE"
+    );
 
     expect(mockedPrisma.teeSearch.count).toHaveBeenCalledWith({
       where: {
@@ -1429,10 +1487,18 @@ describe("updateTeeSearchStatusForUser", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: "ACTIVE",
-          alertGeneration: { increment: 1 }
+          alertGeneration: { increment: 1 },
+          statusEmailSentAt: null,
+          statusEmailSnapshot: expect.objectContaining({
+            schemaVersion: 1,
+            kind: "ALERT_GENERATION_START",
+            alertGeneration: 3,
+            generationStartedAt: expect.any(String)
+          })
         })
       })
     );
+    expect(updated.statusEmailSnapshot).toBeNull();
   });
 });
 
@@ -1444,6 +1510,11 @@ describe("updateTeeSearchForUser", () => {
       .mockResolvedValueOnce({ id: "search-1", preferences: [] } as never);
     mockedPrisma.coursePreference.updateMany.mockResolvedValue({
       count: 1
+    } as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({
+      id: "search-1",
+      status: "ACTIVE",
+      statusEmailSnapshot: null
     } as never);
   });
 
@@ -1475,6 +1546,18 @@ describe("updateTeeSearchForUser", () => {
       where: { id: "pref-a", teeSearchId: "search-1" },
       data: { rank: 2 }
     });
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          alertGeneration: { increment: 1 },
+          statusEmailSentAt: null,
+          statusEmailSnapshot: expect.objectContaining({
+            kind: "ALERT_GENERATION_START",
+            alertGeneration: 3
+          })
+        })
+      })
+    );
   });
 
   it("rejects changing a search to an incompatible verified layout", async () => {

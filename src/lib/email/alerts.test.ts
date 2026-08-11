@@ -5,6 +5,7 @@ import {
   getAutomationWorkerHealthIdempotencyKey,
   getRenderedTeeTimeAlertMatchIds,
   getMatchAlertSubject,
+  getSearchStatusEmailSubject,
   normalizeEmailEnvValue,
   renderAlertHtml,
   renderAutomationWorkerHealthHtml,
@@ -227,6 +228,37 @@ describe("renderAlertHtml", () => {
 });
 
 describe("email alert delivery helpers", () => {
+  it("uses manual-review copy for human-only and mixed consolidated updates", () => {
+    const humanCourse = {
+      courseId: "human-course",
+      courseName: "Course awaiting review",
+      outcome: "NEEDS_ADAPTER" as const,
+      availableMatches: 0,
+      supportStatus: "NEEDS_HUMAN_REVIEW" as const
+    };
+
+    expect(
+      getSearchStatusEmailSubject({
+        kind: "status-update",
+        courses: [humanCourse]
+      })
+    ).toBe("Manual review needed; your alert remains active");
+    expect(
+      getSearchStatusEmailSubject({
+        kind: "status-update",
+        courses: [
+          {
+            courseId: "final-course",
+            courseName: "Phone booking course",
+            outcome: "MANUAL_DIRECT",
+            availableMatches: 0
+          },
+          humanCourse
+        ]
+      })
+    ).toBe("Manual review needed; your alert remains active");
+  });
+
   it("scopes Resend idempotency keys to the exact email content", () => {
     const email = {
       from: "alerts@teetimespot.com",

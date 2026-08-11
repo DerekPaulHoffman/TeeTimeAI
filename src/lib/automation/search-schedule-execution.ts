@@ -123,7 +123,18 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown search check failure";
-    const nextCheckAt = new Date(Date.now() + FAILED_CHECK_RETRY_MINUTES * 60 * 1000);
+    const failedAt = new Date();
+    const defaultRetryAt = new Date(
+      failedAt.getTime() + FAILED_CHECK_RETRY_MINUTES * 60 * 1000
+    );
+    const endpointWakeAt = selectSearchEndpointWakeAt(
+      timing.preferences.map((preference) => preference.course),
+      failedAt
+    );
+    const nextCheckAt =
+      endpointWakeAt && endpointWakeAt < defaultRetryAt
+        ? endpointWakeAt
+        : defaultRetryAt;
     const failed = await failScheduledSearchCheck({
       searchId,
       scheduleVersion,
@@ -140,6 +151,29 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       courseResults: []
     };
   }
+}
+
+export function selectSearchEndpointWakeAt(
+  courses: Array<{
+    supportIncident?: {
+      status: string;
+      humanReviewReason: string | null;
+      escalationDeadlineAt: Date | null;
+    } | null;
+  }>,
+  now = new Date()
+) {
+  const deadlines = courses.flatMap((course) => {
+    const incident = course.supportIncident;
+    return incident?.status === "AUTO_INVESTIGATING" &&
+      !incident.humanReviewReason &&
+      incident.escalationDeadlineAt
+      ? [incident.escalationDeadlineAt]
+      : [];
+  });
+  deadlines.sort((left, right) => left.getTime() - right.getTime());
+  const deadline = deadlines[0];
+  return deadline && deadline <= now ? now : deadline ?? null;
 }
 
 function getSyntheticMultiCycleExpiresAt(timing: {
@@ -213,6 +247,7 @@ export function calculateNextCheckAt(
       supportRetryNeeded,
       now,
       searchExpiresAt,
+      checkStartedAt,
       options?.supportRetryAt
     );
   }
@@ -227,6 +262,7 @@ export function calculateNextCheckAt(
     supportRetryNeeded,
     now,
     searchExpiresAt,
+    checkStartedAt,
     options?.supportRetryAt
   );
 }
@@ -236,6 +272,7 @@ function applySupportDiscoveryRetry(
   supportRetryNeeded: boolean,
   now: Date,
   searchExpiresAt: Date,
+  checkStartedAt: Date,
   requestedRetryAt?: Date | null
 ) {
   if (!supportRetryNeeded) {
@@ -244,7 +281,13 @@ function applySupportDiscoveryRetry(
   const defaultRetryAt = now.getTime() + SUPPORT_DISCOVERY_RETRY_MINUTES * 60 * 1000;
   const supportRetryAt = new Date(
     Math.min(
-      requestedRetryAt && requestedRetryAt > now ? requestedRetryAt.getTime() : defaultRetryAt,
+      requestedRetryAt &&
+      requestedRetryAt >= checkStartedAt &&
+      requestedRetryAt <= now
+        ? now.getTime()
+        : requestedRetryAt && requestedRetryAt > now
+          ? requestedRetryAt.getTime()
+          : defaultRetryAt,
       searchExpiresAt.getTime()
     )
   );

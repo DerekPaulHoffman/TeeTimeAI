@@ -45,6 +45,46 @@ describe("monitoring status notices", () => {
     );
   });
 
+  it("retains the hard endpoint wake after an earlier retry update", () => {
+    const endpointDeadlineAt = new Date("2026-08-10T14:28:00.000Z");
+    const retrying = candidate({ endpointDeadlineAt });
+    const reachedRetry = {
+      courseId: retrying.result.courseId,
+      recipient: "owner@example.com",
+      sentAt: new Date("2026-08-10T14:05:00.000Z"),
+      customerStatus: "RETRYING_AUTOMATICALLY" as const
+    };
+
+    const waiting = planMonitoringStatusNotices({
+      candidates: [retrying],
+      reachedOutages: [reachedRetry],
+      ownerRecipient: "owner@example.com",
+      now: new Date("2026-08-10T14:10:00.000Z")
+    });
+
+    expect(waiting.outageCourses).toEqual([]);
+    expect(waiting.nextConsolidationAt).toEqual(endpointDeadlineAt);
+
+    const needsHuman = candidate({
+      endpointDeadlineAt,
+      previousStatus: "RETRYING_AUTOMATICALLY",
+      currentStatus: "NEEDS_HUMAN_REVIEW",
+      result: {
+        ...retrying.result,
+        outcome: "NEEDS_ADAPTER",
+        supportStatus: "NEEDS_HUMAN_REVIEW"
+      }
+    });
+    const due = planMonitoringStatusNotices({
+      candidates: [needsHuman],
+      reachedOutages: [reachedRetry],
+      ownerRecipient: "owner@example.com",
+      now: endpointDeadlineAt
+    });
+
+    expect(due.outageCourses).toEqual([needsHuman.result]);
+  });
+
   it("delivers one consolidated outage after the window and remains idempotent", () => {
     const input = candidate();
     const planned = planMonitoringStatusNotices({

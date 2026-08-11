@@ -11,6 +11,7 @@ export type MonitoringStatusNoticeCandidate = {
   previousStatus: CustomerMonitoringStatus;
   currentStatus: CustomerMonitoringStatus;
   episodeStartedAt: Date | null;
+  endpointDeadlineAt?: Date | null;
 };
 
 export type ReachedMonitoringOutage = {
@@ -68,12 +69,21 @@ export function planMonitoringStatusNotices(input: {
       ownerRecipient,
       episodeStartedAt
     );
+    const eligibleAt =
+      candidate.endpointDeadlineAt ??
+      new Date(
+        episodeStartedAt.getTime() + MONITORING_STATUS_CONSOLIDATION_MS
+      );
     if (latestOwnerVisibleStatus?.customerStatus === candidate.currentStatus) {
+      if (
+        candidate.currentStatus === "RETRYING_AUTOMATICALLY" &&
+        eligibleAt > now &&
+        (!nextConsolidationAt || eligibleAt < nextConsolidationAt)
+      ) {
+        nextConsolidationAt = eligibleAt;
+      }
       return [];
     }
-    const eligibleAt = new Date(
-      episodeStartedAt.getTime() + MONITORING_STATUS_CONSOLIDATION_MS
-    );
     if (eligibleAt > now) {
       if (!nextConsolidationAt || eligibleAt < nextConsolidationAt) {
         nextConsolidationAt = eligibleAt;

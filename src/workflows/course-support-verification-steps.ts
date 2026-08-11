@@ -8,7 +8,6 @@ import type {
 } from "@prisma/client";
 
 import { fetchCourseTeeSheet } from "@/lib/automation/course-provider-read";
-import { recordCourseMonitoringFinalClassification } from "@/lib/automation/course-monitoring";
 import type { AutomationPlaybookFactualDisposition } from "@/lib/automation/course-monitoring-playbook";
 import {
   loadCourseMonitoringPlaybookRuntime,
@@ -733,18 +732,6 @@ async function executeOrderedCourseSupportVerification(input: {
           factualDisposition: factualDisposition.disposition,
           runtimeVersion: input.runtimeVersion,
         });
-        await recordCourseMonitoringFinalClassification({
-          courseId: course.id,
-          state: factualDisposition.state,
-          outcome: factualDisposition.outcome,
-          source: "COURSE_SUPPORT_RESPONDER",
-          message: factualDisposition.message,
-          evidenceUrl:
-            course.bookingWindowEvidenceUrl ??
-            course.detectedBookingUrl ??
-            course.website,
-          runtimeVersion: input.runtimeVersion,
-        });
         return completeFactualVerification({
           input: input.input,
           revision,
@@ -1066,12 +1053,18 @@ async function executeOrderedCourseSupportVerification(input: {
           stage,
           transition: "FAILED_TERMINAL",
           readPath: "LOCAL_READER",
-          evidenceKind: "LOCAL_READER_RESULT",
+          evidenceKind:
+            readerVerification.resultStatus === "EXPIRED"
+              ? "TOOLING"
+              : "LOCAL_READER_RESULT",
           failureClass:
-            readerVerification.resultStatus === "PAGE_MISMATCH"
+            readerVerification.resultStatus === "EXPIRED"
+              ? "TIMEOUT"
+              : readerVerification.resultStatus === "PAGE_MISMATCH"
               ? "SCHEMA"
               : "UNKNOWN",
-          runtimeVersion: readerVerification.readerVersion,
+          runtimeVersion:
+            readerVerification.readerVersion ?? input.runtimeVersion,
           now: readerVerification.observedAt,
         });
         continue;
@@ -1111,37 +1104,20 @@ async function executeOrderedCourseSupportVerification(input: {
     }
 
     if (stage === "INDEPENDENT_CONFIRMATION") {
-      if (runtime.localReaderTechnicalReason) {
-        return failVerification({
-          input: input.input,
-          revision,
-          runtimeVersion: input.runtimeVersion,
-          failureClass:
-            runtime.localReaderTechnicalReason === "ACCOUNT_REQUIRED"
-              ? "AUTH"
-              : "CHALLENGE",
-          providerExecution: false,
-          message:
-            "A fresh independent public-page observation is still required.",
-          retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
-        });
-      }
-      await requireRecordedPlaybookTransition(runtime, {
-        stage,
-        transition: "NOT_APPLICABLE",
-        readPath: "INDEPENDENT_CONFIRMATION",
-        evidenceKind: "TOOLING",
-        skipReason: "NO_INDEPENDENT_CONFIRMATION",
-        runtimeVersion: input.runtimeVersion,
-      });
       return failVerification({
         input: input.input,
         revision,
         runtimeVersion: input.runtimeVersion,
-        failureClass: "MISSING_SOURCE",
+        failureClass:
+          runtime.localReaderTechnicalReason === "ACCOUNT_REQUIRED"
+            ? "AUTH"
+            : runtime.localReaderTechnicalReason
+              ? "CHALLENGE"
+              : "MISSING_SOURCE",
         providerExecution: false,
         message:
-          "All safe ordered paths completed without conclusive automatic monitoring.",
+          "A fresh independent public-page observation is still required.",
+        retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
       });
     }
   }

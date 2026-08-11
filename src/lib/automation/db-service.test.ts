@@ -9,6 +9,7 @@ import {
   completeScheduledSearchCheck,
   failScheduledSearchCheck,
   getActiveSearchForAutomation,
+  listBrowserProbeTargets,
   listAvailableMatchAlerts,
   listPendingMatchAlerts,
   markMatchAlertSent,
@@ -21,6 +22,10 @@ import {
   recordTeeTimeMatch,
   updateHourlyImprovementRunState
 } from "./db-service";
+import {
+  appendAutomationPlaybookEvent,
+  type AutomationPlaybookEventInput
+} from "./course-monitoring-playbook";
 import {
   buildHourlyImprovementRunProvenance,
   buildImprovementCheckpoints,
@@ -54,6 +59,9 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn(),
       updateMany: vi.fn()
     },
+    course: {
+      findMany: vi.fn()
+    },
     $queryRaw: vi.fn(),
     $transaction: vi.fn()
   }
@@ -64,9 +72,153 @@ import { prisma } from "@/lib/prisma";
 
 const mockedPrisma = vi.mocked(prisma);
 
+const browserRuntimeVersion = "a".repeat(40);
+
+function browserPlaybookLedger(includeTerminalReader: boolean) {
+  const events: AutomationPlaybookEventInput[] = [
+    {
+      cycle: 1,
+      stage: "OFFICIAL_IDENTITY",
+      transition: "COMPLETED",
+      readPath: "OFFICIAL_IDENTITY",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:COMPLETED",
+      runtimeVersion: browserRuntimeVersion
+    },
+    {
+      cycle: 1,
+      stage: "TYPED_ADAPTER",
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      failureFingerprint: "PLAYBOOK:TYPED_ADAPTER:NO_RUNNABLE_ADAPTER",
+      runtimeVersion: browserRuntimeVersion
+    },
+    {
+      cycle: 1,
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "COMPLETED",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "PLAYBOOK:OFFICIAL_HTTP_DISCOVERY:COMPLETED",
+      runtimeVersion: browserRuntimeVersion
+    },
+    {
+      cycle: 1,
+      stage: "HTTP_ADAPTER_RETRY",
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      failureFingerprint: "PLAYBOOK:HTTP_ADAPTER_RETRY:NO_RUNNABLE_ADAPTER",
+      runtimeVersion: browserRuntimeVersion
+    },
+    ...(includeTerminalReader
+      ? ([
+          {
+            cycle: 1,
+            stage: "RENDERED_BROWSER_DISCOVERY",
+            transition: "COMPLETED",
+            readPath: "RENDERED_BROWSER",
+            evidenceKind: "RENDERED_PAGE",
+            failureFingerprint:
+              "PLAYBOOK:RENDERED_BROWSER_DISCOVERY:COMPLETED",
+            runtimeVersion: browserRuntimeVersion
+          },
+          {
+            cycle: 1,
+            stage: "BROWSER_ADAPTER_RETRY",
+            transition: "NOT_APPLICABLE",
+            readPath: "TYPED_PROVIDER_ADAPTER",
+            evidenceKind: "TOOLING",
+            skipReason: "NO_RUNNABLE_ADAPTER",
+            failureFingerprint:
+              "PLAYBOOK:BROWSER_ADAPTER_RETRY:NO_RUNNABLE_ADAPTER",
+            runtimeVersion: browserRuntimeVersion
+          },
+          {
+            cycle: 1,
+            stage: "LOCAL_READER",
+            transition: "FAILED_TERMINAL",
+            readPath: "LOCAL_READER",
+            evidenceKind: "LOCAL_READER_RESULT",
+            failureClass: "SCHEMA",
+            failureFingerprint: "PLAYBOOK:LOCAL_READER:SCHEMA",
+            runtimeVersion: "reader-v1"
+          }
+        ] satisfies AutomationPlaybookEventInput[])
+      : [])
+  ];
+  return events.reduce<ReturnType<typeof appendAutomationPlaybookEvent> | null>(
+    (ledger, event) => appendAutomationPlaybookEvent(ledger, event),
+    null
+  );
+}
+
+function localReaderOnlyBrowserProbeCourse(attemptLedger: unknown) {
+  return {
+    id: "course-reader-only",
+    name: "Reader Only Course",
+    website: "https://course.example/tee-times",
+    detectedBookingUrl: "https://course.example/tee-times",
+    detectedPlatform: "UNKNOWN",
+    providerFamilyKey: "UNKNOWN",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "UNSUPPORTED_PROVIDER",
+    bookingMethod: "ONLINE",
+    monitoringMode: "LOCAL_READER_ONLY",
+    isPublic: true,
+    intelligenceVerifiedAt: null,
+    intelligenceReviewAt: null,
+    intelligenceConfidence: null,
+    bookingMetadata: null,
+    supportIncident: {
+      kind: "READER_CANDIDATE",
+      failureClass: "READER_PARSER_MISSING",
+      occurrenceCount: 1,
+      lastSeenAt: new Date("2026-07-21T12:00:00.000Z"),
+      cycle: 1,
+      attemptLedger
+    },
+    probes: [],
+    preferences: []
+  };
+}
+
 describe("automation query payloads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("selects an exact reader-only course for independent browser confirmation", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      localReaderOnlyBrowserProbeCourse(browserPlaybookLedger(true))
+    ] as never);
+
+    await expect(
+      listBrowserProbeTargets(1, undefined, "course-reader-only")
+    ).resolves.toEqual([
+      expect.objectContaining({
+        searchId: undefined,
+        course: expect.objectContaining({ id: "course-reader-only" })
+      })
+    ]);
+    expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "course-reader-only" })
+      })
+    );
+  });
+
+  it("still excludes an exact reader-only course from rendered browser discovery", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      localReaderOnlyBrowserProbeCourse(browserPlaybookLedger(false))
+    ] as never);
+
+    await expect(
+      listBrowserProbeTargets(1, undefined, "course-reader-only")
+    ).resolves.toEqual([]);
   });
 
   it("loads an active check without historical matches or unused user fields", async () => {
@@ -397,6 +549,141 @@ describe("remediation schedule dispatch", () => {
       })
     );
   });
+
+  it("preserves an attached workflow whose wake already meets the endpoint", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:34:44.000Z"));
+    const current = {
+      id: "search-1",
+      status: "ACTIVE",
+      scheduleVersion: 8,
+      remediationDispatchKey: null,
+      remediationDispatchVersion: null,
+      workflowRunId: "healthy-run",
+      checkStatus: "WAITING",
+      nextCheckAt: new Date("2026-08-11T20:34:57.000Z"),
+      preferences: [
+        {
+          course: {
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:35:26.000Z")
+            }
+          }
+        }
+      ],
+      updatedAt: new Date("2026-08-11T20:34:30.000Z")
+    };
+    const tx = {
+      teeSearch: {
+        findUnique: vi.fn().mockResolvedValue(current),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 })
+      }
+    };
+    mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
+      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+    );
+
+    try {
+      await expect(
+        queueSearchCheck("search-1", "dispatch-before-deadline")
+      ).resolves.toMatchObject({
+        scheduleVersion: 8,
+        workflowRunId: "healthy-run",
+        checkStatus: "WAITING"
+      });
+      expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            scheduleVersion: 8,
+            workflowRunId: "healthy-run",
+            checkStatus: "WAITING",
+            nextCheckAt: new Date("2026-08-11T20:34:57.000Z")
+          }),
+          data: {
+            remediationDispatchKey: "dispatch-before-deadline",
+            remediationDispatchVersion: 8
+          }
+        })
+      );
+      const dispatchData = tx.teeSearch.updateMany.mock.calls[0]?.[0]?.data;
+      expect(dispatchData).not.toHaveProperty("scheduleVersion");
+      expect(dispatchData).not.toHaveProperty("workflowRunId");
+      expect(dispatchData).not.toHaveProperty("checkStatus");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces an attached workflow whose endpoint wake is already overdue", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:34:44.000Z"));
+    const current = {
+      id: "search-1",
+      status: "ACTIVE",
+      scheduleVersion: 8,
+      remediationDispatchKey: null,
+      remediationDispatchVersion: null,
+      workflowRunId: "stuck-run",
+      checkStatus: "WAITING",
+      nextCheckAt: new Date("2026-08-11T20:34:40.000Z"),
+      preferences: [
+        {
+          course: {
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:35:26.000Z")
+            }
+          }
+        }
+      ],
+      updatedAt: new Date("2026-08-11T20:34:30.000Z")
+    };
+    const queued = {
+      ...current,
+      scheduleVersion: 9,
+      remediationDispatchKey: "dispatch-overdue-wake",
+      remediationDispatchVersion: 9,
+      workflowRunId: null,
+      checkStatus: "QUEUED",
+      nextCheckAt: new Date("2026-08-11T20:34:44.000Z")
+    };
+    const tx = {
+      teeSearch: {
+        findUnique: vi
+          .fn()
+          .mockResolvedValueOnce(current)
+          .mockResolvedValueOnce(queued),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 })
+      }
+    };
+    mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
+      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+    );
+
+    try {
+      await expect(
+        queueSearchCheck("search-1", "dispatch-overdue-wake")
+      ).resolves.toMatchObject({
+        scheduleVersion: 9,
+        workflowRunId: null,
+        checkStatus: "QUEUED"
+      });
+      expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            scheduleVersion: { increment: 1 },
+            workflowRunId: null,
+            checkStatus: "QUEUED"
+          })
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("guarded schedule dispatch", () => {
@@ -488,6 +775,68 @@ describe("guarded schedule dispatch", () => {
       })
     ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
 
+    expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("atomically replaces the exact attached queued workflow", async () => {
+    const tx = mockGuardedTransaction(1);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt,
+        checkStatus: "QUEUED",
+        workflowRunId: "workflow-sleeping",
+        recoveryDispatchKey: "endpoint-deadline:incident-1:2"
+      })
+    ).resolves.toMatchObject({
+      status: "ACTIVE",
+      scheduleVersion: 9,
+      checkStatus: "QUEUED"
+    });
+
+    expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          scheduleVersion: 8,
+          updatedAt,
+          checkStatus: "QUEUED",
+          workflowRunId: "workflow-sleeping",
+          OR: [
+            { checkLeaseExpiresAt: null },
+            { checkLeaseExpiresAt: { lte: observedAt } }
+          ]
+        }),
+        data: expect.objectContaining({
+          remediationDispatchKey: "endpoint-deadline:incident-1:2",
+          remediationDispatchVersion: 9
+        })
+      })
+    );
+  });
+
+  it("rejects an attached queued workflow that raced into checking", async () => {
+    const tx = mockGuardedTransaction(0);
+
+    await expect(
+      queueSearchCheck("search-1", undefined, {
+        scheduleVersion: 8,
+        updatedAt,
+        observedAt,
+        checkStatus: "QUEUED",
+        workflowRunId: "workflow-sleeping"
+      })
+    ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
+
+    expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          checkStatus: "QUEUED",
+          workflowRunId: "workflow-sleeping"
+        })
+      })
+    );
     expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
   });
 
@@ -636,7 +985,12 @@ describe("schedule recovery fairness", () => {
               }
             ])
           }),
-          select: { id: true }
+          select: expect.objectContaining({
+            id: true,
+            scheduleVersion: true,
+            checkStatus: true,
+            workflowRunId: true
+          })
         })
       );
     } finally {
@@ -733,7 +1087,13 @@ describe("schedule recovery fairness", () => {
     try {
       await listSearchesNeedingScheduleRecovery();
 
-      const query = mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0];
+      const query = mockedPrisma.teeSearch.findMany.mock.calls.find(
+        ([candidate]) =>
+          Array.isArray(candidate?.where?.OR) &&
+          candidate.where.OR.some(
+            (branch) => branch.checkStatus === "IDLE"
+          )
+      )?.[0];
       const recoveryBranches = query?.where?.OR ?? [];
       const deliveryBranch = recoveryBranches.find(
         (branch) => "AND" in branch && Array.isArray(branch.AND)
@@ -756,6 +1116,239 @@ describe("schedule recovery fairness", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("prioritizes an imminent endpoint whose queued workflow was never attached", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:23:00.000Z"));
+    mockedPrisma.teeSearch.findMany.mockClear();
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    try {
+      await listSearchesNeedingScheduleRecovery(
+        new Date("2026-08-11T20:23:00.000Z")
+      );
+
+      expect(mockedPrisma.teeSearch.findMany).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              {
+                checkStatus: "QUEUED",
+                workflowRunId: null,
+                preferences: {
+                  some: {
+                    course: {
+                      supportIncident: {
+                        is: expect.objectContaining({
+                          status: "AUTO_INVESTIGATING",
+                          humanReviewReason: null,
+                          escalationDeadlineAt: {
+                            lte: new Date("2026-08-11T20:28:00.000Z")
+                          }
+                        })
+                      }
+                    }
+                  }
+                }
+              }
+            ])
+          }),
+          take: 50
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers an undelivered attached setup with cron-jitter headroom", async () => {
+    const observedAt = new Date("2026-08-11T20:25:00.000Z");
+    mockedPrisma.teeSearch.findMany.mockClear();
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    await listSearchesNeedingScheduleRecovery(observedAt);
+
+    expect(mockedPrisma.teeSearch.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            {
+              statusEmailSentAt: null,
+              checkStatus: "QUEUED",
+              workflowRunId: { not: null },
+              updatedAt: { lte: new Date("2026-08-11T20:21:00.000Z") }
+            }
+          ])
+        })
+      })
+    );
+  });
+
+  it("proactively replaces one sleeping endpoint workflow before a phase-offset deadline", async () => {
+    const observedAt = new Date("2026-08-11T20:27:00.000Z");
+    const deadlineAt = new Date("2026-08-11T20:28:00.000Z");
+    const candidate = {
+      id: "search-phase-offset",
+      scheduleVersion: 7,
+      checkStatus: "WAITING",
+      workflowRunId: "workflow-sleeping",
+      nextCheckAt: deadlineAt,
+      updatedAt: new Date("2026-08-11T20:20:00.000Z"),
+      statusEmailSentAt: new Date("2026-08-11T20:00:10.000Z"),
+      remediationDispatchKey: null,
+      preferences: [
+        {
+          course: {
+            supportIncident: {
+              id: "incident-1",
+              cycle: 3,
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: deadlineAt,
+              escalatedAt: null
+            }
+          }
+        }
+      ]
+    };
+    mockedPrisma.teeSearch.findMany.mockClear();
+    mockedPrisma.teeSearch.findMany
+      .mockResolvedValueOnce([candidate] as never)
+      .mockResolvedValueOnce([] as never)
+      .mockResolvedValueOnce([
+        {
+          ...candidate,
+          remediationDispatchKey: "endpoint-deadline:incident-1:3"
+        }
+      ] as never)
+      .mockResolvedValueOnce([] as never);
+
+    const first = await listSearchesNeedingScheduleRecovery(observedAt);
+    const repeated = await listSearchesNeedingScheduleRecovery(observedAt);
+
+    expect(first).toEqual([
+      {
+        ...candidate,
+        endpointRecoveryDispatchKey: "endpoint-deadline:incident-1:3"
+      }
+    ]);
+    expect(repeated).toEqual([]);
+    expect(mockedPrisma.teeSearch.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              checkStatus: { in: ["QUEUED", "WAITING"] },
+              workflowRunId: { not: null },
+              preferences: expect.any(Object)
+            })
+          ])
+        })
+      })
+    );
+  });
+
+  it("keeps a just-escalated endpoint in the critical queued recovery cohort", async () => {
+    const observedAt = new Date("2026-08-11T20:28:01.000Z");
+    const justEscalated = {
+      id: "search-just-escalated",
+      scheduleVersion: 4,
+      checkStatus: "QUEUED",
+      workflowRunId: null,
+      nextCheckAt: observedAt,
+      updatedAt: observedAt
+    };
+    mockedPrisma.teeSearch.findMany.mockClear();
+    mockedPrisma.teeSearch.findMany
+      .mockResolvedValueOnce([justEscalated] as never)
+      .mockResolvedValueOnce([] as never);
+
+    const recovered = await listSearchesNeedingScheduleRecovery(observedAt);
+
+    expect(recovered).toEqual([justEscalated]);
+    const criticalWhere = mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0]
+      ?.where;
+    expect(criticalWhere).toEqual(
+      expect.objectContaining({
+        OR: expect.arrayContaining([
+          {
+            AND: [
+              {
+                checkStatus: { in: ["QUEUED", "WAITING"] }
+              },
+              {
+                recheckRequestedAt: {
+                  gte: new Date("2026-08-11T20:23:01.000Z")
+                }
+              },
+              {
+                preferences: {
+                  some: {
+                    course: {
+                      supportIncident: {
+                        is: {
+                          escalatedAt: {
+                            gte: new Date("2026-08-11T20:23:01.000Z")
+                          },
+                          escalationDeadlineAt: { lte: observedAt },
+                          OR: [
+                            {
+                              status: "AUTO_INVESTIGATING",
+                              humanReviewReason: "AUTOMATION_STALLED"
+                            },
+                            {
+                              status: "NEEDS_HUMAN",
+                              humanReviewReason: { not: null }
+                            }
+                          ]
+                        },
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ])
+      })
+    );
+  });
+
+  it("prioritizes a just-escalated waiting search with an attached workflow", async () => {
+    const observedAt = new Date("2026-08-11T20:28:01.000Z");
+    const justEscalated = {
+      id: "search-waiting-escalated",
+      scheduleVersion: 6,
+      checkStatus: "WAITING",
+      workflowRunId: "workflow-sleeping",
+      nextCheckAt: new Date("2026-08-11T20:33:00.000Z"),
+      updatedAt: observedAt
+    };
+    mockedPrisma.teeSearch.findMany.mockClear();
+    mockedPrisma.teeSearch.findMany
+      .mockResolvedValueOnce([justEscalated] as never)
+      .mockResolvedValueOnce([] as never);
+
+    const recovered = await listSearchesNeedingScheduleRecovery(observedAt);
+
+    expect(recovered).toEqual([justEscalated]);
+    const criticalWhere = mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0]
+      ?.where;
+    expect(criticalWhere?.OR).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          AND: expect.arrayContaining([
+            {
+              checkStatus: { in: ["QUEUED", "WAITING"] }
+            }
+          ])
+        })
+      ])
+    );
   });
 });
 
@@ -1118,6 +1711,31 @@ describe("recordCourseProbeIfChanged", () => {
         data: expect.objectContaining({ runtimeVersion: "new-release" })
       })
     );
+  });
+
+  it("does not dedupe an unchanged success across an alert generation boundary", async () => {
+    const generationStartedAt = new Date("2026-08-11T20:00:00.000Z");
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue(null);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "NO_MATCH",
+      message: "Booking opens next week.",
+      runtimeVersion: "same-release",
+      observedAtOrAfter: generationStartedAt
+    });
+
+    expect(mockedPrisma.courseProbe.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          teeSearchId: "search-1",
+          courseId: "fairview-farm",
+          observedAt: { gte: generationStartedAt }
+        }
+      })
+    );
+    expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
   });
 
   it("records a changed policy reason", async () => {

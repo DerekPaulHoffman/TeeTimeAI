@@ -9,6 +9,7 @@ const dbMocks = vi.hoisted(() => ({
   isSearchCheckLeaseCurrent: vi.fn(),
   listAvailableMatchAlerts: vi.fn(),
   listPendingMatchAlerts: vi.fn(),
+  listSearchCourseVerdictsSince: vi.fn(),
   markCourseBookingWindowChecked: vi.fn(),
   markMatchAlertSent: vi.fn(),
   markMatchAlertSuppressed: vi.fn(),
@@ -87,6 +88,7 @@ const monitoringDiscoveryMocks = vi.hoisted(() => ({
 const courseMonitoringMocks = vi.hoisted(() => ({
   confirmCourseMonitoringTechnicalFinal: vi.fn(),
   getCourseMonitoringRetryAt: vi.fn(),
+  reconcileCourseMonitoringDeadlines: vi.fn(),
   recordCourseMonitoringFinalClassification: vi.fn(),
   recordCourseMonitoringPlaybookTransition: vi.fn(),
   recordCourseMonitoringSuccess: vi.fn()
@@ -122,6 +124,8 @@ vi.mock(
   () => monitoringDiscoveryMocks
 );
 vi.mock("@/lib/automation/course-monitoring", () => ({
+  ACTIVE_DEMAND_ESCALATION_MS: 30 * 60 * 1000,
+  CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS: 2 * 60 * 1000,
   FAILURE_CONFIRMATION_WINDOW_MS: 15 * 60 * 1000,
   FIRST_FAILURE_RETRY_MS: 2 * 60 * 1000,
   ...courseMonitoringMocks
@@ -139,9 +143,11 @@ import {
   type AutomationPlaybookEventInput,
   type AutomationPlaybookLedger
 } from "./course-monitoring-playbook";
+import { preserveAlertGenerationClockInStatusSnapshot } from "@/lib/searches/generation-clock";
 
 const search = {
   id: "search-1",
+  createdAt: new Date("2026-07-11T12:00:00.000Z"),
   date: new Date("2026-07-12T00:00:00.000Z"),
   startTime: "07:00",
   endTime: "10:00",
@@ -379,6 +385,11 @@ describe("runSearchCheck email cadence", () => {
           ? new Date(Date.now() + 2 * 60 * 1000)
           : null
     );
+    courseMonitoringMocks.reconcileCourseMonitoringDeadlines.mockResolvedValue({
+      checked: 0,
+      escalated: 0,
+      humanReviewIncidentIds: []
+    });
     courseMonitoringMocks.recordCourseMonitoringFinalClassification.mockResolvedValue(
       null
     );
@@ -391,6 +402,7 @@ describe("runSearchCheck email cadence", () => {
     dbMocks.heartbeatSearchCheckLease.mockResolvedValue(true);
     dbMocks.isSearchCheckLeaseCurrent.mockResolvedValue(true);
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({ ...search });
+    dbMocks.listSearchCourseVerdictsSince.mockResolvedValue([]);
     dbMocks.getCourseMonitoringPlaybookContext.mockResolvedValue(null);
     dbMocks.runWithSearchCheckLease.mockImplementation(
       async (_searchId, worker) => ({
@@ -2080,7 +2092,7 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("delivers recovery with a same-check match instead of a separate match email", async () => {
+  it("delivers a same-check recovery match once to every current recipient", async () => {
     const firstDegradedAt = new Date("2026-07-11T11:30:00.000Z");
     const monitoredCourse = {
       ...search.preferences[0].course,
@@ -2096,6 +2108,7 @@ describe("runSearchCheck email cadence", () => {
     };
     const degradedSearch = {
       ...search,
+      additionalEmails: ["friend@example.com"],
       statusEmailSentAt: new Date("2026-07-11T11:40:00.000Z"),
       preferences: [
         {
@@ -2166,22 +2179,48 @@ describe("runSearchCheck email cadence", () => {
         customerStatus: "RETRYING_AUTOMATICALLY"
       }
     ]);
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementationOnce(
+      async (input) => {
+        const deliveries = [];
+        for (const recipient of [
+          "player@resend.dev",
+          "friend@example.com"
+        ]) {
+          await input.send({
+            recipient,
+            idempotencyKey: `tee-search-delivery-${recipient}`,
+            payload: deliveryOutboxMocks.preparedPayload,
+            assertCurrentDelivery: vi.fn().mockResolvedValue(undefined)
+          });
+          deliveries.push({ id: `delivery-${recipient}`, status: "SENT" });
+        }
+        return deliveries;
+      }
+    );
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledOnce();
-    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: "recovery",
-        courses: [expect.objectContaining({ outcome: "MATCH_FOUND" })]
-      })
-    );
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledTimes(2);
+    expect(
+      emailMocks.sendSearchStatusEmail.mock.calls
+        .map(([input]) => input.to)
+        .sort()
+    ).toEqual(["friend@example.com", "player@resend.dev"]);
+    for (const [input] of emailMocks.sendSearchStatusEmail.mock.calls) {
+      expect(input).toEqual(
+        expect.objectContaining({
+          kind: "recovery",
+          courses: [expect.objectContaining({ outcome: "MATCH_FOUND" })]
+        })
+      );
+    }
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
     expect(
       deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
     ).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "MONITORING_RECOVERY",
+        recipients: ["player@resend.dev", "friend@example.com"],
         payload: expect.objectContaining({
           matchIds: ["match-1"],
           matchRefs: [{ matchId: "match-1", availabilityCycle: 0 }]
@@ -2476,12 +2515,11 @@ describe("runSearchCheck email cadence", () => {
         .invocationCallOrder[0]!
     );
     expect(
-      courseMonitoringMocks.recordCourseMonitoringSuccess.mock
-        .invocationCallOrder[0]
-    ).toBeLessThan(
-      supportIncidentMocks.resolveCourseSupportIncident.mock
-        .invocationCallOrder[0]!
-    );
+      courseMonitoringMocks.recordCourseMonitoringSuccess
+    ).toHaveBeenCalled();
+    expect(
+      supportIncidentMocks.resolveCourseSupportIncident
+    ).not.toHaveBeenCalled();
   });
 
   it("reports a completed reader challenge without returning to CHECK_PENDING", async () => {
@@ -2714,6 +2752,19 @@ describe("runSearchCheck email cadence", () => {
 
   it("applies independent factual proof before the human-review short circuit", async () => {
     const attemptLedger = buildIndependentFactualFinalPlaybook();
+    let freshCycleStatus = "NOT_OPEN";
+    courseMonitoringMocks.recordCourseMonitoringFinalClassification.mockImplementationOnce(
+      async () => {
+        freshCycleStatus = "AUTO_INVESTIGATING";
+        return null;
+      }
+    );
+    supportIncidentMocks.resolveCourseSupportIncident.mockImplementationOnce(
+      async () => {
+        freshCycleStatus = "RESOLVED";
+        return null;
+      }
+    );
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       preferences: [
@@ -2763,7 +2814,10 @@ describe("runSearchCheck email cadence", () => {
         outcome: "MANUAL_DIRECT"
       })
     );
-    expect(supportIncidentMocks.resolveCourseSupportIncident).toHaveBeenCalled();
+    expect(freshCycleStatus).toBe("AUTO_INVESTIGATING");
+    expect(
+      supportIncidentMocks.resolveCourseSupportIncident
+    ).not.toHaveBeenCalled();
   });
 
   it("uses only the local reader when the persisted monitoring mode requires it", async () => {
@@ -2842,6 +2896,87 @@ describe("runSearchCheck email cadence", () => {
     expect(result.courseResults[0]).toMatchObject({
       outcome: "CHECK_PENDING",
       message: expect.stringContaining("in progress")
+    });
+  });
+
+  it("does not reopen a reader-only job after its cycle advances to independent confirmation", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const playbook = installPlaybookPersistence(
+      buildPlaybookThroughBrowserRetry()
+    );
+    const buildReaderOnlySearch = () => ({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Reader Only Public Course",
+            isPublic: true,
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "BLOCKED",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            monitoringMode: "LOCAL_READER_ONLY",
+            intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+            intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+            intelligenceConfidence: 0.95,
+            policyNotes: null,
+            supportIncident: {
+              ...playbook.context(),
+              firstSeenAt: new Date("2026-07-11T12:00:00.000Z")
+            },
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "grassyhill",
+              bookingBaseUrl: "https://grassyhill.cps.golf/",
+              courseIds: [1]
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.getActiveSearchForAutomation.mockImplementation(async () =>
+      buildReaderOnlySearch()
+    );
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
+      "cps:grassyhill.cps.golf"
+    );
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "local-job-terminal",
+      status: "COMPLETED",
+      queueDisposition: "TERMINAL",
+      readerResultStatus: "PAGE_MISMATCH"
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const first = await runSearchCheck("search-1", "test");
+    expect(first.courseResults[0]).toMatchObject({ outcome: "FETCH_FAILED" });
+    expect(first.courseResults[0]?.outcome).not.toBe("CHECK_PENDING");
+    expect(assessAutomationPlaybook(playbook.getLedger(), 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "INDEPENDENT_CONFIRMATION"
+    });
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(new Date("2026-07-11T12:16:00.000Z"));
+    const second = await runSearchCheck("search-1", "test");
+
+    expect(second.courseResults[0]).toMatchObject({
+      outcome: "NEEDS_ADAPTER",
+      message: expect.stringContaining("independent signed-out confirmation")
+    });
+    expect(second.courseResults[0]?.outcome).not.toBe("CHECK_PENDING");
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledOnce();
+    expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledOnce();
+    expect(assessAutomationPlaybook(playbook.getLedger(), 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "INDEPENDENT_CONFIRMATION"
     });
   });
 
@@ -3221,7 +3356,7 @@ describe("runSearchCheck email cadence", () => {
   });
 
   it("opens a persistent operator incident for unsupported courses", async () => {
-    const createdAt = new Date("2026-07-11T12:09:30.000Z");
+    const createdAt = new Date("2026-07-11T12:04:00.000Z");
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       createdAt,
@@ -3245,7 +3380,8 @@ describe("runSearchCheck email cadence", () => {
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         searchId: "search-1",
-        kind: "NEEDS_ADAPTER"
+        kind: "NEEDS_ADAPTER",
+        episodeStartedAt: createdAt
       })
     );
     expect(result.courseResults[0]).toEqual(
@@ -3256,6 +3392,241 @@ describe("runSearchCheck email cadence", () => {
       })
     );
     expect(result.supportRetryNeeded).toBe(false);
+  });
+
+  it("anchors a delayed edited generation to its durable generation marker", async () => {
+    const generationStartedAt = new Date("2026-07-11T12:04:00.000Z");
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      alertGeneration: 3,
+      statusEmailSentAt: null,
+      statusEmailSnapshot: {
+        schemaVersion: 1,
+        kind: "ALERT_GENERATION_START",
+        alertGeneration: 3,
+        generationStartedAt: generationStartedAt.toISOString()
+      },
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null
+          }
+        }
+      ]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchId: "search-1",
+        kind: "NEEDS_ADAPTER",
+        episodeStartedAt: generationStartedAt
+      })
+    );
+  });
+
+  it("keeps generation zero anchored after unrecorded setup delivery", async () => {
+    const createdAt = new Date("2026-07-11T12:00:00.000Z");
+    const initialSearch = {
+      ...search,
+      createdAt,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue(initialSearch);
+    dbMocks.listSearchCourseVerdictsSince
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        {
+          courseId: "course-1",
+          outcome: "NEEDS_ADAPTER",
+          observedAt: new Date("2026-07-11T12:10:00.000Z")
+        }
+      ]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    const first = await runSearchCheck("search-1", "test");
+    const setupPayload = deliveryOutboxMocks.preparedPayload as {
+      statusSnapshot: unknown;
+    };
+    expect(first.statusEmailOutcome).toBe("sent");
+
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...initialSearch,
+      statusEmailSentAt: new Date("2026-07-11T12:10:00.000Z"),
+      statusEmailSnapshot: setupPayload.statusSnapshot
+    });
+    await runSearchCheck("search-1", "test");
+
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledTimes(
+      2
+    );
+    for (const [issue] of supportIncidentMocks.reportCourseSupportIssue.mock
+      .calls) {
+      expect(issue).toEqual(
+        expect.objectContaining({ episodeStartedAt: createdAt })
+      );
+    }
+  });
+
+  it("keeps an edited generation anchored after unrecorded setup delivery", async () => {
+    const generationStartedAt = new Date("2026-07-11T12:04:00.000Z");
+    const generationMarker = {
+      schemaVersion: 1,
+      kind: "ALERT_GENERATION_START",
+      alertGeneration: 3,
+      generationStartedAt: generationStartedAt.toISOString()
+    };
+    const initialSearch = {
+      ...search,
+      alertGeneration: 3,
+      statusEmailSentAt: null,
+      statusEmailSnapshot: generationMarker,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue(initialSearch);
+    dbMocks.listSearchCourseVerdictsSince
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        {
+          courseId: "course-1",
+          outcome: "NEEDS_ADAPTER",
+          observedAt: new Date("2026-07-11T12:10:00.000Z")
+        }
+      ]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    const first = await runSearchCheck("search-1", "test");
+    const setupPayload = deliveryOutboxMocks.preparedPayload as {
+      statusSnapshot: unknown;
+    };
+    expect(first.statusEmailOutcome).toBe("sent");
+    const persistedSnapshot = preserveAlertGenerationClockInStatusSnapshot({
+      alertGeneration: 3,
+      currentStatusEmailSnapshot: generationMarker,
+      courseSnapshot: setupPayload.statusSnapshot as never
+    });
+
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...initialSearch,
+      statusEmailSentAt: new Date("2026-07-11T12:10:00.000Z"),
+      statusEmailSnapshot: persistedSnapshot
+    });
+    await runSearchCheck("search-1", "test");
+
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledTimes(
+      2
+    );
+    for (const [issue] of supportIncidentMocks.reportCourseSupportIssue.mock
+      .calls) {
+      expect(issue).toEqual(
+        expect.objectContaining({ episodeStartedAt: generationStartedAt })
+      );
+    }
+  });
+
+  it("keeps an unrecorded post-success failure on its first failure timestamp", async () => {
+    const createdAt = new Date("2026-07-01T12:00:00.000Z");
+    const failureObservedAt = new Date("2026-07-11T12:10:00.000Z");
+    const retryObservedAt = new Date("2026-07-11T12:12:00.000Z");
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      createdAt,
+      statusEmailSentAt: new Date("2026-07-01T12:00:10.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null,
+            monitoringStatus: {
+              state: "HEALTHY",
+              firstDegradedAt: null,
+              failureFingerprint: null,
+              stateChangedAt: new Date("2026-07-01T12:00:05.000Z")
+            }
+          }
+        }
+      ]
+    });
+    dbMocks.listSearchCourseVerdictsSince
+      .mockResolvedValueOnce([
+        {
+          courseId: "course-1",
+          outcome: "NO_MATCH",
+          observedAt: new Date("2026-07-10T12:00:00.000Z"),
+          failureEpisodeStartedAt: null
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          courseId: "course-1",
+          outcome: "NEEDS_ADAPTER",
+          observedAt: failureObservedAt,
+          failureEpisodeStartedAt: failureObservedAt
+        }
+      ]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    });
+
+    await runSearchCheck("search-1", "test");
+    vi.setSystemTime(retryObservedAt);
+    await runSearchCheck("search-1", "test");
+
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledTimes(
+      2
+    );
+    for (const [issue] of supportIncidentMocks.reportCourseSupportIssue.mock
+      .calls) {
+      expect(issue).toEqual(
+        expect.objectContaining({
+          searchId: "search-1",
+          kind: "NEEDS_ADAPTER",
+          episodeStartedAt: failureObservedAt
+        })
+      );
+    }
   });
 
   it("runs a runnable public adapter despite legacy policy-only evidence", async () => {
@@ -3492,7 +3863,7 @@ describe("runSearchCheck email cadence", () => {
       deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
     ).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "MONITORING_OUTAGE",
+        kind: "MONITORING_STATUS_UPDATE",
         payload: expect.objectContaining({
           statusSnapshot: [
             expect.objectContaining({
@@ -3607,7 +3978,7 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("sends one human-review update at T+30 before watchdog persistence and dedupes the watchdog replay", async () => {
+  it("persists and sends one human-review status update at the endpoint deadline", async () => {
     const firstDegradedAt = new Date("2026-07-11T11:40:00.000Z");
     const escalationDeadlineAt = new Date("2026-07-11T12:10:00.000Z");
     const buildDeadlineSearch = (humanReviewReason: string | null) => ({
@@ -3626,7 +3997,9 @@ describe("runSearchCheck email cadence", () => {
             automationEligibility: "NEEDS_REVIEW",
             automationReason: "OTHER",
             monitoringStatus: {
-              state: "AUTO_INVESTIGATING",
+              state: humanReviewReason
+                ? "ENGINEERING_VERIFICATION_NEEDED"
+                : "AUTO_INVESTIGATING",
               firstDegradedAt,
               failureFingerprint: "FOREUP:UNKNOWN",
               nextAutomaticAttemptAt: null,
@@ -3639,6 +4012,7 @@ describe("runSearchCheck email cadence", () => {
               status: "AUTO_INVESTIGATING",
               attemptLedger: null,
               humanReviewReason,
+              escalatedAt: humanReviewReason ? escalationDeadlineAt : null,
               escalationDeadlineAt,
               firstSeenAt: firstDegradedAt
             },
@@ -3652,9 +4026,20 @@ describe("runSearchCheck email cadence", () => {
       ]
     });
 
-    dbMocks.getActiveSearchForAutomation.mockResolvedValue(
-      buildDeadlineSearch(null)
-    );
+    dbMocks.getActiveSearchForAutomation
+      .mockResolvedValueOnce(buildDeadlineSearch(null))
+      .mockResolvedValue(buildDeadlineSearch("AUTOMATION_STALLED"));
+    courseMonitoringMocks.reconcileCourseMonitoringDeadlines
+      .mockResolvedValueOnce({
+        checked: 1,
+        escalated: 0,
+        humanReviewIncidentIds: []
+      })
+      .mockResolvedValueOnce({
+        checked: 1,
+        escalated: 1,
+        humanReviewIncidentIds: []
+      });
     const first = await runSearchCheck("search-1", "test");
 
     expect(first.courseResults[0]).toMatchObject({
@@ -3665,7 +4050,7 @@ describe("runSearchCheck email cadence", () => {
     expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledTimes(1);
     expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "outage",
+        kind: "status-update",
         courses: [
           expect.objectContaining({
             supportStatus: "NEEDS_HUMAN_REVIEW"
@@ -3689,6 +4074,11 @@ describe("runSearchCheck email cadence", () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue(
       buildDeadlineSearch("AUTOMATION_STALLED")
     );
+    courseMonitoringMocks.reconcileCourseMonitoringDeadlines.mockResolvedValue({
+      checked: 0,
+      escalated: 0,
+      humanReviewIncidentIds: []
+    });
 
     const replay = await runSearchCheck("search-1", "test");
     expect(replay.courseResults[0]).toMatchObject({
@@ -3732,9 +4122,14 @@ describe("runSearchCheck email cadence", () => {
       phone: undefined,
       bookingAccess: undefined
     });
-    expect(supportIncidentMocks.resolveCourseSupportIncident).toHaveBeenCalledWith(
-      expect.objectContaining({ resolution: "IDENTITY_CLASSIFIED" })
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringFinalClassification
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "FINAL_IDENTITY" })
     );
+    expect(
+      supportIncidentMocks.resolveCourseSupportIncident
+    ).not.toHaveBeenCalled();
   });
 
   it("keeps an expired private identity paused without closing its support incident", async () => {
@@ -4117,6 +4512,114 @@ describe("runSearchCheck email cadence", () => {
     });
   });
 
+  it("keeps an edited generation fresh through unchanged booking-window success and later failure", async () => {
+    const generationStartedAt = new Date("2026-07-11T12:04:00.000Z");
+    const failureObservedAt = new Date("2026-07-11T12:12:00.000Z");
+    const generationMarker = {
+      schemaVersion: 1,
+      kind: "ALERT_GENERATION_START",
+      alertGeneration: 3,
+      generationStartedAt: generationStartedAt.toISOString()
+    };
+    const bookingWindowCourse = {
+      ...search.preferences[0].course,
+      name: "Weekend Golf Course",
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/123#/teetimes",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      policyNotes: null,
+      bookingMetadata: {
+        scheduleId: 123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/123#/teetimes"
+      },
+      bookingWindowDaysAhead: 14,
+      bookingReleaseTimeLocal: "05:00",
+      bookingWindowSource: "PROVIDER_CONFIG",
+      bookingWindowConfidence: 1,
+      bookingWindowEvidenceUrl:
+        "https://foreupsoftware.com/index.php/booking/123#/teetimes",
+      bookingWindowCheckedAt: new Date("2026-07-10T12:00:00.000Z"),
+      bookingWindowObservedAt: new Date("2026-07-10T12:00:00.000Z")
+    };
+    const editedSearch = {
+      ...search,
+      alertGeneration: 3,
+      statusEmailSnapshot: generationMarker,
+      date: new Date("2026-07-29T00:00:00.000Z"),
+      preferences: [{ rank: 1, course: bookingWindowCourse }]
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue(editedSearch);
+    dbMocks.listSearchCourseVerdictsSince
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          courseId: "course-1",
+          outcome: "NO_MATCH",
+          observedAt: new Date("2026-07-11T12:10:00.000Z"),
+          failureEpisodeStartedAt: null
+        }
+      ]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        observedAtOrAfter: generationStartedAt
+      })
+    );
+
+    const persistedSnapshot = preserveAlertGenerationClockInStatusSnapshot({
+      alertGeneration: 3,
+      currentStatusEmailSnapshot: generationMarker,
+      courseSnapshot: []
+    });
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...editedSearch,
+      statusEmailSentAt: new Date("2026-07-11T12:10:00.000Z"),
+      statusEmailSnapshot: persistedSnapshot,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...bookingWindowCourse,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "UNKNOWN",
+            detectedBookingUrl: null,
+            automationEligibility: "UNKNOWN",
+            policyNotes: null,
+            bookingMetadata: null,
+            bookingWindowDaysAhead: null,
+            bookingReleaseTimeLocal: null,
+            bookingWindowSource: null,
+            bookingWindowConfidence: null,
+            bookingWindowEvidenceUrl: null,
+            bookingWindowCheckedAt: null,
+            bookingWindowObservedAt: null
+          }
+        }
+      ]
+    });
+    vi.setSystemTime(failureObservedAt);
+
+    await runSearchCheck("search-1", "test");
+
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        course: expect.objectContaining({ id: "course-1" }),
+        episodeStartedAt: failureObservedAt,
+        kind: "NEEDS_ADAPTER"
+      })
+    );
+  });
+
   it("passes a stored official rule page to ForeUP when refreshing booking-window evidence", async () => {
     const evidenceUrl =
       "https://www.tashuaknolls.com/tee-times-fees/reservations/";
@@ -4217,14 +4720,15 @@ describe("runSearchCheck email cadence", () => {
         bookableHoleCounts: [9, 18]
       })
     );
-    expect(
-      supportIncidentMocks.resolveCourseSupportIncident
-    ).toHaveBeenCalledWith(
+    expect(courseMonitoringMocks.recordCourseMonitoringSuccess).toHaveBeenCalledWith(
       expect.objectContaining({
         courseId: "blue-rock",
-        resolution: "MONITORING_RESTORED"
+        outcome: "NO_MATCH"
       })
     );
+    expect(
+      supportIncidentMocks.resolveCourseSupportIncident
+    ).not.toHaveBeenCalled();
   });
 
   it("persists a booking window and ignores provider-visible slots until public release", async () => {

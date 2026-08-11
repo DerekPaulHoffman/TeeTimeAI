@@ -4103,6 +4103,83 @@ describe("search email delivery outbox", () => {
     );
   });
 
+  it("retains the edited-generation clock while finalizing setup", async () => {
+    const generationStartedAt = "2026-07-15T14:50:00.000Z";
+    const statusSnapshot = [
+      {
+        courseId: "course-1",
+        courseName: "Course",
+        state: "NEEDS_ADAPTER:ACTIONABLE:IN_OPERATOR_QUEUE:NONE"
+      }
+    ];
+    const setupPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      statusSnapshot,
+      statusReport: {
+        kind: "setup",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        userTimeZone: "America/New_York",
+        courses: []
+      }
+    };
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      {
+        ...currentSearch,
+        statusEmailSnapshot: {
+          schemaVersion: 1,
+          kind: "ALERT_GENERATION_START",
+          alertGeneration: 3,
+          generationStartedAt
+        }
+      }
+    ] as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      delivery("delivery-1", "owner@example.com", {
+        kind: "SETUP",
+        groupKey: "setup-group",
+        payload: setupPayload,
+        status: "SENT",
+        sentAt: now
+      }),
+      delivery("delivery-2", "friend@example.com", {
+        kind: "SETUP",
+        groupKey: "setup-group",
+        payload: setupPayload,
+        status: "SUPPRESSED",
+        sentAt: now
+      })
+    ] as never);
+
+    await expect(
+      finalizeSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        kind: "SETUP",
+        groupKey: "setup-group"
+      })
+    ).resolves.toEqual(
+      expect.objectContaining({ finalized: true, ownerSent: true })
+    );
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          statusEmailSentAt: now,
+          statusEmailSnapshot: {
+            schemaVersion: 1,
+            kind: "ALERT_GENERATION_STATUS",
+            alertGeneration: 3,
+            generationStartedAt,
+            courseSnapshot: statusSnapshot
+          }
+        }
+      })
+    );
+  });
+
   it("rejects URLs and secret-bearing keys in durable payloads", () => {
     expect(() =>
       assertSafeSearchEmailPayload({

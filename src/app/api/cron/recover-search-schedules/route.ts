@@ -1,5 +1,6 @@
 import { listSearchesNeedingScheduleRecovery } from "@/lib/automation/db-service";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
+import { consumeSearchScheduleQueueMessage } from "@/lib/automation/search-schedule-consumer";
 import { recoverDueCourseSupportVerificationRequests } from "@/lib/automation/course-support-verification-scheduler";
 import { checkAutomationWorkerHealth } from "@/lib/automation/worker-state";
 import {
@@ -62,9 +63,45 @@ export async function GET(request: Request) {
   // Reconcile course deadlines before selecting due searches. A search waking
   // at the thirty-minute boundary must see the human-review customer state,
   // not race ahead with an obsolete automatic-retry notice.
-  const searches = await listSearchesNeedingScheduleRecovery();
+  const recoveryObservedAt = new Date();
+  const searches = await listSearchesNeedingScheduleRecovery(
+    recoveryObservedAt
+  );
   const results = await Promise.allSettled(
-    searches.map((search) => startSearchSchedule(search.id))
+    searches.map((search) => {
+      if (
+        search.checkStatus === "QUEUED" &&
+        search.workflowRunId === null
+      ) {
+        return consumeSearchScheduleQueueMessage({
+          searchId: search.id,
+          scheduleVersion: search.scheduleVersion,
+          trigger: "START_FAILED"
+        });
+      }
+      if (
+        search.checkStatus === "WAITING" ||
+        search.checkStatus === "QUEUED"
+      ) {
+        return startSearchSchedule(search.id, {
+          expectedState: {
+            scheduleVersion: search.scheduleVersion,
+            updatedAt: search.updatedAt,
+            observedAt: recoveryObservedAt,
+            checkStatus: search.checkStatus,
+            workflowRunId: search.workflowRunId,
+            ...("endpointRecoveryDispatchKey" in search &&
+            search.endpointRecoveryDispatchKey
+              ? {
+                  recoveryDispatchKey:
+                    search.endpointRecoveryDispatchKey
+                }
+              : {})
+          }
+        });
+      }
+      return startSearchSchedule(search.id);
+    })
   );
 
   let courseSupportVerification = {

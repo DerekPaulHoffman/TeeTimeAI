@@ -11,7 +11,7 @@ The course-support responder is the dedicated engineering path for persistent `N
 - The bounded product-improvement loop remains in `C:\dev\TeeTimeAI-automation`. It must not use the dispatch checkout or select course-support incidents.
 - A due batch contains one provider family and one failure fingerprint. The default claim is 5 courses; the command clamps all requests to 1 through 20.
 - Batches prioritize near-date active real-demand fetch failures, then other active real demand, then historical non-engineering incidents whose searches have ended, then engineering-only synthetic coverage. Aged engineering-only evidence receives bounded fairness when no critical real demand is waiting.
-- Every 10-minute run prioritizes an expired owned recovery before unrelated due work, then may coordinate up to three unrelated provider/fingerprint groups. Each claim remains bounded to no more than five courses by default. Genuine provider/path conflicts remain serialized; unrelated groups may proceed together.
+- Every 10-minute run prioritizes an expired owned recovery before unrelated due work, then may coordinate up to three unrelated provider/fingerprint groups. When inspection reports `recoveryContinuation.reinspectAfterRecovery=true`, finish the one authorized recovery, inspect once more, and use remaining capacity for the highest-priority unrelated due group; recovery must not consume the only scheduled opportunity while safe capacity remains. Each claim remains bounded to no more than five courses by default. Genuine provider/path conflicts remain serialized; unrelated groups may proceed together.
 - Each task records its provider group and bounded course ordinals at claim time and must end with a durable batch closeout (`success`, `classification_only`, `partial`, `retryable_failed`, or `needs_human`) or one concrete visible blocker. Passing local tests is not a closeout: when production still cannot produce trustworthy evidence, the task records the observed provider failure, performs the best safe reusable fix or terminal classification available, and persists the exact next attempt or engineering action.
 - The broad product-improvement loop uses an independent writer lane and may proceed while a responder batch is active or requires recovery. Responder state remains informational there, and course-support incidents are never portfolio candidates for that loop.
 
@@ -28,7 +28,9 @@ Every new or materially changed course uses this exact stage order. A skipped st
 5. `RENDERED_BROWSER_DISCOVERY`: use ordinary Playwright discovery only when HTTP remains inconclusive. It may execute normal page JavaScript and wait passively for a bounded period.
 6. `BROWSER_ADAPTER_RETRY`: retry the typed adapter with metadata learned from the rendered official page.
 7. `LOCAL_READER`: queue the signed local Chrome reader only as the last automatic read path and only when a safe compatible capability exists.
-8. `INDEPENDENT_CONFIRMATION`: independently confirm the successful monitoring result, factual result, or technical observation before closeout.
+8. `INDEPENDENT_CONFIRMATION`: when no prior path returned a successful availability read, independently confirm the factual result, technical observation, or remaining inconclusive state before closeout.
+
+A fresh signed `LOCAL_READER` result that successfully returns the requested tee sheet, including a truthful zero-slot result, is direct current monitoring proof and may restore monitoring without another browser read. This is the same bounded success short-circuit used by an earlier runnable adapter. `NOT_APPLICABLE`, `PAGE_MISMATCH`, `READER_ERROR`, and terminal access-control results are not monitoring proof: they leave `INDEPENDENT_CONFIRMATION` pending for the responder's persisted ordinary browser stage. The detached verifier must never mark that stage `NOT_APPLICABLE` merely because the reader did not provide a technical reason.
 
 The timing contract is measured from alert creation or a material-change revalidation:
 
@@ -121,7 +123,7 @@ Every new `CourseProbe` records `runtimeVersion`, normally the deployed Git comm
 - its `runtimeVersion` exactly matches the claimed release SHA; and
 - its outcome is `MATCH_FOUND` or `NO_MATCH`.
 
-When an incident no longer has any active future search for its course, the five-minute deployed recovery cron may run one standalone `CourseSupportVerificationRequest` for the claimed release. Each request has a durable 35-minute deadline, including the full ordered-playbook margin. Success within that window is consumed as release proof; a later unrelated transient failure is recorded as a new monitoring event instead of reopening the completed release verification. A retry that cannot start before the deadline becomes stale and the batch closes with a precise retryable outcome instead of waiting indefinitely. This covers both engineering-only synthetic provenance and historical real-demand incidents after their golfer searches end; `engineeringOnly` remains unchanged so notification and provenance history stay accurate. This is not a synthetic customer search: the verification request stores no user, recipient, search, match, slot, booking URL, or delivery payload, and the detached path cannot create customer-scoped rows or send email. Provider discovery may still update reusable canonical course metadata and append source-backed discovery evidence, including an official booking URL. It uses the same shared provider dispatcher and provider-family lease with one player and a bounded course-local daylight window. The request rechecks exact release/runtime ownership, incident state, current active demand, and the provider snapshot before discovery, before adapter I/O, at completion, and again when proof is consumed. Any active future course/search pair invalidates detached proof so the normal golfer Workflow remains authoritative.
+The five-minute deployed recovery cron may run one standalone `CourseSupportVerificationRequest` for a claimed release. With active golfer demand, that responder-owned request may continue the ordered background playbook, persist learned provider metadata, and reach the browser, adapter-retry, reader, and confirmation stages while customer state remains manual review. It cannot by itself prove restored customer monitoring: any active future course/search pair invalidates detached success proof so the normal golfer Workflow remains authoritative. When no active future pair exists, exact-release success within the request window may be consumed as reusable release proof. Each request has a durable 35-minute deadline, including the full ordered-playbook margin. A later unrelated transient failure is recorded as a new monitoring event instead of reopening completed release verification, and a retry that cannot start before the deadline becomes stale rather than waiting indefinitely. This covers active responder progression, engineering-only synthetic provenance, and historical real-demand incidents after their golfer searches end; `engineeringOnly` remains unchanged so notification and provenance history stay accurate. This is not a synthetic customer search: the verification request stores no user, recipient, search, match, slot, booking URL, or delivery payload, and the detached path cannot create customer-scoped rows or send email. Provider discovery may still update reusable canonical course metadata and append source-backed discovery evidence, including an official booking URL. It uses the same shared provider dispatcher and provider-family lease with one player and a bounded course-local daylight window. The request rechecks exact release/runtime ownership, incident state, current active demand, and the provider snapshot before discovery, before adapter I/O, at completion, and again when proof is consumed.
 
 Detached success is accepted only for an exact-release `MATCH_FOUND` or `NO_MATCH` with `providerExecution=true`, a safe provider response, an unchanged provider fingerprint, and evidence newer than deployment, dispatch, and the incident's newest failure. It proves reusable provider readiness only; it never means a golfer received an alert. Unsupported metadata, account/CAPTCHA/queue barriers, unsafe booking destinations, and provider failures remain honest non-success evidence.
 
@@ -208,6 +210,24 @@ npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status 
 # create an AutomationRun or persist discovery, course, incident, or probe data.
 npm run automation:browser-probe -- --dry-run --trace-json --course-name "<exact course name>" --limit 1
 
+The dry run is diagnosis only and never satisfies a playbook stage. For a
+claimed batch, `automation:course-support -- verify` finds only the caller's
+owned browser-ready ordinals and repeats the ordinary signed-out browser read
+without `--dry-run` before it classifies evidence. That persisted read may
+complete `RENDERED_BROWSER_DISCOVERY` or, after a terminal reader result,
+`INDEPENDENT_CONFIRMATION`. Do not substitute a dry-run trace for either
+transition. The claimed-batch browser run persists reusable course discovery
+and ledger evidence only: it does not write a search-scoped `CourseProbe` or
+apply a terminal monitoring/incident state. Guarded batch verification and
+closeout own those decisions so a newer golfer Workflow result cannot be
+overwritten.
+
+Direct `automation:browser-probe` invocation is diagnostic-only and rejects
+calls without `--dry-run`. Persisted browser progression must run through the
+owned `automation:course-support -- verify` batch so discovery, course updates,
+and ledger transitions share the exact lease, release, incident cycle, and
+inside-transaction ownership fence.
+
 # Gate a classification-only release on the expected pre-mutation result.
 npm run automation:browser-probe -- --dry-run --trace-json --course-name "<exact course name>" --limit 1 --expect-disposition MANUAL_FINAL
 
@@ -224,7 +244,12 @@ npm run deployment:wait -- --sha <git-sha>
 npm run automation:course-support -- verify --batch-ref <batch-ref> --release-sha <git-sha> --deployed-at <iso-timestamp>
 
 # If detachedVerification.rerunNeeded is true, heartbeat, wait for the deployed
-# recovery cron, and rerun verify before closeout.
+# recovery cron, and rerun verify before closeout. Active golfer demand does not
+# cancel this responder-owned progression: the customer remains in manual review
+# while the background request performs the learned-metadata adapter retry,
+# queues the local reader only after browser completion, and later requests the
+# independent browser confirmation. A fresh golfer Workflow result is still
+# required before restored monitoring is reported.
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING
 npm run automation:course-support -- verify --batch-ref <batch-ref>
 

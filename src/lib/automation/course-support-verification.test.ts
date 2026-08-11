@@ -543,7 +543,7 @@ describe("course-support verification scheduling", () => {
     });
   });
 
-  it("does not schedule an engineering request while any active future pair exists", async () => {
+  it("schedules responder playbook progression while active demand remains customer-visible", async () => {
     const localTransition = new Date("2026-07-21T02:00:00.000Z");
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
@@ -569,12 +569,17 @@ describe("course-support verification scheduling", () => {
         now: localTransition
       })
     ).resolves.toEqual({
-      createdCount: 0,
-      eligibleCount: 0,
-      ineligibleCount: 1,
+      createdCount: 1,
+      eligibleCount: 1,
+      ineligibleCount: 0,
       requests: []
     });
-    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.requestCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ courseId: "course-1" })]
+      })
+    );
+    expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
     expect(prismaMocks.activeSearchCount).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
@@ -975,7 +980,7 @@ describe("course-support verification execution fencing", () => {
     );
   });
 
-  it("invalidates a queued request when active demand appears before claim", async () => {
+  it("claims queued responder progression even when active demand still exists", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
       request({
         runtimeVersion: null,
@@ -995,13 +1000,17 @@ describe("course-support verification execution fencing", () => {
         runtimeVersion: releaseSha,
         now
       })
-    ).resolves.toEqual({ claimed: false, reason: "active_demand" });
+    ).resolves.toMatchObject({
+      claimed: true,
+      revision: 1,
+      runtimeVersion: releaseSha
+    });
     expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          status: "STALE",
-          leaseToken: null,
-          nextAttemptAt: null
+          status: "CHECKING",
+          runtimeVersion: releaseSha,
+          attemptCount: { increment: 1 }
         })
       })
     );
@@ -1713,7 +1722,7 @@ describe("course-support verification terminal evidence", () => {
     );
   });
 
-  it("turns a failure stale instead of retrying after real demand appears", async () => {
+  it("keeps responder playbook retries active after real demand appears", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(request());
     prismaMocks.activeSearchCount.mockResolvedValue(1);
 
@@ -1730,8 +1739,8 @@ describe("course-support verification terminal evidence", () => {
       })
     ).resolves.toMatchObject({
       failed: true,
-      status: "STALE",
-      nextAttemptAt: null
+      status: "RETRYABLE_FAILED",
+      nextAttemptAt: new Date("2026-07-21T12:30:00.000Z")
     });
   });
 

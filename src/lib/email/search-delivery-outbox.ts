@@ -9,6 +9,7 @@ import {
 
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { prisma } from "@/lib/prisma";
+import { preserveAlertGenerationClockInStatusSnapshot } from "@/lib/searches/generation-clock";
 import {
   EmailDeliveryNotAcceptedError,
   type TeeTimeAlertInput
@@ -97,6 +98,7 @@ type LockedSearch = {
   userId: string;
   status: string;
   alertGeneration: number;
+  statusEmailSnapshot: unknown;
   checkLeaseToken: string | null;
   checkLeaseExpiresAt: Date | null;
   alertEmail: string | null;
@@ -1131,7 +1133,11 @@ async function applyOwnerDeliveryOutcome(
       where: { id: input.searchId, alertGeneration: input.alertGeneration },
       data: {
         statusEmailSentAt: sentAt,
-        statusEmailSnapshot: payload.statusSnapshot
+        statusEmailSnapshot: preserveAlertGenerationClockInStatusSnapshot({
+          alertGeneration: input.alertGeneration,
+          currentStatusEmailSnapshot: search.statusEmailSnapshot,
+          courseSnapshot: payload.statusSnapshot as Prisma.InputJsonValue
+        })
       }
     });
   } else if (
@@ -3779,6 +3785,7 @@ async function lockSearchRow(
       search."userId",
       search."status"::text AS "status",
       search."alertGeneration",
+      search."statusEmailSnapshot",
       search."checkLeaseToken",
       search."checkLeaseExpiresAt",
       search."alertEmail",

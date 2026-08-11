@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import type {
   AutomationReason,
   BookingMethod,
+  CourseMonitoringState,
   CourseSupportBatchIncidentResult,
   CourseSupportBatchStatus,
   CourseSupportFailureClass,
@@ -50,10 +51,10 @@ import {
   type ResponderFailureDomain,
   type ResponderOutcome
 } from "./course-support-responder-policy";
-import { resolveCourseSupportIncident } from "./support-incidents";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 import {
+  compareCourseSupportGroupPriority,
   isCriticalRealDemand,
   selectCourseSupportBatch,
   type CourseSupportCandidate,
@@ -152,7 +153,14 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,
   intelligenceConfidence: true,
-  bookingMetadata: true
+  bookingMetadata: true,
+  monitoringStatus: {
+    select: {
+      state: true,
+      lastSuccessfulAt: true,
+      revision: true
+    }
+  }
 } satisfies Prisma.CourseSelect;
 const DETACHED_VERIFICATION_REQUEST_STATE_SELECT = {
   batchIncidentId: true,
@@ -1173,6 +1181,8 @@ export async function inspectCourseSupportQueue(input?: {
         providerFamilyKey: true,
         failureFingerprint: true,
         engineeringOnly: true,
+        escalationDeadlineAt: true,
+        firstSeenAt: true,
         course: {
           select: {
             timeZone: true,
@@ -1278,10 +1288,23 @@ export async function inspectCourseSupportQueue(input?: {
           const current = groups.get(key) ?? {
             providerFamilyKey: item.incident.providerFamilyKey,
             activeRealDemandCount: 0,
-            courseCount: 0
+            courseCount: 0,
+            earliestEscalationDeadlineAt: null as Date | null,
+            firstSeenAt: item.incident.firstSeenAt ?? now
           };
           current.activeRealDemandCount += item.activeRealSearchCount;
           current.courseCount += 1;
+          if (item.activeRealSearchCount > 0 && item.incident.escalationDeadlineAt) {
+            current.earliestEscalationDeadlineAt = new Date(
+              Math.min(
+                current.earliestEscalationDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER,
+                item.incident.escalationDeadlineAt.getTime()
+              )
+            );
+          }
+          if (item.incident.firstSeenAt < current.firstSeenAt) {
+            current.firstSeenAt = item.incident.firstSeenAt;
+          }
           groups.set(key, current);
           return groups;
         },
@@ -1291,17 +1314,22 @@ export async function inspectCourseSupportQueue(input?: {
             providerFamilyKey: string;
             activeRealDemandCount: number;
             courseCount: number;
+            earliestEscalationDeadlineAt: Date | null;
+            firstSeenAt: Date;
           }
         >()
       )
       .values()
   ]
-    .sort(
-      (left, right) =>
-        right.activeRealDemandCount - left.activeRealDemandCount ||
+    .sort((left, right) => {
+      const priorityOrder = compareCourseSupportGroupPriority(left, right);
+      return (
+        priorityOrder ||
         right.courseCount - left.courseCount ||
+        left.firstSeenAt.getTime() - right.firstSeenAt.getTime() ||
         left.providerFamilyKey.localeCompare(right.providerFamilyKey)
-    )
+      );
+    })
     .slice(0, 3)
     .map((group, index) => ({
       ordinal: index + 1,
@@ -1363,6 +1391,18 @@ export async function inspectCourseSupportQueue(input?: {
       globalProviderRequestLimit: 2,
       perProviderFamilyRequestLimit: 1,
       groups: readOnlyDispatchGroups
+    },
+    recoveryContinuation: {
+      reinspectAfterRecovery: Boolean(
+        expiredBatch &&
+          availableDueIncidents.length > 0 &&
+          activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES
+      ),
+      dueIncidentCount: availableDueIncidents.length,
+      availableWriterSlots: Math.max(
+        0,
+        MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length
+      )
     },
     ownedByCurrentTask,
     activeWriter: activeBatch
@@ -1608,10 +1648,17 @@ export async function claimCourseSupportBatch(input: {
           },
           select: {
             id: true,
+            cycle: true,
+            revision: true,
+            status: true,
+            activeBatchId: true,
             engineeringOnly: true,
             course: {
               select: {
                 timeZone: true,
+                monitoringStatus: {
+                  select: { state: true }
+                },
                 preferences: {
                   where: {
                     teeSearch: {
@@ -1651,6 +1698,50 @@ export async function claimCourseSupportBatch(input: {
           ) {
             throw new Error("Course-support demand changed during claim; rerun selection.");
           }
+        }
+        let reconciledAuthoritativeFinalCount = 0;
+        for (const incident of selected.incidents) {
+          const current = currentIncidentById.get(incident.id);
+          if (!current) {
+            throw new Error("Course-support demand changed during claim; rerun selection.");
+          }
+          const finalState = current.course.monitoringStatus?.state;
+          if (finalState !== "FINAL_MANUAL" && finalState !== "FINAL_IDENTITY") {
+            continue;
+          }
+          const reconciled = await tx.courseSupportIncident.updateMany({
+            where: {
+              id: current.id,
+              cycle: current.cycle,
+              revision: current.revision,
+              status: "AUTO_INVESTIGATING",
+              activeBatchId: null
+            },
+            data: {
+              status: "RESOLVED",
+              resolvedAt: now,
+              resolution:
+                finalState === "FINAL_IDENTITY"
+                  ? "IDENTITY_CLASSIFIED"
+                  : "DIRECT_BOOKING_CLASSIFIED",
+              resolutionMessage:
+                "Current authoritative monitoring state already records the factual final classification.",
+              nextAction: null,
+              nextAttemptAt: null,
+              nextReminderAt: null,
+              lastSeenAt: now,
+              revision: { increment: 1 }
+            }
+          });
+          if (reconciled.count !== 1) {
+            throw new Error(
+              "Course-support factual finality changed during claim; rerun selection."
+            );
+          }
+          reconciledAuthoritativeFinalCount += 1;
+        }
+        if (reconciledAuthoritativeFinalCount > 0) {
+          return { reconciledAuthoritativeFinalCount };
         }
         if (input.retryOrdinal !== undefined) {
           const outsideDueFetchFailures = await tx.courseSupportIncident.findMany({
@@ -1876,6 +1967,19 @@ export async function claimCourseSupportBatch(input: {
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
     );
+
+    if ("reconciledAuthoritativeFinalCount" in created) {
+      return {
+        outcome: "no_due_work" as const,
+        durableCloseoutRecorded: true,
+        reconciledAuthoritativeFinalCount:
+          created.reconciledAuthoritativeFinalCount,
+        ...getResponderThreadPolicy({
+          outcome: "no_due_work",
+          durableCloseoutRecorded: true
+        })
+      };
+    }
 
     return {
       outcome: "ready" as const,
@@ -3616,6 +3720,70 @@ export async function closeoutCourseSupportBatch(input: {
   await runCourseSupportSerializableTransactionWithRetry(
     async (tx) => {
       const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
+      const persistCourseMonitoringCloseout = async (input: {
+        courseId: string;
+        snapshot:
+          | {
+              state: CourseMonitoringState;
+              lastSuccessfulAt: Date | null;
+              revision: number;
+            }
+          | null
+          | undefined;
+        targetState: CourseMonitoringState;
+        data: Prisma.CourseMonitoringStatusUpdateManyMutationInput;
+      }) => {
+        if (!courseMonitoringAvailable || !input.snapshot) {
+          return false;
+        }
+        const snapshotIsAuthoritative =
+          input.snapshot.state === "HEALTHY" ||
+          input.snapshot.state === "FINAL_MANUAL" ||
+          input.snapshot.state === "FINAL_IDENTITY" ||
+          input.snapshot.state === "FINAL_TECHNICAL";
+        if (snapshotIsAuthoritative) {
+          if (input.snapshot.state === input.targetState) {
+            // Lock and CAS the unchanged authoritative row so a newer search
+            // observation cannot be hidden by the batch's stale snapshot.
+            const monitoringAsserted =
+              await tx.courseMonitoringStatus.updateMany({
+                where: {
+                  courseId: input.courseId,
+                  state: input.snapshot.state,
+                  revision: input.snapshot.revision,
+                  lastSuccessfulAt: input.snapshot.lastSuccessfulAt
+                },
+                data: {
+                  revision: { increment: 0 }
+                }
+              });
+            if (monitoringAsserted.count !== 1) {
+              throw new Error(
+                "Course monitoring changed during responder closeout; reverify before closing the batch."
+              );
+            }
+            return false;
+          }
+          throw new Error(
+            "Course monitoring reached a newer authoritative state during responder closeout; reverify before closing the batch."
+          );
+        }
+        const monitoringUpdated = await tx.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: input.courseId,
+            state: input.snapshot.state,
+            revision: input.snapshot.revision,
+            lastSuccessfulAt: input.snapshot.lastSuccessfulAt
+          },
+          data: input.data
+        });
+        if (monitoringUpdated.count !== 1) {
+          throw new Error(
+            "Course monitoring changed during responder closeout; reverify before closing the batch."
+          );
+        }
+        return true;
+      };
       const detachedRequestStates = batch.releaseSha
         ? await tx.courseSupportVerificationRequest.findMany({
             where: {
@@ -3724,10 +3892,11 @@ export async function closeoutCourseSupportBatch(input: {
               revision: { increment: 1 }
             }
           });
-          if (courseMonitoringAvailable) {
-            await tx.courseMonitoringStatus.updateMany({
-              where: { courseId: entry.courseId },
-              data: {
+          const monitoringUpdated = await persistCourseMonitoringCloseout({
+            courseId: entry.courseId,
+            snapshot: entry.course.monitoringStatus,
+            targetState: "HEALTHY",
+            data: {
                 state: "HEALTHY",
                 lastSuccessfulAt: now,
                 consecutiveFailures: 0,
@@ -3737,8 +3906,9 @@ export async function closeoutCourseSupportBatch(input: {
                 revalidationRequestedAt: null,
                 stateChangedAt: now,
                 revision: { increment: 1 }
-              }
-            });
+            }
+          });
+          if (monitoringUpdated) {
             await tx.courseMonitoringEvent.create({
               data: {
                 courseId: entry.courseId,
@@ -3792,10 +3962,11 @@ export async function closeoutCourseSupportBatch(input: {
               revision: { increment: 1 }
             }
           });
-          if (courseMonitoringAvailable) {
-            await tx.courseMonitoringStatus.updateMany({
-              where: { courseId: entry.courseId },
-              data: {
+          const monitoringUpdated = await persistCourseMonitoringCloseout({
+            courseId: entry.courseId,
+            snapshot: entry.course.monitoringStatus,
+            targetState: finalMonitoringState,
+            data: {
                 state: finalMonitoringState,
                 consecutiveFailures: 0,
                 failureFingerprint: null,
@@ -3804,8 +3975,9 @@ export async function closeoutCourseSupportBatch(input: {
                 revalidationRequestedAt: null,
                 stateChangedAt: now,
                 revision: { increment: 1 }
-              }
-            });
+            }
+          });
+          if (monitoringUpdated) {
             await tx.courseMonitoringEvent.create({
               data: {
                 courseId: entry.courseId,
@@ -3860,17 +4032,19 @@ export async function closeoutCourseSupportBatch(input: {
               revision: { increment: 1 }
             }
           });
-          if (courseMonitoringAvailable) {
-            await tx.courseMonitoringStatus.updateMany({
-              where: { courseId: entry.courseId },
-              data: {
+          const monitoringUpdated = await persistCourseMonitoringCloseout({
+            courseId: entry.courseId,
+            snapshot: entry.course.monitoringStatus,
+            targetState: "ENGINEERING_VERIFICATION_NEEDED",
+            data: {
                 state: "ENGINEERING_VERIFICATION_NEEDED",
                 nextAutomaticAttemptAt: humanRetryAt,
                 revalidationRequestedAt: null,
                 stateChangedAt: now,
                 revision: { increment: 1 }
-              }
-            });
+            }
+          });
+          if (monitoringUpdated) {
             await tx.courseMonitoringEvent.create({
               data: {
                 courseId: entry.courseId,
@@ -3943,17 +4117,17 @@ export async function closeoutCourseSupportBatch(input: {
               revision: { increment: 1 }
             }
           });
-          if (courseMonitoringAvailable) {
-            await tx.courseMonitoringStatus.updateMany({
-              where: { courseId: entry.courseId },
-              data: {
+          await persistCourseMonitoringCloseout({
+            courseId: entry.courseId,
+            snapshot: entry.course.monitoringStatus,
+            targetState: "AUTO_INVESTIGATING",
+            data: {
                 state: "AUTO_INVESTIGATING",
                 nextAutomaticAttemptAt: nextAttemptAt,
                 stateChangedAt: now,
                 revision: { increment: 1 }
-              }
-            });
-          }
+            }
+          });
         }
         if (incidentUpdated.count !== 1) {
           throw new Error("A course-support incident changed during closeout.");
@@ -4011,22 +4185,6 @@ export async function closeoutCourseSupportBatch(input: {
       }
     }
   );
-
-  for (const entry of normalizedEntries.filter((candidate) =>
-    ["RESTORED", "FINAL_DISPOSITION"].includes(candidate.normalizedResult)
-  )) {
-    await resolveCourseSupportIncident({
-      courseId: entry.courseId,
-      resolution:
-        entry.normalizedResult === "RESTORED"
-          ? "MONITORING_RESTORED"
-          : getFinalDispositionResolution(entry.proofSnapshot),
-      message: sanitizeResponderText(
-        entry.message ?? "Course-support responder closeout recorded."
-      ),
-      now
-    });
-  }
 
   const finalOutcome = outcome;
   const finalBatchStatus = batchStatus;
@@ -5006,6 +5164,7 @@ async function listDueCourseSupportCandidates(now: Date) {
       engineeringOnly: true,
       activeRealSearchCount: true,
       earliestTargetDate: true,
+      escalationDeadlineAt: true,
       firstSeenAt: true,
       lastSeenAt: true,
       lastAttemptAt: true,

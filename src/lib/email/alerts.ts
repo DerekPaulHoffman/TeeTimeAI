@@ -6,6 +6,7 @@ import { getRenderedAvailabilityTimes, renderCustomerEmail } from "@/lib/email/c
 import { isVercelProduction } from "@/lib/env";
 import { isSearchEmailDeliveryEnabled } from "@/lib/email/delivery-policy";
 import {
+  getCustomerCourseMonitoringStatus,
   renderSearchStatusHtml,
   type SearchStatusEmailInput
 } from "@/lib/email/search-status";
@@ -222,16 +223,7 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
   const email = {
     from,
     to: input.to,
-    subject:
-      input.kind === "setup"
-        ? "Your Tee Time Spot alert is active"
-        : input.kind === "daily"
-          ? "Your morning Tee Time Spot update"
-          : input.kind === "outage"
-            ? "Your alert is active while automatic checks retry"
-            : input.kind === "recovery"
-              ? "Automatic tee-time checks have resumed"
-              : "A course status has been confirmed",
+    subject: getSearchStatusEmailSubject(input),
     html: renderSearchStatusHtml({
       ...input,
       stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)
@@ -297,6 +289,28 @@ export async function sendAutomationWorkerHealthEmail(
     throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
   }
   return { ...result.data, deliveryStatus: "sent" };
+}
+
+export function getSearchStatusEmailSubject(
+  input: Pick<SearchStatusEmailInput, "kind" | "courses">
+) {
+  if (
+    input.courses.some(
+      (course) =>
+        getCustomerCourseMonitoringStatus(course) === "NEEDS_HUMAN_REVIEW"
+    )
+  ) {
+    return "Manual review needed; your alert remains active";
+  }
+  return input.kind === "setup"
+    ? "Your Tee Time Spot alert is active"
+    : input.kind === "daily"
+      ? "Your morning Tee Time Spot update"
+      : input.kind === "outage"
+        ? "Your alert is active while automatic checks retry"
+        : input.kind === "recovery"
+          ? "Automatic tee-time checks have resumed"
+          : "A course status has been confirmed";
 }
 
 export function getAutomationWorkerHealthIdempotencyKey(

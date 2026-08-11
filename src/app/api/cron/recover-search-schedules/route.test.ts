@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   runCourseMonitoringWatchdog: vi.fn(),
   recoverDueCourseSupportVerificationRequests: vi.fn(),
   recoverPendingClerkEmailUpdates: vi.fn(),
+  consumeSearchScheduleQueueMessage: vi.fn(),
   startSearchSchedule: vi.fn()
 }));
 
@@ -23,6 +24,11 @@ vi.mock("@/lib/automation/db-service", () => ({
 
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: mocks.startSearchSchedule
+}));
+
+vi.mock("@/lib/automation/search-schedule-consumer", () => ({
+  consumeSearchScheduleQueueMessage:
+    mocks.consumeSearchScheduleQueueMessage
 }));
 
 vi.mock("@/lib/automation/worker-state", () => ({
@@ -94,6 +100,9 @@ describe("GET /api/cron/recover-search-schedules", () => {
       considered: 0,
       requeued: 0,
       retainedAuthoritativeFinals: 0
+    });
+    mocks.consumeSearchScheduleQueueMessage.mockResolvedValue({
+      outcome: "started"
     });
   });
 
@@ -206,6 +215,182 @@ describe("GET /api/cron/recover-search-schedules", () => {
     expect(mocks.revalidateHumanReviewCoursesForDeployment).toHaveBeenCalledWith({
       deploymentSha: "a".repeat(40)
     });
+  });
+
+  it("recovers a queued workflow loss on the same schedule version", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      {
+        id: "search-queued",
+        scheduleVersion: 7,
+        checkStatus: "QUEUED",
+        workflowRunId: null
+      }
+    ]);
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.consumeSearchScheduleQueueMessage).toHaveBeenCalledWith({
+      searchId: "search-queued",
+      scheduleVersion: 7,
+      trigger: "START_FAILED"
+    });
+    expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
+  });
+
+  it("restarts a just-escalated waiting workflow only from its observed state", async () => {
+    vi.useFakeTimers();
+    const observedAt = new Date("2026-08-11T20:28:01.000Z");
+    vi.setSystemTime(observedAt);
+    const updatedAt = new Date("2026-08-11T20:28:00.000Z");
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      {
+        id: "search-waiting-escalated",
+        scheduleVersion: 6,
+        checkStatus: "WAITING",
+        workflowRunId: "workflow-sleeping",
+        nextCheckAt: new Date("2026-08-11T20:33:00.000Z"),
+        updatedAt
+      }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({
+      runId: "workflow-replacement",
+      scheduleVersion: 7,
+      reused: false
+    });
+
+    try {
+      const response = await GET(
+        new Request("http://localhost/api/cron/recover-search-schedules", {
+          headers: { authorization: "Bearer test-cron-secret" }
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(mocks.listSearchesNeedingScheduleRecovery).toHaveBeenCalledWith(
+        observedAt
+      );
+      expect(mocks.startSearchSchedule).toHaveBeenCalledWith(
+        "search-waiting-escalated",
+        {
+          expectedState: {
+            scheduleVersion: 6,
+            updatedAt,
+            observedAt,
+            checkStatus: "WAITING",
+            workflowRunId: "workflow-sleeping"
+          }
+        }
+      );
+      expect(mocks.consumeSearchScheduleQueueMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts a replacement at T+27 when an attached T+28 endpoint wake may be lost", async () => {
+    vi.useFakeTimers();
+    const observedAt = new Date("2026-08-11T20:27:00.000Z");
+    const updatedAt = new Date("2026-08-11T20:20:00.000Z");
+    vi.setSystemTime(observedAt);
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      {
+        id: "search-phase-offset",
+        scheduleVersion: 7,
+        checkStatus: "WAITING",
+        workflowRunId: "workflow-may-be-lost",
+        nextCheckAt: new Date("2026-08-11T20:28:00.000Z"),
+        updatedAt,
+        endpointRecoveryDispatchKey: "endpoint-deadline:incident-1:3"
+      }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({
+      runId: "workflow-replacement",
+      scheduleVersion: 8,
+      reused: false
+    });
+
+    try {
+      const response = await GET(
+        new Request("http://localhost/api/cron/recover-search-schedules", {
+          headers: { authorization: "Bearer test-cron-secret" }
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(mocks.startSearchSchedule).toHaveBeenCalledWith(
+        "search-phase-offset",
+        {
+          expectedState: {
+            scheduleVersion: 7,
+            updatedAt,
+            observedAt,
+            checkStatus: "WAITING",
+            workflowRunId: "workflow-may-be-lost",
+            recoveryDispatchKey: "endpoint-deadline:incident-1:3"
+          }
+        }
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces a just-escalated attached queued workflow with an exact-state guard", async () => {
+    vi.useFakeTimers();
+    const observedAt = new Date("2026-08-11T20:28:01.000Z");
+    vi.setSystemTime(observedAt);
+    const updatedAt = new Date("2026-08-11T20:28:00.000Z");
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      {
+        id: "search-queued-attached",
+        scheduleVersion: 9,
+        checkStatus: "QUEUED",
+        workflowRunId: "workflow-sleeping",
+        nextCheckAt: observedAt,
+        updatedAt,
+        endpointRecoveryDispatchKey: "endpoint-deadline:incident-1:3"
+      }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({
+      runId: "workflow-replacement",
+      scheduleVersion: 10,
+      reused: false
+    });
+
+    try {
+      const response = await GET(
+        new Request("http://localhost/api/cron/recover-search-schedules", {
+          headers: { authorization: "Bearer test-cron-secret" }
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(mocks.startSearchSchedule).toHaveBeenCalledWith(
+        "search-queued-attached",
+        {
+          expectedState: {
+            scheduleVersion: 9,
+            updatedAt,
+            observedAt,
+            checkStatus: "QUEUED",
+            workflowRunId: "workflow-sleeping",
+            recoveryDispatchKey: "endpoint-deadline:incident-1:3"
+          }
+        }
+      );
+      expect(mocks.consumeSearchScheduleQueueMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reconciles course deadlines before selecting and starting due searches", async () => {

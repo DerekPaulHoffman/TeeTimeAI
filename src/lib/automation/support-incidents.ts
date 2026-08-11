@@ -45,6 +45,7 @@ export type CourseSupportIssueInput = {
   nextAction?: string;
   readPath?: string;
   now?: Date;
+  episodeStartedAt?: Date;
 };
 
 export type CourseSupportIssueState = {
@@ -159,6 +160,12 @@ export async function escalateCourseSupportIncident(input: {
 
 async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
   const now = input.now ?? new Date();
+  const requestedEpisodeTime = input.episodeStartedAt?.getTime();
+  const requestedEpisodeStartedAt = new Date(
+    Number.isFinite(requestedEpisodeTime) && requestedEpisodeTime! <= now.getTime()
+      ? requestedEpisodeTime!
+      : now.getTime()
+  );
   const safeMessage = input.message
     ? sanitizeResponderText(input.message).slice(0, 500)
     : undefined;
@@ -240,6 +247,16 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       existing.resolution &&
       existing.resolution !== "MONITORING_RESTORED"
   );
+  const opensFreshFailureCycle = Boolean(
+    existing &&
+      !existing.activeBatchId &&
+      (existing.status === "RESOLVED" ||
+        existing.providerFamilyKey !== provider.providerFamilyKey ||
+        existing.failureFingerprint !== failureFingerprint)
+  );
+  const effectiveEpisodeStartedAt = opensFreshFailureCycle
+    ? now
+    : requestedEpisodeStartedAt;
 
   if (disposableSyntheticSearch) {
     if (
@@ -292,7 +309,8 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     message: safeMessage,
     activeRealSearchCount,
     materialEvidenceChanged: materialAccessEvidenceChanged,
-    now
+    now,
+    episodeStartedAt: effectiveEpisodeStartedAt
   });
 
   if (monitoringFailure.retainedHumanFinal) {
@@ -303,17 +321,28 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     } satisfies CourseSupportIssueState;
   }
 
+  const beginsFirstRealDemandEpisode = Boolean(
+    existing?.engineeringOnly &&
+      existing.activeRealSearchCount === 0 &&
+      activeRealSearchCount > 0
+  );
   const continuesCurrentIncidentEpisode = Boolean(
     existing &&
       existing.status !== "RESOLVED" &&
       existing.providerFamilyKey === provider.providerFamilyKey &&
       existing.failureFingerprint === failureFingerprint
   );
-  const episodeStartedAt = continuesCurrentIncidentEpisode
-    ? (monitoringFailure.status?.firstDegradedAt ?? existing?.firstSeenAt ?? now)
-    : now;
+  const incidentEpisodeStartedAt =
+    continuesCurrentIncidentEpisode && !beginsFirstRealDemandEpisode
+    ? new Date(
+        Math.min(
+          existing?.firstSeenAt.getTime() ?? now.getTime(),
+          effectiveEpisodeStartedAt.getTime()
+        )
+      )
+    : effectiveEpisodeStartedAt;
   const episodeEscalationDeadlineAt = getCourseMonitoringEscalationDeadline(
-    episodeStartedAt,
+    incidentEpisodeStartedAt,
     activeRealSearchCount
   );
 
@@ -403,11 +432,9 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           lastSeenAt: now,
           confirmedAt: existing.confirmedAt ?? (monitoringFailure.confirmed ? now : null),
           escalationDeadlineAt:
-            existing.escalationDeadlineAt ??
-            getCourseMonitoringEscalationDeadline(
-              existing.firstSeenAt,
-              nextActiveRealSearchCount
-            ),
+            beginsFirstRealDemandEpisode
+              ? episodeEscalationDeadlineAt
+              : (existing.escalationDeadlineAt ?? episodeEscalationDeadlineAt),
           revision: { increment: 1 }
         }
       });
@@ -549,7 +576,9 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         confirmedAt: fingerprintChanged ? confirmedAt : (existing.confirmedAt ?? confirmedAt),
         escalationDeadlineAt: fingerprintChanged
           ? escalationDeadlineAt
-          : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
+          : beginsFirstRealDemandEpisode
+            ? escalationDeadlineAt
+            : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
         revision: { increment: 1 }
       }
     });

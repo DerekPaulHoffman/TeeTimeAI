@@ -39,6 +39,7 @@ import {
 } from "@/lib/automation/worker-state";
 import { runCourseSupportLeaseWatch } from "@/lib/automation/course-support-lease-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
+import { persistOwnedCourseSupportBrowserPlaybookStages } from "@/lib/automation/course-support-browser-stages";
 import {
   getResponderThreadPolicy,
   sanitizeResponderText,
@@ -46,6 +47,8 @@ import {
   type ResponderFailureDomain,
   type ResponderOutcome
 } from "@/lib/automation/course-support-responder-policy";
+
+import { runBrowserProbe } from "./browser-probe-needed-adapters";
 
 const RESPONDER_OUTCOMES = new Set<ResponderOutcome>([
   "success",
@@ -339,14 +342,53 @@ async function verify(args: string[]) {
   }
   return runWithCourseSupportOperationHeartbeat(
     { batchId, ownerThreadId },
-    (leaseToken) =>
-      verifyCourseSupportBatch({
+    async (leaseToken) => {
+      const browserStages =
+        await persistOwnedCourseSupportBrowserPlaybookStages(
+          {
+            batchId,
+            leaseToken,
+            ownerThreadId,
+            requestedReleaseSha: releaseSha,
+            requestedDeployedAt: deployedAt
+          },
+          {
+            validateReleaseFence: async (fence) => {
+              await assertReleaseGitProvenance(batchId, fence.releaseSha, {
+                allowUnchangedRuntime: currentRuntime
+              });
+            },
+            runBrowserProbe: ({
+              courseId,
+              beforePersist,
+              persistenceFence,
+              deferTerminalCloseout,
+              persistSearchProbe
+            }) =>
+              runBrowserProbe({
+                courseName: undefined,
+                courseId,
+                dryRun: false,
+                expectedDisposition: undefined,
+                limit: 1,
+                traceJson: false,
+                persistenceFence,
+                deferTerminalCloseout,
+                persistSearchProbe,
+                beforePersist: ({ requireCurrentStage }) =>
+                  beforePersist({ requireCurrentStage })
+              })
+          }
+        );
+      const result = await verifyCourseSupportBatch({
         batchId,
         leaseToken,
         ownerThreadId,
         releaseSha,
         deployedAt
-      })
+      });
+      return { ...result, browserStages };
+    }
   );
 }
 

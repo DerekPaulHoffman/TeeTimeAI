@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +17,63 @@ const responderArgs = [
   "--",
   "inspect"
 ];
+
+export const approvedCourseSupportResponderCheckout =
+  "C:\\dev\\TeeTimeAI-course-support-dispatch";
+
+export const requiredCourseSupportIncidentScalarFields = Object.freeze([
+  "attemptLedger",
+  "cycle",
+  "status"
+]);
+
+export function inspectGeneratedPrismaClient(
+  checkout,
+  loadClient = loadPrismaClientFromCheckout
+) {
+  try {
+    const client = loadClient(checkout);
+    const scalarFields = client?.Prisma?.CourseSupportIncidentScalarFieldEnum;
+    const missingScalarFieldCount = requiredCourseSupportIncidentScalarFields.filter(
+      (field) => scalarFields?.[field] !== field
+    ).length;
+
+    return {
+      status: missingScalarFieldCount === 0 ? "current" : "stale",
+      requiredScalarFieldCount: requiredCourseSupportIncidentScalarFields.length,
+      missingScalarFieldCount
+    };
+  } catch {
+    return {
+      status: "unavailable",
+      requiredScalarFieldCount: requiredCourseSupportIncidentScalarFields.length
+    };
+  }
+}
+
+export function generatedPrismaSetupRequiredResult(inspection) {
+  if (inspection.status === "current") {
+    return null;
+  }
+
+  return {
+    outcome: "setup_required",
+    reason:
+      inspection.status === "stale"
+        ? "The responder checkout's generated Prisma client is stale for required course-support fields."
+        : "The responder checkout's generated Prisma client could not be inspected.",
+    failureClass:
+      inspection.status === "stale"
+        ? "STALE_GENERATED_PRISMA_CLIENT"
+        : "GENERATED_PRISMA_CLIENT_UNAVAILABLE",
+    requiredScalarFieldCount: inspection.requiredScalarFieldCount,
+    ...(inspection.status === "stale"
+      ? { missingScalarFieldCount: inspection.missingScalarFieldCount }
+      : {}),
+    nextAction:
+      "Run npm run prisma:generate in the dedicated responder checkout, confirm it remains clean, then rerun the preflight."
+  };
+}
 
 export function responderInvocation(
   platform = process.platform,
@@ -57,18 +115,40 @@ export function launchFailureResult(command) {
   };
 }
 
+export function selectApprovedCourseSupportResponderCheckout(input) {
+  const normalize = (value) =>
+    input.platform === "win32" ? value.toLowerCase() : value;
+  const approvedCheckout = normalize(input.approvedCheckout);
+  if (
+    input.requestedCheckout &&
+    normalize(input.requestedCheckout) !== approvedCheckout
+  ) {
+    return { outcome: "rejected_requested_checkout" };
+  }
+
+  const checkout = input.preparedCheckouts.find(
+    (candidate) => normalize(candidate) === approvedCheckout
+  );
+  if (
+    !checkout ||
+    !input.currentMain ||
+    input.readHead(checkout) !== input.currentMain
+  ) {
+    return { outcome: "unavailable" };
+  }
+  return { outcome: "selected", checkout };
+}
+
 function main() {
-  const requestedCheckout = process.env.TEE_TIME_SPOT_RESPONDER_CHECKOUT?.trim();
-  const worktreeCandidates = git(["worktree", "list", "--porcelain"], process.cwd())
-    ?.split(/\r?\n/u)
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length).trim()) ?? [];
-  const candidates = [...new Set([
-    requestedCheckout,
-    "C:\\dev\\TeeTimeAI-responder-throughput",
-    "C:\\dev\\TeeTimeAi-CourseSupportResponder",
-    ...worktreeCandidates
-  ].filter(Boolean))];
+  const requestedCheckoutValue =
+    process.env.TEE_TIME_SPOT_RESPONDER_CHECKOUT?.trim();
+  const approvedCheckout = resolveCheckoutPath(
+    approvedCourseSupportResponderCheckout
+  );
+  const requestedCheckout = requestedCheckoutValue
+    ? resolveCheckoutPath(requestedCheckoutValue)
+    : undefined;
+  const candidates = [approvedCheckout];
 
   const preparedCheckouts = candidates.filter(
     (candidate) =>
@@ -77,25 +157,41 @@ function main() {
       existsSync(resolve(candidate, ".vercel", "project.json")) &&
       git(["status", "--porcelain"], realpathSync(candidate)) === ""
   );
-  const currentMain = git(["rev-parse", "origin/main"], process.cwd());
-  const checkout = preparedCheckouts.find(
-    (candidate) => git(["rev-parse", "HEAD"], realpathSync(candidate)) === currentMain
-  );
+  const currentMain = git(["rev-parse", "origin/main"], approvedCheckout);
+  const selection = selectApprovedCourseSupportResponderCheckout({
+    approvedCheckout,
+    requestedCheckout,
+    preparedCheckouts,
+    currentMain,
+    readHead: (checkout) => git(["rev-parse", "HEAD"], checkout),
+    platform: process.platform
+  });
+  const checkout = selection.outcome === "selected" ? selection.checkout : null;
 
   if (!checkout) {
     process.stdout.write(
       `${JSON.stringify({
         outcome: "setup_required",
         reason:
-          "No exact-origin/main responder checkout has dependencies and Vercel project metadata.",
+          selection.outcome === "rejected_requested_checkout"
+            ? "The configured responder checkout is not the approved dispatch checkout."
+            : "The approved dispatch checkout is not clean, prepared, and exactly at origin/main.",
+        failureClass:
+          selection.outcome === "rejected_requested_checkout"
+            ? "UNAPPROVED_RESPONDER_CHECKOUT"
+            : "APPROVED_RESPONDER_CHECKOUT_UNAVAILABLE",
         nextAction:
-          "Fast-forward the dedicated responder checkout and refresh dependencies only when the lockfile changed."
+          "Prepare C:\\dev\\TeeTimeAI-course-support-dispatch at exact origin/main and refresh dependencies only when the lockfile changed."
       })}\n`
     );
     process.exitCode = 2;
   } else {
     const resolvedCheckout = realpathSync(checkout);
     const checkoutHead = git(["rev-parse", "HEAD"], resolvedCheckout);
+    const generatedPrismaInspection = inspectGeneratedPrismaClient(resolvedCheckout);
+    const generatedPrismaSetupRequired = generatedPrismaSetupRequiredResult(
+      generatedPrismaInspection
+    );
 
     if (!currentMain || checkoutHead !== currentMain) {
       process.stdout.write(
@@ -105,6 +201,9 @@ function main() {
           nextAction: "Refresh the dedicated responder checkout before running production inspection."
         })}\n`
       );
+      process.exitCode = 2;
+    } else if (generatedPrismaSetupRequired) {
+      process.stdout.write(`${JSON.stringify(generatedPrismaSetupRequired)}\n`);
       process.exitCode = 2;
     } else if (!process.argv.includes("--run")) {
       process.stdout.write(
@@ -131,6 +230,19 @@ function main() {
         process.exitCode = command.status;
       }
     }
+  }
+}
+
+function loadPrismaClientFromCheckout(checkout) {
+  const requireFromCheckout = createRequire(resolve(checkout, "package.json"));
+  return requireFromCheckout("@prisma/client");
+}
+
+function resolveCheckoutPath(checkout) {
+  try {
+    return realpathSync(checkout);
+  } catch {
+    return resolve(checkout);
   }
 }
 

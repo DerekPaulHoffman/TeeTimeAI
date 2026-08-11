@@ -103,6 +103,8 @@ export async function expireOverdueLocalReaderJobs(now = new Date()) {
 export type LocalReaderQueueDisposition =
   "ACTIVE" | "SUCCESS" | "TERMINAL" | "RETRYING_AFTER_TERMINAL_FAILURE";
 
+const EXPIRED_READER_RESULT_STATUS = "EXPIRED" as const;
+
 const SUCCESSFUL_READER_RESULTS = new Set<LocalReaderResult["status"]>([
   "AVAILABLE",
   "NO_AVAILABILITY",
@@ -126,7 +128,18 @@ function readStoredReaderResultStatus(value: Prisma.JsonValue | null) {
 function getReusableReaderDisposition(job: {
   status: string;
   result: Prisma.JsonValue | null;
-}) {
+  jobExpiresAt: Date;
+}, now = new Date()) {
+  if (
+    job.status === "EXPIRED" ||
+    ((job.status === "PENDING" || job.status === "LEASED") &&
+      job.jobExpiresAt <= now)
+  ) {
+    return {
+      queueDisposition: "TERMINAL" as const,
+      readerResultStatus: EXPIRED_READER_RESULT_STATUS,
+    };
+  }
   if (job.status !== "COMPLETED") {
     return {
       queueDisposition: "ACTIVE" as const,
@@ -141,6 +154,54 @@ function getReusableReaderDisposition(job: {
         : ("TERMINAL" as const),
     readerResultStatus,
   };
+}
+
+function isCurrentCycleTerminalReaderJob(input: {
+  job: Pick<
+    LocalReaderJob,
+    | "status"
+    | "courseKey"
+    | "requiredCapabilityKey"
+    | "requiredParserVersion"
+    | "createdAt"
+    | "jobExpiresAt"
+    | "completedAt"
+    | "resultExpiresAt"
+    | "result"
+  >;
+  courseKey: string;
+  capabilityKey: string;
+  parserVersion: number;
+  cycleStartedAt?: Date;
+  now: Date;
+}) {
+  if (
+    !input.cycleStartedAt ||
+    input.job.courseKey !== input.courseKey ||
+    input.job.requiredCapabilityKey !== input.capabilityKey ||
+    input.job.requiredParserVersion !== input.parserVersion ||
+    input.job.createdAt < input.cycleStartedAt
+  ) {
+    return false;
+  }
+  if (
+    input.job.status === "EXPIRED" ||
+    ((input.job.status === "PENDING" || input.job.status === "LEASED") &&
+      input.job.jobExpiresAt <= input.now)
+  ) {
+    return true;
+  }
+  if (
+    input.job.status !== "COMPLETED" ||
+    !input.job.completedAt ||
+    input.job.completedAt < input.cycleStartedAt
+  ) {
+    return false;
+  }
+  const resultStatus = readStoredReaderResultStatus(input.job.result);
+  return Boolean(
+    resultStatus && !SUCCESSFUL_READER_RESULTS.has(resultStatus),
+  );
 }
 
 async function resolveRequiredCapability(
@@ -172,9 +233,23 @@ function canReuseCourseVerification(input: {
   capabilityKey: string;
   parserVersion: number;
   freshnessCutoff: Date;
+  cycleStartedAt?: Date;
   force: boolean;
   now: Date;
 }) {
+  if (
+    !input.force &&
+    isCurrentCycleTerminalReaderJob({
+      job: input.job,
+      courseKey: input.courseKey,
+      capabilityKey: input.capabilityKey,
+      parserVersion: input.parserVersion,
+      cycleStartedAt: input.cycleStartedAt,
+      now: input.now,
+    })
+  ) {
+    return true;
+  }
   if (hasCurrentReaderLease(input.job, input.now)) return true;
   if (
     input.job.courseKey !== input.courseKey ||
@@ -263,6 +338,7 @@ export async function queueLocalReaderCourseVerification(input: {
         capabilityKey: requiredCapability.key,
         parserVersion: requiredCapability.parserVersion,
         freshnessCutoff,
+        cycleStartedAt: input.notBefore,
         force: input.force === true,
         now,
       })
@@ -386,6 +462,48 @@ export async function queueLocalReaderJob(input: {
       ...getReusableReaderDisposition(reusableAcrossScheduleVersions),
     };
   }
+  const terminalAcrossScheduleVersions = input.notBefore
+    ? await prisma.localReaderJob.findFirst({
+        where: {
+          teeSearchId: input.searchId,
+          courseId: input.courseId,
+          courseKey,
+          targetDate: input.targetDate,
+          players: input.players,
+          requiredCapabilityKey: requiredCapability.key,
+          requiredParserVersion: requiredCapability.parserVersion,
+          createdAt: { gte: input.notBefore },
+          OR: [
+            { status: "EXPIRED" },
+            {
+              status: { in: ["PENDING", "LEASED"] },
+              jobExpiresAt: { lte: now },
+            },
+            {
+              status: "COMPLETED",
+              completedAt: { gte: input.notBefore },
+            },
+          ],
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      })
+    : null;
+  if (
+    terminalAcrossScheduleVersions &&
+    isCurrentCycleTerminalReaderJob({
+      job: terminalAcrossScheduleVersions,
+      courseKey,
+      capabilityKey: requiredCapability.key,
+      parserVersion: requiredCapability.parserVersion,
+      cycleStartedAt: input.notBefore,
+      now,
+    })
+  ) {
+    return {
+      ...terminalAcrossScheduleVersions,
+      ...getReusableReaderDisposition(terminalAcrossScheduleVersions, now),
+    };
+  }
   const unique = {
     teeSearchId: input.searchId,
     courseId: input.courseId,
@@ -398,6 +516,22 @@ export async function queueLocalReaderJob(input: {
       teeSearchId_courseId_scheduleVersion_targetDate_players: unique,
     },
   });
+  if (
+    existing &&
+    isCurrentCycleTerminalReaderJob({
+      job: existing,
+      courseKey,
+      capabilityKey: requiredCapability.key,
+      parserVersion: requiredCapability.parserVersion,
+      cycleStartedAt: input.notBefore,
+      now,
+    })
+  ) {
+    return {
+      ...existing,
+      ...getReusableReaderDisposition(existing, now),
+    };
+  }
   if (
     existing &&
     existing.jobExpiresAt > now &&
@@ -541,6 +675,31 @@ function pickReaderCandidate(
     .find((job) => !activeFamilies.has(getReaderProviderFamily(job)));
 }
 
+async function findActiveCustomerReaderCandidate(input: {
+  transaction: Prisma.TransactionClient;
+  claimableWhere: Prisma.LocalReaderJobWhereInput;
+  activeFamilies: Set<string>;
+}): Promise<LocalReaderJob | null> {
+  let cursorId: string | null = null;
+  for (;;) {
+    const candidates: LocalReaderJob[] =
+      await input.transaction.localReaderJob.findMany({
+      where: {
+        ...input.claimableWhere,
+        ...ACTIVE_REAL_CUSTOMER_READER_JOB_WHERE,
+      },
+      orderBy: READER_CLAIM_ORDER,
+      take: READER_CLAIM_BATCH_SIZE,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    });
+    const candidate = pickReaderCandidate(candidates, input.activeFamilies);
+    if (candidate) return candidate;
+    if (candidates.length < READER_CLAIM_BATCH_SIZE) return null;
+    cursorId = candidates.at(-1)?.id ?? null;
+    if (!cursorId) return null;
+  }
+}
+
 async function claimReaderCandidate(
   handshake: LocalReaderAgentHandshake,
   now: Date,
@@ -593,19 +752,11 @@ async function claimReaderCandidate(
               },
             ],
           } satisfies Prisma.LocalReaderJobWhereInput;
-          const customerCandidates =
-            await transaction.localReaderJob.findMany({
-              where: {
-                ...claimableWhere,
-                ...ACTIVE_REAL_CUSTOMER_READER_JOB_WHERE,
-              },
-              orderBy: READER_CLAIM_ORDER,
-              take: READER_CLAIM_BATCH_SIZE,
-            });
-          let candidate = pickReaderCandidate(
-            customerCandidates,
+          let candidate = await findActiveCustomerReaderCandidate({
+            transaction,
+            claimableWhere,
             activeFamilies,
-          );
+          });
           if (!candidate) {
             const backgroundCandidates =
               await transaction.localReaderJob.findMany({
@@ -616,10 +767,8 @@ async function claimReaderCandidate(
                 orderBy: READER_CLAIM_ORDER,
                 take: READER_CLAIM_BATCH_SIZE,
               });
-            candidate = pickReaderCandidate(
-              backgroundCandidates,
-              activeFamilies,
-            );
+            candidate =
+              pickReaderCandidate(backgroundCandidates, activeFamilies) ?? null;
           }
           if (!candidate) return null;
 
@@ -1184,11 +1333,24 @@ export async function getLocalReaderCourseVerification(input: {
       players: input.players,
       requiredCapabilityKey: requiredCapability.key,
       requiredParserVersion: requiredCapability.parserVersion,
-      status: { in: ["PENDING", "LEASED", "COMPLETED"] },
+      status: { in: ["PENDING", "LEASED", "COMPLETED", "EXPIRED"] },
     },
     orderBy: { createdAt: "desc" },
   });
   if (!row) return null;
+  if (
+    row.createdAt >= input.notBefore &&
+    (row.status === "EXPIRED" ||
+      ((row.status === "PENDING" || row.status === "LEASED") &&
+        row.jobExpiresAt <= now))
+  ) {
+    return {
+      status: "TERMINAL" as const,
+      observedAt: row.jobExpiresAt,
+      readerVersion: null,
+      resultStatus: EXPIRED_READER_RESULT_STATUS,
+    };
+  }
   if (
     (row.status === "PENDING" || row.status === "LEASED") &&
     row.jobExpiresAt > now &&

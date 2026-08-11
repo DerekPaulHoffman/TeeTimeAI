@@ -28,6 +28,10 @@ import {
   revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
   runSerializedCourseMonitoringWrite
 } from "./course-monitoring";
+import {
+  runCourseSupportBrowserPersistenceWrite,
+  type CourseSupportBrowserPersistenceFence
+} from "./course-support-browser-stages";
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import {
   earliestPotentiallyActiveSearchDate,
@@ -255,6 +259,69 @@ export async function getActiveSearchForAutomation(
     : null;
 }
 
+export async function listSearchCourseVerdictsSince(input: {
+  searchId: string;
+  courseIds: string[];
+  observedAtOrAfter: Date;
+}) {
+  const courseIds = [...new Set(input.courseIds.filter(Boolean))];
+  if (courseIds.length === 0) {
+    return [];
+  }
+  return prisma.$queryRaw<
+    Array<{
+      courseId: string;
+      outcome: string;
+      observedAt: Date;
+      failureEpisodeStartedAt: Date | null;
+    }>
+  >(Prisma.sql`
+    WITH scoped AS (
+      SELECT "id", "courseId", "outcome", "observedAt"
+      FROM "CourseProbe"
+      WHERE "teeSearchId" = ${input.searchId}
+        AND "courseId" IN (${Prisma.join(courseIds)})
+        AND "observedAt" >= ${input.observedAtOrAfter}
+    ), latest AS (
+      SELECT DISTINCT ON ("courseId")
+        "id", "courseId", "outcome", "observedAt"
+      FROM scoped
+      ORDER BY "courseId", "observedAt" DESC, "id" DESC
+    ), latest_success AS (
+      SELECT DISTINCT ON ("courseId")
+        "id", "courseId", "observedAt"
+      FROM scoped
+      WHERE "outcome" IN (
+        'MATCH_FOUND'::"ProbeOutcome",
+        'NO_MATCH'::"ProbeOutcome"
+      )
+      ORDER BY "courseId", "observedAt" DESC, "id" DESC
+    ), failure_episode AS (
+      SELECT
+        failure."courseId",
+        MIN(failure."observedAt") AS "failureEpisodeStartedAt"
+      FROM scoped AS failure
+      INNER JOIN latest_success AS success
+        ON success."courseId" = failure."courseId"
+      WHERE (failure."observedAt", failure."id") >
+        (success."observedAt", success."id")
+        AND failure."outcome" NOT IN (
+          'MATCH_FOUND'::"ProbeOutcome",
+          'NO_MATCH'::"ProbeOutcome"
+        )
+      GROUP BY failure."courseId"
+    )
+    SELECT
+      latest."courseId",
+      latest."outcome",
+      latest."observedAt",
+      failure_episode."failureEpisodeStartedAt"
+    FROM latest
+    LEFT JOIN failure_episode
+      ON failure_episode."courseId" = latest."courseId"
+  `);
+}
+
 export async function getCourseMonitoringPlaybookContext(courseId: string) {
   return prisma.courseSupportIncident.findUnique({
     where: { courseId },
@@ -269,11 +336,19 @@ export async function getCourseMonitoringPlaybookContext(courseId: string) {
 
 export async function listBrowserProbeTargets(
   limit = 5,
-  courseName?: string
+  courseName?: string,
+  courseId?: string
 ): Promise<BrowserProbeTarget[]> {
   const requestedCourseName = courseName?.trim().toLocaleLowerCase("en-US");
-  if (requestedCourseName) {
-    return listExactIncidentBrowserProbeTarget(requestedCourseName);
+  const requestedCourseId = courseId?.trim();
+  if (requestedCourseName && requestedCourseId) {
+    throw new Error("A browser probe may select a course by name or id, not both.");
+  }
+  if (requestedCourseName || requestedCourseId) {
+    return listExactIncidentBrowserProbeTarget({
+      requestedCourseName,
+      requestedCourseId
+    });
   }
   const [searches, openIncidents] = await Promise.all([
     prisma.teeSearch.findMany({
@@ -459,12 +534,20 @@ export async function listBrowserProbeTargets(
   }));
 }
 
-async function listExactIncidentBrowserProbeTarget(
-  requestedCourseName: string
-): Promise<BrowserProbeTarget[]> {
+async function listExactIncidentBrowserProbeTarget(input: {
+  requestedCourseName?: string;
+  requestedCourseId?: string;
+}): Promise<BrowserProbeTarget[]> {
   const courses = await prisma.course.findMany({
     where: {
-      name: { equals: requestedCourseName, mode: "insensitive" },
+      ...(input.requestedCourseId
+        ? { id: input.requestedCourseId }
+        : {
+            name: {
+              equals: input.requestedCourseName!,
+              mode: "insensitive" as const
+            }
+          }),
       supportIncident: { is: { status: { not: "RESOLVED" } } }
     },
     include: {
@@ -473,7 +556,9 @@ async function listExactIncidentBrowserProbeTarget(
           kind: true,
           failureClass: true,
           occurrenceCount: true,
-          lastSeenAt: true
+          lastSeenAt: true,
+          cycle: true,
+          attemptLedger: true
         }
       },
       probes: {
@@ -494,7 +579,7 @@ async function listExactIncidentBrowserProbeTarget(
       }
     }
   });
-  if (courses.length > 1) {
+  if (!input.requestedCourseId && courses.length > 1) {
     throw new Error("The requested browser-probe course name is ambiguous.");
   }
   const course = courses[0];
@@ -522,14 +607,26 @@ async function listExactIncidentBrowserProbeTarget(
       ? getBestUnsupportedCoverageProbeUrl(probeCourse)
       : getBestProbeUrl(probeCourse)
     : null;
+  const nextPlaybookStage = course?.supportIncident
+    ? assessAutomationPlaybook(
+        course.supportIncident.attemptLedger,
+        course.supportIncident.cycle
+      ).nextStage
+    : null;
+  const readerOnlyIndependentConfirmation = Boolean(
+    course?.monitoringMode === "LOCAL_READER_ONLY" &&
+    nextPlaybookStage === "INDEPENDENT_CONFIRMATION"
+  );
   if (
     !course ||
     !probeUrl ||
     !probeCourse ||
-    course.monitoringMode === "LOCAL_READER_ONLY" ||
+    (course.monitoringMode === "LOCAL_READER_ONLY" &&
+      !readerOnlyIndependentConfirmation) ||
     (!shouldQueueBrowserProbe(probeCourse) &&
       !hasCurrentTechnicalAccessFailure &&
-      !hasCurrentUnsupportedCoverageFailure)
+      !hasCurrentUnsupportedCoverageFailure &&
+      !readerOnlyIndependentConfirmation)
   ) {
     return [];
   }
@@ -632,6 +729,7 @@ type CourseProbeInput = {
   rawSummary?: Prisma.InputJsonValue;
   automationRunId?: string;
   runtimeVersion?: string;
+  observedAtOrAfter?: Date;
 };
 
 export async function recordCourseProbe(input: CourseProbeInput) {
@@ -649,36 +747,50 @@ export async function recordCourseProbe(input: CourseProbeInput) {
   });
 }
 
-export async function recordBrowserDiscovery(input: BrowserDiscovery) {
+export async function recordBrowserDiscovery(
+  input: BrowserDiscovery,
+  persistenceFence?: CourseSupportBrowserPersistenceFence,
+  runtimeVersion?: string | null
+) {
   input = normalizeBrowserDiscoveryForMonitoring(input);
   const learnedOnline = input.status === "LEARNED" && Boolean(input.apiMetadata);
   const automationEligibility =
     input.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN");
   const bookingMethod =
     input.bookingMethod ?? (learnedOnline && input.bookingUrl ? "PUBLIC_ONLINE" : "UNKNOWN");
-  return prisma.courseAutomationDiscovery.create({
-    data: {
-      courseId: input.courseId,
-      status: input.status,
-      detectedPlatform: input.detectedPlatform,
-      bookingMethod,
-      bookingPhone: input.bookingPhone,
+  const data = {
+    courseId: input.courseId,
+    status: input.status,
+    detectedPlatform: input.detectedPlatform,
+    bookingMethod,
+    bookingPhone: input.bookingPhone,
+    automationEligibility,
+    automationReason: input.automationReason ?? "NONE",
+    bookingAccessMode: resolveBookingAccessMode({
       automationEligibility,
-      automationReason: input.automationReason ?? "NONE",
-      bookingAccessMode: resolveBookingAccessMode({
-        automationEligibility,
-        automationReason: input.automationReason,
-        bookingMethod,
-        bookingAccessMode: input.bookingAccessMode
-      }),
-      sourceUrl: input.sourceUrl,
-      bookingUrl: input.bookingUrl,
-      apiEndpoint: input.apiEndpoint,
-      apiMetadata: input.apiMetadata as Prisma.InputJsonValue | undefined,
-      confidence: input.confidence,
-      evidence: input.evidence as Prisma.InputJsonValue
-    }
-  });
+      automationReason: input.automationReason,
+      bookingMethod,
+      bookingAccessMode: input.bookingAccessMode
+    }),
+    sourceUrl: input.sourceUrl,
+    bookingUrl: input.bookingUrl,
+    apiEndpoint: input.apiEndpoint,
+    apiMetadata: input.apiMetadata as Prisma.InputJsonValue | undefined,
+    confidence: input.confidence,
+    evidence: input.evidence as Prisma.InputJsonValue
+  };
+  if (!persistenceFence) {
+    return prisma.courseAutomationDiscovery.create({ data });
+  }
+  return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
+    runCourseSupportBrowserPersistenceWrite({
+      transaction,
+      fence: persistenceFence,
+      runtimeVersion,
+      mutate: (ownedTransaction) =>
+        ownedTransaction.courseAutomationDiscovery.create({ data })
+    })
+  );
 }
 
 export type BrowserDiscoveryCourseExpectation = {
@@ -757,10 +869,24 @@ export async function retireLegacyPolicyOnlyCourseBlock(
 
 export async function applyBrowserDiscoveryToCourse(
   input: BrowserDiscovery,
-  expectedCourse?: BrowserDiscoveryCourseExpectation
+  expectedCourse?: BrowserDiscoveryCourseExpectation,
+  persistenceFence?: CourseSupportBrowserPersistenceFence,
+  runtimeVersion?: string | null
 ) {
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
-    applyBrowserDiscoveryToCourseInTransaction(input, expectedCourse, transaction)
+    persistenceFence
+      ? runCourseSupportBrowserPersistenceWrite({
+          transaction,
+          fence: persistenceFence,
+          runtimeVersion,
+          mutate: (ownedTransaction) =>
+            applyBrowserDiscoveryToCourseInTransaction(
+              input,
+              expectedCourse,
+              ownedTransaction
+            )
+        })
+      : applyBrowserDiscoveryToCourseInTransaction(input, expectedCourse, transaction)
   );
 }
 
@@ -1516,6 +1642,9 @@ export type SearchScheduleExpectedState = {
   scheduleVersion: number;
   updatedAt: Date;
   observedAt: Date;
+  checkStatus?: "WAITING" | "QUEUED";
+  workflowRunId?: string | null;
+  recoveryDispatchKey?: string;
 };
 
 export type SearchScheduleNotEligible = {
@@ -1544,15 +1673,29 @@ export async function queueSearchCheck(
   if (remediationDispatchKey && expectedState) {
     throw new Error("Expected-state guards cannot be combined with remediation dispatch.");
   }
+  if (
+    expectedState?.recoveryDispatchKey &&
+    expectedState.recoveryDispatchKey.length > 128
+  ) {
+    throw new Error("Recovery dispatch key is too long.");
+  }
   return prisma.$transaction(async (tx) => {
     if (expectedState) {
+      const expectedCheckStatus = expectedState.checkStatus ?? "WAITING";
+      const hasExpectedWorkflowRunId = Object.prototype.hasOwnProperty.call(
+        expectedState,
+        "workflowRunId"
+      );
       const updated = await tx.teeSearch.updateMany({
         where: {
           id: searchId,
           status: "ACTIVE",
           scheduleVersion: expectedState.scheduleVersion,
           updatedAt: expectedState.updatedAt,
-          checkStatus: "WAITING",
+          checkStatus: expectedCheckStatus,
+          ...(hasExpectedWorkflowRunId
+            ? { workflowRunId: expectedState.workflowRunId }
+            : {}),
           OR: [
             { checkLeaseExpiresAt: null },
             { checkLeaseExpiresAt: { lte: expectedState.observedAt } }
@@ -1566,7 +1709,14 @@ export async function queueSearchCheck(
           workflowRunId: null,
           checkLeaseToken: null,
           checkLeaseExpiresAt: null,
-          recheckRequestedAt: null
+          recheckRequestedAt: null,
+          ...(expectedState.recoveryDispatchKey
+            ? {
+                remediationDispatchKey: expectedState.recoveryDispatchKey,
+                remediationDispatchVersion:
+                  expectedState.scheduleVersion + 1
+              }
+            : {})
         }
       });
       if (updated.count === 0) {
@@ -1603,6 +1753,22 @@ export async function queueSearchCheck(
             remediationDispatchVersion: true,
             workflowRunId: true,
             checkStatus: true,
+            nextCheckAt: true,
+            preferences: {
+              select: {
+                course: {
+                  select: {
+                    supportIncident: {
+                      select: {
+                        status: true,
+                        humanReviewReason: true,
+                        escalationDeadlineAt: true
+                      }
+                    }
+                  }
+                }
+              }
+            },
             updatedAt: true
           }
         });
@@ -1617,6 +1783,55 @@ export async function queueSearchCheck(
             ...current,
             scheduleVersion: current.remediationDispatchVersion
           };
+        }
+
+        const earliestEndpointDeadlineAt = (
+          current.preferences ?? []
+        )
+          .map(
+            (preference) => preference.course.supportIncident
+          )
+          .filter(
+            (incident) =>
+              incident?.status === "AUTO_INVESTIGATING" &&
+              !incident.humanReviewReason &&
+              incident.escalationDeadlineAt
+          )
+          .map((incident) => incident!.escalationDeadlineAt!)
+          .sort((left, right) => left.getTime() - right.getTime())[0];
+        const remediationObservedAt = new Date();
+        const preserveAttachedEndpointWake = Boolean(
+          current.workflowRunId &&
+          current.checkStatus === "WAITING" &&
+          current.nextCheckAt &&
+          earliestEndpointDeadlineAt &&
+          earliestEndpointDeadlineAt > remediationObservedAt &&
+          current.nextCheckAt > remediationObservedAt &&
+          current.nextCheckAt <= earliestEndpointDeadlineAt
+        );
+        if (preserveAttachedEndpointWake) {
+          const preserved = await tx.teeSearch.updateMany({
+            where: {
+              id: searchId,
+              status: "ACTIVE",
+              scheduleVersion: current.scheduleVersion,
+              workflowRunId: current.workflowRunId,
+              checkStatus: "WAITING",
+              nextCheckAt: current.nextCheckAt,
+              OR: [
+                { remediationDispatchKey: null },
+                { remediationDispatchKey: { not: remediationDispatchKey } }
+              ]
+            },
+            data: {
+              remediationDispatchKey,
+              remediationDispatchVersion: current.scheduleVersion
+            }
+          });
+          if (preserved.count === 1) {
+            return current;
+          }
+          continue;
         }
 
         const nextVersion = current.scheduleVersion + 1;
@@ -2088,6 +2303,13 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
                   nextAutomaticAttemptAt: true,
                   revalidationRequestedAt: true
                 }
+              },
+              supportIncident: {
+                select: {
+                  status: true,
+                  humanReviewReason: true,
+                  escalationDeadlineAt: true
+                }
               }
             }
           }
@@ -2097,18 +2319,137 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
   });
 }
 
-export async function listSearchesNeedingScheduleRecovery() {
-  const now = new Date();
+export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
   const queuedOverdueBefore = new Date(now.getTime() - 2 * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - 10 * 60 * 1000);
   const missingInitialVerdictBefore = new Date(now.getTime() - 5 * 60 * 1000);
-  return prisma.teeSearch.findMany({
+  const attachedSetupRecoveryBefore = new Date(
+    now.getTime() - 4 * 60 * 1000
+  );
+  const endpointRecoveryHorizon = new Date(now.getTime() + 5 * 60 * 1000);
+  const recentEndpointEscalationAfter = new Date(
+    now.getTime() - 5 * 60 * 1000
+  );
+  const recoverySelect = {
+    id: true,
+    scheduleVersion: true,
+    checkStatus: true,
+    workflowRunId: true,
+    nextCheckAt: true,
+    updatedAt: true,
+    statusEmailSentAt: true,
+    remediationDispatchKey: true,
+    preferences: {
+      select: {
+        course: {
+          select: {
+            supportIncident: {
+              select: {
+                id: true,
+                cycle: true,
+                status: true,
+                humanReviewReason: true,
+                escalationDeadlineAt: true,
+                escalatedAt: true
+              }
+            }
+          }
+        }
+      }
+    }
+  } satisfies Prisma.TeeSearchSelect;
+  const sharedWhere = {
+    status: "ACTIVE" as const,
+    // Exact multi-course expiry is enforced by executeScheduledSearchCheck.
+    // This indexed floor keeps every possibly-current local calendar date in
+    // the recovery cohort without reviving older searches.
+    date: { gte: earliestPotentiallyActiveSearchDate(now) }
+  };
+  const criticalEndpointSearches = await prisma.teeSearch.findMany({
     where: {
-      status: "ACTIVE",
-      // Exact multi-course expiry is enforced by executeScheduledSearchCheck.
-      // This indexed floor keeps every possibly-current local calendar date in
-      // the recovery cohort without reviving older searches.
-      date: { gte: earliestPotentiallyActiveSearchDate(now) },
+      ...sharedWhere,
+      OR: [
+        {
+          checkStatus: "QUEUED",
+          workflowRunId: null,
+          preferences: {
+            some: {
+              course: {
+                supportIncident: {
+                  is: {
+                    status: "AUTO_INVESTIGATING",
+                    humanReviewReason: null,
+                    escalationDeadlineAt: { lte: endpointRecoveryHorizon }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          statusEmailSentAt: null,
+          checkStatus: "QUEUED",
+          workflowRunId: { not: null },
+          updatedAt: { lte: attachedSetupRecoveryBefore }
+        },
+        {
+          checkStatus: { in: ["QUEUED", "WAITING"] },
+          workflowRunId: { not: null },
+          preferences: {
+            some: {
+              course: {
+                supportIncident: {
+                  is: {
+                    status: "AUTO_INVESTIGATING",
+                    humanReviewReason: null,
+                    escalationDeadlineAt: { lte: endpointRecoveryHorizon }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          AND: [
+            {
+              checkStatus: { in: ["QUEUED", "WAITING"] }
+            },
+            { recheckRequestedAt: { gte: recentEndpointEscalationAfter } },
+            {
+              preferences: {
+                some: {
+                  course: {
+                    supportIncident: {
+                      is: {
+                        escalatedAt: { gte: recentEndpointEscalationAfter },
+                        escalationDeadlineAt: { lte: now },
+                        OR: [
+                          {
+                            status: "AUTO_INVESTIGATING",
+                            humanReviewReason: "AUTOMATION_STALLED"
+                          },
+                          {
+                            status: "NEEDS_HUMAN",
+                            humanReviewReason: { not: null }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    select: recoverySelect,
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    take: 50
+  });
+  const standardRecoverySearches = await prisma.teeSearch.findMany({
+    where: {
+      ...sharedWhere,
       OR: [
         { checkStatus: "IDLE" },
         {
@@ -2177,10 +2518,86 @@ export async function listSearchesNeedingScheduleRecovery() {
         }
       ]
     },
-    select: { id: true },
+    select: recoverySelect,
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     take: 50
   });
+  type RecoverySearch = (typeof criticalEndpointSearches)[number] & {
+    endpointRecoveryDispatchKey?: string;
+  };
+  const filteredCriticalEndpointSearches = criticalEndpointSearches.flatMap(
+    (search): RecoverySearch[] => {
+      const incidents = (search.preferences ?? [])
+        .map((preference) => preference.course.supportIncident)
+        .filter((incident) => Boolean(incident));
+      const imminentIncident = incidents
+        .filter(
+          (incident) =>
+            incident?.status === "AUTO_INVESTIGATING" &&
+            !incident.humanReviewReason &&
+            incident.escalationDeadlineAt &&
+            incident.escalationDeadlineAt <= endpointRecoveryHorizon
+        )
+        .sort(
+          (left, right) =>
+            left!.escalationDeadlineAt!.getTime() -
+            right!.escalationDeadlineAt!.getTime()
+        )[0];
+      const recentlyEscalated = incidents.some(
+        (incident) =>
+          incident?.escalatedAt &&
+          incident.escalatedAt >= recentEndpointEscalationAfter &&
+          incident.escalationDeadlineAt &&
+          incident.escalationDeadlineAt <= now &&
+          (incident.humanReviewReason === "AUTOMATION_STALLED" ||
+            (incident.status === "NEEDS_HUMAN" &&
+              Boolean(incident.humanReviewReason)))
+      );
+      const attachedSetupRecovery =
+        search.statusEmailSentAt === null &&
+        search.checkStatus === "QUEUED" &&
+        Boolean(search.workflowRunId) &&
+        search.updatedAt <= attachedSetupRecoveryBefore;
+      const attachedEndpointRecovery = Boolean(
+        imminentIncident &&
+          search.workflowRunId &&
+          (search.checkStatus === "QUEUED" ||
+            search.checkStatus === "WAITING")
+      );
+      if (!attachedEndpointRecovery || !imminentIncident) {
+        return [search];
+      }
+      const recoveryDispatchKey = `endpoint-deadline:${imminentIncident.id}:${imminentIncident.cycle}`;
+      const alreadyDispatched =
+        search.remediationDispatchKey === recoveryDispatchKey;
+      if (
+        alreadyDispatched &&
+        !attachedSetupRecovery &&
+        !recentlyEscalated
+      ) {
+        return [];
+      }
+      return alreadyDispatched
+        ? [search]
+        : [{ ...search, endpointRecoveryDispatchKey: recoveryDispatchKey }];
+    }
+  );
+  const selected = new Map<
+    string,
+    RecoverySearch
+  >();
+  for (const search of [
+    ...filteredCriticalEndpointSearches,
+    ...standardRecoverySearches
+  ]) {
+    if (!selected.has(search.id)) {
+      selected.set(search.id, search);
+    }
+    if (selected.size === 50) {
+      break;
+    }
+  }
+  return [...selected.values()];
 }
 
 type MatchAlertCycleRef = {
@@ -2243,7 +2660,10 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
   const latest = await prisma.courseProbe.findFirst({
     where: {
       teeSearchId: input.searchId,
-      courseId: input.courseId
+      courseId: input.courseId,
+      ...(input.observedAtOrAfter
+        ? { observedAt: { gte: input.observedAtOrAfter } }
+        : {})
     },
     orderBy: { observedAt: "desc" },
     select: {

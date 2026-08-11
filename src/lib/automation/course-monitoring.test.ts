@@ -5,10 +5,12 @@ import {
   ACTIVE_HUMAN_RETRY_MS,
   ACTIVE_REMINDER_MS,
   FAILURE_CONFIRMATION_WINDOW_MS,
+  CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS,
   INACTIVE_HUMAN_RETRY_MS,
   INACTIVE_INVESTIGATION_MS,
   INACTIVE_REMINDER_MS,
   decideMonitoringFailureState,
+  getFirstFailureRetryAt,
   getCourseMonitoringEscalationDeadline,
   getHumanReviewReminderAt,
   getHumanReviewRetryAt,
@@ -67,19 +69,29 @@ describe("course monitoring lifecycle", () => {
   it("uses the active and inactive escalation and reminder cadences", () => {
     const now = new Date("2026-07-27T12:00:00.000Z");
     expect(getCourseMonitoringEscalationDeadline(now, 1).getTime() - now.getTime()).toBe(
-      ACTIVE_DEMAND_ESCALATION_MS
+      ACTIVE_DEMAND_ESCALATION_MS - CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS
     );
     expect(getCourseMonitoringEscalationDeadline(now, 0).getTime() - now.getTime()).toBe(
       INACTIVE_INVESTIGATION_MS
     );
     expect(INACTIVE_INVESTIGATION_MS).toBe(30 * 60 * 1000);
     expect(ACTIVE_DEMAND_ESCALATION_MS).toBe(30 * 60 * 1000);
+    expect(CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS).toBe(2 * 60 * 1000);
     expect(getHumanReviewRetryAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_HUMAN_RETRY_MS);
     expect(getHumanReviewRetryAt(now, 0).getTime() - now.getTime()).toBe(INACTIVE_HUMAN_RETRY_MS);
     expect(INACTIVE_HUMAN_RETRY_MS).toBe(6 * 60 * 60 * 1000);
     expect(getHumanReviewReminderAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_REMINDER_MS);
     expect(getHumanReviewReminderAt(now, 0).getTime() - now.getTime()).toBe(INACTIVE_REMINDER_MS);
     expect(FAILURE_CONFIRMATION_WINDOW_MS).toBe(15 * 60 * 1000);
+  });
+
+  it("anchors the first retry to the check episode instead of failure completion", () => {
+    const episodeStartedAt = new Date("2026-07-27T12:00:00.000Z");
+    const failureObservedAt = new Date("2026-07-27T12:00:04.000Z");
+
+    expect(
+      getFirstFailureRetryAt(failureObservedAt, episodeStartedAt).toISOString()
+    ).toBe("2026-07-27T12:02:00.000Z");
   });
 
   it("keeps customer workflows off the responder's hot investigation loop", () => {
@@ -133,6 +145,44 @@ describe("course monitoring lifecycle", () => {
         now
       })?.toISOString()
     ).toBe("2026-07-27T12:02:00.000Z");
+  });
+
+  it("normalizes an overdue first-failure deadline to the current check", () => {
+    const now = new Date("2026-07-27T12:02:04.000Z");
+    expect(
+      selectSearchWorkflowMonitoringRetryAt({
+        statuses: [
+          {
+            courseId: "first-failure",
+            state: "DEGRADED_RETRYING",
+            nextAutomaticAttemptAt: new Date("2026-07-27T12:02:00.000Z")
+          }
+        ],
+        transientRetryCourseIds: ["first-failure"],
+        now
+      })?.toISOString()
+    ).toBe("2026-07-27T12:02:04.000Z");
+  });
+
+  it("keeps the persisted customer endpoint deadline as a hard wake", () => {
+    const now = new Date("2026-07-27T12:20:00.000Z");
+    const escalationDeadlineAt = new Date("2026-07-27T12:28:00.000Z");
+
+    expect(
+      selectSearchWorkflowMonitoringRetryAt({
+        statuses: [],
+        incidents: [
+          {
+            courseId: "deadline-course",
+            status: "AUTO_INVESTIGATING",
+            humanReviewReason: null,
+            escalationDeadlineAt
+          }
+        ],
+        transientRetryCourseIds: [],
+        now
+      })
+    ).toEqual(escalationDeadlineAt);
   });
 
   it("sleeps only when every course is in a final state without revalidation", () => {

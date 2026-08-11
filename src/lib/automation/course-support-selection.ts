@@ -24,6 +24,7 @@ export type CourseSupportCandidate = {
   engineeringOnly: boolean;
   activeRealSearchCount: number;
   earliestTargetDate: Date | null;
+  escalationDeadlineAt: Date | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
   lastAttemptAt: Date | null;
@@ -43,6 +44,11 @@ export type SelectedCourseSupportBatch = {
   incidents: CourseSupportCandidate[];
   fairnessReason: "PRIORITY" | "AGED_SYNTHETIC_RESERVATION" | "TARGETED_RETRY";
   containsCriticalRealDemand: boolean;
+};
+
+export type CourseSupportGroupPriority = {
+  activeRealDemandCount: number;
+  earliestEscalationDeadlineAt: Date | null;
 };
 
 export function selectCourseSupportBatch(input: {
@@ -124,6 +130,13 @@ export function compareCourseSupportCandidates(
   right: CourseSupportCandidate,
   now: Date
 ) {
+  const groupPriority = compareCourseSupportGroupPriority(
+    candidateGroupPriority([left]),
+    candidateGroupPriority([right])
+  );
+  if (groupPriority !== 0) {
+    return groupPriority;
+  }
   const priority = candidatePriority(left, now) - candidatePriority(right, now);
   if (priority !== 0) {
     return priority;
@@ -189,10 +202,12 @@ function compareCourseSupportGroups(
   right: CourseSupportCandidate[],
   now: Date
 ) {
-  const leftCritical = left.some((candidate) => isCriticalRealDemand(candidate, now));
-  const rightCritical = right.some((candidate) => isCriticalRealDemand(candidate, now));
-  if (leftCritical !== rightCritical) {
-    return leftCritical ? -1 : 1;
+  const groupPriority = compareCourseSupportGroupPriority(
+    candidateGroupPriority(left),
+    candidateGroupPriority(right)
+  );
+  if (groupPriority !== 0) {
+    return groupPriority;
   }
   const leadComparison = compareCourseSupportCandidates(left[0], right[0], now);
   if (leadComparison !== 0) {
@@ -207,6 +222,49 @@ function compareCourseSupportGroups(
     0
   );
   return rightDemand - leftDemand || oldestSeenAt(left) - oldestSeenAt(right);
+}
+
+export function compareCourseSupportGroupPriority(
+  left: CourseSupportGroupPriority,
+  right: CourseSupportGroupPriority
+) {
+  const leftHasRealDemand = left.activeRealDemandCount > 0;
+  const rightHasRealDemand = right.activeRealDemandCount > 0;
+  if (leftHasRealDemand !== rightHasRealDemand) {
+    return leftHasRealDemand ? -1 : 1;
+  }
+  if (leftHasRealDemand) {
+    const deadlineOrder =
+      (left.earliestEscalationDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER) -
+      (right.earliestEscalationDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
+    if (deadlineOrder !== 0) {
+      return deadlineOrder;
+    }
+    const demandOrder = right.activeRealDemandCount - left.activeRealDemandCount;
+    if (demandOrder !== 0) {
+      return demandOrder;
+    }
+  }
+  return 0;
+}
+
+function candidateGroupPriority(
+  candidates: readonly CourseSupportCandidate[]
+): CourseSupportGroupPriority {
+  const activeRealCandidates = candidates.filter(
+    (candidate) => candidate.activeRealSearchCount > 0
+  );
+  const deadlines = activeRealCandidates.flatMap((candidate) =>
+    candidate.escalationDeadlineAt ? [candidate.escalationDeadlineAt.getTime()] : []
+  );
+  return {
+    activeRealDemandCount: activeRealCandidates.reduce(
+      (sum, candidate) => sum + candidate.activeRealSearchCount,
+      0
+    ),
+    earliestEscalationDeadlineAt:
+      deadlines.length > 0 ? new Date(Math.min(...deadlines)) : null
+  };
 }
 
 function candidatePriority(candidate: CourseSupportCandidate, now: Date) {

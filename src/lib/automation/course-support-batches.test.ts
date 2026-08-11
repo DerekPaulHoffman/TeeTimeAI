@@ -17,6 +17,7 @@ const prismaMocks = vi.hoisted(() => ({
   verificationRequestFindMany: vi.fn(),
   verificationRequestUpdateMany: vi.fn(),
   monitoringStatusUpdateMany: vi.fn(),
+  monitoringEventCreate: vi.fn(),
   automationRunUpdateMany: vi.fn(),
   teeSearchCount: vi.fn(),
   teeSearchUpdateMany: vi.fn(),
@@ -31,6 +32,9 @@ const verificationMocks = vi.hoisted(() => ({
 }));
 const leaseMocks = vi.hoisted(() => ({
   withPostgresAdvisoryTextLease: vi.fn()
+}));
+const supportIncidentMocks = vi.hoisted(() => ({
+  resolveCourseSupportIncident: vi.fn()
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -57,6 +61,7 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("./course-support-verification", () => verificationMocks);
 vi.mock("./lease", () => leaseMocks);
+vi.mock("./support-incidents", () => supportIncidentMocks);
 
 import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 
@@ -353,6 +358,13 @@ const transactionClient = {
   }
 };
 
+const monitoringTransactionClient = {
+  ...transactionClient,
+  courseMonitoringEvent: {
+    create: prismaMocks.monitoringEventCreate
+  }
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   prismaMocks.transaction.mockImplementation(
@@ -378,6 +390,7 @@ beforeEach(() => {
   prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
   prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
   prismaMocks.monitoringStatusUpdateMany.mockResolvedValue({ count: 1 });
+  prismaMocks.monitoringEventCreate.mockResolvedValue({ id: "monitoring-event-1" });
   prismaMocks.automationRunUpdateMany.mockResolvedValue({ count: 1 });
   prismaMocks.teeSearchCount.mockResolvedValue(0);
   prismaMocks.supportIncidentFindMany.mockResolvedValue([]);
@@ -413,6 +426,7 @@ function candidate(overrides: Partial<CourseSupportCandidate> = {}): CourseSuppo
     engineeringOnly: true,
     activeRealSearchCount: 0,
     earliestTargetDate: null,
+    escalationDeadlineAt: null,
     firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
     lastSeenAt: new Date("2026-07-15T18:00:00.000Z"),
     lastAttemptAt: null,
@@ -540,7 +554,7 @@ describe("course-support batch selection", () => {
     expect(selected?.incidents.map((incident) => incident.id)).toEqual(["real"]);
   });
 
-  it("reserves the fourth noncritical batch opportunity for aged synthetic work", () => {
+  it("keeps aged synthetic fairness eligible beside noncritical active demand", () => {
     const selected = selectCourseSupportBatch({
       candidates: [
         candidate({
@@ -572,6 +586,37 @@ describe("course-support batch selection", () => {
     });
   });
 
+  it("prioritizes the nearest customer escalation deadline over older real-demand work", () => {
+    const selected = selectCourseSupportBatch({
+      candidates: [
+        candidate({
+          id: "older-real",
+          courseId: "older-real-course",
+          providerFamilyKey: "OLDER",
+          failureFingerprint: "older-failure",
+          engineeringOnly: false,
+          activeRealSearchCount: 2,
+          escalationDeadlineAt: new Date("2026-07-15T20:25:00.000Z"),
+          firstSeenAt: new Date("2026-07-15T18:00:00.000Z")
+        }),
+        candidate({
+          id: "new-alert",
+          courseId: "new-alert-course",
+          providerFamilyKey: "NEW_ALERT",
+          failureFingerprint: "new-alert-failure",
+          engineeringOnly: false,
+          activeRealSearchCount: 1,
+          escalationDeadlineAt: new Date("2026-07-15T20:10:00.000Z"),
+          firstSeenAt: new Date("2026-07-15T19:55:00.000Z")
+        })
+      ],
+      now
+    });
+
+    expect(selected?.providerFamilyKey).toBe("NEW_ALERT");
+    expect(selected?.incidents.map((incident) => incident.id)).toEqual(["new-alert"]);
+  });
+
   it("keeps a provider/fingerprint batch bounded at twenty", () => {
     const selected = selectCourseSupportBatch({
       candidates: Array.from({ length: 30 }, (_, index) =>
@@ -587,7 +632,7 @@ describe("course-support batch selection", () => {
     expect(selected?.incidents).toHaveLength(20);
   });
 
-  it("reserves one slot in a five-course mixed group for aged synthetic coverage", () => {
+  it("reserves bounded aged synthetic fairness beside noncritical customer work", () => {
     const selected = selectCourseSupportBatch({
       candidates: [
         ...Array.from({ length: 5 }, (_, index) =>
@@ -611,6 +656,9 @@ describe("course-support batch selection", () => {
 
     expect(selected?.incidents).toHaveLength(5);
     expect(selected?.incidents.some((incident) => incident.id === "aged-synthetic")).toBe(true);
+    expect(selected?.incidents.filter((incident) => incident.id.startsWith("real-"))).toHaveLength(
+      4
+    );
   });
 
   it("claims only the exact due incidents from a completed retryable batch", () => {
@@ -926,6 +974,61 @@ describe("course-support claim demand fencing", () => {
 
     expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ["FINAL_MANUAL", "DIRECT_BOOKING_CLASSIFIED"],
+    ["FINAL_IDENTITY", "IDENTITY_CLASSIFIED"],
+  ] as const)(
+    "reconciles a persisted %s classification before responder ownership",
+    async (state, resolution) => {
+      const selected = incidentRecord({
+        engineeringOnly: true,
+        preferences: [],
+      });
+      prismaMocks.supportIncidentFindMany
+        .mockResolvedValueOnce([selected])
+        .mockResolvedValueOnce([
+          {
+            ...selected,
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: null,
+            revision: 7,
+            course: {
+              ...selected.course,
+              monitoringStatus: { state },
+            },
+          },
+        ]);
+
+      await expect(
+        claimCourseSupportBatch({
+          ownerThreadId: "owner-thread",
+          branch: "automation/course-support-20260715-200000",
+          baseSha,
+          now: new Date("2026-07-21T01:37:00.000Z"),
+        }),
+      ).resolves.toMatchObject({
+        outcome: "no_due_work",
+        reconciledAuthoritativeFinalCount: 1,
+      });
+
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith({
+        where: {
+          id: selected.id,
+          cycle: selected.cycle,
+          revision: 7,
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: null,
+        },
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolution,
+        }),
+      });
+      expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    },
+  );
 
   it("atomically promotes synthetic provenance when current real demand exists", async () => {
     const preferences = [
@@ -3335,12 +3438,16 @@ describe("course-support inspection ownership", () => {
         providerFamilyKey: "FOREUP",
         failureFingerprint: "historical",
         engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:30:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
         course: { timeZone: "America/New_York", preferences: [] }
       },
       {
         providerFamilyKey: "FOREUP",
         failureFingerprint: "live",
         engineeringOnly: true,
+        escalationDeadlineAt: new Date("2026-07-15T20:20:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:50:00.000Z"),
         course: {
           timeZone: "America/New_York",
           preferences: [
@@ -3357,6 +3464,8 @@ describe("course-support inspection ownership", () => {
         providerFamilyKey: "CPS",
         failureFingerprint: "synthetic",
         engineeringOnly: true,
+        escalationDeadlineAt: new Date("2026-07-15T20:30:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:00:00.000Z"),
         course: { timeZone: "America/New_York", preferences: [] }
       }
     ]);
@@ -3380,6 +3489,95 @@ describe("course-support inspection ownership", () => {
         })
       })
     );
+  });
+
+  it("shows nearest-deadline active customer groups first in the inspect plan", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        providerFamilyKey: "OLDER_GROUP",
+        failureFingerprint: "older",
+        engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:25:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "older-search",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      },
+      {
+        providerFamilyKey: "NEW_ALERT_GROUP",
+        failureFingerprint: "new-alert",
+        engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:10:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:55:00.000Z"),
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "new-alert-search",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      }
+    ]);
+
+    const result = await inspectCourseSupportQueue({ now });
+
+    expect(result.readOnlyDispatchPlan.groups.map((group) => group.providerFamilyKey)).toEqual([
+      "NEW_ALERT_GROUP",
+      "OLDER_GROUP"
+    ]);
+  });
+
+  it("preserves due dispatch work for one reinspection after expired recovery", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        providerFamilyKey: "DUE_GROUP",
+        failureFingerprint: "due",
+        engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:10:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:55:00.000Z"),
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "due-search",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      }
+    ]);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce({
+      id: "expired-batch",
+      reference: "expired-reference",
+      status: "VERIFYING",
+      leaseExpiresAt: new Date("2026-07-15T19:59:00.000Z")
+    });
+
+    await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
+      outcome: "recovery_required",
+      recoveryContinuation: {
+        reinspectAfterRecovery: true,
+        dueIncidentCount: 1,
+        availableWriterSlots: 3
+      },
+      readOnlyDispatchPlan: {
+        groups: [{ providerFamilyKey: "DUE_GROUP" }]
+      }
+    });
   });
 
   it("resumes owned responder work without consulting the hourly lane", async () => {
@@ -3955,6 +4153,11 @@ describe("detached verification atomic batch fences", () => {
       intelligenceVerifiedAt: Date | null;
       intelligenceReviewAt: Date | null;
       intelligenceConfidence: number | null;
+      monitoringStatus: {
+        state: "AUTO_INVESTIGATING" | "HEALTHY" | "FINAL_MANUAL";
+        lastSuccessfulAt: Date | null;
+        revision: number;
+      } | null;
     }> = {}
   ) {
     return {
@@ -3975,6 +4178,11 @@ describe("detached verification atomic batch fences", () => {
       intelligenceReviewAt: null,
       intelligenceConfidence: null,
       bookingMetadata: { adapter: "example" },
+      monitoringStatus: {
+        state: "AUTO_INVESTIGATING",
+        lastSuccessfulAt: new Date("2026-07-15T18:00:00.000Z"),
+        revision: 4
+      },
       ...overrides
     };
   }
@@ -4186,7 +4394,11 @@ describe("detached verification atomic batch fences", () => {
   }
 
   function closeoutBatch(
-    result: "RESTORED" | "RETRY_SCHEDULED" | "NEEDS_HUMAN",
+    result:
+      | "RESTORED"
+      | "FINAL_DISPOSITION"
+      | "RETRY_SCHEDULED"
+      | "NEEDS_HUMAN",
     retryProofSnapshot: Record<string, unknown> | null = null
   ) {
     const proofSnapshot =
@@ -4200,6 +4412,12 @@ describe("detached verification atomic batch fences", () => {
             providerExecution: true,
             providerSnapshotFingerprint: providerFingerprint
           }
+        : result === "FINAL_DISPOSITION"
+          ? {
+              kind: "PLAYBOOK_FACTUAL_FINAL",
+              disposition: "MANUAL_DIRECT",
+              runtimeVersion: releaseSha
+            }
         : retryProofSnapshot;
     return {
       id: "batch-1",
@@ -4239,13 +4457,192 @@ describe("detached verification atomic batch fences", () => {
             failureFingerprint: "fingerprint",
             attemptCount: 1,
             attemptLedger:
-              result === "NEEDS_HUMAN" ? exhaustedAttemptLedger() : null,
+              result === "NEEDS_HUMAN"
+                ? exhaustedAttemptLedger()
+                : result === "FINAL_DISPOSITION"
+                  ? factualFinalLedger("MANUAL_DIRECT")
+                  : null,
             escalatedAt: null
           }
         }
       ]
     };
   }
+
+  it.each([
+    {
+      result: "NEEDS_HUMAN" as const,
+      requestedOutcome: "needs_human" as const
+    },
+    {
+      result: "FINAL_DISPOSITION" as const,
+      requestedOutcome: "classification_only" as const
+    },
+    {
+      result: "RETRY_SCHEDULED" as const,
+      requestedOutcome: "retryable_failed" as const
+    }
+  ])(
+    "does not overwrite a search success racing responder $result closeout",
+    async ({ result, requestedOutcome }) => {
+      prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch(result));
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.monitoringStatusUpdateMany.mockResolvedValue({ count: 0 });
+      prismaMocks.transaction.mockImplementationOnce(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient
+          ) => Promise<unknown>
+        ) => worker(monitoringTransactionClient)
+      );
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome,
+          now
+        })
+      ).rejects.toThrow("Course monitoring changed during responder closeout");
+
+      expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            courseId: "course-1",
+            state: "AUTO_INVESTIGATING",
+            revision: 4,
+            lastSuccessfulAt: new Date("2026-07-15T18:00:00.000Z")
+          }
+        })
+      );
+      expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+    }
+  );
+
+  it("reasserts a matching factual final snapshot before resolving the batch", async () => {
+    const batch = closeoutBatch("FINAL_DISPOSITION");
+    batch.incidents[0].course.monitoringStatus = {
+      state: "FINAL_MANUAL",
+      lastSuccessfulAt: null,
+      revision: 5
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    // A search restored HEALTHY after the batch snapshot was read.
+    prismaMocks.monitoringStatusUpdateMany.mockResolvedValue({ count: 0 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient
+        ) => Promise<unknown>
+      ) => worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "classification_only",
+        now
+      })
+    ).rejects.toThrow("Course monitoring changed during responder closeout");
+
+    expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        state: "FINAL_MANUAL",
+        revision: 5,
+        lastSuccessfulAt: null
+      },
+      data: {
+        revision: { increment: 0 }
+      }
+    });
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not resolve a fresh incident cycle opened after atomic batch closeout", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      closeoutBatch("FINAL_DISPOSITION")
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    let freshCycleStatus = "NOT_OPEN";
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient
+        ) => Promise<unknown>
+      ) => {
+        const result = await worker(monitoringTransactionClient);
+        freshCycleStatus = "AUTO_INVESTIGATING";
+        return result;
+      }
+    );
+    supportIncidentMocks.resolveCourseSupportIncident.mockImplementation(
+      async () => {
+        freshCycleStatus = "RESOLVED";
+      }
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "classification_only",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "classification_only",
+      durableCloseoutRecorded: true
+    });
+
+    expect(freshCycleStatus).toBe("AUTO_INVESTIGATING");
+    expect(
+      supportIncidentMocks.resolveCourseSupportIncident
+    ).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledOnce();
+  });
+
+  it.each(["HEALTHY", "FINAL_MANUAL"] as const)(
+    "requires re-verification instead of replacing an already authoritative %s state",
+    async (state) => {
+      const batch = closeoutBatch("NEEDS_HUMAN");
+      batch.incidents[0].course.monitoringStatus = {
+        state,
+        lastSuccessfulAt:
+          state === "HEALTHY" ? new Date("2026-07-15T19:59:00.000Z") : null,
+        revision: 5
+      };
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.transaction.mockImplementationOnce(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient
+          ) => Promise<unknown>
+        ) => worker(monitoringTransactionClient)
+      );
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "needs_human",
+          now
+        })
+      ).rejects.toThrow("newer authoritative state");
+      expect(prismaMocks.monitoringStatusUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+    }
+  );
 
   it("atomically stales detached work when human evidence supersedes it", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({

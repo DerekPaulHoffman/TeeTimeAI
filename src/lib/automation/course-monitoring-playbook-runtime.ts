@@ -3,6 +3,7 @@ import type { CourseMonitoringEventSource } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 import { recordCourseMonitoringPlaybookTransition } from "./course-monitoring";
+import type { CourseSupportBrowserPersistenceFence } from "./course-support-browser-stages";
 import {
   assessAutomationPlaybook,
   parseAutomationPlaybookLedger,
@@ -81,6 +82,7 @@ export async function loadCourseMonitoringPlaybookRuntime(
 export async function recordRuntimePlaybookTransition(
   runtime: CourseMonitoringPlaybookRuntime,
   input: RuntimePlaybookTransitionInput,
+  browserPersistenceFence?: CourseSupportBrowserPersistenceFence,
 ) {
   if (runtime.assessment.conclusion !== "INCOMPLETE") {
     return { recorded: false as const, reason: "CONCLUDED" as const };
@@ -111,6 +113,7 @@ export async function recordRuntimePlaybookTransition(
     note: getRuntimePlaybookNote(input.stage, input.transition),
     source: input.source,
     now: input.now,
+    browserPersistenceFence,
   });
   if (!result) {
     return { recorded: false as const, reason: "UNAVAILABLE" as const };

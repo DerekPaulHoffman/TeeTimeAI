@@ -114,6 +114,67 @@ describe("course monitoring write serialization", () => {
     );
   });
 
+  it("closes an unclaimed automatic incident in the same serialized success write", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    const succeededAt = new Date("2026-07-27T15:45:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: null,
+      revision: 4,
+    });
+
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      now: succeededAt,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: null,
+        revision: 4,
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolvedAt: succeededAt,
+        resolution: "MONITORING_RESTORED",
+        nextAttemptAt: null,
+        nextReminderAt: null,
+      }),
+    });
+  });
+
+  it("does not steal responder ownership while recording success", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-1",
+      revision: 4,
+    });
+
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      now: new Date("2026-07-27T15:45:00.000Z"),
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["manual", "FINAL_MANUAL", "MANUAL_DIRECT"],
     ["identity", "FINAL_IDENTITY", "IDENTITY_FINAL"],
@@ -156,6 +217,99 @@ describe("course monitoring write serialization", () => {
       ).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ["FINAL_MANUAL", "MANUAL_DIRECT", "DIRECT_BOOKING_CLASSIFIED"],
+    ["FINAL_IDENTITY", "IDENTITY_FINAL", "IDENTITY_CLASSIFIED"],
+  ] as const)(
+    "atomically reconciles an unclaimed incident when %s classification already persisted",
+    async (state, outcome, resolution) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const classifiedAt = new Date("2026-07-27T15:50:00.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        revision: 8,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-1",
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: null,
+        revision: 4,
+      });
+
+      await recordCourseMonitoringFinalClassification({
+        courseId: "course-1",
+        state,
+        outcome,
+        message: "Official evidence confirms the factual final state.",
+        now: classifiedAt,
+      });
+
+      expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
+      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).toHaveBeenCalledWith({
+        where: {
+          id: "incident-1",
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: null,
+          revision: 4,
+        },
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolvedAt: classifiedAt,
+          resolution,
+          nextAttemptAt: null,
+          nextReminderAt: null,
+        }),
+      });
+    },
+  );
+
+  it("preserves active responder ownership while recording a factual final", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+      courseId: "course-1",
+      state: "AUTO_INVESTIGATING",
+      consecutiveFailures: 1,
+      failureFingerprint: "PHONE_ONLY:CONFIRMED",
+      firstDegradedAt: new Date("2026-07-27T15:40:00.000Z"),
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+      revision: 8,
+    });
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-1",
+      revision: 4,
+    });
+
+    await recordCourseMonitoringFinalClassification({
+      courseId: "course-1",
+      state: "FINAL_MANUAL",
+      outcome: "MANUAL_DIRECT",
+      message: "Official evidence confirms phone-only booking.",
+      now: new Date("2026-07-27T15:50:00.000Z"),
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+  });
 
   it("repairs a dirty final snapshot without recording a same-state transition", async () => {
     prismaMocks.$transaction.mockReset();
@@ -447,7 +601,7 @@ describe("course monitoring write serialization", () => {
         data: expect.objectContaining({
           cycle: { increment: 1 },
           status: "AUTO_INVESTIGATING",
-          escalationDeadlineAt: new Date("2026-07-27T16:30:00.000Z"),
+          escalationDeadlineAt: new Date("2026-07-27T16:28:00.000Z"),
         }),
       }),
     );
@@ -541,7 +695,7 @@ describe("course monitoring write serialization", () => {
           status: "AUTO_INVESTIGATING",
           humanReviewReason: null,
           nextAttemptAt: now,
-          escalationDeadlineAt: new Date("2026-07-27T16:30:00.000Z"),
+          escalationDeadlineAt: new Date("2026-07-27T16:28:00.000Z"),
         }),
       }),
     );

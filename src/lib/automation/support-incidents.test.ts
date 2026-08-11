@@ -145,7 +145,7 @@ describe("course support incidents", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           confirmedAt: null,
-          escalationDeadlineAt: new Date(now.getTime() + 30 * 60 * 1000),
+          escalationDeadlineAt: new Date(now.getTime() + 28 * 60 * 1000),
           nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000)
         })
       })
@@ -448,6 +448,38 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
   });
 
+  it("keeps first-seen truthful while anchoring retry and escalation to the generation", async () => {
+    const episodeStartedAt = new Date(now.getTime() - 4_000);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+    prismaMocks.courseSupportIncident.create.mockResolvedValue(
+      incident({ firstSeenAt: now })
+    );
+
+    await reportCourseSupportIssue({
+      course: {
+        ...foreupCourse,
+        timeZone: "America/New_York"
+      },
+      searchId: "search-1",
+      kind: "FETCH_FAILED",
+      message: "The first provider attempt failed.",
+      episodeStartedAt,
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          firstSeenAt: now,
+          nextAttemptAt: new Date(episodeStartedAt.getTime() + 2 * 60 * 1000),
+          escalationDeadlineAt: new Date(
+            episodeStartedAt.getTime() + 28 * 60 * 1000
+          )
+        })
+      })
+    );
+  });
+
   it("anchors a repaired missing deadline to the first degradation episode", async () => {
     const firstSeenAt = new Date(now.getTime() - 10 * 60 * 1000);
     const existing = incident({
@@ -472,7 +504,37 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          escalationDeadlineAt: new Date(firstSeenAt.getTime() + 30 * 60 * 1000)
+          escalationDeadlineAt: new Date(firstSeenAt.getTime() + 28 * 60 * 1000)
+        })
+      })
+    );
+  });
+
+  it("does not reset a persisted endpoint deadline after setup delivery", async () => {
+    const persistedDeadline = new Date(now.getTime() + 18 * 60 * 1000);
+    const existing = incident({
+      providerFamilyKey: "FOREUP",
+      failureClass: "AUTH",
+      failureFingerprint: authFailureFingerprint,
+      escalationDeadlineAt: persistedDeadline
+    });
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(existing);
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
+      episodeStartedAt: now,
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          escalationDeadlineAt: persistedDeadline
         })
       })
     );
@@ -917,6 +979,100 @@ describe("course support incidents", () => {
     });
   });
 
+  it("starts a fresh retry and escalation ladder when the failure fingerprint changes", async () => {
+    const oldEpisodeStartedAt = new Date(now.getTime() - 20 * 60 * 1000);
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        providerFamilyKey: "FOREUP",
+        failureClass: "RATE_LIMIT",
+        failureFingerprint: rateLimitFailureFingerprint,
+        firstSeenAt: oldEpisodeStartedAt,
+        escalationDeadlineAt: new Date(
+          oldEpisodeStartedAt.getTime() + 28 * 60 * 1000
+        )
+      })
+    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({
+        cycle: 2,
+        providerFamilyKey: "FOREUP",
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        firstSeenAt: now
+      })
+    );
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
+      episodeStartedAt: oldEpisodeStartedAt,
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        firstSeenAt: now,
+        nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000),
+        escalationDeadlineAt: new Date(now.getTime() + 28 * 60 * 1000),
+        failureFingerprint: authFailureFingerprint
+      })
+    });
+  });
+
+  it("starts a fresh ladder when the same failure returns after monitoring recovery", async () => {
+    const oldEpisodeStartedAt = new Date(now.getTime() - 20 * 60 * 1000);
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        status: "RESOLVED",
+        resolution: "MONITORING_RESTORED",
+        resolvedAt: new Date(now.getTime() - 60 * 1000),
+        providerFamilyKey: "FOREUP",
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        firstSeenAt: oldEpisodeStartedAt,
+        escalationDeadlineAt: new Date(
+          oldEpisodeStartedAt.getTime() + 28 * 60 * 1000
+        )
+      })
+    );
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(
+      incident({
+        cycle: 2,
+        providerFamilyKey: "FOREUP",
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        firstSeenAt: now
+      })
+    );
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
+      episodeStartedAt: oldEpisodeStartedAt,
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1" },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        firstSeenAt: now,
+        nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000),
+        escalationDeadlineAt: new Date(now.getTime() + 28 * 60 * 1000),
+        failureFingerprint: authFailureFingerprint
+      })
+    });
+  });
+
   it("escalates a concrete blocker into the durable operator queue", async () => {
     const blocked = incident({
       status: "NEEDS_HUMAN",
@@ -1042,13 +1198,16 @@ describe("course support incidents", () => {
   });
 
   it("preserves a claimed incident cycle while promoting newly arrived real demand", async () => {
+    const generationStartedAt = new Date(now.getTime() - 5 * 60 * 1000);
     const owned = incident({
       activeBatchId: "batch-1",
       providerFamilyKey: "CHRONOGOLF",
       failureFingerprint: "claimed-fingerprint",
       engineeringOnly: true,
       activeRealSearchCount: 0,
-      earliestTargetDate: null
+      earliestTargetDate: null,
+      firstSeenAt: new Date(now.getTime() - 48 * 60 * 60 * 1000),
+      escalationDeadlineAt: new Date(now.getTime() - 47.5 * 60 * 60 * 1000)
     });
     prismaMocks.teeSearch.aggregate.mockResolvedValue({
       _count: { id: 1 },
@@ -1071,6 +1230,7 @@ describe("course support incidents", () => {
         searchId: "search-1",
         kind: "FETCH_FAILED",
         error: new Error("A newly shaped provider failure"),
+        episodeStartedAt: generationStartedAt,
         now
       })
     ).resolves.toEqual({
@@ -1092,7 +1252,10 @@ describe("course support incidents", () => {
         engineeringOnly: false,
         activeRealSearchCount: 1,
         earliestTargetDate: now,
-        lastSeenAt: now
+        lastSeenAt: now,
+        escalationDeadlineAt: new Date(
+          generationStartedAt.getTime() + 28 * 60 * 1000
+        )
       })
     });
     const promotionData = prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;

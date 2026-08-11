@@ -285,7 +285,8 @@ export async function scheduleCourseSupportVerificationRequests(input: {
             course: entry.course,
             releaseSha
           }),
-          now
+          now,
+          "PROGRESSION"
         );
         if (!eligibility.eligible) {
           continue;
@@ -439,7 +440,8 @@ export async function claimCourseSupportVerificationRequest(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(request),
-        now
+        now,
+        "PROGRESSION"
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, request, now, eligibility.reason);
@@ -578,7 +580,8 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(ownedRequest),
-        now
+        now,
+        "PROGRESSION"
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
@@ -654,7 +657,8 @@ export async function markCourseSupportVerificationDiscoveryAttempted(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(ownedRequest),
-        now
+        now,
+        "PROGRESSION"
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
@@ -715,7 +719,8 @@ export async function markCourseSupportVerificationDiscoveryVerified(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(ownedRequest),
-        now
+        now,
+        "PROGRESSION"
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
@@ -788,7 +793,8 @@ export async function completeCourseSupportVerificationRequest(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(ownedRequest),
-        now
+        now,
+        "PROGRESSION"
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
@@ -876,7 +882,8 @@ export async function completeCourseSupportVerificationFactualFinal(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(ownedRequest),
-        now
+        now,
+        "PROGRESSION"
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
@@ -1016,7 +1023,8 @@ export async function failCourseSupportVerificationRequest(input: {
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(ownedRequest),
-        now
+        now,
+        "PROGRESSION"
       );
       const provider = buildProviderSnapshot(ownedRequest.course);
       const stillCurrent =
@@ -1467,7 +1475,8 @@ function buildDetachedEligibilityInputFromRequest(
 async function evaluateDetachedEligibility(
   transaction: Prisma.TransactionClient,
   input: DetachedEligibilityInput,
-  now: Date
+  now: Date,
+  mode: "PROGRESSION" | "PROOF" = "PROOF"
 ): Promise<
   | { eligible: true }
   | {
@@ -1515,7 +1524,9 @@ async function evaluateDetachedEligibility(
     }
   });
   if (activeFuturePairs > 0) {
-    return { eligible: false, reason: "active_demand" };
+    return mode === "PROGRESSION"
+      ? { eligible: true }
+      : { eligible: false, reason: "active_demand" };
   }
   if (input.incident.activeRealSearchCount === 0 && input.incident.earliestTargetDate === null) {
     return { eligible: true };

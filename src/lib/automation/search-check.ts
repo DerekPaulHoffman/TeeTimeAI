@@ -12,6 +12,7 @@ import {
   isSearchCheckLeaseCurrent,
   listAvailableMatchAlerts,
   listPendingMatchAlerts,
+  listSearchCourseVerdictsSince,
   markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
   markSearchStatusEmailSent,
@@ -25,8 +26,11 @@ import {
   type SearchCheckLease
 } from "@/lib/automation/db-service";
 import {
+  ACTIVE_DEMAND_ESCALATION_MS,
+  CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS,
   FIRST_FAILURE_RETRY_MS,
   getCourseMonitoringRetryAt,
+  reconcileCourseMonitoringDeadlines,
   recordCourseMonitoringFinalClassification,
   recordCourseMonitoringSuccess
 } from "@/lib/automation/course-monitoring";
@@ -69,8 +73,7 @@ import {
   type SearchPlaybookRuntime
 } from "@/lib/automation/search-playbook-runtime";
 import {
-  reportCourseSupportIssue,
-  resolveCourseSupportIncident
+  reportCourseSupportIssue
 } from "@/lib/automation/support-incidents";
 import {
   getBookingWindowForTargetDate,
@@ -125,6 +128,10 @@ import {
   type MonitoringStatusNoticeCandidate
 } from "@/lib/email/monitoring-status-notices";
 import { getCustomerMonitoringStatus } from "@/lib/customer-monitoring-status";
+import {
+  preserveAlertGenerationClockInStatusSnapshot,
+  readAlertGenerationStartedAt
+} from "@/lib/searches/generation-clock";
 import { buildCourseFactLine } from "@/lib/email/course-facts";
 import {
   buildCoursePriceEstimate,
@@ -148,6 +155,11 @@ const SHORT_SEARCH_RETRY_FAILURES = new Set([
   "TIMEOUT",
   "NETWORK",
   "UNKNOWN"
+]);
+const SUCCESSFUL_COURSE_VERDICTS = new Set([
+  "MATCH_FOUND",
+  "NO_MATCH",
+  "BOOKING_NOT_OPEN"
 ]);
 
 type AutomationCourse = AutomationCourseProviderRead & {
@@ -304,6 +316,33 @@ async function checkSearch(
   }
   let search = loadedSearch;
   const customerStatusObservedAt = new Date();
+  const generationStartedAt = readAlertGenerationStartedAt({
+    alertGeneration: search.alertGeneration,
+    createdAt: search.createdAt,
+    statusEmailSnapshot: search.statusEmailSnapshot
+  });
+  const customerEndpointStartedAt =
+    generationStartedAt ?? customerStatusObservedAt;
+  const searchCourseIds = search.preferences.map(
+    (preference) => preference.course.id
+  );
+  const currentGenerationVerdicts = await listSearchCourseVerdictsSince({
+    searchId: search.id,
+    courseIds: searchCourseIds,
+    observedAtOrAfter: customerEndpointStartedAt
+  });
+  const currentGenerationVerdictByCourse = new Map(
+    currentGenerationVerdicts.map((verdict) => [verdict.courseId, verdict])
+  );
+  const initialDeadlineReconciliation =
+    await reconcileCourseMonitoringDeadlines({
+      courseIds: searchCourseIds,
+      now: customerStatusObservedAt,
+      source: "SEARCH_WORKFLOW"
+    });
+  if (initialDeadlineReconciliation.escalated > 0) {
+    search = (await getActiveSearchForAutomation(searchId)) ?? search;
+  }
 
   let monitoringRetryCourseIds = new Set<string>();
   let monitoringDeferredCourseIds = new Set<string>();
@@ -375,6 +414,31 @@ async function checkSearch(
         : null
     ])
   );
+  const getCourseFailureEpisodeStartedAt = (course: {
+    id: string;
+    supportIncident?: { status: string; firstSeenAt?: Date | null } | null;
+  }) => {
+    const priorVerdict = currentGenerationVerdictByCourse.get(course.id);
+    if (!priorVerdict) {
+      return customerEndpointStartedAt;
+    }
+    const previousMonitoring = monitoringBeforeCheck.get(course.id) ?? null;
+    if (SUCCESSFUL_COURSE_VERDICTS.has(priorVerdict.outcome)) {
+      return customerStatusObservedAt;
+    }
+    if (previousMonitoring?.firstDegradedAt) {
+      return previousMonitoring.firstDegradedAt;
+    }
+    if (
+      course.supportIncident?.status !== undefined &&
+      course.supportIncident.status !== "RESOLVED"
+    ) {
+      return course.supportIncident.firstSeenAt ?? customerStatusObservedAt;
+    }
+    return (
+      priorVerdict.failureEpisodeStartedAt ?? customerEndpointStartedAt
+    );
+  };
 
   const searchWindow = {
     date: search.date.toISOString().slice(0, 10),
@@ -449,6 +513,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome,
@@ -467,15 +532,6 @@ async function checkSearch(
           message,
           runtimeVersion
         });
-        if (course.supportIncident?.status !== "RESOLVED") {
-          await resolveCourseSupportIncident({
-            courseId: course.id,
-            resolution: identityFinal
-              ? "IDENTITY_CLASSIFIED"
-              : "DIRECT_BOOKING_CLASSIFIED",
-            message
-          });
-        }
         courseResults.push({
           courseId: course.id,
           courseName: course.name,
@@ -521,6 +577,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome: "NEEDS_ADAPTER",
@@ -748,6 +805,7 @@ async function checkSearch(
         const supportIssue = await reportCourseSupportIssue({
           course,
           searchId: search.id,
+          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
           kind: "NEEDS_ADAPTER",
           message,
           readPath: "OFFICIAL_LINK_VERIFICATION",
@@ -759,6 +817,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome: "IDENTITY_RECHECK",
@@ -816,6 +875,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome,
@@ -843,14 +903,6 @@ async function checkSearch(
               runtimeVersion
             });
           }
-          await resolveCourseSupportIncident({
-            courseId: course.id,
-            resolution:
-              monitoringGate.disposition === "IDENTITY_FINAL"
-                ? "IDENTITY_CLASSIFIED"
-                : "DIRECT_BOOKING_CLASSIFIED",
-            message
-          });
         }
         courseResults.push({
           courseId: course.id,
@@ -899,6 +951,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome: "NO_MATCH",
@@ -926,6 +979,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome: "BLOCKED_TOOLING",
@@ -938,6 +992,7 @@ async function checkSearch(
         const supportIssue = await reportCourseSupportIssue({
           course,
           searchId: search.id,
+          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
           kind: "BLOCKED_TOOLING",
           message,
           readPath: "LOCAL_READER_CONFIGURATION",
@@ -981,6 +1036,7 @@ async function checkSearch(
           await recordCourseProbeIfChanged({
             searchId: search.id,
             courseId: course.id,
+            observedAtOrAfter: customerEndpointStartedAt,
             automationRunId,
             runtimeVersion,
             outcome: "NEEDS_ADAPTER",
@@ -1012,6 +1068,7 @@ async function checkSearch(
         await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome: "NEEDS_ADAPTER",
@@ -1024,6 +1081,7 @@ async function checkSearch(
         const supportIssue = await reportCourseSupportIssue({
           course,
           searchId: search.id,
+          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
           kind: "NEEDS_ADAPTER",
           message,
           readPath: browserProbeQueued
@@ -1114,6 +1172,7 @@ async function checkSearch(
         await recordBookingWindowWaitingProbe({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           targetDate: searchWindow.date,
@@ -1134,15 +1193,13 @@ async function checkSearch(
           (stage) => stage.stage === "BROWSER_ADAPTER_RETRY"
         )?.completedAt ?? null;
       const localReaderNotBefore =
-        (localReaderOnly || activePlaybookStage === "LOCAL_READER") &&
-        browserAdapterRetryCompletedAt
+        activePlaybookStage === "LOCAL_READER" && browserAdapterRetryCompletedAt
           ? new Date(browserAdapterRetryCompletedAt)
           : undefined;
       try {
         const localReaderShouldRun =
           localReaderEligible &&
-          (localReaderOnly ||
-            playbookRuntime?.assessment.nextStage === "LOCAL_READER");
+          playbookRuntime?.assessment.nextStage === "LOCAL_READER";
         const localReaderObservation = localReaderShouldRun
           ? await getFreshLocalReaderObservation({
               searchId: search.id,
@@ -1198,6 +1255,7 @@ async function checkSearch(
           await recordCourseProbeIfChanged({
             searchId: search.id,
             courseId: course.id,
+            observedAtOrAfter: customerEndpointStartedAt,
             automationRunId,
             runtimeVersion: localReaderObservation.readerVersion,
             outcome: "FETCH_FAILED",
@@ -1284,6 +1342,7 @@ async function checkSearch(
           await recordBookingWindowWaitingProbe({
             searchId: search.id,
             courseId: course.id,
+            observedAtOrAfter: customerEndpointStartedAt,
             automationRunId,
             runtimeVersion,
             targetDate: searchWindow.date,
@@ -1300,11 +1359,6 @@ async function checkSearch(
             outcome: "NO_MATCH",
             message: "Fresh public monitoring confirmed the booking release window.",
             runtimeVersion
-          });
-          await resolveCourseSupportIncident({
-            courseId: course.id,
-            resolution: "MONITORING_RESTORED",
-            message: `${course.name} returned a verified booking-window release for ${searchWindow.date}.`
           });
           courseResults.push(
             buildBookingWindowCourseReport(course, bookingWindow)
@@ -1385,6 +1439,7 @@ async function checkSearch(
           const supportIssue = await reportCourseSupportIssue({
             course,
             searchId: search.id,
+            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
             kind: "FETCH_FAILED",
             message: unsafeBookingMessage,
             readPath: "ADAPTER_OUTPUT_VALIDATION",
@@ -1427,6 +1482,7 @@ async function checkSearch(
         await recordCourseProbe({
           searchId: search.id,
           courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
           automationRunId,
           runtimeVersion,
           outcome,
@@ -1456,11 +1512,6 @@ async function checkSearch(
                 ? "Fresh public monitoring found matching availability."
                 : "Fresh public monitoring completed with no matching availability.",
             runtimeVersion
-          });
-          await resolveCourseSupportIncident({
-            courseId: course.id,
-            resolution: "MONITORING_RESTORED",
-            message: `${course.name} completed a public read-only tee-sheet check with outcome ${outcome}.`
           });
         }
         courseResults.push({
@@ -1500,8 +1551,7 @@ async function checkSearch(
           error instanceof Error ? error.message : "Unknown adapter error";
         const providerFailure = classifyProviderFailure({ error });
         const localReaderStageActive =
-          localReaderEligible &&
-          (localReaderOnly || activePlaybookStage === "LOCAL_READER");
+          localReaderEligible && activePlaybookStage === "LOCAL_READER";
         const localReaderJob =
           customerBookingUrl && localReaderStageActive
             ? await queueLocalReaderJob({
@@ -1574,9 +1624,10 @@ async function checkSearch(
           }
         }
         await recordCourseProbe({
-          searchId: search.id,
-          courseId: course.id,
-          automationRunId,
+            searchId: search.id,
+            courseId: course.id,
+            observedAtOrAfter: customerEndpointStartedAt,
+            automationRunId,
           runtimeVersion,
           outcome: "FETCH_FAILED",
           message,
@@ -1587,6 +1638,7 @@ async function checkSearch(
         const supportIssue = await reportCourseSupportIssue({
           course,
           searchId: search.id,
+          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
           kind:
             localReaderTerminalFailure || localReaderStageActive
               ? "READER_CANDIDATE"
@@ -1782,6 +1834,14 @@ async function checkSearch(
   courseResults.sort((left, right) => (left.rank ?? 99) - (right.rank ?? 99));
 
   const retryCalculationStartedAt = new Date();
+  const deadlineReconciliation = await reconcileCourseMonitoringDeadlines({
+    courseIds: searchCourseIds,
+    now: retryCalculationStartedAt,
+    source: "SEARCH_WORKFLOW"
+  });
+  if (deadlineReconciliation.escalated > 0) {
+    search = (await getActiveSearchForAutomation(searchId)) ?? search;
+  }
   const persistedSupportRetryAt = await getCourseMonitoringRetryAt(
     supportIssues.map((issue) => issue.courseId),
     {
@@ -1833,7 +1893,13 @@ async function checkSearch(
       alertGeneration: search.alertGeneration,
       checkLeaseToken: lease.token,
       sentAt: checkedAt,
-      snapshot: toSearchEmailJson(buildSearchStatusSnapshot(courseResults))
+      snapshot: preserveAlertGenerationClockInStatusSnapshot({
+        alertGeneration: search.alertGeneration,
+        currentStatusEmailSnapshot: search.statusEmailSnapshot,
+        courseSnapshot: toSearchEmailJson(
+          buildSearchStatusSnapshot(courseResults)
+        )
+      })
     });
     if (updated.count !== 1) {
       throw new SearchCheckLeaseLostError();
@@ -2567,6 +2633,17 @@ async function deliverMonitoringStatusNotices(input: {
               supportStatus: "NEEDS_HUMAN_REVIEW" as const
             }
           : result;
+      const endpointDeadlineAt =
+        preference.course.supportIncident?.escalatedAt ??
+        preference.course.supportIncident?.escalationDeadlineAt ??
+        null;
+      const endpointEpisodeStartedAt = endpointDeadlineAt
+        ? new Date(
+            endpointDeadlineAt.getTime() -
+              (ACTIVE_DEMAND_ESCALATION_MS -
+                CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS)
+          )
+        : null;
       return [
         {
           providerFamilyKey: resolveProviderCapability(
@@ -2575,6 +2652,7 @@ async function deliverMonitoringStatusNotices(input: {
           result: customerResult,
           previousStatus,
           currentStatus,
+          endpointDeadlineAt,
           episodeStartedAt:
             currentStatus === "FINAL_DIRECT_ACTION"
               ? preference.course.supportIncident?.firstSeenAt ??
@@ -2585,7 +2663,10 @@ async function deliverMonitoringStatusNotices(input: {
                 null
               : currentStatus === "RETRYING_AUTOMATICALLY" ||
                   currentStatus === "NEEDS_HUMAN_REVIEW"
-              ? current?.firstDegradedAt ?? previous?.firstDegradedAt ?? null
+              ? endpointEpisodeStartedAt ??
+                current?.firstDegradedAt ??
+                previous?.firstDegradedAt ??
+                null
               : previous?.firstDegradedAt ?? null
         }
       ];
@@ -2601,6 +2682,11 @@ async function deliverMonitoringStatusNotices(input: {
     })
   ]);
   const ownerRecipient = input.search.alertEmail ?? input.search.user.email;
+  const alertRecipients = getAlertRecipients(
+    ownerRecipient,
+    input.search.additionalEmails
+  );
+  const authorizedRecipientSet = new Set(alertRecipients);
   const plan = planMonitoringStatusNotices({
     candidates,
     reachedOutages,
@@ -2632,24 +2718,18 @@ async function deliverMonitoringStatusNotices(input: {
     (course) =>
       currentStatusByCourse.get(course.courseId) === "NEEDS_HUMAN_REVIEW"
   );
-  const combineFinalAndHumanReview =
-    plan.finalCourses.length > 0 && humanReviewCourses.length > 0;
-  const consolidatedStatusCourses = combineFinalAndHumanReview
-    ? [
-        ...new Map(
-          [...plan.finalCourses, ...humanReviewCourses].map((course) => [
-            course.courseId,
-            course
-          ])
-        ).values()
-      ]
-    : plan.finalCourses;
-  const outageCourses = combineFinalAndHumanReview
-    ? plan.outageCourses.filter(
-        (course) =>
-          currentStatusByCourse.get(course.courseId) !== "NEEDS_HUMAN_REVIEW"
-      )
-    : plan.outageCourses;
+  const consolidatedStatusCourses = [
+    ...new Map(
+      [...plan.finalCourses, ...humanReviewCourses].map((course) => [
+        course.courseId,
+        course
+      ])
+    ).values()
+  ];
+  const outageCourses = plan.outageCourses.filter(
+    (course) =>
+      currentStatusByCourse.get(course.courseId) !== "NEEDS_HUMAN_REVIEW"
+  );
   let outcome: NonNullable<SearchCheckResult["statusEmailOutcome"]> = "skipped";
   let ownerSentMatchCount = 0;
 
@@ -2671,6 +2751,14 @@ async function deliverMonitoringStatusNotices(input: {
         : [];
     const coveredMatchIds = getCoveredPendingMatchIds(pendingMatches, courses);
     const coveredMatchIdSet = new Set(coveredMatchIds);
+    const deliveryRecipients =
+      kind === "recovery"
+        ? coveredMatchIds.length > 0
+          ? alertRecipients
+          : recipients.filter((recipient) =>
+              authorizedRecipientSet.has(recipient.trim().toLowerCase())
+            )
+        : recipients;
     const delivered = await deliverSearchStatusReport({
       search: input.search,
       searchWindow: input.searchWindow,
@@ -2688,7 +2776,7 @@ async function deliverMonitoringStatusNotices(input: {
           ownerRecipient
         }
       ),
-      recipients,
+      recipients: deliveryRecipients,
       coveredMatchIds,
       coveredMatchRefs: pendingMatches
         .filter((match) => coveredMatchIdSet.has(match.id))
@@ -2718,12 +2806,12 @@ async function deliverMonitoringStatusNotices(input: {
   await deliver(
     "status-update",
     consolidatedStatusCourses,
-    getAlertRecipients(ownerRecipient, input.search.additionalEmails)
+    alertRecipients
   );
   await deliver(
     "outage",
     outageCourses,
-    getAlertRecipients(ownerRecipient, input.search.additionalEmails)
+    alertRecipients
   );
 
   return {
@@ -3236,6 +3324,7 @@ function getFinalMonitoringMessage(
 async function recordBookingWindowWaitingProbe(input: {
   searchId: string;
   courseId: string;
+  observedAtOrAfter: Date;
   automationRunId: string;
   runtimeVersion: string;
   targetDate: string;
@@ -3245,6 +3334,7 @@ async function recordBookingWindowWaitingProbe(input: {
   await recordCourseProbeIfChanged({
     searchId: input.searchId,
     courseId: input.courseId,
+    observedAtOrAfter: input.observedAtOrAfter,
     automationRunId: input.automationRunId,
     runtimeVersion: input.runtimeVersion,
     outcome: "NO_MATCH",

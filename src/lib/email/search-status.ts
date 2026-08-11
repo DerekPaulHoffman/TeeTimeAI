@@ -5,6 +5,7 @@ import type {
   BookingMethod
 } from "@/lib/courses/intelligence";
 import type { CoursePriceEstimate } from "@/lib/pricing/course-prices";
+import { unwrapAlertGenerationStatusSnapshot } from "@/lib/searches/generation-clock";
 import {
   getAlertSupportDescription,
   getAlertSupportLabel,
@@ -871,10 +872,11 @@ function formatBookingWindowRelease(
 }
 
 function parseSearchStatusSnapshot(value: unknown): SearchStatusSnapshot | null {
-  if (!Array.isArray(value)) {
+  const publicSnapshot = unwrapAlertGenerationStatusSnapshot(value);
+  if (!Array.isArray(publicSnapshot)) {
     return null;
   }
-  const snapshot = value.filter(
+  const snapshot = publicSnapshot.filter(
     (entry): entry is SearchStatusSnapshot[number] =>
       Boolean(
         entry &&
@@ -884,7 +886,7 @@ function parseSearchStatusSnapshot(value: unknown): SearchStatusSnapshot | null 
           typeof (entry as SearchStatusSnapshot[number]).state === "string"
       )
   );
-  return snapshot.length === value.length ? snapshot : null;
+  return snapshot.length === publicSnapshot.length ? snapshot : null;
 }
 
 function formatStartsAtTime(value: string, timeZone: string) {

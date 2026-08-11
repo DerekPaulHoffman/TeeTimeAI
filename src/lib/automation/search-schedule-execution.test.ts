@@ -15,7 +15,8 @@ vi.mock("@/lib/automation/search-check", () => ({ runSearchCheck }));
 import {
   calculateNextCheckAt,
   calculateSearchWindowEnd,
-  executeScheduledSearchCheck
+  executeScheduledSearchCheck,
+  selectSearchEndpointWakeAt
 } from "./search-schedule-execution";
 
 const SOURCE_BACKED_BOOKING_WINDOW = {
@@ -234,6 +235,26 @@ describe("executeScheduledSearchCheck", () => {
 });
 
 describe("calculateNextCheckAt", () => {
+  it("keeps the persisted customer endpoint as a hard workflow wake", () => {
+    const now = new Date("2026-08-11T20:25:00.000Z");
+    const deadline = new Date("2026-08-11T20:28:00.000Z");
+
+    expect(
+      selectSearchEndpointWakeAt(
+        [
+          {
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: deadline
+            }
+          }
+        ],
+        now
+      )
+    ).toEqual(deadline);
+  });
+
   it("uses configured cadence when a booking window is unknown", () => {
     const searchDate = new Date("2026-08-30T04:00:00.000Z");
     const now = new Date("2026-08-01T12:00:00.000Z");
@@ -297,6 +318,44 @@ describe("calculateNextCheckAt", () => {
         { supportRetryAt: new Date("2026-07-13T19:00:00.000Z") }
       )?.toISOString()
     ).toBe("2026-07-13T20:15:00.000Z");
+  });
+
+  it("runs an immediate catch-up when the first-retry deadline crosses during the check", () => {
+    const searchDate = new Date("2026-08-15T00:00:00.000Z");
+    const checkStartedAt = new Date("2026-07-13T20:00:00.000Z");
+    const now = new Date("2026-07-13T20:02:04.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        120,
+        now,
+        new Date("2026-08-16T00:00:00.000Z"),
+        [{ timeZone: "America/New_York" }],
+        true,
+        checkStartedAt,
+        { supportRetryAt: new Date("2026-07-13T20:02:00.000Z") }
+      )?.toISOString()
+    ).toBe("2026-07-13T20:02:04.000Z");
+  });
+
+  it("runs an immediate catch-up when a delayed initial workflow normalizes its overdue retry", () => {
+    const searchDate = new Date("2026-08-15T00:00:00.000Z");
+    const checkStartedAt = new Date("2026-07-13T20:06:00.000Z");
+    const now = new Date("2026-07-13T20:06:04.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        120,
+        now,
+        new Date("2026-08-16T00:00:00.000Z"),
+        [{ timeZone: "America/New_York" }],
+        true,
+        checkStartedAt,
+        { supportRetryAt: new Date("2026-07-13T20:06:00.000Z") }
+      )?.toISOString()
+    ).toBe("2026-07-13T20:06:04.000Z");
   });
 
   it("wakes for the earliest of several course-specific booking windows", () => {
