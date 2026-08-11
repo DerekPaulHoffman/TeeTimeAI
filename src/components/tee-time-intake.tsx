@@ -700,7 +700,9 @@ function TeeTimeIntakeContent({
         longitude: String(coordinates.longitude),
         radiusMeters: String(milesToMeters(radiusMiles))
       });
-      const response = await fetch(`/api/courses/discover?${params}`);
+      const response = await fetch(`/api/courses/discover?${params}`, {
+        cache: "no-store"
+      });
       responseStatus = response.status;
       if (!response.ok) {
         throw new Error(
@@ -919,7 +921,9 @@ function TeeTimeIntakeContent({
         params.set("longitude", String(searchCoordinates.longitude));
       }
 
-      const response = await fetch(`/api/courses/lookup?${params}`);
+      const response = await fetch(`/api/courses/lookup?${params}`, {
+        cache: "no-store"
+      });
       responseStatus = response.status;
       if (!response.ok) {
         throw new Error(

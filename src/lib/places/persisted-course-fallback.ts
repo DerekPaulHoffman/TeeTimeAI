@@ -1,4 +1,8 @@
 import type { CourseCandidate } from "@/lib/places/google";
+import type {
+  GooglePlaceReviewIndex,
+  GooglePlaceReviewRecord
+} from "@/lib/places/google-place-reviews";
 import { prisma } from "@/lib/prisma";
 
 const EARTH_RADIUS_METERS = 6_371_000;
@@ -45,16 +49,16 @@ type PersistedCourse = {
   phone: string | null;
 };
 
-export async function findPersistedNearbyCourseCandidates(input: {
-  latitude: number;
-  longitude: number;
-  radiusMeters: number;
-}) {
+export async function findPersistedNearbyCourseCandidates(
+  input: {
+    latitude: number;
+    longitude: number;
+    radiusMeters: number;
+  },
+  reviewIndex: GooglePlaceReviewIndex
+) {
   const latitudeDelta = input.radiusMeters / 111_320;
-  const longitudeScale = Math.max(
-    Math.cos((input.latitude * Math.PI) / 180),
-    0.2
-  );
+  const longitudeScale = Math.max(Math.cos((input.latitude * Math.PI) / 180), 0.2);
   const longitudeDelta = input.radiusMeters / (111_320 * longitudeScale);
   const courses = await prisma.course.findMany({
     where: {
@@ -74,7 +78,7 @@ export async function findPersistedNearbyCourseCandidates(input: {
     take: MAX_FALLBACK_COURSES
   });
 
-  return courses
+  return filterPersistedCoursesByPlaceReviews(courses, reviewIndex)
     .map((course) => ({
       ...mapPersistedCourse(course),
       distanceMeters: getDistanceMeters(input, course)
@@ -83,7 +87,10 @@ export async function findPersistedNearbyCourseCandidates(input: {
     .sort((left, right) => left.distanceMeters - right.distanceMeters);
 }
 
-export async function findPersistedCourseCandidatesByName(query: string) {
+export async function findPersistedCourseCandidatesByName(
+  query: string,
+  reviewIndex: GooglePlaceReviewIndex
+) {
   const queryTokens = getLookupTokens(query);
   if (queryTokens.length === 0) {
     return [];
@@ -99,7 +106,7 @@ export async function findPersistedCourseCandidatesByName(query: string) {
     take: MAX_FALLBACK_COURSES
   });
 
-  return courses
+  return filterPersistedCoursesByPlaceReviews(courses, reviewIndex)
     .map((course) => ({
       course,
       score: getLookupMatchScore(queryTokens, course)
@@ -108,6 +115,29 @@ export async function findPersistedCourseCandidatesByName(query: string) {
     .sort((left, right) => right.score - left.score)
     .slice(0, 8)
     .map(({ course }) => mapPersistedCourse(course));
+}
+
+export function filterPersistedCoursesByPlaceReviews<
+  TCourse extends { googlePlaceId: string | null }
+>(courses: readonly TCourse[], reviewIndex: GooglePlaceReviewIndex): TCourse[] {
+  return courses.filter((course) => {
+    if (!course.googlePlaceId) {
+      return false;
+    }
+
+    const review = reviewIndex.byPlaceId.get(course.googlePlaceId);
+    const canonicalReview = review?.canonicalPlaceId
+      ? reviewIndex.byPlaceId.get(review.canonicalPlaceId)
+      : undefined;
+    return !isBlockedPlaceReview(review) && !isBlockedPlaceReview(canonicalReview);
+  });
+}
+
+function isBlockedPlaceReview(review: GooglePlaceReviewRecord | undefined) {
+  return (
+    review?.accessOverride === "VERIFIED_PRIVATE" ||
+    review?.accessOverride === "VERIFIED_NON_COURSE"
+  );
 }
 
 function mapPersistedCourse(course: PersistedCourse): CourseCandidate {
@@ -125,9 +155,7 @@ function mapPersistedCourse(course: PersistedCourse): CourseCandidate {
     longitude: course.longitude,
     timeZone: course.timeZone,
     ...(course.rating !== null ? { rating: course.rating } : {}),
-    ...(course.ratingObservedAt
-      ? { ratingObservedAt: course.ratingObservedAt.toISOString() }
-      : {}),
+    ...(course.ratingObservedAt ? { ratingObservedAt: course.ratingObservedAt.toISOString() } : {}),
     ...(course.phone ? { phone: course.phone } : {}),
     ...(course.detectedBookingUrl || course.website
       ? { website: course.detectedBookingUrl ?? course.website ?? undefined }
@@ -155,10 +183,7 @@ function getLookupMatchScore(tokens: string[], course: PersistedCourse) {
     return 0;
   }
 
-  return tokens.reduce(
-    (score, token) => score + (name.includes(token) ? 2 : 1),
-    0
-  );
+  return tokens.reduce((score, token) => score + (name.includes(token) ? 2 : 1), 0);
 }
 
 function normalizeLookupText(value: string) {
@@ -175,9 +200,7 @@ function getDistanceMeters(
   const destinationLatitude = toRadians(destination.latitude);
   const haversine =
     Math.sin(latitudeDelta / 2) ** 2 +
-    Math.cos(originLatitude) *
-      Math.cos(destinationLatitude) *
-      Math.sin(longitudeDelta / 2) ** 2;
+    Math.cos(originLatitude) * Math.cos(destinationLatitude) * Math.sin(longitudeDelta / 2) ** 2;
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(haversine));
 }
 

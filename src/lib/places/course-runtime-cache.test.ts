@@ -55,14 +55,39 @@ describe("course runtime cache", () => {
       getCourseDiscoveryCacheKey({
         latitude: 41.24241,
         longitude: -73.20851,
-        radiusMeters: 24140
+        radiusMeters: 24140,
+        reviewVersion: "reviews-1"
       })
-    ).toBe("discover-v1:41.242:-73.209:24140");
-    expect(getCourseLookupCacheKey({ query: "  Bethpage   BLACK " })).toBe(
-      "lookup-v1:bethpage black:none:none"
+    ).toBe("discover-v2:reviews-1:41.242:-73.209:24140");
+    expect(
+      getCourseLookupCacheKey({
+        query: "  Bethpage   BLACK ",
+        reviewVersion: "reviews-1"
+      })
+    ).toBe("lookup-v2:reviews-1:bethpage black:none:none");
+    expect(getCoursePhotoMetadataCacheKey(" course-1 ")).toBe("photo-metadata-v1:course-1");
+  });
+
+  it("uses a different course-data key after the review version changes", () => {
+    const input = {
+      latitude: 41.24241,
+      longitude: -73.20851,
+      radiusMeters: 24140
+    };
+
+    expect(getCourseDiscoveryCacheKey({ ...input, reviewVersion: "reviews-1" })).not.toBe(
+      getCourseDiscoveryCacheKey({ ...input, reviewVersion: "reviews-2" })
     );
-    expect(getCoursePhotoMetadataCacheKey(" course-1 ")).toBe(
-      "photo-metadata-v1:course-1"
+    expect(
+      getCourseLookupCacheKey({
+        query: "Bethpage Black",
+        reviewVersion: "reviews-1"
+      })
+    ).not.toBe(
+      getCourseLookupCacheKey({
+        query: "Bethpage Black",
+        reviewVersion: "reviews-2"
+      })
     );
   });
 });

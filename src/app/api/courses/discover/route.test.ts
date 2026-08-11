@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   enrichCoursesWithHoleLayouts: vi.fn(),
   enrichCoursesWithBookingEvidence: vi.fn(),
   findPersistedNearbyCourseCandidates: vi.fn(),
+  getCourseDiscoveryCacheKey: vi.fn(),
+  loadActiveGooglePlaceReviewIndex: vi.fn(),
   readCourseRuntimeCache: vi.fn(),
   searchNearbyGolfCourses: vi.fn(),
   writeCourseRuntimeCache: vi.fn()
@@ -37,8 +39,16 @@ vi.mock("@/lib/places/google", () => ({
   searchNearbyGolfCourses: mocks.searchNearbyGolfCourses
 }));
 
+vi.mock("@/lib/places/google-place-reviews", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/places/google-place-reviews")>();
+  return {
+    ...actual,
+    loadActiveGooglePlaceReviewIndex: mocks.loadActiveGooglePlaceReviewIndex
+  };
+});
+
 vi.mock("@/lib/places/course-runtime-cache", () => ({
-  getCourseDiscoveryCacheKey: vi.fn(() => "discover-key"),
+  getCourseDiscoveryCacheKey: mocks.getCourseDiscoveryCacheKey,
   readCourseRuntimeCache: mocks.readCourseRuntimeCache,
   writeCourseRuntimeCache: mocks.writeCourseRuntimeCache
 }));
@@ -52,6 +62,12 @@ const originalEnv = {
   VERCEL_ENV: process.env.VERCEL_ENV
 };
 
+const testReviewIndex = {
+  byPlaceId: new Map(),
+  verifiedPublicCourses: [],
+  reviewVersion: "reviews-1"
+};
+
 describe("GET /api/courses/discover provider configuration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -62,6 +78,8 @@ describe("GET /api/courses/discover provider configuration", () => {
     mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithBookingEvidence.mockImplementation(async (courses) => courses);
     mocks.findPersistedNearbyCourseCandidates.mockResolvedValue([]);
+    mocks.getCourseDiscoveryCacheKey.mockReturnValue("discover-key");
+    mocks.loadActiveGooglePlaceReviewIndex.mockResolvedValue(testReviewIndex);
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
   });
@@ -98,7 +116,10 @@ describe("GET /api/courses/discover provider configuration", () => {
 
   it("returns a generic 503 when durable place reviews cannot be read", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
-    mocks.searchNearbyGolfCourses.mockRejectedValue(
+    mocks.readCourseRuntimeCache.mockResolvedValue([
+      { googlePlaceId: "stale-course", name: "Stale Cached Course" }
+    ]);
+    mocks.loadActiveGooglePlaceReviewIndex.mockRejectedValue(
       new GooglePlaceReviewsUnavailableError(new Error("database unavailable"))
     );
 
@@ -108,6 +129,8 @@ describe("GET /api/courses/discover provider configuration", () => {
     await expect(response.json()).resolves.toEqual({
       error: "We couldn't load nearby courses right now. Please wait a moment and try again."
     });
+    expect(mocks.readCourseRuntimeCache).not.toHaveBeenCalled();
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
   });
 
   it("returns an actionable generic 503 after provider retries and persisted fallback are exhausted", async () => {
@@ -139,15 +162,24 @@ describe("GET /api/courses/discover provider configuration", () => {
     expect(response.headers.get("vercel-cdn-cache-control")).toBe(
       courseDataSuccessCacheHeaders["Vercel-CDN-Cache-Control"]
     );
-    expect(mocks.searchNearbyGolfCourses).toHaveBeenCalledWith({
+    expect(mocks.getCourseDiscoveryCacheKey).toHaveBeenCalledWith({
       latitude: 41.242,
       longitude: -73.209,
       radiusMeters: 24140,
-      signal: expect.any(AbortSignal)
+      reviewVersion: "reviews-1"
     });
+    expect(mocks.searchNearbyGolfCourses).toHaveBeenCalledWith(
+      {
+        latitude: 41.242,
+        longitude: -73.209,
+        radiusMeters: 24140,
+        signal: expect.any(AbortSignal)
+      },
+      testReviewIndex
+    );
   });
 
-  it("serves year-cached discovery without another Google search", async () => {
+  it("loads reviews before serving runtime-cached discovery", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     mocks.readCourseRuntimeCache.mockResolvedValue([
       { googlePlaceId: "course-1", name: "Cached Public Course" }
@@ -161,6 +193,9 @@ describe("GET /api/courses/discover provider configuration", () => {
       demo: false
     });
     expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+    expect(mocks.loadActiveGooglePlaceReviewIndex.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.readCourseRuntimeCache.mock.invocationCallOrder[0]
+    );
     expect(mocks.cacheCourseCandidatePhotos).toHaveBeenCalledWith([
       { googlePlaceId: "course-1", name: "Cached Public Course" }
     ]);
@@ -182,6 +217,14 @@ describe("GET /api/courses/discover provider configuration", () => {
       courses: [{ googlePlaceId: "course-1", name: "Known Public Course" }],
       demo: false
     });
+    expect(mocks.findPersistedNearbyCourseCandidates).toHaveBeenCalledWith(
+      {
+        latitude: 41.242,
+        longitude: -73.209,
+        radiusMeters: 24140
+      },
+      testReviewIndex
+    );
     expect(mocks.writeCourseRuntimeCache).toHaveBeenCalledWith(
       "discover-key",
       [expect.objectContaining({ googlePlaceId: "course-1" })],

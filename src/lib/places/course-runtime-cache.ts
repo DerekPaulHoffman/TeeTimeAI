@@ -21,11 +21,7 @@ export async function readCourseRuntimeCache<T>(key: string): Promise<T | null> 
 export async function writeCourseRuntimeCache(
   key: string,
   value: unknown,
-  name:
-    | "course-discovery"
-    | "course-lookup"
-    | "course-photo"
-    | "course-photo-metadata"
+  name: "course-discovery" | "course-lookup" | "course-photo" | "course-photo-metadata"
 ) {
   if (process.env.VERCEL_ENV !== "production") {
     return;
@@ -49,9 +45,11 @@ export function getCourseDiscoveryCacheKey(input: {
   latitude: number;
   longitude: number;
   radiusMeters: number;
+  reviewVersion: string;
 }) {
   return [
-    "discover-v1",
+    "discover-v2",
+    input.reviewVersion,
     input.latitude.toFixed(3),
     input.longitude.toFixed(3),
     input.radiusMeters
@@ -62,10 +60,12 @@ export function getCourseLookupCacheKey(input: {
   query: string;
   latitude?: number;
   longitude?: number;
+  reviewVersion: string;
 }) {
   const normalizedQuery = input.query.trim().replace(/\s+/g, " ").toLowerCase();
   return [
-    "lookup-v1",
+    "lookup-v2",
+    input.reviewVersion,
     normalizedQuery,
     input.latitude?.toFixed(3) ?? "none",
     input.longitude?.toFixed(3) ?? "none"

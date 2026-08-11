@@ -1,9 +1,7 @@
 import { prisma } from "@/lib/prisma";
 
 export type GooglePlaceAccessOverrideValue =
-  | "VERIFIED_PUBLIC"
-  | "VERIFIED_PRIVATE"
-  | "VERIFIED_NON_COURSE";
+  "VERIFIED_PUBLIC" | "VERIFIED_PRIVATE" | "VERIFIED_NON_COURSE";
 
 export type GooglePlaceReviewRecord = {
   googlePlaceId: string;
@@ -26,13 +24,15 @@ export type GooglePlaceReviewRecord = {
 export type GooglePlaceReviewIndex = {
   byPlaceId: ReadonlyMap<string, GooglePlaceReviewRecord>;
   verifiedPublicCourses: readonly GooglePlaceReviewRecord[];
+  reviewVersion: string;
 };
 
 const EMPTY_VERIFIED_PUBLIC_COURSES: readonly GooglePlaceReviewRecord[] = [];
 
 export const EMPTY_GOOGLE_PLACE_REVIEW_INDEX: GooglePlaceReviewIndex = {
   byPlaceId: new Map(),
-  verifiedPublicCourses: EMPTY_VERIFIED_PUBLIC_COURSES
+  verifiedPublicCourses: EMPTY_VERIFIED_PUBLIC_COURSES,
+  reviewVersion: "none"
 };
 
 export class GooglePlaceReviewsUnavailableError extends Error {
@@ -43,7 +43,8 @@ export class GooglePlaceReviewsUnavailableError extends Error {
 }
 
 export function buildGooglePlaceReviewIndex(
-  rows: readonly GooglePlaceReviewRecord[]
+  rows: readonly GooglePlaceReviewRecord[],
+  reviewVersion = "none"
 ): GooglePlaceReviewIndex {
   // PostgreSQL row order is unspecified. Stable place-ID ordering keeps alias fallback
   // deterministic when more than one retained alias points at the same canonical course.
@@ -60,14 +61,14 @@ export function buildGooglePlaceReviewIndex(
 
   return {
     byPlaceId: new Map(activeRows.map((row) => [row.googlePlaceId, row])),
-    verifiedPublicCourses
+    verifiedPublicCourses,
+    reviewVersion
   };
 }
 
 export async function loadActiveGooglePlaceReviewIndex(): Promise<GooglePlaceReviewIndex> {
   try {
     const rows = await prisma.googlePlaceReview.findMany({
-      where: { active: true },
       orderBy: { googlePlaceId: "asc" },
       select: {
         googlePlaceId: true,
@@ -84,11 +85,19 @@ export async function loadActiveGooglePlaceReviewIndex(): Promise<GooglePlaceRev
         canonicalPhone: true,
         latitude: true,
         longitude: true,
-        retainWhenCanonicalAbsent: true
+        retainWhenCanonicalAbsent: true,
+        updatedAt: true
       }
     });
 
-    return buildGooglePlaceReviewIndex(rows);
+    const latestUpdatedAt = rows.reduce<number | null>((latest, row) => {
+      const updatedAt = row.updatedAt.getTime();
+      return latest === null || updatedAt > latest ? updatedAt : latest;
+    }, null);
+    const reviewVersion =
+      latestUpdatedAt === null ? "none" : new Date(latestUpdatedAt).toISOString();
+
+    return buildGooglePlaceReviewIndex(rows, reviewVersion);
   } catch (error) {
     throw new GooglePlaceReviewsUnavailableError(error);
   }

@@ -11,7 +11,10 @@ import {
   writeCourseRuntimeCache
 } from "@/lib/places/course-runtime-cache";
 import { searchNearbyGolfCourses } from "@/lib/places/google";
-import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
+import {
+  GooglePlaceReviewsUnavailableError,
+  loadActiveGooglePlaceReviewIndex
+} from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { findPersistedNearbyCourseCandidates } from "@/lib/places/persisted-course-fallback";
@@ -26,17 +29,12 @@ export async function GET(request: NextRequest) {
   const radiusMeters = normalizeCourseSearchRadiusMeters(
     request.nextUrl.searchParams.get("radiusMeters")
   );
-  const cacheKey = getCourseDiscoveryCacheKey({ latitude, longitude, radiusMeters });
-
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
     return NextResponse.json({ error: "Latitude and longitude are required" }, { status: 400 });
   }
 
   if (!hasGooglePlacesConfig() && isVercelProduction()) {
-    return NextResponse.json(
-      { error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE },
-      { status: 503 }
-    );
+    return NextResponse.json({ error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE }, { status: 503 });
   }
 
   if (!hasGooglePlacesConfig()) {
@@ -45,6 +43,23 @@ export async function GET(request: NextRequest) {
       { headers: courseDataSuccessCacheHeaders }
     );
   }
+
+  let reviewIndex: Awaited<ReturnType<typeof loadActiveGooglePlaceReviewIndex>>;
+  try {
+    reviewIndex = await loadActiveGooglePlaceReviewIndex();
+  } catch (error) {
+    if (error instanceof GooglePlaceReviewsUnavailableError) {
+      return NextResponse.json({ error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE }, { status: 503 });
+    }
+    throw error;
+  }
+
+  const cacheKey = getCourseDiscoveryCacheKey({
+    latitude,
+    longitude,
+    radiusMeters,
+    reviewVersion: reviewIndex.reviewVersion
+  });
 
   try {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
@@ -56,12 +71,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const courses = await searchNearbyGolfCourses({
-      latitude,
-      longitude,
-      radiusMeters,
-      signal: request.signal
-    });
+    const courses = await searchNearbyGolfCourses(
+      {
+        latitude,
+        longitude,
+        radiusMeters,
+        signal: request.signal
+      },
+      reviewIndex
+    );
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",
@@ -78,13 +96,15 @@ export async function GET(request: NextRequest) {
         return coursesWithSupport;
       }
     );
-    const coursesWithPrices = await enrichCoursesWithBookingEvidence(coursesWithLayouts).catch((error) => {
-      console.warn(
-        "Course pricing enrichment unavailable",
-        error instanceof Error ? error.message : "Unknown pricing error"
-      );
-      return coursesWithLayouts;
-    });
+    const coursesWithPrices = await enrichCoursesWithBookingEvidence(coursesWithLayouts).catch(
+      (error) => {
+        console.warn(
+          "Course pricing enrichment unavailable",
+          error instanceof Error ? error.message : "Unknown pricing error"
+        );
+        return coursesWithLayouts;
+      }
+    );
     await Promise.all([
       writeCourseRuntimeCache(cacheKey, coursesWithPrices, "course-discovery"),
       cacheCourseCandidatePhotos(coursesWithPrices)
@@ -93,20 +113,13 @@ export async function GET(request: NextRequest) {
       { courses: coursesWithPrices, demo: false },
       { headers: courseDataSuccessCacheHeaders }
     );
-  } catch (error) {
-    if (error instanceof GooglePlaceReviewsUnavailableError) {
-      return NextResponse.json(
-        { error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE },
-        { status: 503 }
-      );
-    }
-
+  } catch {
     try {
       const persistedCourses = await findPersistedNearbyCourseCandidates({
         latitude,
         longitude,
         radiusMeters
-      });
+      }, reviewIndex);
       if (persistedCourses.length > 0) {
         const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
         const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
@@ -127,9 +140,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(
-      { error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE },
-      { status: 503 }
-    );
+    return NextResponse.json({ error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE }, { status: 503 });
   }
 }

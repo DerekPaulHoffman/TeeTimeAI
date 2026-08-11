@@ -316,7 +316,8 @@ describe("TeeTimeIntake", () => {
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Trumbull, CT");
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("/api/courses/discover?")
+        expect.stringContaining("/api/courses/discover?"),
+        { cache: "no-store" }
       )
     );
     expect(await screen.findAllByText(/\$39.*\$43/)).not.toHaveLength(0);
@@ -382,6 +383,10 @@ describe("TeeTimeIntake", () => {
     await screen.findByRole("heading", {
       name: "Wheeler Family Traditions Golf Club"
     });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/courses/lookup?"),
+      { cache: "no-store" }
+    );
     expect(
       screen.getByText('Direct search · "wheeler family tranditions in wallinford"')
     ).toBeTruthy();

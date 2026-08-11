@@ -9,7 +9,10 @@ import {
   writeCourseRuntimeCache
 } from "@/lib/places/course-runtime-cache";
 import { getGooglePlacesApiKey, searchGolfCoursesByName } from "@/lib/places/google";
-import { GooglePlaceReviewsUnavailableError } from "@/lib/places/google-place-reviews";
+import {
+  GooglePlaceReviewsUnavailableError,
+  loadActiveGooglePlaceReviewIndex
+} from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { findPersistedCourseCandidatesByName } from "@/lib/places/persisted-course-fallback";
 
@@ -27,7 +30,9 @@ export async function GET(request: NextRequest) {
 
   if (query.length < MIN_QUERY_LENGTH || query.length > MAX_QUERY_LENGTH) {
     return NextResponse.json(
-      { error: `Enter a course name between ${MIN_QUERY_LENGTH} and ${MAX_QUERY_LENGTH} characters.` },
+      {
+        error: `Enter a course name between ${MIN_QUERY_LENGTH} and ${MAX_QUERY_LENGTH} characters.`
+      },
       { status: 400 }
     );
   }
@@ -43,19 +48,38 @@ export async function GET(request: NextRequest) {
   const longitude = hasLongitude ? Number(longitudeValue) : undefined;
   if (
     (latitude !== undefined && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) ||
-    (longitude !== undefined && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180))
+    (longitude !== undefined &&
+      (!Number.isFinite(longitude) || longitude < -180 || longitude > 180))
   ) {
     return NextResponse.json({ error: "Enter valid search coordinates." }, { status: 400 });
   }
 
   if (!getGooglePlacesApiKey()) {
     return NextResponse.json(
-      { error: "Course lookup is temporarily unavailable. Try the nearby search instead." },
+      {
+        error: "Course lookup is temporarily unavailable. Try the nearby search instead."
+      },
       { status: 503 }
     );
   }
 
-  const cacheKey = getCourseLookupCacheKey({ query, latitude, longitude });
+  let reviewIndex: Awaited<ReturnType<typeof loadActiveGooglePlaceReviewIndex>>;
+  try {
+    reviewIndex = await loadActiveGooglePlaceReviewIndex();
+  } catch (error) {
+    console.error(
+      "Course lookup failed",
+      error instanceof Error ? error.message : "Unknown course lookup error"
+    );
+    return NextResponse.json({ error: COURSE_LOOKUP_UNAVAILABLE_MESSAGE }, { status: 503 });
+  }
+
+  const cacheKey = getCourseLookupCacheKey({
+    query,
+    latitude,
+    longitude,
+    reviewVersion: reviewIndex.reviewVersion
+  });
 
   try {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
@@ -67,12 +91,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const courses = await searchGolfCoursesByName({
-      query,
-      latitude,
-      longitude,
-      signal: request.signal
-    });
+    const courses = await searchGolfCoursesByName(
+      {
+        query,
+        latitude,
+        longitude,
+        signal: request.signal
+      },
+      reviewIndex
+    );
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",
@@ -104,7 +131,10 @@ export async function GET(request: NextRequest) {
     );
     if (!(error instanceof GooglePlaceReviewsUnavailableError)) {
       try {
-        const persistedCourses = await findPersistedCourseCandidatesByName(query);
+        const persistedCourses = await findPersistedCourseCandidatesByName(
+          query,
+          reviewIndex
+        );
         if (persistedCourses.length > 0) {
           const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
           const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
@@ -125,9 +155,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    return NextResponse.json(
-      { error: COURSE_LOOKUP_UNAVAILABLE_MESSAGE },
-      { status: 503 }
-    );
+    return NextResponse.json({ error: COURSE_LOOKUP_UNAVAILABLE_MESSAGE }, { status: 503 });
   }
 }

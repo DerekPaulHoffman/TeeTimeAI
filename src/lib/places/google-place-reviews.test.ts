@@ -38,15 +38,48 @@ describe("Google Place review index", () => {
     expect([...index.byPlaceId.keys()]).toEqual(["place-a", "place-z"]);
   });
 
-  it("loads active rows once with a narrow projection", async () => {
-    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([review()] as never);
+  it("loads active and inactive rows once so the review version covers deactivations", async () => {
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([
+      review({ updatedAt: new Date("2026-07-14T00:00:00.000Z") }),
+      review({
+        googlePlaceId: "inactive",
+        active: false,
+        updatedAt: new Date("2026-07-15T00:00:00.000Z")
+      })
+    ] as never);
 
     const index = await loadActiveGooglePlaceReviewIndex();
 
     expect(index.byPlaceId.has("place-1")).toBe(true);
-    expect(mockedPrisma.googlePlaceReview.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { active: true } })
-    );
+    expect(index.byPlaceId.has("inactive")).toBe(false);
+    expect(index.reviewVersion).toBe("2026-07-15T00:00:00.000Z");
+    expect(mockedPrisma.googlePlaceReview.findMany).toHaveBeenCalledWith({
+      orderBy: { googlePlaceId: "asc" },
+      select: expect.objectContaining({ active: true, updatedAt: true })
+    });
+  });
+
+  it("changes the review version when an inactive review is updated", async () => {
+    mockedPrisma.googlePlaceReview.findMany
+      .mockResolvedValueOnce([
+        review({
+          active: false,
+          updatedAt: new Date("2026-07-14T00:00:00.000Z")
+        })
+      ] as never)
+      .mockResolvedValueOnce([
+        review({
+          active: false,
+          updatedAt: new Date("2026-07-16T00:00:00.000Z")
+        })
+      ] as never);
+
+    const before = await loadActiveGooglePlaceReviewIndex();
+    const after = await loadActiveGooglePlaceReviewIndex();
+
+    expect(before.reviewVersion).toBe("2026-07-14T00:00:00.000Z");
+    expect(after.reviewVersion).toBe("2026-07-16T00:00:00.000Z");
+    expect(after.reviewVersion).not.toBe(before.reviewVersion);
   });
 
   it("wraps database failures in the public unavailable error", async () => {
@@ -64,7 +97,9 @@ describe("Google Place review index", () => {
   });
 });
 
-function review(overrides: Partial<GooglePlaceReviewRecord> = {}): GooglePlaceReviewRecord {
+type GooglePlaceReviewRow = GooglePlaceReviewRecord & { updatedAt: Date };
+
+function review(overrides: Partial<GooglePlaceReviewRow> = {}): GooglePlaceReviewRow {
   return {
     googlePlaceId: "place-1",
     accessOverride: null,
@@ -81,6 +116,7 @@ function review(overrides: Partial<GooglePlaceReviewRecord> = {}): GooglePlaceRe
     latitude: null,
     longitude: null,
     retainWhenCanonicalAbsent: false,
+    updatedAt: new Date("2026-07-14T00:00:00.000Z"),
     ...overrides
   };
 }
