@@ -143,6 +143,88 @@ function exhaustedAttemptLedger(cycle = 1) {
   return ledger;
 }
 
+function browserReadyAttemptLedger(cycle = 1) {
+  let ledger: unknown = null;
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "OFFICIAL_IDENTITY",
+    transition: "COMPLETED",
+    readPath: "OFFICIAL_IDENTITY",
+    evidenceKind: "OFFICIAL_SOURCE",
+    failureFingerprint: "TEST:OFFICIAL_IDENTITY:COMPLETE",
+    runtimeVersion: "test-runtime",
+    observedAt: now
+  });
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "TYPED_ADAPTER",
+    transition: "NOT_APPLICABLE",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:TYPED_ADAPTER:SKIPPED",
+    runtimeVersion: "test-runtime",
+    skipReason: "NO_RUNNABLE_ADAPTER",
+    observedAt: now
+  });
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "OFFICIAL_HTTP_DISCOVERY",
+    transition: "COMPLETED",
+    readPath: "OFFICIAL_HTTP",
+    evidenceKind: "OFFICIAL_SOURCE",
+    failureFingerprint: "TEST:OFFICIAL_HTTP:COMPLETE",
+    runtimeVersion: "test-runtime",
+    observedAt: now
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "HTTP_ADAPTER_RETRY",
+    transition: "NOT_APPLICABLE",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:HTTP_ADAPTER_RETRY:SKIPPED",
+    runtimeVersion: "test-runtime",
+    skipReason: "NO_RUNNABLE_ADAPTER",
+    observedAt: now
+  });
+}
+
+function independentReadyAttemptLedger(cycle = 1) {
+  let ledger: unknown = browserReadyAttemptLedger(cycle);
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "RENDERED_BROWSER_DISCOVERY",
+    transition: "COMPLETED",
+    readPath: "RENDERED_BROWSER",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: "TEST:RENDERED_BROWSER:COMPLETE",
+    runtimeVersion: "test-runtime",
+    observedAt: now
+  });
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "BROWSER_ADAPTER_RETRY",
+    transition: "NOT_APPLICABLE",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:SKIPPED",
+    runtimeVersion: "test-runtime",
+    skipReason: "NO_RUNNABLE_ADAPTER",
+    observedAt: now
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "LOCAL_READER",
+    transition: "FAILED_TERMINAL",
+    readPath: "LOCAL_READER",
+    evidenceKind: "LOCAL_READER_RESULT",
+    failureFingerprint: "TEST:LOCAL_READER:TERMINAL",
+    runtimeVersion: "test-runtime",
+    failureClass: "UNKNOWN",
+    observedAt: now
+  });
+}
+
 function factualFinalLedger(disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL") {
   let ledger: unknown = null;
   const stages = [
@@ -928,6 +1010,8 @@ describe("course-support claim demand fencing", () => {
   }) {
     return {
       ...candidate({ engineeringOnly: input.engineeringOnly }),
+      confirmedAt: now,
+      attemptLedger: null,
       course: {
         timeZone: "America/Los_Angeles",
         preferences: input.preferences
@@ -973,6 +1057,137 @@ describe("course-support claim demand fencing", () => {
     });
 
     expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["rendered browser discovery", browserReadyAttemptLedger()],
+    ["independent confirmation", independentReadyAttemptLedger()]
+  ])("claims unconfirmed active demand at %s", async (_stage, attemptLedger) => {
+    const preferences = [
+      {
+        teeSearch: {
+          id: "active-public-search",
+          date: new Date("2026-07-22T00:00:00.000Z")
+        }
+      }
+    ];
+    const incident = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      confirmedAt: null,
+      attemptLedger
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z")
+      })
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      leverage: { activeRealDemandCount: 1 }
+    });
+  });
+
+  it("excludes unconfirmed zero-demand work even when its ledger is browser-ready", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+        confirmedAt: null,
+        attemptLedger: browserReadyAttemptLedger()
+      }
+    ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z")
+      })
+    ).resolves.toMatchObject({ outcome: "no_due_work" });
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unconfirmed claim when live demand expires during ownership fencing", async () => {
+    const selected = {
+      ...incidentRecord({
+        engineeringOnly: false,
+        preferences: [
+          {
+            teeSearch: {
+              id: "expiring-public-search",
+              date: new Date("2026-07-22T00:00:00.000Z")
+            }
+          }
+        ]
+      }),
+      confirmedAt: null,
+      attemptLedger: browserReadyAttemptLedger()
+    };
+    const expired = {
+      ...selected,
+      course: { ...selected.course, preferences: [] }
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([selected])
+      .mockResolvedValueOnce([expired]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z")
+      })
+    ).rejects.toThrow("stage eligibility changed during claim");
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unconfirmed claim if its playbook moves back to a search-owned stage", async () => {
+    const preferences = [
+      {
+        teeSearch: {
+          id: "active-public-search",
+          date: new Date("2026-07-22T00:00:00.000Z")
+        }
+      }
+    ];
+    const selected = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      confirmedAt: null,
+      attemptLedger: browserReadyAttemptLedger()
+    };
+    const searchOwned = {
+      ...selected,
+      attemptLedger: appendAutomationPlaybookEvent(null, {
+        cycle: 1,
+        stage: "OFFICIAL_IDENTITY",
+        transition: "COMPLETED",
+        readPath: "OFFICIAL_IDENTITY",
+        evidenceKind: "OFFICIAL_SOURCE",
+        failureFingerprint: "TEST:OFFICIAL_IDENTITY:ONLY",
+        runtimeVersion: "test-runtime",
+        observedAt: now
+      })
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([selected])
+      .mockResolvedValueOnce([searchOwned]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z")
+      })
+    ).rejects.toThrow("stage eligibility changed during claim");
   });
 
   it.each([
@@ -1137,6 +1352,8 @@ describe("course-support claim demand fencing", () => {
     });
     const incident = {
       ...intended,
+      confirmedAt: now,
+      attemptLedger: null,
       course: { timeZone: "America/Los_Angeles", preferences: [] }
     };
     prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
@@ -1214,12 +1431,16 @@ describe("course-support claim demand fencing", () => {
       .mockResolvedValueOnce([
         {
           ...intended,
+          confirmedAt: now,
+          attemptLedger: null,
           course: { timeZone: "America/Los_Angeles", preferences: [] }
         }
       ])
       .mockResolvedValueOnce([
         {
           ...intended,
+          confirmedAt: now,
+          attemptLedger: null,
           course: {
             timeZone: "America/Los_Angeles",
             preferences: [
@@ -1259,6 +1480,8 @@ describe("course-support claim demand fencing", () => {
     });
     const incident = {
       ...intended,
+      confirmedAt: now,
+      attemptLedger: null,
       course: { timeZone: "America/Los_Angeles", preferences: [] }
     };
     prismaMocks.batchFindUnique.mockResolvedValue(retryBatchEvidence(intended));
@@ -1267,6 +1490,9 @@ describe("course-support claim demand fencing", () => {
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([
         {
+          cycle: 1,
+          confirmedAt: now,
+          attemptLedger: null,
           course: {
             timeZone: "America/New_York",
             preferences: [
@@ -1296,6 +1522,54 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
     expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not let a targeted retry bypass unconfirmed browser-ready real demand", async () => {
+    const intended = candidate({
+      id: "retry-intended",
+      courseId: "retry-course",
+      engineeringOnly: false
+    });
+    const incident = {
+      ...intended,
+      confirmedAt: now,
+      attemptLedger: null,
+      course: { timeZone: "America/Los_Angeles", preferences: [] }
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatchEvidence(intended));
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([
+        {
+          cycle: 1,
+          confirmedAt: null,
+          attemptLedger: browserReadyAttemptLedger(),
+          course: {
+            timeZone: "America/New_York",
+            preferences: [
+              {
+                teeSearch: {
+                  id: "unconfirmed-critical-demand",
+                  date: new Date("2026-07-22T00:00:00.000Z")
+                }
+              }
+            ]
+          }
+        }
+      ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryBatchId: "private-source-batch-id",
+        retryOrdinal: 1,
+        maxCourses: 1,
+        now: new Date("2026-07-21T01:00:00.000Z")
+      })
+    ).rejects.toThrow("cannot bypass due critical real-demand work");
   });
 });
 
@@ -3435,6 +3709,7 @@ describe("course-support inspection ownership", () => {
   it("reports live demand separately from historical real provenance", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
       {
+        confirmedAt: now,
         providerFamilyKey: "FOREUP",
         failureFingerprint: "historical",
         engineeringOnly: false,
@@ -3443,6 +3718,7 @@ describe("course-support inspection ownership", () => {
         course: { timeZone: "America/New_York", preferences: [] }
       },
       {
+        confirmedAt: now,
         providerFamilyKey: "FOREUP",
         failureFingerprint: "live",
         engineeringOnly: true,
@@ -3461,6 +3737,7 @@ describe("course-support inspection ownership", () => {
         }
       },
       {
+        confirmedAt: now,
         providerFamilyKey: "CPS",
         failureFingerprint: "synthetic",
         engineeringOnly: true,
@@ -3482,18 +3759,81 @@ describe("course-support inspection ownership", () => {
     expect(prismaMocks.supportIncidentFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          confirmedAt: { not: null }
+          AND: expect.arrayContaining([
+            expect.objectContaining({
+              OR: expect.arrayContaining([
+                { confirmedAt: { not: null } },
+                expect.objectContaining({ course: expect.any(Object) })
+              ])
+            })
+          ])
         }),
         select: expect.objectContaining({
+          confirmedAt: true,
+          attemptLedger: true,
           course: expect.objectContaining({ select: expect.any(Object) })
         })
       })
     );
   });
 
+  it("includes due unconfirmed live demand only at a responder-owned browser stage", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        cycle: 1,
+        confirmedAt: null,
+        attemptLedger: browserReadyAttemptLedger(),
+        providerFamilyKey: "LIVE_BROWSER_GROUP",
+        failureFingerprint: "live-browser",
+        engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:28:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:58:00.000Z"),
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "live-search",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      },
+      {
+        cycle: 1,
+        confirmedAt: null,
+        attemptLedger: browserReadyAttemptLedger(),
+        providerFamilyKey: "NO_DEMAND_GROUP",
+        failureFingerprint: "no-demand",
+        engineeringOnly: true,
+        escalationDeadlineAt: new Date("2026-07-15T20:28:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:58:00.000Z"),
+        course: { timeZone: "America/New_York", preferences: [] }
+      }
+    ]);
+
+    await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
+      outcome: "ready",
+      dueIncidentCount: 1,
+      dueRealCount: 1,
+      dueHistoricalRealCount: 0,
+      dueEngineeringCount: 0,
+      readOnlyDispatchPlan: {
+        groups: [
+          expect.objectContaining({
+            providerFamilyKey: "LIVE_BROWSER_GROUP",
+            activeRealDemandCount: 1
+          })
+        ]
+      }
+    });
+  });
+
   it("shows nearest-deadline active customer groups first in the inspect plan", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
       {
+        confirmedAt: now,
         providerFamilyKey: "OLDER_GROUP",
         failureFingerprint: "older",
         engineeringOnly: false,
@@ -3512,6 +3852,7 @@ describe("course-support inspection ownership", () => {
         }
       },
       {
+        confirmedAt: now,
         providerFamilyKey: "NEW_ALERT_GROUP",
         failureFingerprint: "new-alert",
         engineeringOnly: false,
@@ -3542,6 +3883,7 @@ describe("course-support inspection ownership", () => {
   it("preserves due dispatch work for one reinspection after expired recovery", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
       {
+        confirmedAt: now,
         providerFamilyKey: "DUE_GROUP",
         failureFingerprint: "due",
         engineeringOnly: false,

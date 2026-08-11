@@ -24,7 +24,10 @@ import {
   isCourseSupportFactualFinalProof,
   scheduleCourseSupportVerificationRequests
 } from "./course-support-verification";
-import { isAutomationPlaybookExhausted } from "./course-monitoring-playbook";
+import {
+  assessAutomationPlaybook,
+  isAutomationPlaybookExhausted
+} from "./course-monitoring-playbook";
 import {
   getHumanReviewRetryAt,
   inferHumanReviewReason
@@ -347,6 +350,63 @@ export async function withCourseSupportWriteConflictRetry<T>(
     }
   }
   throw new Error("Course-support write-conflict retry exhausted unexpectedly.");
+}
+
+function isResponderSelectionEligible(input: {
+  confirmedAt: Date | null | undefined;
+  attemptLedger: unknown;
+  cycle: number;
+  activeRealSearchCount: number;
+}) {
+  if (input.confirmedAt != null) {
+    return true;
+  }
+  if (input.activeRealSearchCount <= 0) {
+    return false;
+  }
+  const assessment = assessAutomationPlaybook(
+    input.attemptLedger,
+    input.cycle
+  );
+  return (
+    assessment.valid &&
+    assessment.conclusion === "INCOMPLETE" &&
+    (assessment.nextStage === "RENDERED_BROWSER_DISCOVERY" ||
+      assessment.nextStage === "INDEPENDENT_CONFIRMATION")
+  );
+}
+
+function buildDueResponderIncidentWhere(
+  now: Date
+): Prisma.CourseSupportIncidentWhereInput {
+  return {
+    status: "AUTO_INVESTIGATING",
+    activeBatchId: null,
+    AND: [
+      {
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+      },
+      {
+        OR: [
+          { confirmedAt: { not: null } },
+          {
+            course: {
+              preferences: {
+                some: {
+                  teeSearch: {
+                    status: "ACTIVE",
+                    trafficClass: {
+                      notIn: [...syntheticWebsiteTrafficClasses]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  };
 }
 
 function runCourseSupportTransactionWithRetry<T>(
@@ -1168,16 +1228,14 @@ export async function inspectCourseSupportQueue(input?: {
   if (input?.requestingThreadId !== undefined) {
     validateOwnerThread(input.requestingThreadId);
   }
-  const dueWhere = {
-    status: "AUTO_INVESTIGATING" as const,
-    activeBatchId: null,
-    confirmedAt: { not: null },
-    OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
-  };
-  const [dueIncidents, activeBatches, expiredBatch] = await Promise.all([
+  const dueWhere = buildDueResponderIncidentWhere(now);
+  const [rawDueIncidents, activeBatches, expiredBatch] = await Promise.all([
     prisma.courseSupportIncident.findMany({
       where: dueWhere,
       select: {
+        cycle: true,
+        confirmedAt: true,
+        attemptLedger: true,
         providerFamilyKey: true,
         failureFingerprint: true,
         engineeringOnly: true,
@@ -1241,6 +1299,35 @@ export async function inspectCourseSupportQueue(input?: {
   const activeProviderGroups = new Set(
     activeBatches.map((batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`)
   );
+  const dueDemand = rawDueIncidents.flatMap((incident) => {
+    const currentDemand = deriveCourseSupportCurrentDemand(incident.course.preferences, {
+      timeZone: incident.course.timeZone,
+      now
+    });
+    if (
+      !isResponderSelectionEligible({
+        confirmedAt: incident.confirmedAt,
+        attemptLedger: incident.attemptLedger,
+        cycle: incident.cycle,
+        activeRealSearchCount: currentDemand.activeRealSearchCount
+      })
+    ) {
+      return [];
+    }
+    return [
+      {
+        incident: {
+          ...incident,
+          engineeringOnly:
+            currentDemand.activeRealSearchCount > 0
+              ? false
+              : incident.engineeringOnly
+        },
+        ...currentDemand
+      }
+    ];
+  });
+  const dueIncidents = dueDemand.map(({ incident }) => incident);
   const availableDueIncidents = dueIncidents.filter(
     (incident) =>
       !activeProviderGroups.has(`${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`)
@@ -1251,19 +1338,6 @@ export async function inspectCourseSupportQueue(input?: {
       (incident) => `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`
     )
   );
-  const dueDemand = dueIncidents.map((incident) => {
-    const currentDemand = deriveCourseSupportCurrentDemand(incident.course.preferences, {
-      timeZone: incident.course.timeZone,
-      now
-    });
-    return {
-      incident: {
-        ...incident,
-        engineeringOnly: currentDemand.activeRealSearchCount > 0 ? false : incident.engineeringOnly
-      },
-      ...currentDemand
-    };
-  });
   const dueRealCount = dueDemand.filter(
     ({ activeRealSearchCount }) => activeRealSearchCount > 0
   ).length;
@@ -1650,6 +1724,8 @@ export async function claimCourseSupportBatch(input: {
             id: true,
             cycle: true,
             revision: true,
+            confirmedAt: true,
+            attemptLedger: true,
             status: true,
             activeBatchId: true,
             engineeringOnly: true,
@@ -1690,6 +1766,18 @@ export async function claimCourseSupportBatch(input: {
           });
           const currentEngineeringOnly =
             currentDemand.activeRealSearchCount > 0 ? false : current.engineeringOnly;
+          if (
+            !isResponderSelectionEligible({
+              confirmedAt: current.confirmedAt,
+              attemptLedger: current.attemptLedger,
+              cycle: current.cycle,
+              activeRealSearchCount: currentDemand.activeRealSearchCount
+            })
+          ) {
+            throw new Error(
+              "Course-support stage eligibility changed during claim; rerun selection."
+            );
+          }
           if (
             currentDemand.activeRealSearchCount !== incident.activeRealSearchCount ||
             (currentDemand.earliestTargetDate?.getTime() ?? null) !==
@@ -1746,16 +1834,16 @@ export async function claimCourseSupportBatch(input: {
         if (input.retryOrdinal !== undefined) {
           const outsideDueFetchFailures = await tx.courseSupportIncident.findMany({
             where: {
+              ...buildDueResponderIncidentWhere(now),
               id: {
                 notIn: selected.incidents.map((incident) => incident.id)
               },
-              status: "AUTO_INVESTIGATING",
-              activeBatchId: null,
-              confirmedAt: { not: null },
-              kind: "FETCH_FAILED",
-              OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+              kind: "FETCH_FAILED"
             },
             select: {
+              cycle: true,
+              confirmedAt: true,
+              attemptLedger: true,
               course: {
                 select: {
                   timeZone: true,
@@ -1776,12 +1864,19 @@ export async function claimCourseSupportBatch(input: {
               }
             }
           });
-          const outsideCriticalDemandAppeared = outsideDueFetchFailures.some(({ course }) => {
+          const outsideCriticalDemandAppeared = outsideDueFetchFailures.some((incident) => {
+            const { course } = incident;
             const currentDemand = deriveCourseSupportCurrentDemand(course.preferences, {
               timeZone: course.timeZone,
               now
             });
             return Boolean(
+              isResponderSelectionEligible({
+                confirmedAt: incident.confirmedAt,
+                attemptLedger: incident.attemptLedger,
+                cycle: incident.cycle,
+                activeRealSearchCount: currentDemand.activeRealSearchCount
+              }) &&
               currentDemand.activeRealSearchCount > 0 &&
               currentDemand.earliestTargetDate &&
               currentDemand.earliestTargetDate.getTime() <= now.getTime() + NEAR_DATE_WINDOW_MS
@@ -5145,17 +5240,14 @@ function getSafeEvidenceOrigin(value: string) {
 
 async function listDueCourseSupportCandidates(now: Date) {
   const incidents = await prisma.courseSupportIncident.findMany({
-    where: {
-      status: "AUTO_INVESTIGATING",
-      activeBatchId: null,
-      confirmedAt: { not: null },
-      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
-    },
+    where: buildDueResponderIncidentWhere(now),
     orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
     select: {
       id: true,
       courseId: true,
       cycle: true,
+      confirmedAt: true,
+      attemptLedger: true,
       kind: true,
       providerFamilyKey: true,
       failureClass: true,
@@ -5189,16 +5281,46 @@ async function listDueCourseSupportCandidates(now: Date) {
       }
     }
   });
-  return incidents.map(({ course, ...incident }) => {
+  return incidents.flatMap(({ course, ...incident }) => {
     const currentDemand = deriveCourseSupportCurrentDemand(course.preferences, {
       timeZone: course.timeZone,
       now
     });
-    return {
-      ...incident,
-      ...currentDemand,
-      engineeringOnly: currentDemand.activeRealSearchCount > 0 ? false : incident.engineeringOnly
-    };
+    if (
+      !isResponderSelectionEligible({
+        confirmedAt: incident.confirmedAt,
+        attemptLedger: incident.attemptLedger,
+        cycle: incident.cycle,
+        activeRealSearchCount: currentDemand.activeRealSearchCount
+      })
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: incident.id,
+        courseId: incident.courseId,
+        cycle: incident.cycle,
+        kind: incident.kind,
+        providerFamilyKey: incident.providerFamilyKey,
+        failureClass: incident.failureClass,
+        failureFingerprint: incident.failureFingerprint,
+        humanReviewReason: incident.humanReviewReason,
+        engineeringOnly:
+          currentDemand.activeRealSearchCount > 0
+            ? false
+            : incident.engineeringOnly,
+        activeRealSearchCount: currentDemand.activeRealSearchCount,
+        earliestTargetDate: currentDemand.earliestTargetDate,
+        escalationDeadlineAt: incident.escalationDeadlineAt,
+        firstSeenAt: incident.firstSeenAt,
+        lastSeenAt: incident.lastSeenAt,
+        lastAttemptAt: incident.lastAttemptAt,
+        nextAttemptAt: incident.nextAttemptAt,
+        attemptCount: incident.attemptCount,
+        updatedAt: incident.updatedAt
+      }
+    ];
   });
 }
 async function recordRoutineResponderObservation(input: {
