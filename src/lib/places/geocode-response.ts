@@ -2,6 +2,8 @@ import { LocationNotFoundError } from "@/lib/places/geocode";
 
 const LOCATION_NOT_FOUND_MESSAGE =
   "We couldn't find that location. Check the city, state, or ZIP code and try again.";
+export const LOCATION_SEARCH_UNAVAILABLE_MESSAGE =
+  "We couldn't search that location right now. Please wait a moment and try again.";
 
 export const geocodeSuccessCacheHeaders = {
   "Cache-Control": "public, max-age=0, must-revalidate",
@@ -15,7 +17,7 @@ export function getGeocodeErrorResponse(error: unknown) {
   }
 
   return {
-    message: error instanceof Error ? error.message : "Could not geocode location",
-    status: 502
+    message: LOCATION_SEARCH_UNAVAILABLE_MESSAGE,
+    status: 503
   };
 }

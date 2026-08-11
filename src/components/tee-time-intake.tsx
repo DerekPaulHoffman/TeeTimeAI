@@ -101,6 +101,13 @@ type Notice = {
   message: string;
 };
 
+const LOCATION_SEARCH_UNAVAILABLE_MESSAGE =
+  "We couldn't search that location right now. Please wait a moment and try again.";
+const COURSE_DISCOVERY_UNAVAILABLE_MESSAGE =
+  "We couldn't load nearby courses right now. Please wait a moment and try again.";
+const COURSE_LOOKUP_UNAVAILABLE_MESSAGE =
+  "We couldn't look up that course right now. Please wait a moment and try again.";
+
 declare global {
   interface Window {
     gm_authFailure?: () => void;
@@ -653,7 +660,7 @@ function TeeTimeIntakeContent({
         throw new Error(
           await readApiError(
             geocode,
-            "We couldn't find that location. Check the city, state, or ZIP code and try again."
+            LOCATION_SEARCH_UNAVAILABLE_MESSAGE
           )
         );
       }
@@ -670,10 +677,13 @@ function TeeTimeIntakeContent({
         }
       });
       shouldScrollToResultsRef.current = false;
-      setLocationInputInvalid(true);
+      setLocationInputInvalid(responseStatus === 400 || responseStatus === 404);
       setNotice({
         type: "error",
-        message: error instanceof Error ? error.message : "Could not geocode that location."
+        message:
+          (responseStatus === 400 || responseStatus === 404) && error instanceof Error
+            ? error.message
+            : LOCATION_SEARCH_UNAVAILABLE_MESSAGE
       });
       setLoading(false);
     }
@@ -693,7 +703,12 @@ function TeeTimeIntakeContent({
       const response = await fetch(`/api/courses/discover?${params}`);
       responseStatus = response.status;
       if (!response.ok) {
-        throw new Error(await readApiError(response, "Could not load nearby courses."));
+        throw new Error(
+          await readApiError(
+            response,
+            COURSE_DISCOVERY_UNAVAILABLE_MESSAGE
+          )
+        );
       }
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
@@ -733,7 +748,7 @@ function TeeTimeIntakeContent({
           ? "Loaded demo courses. Add Google Places keys for live discovery."
           : `Found ${data.courses.length} public golf courses within ${radiusMiles} miles.`
       });
-    } catch (error) {
+    } catch {
       trackWebsiteEvent({
         name: "course_discovery_failed",
         metadata: {
@@ -745,7 +760,7 @@ function TeeTimeIntakeContent({
       shouldScrollToResultsRef.current = false;
       setNotice({
         type: "error",
-        message: error instanceof Error ? error.message : "Could not load nearby courses."
+        message: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE
       });
     } finally {
       setLoading(false);
@@ -896,6 +911,7 @@ function TeeTimeIntakeContent({
     setCourseLookupState("loading");
     setCourseLookupMessage("Looking for matching golf coursesâ€¦");
 
+    let responseStatus: number | undefined;
     try {
       const params = new URLSearchParams({ q: normalizedQuery });
       if (searchCoordinates) {
@@ -904,10 +920,16 @@ function TeeTimeIntakeContent({
       }
 
       const response = await fetch(`/api/courses/lookup?${params}`);
-      const data = (await response.json()) as { courses?: CourseCandidate[]; error?: string };
+      responseStatus = response.status;
       if (!response.ok) {
-        throw new Error(data.error ?? "Could not look up that course.");
+        throw new Error(
+          await readApiError(
+            response,
+            COURSE_LOOKUP_UNAVAILABLE_MESSAGE
+          )
+        );
       }
+      const data = (await response.json()) as { courses?: CourseCandidate[] };
 
       const matches = data.courses ?? [];
       setCourseLookupResults(matches);
@@ -926,7 +948,12 @@ function TeeTimeIntakeContent({
       setCourseLookupResults([]);
       setCourseLookupState("error");
       setCourseLookupMessage(
-        error instanceof Error ? error.message : "Could not look up that course."
+        responseStatus !== undefined &&
+          responseStatus >= 400 &&
+          responseStatus < 500 &&
+          error instanceof Error
+          ? error.message
+          : COURSE_LOOKUP_UNAVAILABLE_MESSAGE
       );
     }
   }
@@ -2731,6 +2758,10 @@ function Notice({ id, notice }: { id?: string; notice: Notice }) {
 }
 
 async function readApiError(response: Response, fallback: string) {
+  if (response.status >= 500) {
+    return fallback;
+  }
+
   try {
     const body = (await response.json()) as { error?: unknown };
     return typeof body.error === "string" && body.error.trim() ? body.error : fallback;

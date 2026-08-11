@@ -4,7 +4,8 @@ import { hasGooglePlacesConfig, isVercelProduction } from "@/lib/env";
 import { geocodeLocation } from "@/lib/places/geocode";
 import {
   geocodeSuccessCacheHeaders,
-  getGeocodeErrorResponse
+  getGeocodeErrorResponse,
+  LOCATION_SEARCH_UNAVAILABLE_MESSAGE
 } from "@/lib/places/geocode-response";
 
 export async function GET(request: NextRequest) {
@@ -15,13 +16,13 @@ export async function GET(request: NextRequest) {
 
   if (!hasGooglePlacesConfig() && isVercelProduction()) {
     return NextResponse.json(
-      { error: "Location search is temporarily unavailable. Try again in a moment." },
+      { error: LOCATION_SEARCH_UNAVAILABLE_MESSAGE },
       { status: 503 }
     );
   }
 
   try {
-    const result = await geocodeLocation(query);
+    const result = await geocodeLocation(query, request.signal);
     return NextResponse.json(result, { headers: geocodeSuccessCacheHeaders });
   } catch (error) {
     const response = getGeocodeErrorResponse(error);

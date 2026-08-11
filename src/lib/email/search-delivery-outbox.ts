@@ -1311,8 +1311,11 @@ export async function listReachedMonitoringOutages(input: {
     select: {
       recipient: true,
       sentAt: true,
+      status: true,
+      lastError: true,
       payload: true
-    }
+    },
+    orderBy: [{ sentAt: "asc" }, { createdAt: "asc" }]
   });
   const reached = new Map<
     string,
@@ -1324,7 +1327,14 @@ export async function listReachedMonitoringOutages(input: {
     }
   >();
   for (const delivery of deliveries) {
-    if (!delivery.sentAt) {
+    if (
+      !delivery.sentAt ||
+      !(
+        delivery.status === "SENT" ||
+        delivery.lastError === DELIVERY_DRY_RUN ||
+        delivery.lastError === STATUS_RECIPIENT_PRIOR_REACHED
+      )
+    ) {
       continue;
     }
     const payload = parseSearchEmailPayload(delivery.payload);

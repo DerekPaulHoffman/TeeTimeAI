@@ -187,6 +187,7 @@ type AutomationCourse = AutomationCourseProviderRead & {
     status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED";
     attemptLedger: unknown;
     humanReviewReason: string | null;
+    escalatedAt?: Date | null;
     escalationDeadlineAt: Date | null;
     firstSeenAt: Date;
   } | null;
@@ -1806,6 +1807,7 @@ async function checkSearch(
 
   await maintainSearchCheckLease(lease);
   const checkedAt = new Date();
+  applyCustomerMonitoringProjection(search, courseResults, checkedAt);
   const statusEmailsEnabled = areSearchStatusEmailsEnabled();
   const statusKindBeforeRetry = statusEmailsEnabled
     ? getEnabledSearchStatusEmailKind(
@@ -1864,6 +1866,7 @@ async function checkSearch(
     pendingStatusReplacement = null;
   }
   search = (await getActiveSearchForAutomation(searchId)) ?? search;
+  applyCustomerMonitoringProjection(search, courseResults, checkedAt);
   await maintainSearchCheckLease(lease);
   let monitoringNoticeOutcome: SearchCheckResult["statusEmailOutcome"] =
     "skipped";
@@ -1893,6 +1896,7 @@ async function checkSearch(
         supportRetryNeeded = true;
       }
       search = (await getActiveSearchForAutomation(searchId)) ?? search;
+      applyCustomerMonitoringProjection(search, courseResults, checkedAt);
     } catch (error) {
       if (error instanceof SearchCheckLeaseLostError) {
         throw error;
@@ -2287,6 +2291,63 @@ function getCustomerBookingUrl(course: AutomationCourse) {
   );
 }
 
+function getLiveCustomerMonitoringStatus(
+  course: AutomationCourse,
+  result: SearchCheckCourseResult,
+  observedAt: Date
+) {
+  return getCustomerMonitoringStatus({
+    outcome: result.outcome,
+    monitoringDisposition: result.monitoringDisposition,
+    monitoringState: course.monitoringStatus?.state ?? null,
+    monitoringStateChangedAt:
+      course.monitoringStatus?.stateChangedAt ?? null,
+    incidentStatus: course.supportIncident?.status ?? null,
+    humanReviewReason: course.supportIncident?.humanReviewReason ?? null,
+    incidentEscalatedAt: course.supportIncident?.escalatedAt ?? null,
+    outcomeObservedAt: observedAt,
+    escalationDeadlineAt: course.supportIncident?.escalationDeadlineAt ?? null,
+    now: observedAt,
+    supportStatus: result.supportStatus,
+    automationReason: result.automationReason
+  });
+}
+
+function applyCustomerMonitoringProjection(
+  search: NonNullable<Awaited<ReturnType<typeof getActiveSearchForAutomation>>>,
+  courseResults: SearchCheckCourseResult[],
+  observedAt: Date
+) {
+  const resultByCourse = new Map(
+    courseResults.map((result) => [result.courseId, result])
+  );
+  for (const preference of search.preferences) {
+    const result = resultByCourse.get(preference.course.id);
+    if (!result) continue;
+    const customerStatus = getLiveCustomerMonitoringStatus(
+      preference.course,
+      result,
+      observedAt
+    );
+    if (
+      customerStatus === "NEEDS_HUMAN_REVIEW" &&
+      result.supportStatus !== "NEEDS_HUMAN_REVIEW"
+    ) {
+      result.message = HUMAN_REVIEW_CUSTOMER_MESSAGE;
+      result.supportStatus = "NEEDS_HUMAN_REVIEW";
+    } else if (
+      (customerStatus === "MONITORED" ||
+        customerStatus === "FINAL_DIRECT_ACTION") &&
+      result.supportStatus === "NEEDS_HUMAN_REVIEW"
+    ) {
+      delete result.supportStatus;
+      if (result.message === HUMAN_REVIEW_CUSTOMER_MESSAGE) {
+        delete result.message;
+      }
+    }
+  }
+}
+
 type RunnableSearchPlaybookStage =
   | "TYPED_ADAPTER"
   | "HTTP_ADAPTER_RETRY"
@@ -2492,19 +2553,11 @@ async function deliverMonitoringStatusNotices(input: {
       const previousStatus = getCustomerMonitoringStatus({
         monitoringState: previous?.state ?? null
       });
-      const currentStatus = getCustomerMonitoringStatus({
-        outcome: result.outcome,
-        monitoringDisposition: result.monitoringDisposition,
-        monitoringState: current?.state ?? null,
-        incidentStatus: preference.course.supportIncident?.status ?? null,
-        humanReviewReason:
-          preference.course.supportIncident?.humanReviewReason ?? null,
-        escalationDeadlineAt:
-          preference.course.supportIncident?.escalationDeadlineAt ?? null,
-        now: input.checkedAt,
-        supportStatus: result.supportStatus,
-        automationReason: result.automationReason
-      });
+      const currentStatus = getLiveCustomerMonitoringStatus(
+        preference.course,
+        result,
+        input.checkedAt
+      );
       const customerResult =
         currentStatus === "NEEDS_HUMAN_REVIEW" &&
         result.supportStatus !== "NEEDS_HUMAN_REVIEW"
@@ -2629,7 +2682,11 @@ async function deliverMonitoringStatusNotices(input: {
       periodKey: buildMonitoringStatusNoticeGroupKey(
         kind,
         candidates,
-        courseIds
+        courseIds,
+        {
+          reachedOutages,
+          ownerRecipient
+        }
       ),
       recipients,
       coveredMatchIds,

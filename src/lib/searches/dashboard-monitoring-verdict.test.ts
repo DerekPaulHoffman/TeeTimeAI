@@ -77,6 +77,45 @@ describe("dashboard monitoring verdict", () => {
     );
   });
 
+  it("keeps an escalated revalidation in manual review until durable success", () => {
+    const escalatedAt = new Date("2026-08-10T14:30:00.000Z");
+    const revalidating = getDashboardMonitoringVerdict({
+      ...base,
+      latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: escalatedAt },
+      monitoringState: "AUTO_INVESTIGATING",
+      supportIncidentStatus: "AUTO_INVESTIGATING",
+      incidentEscalatedAt: escalatedAt
+    });
+    expect(revalidating.label).toBe("Manual review needed");
+
+    const staleHealthy = getDashboardMonitoringVerdict({
+      ...base,
+      upcomingBookingWindow: { opensAt: "later" },
+      latestProbe: {
+        outcome: "NO_MATCH",
+        observedAt: new Date("2026-08-10T14:29:00.000Z")
+      },
+      monitoringState: "HEALTHY",
+      monitoringStateChangedAt: new Date("2026-08-10T14:29:00.000Z"),
+      supportIncidentStatus: "AUTO_INVESTIGATING",
+      incidentEscalatedAt: escalatedAt
+    });
+    expect(staleHealthy.label).toBe("Manual review needed");
+
+    const recovered = getDashboardMonitoringVerdict({
+      ...base,
+      latestProbe: {
+        outcome: "NO_MATCH",
+        observedAt: new Date("2026-08-10T14:31:00.000Z")
+      },
+      monitoringState: "HEALTHY",
+      monitoringStateChangedAt: new Date("2026-08-10T14:31:00.000Z"),
+      supportIncidentStatus: "AUTO_INVESTIGATING",
+      incidentEscalatedAt: escalatedAt
+    });
+    expect(recovered.label).toBe("Tee-time alerts available");
+  });
+
   it("keeps verified direct actions distinct from human review", () => {
     const verdict = getDashboardMonitoringVerdict({
       ...base,

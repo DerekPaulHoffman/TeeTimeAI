@@ -3429,6 +3429,184 @@ describe("runSearchCheck email cadence", () => {
     });
   });
 
+  it("revalidates an escalated incident while keeping the customer status in human review", async () => {
+    const firstDegradedAt = new Date("2026-07-11T11:00:00.000Z");
+    const escalatedAt = new Date("2026-07-11T11:30:00.000Z");
+    const revalidating = {
+      ...search,
+      statusEmailSentAt: new Date("2026-07-11T11:05:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            detectedBookingUrl:
+              "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            monitoringStatus: {
+              state: "AUTO_INVESTIGATING",
+              firstDegradedAt,
+              failureFingerprint: "FOREUP:NETWORK",
+              nextAutomaticAttemptAt: null,
+              revalidationRequestedAt: new Date("2026-07-11T12:00:00.000Z"),
+              stateChangedAt: firstDegradedAt
+            },
+            supportIncident: {
+              id: "incident-escalated",
+              cycle: 1,
+              status: "AUTO_INVESTIGATING",
+              attemptLedger: null,
+              humanReviewReason: null,
+              escalatedAt,
+              escalationDeadlineAt: new Date("2026-07-11T13:00:00.000Z"),
+              firstSeenAt: firstDegradedAt
+            },
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue(revalidating);
+    adapterMocks.fetchForeupTeeSheet.mockRejectedValue(
+      new Error("Temporary public tee-sheet failure")
+    );
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledTimes(1);
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "FETCH_FAILED",
+      supportStatus: "NEEDS_HUMAN_REVIEW"
+    });
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "MONITORING_OUTAGE",
+        payload: expect.objectContaining({
+          statusSnapshot: [
+            expect.objectContaining({
+              customerStatus: "NEEDS_HUMAN_REVIEW"
+            })
+          ]
+        })
+      })
+    );
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mock.calls.some(
+        ([input]) =>
+          input.payload.statusSnapshot?.some(
+            (course: { customerStatus?: string }) =>
+              course.customerStatus === "RETRYING_AUTOMATICALLY"
+          )
+      )
+    ).toBe(false);
+  });
+
+  it("sends monitored recovery after escalated revalidation succeeds durably", async () => {
+    const firstDegradedAt = new Date("2026-07-11T11:00:00.000Z");
+    const escalatedAt = new Date("2026-07-11T11:30:00.000Z");
+    const supportIncident = {
+      id: "incident-escalated",
+      cycle: 1,
+      status: "AUTO_INVESTIGATING" as const,
+      attemptLedger: null,
+      humanReviewReason: null,
+      escalatedAt,
+      escalationDeadlineAt: new Date("2026-07-11T13:00:00.000Z"),
+      firstSeenAt: firstDegradedAt
+    };
+    const revalidating = {
+      ...search,
+      statusEmailSentAt: new Date("2026-07-11T11:05:00.000Z"),
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            detectedBookingUrl:
+              "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+            automationEligibility: "ALLOWED",
+            automationReason: "NONE",
+            monitoringStatus: {
+              state: "AUTO_INVESTIGATING",
+              firstDegradedAt,
+              failureFingerprint: "FOREUP:NETWORK",
+              nextAutomaticAttemptAt: null,
+              revalidationRequestedAt: new Date("2026-07-11T12:00:00.000Z"),
+              stateChangedAt: firstDegradedAt
+            },
+            supportIncident,
+            bookingMetadata: {
+              scheduleId: 6123,
+              bookingBaseUrl:
+                "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+            }
+          }
+        }
+      ]
+    };
+    const healthy = {
+      ...revalidating,
+      preferences: [
+        {
+          ...revalidating.preferences[0],
+          course: {
+            ...revalidating.preferences[0].course,
+            monitoringStatus: {
+              state: "HEALTHY",
+              firstDegradedAt: null,
+              failureFingerprint: null,
+              nextAutomaticAttemptAt: null,
+              revalidationRequestedAt: null,
+              stateChangedAt: new Date("2026-07-11T12:10:00.000Z")
+            }
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation
+      .mockResolvedValueOnce(revalidating)
+      .mockResolvedValue(healthy);
+    deliveryOutboxMocks.listReachedMonitoringOutages.mockResolvedValue([
+      {
+        courseId: "course-1",
+        recipient: "player@resend.dev",
+        sentAt: escalatedAt,
+        customerStatus: "NEEDS_HUMAN_REVIEW"
+      }
+    ]);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledTimes(1);
+    expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
+    expect(result.courseResults[0]?.supportStatus).toBeUndefined();
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "MONITORING_RECOVERY" })
+    );
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "recovery" })
+    );
+  });
+
   it("sends one human-review update at T+30 before watchdog persistence and dedupes the watchdog replay", async () => {
     const firstDegradedAt = new Date("2026-07-11T11:40:00.000Z");
     const escalationDeadlineAt = new Date("2026-07-11T12:10:00.000Z");

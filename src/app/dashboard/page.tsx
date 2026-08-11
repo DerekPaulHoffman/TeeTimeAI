@@ -448,10 +448,16 @@ function DashboardSearchCard({
               automationReason: preference.course.automationReason,
               latestProbe,
               upcomingBookingWindow,
+              monitoringState:
+                preference.course.monitoringStatus?.state ?? null,
+              monitoringStateChangedAt:
+                preference.course.monitoringStatus?.stateChangedAt ?? null,
               supportIncidentStatus:
                 preference.course.supportIncident?.status ?? null,
               humanReviewReason:
                 preference.course.supportIncident?.humanReviewReason ?? null,
+              incidentEscalatedAt:
+                preference.course.supportIncident?.escalatedAt ?? null,
               escalationDeadlineAt:
                 preference.course.supportIncident?.escalationDeadlineAt ?? null,
               firstTimeLookup:

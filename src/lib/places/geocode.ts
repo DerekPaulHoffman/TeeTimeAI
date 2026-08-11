@@ -1,4 +1,5 @@
 import { getGooglePlacesApiKey } from "@/lib/places/google";
+import { fetchGooglePlacesJsonWithRetry } from "@/lib/places/google-places-request";
 
 export class LocationNotFoundError extends Error {
   constructor() {
@@ -7,7 +8,7 @@ export class LocationNotFoundError extends Error {
   }
 }
 
-export async function geocodeLocation(query: string) {
+export async function geocodeLocation(query: string, signal?: AbortSignal) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
     return {
@@ -17,34 +18,36 @@ export async function geocodeLocation(query: string) {
     };
   }
 
-  const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location"
-    },
-    body: JSON.stringify({
-      textQuery: query,
-      maxResultCount: 1,
-      regionCode: "US"
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Google Places text search failed with ${response.status}`);
-  }
-
-  const json = (await response.json()) as {
+  const { response, json } = await fetchGooglePlacesJsonWithRetry<{
     places?: Array<{
       location?: {
         latitude?: number;
         longitude?: number;
       };
     }>;
-  };
+  }>(
+    "https://places.googleapis.com/v1/places:searchText",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location"
+      },
+      body: JSON.stringify({
+        textQuery: query,
+        maxResultCount: 1,
+        regionCode: "US"
+      }),
+      signal
+    }
+  );
 
-  const location = json.places?.[0]?.location;
+  if (!response.ok) {
+    throw new Error(`Google Places text search failed with ${response.status}`);
+  }
+
+  const location = json?.places?.[0]?.location;
   if (location?.latitude === undefined || location.longitude === undefined) {
     throw new LocationNotFoundError();
   }

@@ -1,5 +1,8 @@
 import type { CourseAlertSupport } from "@/lib/courses/intelligence";
-import { getCustomerMonitoringStatus } from "@/lib/customer-monitoring-status";
+import {
+  getCustomerMonitoringStatus,
+  type CustomerMonitoringStatusInput
+} from "@/lib/customer-monitoring-status";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 
 export type DashboardMonitoringVerdictInput = {
@@ -27,7 +30,10 @@ export type DashboardMonitoringVerdictInput = {
     | "NEEDS_HUMAN"
     | "RESOLVED"
     | null;
+  monitoringState?: CustomerMonitoringStatusInput["monitoringState"];
+  monitoringStateChangedAt?: Date | null;
   humanReviewReason?: string | null;
+  incidentEscalatedAt?: Date | null;
   escalationDeadlineAt?: Date | null;
   now?: Date;
   firstTimeLookup: boolean;
@@ -36,7 +42,25 @@ export type DashboardMonitoringVerdictInput = {
 export function getDashboardMonitoringVerdict(
   input: DashboardMonitoringVerdictInput
 ) {
-  if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
+  const customerStatus = getCustomerMonitoringStatus({
+    outcome: input.latestProbe?.outcome,
+    monitoringState: input.monitoringState,
+    monitoringStateChangedAt: input.monitoringStateChangedAt,
+    outcomeObservedAt: input.latestProbe?.observedAt,
+    incidentStatus: input.supportIncidentStatus,
+    humanReviewReason: input.humanReviewReason,
+    incidentEscalatedAt: input.incidentEscalatedAt,
+    escalationDeadlineAt: input.escalationDeadlineAt,
+    now: input.now,
+    automationReason: input.automationReason,
+    directActionAvailable: Boolean(input.alertSupport)
+  });
+
+  if (
+    customerStatus !== "NEEDS_HUMAN_REVIEW" &&
+    input.upcomingBookingWindow &&
+    input.latestProbe?.outcome === "NO_MATCH"
+  ) {
     return {
       label: "Checks start when booking opens",
       detail: "We will begin checking at the course's useful booking release time.",
@@ -45,16 +69,6 @@ export function getDashboardMonitoringVerdict(
       className: "is-detail"
     };
   }
-
-  const customerStatus = getCustomerMonitoringStatus({
-    outcome: input.latestProbe?.outcome,
-    incidentStatus: input.supportIncidentStatus,
-    humanReviewReason: input.humanReviewReason,
-    escalationDeadlineAt: input.escalationDeadlineAt,
-    now: input.now,
-    automationReason: input.automationReason,
-    directActionAvailable: Boolean(input.alertSupport)
-  });
 
   if (customerStatus === "MONITORED") {
     return {

@@ -754,6 +754,9 @@ const searchListInclude = {
           bookingFacts: {
             orderBy: { holes: "asc" }
           },
+          monitoringStatus: {
+            select: { state: true, stateChangedAt: true }
+          },
           profile: {
             select: {
               canonicalSlug: true,
@@ -764,6 +767,7 @@ const searchListInclude = {
             select: {
               status: true,
               humanReviewReason: true,
+              escalatedAt: true,
               escalationDeadlineAt: true,
               firstSeenAt: true
             }

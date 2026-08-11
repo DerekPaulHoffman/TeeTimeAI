@@ -213,6 +213,8 @@ describe("search email delivery outbox", () => {
       {
         recipient: "owner@example.com",
         sentAt: new Date("2026-07-15T15:01:00.000Z"),
+        status: "SENT",
+        lastError: null,
         payload: {
           schemaVersion: 2,
           checkedAt: "2026-07-15T15:00:00.000Z",
@@ -235,6 +237,8 @@ describe("search email delivery outbox", () => {
       {
         recipient: "friend@example.com",
         sentAt: new Date("2026-07-15T15:02:00.000Z"),
+        status: "SENT",
+        lastError: null,
         payload: {
           schemaVersion: 2,
           checkedAt: "2026-07-15T15:00:00.000Z",
@@ -254,6 +258,28 @@ describe("search email delivery outbox", () => {
               courseName: "Unreported retry",
               state: "FETCH_FAILED:ACTIONABLE:IN_OPERATOR_QUEUE:NONE",
               customerStatus: "RETRYING_AUTOMATICALLY"
+            }
+          ]
+        }
+      },
+      {
+        recipient: "owner@example.com",
+        sentAt: new Date("2026-07-15T15:03:00.000Z"),
+        status: "SUPPRESSED",
+        lastError: "DELIVERY_RECIPIENT_NO_LONGER_AUTHORIZED",
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusReport: {
+            kind: "status-update",
+            courses: [{ courseId: "course-suppressed" }]
+          },
+          statusSnapshot: [
+            {
+              courseId: "course-suppressed",
+              courseName: "Suppressed",
+              state: "NEEDS_ADAPTER:ACTIONABLE:NEEDS_HUMAN_REVIEW:NONE",
+              customerStatus: "NEEDS_HUMAN_REVIEW"
             }
           ]
         }

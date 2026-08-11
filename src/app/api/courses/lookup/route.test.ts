@@ -88,7 +88,8 @@ describe("GET /api/courses/lookup", () => {
     expect(mocks.searchGolfCoursesByName).toHaveBeenCalledWith({
       query: "Bethpage Black",
       latitude: 40.73,
-      longitude: -73.44
+      longitude: -73.44,
+      signal: expect.any(AbortSignal)
     });
     expect(mocks.enrichCoursesWithAlertSupport).toHaveBeenCalledWith([
       expect.objectContaining({ googlePlaceId: "bethpage-black" })
@@ -180,7 +181,20 @@ describe("GET /api/courses/lookup", () => {
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
-      error: "Course lookup is temporarily unavailable. Try again in a moment."
+      error: "We couldn't look up that course right now. Please wait a moment and try again."
+    });
+  });
+
+  it("does not expose upstream failure details when lookup fallback is empty", async () => {
+    mocks.searchGolfCoursesByName.mockRejectedValue(
+      new Error("Google Places course search failed with 429")
+    );
+
+    const response = await GET(request("?q=Bethpage%20Black"));
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "We couldn't look up that course right now. Please wait a moment and try again."
     });
   });
 });

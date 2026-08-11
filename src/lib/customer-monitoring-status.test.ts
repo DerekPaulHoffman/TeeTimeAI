@@ -85,6 +85,65 @@ describe("customer monitoring status", () => {
     ).toBe("NEEDS_HUMAN_REVIEW");
   });
 
+  it("keeps human review customer-visible through unresolved internal revalidation", () => {
+    const escalatedAt = new Date("2026-08-10T14:30:00.000Z");
+
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        incidentStatus: "AUTO_INVESTIGATING",
+        incidentEscalatedAt: escalatedAt,
+        escalationDeadlineAt: new Date("2026-08-10T21:00:00.000Z"),
+        now: new Date("2026-08-10T15:00:00.000Z")
+      })
+    ).toBe("NEEDS_HUMAN_REVIEW");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        monitoringState: "HEALTHY",
+        incidentStatus: "RESOLVED",
+        incidentEscalatedAt: escalatedAt
+      })
+    ).toBe("MONITORED");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        incidentStatus: "RESOLVED",
+        incidentEscalatedAt: escalatedAt,
+        supportStatus: "NEEDS_HUMAN_REVIEW"
+      })
+    ).toBe("MONITORED");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        monitoringState: "AUTO_INVESTIGATING",
+        incidentStatus: "AUTO_INVESTIGATING",
+        incidentEscalatedAt: escalatedAt,
+        outcomeObservedAt: new Date("2026-08-10T14:29:59.000Z")
+      })
+    ).toBe("NEEDS_HUMAN_REVIEW");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        monitoringState: "HEALTHY",
+        monitoringStateChangedAt: new Date("2026-08-10T14:29:00.000Z"),
+        incidentStatus: "AUTO_INVESTIGATING",
+        incidentEscalatedAt: escalatedAt,
+        outcomeObservedAt: new Date("2026-08-10T14:29:00.000Z")
+      })
+    ).toBe("NEEDS_HUMAN_REVIEW");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        monitoringState: "HEALTHY",
+        monitoringStateChangedAt: new Date("2026-08-10T14:31:00.000Z"),
+        incidentStatus: "AUTO_INVESTIGATING",
+        incidentEscalatedAt: escalatedAt,
+        outcomeObservedAt: new Date("2026-08-10T14:31:00.000Z")
+      })
+    ).toBe("MONITORED");
+  });
+
   it("reserves factual finality for verified direct-action states", () => {
     for (const monitoringDisposition of [
       "MANUAL_FINAL",

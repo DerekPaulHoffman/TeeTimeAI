@@ -216,6 +216,58 @@ describe("monitoring status notices", () => {
     expect(repeated.outageCourses).toEqual([]);
   });
 
+  it("re-emits human review when the latest owner-visible status was retrying", () => {
+    const needsHuman = candidate({
+      previousStatus: "RETRYING_AUTOMATICALLY",
+      currentStatus: "NEEDS_HUMAN_REVIEW",
+      result: {
+        ...candidate().result,
+        outcome: "NEEDS_ADAPTER",
+        supportStatus: "NEEDS_HUMAN_REVIEW"
+      }
+    });
+    const olderHuman = {
+      courseId: "course-1",
+      recipient: "owner@example.com",
+      sentAt: new Date("2026-08-10T14:05:00.000Z"),
+      customerStatus: "NEEDS_HUMAN_REVIEW" as const
+    };
+    const latestRetry = {
+      ...olderHuman,
+      sentAt: new Date("2026-08-10T14:20:00.000Z"),
+      customerStatus: "RETRYING_AUTOMATICALLY" as const
+    };
+    const reachedOutages = [olderHuman, latestRetry];
+
+    const planned = planMonitoringStatusNotices({
+      candidates: [needsHuman],
+      reachedOutages,
+      ownerRecipient: "owner@example.com",
+      now: new Date("2026-08-10T14:30:00.000Z")
+    });
+    expect(planned.outageCourses).toEqual([needsHuman.result]);
+
+    const originalHumanKey = buildMonitoringStatusNoticeGroupKey(
+      "outage",
+      [needsHuman],
+      [needsHuman.result.courseId],
+      {
+        reachedOutages: [],
+        ownerRecipient: "owner@example.com"
+      }
+    );
+    const correctionKey = buildMonitoringStatusNoticeGroupKey(
+      "outage",
+      [needsHuman],
+      [needsHuman.result.courseId],
+      {
+        reachedOutages,
+        ownerRecipient: "owner@example.com"
+      }
+    );
+    expect(correctionKey).not.toBe(originalHumanKey);
+  });
+
   it("consolidates newly factual-final courses after 30 minutes", () => {
     const final = candidate({
       previousStatus: "RETRYING_AUTOMATICALLY",

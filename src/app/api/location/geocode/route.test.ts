@@ -58,6 +58,10 @@ describe("geocode API errors", () => {
       longitude: -88.5243087,
       demo: false
     });
+    expect(mockedGeocodeLocation).toHaveBeenCalledWith(
+      "49908",
+      expect.any(AbortSignal)
+    );
   });
 
   it("does not cache invalid-location responses at Vercel's edge", async () => {
@@ -81,8 +85,8 @@ describe("geocode API errors", () => {
 
   it("keeps provider failures distinct from invalid user input", () => {
     expect(getGeocodeErrorResponse(new Error("Google Places text search failed with 503"))).toEqual({
-      message: "Google Places text search failed with 503",
-      status: 502
+      message: "We couldn't search that location right now. Please wait a moment and try again.",
+      status: 503
     });
   });
 
@@ -96,7 +100,7 @@ describe("geocode API errors", () => {
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "Location search is temporarily unavailable. Try again in a moment."
+      error: "We couldn't search that location right now. Please wait a moment and try again."
     });
     expect(response.headers.get("Vercel-CDN-Cache-Control")).toBeNull();
     expect(mockedGeocodeLocation).not.toHaveBeenCalled();

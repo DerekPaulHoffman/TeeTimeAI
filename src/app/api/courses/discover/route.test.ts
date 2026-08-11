@@ -78,7 +78,7 @@ describe("GET /api/courses/discover provider configuration", () => {
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "Course discovery is temporarily unavailable. Try again in a moment."
+      error: "We couldn't load nearby courses right now. Please wait a moment and try again."
     });
     expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
     expect(mocks.cacheCourseCandidatePhotos).not.toHaveBeenCalled();
@@ -106,7 +106,21 @@ describe("GET /api/courses/discover provider configuration", () => {
 
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "Course discovery is temporarily unavailable. Try again in a moment."
+      error: "We couldn't load nearby courses right now. Please wait a moment and try again."
+    });
+  });
+
+  it("returns an actionable generic 503 after provider retries and persisted fallback are exhausted", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    mocks.searchNearbyGolfCourses.mockRejectedValue(
+      new Error("Google Places nearby search failed with 429")
+    );
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "We couldn't load nearby courses right now. Please wait a moment and try again."
     });
   });
 
@@ -125,6 +139,12 @@ describe("GET /api/courses/discover provider configuration", () => {
     expect(response.headers.get("vercel-cdn-cache-control")).toBe(
       courseDataSuccessCacheHeaders["Vercel-CDN-Cache-Control"]
     );
+    expect(mocks.searchNearbyGolfCourses).toHaveBeenCalledWith({
+      latitude: 41.242,
+      longitude: -73.209,
+      radiusMeters: 24140,
+      signal: expect.any(AbortSignal)
+    });
   });
 
   it("serves year-cached discovery without another Google search", async () => {

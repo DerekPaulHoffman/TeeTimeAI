@@ -25,8 +25,11 @@ export type CustomerMonitoringStatusInput = {
     | "FINAL_TECHNICAL"
     | "FINAL_IDENTITY"
     | null;
+  monitoringStateChangedAt?: Date | null;
   incidentStatus?: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED" | null;
   humanReviewReason?: string | null;
+  incidentEscalatedAt?: Date | null;
+  outcomeObservedAt?: Date | null;
   escalationDeadlineAt?: Date | null;
   now?: Date;
   supportStatus?: "IN_OPERATOR_QUEUE" | "NEEDS_HUMAN_REVIEW" | null;
@@ -66,6 +69,24 @@ export function getCustomerMonitoringStatus(
       input.escalationDeadlineAt &&
       input.escalationDeadlineAt.getTime() <= (input.now ?? new Date()).getTime()
   );
+  const unresolvedHumanReview = Boolean(
+    input.incidentEscalatedAt &&
+      input.incidentStatus &&
+      input.incidentStatus !== "RESOLVED"
+  );
+  const freshMonitoredOutcome = Boolean(
+    input.outcome &&
+      MONITORED_OUTCOMES.has(input.outcome) &&
+      input.outcomeObservedAt &&
+      input.incidentEscalatedAt &&
+      input.outcomeObservedAt >= input.incidentEscalatedAt
+  );
+  const freshHealthyState = Boolean(
+    input.monitoringState === "HEALTHY" &&
+      input.monitoringStateChangedAt &&
+      input.incidentEscalatedAt &&
+      input.monitoringStateChangedAt >= input.incidentEscalatedAt
+  );
   if (
     (input.monitoringState && FINAL_MONITORING_STATES.has(input.monitoringState)) ||
     (input.monitoringDisposition &&
@@ -75,10 +96,30 @@ export function getCustomerMonitoringStatus(
     return "FINAL_DIRECT_ACTION";
   }
 
+  // A fresh persisted success closes the customer-visible outage even when
+  // incident closeout is still catching up behind the successful check.
+  if (
+    input.monitoringState === "HEALTHY" &&
+    (!unresolvedHumanReview || freshHealthyState)
+  ) {
+    return "MONITORED";
+  }
+  if (unresolvedHumanReview && freshMonitoredOutcome) {
+    return "MONITORED";
+  }
+  if (
+    input.incidentStatus === "RESOLVED" &&
+    input.outcome &&
+    MONITORED_OUTCOMES.has(input.outcome)
+  ) {
+    return "MONITORED";
+  }
+
   if (
     input.monitoringState === "ENGINEERING_VERIFICATION_NEEDED" ||
     input.incidentStatus === "NEEDS_HUMAN" ||
     input.humanReviewReason === "AUTOMATION_STALLED" ||
+    unresolvedHumanReview ||
     escalationDeadlineReached ||
     input.supportStatus === "NEEDS_HUMAN_REVIEW"
   ) {
@@ -90,8 +131,7 @@ export function getCustomerMonitoringStatus(
   }
 
   if (
-    input.monitoringState === "HEALTHY" ||
-    (input.outcome && MONITORED_OUTCOMES.has(input.outcome))
+    input.outcome && MONITORED_OUTCOMES.has(input.outcome)
   ) {
     return "MONITORED";
   }

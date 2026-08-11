@@ -17,6 +17,9 @@ import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { findPersistedNearbyCourseCandidates } from "@/lib/places/persisted-course-fallback";
 import { enrichCoursesWithBookingEvidence } from "@/lib/pricing/course-price-enrichment";
 
+const COURSE_DISCOVERY_UNAVAILABLE_MESSAGE =
+  "We couldn't load nearby courses right now. Please wait a moment and try again.";
+
 export async function GET(request: NextRequest) {
   const latitude = Number(request.nextUrl.searchParams.get("latitude"));
   const longitude = Number(request.nextUrl.searchParams.get("longitude"));
@@ -31,7 +34,7 @@ export async function GET(request: NextRequest) {
 
   if (!hasGooglePlacesConfig() && isVercelProduction()) {
     return NextResponse.json(
-      { error: "Course discovery is temporarily unavailable. Try again in a moment." },
+      { error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE },
       { status: 503 }
     );
   }
@@ -53,7 +56,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const courses = await searchNearbyGolfCourses({ latitude, longitude, radiusMeters });
+    const courses = await searchNearbyGolfCourses({
+      latitude,
+      longitude,
+      radiusMeters,
+      signal: request.signal
+    });
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",
@@ -88,7 +96,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     if (error instanceof GooglePlaceReviewsUnavailableError) {
       return NextResponse.json(
-        { error: "Course discovery is temporarily unavailable. Try again in a moment." },
+        { error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE },
         { status: 503 }
       );
     }
@@ -120,8 +128,8 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Could not discover courses" },
-      { status: 502 }
+      { error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE },
+      { status: 503 }
     );
   }
 }

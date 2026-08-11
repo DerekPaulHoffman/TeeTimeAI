@@ -221,6 +221,7 @@ function makeOperationalGolfCoursePlace({
 
 describe("Google Places mapping", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     delete process.env.GOOGLE_PLACES_API_KEY;
   });
@@ -308,13 +309,13 @@ describe("Google Places mapping", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "https://places.googleapis.com/v1/places/course%2Fwith%20spaces",
-      {
+      expect.objectContaining({
         cache: "no-store",
         headers: {
           "X-Goog-Api-Key": "test-key",
           "X-Goog-FieldMask": "photos"
         }
-      }
+      })
     );
   });
 
@@ -512,6 +513,82 @@ describe("Google Places mapping", () => {
       })
     );
     expect(corroborationBody).not.toHaveProperty("strictTypeFiltering");
+  });
+
+  it("returns primary direct-name results when optional corroboration never settles", async () => {
+    vi.useFakeTimers();
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_request, init) => {
+        const body = JSON.parse(String(init?.body)) as { textQuery?: string };
+        if (body.textQuery?.endsWith(" public golf course")) {
+          return new Promise<Response>(() => undefined);
+        }
+        return Response.json({
+          places: [
+            {
+              id: "places/direct-country-club",
+              displayName: { text: "Direct Country Club" },
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://example.com/direct-country-club",
+              location: { latitude: 43.615, longitude: -116.2023 }
+            }
+          ]
+        });
+      }
+    );
+
+    const request = searchGolfCoursesByName({ query: "Direct Country Club" });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(request).resolves.toEqual([
+      expect.objectContaining({
+        googlePlaceId: "direct-country-club",
+        publicAccessStatus: "UNVERIFIED"
+      })
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("propagates caller cancellation during optional direct-name corroboration", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const controller = new AbortController();
+    const abortReason = new DOMException("visitor left", "AbortError");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_request, init) => {
+        const body = JSON.parse(String(init?.body)) as { textQuery?: string };
+        if (body.textQuery?.endsWith(" public golf course")) {
+          return new Promise<Response>(() => undefined);
+        }
+        return Response.json({
+          places: [
+            {
+              id: "places/cancel-country-club",
+              displayName: { text: "Cancel Country Club" },
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              websiteUri: "https://example.com/cancel-country-club",
+              location: { latitude: 43.615, longitude: -116.2023 }
+            }
+          ]
+        });
+      }
+    );
+
+    const request = searchGolfCoursesByName({
+      query: "Cancel Country Club",
+      signal: controller.signal
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    controller.abort(abortReason);
+
+    await expect(request).rejects.toBe(abortReason);
   });
 
   it("keeps likely public outdoor golf courses from Places results", () => {
@@ -2074,6 +2151,294 @@ describe("Google Places mapping", () => {
       "Torrey Pines Golf Course",
       "Torrey Pines Golf Course: South Course"
     ]);
+  });
+
+  it("keeps successful nearby results after the other ranking pass exhausts its retry", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("busy", {
+          status: 503,
+          headers: { "Retry-After": "0" }
+        })
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          places: [
+            {
+              id: "places/boise-public",
+              displayName: { text: "Boise Public Golf Course" },
+              formattedAddress: "Boise, ID 83702",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 43.615, longitude: -116.2023 }
+            }
+          ]
+        })
+      )
+      .mockResolvedValueOnce(Response.json({ places: [] }))
+      .mockResolvedValueOnce(
+        new Response("still busy", {
+          status: 503,
+          headers: { "Retry-After": "0" }
+        })
+      );
+
+    const courses = await searchNearbyGolfCourses({
+      latitude: 43.615,
+      longitude: -116.2023,
+      radiusMeters: 24140
+    });
+
+    expect(courses).toEqual([
+      expect.objectContaining({
+        googlePlaceId: "boise-public",
+        name: "Boise Public Golf Course"
+      })
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("throws when one ranking pass fails and the other produces no usable fallback", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (request, init) => {
+        const url = String(request);
+        if (url.endsWith("places:searchText")) {
+          return Response.json({ places: [] });
+        }
+
+        const body = JSON.parse(String(init?.body)) as {
+          rankPreference?: string;
+        };
+        if (body.rankPreference === "POPULARITY") {
+          return new Response("busy", {
+            status: 503,
+            headers: { "Retry-After": "0" }
+          });
+        }
+        return Response.json({ places: [] });
+      }
+    );
+
+    await expect(
+      searchNearbyGolfCourses({
+        latitude: 43.615,
+        longitude: -116.2023,
+        radiusMeters: 24140
+      })
+    ).rejects.toThrow("Google Places nearby search failed with 503");
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => {
+        const body = init?.body ? JSON.parse(String(init.body)) : null;
+        return body?.rankPreference === "POPULARITY";
+      })
+    ).toHaveLength(2);
+  });
+
+  it("keeps nearby typed results when optional public-course search never settles", async () => {
+    vi.useFakeTimers();
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (request) => {
+        const url = String(request);
+        if (url.endsWith("places:searchText")) {
+          return new Promise<Response>(() => undefined);
+        }
+        return Response.json({
+          places: [
+            {
+              id: "places/bounded-nearby",
+              displayName: { text: "Bounded Nearby Golf Course" },
+              formattedAddress: "Boise, ID 83702",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 43.615, longitude: -116.2023 }
+            }
+          ]
+        });
+      }
+    );
+
+    const request = searchNearbyGolfCourses({
+      latitude: 43.615,
+      longitude: -116.2023,
+      radiusMeters: 24140
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(request).resolves.toEqual([
+      expect.objectContaining({ googlePlaceId: "bounded-nearby" })
+    ]);
+    expect(
+      fetchMock.mock.calls.filter(([request]) =>
+        String(request).endsWith("places:searchText")
+      )
+    ).toHaveLength(2);
+  });
+
+  it("keeps nearby typed results when verified-public hydration never settles", async () => {
+    vi.useFakeTimers();
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (request) => {
+        const url = String(request);
+        if (url.includes("ChIJHRdhRQt16IkRnZxbawELtdM")) {
+          return new Promise<Response>(() => undefined);
+        }
+        if (url.endsWith("places:searchText")) {
+          return Response.json({ places: [] });
+        }
+        return Response.json({
+          places: [
+            {
+              id: "places/orange-bounded",
+              displayName: { text: "Orange Bounded Golf Course" },
+              formattedAddress: "Orange, CT 06477",
+              primaryType: "golf_course",
+              types: ["golf_course"],
+              businessStatus: "OPERATIONAL",
+              location: { latitude: 41.267, longitude: -73.045 }
+            }
+          ]
+        });
+      }
+    );
+
+    const request = searchNearbyGolfCourses({
+      latitude: 41.267,
+      longitude: -73.045,
+      radiusMeters: 24140
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(request).resolves.toEqual([
+      expect.objectContaining({ googlePlaceId: "orange-bounded" })
+    ]);
+    expect(
+      fetchMock.mock.calls.filter(([request]) =>
+        String(request).includes("ChIJHRdhRQt16IkRnZxbawELtdM")
+      )
+    ).toHaveLength(2);
+  });
+
+  it("keeps usable public-text and verified-public courses when both ranking passes fail", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (request) => {
+        const url = String(request);
+        if (url.endsWith("places:searchNearby")) {
+          return new Response("busy", {
+            status: 503,
+            headers: { "Retry-After": "0" }
+          });
+        }
+        if (url.endsWith("places:searchText")) {
+          return Response.json({
+            places: [
+              {
+                id: "places/orange-public",
+                displayName: { text: "Orange Public Golf Course" },
+                formattedAddress: "Orange, CT 06477",
+                primaryType: "golf_course",
+                types: ["golf_course"],
+                businessStatus: "OPERATIONAL",
+                location: { latitude: 41.258, longitude: -73.025 }
+              }
+            ]
+          });
+        }
+        if (url.includes("ChIJHRdhRQt16IkRnZxbawELtdM")) {
+          return Response.json({
+            id: "places/ChIJHRdhRQt16IkRnZxbawELtdM",
+            displayName: { text: "Grassy Hill Country Club" },
+            formattedAddress: "441 Clark Ln, Orange, CT 06477",
+            primaryType: "association_or_organization",
+            types: ["association_or_organization", "point_of_interest"],
+            businessStatus: "OPERATIONAL",
+            websiteUri: "https://grassyhillcountryclub.com/",
+            location: { latitude: 41.2675142, longitude: -73.044987 }
+          });
+        }
+        throw new Error("Unexpected Google Places test request");
+      });
+
+    const courses = await searchNearbyGolfCourses({
+      latitude: 41.2306979,
+      longitude: -73.064036,
+      radiusMeters: 24140
+    });
+
+    expect(courses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          googlePlaceId: "orange-public",
+          name: "Orange Public Golf Course"
+        }),
+        expect.objectContaining({
+          googlePlaceId: "ChIJHRdhRQt16IkRnZxbawELtdM",
+          name: "Grassy Hill Country Club"
+        })
+      ])
+    );
+    expect(
+      fetchMock.mock.calls.filter(([request]) =>
+        String(request).endsWith("places:searchNearby")
+      )
+    ).toHaveLength(4);
+  });
+
+  it("throws after both ranking passes fail when fallback results are unusable", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (request) => {
+        const url = String(request);
+        if (url.endsWith("places:searchNearby")) {
+          return new Response("busy", {
+            status: 503,
+            headers: { "Retry-After": "0" }
+          });
+        }
+        if (url.endsWith("places:searchText")) {
+          return Response.json({
+            places: [
+              {
+                id: "places/not-a-course",
+                displayName: { text: "Golf Galaxy" },
+                primaryType: "sporting_goods_store",
+                types: ["sporting_goods_store"],
+                businessStatus: "OPERATIONAL",
+                location: { latitude: 43.615, longitude: -116.2023 }
+              }
+            ]
+          });
+        }
+        throw new Error("Unexpected Google Places test request");
+      });
+
+    await expect(
+      searchNearbyGolfCourses({
+        latitude: 43.615,
+        longitude: -116.2023,
+        radiusMeters: 24140
+      })
+    ).rejects.toThrow("Google Places nearby search failed with 503");
+    expect(
+      fetchMock.mock.calls.filter(([request]) =>
+        String(request).endsWith("places:searchNearby")
+      )
+    ).toHaveLength(4);
   });
 
   it("merges popularity and distance ranked Places results before filtering", async () => {

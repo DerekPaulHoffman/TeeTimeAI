@@ -25,6 +25,7 @@ import {
   type CoursePhotoAttribution,
   type GooglePlacePhoto
 } from "@/lib/places/course-photo-metadata";
+import { fetchGooglePlacesJsonWithRetry } from "@/lib/places/google-places-request";
 import { getTimeZoneForCoordinates } from "@/lib/timezones";
 
 export type {
@@ -118,12 +119,14 @@ export type NearbyCourseSearchInput = {
   latitude: number;
   longitude: number;
   radiusMeters?: number;
+  signal?: AbortSignal;
 };
 
 export type CourseNameSearchInput = {
   query: string;
   latitude?: number;
   longitude?: number;
+  signal?: AbortSignal;
 };
 
 type RankPreference = "POPULARITY" | "DISTANCE";
@@ -401,12 +404,21 @@ export async function searchNearbyGolfCourses(
 ) {
   const activeReviewIndex = reviewIndex ?? await loadActiveGooglePlaceReviewIndex();
   const placesById = new Map<string, GooglePlace>();
-  const [popularityPlaces, distancePlaces, publicCoursePlaces, verifiedPublicCoursePlaces] = await Promise.all([
-    searchNearbyGolfCoursePlaces(input, "POPULARITY"),
-    searchNearbyGolfCoursePlaces(input, "DISTANCE"),
+  const [rankedSearches, publicCoursePlaces, verifiedPublicCoursePlaces] = await Promise.all([
+    Promise.allSettled([
+      searchNearbyGolfCoursePlaces(input, "POPULARITY"),
+      searchNearbyGolfCoursePlaces(input, "DISTANCE")
+    ]),
     searchPublicGolfCoursePlaces(input),
     searchVerifiedPublicCoursePlaces(input, activeReviewIndex)
   ]);
+  throwIfSearchAborted(input.signal);
+  const rankedSearchFailure = rankedSearches.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected"
+  );
+  const rankedPlaces = rankedSearches.flatMap((result) =>
+    result.status === "fulfilled" ? result.value : []
+  );
   const publicCourseEvidenceIds = new Set(
     [...publicCoursePlaces, ...verifiedPublicCoursePlaces]
       .map((place) => normalizePlaceId(place.id ?? place.name ?? ""))
@@ -414,8 +426,7 @@ export async function searchNearbyGolfCourses(
   );
 
   for (const places of [
-    popularityPlaces,
-    distancePlaces,
+    rankedPlaces,
     publicCoursePlaces,
     verifiedPublicCoursePlaces
   ]) {
@@ -427,7 +438,7 @@ export async function searchNearbyGolfCourses(
     }
   }
 
-  return dedupeGolfCoursePlaces(
+  const courses = dedupeGolfCoursePlaces(
     filterPublicGolfCoursePlaces([...placesById.values()], {
       publicCourseEvidenceIds,
       reviewIndex: activeReviewIndex
@@ -443,6 +454,12 @@ export async function searchNearbyGolfCourses(
     })
     .filter((course) => (course.distanceMeters ?? Number.MAX_SAFE_INTEGER) <= getSearchRadius(input))
     .sort((a, b) => (a.distanceMeters ?? Number.MAX_SAFE_INTEGER) - (b.distanceMeters ?? Number.MAX_SAFE_INTEGER));
+
+  if (rankedSearchFailure && courses.length === 0) {
+    throw rankedSearchFailure.reason;
+  }
+
+  return courses;
 }
 
 export async function searchGolfCoursesByName(
@@ -457,43 +474,48 @@ export async function searchGolfCoursesByName(
   const activeReviewIndex = reviewIndex ?? await loadActiveGooglePlaceReviewIndex();
   const hasLocationBias =
     Number.isFinite(input.latitude) && Number.isFinite(input.longitude);
-  const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
-    },
-    body: JSON.stringify({
-      textQuery: input.query.trim(),
-      languageCode: "en",
-      includedType: "golf_course",
-      strictTypeFiltering: true,
-      pageSize: 8,
-      rankPreference: "RELEVANCE",
-      ...(hasLocationBias
-        ? {
-            locationBias: {
-              circle: {
-                center: {
-                  latitude: input.latitude,
-                  longitude: input.longitude
-                },
-                radius: 50000
+  const { response, json } = await fetchGooglePlacesJsonWithRetry<{
+    places?: GooglePlace[];
+  }>(
+    "https://places.googleapis.com/v1/places:searchText",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
+      },
+      body: JSON.stringify({
+        textQuery: input.query.trim(),
+        languageCode: "en",
+        includedType: "golf_course",
+        strictTypeFiltering: true,
+        pageSize: 8,
+        rankPreference: "RELEVANCE",
+        ...(hasLocationBias
+          ? {
+              locationBias: {
+                circle: {
+                  center: {
+                    latitude: input.latitude,
+                    longitude: input.longitude
+                  },
+                  radius: 50000
+                }
               }
             }
-          }
-        : {})
-    })
-  });
+          : {})
+      }),
+      signal: input.signal
+    }
+  );
 
   if (!response.ok) {
     throw new Error(`Google Places course search failed with ${response.status}`);
   }
 
-  const json = (await response.json()) as { places?: GooglePlace[] };
-  const primaryPlaces = json.places ?? [];
+  const primaryPlaces = json?.places ?? [];
   const initiallyAcceptedPlaces = filterPublicGolfCoursePlaces(primaryPlaces, {
     reviewIndex: activeReviewIndex
   });
@@ -559,7 +581,9 @@ export async function getGooglePlacePhoto(
   }
 
   try {
-    const response = await fetch(
+    const { response, json } = await fetchGooglePlacesJsonWithRetry<
+      Pick<GooglePlace, "photos">
+    >(
       `https://places.googleapis.com/v1/places/${encodeURIComponent(normalizedPlaceId)}`,
       {
         cache: "no-store",
@@ -573,7 +597,7 @@ export async function getGooglePlacePhoto(
       return null;
     }
 
-    const place = (await response.json()) as Pick<GooglePlace, "photos">;
+    const place = json ?? {};
     const photo = place.photos?.[0];
     if (!photo?.name) {
       return null;
@@ -598,42 +622,50 @@ async function searchPublicGolfCoursePlacesByName(input: CourseNameSearchInput) 
     Number.isFinite(input.latitude) && Number.isFinite(input.longitude);
 
   try {
-    const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": apiKey,
-        "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
-      },
-      body: JSON.stringify({
-        textQuery: `${input.query.trim()} public golf course`,
-        languageCode: "en",
-        pageSize: 8,
-        rankPreference: "RELEVANCE",
-        ...(hasLocationBias
-          ? {
-              locationBias: {
-                circle: {
-                  center: {
-                    latitude: input.latitude,
-                    longitude: input.longitude
-                  },
-                  radius: 50000
+    const { response, json } = await fetchGooglePlacesJsonWithRetry<{
+      places?: GooglePlace[];
+    }>(
+      "https://places.googleapis.com/v1/places:searchText",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
+        },
+        body: JSON.stringify({
+          textQuery: `${input.query.trim()} public golf course`,
+          languageCode: "en",
+          pageSize: 8,
+          rankPreference: "RELEVANCE",
+          ...(hasLocationBias
+            ? {
+                locationBias: {
+                  circle: {
+                    center: {
+                      latitude: input.latitude,
+                      longitude: input.longitude
+                    },
+                    radius: 50000
+                  }
                 }
               }
-            }
-          : {})
-      })
-    });
+            : {})
+        }),
+        signal: input.signal
+      }
+    );
 
     if (!response.ok) {
       return [];
     }
 
-    const json = (await response.json()) as { places?: GooglePlace[] };
-    return json.places ?? [];
-  } catch {
+    return json?.places ?? [];
+  } catch (error) {
+    if (input.signal?.aborted) {
+      throw error;
+    }
     return [];
   }
 }
@@ -647,38 +679,43 @@ async function searchNearbyGolfCoursePlaces(
     throw new Error("GOOGLE_PLACES_API_KEY is not configured");
   }
 
-  const response = await fetch("https://places.googleapis.com/v1/places:searchNearby", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask":
-        "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus,places.containingPlaces"
-    },
-    body: JSON.stringify({
-      languageCode: "en",
-      includedPrimaryTypes: ["golf_course"],
-      excludedPrimaryTypes: Array.from(NON_PUBLIC_PRIMARY_TYPES),
-      maxResultCount: 20,
-      rankPreference,
-      locationRestriction: {
-        circle: {
-          center: {
-            latitude: input.latitude,
-            longitude: input.longitude
-          },
-          radius: getSearchRadius(input)
+  const { response, json } = await fetchGooglePlacesJsonWithRetry<{
+    places?: GooglePlace[];
+  }>(
+    "https://places.googleapis.com/v1/places:searchNearby",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.rating,places.nationalPhoneNumber,places.websiteUri,places.photos,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus,places.containingPlaces"
+      },
+      body: JSON.stringify({
+        languageCode: "en",
+        includedPrimaryTypes: ["golf_course"],
+        excludedPrimaryTypes: Array.from(NON_PUBLIC_PRIMARY_TYPES),
+        maxResultCount: 20,
+        rankPreference,
+        locationRestriction: {
+          circle: {
+            center: {
+              latitude: input.latitude,
+              longitude: input.longitude
+            },
+            radius: getSearchRadius(input)
+          }
         }
-      }
-    })
-  });
+      }),
+      signal: input.signal
+    }
+  );
 
   if (!response.ok) {
     throw new Error(`Google Places nearby search failed with ${response.status}`);
   }
 
-  const json = (await response.json()) as { places?: GooglePlace[] };
-  return json.places ?? [];
+  return json?.places ?? [];
 }
 
 async function searchPublicGolfCoursePlaces(input: NearbyCourseSearchInput) {
@@ -688,30 +725,38 @@ async function searchPublicGolfCoursePlaces(input: NearbyCourseSearchInput) {
   }
 
   try {
-    const response = await fetch("https://places.googleapis.com/v1/places:searchText", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": apiKey,
-        "X-Goog-FieldMask":
-          "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
-      },
-      body: JSON.stringify({
-        textQuery: "public golf courses",
-        languageCode: "en",
-        pageSize: 20,
-        rankPreference: "RELEVANCE",
-        ...getTextSearchLocation(input)
-      })
-    });
+    const { response, json } = await fetchGooglePlacesJsonWithRetry<{
+      places?: GooglePlace[];
+    }>(
+      "https://places.googleapis.com/v1/places:searchText",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.types,places.primaryType,places.googleMapsTypeLabel,places.businessStatus"
+        },
+        body: JSON.stringify({
+          textQuery: "public golf courses",
+          languageCode: "en",
+          pageSize: 20,
+          rankPreference: "RELEVANCE",
+          ...getTextSearchLocation(input)
+        }),
+        signal: input.signal
+      }
+    );
 
     if (!response.ok) {
       return [];
     }
 
-    const json = (await response.json()) as { places?: GooglePlace[] };
-    return json.places ?? [];
-  } catch {
+    return json?.places ?? [];
+  } catch (error) {
+    if (input.signal?.aborted) {
+      throw error;
+    }
     return [];
   }
 }
@@ -739,14 +784,15 @@ async function searchVerifiedPublicCoursePlaces(
     await Promise.all(
       nearbyVerifiedCourses.map(async (course) => {
         try {
-          const response = await fetch(
-            `https://places.googleapis.com/v1/places/${course.googlePlaceId}`,
+          const { response, json } = await fetchGooglePlacesJsonWithRetry<GooglePlace>(
+            `https://places.googleapis.com/v1/places/${encodeURIComponent(course.googlePlaceId)}`,
             {
               headers: {
                 "X-Goog-Api-Key": apiKey,
                 "X-Goog-FieldMask":
                   "id,displayName,formattedAddress,addressComponents,location,rating,nationalPhoneNumber,websiteUri,photos,types,primaryType,businessStatus"
-              }
+              },
+              signal: input.signal
             }
           );
 
@@ -754,8 +800,11 @@ async function searchVerifiedPublicCoursePlaces(
             return null;
           }
 
-          return (await response.json()) as GooglePlace;
-        } catch {
+          return json ?? null;
+        } catch (error) {
+          if (input.signal?.aborted) {
+            throw error;
+          }
           return null;
         }
       })
@@ -765,6 +814,16 @@ async function searchVerifiedPublicCoursePlaces(
 
 function getSearchRadius(input: NearbyCourseSearchInput) {
   return input.radiusMeters ?? 30000;
+}
+
+function throwIfSearchAborted(signal: AbortSignal | undefined) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  throw signal.reason instanceof Error || signal.reason instanceof DOMException
+    ? signal.reason
+    : new DOMException("Google Places search was cancelled", "AbortError");
 }
 
 function getTextSearchLocation(input: NearbyCourseSearchInput) {

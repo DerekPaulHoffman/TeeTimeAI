@@ -68,6 +68,7 @@ const activeSearchCourseInclude = {
       status: true,
       attemptLedger: true,
       humanReviewReason: true,
+      escalatedAt: true,
       escalationDeadlineAt: true,
       firstSeenAt: true
     }

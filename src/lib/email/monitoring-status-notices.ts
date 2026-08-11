@@ -63,13 +63,12 @@ export function planMonitoringStatusNotices(input: {
     if (!episodeStartedAt) {
       return [];
     }
-    if (
-      hasReachedOutageSince(
-        reachedByCourse.get(candidate.result.courseId),
-        episodeStartedAt,
-        candidate.currentStatus
-      )
-    ) {
+    const latestOwnerVisibleStatus = getLatestReachedOutageSince(
+      reachedByCourse.get(candidate.result.courseId),
+      ownerRecipient,
+      episodeStartedAt
+    );
+    if (latestOwnerVisibleStatus?.customerStatus === candidate.currentStatus) {
       return [];
     }
     const eligibleAt = new Date(
@@ -147,18 +146,41 @@ export function planMonitoringStatusNotices(input: {
 export function buildMonitoringStatusNoticeGroupKey(
   kind: "outage" | "recovery" | "status-update",
   candidates: MonitoringStatusNoticeCandidate[],
-  courseIds: string[]
+  courseIds: string[],
+  visibility?: {
+    reachedOutages: ReachedMonitoringOutage[];
+    ownerRecipient: string;
+  }
 ) {
   const selected = new Set(courseIds);
+  const ownerRecipient = visibility
+    ? normalizeRecipient(visibility.ownerRecipient)
+    : null;
   const episodes = candidates
     .filter((candidate) => selected.has(candidate.result.courseId))
-    .map((candidate) => ({
-      courseId: candidate.result.courseId,
-      providerFamilyKey: candidate.providerFamilyKey,
-      customerStatus: candidate.currentStatus,
-      episodeStartedAt:
-        candidate.episodeStartedAt?.toISOString() ?? "unknown"
-    }))
+    .map((candidate) => {
+      const latestOwnerVisibleStatus =
+        visibility && ownerRecipient && candidate.episodeStartedAt
+          ? getLatestReachedOutageSince(
+              visibility.reachedOutages.filter(
+                (reached) => reached.courseId === candidate.result.courseId
+              ),
+              ownerRecipient,
+              candidate.episodeStartedAt
+            )
+          : null;
+      return {
+        courseId: candidate.result.courseId,
+        providerFamilyKey: candidate.providerFamilyKey,
+        customerStatus: candidate.currentStatus,
+        episodeStartedAt:
+          candidate.episodeStartedAt?.toISOString() ?? "unknown",
+        previousOwnerVisibleStatus:
+          latestOwnerVisibleStatus?.customerStatus ?? "none",
+        previousOwnerVisibleAt:
+          latestOwnerVisibleStatus?.sentAt.toISOString() ?? "none"
+      };
+    })
     .sort((left, right) => left.courseId.localeCompare(right.courseId));
   const digest = createHash("sha256")
     .update(JSON.stringify({ kind, episodes }))
@@ -190,18 +212,24 @@ function isUnavailableCustomerStatus(status: CustomerMonitoringStatus) {
   );
 }
 
-function hasReachedOutageSince(
+function getLatestReachedOutageSince(
   reached: ReachedMonitoringOutage[] | undefined,
+  recipient: string,
   episodeStartedAt: Date,
-  customerStatus: CustomerMonitoringStatus
 ) {
-  return Boolean(
-    reached?.some(
-      (notice) =>
-        notice.customerStatus === customerStatus &&
-        notice.sentAt >= episodeStartedAt
-    )
-  );
+  const normalizedRecipient = normalizeRecipient(recipient);
+  let latest: ReachedMonitoringOutage | null = null;
+  for (const notice of reached ?? []) {
+    if (
+      normalizeRecipient(notice.recipient) !== normalizedRecipient ||
+      notice.sentAt < episodeStartedAt ||
+      (latest && notice.sentAt < latest.sentAt)
+    ) {
+      continue;
+    }
+    latest = notice;
+  }
+  return latest;
 }
 
 function hasReachedRecipientStatusSince(

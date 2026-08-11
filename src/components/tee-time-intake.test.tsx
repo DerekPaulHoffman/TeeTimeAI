@@ -430,6 +430,41 @@ describe("TeeTimeIntake", () => {
     );
   });
 
+  it("shows actionable course-lookup validation copy", async () => {
+    const validationMessage =
+      "Enter a course name between 2 and 120 characters.";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.startsWith("/api/courses/lookup")) {
+        return Response.json({ error: validationMessage }, { status: 400 });
+      }
+
+      if (url === "/api/analytics/events") {
+        return Response.json({ event: { id: "event-1" } }, { status: 201 });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+
+    const { unmount } = render(
+      <TeeTimeIntake
+        {...signedInAccountProps}
+        initialValues={{ location: "Wallingford, CT" }}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText("Course name and town"), {
+      target: { value: "Example public course" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Find course" }));
+
+    expect(await screen.findByText(validationMessage)).toBeTruthy();
+    unmount();
+  });
+
   it("replaces Add with Report inaccuracy for a course that needs access review", async () => {
     const feedbackEvents: CustomEvent[] = [];
     const handleFeedback = (event: Event) => {
@@ -583,5 +618,40 @@ describe("TeeTimeIntake", () => {
     expect(screen.queryByText("We couldn't start your alert")).toBeNull();
 
     window.removeEventListener(OPEN_FEEDBACK_EVENT, handleFeedback);
+  });
+
+  it("shows actionable retry copy instead of upstream geocode details", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/location/geocode")) {
+        return Response.json(
+          { error: "Google Places text search failed with 429" },
+          { status: 503 }
+        );
+      }
+      if (url === "/api/analytics/events") {
+        return Response.json({ event: { id: "event-1" } }, { status: 201 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+
+    render(
+      <TeeTimeIntake
+        {...signedInAccountProps}
+        initialValues={{ location: "83702" }}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(
+      await screen.findByText(
+        "We couldn't search that location right now. Please wait a moment and try again."
+      )
+    ).toBeTruthy();
+    expect(screen.queryByText(/Google Places|429/)).toBeNull();
+    expect(screen.getByLabelText("Location").getAttribute("aria-invalid")).toBe("false");
   });
 });

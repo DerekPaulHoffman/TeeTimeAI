@@ -15,6 +15,8 @@ import { findPersistedCourseCandidatesByName } from "@/lib/places/persisted-cour
 
 const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 120;
+const COURSE_LOOKUP_UNAVAILABLE_MESSAGE =
+  "We couldn't look up that course right now. Please wait a moment and try again.";
 
 export async function GET(request: NextRequest) {
   const query = request.nextUrl.searchParams.get("q")?.trim() ?? "";
@@ -65,7 +67,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const courses = await searchGolfCoursesByName({ query, latitude, longitude });
+    const courses = await searchGolfCoursesByName({
+      query,
+      latitude,
+      longitude,
+      signal: request.signal
+    });
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",
@@ -118,10 +125,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const status = error instanceof GooglePlaceReviewsUnavailableError ? 503 : 502;
     return NextResponse.json(
-      { error: "Course lookup is temporarily unavailable. Try again in a moment." },
-      { status }
+      { error: COURSE_LOOKUP_UNAVAILABLE_MESSAGE },
+      { status: 503 }
     );
   }
 }

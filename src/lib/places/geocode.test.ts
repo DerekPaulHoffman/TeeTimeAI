@@ -81,4 +81,36 @@ describe("Google Places text geocoding", () => {
     expect(error).toBeInstanceOf(LocationNotFoundError);
     expect(error).toHaveProperty("message", "No matching location found.");
   });
+
+  it("retries one transient rate limit before returning coordinates", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("busy", {
+          status: 429,
+          headers: { "Retry-After": "0" }
+        })
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          places: [
+            {
+              location: {
+                latitude: 43.615,
+                longitude: -116.2023
+              }
+            }
+          ]
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(geocodeLocation("83702")).resolves.toEqual({
+      latitude: 43.615,
+      longitude: -116.2023,
+      demo: false
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
