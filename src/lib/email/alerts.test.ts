@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildContentScopedEmailIdempotencyKey,
+  getAutomationWorkerHealthIdempotencyKey,
   getRenderedTeeTimeAlertMatchIds,
   getMatchAlertSubject,
   normalizeEmailEnvValue,
   renderAlertHtml,
+  renderAutomationWorkerHealthHtml,
   sendAutomationWorkerHealthEmail,
   sendSearchStatusEmail,
   sendTeeTimeAlert,
@@ -343,15 +345,118 @@ describe("email alert delivery helpers", () => {
     });
   });
 
-  it("suppresses automation worker health email", async () => {
-    await expect(
-      sendAutomationWorkerHealthEmail({
-        workerKey: "course-support-responder",
-        event: "overdue",
-        expectedAt: new Date("2026-07-27T12:00:00.000Z"),
-        observedAt: new Date("2026-07-27T12:10:00.000Z")
+  it("enables idempotent monitoring transition status deliveries", async () => {
+    await withMissingProductionEmailConfiguration(async () => {
+      for (const kind of ["outage", "recovery", "status-update"] as const) {
+        const result = await sendSearchStatusEmail({
+          searchId: "search-1",
+          to: "demo@teetimeai.local",
+          kind,
+          targetDate: "2026-08-12",
+          startTime: "08:00",
+          endTime: "11:00",
+          players: 2,
+          checkedAt: new Date("2026-08-10T14:30:00.000Z"),
+          courses: [
+            {
+              courseId: "course-1",
+              courseName: "Pine Oaks",
+              outcome:
+                kind === "outage"
+                  ? "FETCH_FAILED"
+                  : kind === "status-update"
+                    ? "MANUAL_DIRECT"
+                    : "NO_MATCH",
+              availableMatches: 0,
+              bookingUrl: "https://course.example/tee-times"
+            }
+          ],
+          stableIdempotencyKey: `status-${kind}`
+        });
+        expect(result).toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+      }
+    });
+  });
+
+  it("returns not configured for worker health email without operator email env", async () => {
+    await withMissingProductionEmailConfiguration(async () => {
+      await expect(
+        sendAutomationWorkerHealthEmail({
+          workerKey: "course-support-responder",
+          event: "overdue",
+          expectedAt: new Date("2026-07-27T12:00:00.000Z"),
+          observedAt: new Date("2026-07-27T12:10:00.000Z")
+        })
+      ).resolves.toEqual({ deliveryStatus: "not_configured" });
+    });
+  });
+
+  it("uses stable episode-scoped worker health idempotency", () => {
+    const input = {
+      workerKey: "course-support-responder",
+      event: "overdue" as const,
+      expectedAt: new Date("2026-08-10T12:00:00.000Z"),
+      observedAt: new Date("2026-08-10T12:21:00.000Z")
+    };
+    const key = getAutomationWorkerHealthIdempotencyKey(input);
+
+    expect(
+      getAutomationWorkerHealthIdempotencyKey({
+        ...input,
+        observedAt: new Date("2026-08-10T12:25:00.000Z")
       })
-    ).resolves.toEqual({ deliveryStatus: "not_configured" });
+    ).toBe(key);
+    expect(
+      getAutomationWorkerHealthIdempotencyKey({
+        ...input,
+        event: "recovered"
+      })
+    ).not.toBe(key);
+    expect(key).not.toContain(input.workerKey);
+  });
+
+  it("dry-runs worker health email only for a reserved operator recipient", async () => {
+    const original = {
+      resendApiKey: process.env.RESEND_API_KEY,
+      alertEmailFrom: process.env.ALERT_EMAIL_FROM,
+      operatorAlertEmail: process.env.OPERATOR_ALERT_EMAIL
+    };
+    process.env.RESEND_API_KEY = "re_test_placeholder";
+    process.env.ALERT_EMAIL_FROM = "alerts@teetimespot.test";
+    process.env.OPERATOR_ALERT_EMAIL = "operator@example.com";
+    try {
+      await expect(
+        sendAutomationWorkerHealthEmail({
+          workerKey: "course-support-responder",
+          event: "overdue",
+          expectedAt: new Date("2026-08-10T12:00:00.000Z"),
+          observedAt: new Date("2026-08-10T12:21:00.000Z")
+        })
+      ).resolves.toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
+    } finally {
+      restoreEnvironment("RESEND_API_KEY", original.resendApiKey);
+      restoreEnvironment("ALERT_EMAIL_FROM", original.alertEmailFrom);
+      restoreEnvironment("OPERATOR_ALERT_EMAIL", original.operatorAlertEmail);
+    }
+  });
+
+  it("renders privacy-safe overdue and recovery operator messages", () => {
+    const overdue = renderAutomationWorkerHealthHtml({
+      workerKey: "reader-<primary>",
+      event: "overdue",
+      expectedAt: new Date("2026-08-10T12:00:00.000Z"),
+      observedAt: new Date("2026-08-10T12:21:00.000Z")
+    });
+    const recovered = renderAutomationWorkerHealthHtml({
+      workerKey: "course-support-responder",
+      event: "recovered",
+      expectedAt: new Date("2026-08-10T12:00:00.000Z"),
+      observedAt: new Date("2026-08-10T12:22:00.000Z")
+    });
+
+    expect(overdue).toContain("21 minutes overdue");
+    expect(overdue).toContain("reader-&lt;primary&gt;");
+    expect(recovered).toContain("reported healthy activity again");
   });
 });
 

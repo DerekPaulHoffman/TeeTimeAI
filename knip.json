@@ -6,7 +6,11 @@
     "tools/local-chrome-reader/chronogolf-reader.js",
     "tools/local-chrome-reader/content.js",
     "tools/local-chrome-reader/cps-reader.js",
+    "tools/local-chrome-reader/ezlinks-reader.js",
     "tools/local-chrome-reader/options.js",
+    "tools/local-chrome-reader/prophet-reader.js",
+    "tools/local-chrome-reader/tenfore-reader.js",
+    "tools/local-chrome-reader/webtrac-reader.js",
     "tools/public-tee-time-reader/devtools.js",
     "tools/public-tee-time-reader/panel.js"
   ]

@@ -760,7 +760,14 @@ export async function listRetryableSearchEmailDeliveryGroups(input: {
       teeSearchId: input.searchId,
       alertGeneration: input.alertGeneration,
       kind: {
-        in: (["SETUP", "DAILY", "MATCH"] as const).filter(
+        in: ([
+          "SETUP",
+          "DAILY",
+          "MATCH",
+          "MONITORING_STATUS_UPDATE",
+          "MONITORING_OUTAGE",
+          "MONITORING_RECOVERY"
+        ] as const).filter(
           isSearchEmailDeliveryEnabled
         )
       },
@@ -1259,7 +1266,13 @@ export async function hydrateSearchStatusEmailPayload(
     ? (report.courses as SearchStatusCourseReport[])
     : [];
   return {
-    kind: report.kind === "daily" ? "daily" : "setup",
+    kind:
+      report.kind === "daily" ||
+      report.kind === "outage" ||
+      report.kind === "recovery" ||
+      report.kind === "status-update"
+        ? report.kind
+        : "setup",
     targetDate: requireString(report.targetDate, "target date"),
     startTime: requireString(report.startTime, "start time"),
     endTime: requireString(report.endTime, "end time"),
@@ -1269,10 +1282,171 @@ export async function hydrateSearchStatusEmailPayload(
         ? report.requestedLayoutHoles
         : null,
     userTimeZone: requireString(report.userTimeZone, "user time zone"),
+    providerLabel: optionalString(report.providerLabel),
     checkedAt: new Date(payload.checkedAt),
     courses,
     previousSnapshot: report.previousSnapshot
   };
+}
+
+export async function listReachedMonitoringOutages(input: {
+  searchId: string;
+  alertGeneration: number;
+}) {
+  const deliveries = await prisma.searchEmailDelivery.findMany({
+    where: {
+      teeSearchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      kind: {
+        in: [
+          "SETUP",
+          "DAILY",
+          "MONITORING_STATUS_UPDATE",
+          "MONITORING_OUTAGE"
+        ]
+      },
+      status: { in: ["SENT", "SUPPRESSED"] },
+      sentAt: { not: null }
+    },
+    select: {
+      recipient: true,
+      sentAt: true,
+      payload: true
+    }
+  });
+  const reached = new Map<
+    string,
+    {
+      courseId: string;
+      recipient: string;
+      sentAt: Date;
+      customerStatus: "RETRYING_AUTOMATICALLY" | "NEEDS_HUMAN_REVIEW";
+    }
+  >();
+  for (const delivery of deliveries) {
+    if (!delivery.sentAt) {
+      continue;
+    }
+    const payload = parseSearchEmailPayload(delivery.payload);
+    const report = optionalJsonRecord(payload?.statusReport);
+    const reportedCourseIds = new Set(
+      (report && Array.isArray(report.courses) ? report.courses : [])
+        .map((value) => optionalString(optionalJsonRecord(value)?.courseId))
+        .filter((courseId): courseId is string => Boolean(courseId))
+    );
+    const snapshot = Array.isArray(payload?.statusSnapshot)
+      ? payload.statusSnapshot
+      : [];
+    for (const value of snapshot) {
+      const entry = optionalJsonRecord(value);
+      const courseId = optionalString(entry?.courseId);
+      const customerStatus = optionalString(entry?.customerStatus);
+      const legacyState = optionalString(entry?.state);
+      const unavailableStatus =
+        customerStatus === "RETRYING_AUTOMATICALLY" ||
+        customerStatus === "NEEDS_HUMAN_REVIEW"
+          ? customerStatus
+          : legacyState?.includes(":NEEDS_HUMAN_REVIEW:")
+            ? "NEEDS_HUMAN_REVIEW"
+            : legacyState?.startsWith("NEEDS_ADAPTER:") ||
+                legacyState?.startsWith("FETCH_FAILED:")
+              ? "RETRYING_AUTOMATICALLY"
+              : null;
+      if (
+        !courseId ||
+        !unavailableStatus ||
+        (reportedCourseIds.size > 0 && !reportedCourseIds.has(courseId))
+      ) {
+        continue;
+      }
+      const key = `${courseId}\u0000${delivery.recipient}\u0000${unavailableStatus}\u0000${delivery.sentAt.toISOString()}`;
+      reached.set(key, {
+        courseId,
+        recipient: delivery.recipient,
+        sentAt: delivery.sentAt,
+        customerStatus: unavailableStatus
+      });
+    }
+  }
+  return [...reached.values()];
+}
+
+export async function listReachedMonitoringFinals(input: {
+  searchId: string;
+  alertGeneration: number;
+}) {
+  const deliveries = await prisma.searchEmailDelivery.findMany({
+    where: {
+      teeSearchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      kind: { in: ["SETUP", "DAILY", "MONITORING_STATUS_UPDATE"] },
+      status: { in: ["SENT", "SUPPRESSED"] },
+      sentAt: { not: null }
+    },
+    select: {
+      recipient: true,
+      sentAt: true,
+      status: true,
+      lastError: true,
+      payload: true
+    }
+  });
+  const reached = new Map<
+    string,
+    { courseId: string; recipient: string; sentAt: Date }
+  >();
+  for (const delivery of deliveries) {
+    if (
+      !delivery.sentAt ||
+      !(
+        delivery.status === "SENT" ||
+        delivery.lastError === DELIVERY_DRY_RUN ||
+        delivery.lastError === STATUS_RECIPIENT_PRIOR_REACHED
+      )
+    ) {
+      continue;
+    }
+    const payload = parseSearchEmailPayload(delivery.payload);
+    const report = optionalJsonRecord(payload?.statusReport);
+    const reportedCourseIds = new Set(
+      (report && Array.isArray(report.courses) ? report.courses : [])
+        .map((value) => optionalString(optionalJsonRecord(value)?.courseId))
+        .filter((courseId): courseId is string => Boolean(courseId))
+    );
+    const snapshot = Array.isArray(payload?.statusSnapshot)
+      ? payload.statusSnapshot
+      : [];
+    for (const value of snapshot) {
+      const entry = optionalJsonRecord(value);
+      const courseId = optionalString(entry?.courseId);
+      if (
+        !courseId ||
+        (reportedCourseIds.size > 0 && !reportedCourseIds.has(courseId))
+      ) {
+        continue;
+      }
+      const customerStatus = optionalString(entry?.customerStatus);
+      const legacyState = optionalString(entry?.state);
+      const reportedFinal =
+        customerStatus === "FINAL_DIRECT_ACTION" ||
+        legacyState?.startsWith("MANUAL_DIRECT:") ||
+        legacyState?.startsWith("IDENTITY_FINAL:") ||
+        legacyState?.startsWith("BLOCKED_AUTH:") ||
+        legacyState?.includes(":MANUAL_FINAL:") ||
+        legacyState?.includes(":TECHNICAL_FINAL:") ||
+        legacyState?.includes(":IDENTITY_FINAL:");
+      if (!reportedFinal) {
+        continue;
+      }
+      const key = `${courseId}\u0000${delivery.recipient}\u0000${delivery.sentAt.toISOString()}`;
+      reached.set(key, {
+        courseId,
+        recipient: delivery.recipient,
+        sentAt: delivery.sentAt
+      });
+    }
+  }
+  return [...reached.values()];
 }
 
 export async function hydrateMatchAlertPayload(input: {
@@ -3753,6 +3927,7 @@ function isStatusDeliveryKind(kind: SearchEmailDeliveryKind) {
   return (
     kind === "SETUP" ||
     kind === "DAILY" ||
+    kind === "MONITORING_STATUS_UPDATE" ||
     kind === "MONITORING_OUTAGE" ||
     kind === "MONITORING_RECOVERY"
   );

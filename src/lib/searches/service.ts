@@ -763,6 +763,8 @@ const searchListInclude = {
           supportIncident: {
             select: {
               status: true,
+              humanReviewReason: true,
+              escalationDeadlineAt: true,
               firstSeenAt: true
             }
           }

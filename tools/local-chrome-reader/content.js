@@ -480,6 +480,7 @@
       }
       return;
     }
+    if (pending.result) return;
     pendingJobLookupAttempts = 0;
     if (!reader) {
       return;
@@ -544,6 +545,8 @@
           readerVersion: reader?.READER_VERSION || "rendered-reader-v1",
         },
       });
+    } finally {
+      running = false;
     }
   }
 

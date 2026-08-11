@@ -17,6 +17,7 @@ import {
   classifyAutomationRunKind,
   parseAutomationRunAudit
 } from "@/lib/automation/db-service";
+import { revalidateCourseMonitoringForProviderEvidenceChangeInTransaction } from "@/lib/automation/course-monitoring";
 import { getOperatorCourseEvidenceReviewAt } from "@/lib/automation/operator-evidence-lifecycle";
 import { bootstrapAutomationWorkers } from "@/lib/automation/worker-state";
 import { prisma } from "@/lib/prisma";
@@ -209,7 +210,20 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
   const input = parseCourseEvidence(JSON.parse(raw) as unknown);
   const course = await prisma.course.findUnique({
     where: { googlePlaceId: input.googlePlaceId },
-    select: { id: true, updatedAt: true }
+    select: {
+      id: true,
+      website: true,
+      detectedBookingUrl: true,
+      detectedPlatform: true,
+      providerFamilyKey: true,
+      bookingMethod: true,
+      bookingAccessMode: true,
+      automationEligibility: true,
+      automationReason: true,
+      monitoringMode: true,
+      bookingMetadata: true,
+      updatedAt: true
+    }
   });
   if (!course) throw new Error("No course matched the supplied Google Place ID.");
   const observedAt = new Date();
@@ -239,6 +253,19 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
       if (updated.count !== 1) {
         throw new Error("Course evidence changed while the update was being applied.");
       }
+      const applied = await tx.course.findUnique({
+        where: { id: course.id }
+      });
+      if (!applied) {
+        throw new Error("Course evidence disappeared while the update was being applied.");
+      }
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(tx, {
+        courseId: course.id,
+        before: course,
+        after: applied,
+        source: "OPERATOR_CLI",
+        now: observedAt
+      });
       await tx.courseAutomationDiscovery.create({
         data: {
           courseId: course.id,

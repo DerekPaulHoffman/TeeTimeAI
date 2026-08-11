@@ -19,12 +19,14 @@ const prismaMocks = vi.hoisted(() => ({
   monitoringStatusUpdateMany: vi.fn(),
   automationRunUpdateMany: vi.fn(),
   teeSearchCount: vi.fn(),
+  teeSearchUpdateMany: vi.fn(),
   transaction: vi.fn()
 }));
 const verificationMocks = vi.hoisted(() => ({
   buildCourseSupportProviderSnapshotFingerprint: vi.fn(),
   getCurrentCourseSupportVerificationFailure: vi.fn(),
   getEligibleCourseSupportVerificationProof: vi.fn(),
+  isCourseSupportFactualFinalProof: vi.fn(),
   scheduleCourseSupportVerificationRequests: vi.fn()
 }));
 const leaseMocks = vi.hoisted(() => ({
@@ -56,6 +58,8 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("./course-support-verification", () => verificationMocks);
 vi.mock("./lease", () => leaseMocks);
 
+import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
+
 import {
   assessCourseSupportRecovery,
   assessCourseSupportReleaseTransition,
@@ -75,28 +79,101 @@ import {
   canVerifyUnchangedCourseSupportRuntime,
   collectFreshRemediatedCourseProof,
   computeCourseSupportNextAttemptAt,
+  courseSupportRecoveryBatchesConflict,
   deriveCourseSupportCurrentDemand,
   findConflictingResponderPaths,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
   isDurableTerminalProof,
+  isRetryableCourseSupportWriteConflict,
   isRemediatedSearchSchedulerHealthy,
   markCourseSupportBatchNeedsHuman,
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
   recoverCourseSupportBatch,
+  renewCourseSupportBatchOperationLease,
   resolveCourseSupportProviderCapability,
   selectCourseSupportBatch,
   selectCourseSupportRetryBatch,
   shouldDispatchRemediatedCourseRechecks,
   shouldFinalizeSourceUnverified,
   verifyCourseSupportBatch,
+  withCourseSupportWriteConflictRetry,
   type CourseSupportCandidate,
   type CourseSupportRetryBatchEvidence
 } from "./course-support-batches";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
+
+function exhaustedAttemptLedger(cycle = 1) {
+  let ledger: unknown = null;
+  const stages = [
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "NO_PROVIDER_METADATA"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "NO_RUNNABLE_ADAPTER"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "NO_PROVIDER_METADATA"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "NO_BROWSER_ROUTE"],
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+    ["LOCAL_READER", "LOCAL_READER", "NO_LOCAL_READER_CAPABILITY"],
+    [
+      "INDEPENDENT_CONFIRMATION",
+      "INDEPENDENT_CONFIRMATION",
+      "NO_INDEPENDENT_CONFIRMATION"
+    ]
+  ] as const;
+  for (const [stage, readPath, skipReason] of stages) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle,
+      stage,
+      transition: "NOT_APPLICABLE",
+      readPath,
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:EXHAUSTED",
+      runtimeVersion: "test-runtime",
+      skipReason,
+      observedAt: now
+    });
+  }
+  return ledger;
+}
+
+function factualFinalLedger(disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL") {
+  let ledger: unknown = null;
+  const stages = [
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "NO_PROVIDER_METADATA"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "NO_RUNNABLE_ADAPTER"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "NO_PROVIDER_METADATA"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "NO_BROWSER_ROUTE"],
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+    ["LOCAL_READER", "LOCAL_READER", "NO_LOCAL_READER_CAPABILITY"]
+  ] as const;
+  for (const [stage, readPath, skipReason] of stages) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage,
+      transition: "NOT_APPLICABLE",
+      readPath,
+      evidenceKind: "TOOLING",
+      failureFingerprint: `PLAYBOOK:${stage}:${skipReason}`,
+      runtimeVersion: "a".repeat(40),
+      skipReason,
+      observedAt: new Date("2026-07-15T20:05:30.000Z")
+    });
+  }
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "FACTUAL_FINAL",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: `PLAYBOOK:INDEPENDENT_CONFIRMATION:${disposition}`,
+    runtimeVersion: "a".repeat(40),
+    factualDisposition: disposition,
+    observedAt: new Date("2026-07-15T20:06:00.000Z")
+  });
+}
 
 describe("course-support path planning", () => {
   it("rejects exact and provider-family code scope collisions", () => {
@@ -107,10 +184,7 @@ describe("course-support path planning", () => {
           "src/lib/automation/course-support-batches.ts",
           "docs/course-support-responder.md"
         ],
-        [
-          "src/lib/tee-times/adapters/cps/fetch.ts",
-          "src/lib/automation/course-support-batches.ts"
-        ]
+        ["src/lib/tee-times/adapters/cps/fetch.ts", "src/lib/automation/course-support-batches.ts"]
       )
     ).toEqual([
       "src/lib/automation/course-support-batches.ts",
@@ -121,13 +195,50 @@ describe("course-support path planning", () => {
   it("keeps unrelated provider and documentation scopes independent", () => {
     expect(
       findConflictingResponderPaths(
-        [
-          "src/lib/tee-times/adapters/chronogolf/fetch.ts",
-          "docs/course-support-responder.md"
-        ],
+        ["src/lib/tee-times/adapters/chronogolf/fetch.ts", "docs/course-support-responder.md"],
         ["src/lib/tee-times/adapters/cps/fetch.ts"]
       )
     ).toEqual([]);
+  });
+
+  it("blocks recovery only for matching provider, fingerprint, or code scope", () => {
+    const recovering = {
+      providerFamilyKey: "CPS",
+      failureFingerprint: "cps-timeout",
+      summary: { plannedPaths: ["src/lib/tee-times/adapters/cps/fetch.ts"] }
+    };
+    expect(
+      courseSupportRecoveryBatchesConflict(recovering, {
+        providerFamilyKey: "CPS",
+        failureFingerprint: "different-failure",
+        summary: { plannedPaths: [] }
+      })
+    ).toBe(true);
+    expect(
+      courseSupportRecoveryBatchesConflict(recovering, {
+        providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: "cps-timeout",
+        summary: { plannedPaths: [] }
+      })
+    ).toBe(true);
+    expect(
+      courseSupportRecoveryBatchesConflict(recovering, {
+        providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: "chronogolf-schema",
+        summary: {
+          plannedPaths: ["src/lib/tee-times/adapters/cps/normalize.ts"]
+        }
+      })
+    ).toBe(true);
+    expect(
+      courseSupportRecoveryBatchesConflict(recovering, {
+        providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: "chronogolf-schema",
+        summary: {
+          plannedPaths: ["src/lib/tee-times/adapters/chronogolf/fetch.ts"]
+        }
+      })
+    ).toBe(false);
   });
 
   it("reopens only an unreleased verifying batch whose original plan was empty", () => {
@@ -168,6 +279,49 @@ describe("course-support path planning", () => {
   );
 });
 
+describe("course-support write-conflict retry", () => {
+  it("recognizes Prisma serialization and Postgres deadlock failures", () => {
+    expect(isRetryableCourseSupportWriteConflict({ code: "P2034" })).toBe(true);
+    expect(isRetryableCourseSupportWriteConflict({ code: "40P01" })).toBe(true);
+    expect(
+      isRetryableCourseSupportWriteConflict(new Error("deadlock detected while writing"))
+    ).toBe(true);
+    expect(isRetryableCourseSupportWriteConflict(new Error("request timed out"))).toBe(false);
+  });
+
+  it("retries a bounded number of rolled-back write conflicts", async () => {
+    const conflict = Object.assign(new Error("write conflict"), {
+      code: "P2034"
+    });
+    const operation = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(conflict)
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValue("persisted");
+    const sleep = vi.fn(async () => undefined);
+
+    await expect(withCourseSupportWriteConflictRetry(operation, { sleep })).resolves.toBe(
+      "persisted"
+    );
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenNthCalledWith(1, 25);
+    expect(sleep).toHaveBeenNthCalledWith(2, 50);
+  });
+
+  it("does not retry an ownership or validation failure", async () => {
+    const operation = vi.fn(async () => {
+      throw new Error("Responder ownership changed.");
+    });
+    const sleep = vi.fn(async () => undefined);
+
+    await expect(withCourseSupportWriteConflictRetry(operation, { sleep })).rejects.toThrow(
+      "ownership changed"
+    );
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+});
+
 const transactionClient = {
   automationRun: {
     create: prismaMocks.automationRunCreate,
@@ -193,7 +347,10 @@ const transactionClient = {
   courseMonitoringStatus: {
     updateMany: prismaMocks.monitoringStatusUpdateMany
   },
-  teeSearch: { count: prismaMocks.teeSearchCount }
+  teeSearch: {
+    count: prismaMocks.teeSearchCount,
+    updateMany: prismaMocks.teeSearchUpdateMany
+  }
 };
 
 beforeEach(() => {
@@ -217,6 +374,7 @@ beforeEach(() => {
     requests: []
   });
   verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("b".repeat(64));
+  verificationMocks.isCourseSupportFactualFinalProof.mockReturnValue(true);
   prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
   prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
   prismaMocks.monitoringStatusUpdateMany.mockResolvedValue({ count: 1 });
@@ -1857,6 +2015,54 @@ describe("fresh runtime verification", () => {
     ).toBe(true);
   });
 
+  it.each(["MANUAL_DIRECT", "IDENTITY_FINAL"] as const)(
+    "accepts exact-release ordered %s proof as a durable batch final",
+    (disposition) => {
+      const releaseSha = "a".repeat(40);
+      const attemptLedger = factualFinalLedger(disposition);
+      const event = attemptLedger.events.at(-1)!;
+      expect(
+        isDurableTerminalProof(
+          {
+            normalizedResult: "FINAL_DISPOSITION",
+            proofSnapshot: {
+              schemaVersion: 1,
+              kind: "PLAYBOOK_FACTUAL_FINAL",
+              playbookVersion: 1,
+              disposition,
+              outcome: disposition,
+              cycle: 1,
+              stage: event.stage,
+              sequence: event.sequence,
+              readPath: event.readPath,
+              evidenceKind: event.evidenceKind,
+              failureFingerprint: event.failureFingerprint,
+              observedAt: event.observedAt,
+              completedAt: "2026-07-15T20:06:30.000Z",
+              releaseSha,
+              runtimeVersion: releaseSha,
+              providerExecution: false
+            },
+            verifiedAt: new Date("2026-07-15T20:07:00.000Z"),
+            verifiedIncidentUpdatedAt: new Date("2026-07-15T20:06:30.000Z"),
+            incident: {
+              cycle: 1,
+              attemptLedger,
+              firstSeenAt: new Date("2026-07-15T19:00:00.000Z"),
+              lastSeenAt: new Date("2026-07-15T20:05:30.000Z")
+            }
+          },
+          {
+            createdAt: new Date("2026-07-15T19:00:00.000Z"),
+            releaseSha,
+            deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+            recheckDispatchStartedAt: new Date("2026-07-15T20:05:30.000Z")
+          }
+        )
+      ).toBe(true);
+    }
+  );
+
   it("rejects exact-place terminal proof older than the incident cycle", () => {
     expect(
       isDurableTerminalProof(
@@ -2731,13 +2937,143 @@ describe("course-support recovery", () => {
         })
       })
     );
-    expect(prismaMocks.batchFindFirst).toHaveBeenCalledWith(
+    expect(prismaMocks.batchFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           leaseExpiresAt: { gt: now }
         })
       })
     );
+  });
+
+  it("recovers beside an unrelated active provider group", async () => {
+    const expiredAt = new Date("2026-07-15T19:00:00.000Z");
+    const incidentUpdatedAt = new Date("2026-07-15T19:30:00.000Z");
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "CLAIMED",
+      leaseExpiresAt: expiredAt,
+      ownerThreadId: "old-thread",
+      ownerAutomationRunId: null,
+      providerFamilyKey: "CPS",
+      failureFingerprint: "cps-timeout",
+      baseSha: "a".repeat(40),
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchKey: null,
+      recheckDispatchStartedAt: null,
+      recheckDispatchedAt: null,
+      revision: 1,
+      summary: {
+        branch: "fix/recover-cps",
+        plannedPaths: ["src/lib/tee-times/adapters/cps/fetch.ts"]
+      },
+      incidents: [
+        {
+          id: "batch-entry-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          result: "PENDING",
+          updatedAt: incidentUpdatedAt,
+          incident: {
+            status: "AUTO_INVESTIGATING",
+            resolution: null,
+            decisionAt: null,
+            updatedAt: incidentUpdatedAt
+          }
+        }
+      ]
+    });
+    prismaMocks.batchFindMany.mockResolvedValue([
+      {
+        id: "batch-2",
+        providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: "chronogolf-schema",
+        summary: {
+          plannedPaths: ["src/lib/tee-times/adapters/chronogolf/fetch.ts"]
+        }
+      }
+    ]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: "batch-1",
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/recover-cps",
+        currentHeadSha: "a".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        now
+      })
+    ).resolves.toMatchObject({ outcome: "ready", recovered: true });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "batch-1",
+          leaseExpiresAt: { lte: now }
+        })
+      })
+    );
+  });
+
+  it("defers recovery for an active batch with overlapping provider scope", async () => {
+    const incidentUpdatedAt = new Date("2026-07-15T19:30:00.000Z");
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "CLAIMED",
+      leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+      ownerThreadId: "old-thread",
+      ownerAutomationRunId: null,
+      providerFamilyKey: "CPS",
+      failureFingerprint: "cps-timeout",
+      baseSha: "a".repeat(40),
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchKey: null,
+      recheckDispatchStartedAt: null,
+      recheckDispatchedAt: null,
+      revision: 1,
+      summary: { branch: "fix/recover-cps", plannedPaths: [] },
+      incidents: [
+        {
+          id: "batch-entry-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          result: "PENDING",
+          updatedAt: incidentUpdatedAt,
+          incident: {
+            status: "AUTO_INVESTIGATING",
+            resolution: null,
+            decisionAt: null,
+            updatedAt: incidentUpdatedAt
+          }
+        }
+      ]
+    });
+    prismaMocks.batchFindMany.mockResolvedValue([
+      {
+        id: "batch-2",
+        providerFamilyKey: "CPS",
+        failureFingerprint: "cps-schema",
+        summary: { plannedPaths: [] }
+      }
+    ]);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: "batch-1",
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/recover-cps",
+        currentHeadSha: "a".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        now
+      })
+    ).resolves.toMatchObject({ outcome: "deferred_busy", recovered: false });
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
   it("closes expired ownership superseded by a later durable course decision", async () => {
@@ -2850,14 +3186,35 @@ describe("course-support inspection ownership", () => {
     }
   );
 
-  it("preserves expired, empty, and ready queue outcomes without an active writer", () => {
+  it("prioritizes expired recovery before unrelated due work when a writer slot is open", () => {
     expect(
       classifyCourseSupportQueueInspection({
         ...inspection,
         hasActiveBatch: false,
         hasExpiredBatch: true
       })
-    ).toBe("ready");
+    ).toBe("recovery_required");
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        activeBatchCount: 2,
+        maxActiveBatches: 3,
+        requestingThreadId: "different-thread",
+        hasExpiredBatch: true
+      })
+    ).toBe("recovery_required");
+    expect(
+      classifyCourseSupportQueueInspection({
+        ...inspection,
+        activeBatchCount: 3,
+        maxActiveBatches: 3,
+        requestingThreadId: "different-thread",
+        hasExpiredBatch: true
+      })
+    ).toBe("deferred_busy");
+  });
+
+  it("preserves empty and ready queue outcomes without an active writer", () => {
     expect(
       classifyCourseSupportQueueInspection({
         ...inspection,
@@ -3431,6 +3788,34 @@ describe("course-support release heartbeat persistence", () => {
     descendantVerified: true
   };
 
+  it("renews a long-operation lease without changing batch revision or release state", async () => {
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      renewCourseSupportBatchOperationLease({
+        batchId: "batch-1",
+        leaseToken: "lease-token",
+        ownerThreadId: "owner-thread",
+        now
+      })
+    ).resolves.toMatchObject({
+      heartbeatRecorded: true,
+      leaseExpiresAt: "2026-07-15T20:15:00.000Z"
+    });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "batch-1",
+        leaseToken: "lease-token",
+        ownerThreadId: "owner-thread",
+        leaseExpiresAt: { gte: now }
+      }),
+      data: {
+        heartbeatAt: now,
+        leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z")
+      }
+    });
+  });
+
   it("advances with owner/CAS fences, archives stable ordinals, and resets only machine proof", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(ownedBatch());
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
@@ -3853,6 +4238,8 @@ describe("detached verification atomic batch fences", () => {
             failureClass: "UNSUPPORTED_FAMILY",
             failureFingerprint: "fingerprint",
             attemptCount: 1,
+            attemptLedger:
+              result === "NEEDS_HUMAN" ? exhaustedAttemptLedger() : null,
             escalatedAt: null
           }
         }
@@ -3874,6 +4261,7 @@ describe("detached verification atomic batch fences", () => {
           course: { name: "Course One" },
           incident: {
             engineeringOnly: false,
+            attemptLedger: exhaustedAttemptLedger(),
             status: "AUTO_INVESTIGATING",
             activeBatchId: "batch-1",
             updatedAt: incidentUpdatedAt
@@ -3914,6 +4302,43 @@ describe("detached verification atomic batch fences", () => {
         lastError: "human_verification_superseded"
       })
     });
+  });
+
+  it("refuses human escalation before every safe playbook stage is exhausted", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue({
+      status: "VERIFYING",
+      revision: 7,
+      incidents: [
+        {
+          id: "entry-1",
+          createdAt: new Date("2026-07-15T18:00:00.000Z"),
+          incidentId: "incident-1",
+          cycle: 1,
+          updatedAt: incidentUpdatedAt,
+          course: { name: "Course One" },
+          incident: {
+            engineeringOnly: false,
+            attemptLedger: null,
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: "batch-1",
+            updatedAt: incidentUpdatedAt
+          }
+        }
+      ]
+    });
+
+    await expect(
+      markCourseSupportBatchNeedsHuman({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        evidence: "Provider approval is required.",
+        nextAction: "Request provider access.",
+        now
+      })
+    ).rejects.toThrow("exhaust every safe read path");
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
   });
 
   it("downgrades detached success when live demand appears before atomic persistence", async () => {
@@ -4262,6 +4687,44 @@ describe("detached verification atomic batch fences", () => {
       outcome: "needs_human",
       durableCloseoutRecorded: true
     });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          nextAttemptAt: new Date("2026-07-16T02:00:00.000Z")
+        })
+      })
+    );
+    expect(prismaMocks.teeSearchUpdateMany).toHaveBeenCalledWith({
+      where: {
+        status: "ACTIVE",
+        trafficClass: { notIn: ["AUTOMATION", "TEST"] },
+        date: { gte: new Date("2026-07-15T00:00:00.000Z") },
+        preferences: { some: { courseId: "course-1" } }
+      },
+      data: {
+        nextCheckAt: now,
+        recheckRequestedAt: now
+      }
+    });
+  });
+
+  it("refuses human closeout without current-cycle playbook exhaustion", async () => {
+    const batch = closeoutBatch("NEEDS_HUMAN");
+    batch.incidents[0].incident.attemptLedger = null;
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "needs_human",
+        now
+      })
+    ).rejects.toThrow(/playbook is exhausted/i);
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
   it("refuses closeout when detached success finished after the last verify read", async () => {

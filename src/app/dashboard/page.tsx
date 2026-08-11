@@ -44,7 +44,7 @@ import {
   getDashboardAvailabilityView,
   readDashboardAvailabilitySnapshot
 } from "@/lib/searches/dashboard-availability";
-import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
+import { getDashboardMonitoringVerdict } from "@/lib/searches/dashboard-monitoring-verdict";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { formatCourseDistance } from "@/lib/email/course-facts";
@@ -442,15 +442,18 @@ function DashboardSearchCard({
                 : null
             });
             const monitoringVerdict = getDashboardMonitoringVerdict({
-              alertSupport,
+              alertSupport: alertSupport ?? null,
               bookingPhone,
               automationEligibility: preference.course.automationEligibility,
               automationReason: preference.course.automationReason,
               latestProbe,
               upcomingBookingWindow,
-              supportIssueRecorded:
-                preference.course.supportIncident?.status === "AUTO_INVESTIGATING" ||
-                preference.course.supportIncident?.status === "NEEDS_HUMAN",
+              supportIncidentStatus:
+                preference.course.supportIncident?.status ?? null,
+              humanReviewReason:
+                preference.course.supportIncident?.humanReviewReason ?? null,
+              escalationDeadlineAt:
+                preference.course.supportIncident?.escalationDeadlineAt ?? null,
               firstTimeLookup:
                 Math.abs(
                   preference.course.createdAt.getTime() - search.createdAt.getTime()
@@ -686,116 +689,6 @@ function formatObservationDate(value: Date | string | undefined) {
     day: "numeric",
     year: "numeric"
   });
-}
-
-function getDashboardMonitoringVerdict(input: {
-  alertSupport: ReturnType<typeof getCourseAlertSupport> | null;
-  bookingPhone?: string | null;
-  automationEligibility: string;
-  automationReason: string;
-  latestProbe?: {
-    outcome:
-      | "MATCH_FOUND"
-      | "NO_MATCH"
-      | "BLOCKED_POLICY"
-      | "BLOCKED_AUTH"
-      | "BLOCKED_TOOLING"
-      | "FETCH_FAILED"
-      | "NEEDS_ADAPTER"
-      | "MANUAL_DIRECT"
-      | "IDENTITY_FINAL"
-      | "IDENTITY_RECHECK";
-    observedAt: Date;
-  };
-  upcomingBookingWindow: ReturnType<typeof getBookingWindowForTargetDate>;
-  supportIssueRecorded: boolean;
-  firstTimeLookup: boolean;
-}) {
-  if (input.upcomingBookingWindow && input.latestProbe?.outcome === "NO_MATCH") {
-    return {
-      label: "Checks start when booking opens",
-      detail: "We will begin checking at the course's useful booking release time.",
-      emoji: "📅",
-      icon: "scheduled" as const,
-      className: "is-detail"
-    };
-  }
-  if (
-    input.latestProbe?.outcome === "MATCH_FOUND" ||
-    input.latestProbe?.outcome === "NO_MATCH"
-  ) {
-    return {
-      label: "Tee-time alerts available",
-      detail: "The latest check completed successfully.",
-      emoji: "✅",
-      icon: "watching" as const,
-      className: "is-public"
-    };
-  }
-  if (
-    input.automationReason === "TEMPORARILY_UNAVAILABLE" ||
-    input.latestProbe?.outcome === "FETCH_FAILED" ||
-    input.latestProbe?.outcome === "BLOCKED_TOOLING"
-  ) {
-    return {
-      label: "Check the official site for now",
-      detail:
-        "The course's public tee-time service isn't responding to our checks. Your alert is still active; use the official site while Tee Time Spot retries and we'll email you when checks resume.",
-      emoji: "🔄",
-      icon: "unavailable" as const,
-      className: "is-official-site-only"
-    };
-  }
-  if (
-    input.alertSupport ||
-    input.latestProbe?.outcome === "NEEDS_ADAPTER" ||
-    input.latestProbe?.outcome === "BLOCKED_POLICY" ||
-    input.latestProbe?.outcome === "BLOCKED_AUTH" ||
-    input.latestProbe?.outcome === "MANUAL_DIRECT" ||
-    input.latestProbe?.outcome === "IDENTITY_FINAL" ||
-    input.latestProbe?.outcome === "IDENTITY_RECHECK"
-  ) {
-    if (input.latestProbe?.outcome === "NEEDS_ADAPTER") {
-      return {
-        label: "Automatic alerts unavailable",
-        detail: input.supportIssueRecorded
-          ? "We recorded this monitoring gap and will keep working on it. Use the official course site for current availability."
-          : "We could not confirm reliable automatic monitoring. Use the official course site for current availability.",
-        emoji: "🌐",
-        icon: "unavailable" as const,
-        className: "is-official-site-only"
-      };
-    }
-    if (input.alertSupport) {
-      const action = getDashboardCourseAction(input.alertSupport, input.bookingPhone);
-      return {
-        ...action,
-        icon: "unavailable" as const,
-        className: "is-official-site-only"
-      };
-    }
-
-    return {
-      label: "Check the official course site",
-      detail:
-        "Use the official course site for current availability while Tee Time Spot works to add alerts.",
-      emoji: "🌐",
-      icon: "unavailable" as const,
-      className: "is-official-site-only"
-    };
-  }
-  return {
-    label: input.firstTimeLookup ? "Checking this course for the first time" : "Alert availability pending",
-    detail:
-      input.automationEligibility === "ALLOWED"
-        ? "The first check is starting now and will confirm the current result."
-        : input.firstTimeLookup
-          ? "Tee Time Spot hasn't checked this course before. We'll email whether alerts are available after the first check, usually within 10 minutes."
-          : "We’ll email whether tee-time alerts are available after the first check, usually within 10 minutes.",
-    emoji: "⏳",
-    icon: "scheduled" as const,
-    className: "is-detail"
-  };
 }
 
 function formatCoursePriceRange(range: CoursePriceRange) {

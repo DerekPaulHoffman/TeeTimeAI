@@ -136,7 +136,7 @@ export function getDashboardAvailabilityView(input: {
     return {
       label: "Current availability unavailable",
       detail:
-        "We could not confirm the current tee sheet. Use the official course site while Tee Time Spot keeps working on coverage.",
+        "We could not confirm the current tee sheet. Your alert remains active. Use the official course site while Tee Time Spot keeps trying.",
       tone: "unavailable"
     };
   }

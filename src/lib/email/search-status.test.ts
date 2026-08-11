@@ -40,19 +40,56 @@ const courses: SearchStatusCourseReport[] = [
 ];
 
 describe("search status email cadence", () => {
-  it("waits to finalize the setup report only while a public-page check is active", () => {
+  it("reports CHECKING once every selected course has a current result", () => {
+    const currentResults = [
+      ...courses,
+      {
+        courseId: "course-pending",
+        courseName: "Pending Course",
+        outcome: "CHECK_PENDING" as const,
+        availableMatches: 0
+      }
+    ];
     expect(
-      isInitialSearchStatusReportReady([
-        ...courses,
-        {
-          courseId: "course-pending",
-          courseName: "Pending Course",
-          outcome: "CHECK_PENDING",
-          availableMatches: 0
-        }
-      ])
+      isInitialSearchStatusReportReady(currentResults, currentResults.length)
+    ).toBe(true);
+    expect(
+      isInitialSearchStatusReportReady(currentResults, currentResults.length + 1)
     ).toBe(false);
     expect(isInitialSearchStatusReportReady(courses)).toBe(true);
+  });
+
+  it("reports every canonical current state, including unresolved review states", () => {
+    const course = {
+      courseId: "course-status",
+      courseName: "Status Course",
+      availableMatches: 0
+    };
+
+    expect(
+      isInitialSearchStatusReportReady([
+        { ...course, outcome: "IDENTITY_RECHECK" }
+      ])
+    ).toBe(true);
+    expect(
+      isInitialSearchStatusReportReady([
+        { ...course, outcome: "BLOCKED_POLICY" }
+      ])
+    ).toBe(true);
+    expect(
+      isInitialSearchStatusReportReady([
+        { ...course, outcome: "FETCH_FAILED" }
+      ])
+    ).toBe(true);
+    expect(
+      isInitialSearchStatusReportReady([
+        {
+          ...course,
+          outcome: "NEEDS_ADAPTER",
+          supportStatus: "NEEDS_HUMAN_REVIEW"
+        }
+      ])
+    ).toBe(true);
   });
 
   it("sends setup once and waits until 8 AM on a new local day for the morning report", () => {
@@ -108,6 +145,130 @@ describe("search status email cadence", () => {
 });
 
 describe("renderSearchStatusHtml", () => {
+  it("uses customer-safe manual-review copy and the official site", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-human-review",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-08-12",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-08-10T14:10:00.000Z"),
+      courses: [
+        {
+          courseId: "course-human",
+          courseName: "Course Needing Review",
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/tee-times",
+          supportStatus: "NEEDS_HUMAN_REVIEW"
+        }
+      ]
+    });
+
+    expect(html).toContain("MANUAL REVIEW NEEDED");
+    expect(html).toContain(
+      "Manual review needed; your alert remains active"
+    );
+    expect(html).toContain("Use the official site for current tee times");
+    expect(html).toContain("Open official booking page");
+    expect(html).not.toMatch(/engineering|adapter|automation incident/i);
+  });
+
+  it("renders one consolidated outage update after the planner releases it", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-outage",
+      to: "player@example.com",
+      kind: "outage",
+      providerLabel: "CPS",
+      targetDate: "2026-08-12",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-08-10T14:30:00.000Z"),
+      courses: [
+        {
+          courseId: "course-outage",
+          courseName: "Pine Oaks",
+          outcome: "FETCH_FAILED",
+          availableMatches: 0,
+          bookingUrl: "https://pineoaks.cps.golf/onlineresweb/search-teetime"
+        }
+      ]
+    });
+
+    expect(html).toContain("STATUS UPDATE");
+    expect(html).toContain("Automatic checks are still retrying");
+    expect(html).toContain("Your alert remains active");
+    expect(html).toContain("official site");
+  });
+
+  it("renders a clear factual-final monitoring status update", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-final-status",
+      to: "player@example.com",
+      kind: "status-update",
+      targetDate: "2026-08-12",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-08-10T14:30:00.000Z"),
+      courses: [
+        {
+          courseId: "course-final",
+          courseName: "Pine Oaks",
+          outcome: "MANUAL_DIRECT",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/tee-times",
+          bookingMethod: "PHONE_ONLY",
+          phone: "555-0100"
+        }
+      ]
+    });
+
+    expect(html).toContain("A course status has been confirmed");
+    expect(html).toContain("Your alert remains active for the other selected courses");
+    expect(html).toContain("See the confirmed course details below");
+    expect(html).toContain("Open official site");
+    expect(html).toContain("Call 555-0100");
+    expect(html).not.toMatch(/adapter|probe|incident|playbook/i);
+  });
+
+  it("combines a recovery update with a same-check tee-time match", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-recovery",
+      to: "player@example.com",
+      kind: "recovery",
+      targetDate: "2026-08-12",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-08-10T15:00:00.000Z"),
+      courses: [
+        {
+          courseId: "course-recovery",
+          courseName: "Pine Oaks",
+          timeZone: "America/New_York",
+          outcome: "MATCH_FOUND",
+          availableMatches: 1,
+          bookingUrl: "https://pineoaks.cps.golf/onlineresweb/search-teetime",
+          matchingTimes: [
+            {
+              startsAt: "2026-08-12T08:10:00-04:00",
+              availableSpots: 4,
+              isNew: true
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(html).toContain("AUTOMATIC CHECKS RESUMED");
+    expect(html).toContain("matching tee times are available below");
+    expect(html).toContain("8:10 AM");
+  });
+
   it("combines openings and final current guidance for all five courses", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-five-course-setup",
@@ -187,7 +348,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("PRIORITY 2");
     expect(html).toContain("AVAILABLE NOW");
     expect(html).toContain("11:04 AM");
-    expect(html.match(/AUTOMATIC ALERTS UNAVAILABLE/g)).toHaveLength(3);
+    expect(html.match(/AUTOMATIC CHECKS RETRYING/g)).toHaveLength(3);
     expect(html).not.toContain("SETTING UP MONITORING");
     expect(html).toContain("Please check directly with the course");
     expect(html).toContain('href="tel:8605550100"');
@@ -243,8 +404,8 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).toContain("AUTOMATIC ALERTS UNAVAILABLE");
-    expect(html).toContain("Use the official site for this course");
+    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
+    expect(html).toContain("Use the official site while we keep trying");
     expect(html).toContain("Every selected course has a result below");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we're watching for you");
@@ -336,7 +497,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
-    expect(html).toContain("PRIORITY 2 &middot; AUTOMATIC ALERTS UNAVAILABLE");
+    expect(html).toContain("PRIORITY 2 &middot; AUTOMATIC CHECKS RETRYING");
   });
 
   it("revalidates a generic legacy block instead of treating it as final", () => {
@@ -655,7 +816,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("Please check directly with the course");
   });
 
-  it("tells a first-time lookup golfer that the monitoring gap is in the operator queue", () => {
+  it("tells a first-time lookup golfer that automatic checks are still retrying", () => {
     const baseInput = {
       searchId: "search-1",
       to: "player@example.com",
@@ -680,14 +841,13 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("AUTOMATIC ALERTS UNAVAILABLE");
-    expect(html).toContain("Use the official site for this course");
+    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
+    expect(html).toContain("Use the official site while we keep trying");
     expect(html).toContain("first time Tee Time Spot has checked this course");
-    expect(html).toContain("course coverage queue");
-    expect(html).not.toContain("alerted our course coverage team");
+    expect(html).not.toMatch(/operator|engineering|adapter|coverage queue/i);
   });
 
-  it("treats an incomplete provider check as an immediate golfer-facing verdict", () => {
+  it("treats an incomplete provider check as a retrying golfer-facing status", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-fetch-failed",
       to: "player@example.com",
@@ -708,8 +868,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("TEMPORARILY UNAVAILABLE");
-    expect(html).toContain("cannot currently promise automatic alerts");
+    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
+    expect(html).toContain("Your alert remains active");
+    expect(html).toContain("official site");
     expect(html).toContain("Open official booking page");
   });
 
@@ -736,7 +897,7 @@ describe("renderSearchStatusHtml", () => {
 
     expect(html).toContain("CHECKING NOW");
     expect(html).toContain("fresh public-page check is in progress");
-    expect(html).not.toContain("TEMPORARILY UNAVAILABLE");
+    expect(html).not.toContain("AUTOMATIC CHECKS RETRYING");
     expect(html).not.toContain("automatic alerts are unavailable");
   });
 

@@ -5,5 +5,11 @@ export function areSearchStatusEmailsEnabled() {
 }
 
 export function isSearchEmailDeliveryEnabled(kind: SearchEmailDeliveryKind) {
-  return kind === "MATCH" || kind === "SETUP";
+  return (
+    kind === "MATCH" ||
+    kind === "SETUP" ||
+    kind === "MONITORING_STATUS_UPDATE" ||
+    kind === "MONITORING_OUTAGE" ||
+    kind === "MONITORING_RECOVERY"
+  );
 }

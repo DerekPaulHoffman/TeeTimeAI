@@ -24,7 +24,15 @@ import {
   type BrowserDiscovery,
   type BrowserProbeCourseInput
 } from "./browser-discovery";
-import { startOfUtcCalendarDay } from "./date-boundary";
+import {
+  revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
+  runSerializedCourseMonitoringWrite
+} from "./course-monitoring";
+import { assessAutomationPlaybook } from "./course-monitoring-playbook";
+import {
+  earliestPotentiallyActiveSearchDate,
+  isSearchWindowActive
+} from "./date-boundary";
 import {
   hasCompletePreEditProvenance,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
@@ -53,6 +61,17 @@ const activeSearchCourseInclude = {
     orderBy: { holes: "asc" }
   },
   monitoringStatus: true,
+  supportIncident: {
+    select: {
+      id: true,
+      cycle: true,
+      status: true,
+      attemptLedger: true,
+      humanReviewReason: true,
+      escalationDeadlineAt: true,
+      firstSeenAt: true
+    }
+  },
   profile: {
     select: {
       canonicalSlug: true,
@@ -184,31 +203,66 @@ export function runWithHourlyImprovementLease<T>(worker: () => Promise<T>) {
 }
 
 export async function listActiveSearchesForAutomation(): Promise<ActiveAutomationSearch[]> {
-  return prisma.teeSearch.findMany({
+  const now = new Date();
+  const searches = await prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
       date: {
-        gte: startOfUtcCalendarDay()
+        gte: earliestPotentiallyActiveSearchDate(now)
       },
-      OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: new Date() } }]
+      OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }]
     },
     orderBy: [{ date: "asc" }, { createdAt: "asc" }],
     include: activeSearchInclude
   });
+  return searches.filter((search) =>
+    isSearchWindowActive({
+      date: search.date,
+      endTime: search.endTime,
+      courseTimeZones: search.preferences.map((preference) => preference.course.timeZone),
+      fallbackTimeZone: search.userTimeZone,
+      now
+    })
+  );
 }
 
 export async function getActiveSearchForAutomation(
   searchId: string
 ): Promise<ActiveAutomationSearch | null> {
-  return prisma.teeSearch.findFirst({
+  const now = new Date();
+  const search = await prisma.teeSearch.findFirst({
     where: {
       id: searchId,
       status: "ACTIVE",
       date: {
-        gte: startOfUtcCalendarDay()
+        gte: earliestPotentiallyActiveSearchDate(now)
       }
     },
     include: activeSearchCheckInclude
+  });
+  if (!search) {
+    return null;
+  }
+  return isSearchWindowActive({
+    date: search.date,
+    endTime: search.endTime,
+    courseTimeZones: search.preferences.map((preference) => preference.course.timeZone),
+    fallbackTimeZone: search.userTimeZone,
+    now
+  })
+    ? search
+    : null;
+}
+
+export async function getCourseMonitoringPlaybookContext(courseId: string) {
+  return prisma.courseSupportIncident.findUnique({
+    where: { courseId },
+    select: {
+      id: true,
+      cycle: true,
+      status: true,
+      attemptLedger: true
+    }
   });
 }
 
@@ -225,7 +279,7 @@ export async function listBrowserProbeTargets(
       where: {
         status: "ACTIVE",
         date: {
-          gte: startOfUtcCalendarDay()
+          gte: earliestPotentiallyActiveSearchDate()
         }
       },
       orderBy: [{ date: "asc" }, { createdAt: "asc" }],
@@ -241,6 +295,11 @@ export async function listBrowserProbeTargets(
       select: {
         courseId: true,
         status: true,
+        cycle: true,
+        attemptLedger: true,
+        activeRealSearchCount: true,
+        firstSeenAt: true,
+        nextAttemptAt: true,
         kind: true,
         occurrenceCount: true,
         lastSeenAt: true,
@@ -272,8 +331,26 @@ export async function listBrowserProbeTargets(
       }
     })
   ]);
+  const browserReadyIncidentByCourse = new Map(
+    openIncidents
+      .filter((incident) => {
+        if (incident.status !== "AUTO_INVESTIGATING") return false;
+        const nextStage = assessAutomationPlaybook(
+          incident.attemptLedger,
+          incident.cycle
+        ).nextStage;
+        return (
+          nextStage === "RENDERED_BROWSER_DISCOVERY" ||
+          nextStage === "INDEPENDENT_CONFIRMATION"
+        );
+      })
+      .map((incident) => [incident.courseId, incident])
+  );
   const incidentPriority = new Map(
-    openIncidents.map((incident) => [incident.courseId, incident.status === "NEEDS_HUMAN" ? 0 : 1])
+    [...browserReadyIncidentByCourse.values()].map((incident) => [
+      incident.courseId,
+      incident.activeRealSearchCount > 0 ? 0 : 1
+    ])
   );
   const monitoringFailureByCourse = new Map(
     openIncidents.map((incident) => [
@@ -282,12 +359,16 @@ export async function listBrowserProbeTargets(
     ])
   );
 
-  const targets: Array<BrowserProbeTarget & { supportPriority: number }> = [];
+  const targets: Array<
+    BrowserProbeTarget & { supportPriority: number; episodeStartedAt: Date }
+  > = [];
   const queuedCourseIds = new Set<string>();
 
   for (const search of searches) {
     for (const preference of search.preferences) {
       const course = preference.course;
+      const readyIncident = browserReadyIncidentByCourse.get(course.id);
+      if (!readyIncident) continue;
       const monitoringFailureEvidence = monitoringFailureByCourse.get(course.id);
       const probeCourse = { ...course, monitoringFailureEvidence };
       const probeUrl = getBestProbeUrl(probeCourse);
@@ -317,13 +398,16 @@ export async function listBrowserProbeTargets(
           monitoringFailureEvidence
         },
         probeUrl,
-        supportPriority: incidentPriority.get(course.id) ?? 2
+        supportPriority: incidentPriority.get(course.id) ?? 1,
+        episodeStartedAt: readyIncident.firstSeenAt
       });
       queuedCourseIds.add(course.id);
     }
   }
 
   for (const incident of openIncidents) {
+    const readyIncident = browserReadyIncidentByCourse.get(incident.courseId);
+    if (!readyIncident) continue;
     const course = incident.course;
     if (!course?.id || queuedCourseIds.has(course.id)) {
       continue;
@@ -354,13 +438,17 @@ export async function listBrowserProbeTargets(
         monitoringFailureEvidence
       },
       probeUrl,
-      supportPriority: incidentPriority.get(course.id) ?? 1
+      supportPriority: incidentPriority.get(course.id) ?? 1,
+      episodeStartedAt: readyIncident.firstSeenAt
     });
     queuedCourseIds.add(course.id);
   }
 
   const orderedTargets = targets.sort(
-    (left, right) => left.supportPriority - right.supportPriority || left.rank - right.rank
+    (left, right) =>
+      left.supportPriority - right.supportPriority ||
+      left.episodeStartedAt.getTime() - right.episodeStartedAt.getTime() ||
+      left.rank - right.rank
   );
   return orderedTargets.slice(0, limit).map((target) => ({
     searchId: target.searchId,
@@ -396,7 +484,7 @@ async function listExactIncidentBrowserProbeTarget(
         where: {
           teeSearch: {
             status: "ACTIVE",
-            date: { gte: startOfUtcCalendarDay() }
+            date: { gte: earliestPotentiallyActiveSearchDate() }
           }
         },
         orderBy: { rank: "asc" },
@@ -608,46 +696,77 @@ export async function retireLegacyPolicyOnlyCourseBlock(
     preserveBookingMetadata: boolean;
   }
 ) {
-  const preserveProviderAccess =
-    preservation.preserveDetectedBookingUrl || preservation.preserveBookingMetadata;
-  const updated = await prisma.course.updateMany({
-    where: {
-      id: courseId,
-      updatedAt: expectedCourse.updatedAt,
-      detectedBookingUrl: expectedCourse.detectedBookingUrl,
-      automationEligibility: "BLOCKED",
-      automationReason: "AUTOMATION_PROHIBITED"
-    },
-    data: {
-      ...(!preserveProviderAccess
-        ? {
-            providerFamilyKey: "SOURCE_MISSING",
-            detectedPlatform: "UNKNOWN" as const
-          }
-        : {}),
-      ...(!preservation.preserveWebsite ? { website: null } : {}),
-      ...(!preservation.preserveDetectedBookingUrl ? { detectedBookingUrl: null } : {}),
-      ...(!preservation.preserveBookingMetadata ? { bookingMetadata: Prisma.DbNull } : {}),
-      ...(!preserveProviderAccess ? { bookingMethod: "UNKNOWN" as const } : {}),
-      automationEligibility: "NEEDS_REVIEW",
-      automationReason: "OTHER",
-      bookingAccessMode: "UNKNOWN",
-      policyNotes:
-        "Legacy booking-policy text is not a technical monitoring blocker. Current public monitoring support requires fresh verification.",
-      intelligenceVerifiedAt: null,
-      intelligenceReviewAt: null,
-      intelligenceConfidence: null
+  return runSerializedCourseMonitoringWrite(courseId, async (transaction) => {
+    const current = await transaction.course.findUnique({
+      where: { id: courseId }
+    });
+    if (!current) {
+      return null;
     }
+    const preserveProviderAccess =
+      preservation.preserveDetectedBookingUrl || preservation.preserveBookingMetadata;
+    const updated = await transaction.course.updateMany({
+      where: {
+        id: courseId,
+        updatedAt: expectedCourse.updatedAt,
+        detectedBookingUrl: expectedCourse.detectedBookingUrl,
+        automationEligibility: "BLOCKED",
+        automationReason: "AUTOMATION_PROHIBITED"
+      },
+      data: {
+        ...(!preserveProviderAccess
+          ? {
+              providerFamilyKey: "SOURCE_MISSING",
+              detectedPlatform: "UNKNOWN" as const
+            }
+          : {}),
+        ...(!preservation.preserveWebsite ? { website: null } : {}),
+        ...(!preservation.preserveDetectedBookingUrl ? { detectedBookingUrl: null } : {}),
+        ...(!preservation.preserveBookingMetadata ? { bookingMetadata: Prisma.DbNull } : {}),
+        ...(!preserveProviderAccess ? { bookingMethod: "UNKNOWN" as const } : {}),
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "OTHER",
+        bookingAccessMode: "UNKNOWN",
+        policyNotes:
+          "Legacy booking-policy text is not a technical monitoring blocker. Current public monitoring support requires fresh verification.",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null
+      }
+    });
+    if (updated.count !== 1) {
+      return null;
+    }
+    const applied = await transaction.course.findUnique({ where: { id: courseId } });
+    if (applied) {
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transaction,
+        {
+          courseId,
+          before: current,
+          after: applied,
+          source: "COURSE_SUPPORT_RESPONDER",
+          now: new Date()
+        }
+      );
+    }
+    return applied;
   });
-  if (updated.count !== 1) {
-    return null;
-  }
-  return prisma.course.findUnique({ where: { id: courseId } });
 }
 
 export async function applyBrowserDiscoveryToCourse(
   input: BrowserDiscovery,
   expectedCourse?: BrowserDiscoveryCourseExpectation
+) {
+  return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
+    applyBrowserDiscoveryToCourseInTransaction(input, expectedCourse, transaction)
+  );
+}
+
+async function applyBrowserDiscoveryToCourseInTransaction(
+  input: BrowserDiscovery,
+  expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
+  transaction: Prisma.TransactionClient
 ) {
   input = normalizeAutomatedTechnicalDiscovery(normalizeBrowserDiscoveryForMonitoring(input));
   const provider = resolveProviderCapability({
@@ -685,7 +804,7 @@ export async function applyBrowserDiscoveryToCourse(
       return null;
     }
 
-    const current = await prisma.course.findUnique({
+    const current = await transaction.course.findUnique({
       where: { id: input.courseId },
       select: {
         providerFamilyKey: true,
@@ -698,6 +817,7 @@ export async function applyBrowserDiscoveryToCourse(
         automationEligibility: true,
         automationReason: true,
         bookingAccessMode: true,
+        monitoringMode: true,
         intelligenceVerifiedAt: true,
         intelligenceReviewAt: true,
         intelligenceConfidence: true,
@@ -718,7 +838,7 @@ export async function applyBrowserDiscoveryToCourse(
       return null;
     }
 
-    const updated = await prisma.course.updateMany({
+    const updated = await transaction.course.updateMany({
       where: { id: input.courseId, updatedAt: current.updatedAt },
       data: {
         detectedPlatform: inspectedProviderIdentity.detectedPlatform,
@@ -730,7 +850,22 @@ export async function applyBrowserDiscoveryToCourse(
       return null;
     }
 
-    return prisma.course.findUnique({ where: { id: input.courseId } });
+    const applied = await transaction.course.findUnique({
+      where: { id: input.courseId }
+    });
+    if (applied) {
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transaction,
+        {
+          courseId: input.courseId,
+          before: current,
+          after: applied,
+          source: "COURSE_SUPPORT_RESPONDER",
+          now: new Date()
+        }
+      );
+    }
+    return applied;
   }
 
   const bookingMethod = input.bookingMethod ?? "PUBLIC_ONLINE";
@@ -745,7 +880,7 @@ export async function applyBrowserDiscoveryToCourse(
       ? input.bookingUrl
       : null;
 
-  const current = await prisma.course.findUnique({
+  const current = await transaction.course.findUnique({
     where: { id: input.courseId },
     select: {
       name: true,
@@ -759,6 +894,7 @@ export async function applyBrowserDiscoveryToCourse(
       automationEligibility: true,
       automationReason: true,
       bookingAccessMode: true,
+      monitoringMode: true,
       intelligenceVerifiedAt: true,
       intelligenceReviewAt: true,
       intelligenceConfidence: true,
@@ -831,7 +967,7 @@ export async function applyBrowserDiscoveryToCourse(
     return null;
   }
 
-  const updated = await prisma.course.updateMany({
+  const updated = await transaction.course.updateMany({
     where: { id: input.courseId, updatedAt: current.updatedAt },
     data: sourceUnavailableClassification
       ? {
@@ -888,7 +1024,22 @@ export async function applyBrowserDiscoveryToCourse(
     return null;
   }
 
-  return prisma.course.findUnique({ where: { id: input.courseId } });
+  const applied = await transaction.course.findUnique({
+    where: { id: input.courseId }
+  });
+  if (applied) {
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+      transaction,
+      {
+        courseId: input.courseId,
+        before: current,
+        after: applied,
+        source: "COURSE_SUPPORT_RESPONDER",
+        now: new Date()
+      }
+    );
+  }
+  return applied;
 }
 
 function normalizeAutomatedTechnicalDiscovery(discovery: BrowserDiscovery): BrowserDiscovery {
@@ -1953,7 +2104,10 @@ export async function listSearchesNeedingScheduleRecovery() {
   return prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
-      date: { gte: startOfUtcCalendarDay() },
+      // Exact multi-course expiry is enforced by executeScheduledSearchCheck.
+      // This indexed floor keeps every possibly-current local calendar date in
+      // the recovery cohort without reviving older searches.
+      date: { gte: earliestPotentiallyActiveSearchDate(now) },
       OR: [
         { checkStatus: "IDLE" },
         {

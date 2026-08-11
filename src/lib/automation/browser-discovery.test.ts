@@ -7796,6 +7796,24 @@ describe("TenFore public booking enrichment", () => {
     expect(discovery.policyNotes).toContain("does not generate, replay, solve, or bypass CAPTCHA tokens");
     expect(discovery.apiMetadata).toBeUndefined();
   });
+
+  it("canonicalizes official TenFore vanity links to the rendered-reader host", () => {
+    const discovery = buildBrowserDiscovery({
+      courseId: "municipal-tenfore",
+      courseName: "Municipal Golf Course",
+      sourceUrl: "https://city.example/golf",
+      finalUrl: "https://city.example/tee-times",
+      observedUrls: ["https://www.tenfore.golf/municipal-course"]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: "https://fox.tenfore.golf/municipal-course",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationReason: "CAPTCHA_OR_QUEUE"
+    });
+  });
 });
 
 function chronogolfNextData(input: {

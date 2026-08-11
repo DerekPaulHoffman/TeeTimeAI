@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { Prisma, type CourseMonitoringState } from "@prisma/client";
 
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
@@ -7,8 +9,14 @@ import { prisma } from "@/lib/prisma";
 import {
   createIncidentReference,
   createMonitoringReference,
-  getCourseMonitoringEscalationDeadline
+  getCourseMonitoringEscalationDeadline,
+  runSerializedCourseMonitoringWrite
 } from "./course-monitoring";
+import {
+  AUTOMATION_PLAYBOOK_VERSION,
+  automationPlaybookLedgerSchema,
+  serializeAutomationPlaybookLedger
+} from "./course-monitoring-playbook";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
   buildProviderFailureFingerprint,
@@ -44,6 +52,49 @@ export type CourseMonitoringReconciliationReport = {
   applied: number;
   skippedAfterRefresh: number;
 };
+
+type CourseMonitoringPlaybookBackfillTarget =
+  | "OPEN_INCIDENT"
+  | "AUTOMATIC_TECHNICAL_FINAL"
+  | "ACTIVE_BATCH"
+  | "EXISTING_LEDGER"
+  | "FINAL_MANUAL"
+  | "FINAL_IDENTITY"
+  | "HUMAN_APPROVED_TECHNICAL_FINAL"
+  | "INACTIVE_AUTOMATIC_TECHNICAL_FINAL"
+  | "NOT_ELIGIBLE";
+
+export type CourseMonitoringPlaybookBackfillReport = {
+  apply: boolean;
+  incidentsScanned: number;
+  incidentlessAutomaticTechnicalFinalsToOpen: number;
+  candidatesToBackfill: number;
+  openIncidentsToRequeue: number;
+  automaticTechnicalFinalsToReopen: number;
+  activeBatchesSkipped: number;
+  existingLedgersPreserved: number;
+  manualFinalsPreserved: number;
+  identityFinalsPreserved: number;
+  humanApprovedTechnicalFinalsPreserved: number;
+  inactiveAutomaticTechnicalFinalsPreserved: number;
+  applied: {
+    freshCyclesOpened: number;
+    incidentsCreated: number;
+    monitoringStatusesCreated: number;
+    monitoringStatusesUpdated: number;
+    eventsCreated: number;
+    searchesQueued: number;
+    skippedAfterRefresh: number;
+  };
+};
+
+const EMPTY_AUTOMATION_PLAYBOOK_LEDGER = serializeAutomationPlaybookLedger(
+  automationPlaybookLedgerSchema.parse({
+    version: AUTOMATION_PLAYBOOK_VERSION,
+    events: []
+  })
+);
+const PLAYBOOK_BACKFILL_EVENT_VERSION = 1;
 
 export async function reconcileCourseMonitoringLifecycle(input: {
   apply: boolean;
@@ -185,6 +236,613 @@ export async function reconcileCourseMonitoringLifecycle(input: {
   return report;
 }
 
+export async function backfillCourseMonitoringPlaybook(input: {
+  apply: boolean;
+  now?: Date;
+}): Promise<CourseMonitoringPlaybookBackfillReport> {
+  const now = input.now ?? new Date();
+  const [incidents, incidentlessCourses] = await Promise.all([
+    prisma.courseSupportIncident.findMany({
+      where: {
+        OR: [
+          { status: { in: ["AUTO_INVESTIGATING", "NEEDS_HUMAN"] } },
+          {
+            status: "RESOLVED",
+            resolution: {
+              in: [
+                "TECHNICAL_LIMITATION_CLASSIFIED",
+                "HUMAN_VERIFIED_TECHNICAL_LIMITATION"
+              ]
+            }
+          }
+        ]
+      },
+      orderBy: { createdAt: "asc" },
+      include: {
+        course: {
+          select: {
+            timeZone: true,
+            monitoringStatus: true
+          }
+        }
+      }
+    }),
+    prisma.course.findMany({
+      where: {
+        supportIncident: { is: null },
+        automationEligibility: "BLOCKED"
+      },
+      orderBy: { createdAt: "asc" },
+      include: { monitoringStatus: true }
+    })
+  ]);
+
+  const plans = await Promise.all(
+    incidents.map(async (incident) => {
+      const demand = needsPlaybookBackfillDemandLookup({
+        status: incident.status,
+        resolution: incident.resolution,
+        attemptLedger: incident.attemptLedger,
+        activeBatchId: incident.activeBatchId,
+        monitoringState: incident.course.monitoringStatus?.state ?? null
+      })
+        ? await prisma.teeSearch.aggregate({
+            where: buildActiveCourseDemandWhere(
+              incident.courseId,
+              incident.course.timeZone,
+              now
+            ),
+            _count: { id: true },
+            _min: { date: true }
+          })
+        : { _count: { id: 0 }, _min: { date: null } };
+      return {
+        incident,
+        target: getCourseMonitoringPlaybookBackfillTarget({
+          status: incident.status,
+          resolution: incident.resolution,
+          attemptLedger: incident.attemptLedger,
+          activeBatchId: incident.activeBatchId,
+          monitoringState: incident.course.monitoringStatus?.state ?? null,
+          activeRealSearchCount: demand._count.id
+        })
+      };
+    })
+  );
+  const incidentlessTechnicalFinals = (
+    await Promise.all(
+      incidentlessCourses.map(async (course) => {
+        if (!isIncidentlessAutomaticTechnicalFinal(course)) {
+          return null;
+        }
+        const demand = await prisma.teeSearch.aggregate({
+          where: buildActiveCourseDemandWhere(course.id, course.timeZone, now),
+          _count: { id: true },
+          _min: { date: true }
+        });
+        return demand._count.id > 0 ? { course, demand } : null;
+      })
+    )
+  ).filter((plan) => plan !== null);
+
+  const report: CourseMonitoringPlaybookBackfillReport = {
+    apply: input.apply,
+    incidentsScanned: plans.length,
+    incidentlessAutomaticTechnicalFinalsToOpen: incidentlessTechnicalFinals.length,
+    candidatesToBackfill:
+      plans.filter((plan) => isPlaybookBackfillCandidate(plan.target)).length +
+      incidentlessTechnicalFinals.length,
+    openIncidentsToRequeue: plans.filter((plan) => plan.target === "OPEN_INCIDENT").length,
+    automaticTechnicalFinalsToReopen: plans.filter(
+      (plan) => plan.target === "AUTOMATIC_TECHNICAL_FINAL"
+    ).length + incidentlessTechnicalFinals.length,
+    activeBatchesSkipped: plans.filter((plan) => plan.target === "ACTIVE_BATCH").length,
+    existingLedgersPreserved: plans.filter((plan) => plan.target === "EXISTING_LEDGER")
+      .length,
+    manualFinalsPreserved: plans.filter((plan) => plan.target === "FINAL_MANUAL").length,
+    identityFinalsPreserved: plans.filter((plan) => plan.target === "FINAL_IDENTITY").length,
+    humanApprovedTechnicalFinalsPreserved: plans.filter(
+      (plan) => plan.target === "HUMAN_APPROVED_TECHNICAL_FINAL"
+    ).length,
+    inactiveAutomaticTechnicalFinalsPreserved: plans.filter(
+      (plan) => plan.target === "INACTIVE_AUTOMATIC_TECHNICAL_FINAL"
+    ).length,
+    applied: {
+      freshCyclesOpened: 0,
+      incidentsCreated: 0,
+      monitoringStatusesCreated: 0,
+      monitoringStatusesUpdated: 0,
+      eventsCreated: 0,
+      searchesQueued: 0,
+      skippedAfterRefresh: 0
+    }
+  };
+  if (!input.apply) {
+    return report;
+  }
+
+  for (const plan of plans) {
+    if (!isPlaybookBackfillCandidate(plan.target)) {
+      continue;
+    }
+    const outcome = await runSerializedCourseMonitoringWrite(
+      plan.incident.courseId,
+      async (transaction) => {
+        const [incident, status] = await Promise.all([
+          transaction.courseSupportIncident.findUnique({
+            where: { id: plan.incident.id },
+            include: {
+              course: {
+                select: { timeZone: true }
+              }
+            }
+          }),
+          transaction.courseMonitoringStatus.findUnique({
+            where: { courseId: plan.incident.courseId }
+          })
+        ]);
+        if (!incident) {
+          return null;
+        }
+        const demandWhere = buildActiveCourseDemandWhere(
+          incident.courseId,
+          incident.course.timeZone,
+          now
+        );
+        const demand = await transaction.teeSearch.aggregate({
+          where: demandWhere,
+          _count: { id: true },
+          _min: { date: true }
+        });
+        const target = getCourseMonitoringPlaybookBackfillTarget({
+          status: incident.status,
+          resolution: incident.resolution,
+          attemptLedger: incident.attemptLedger,
+          activeBatchId: incident.activeBatchId,
+          monitoringState: status?.state ?? null,
+          activeRealSearchCount: demand._count.id
+        });
+        if (!isPlaybookBackfillCandidate(target)) {
+          return null;
+        }
+
+        const nextCycle = incident.cycle + 1;
+        const idempotencyKey = `course-monitoring-playbook-backfill-v${PLAYBOOK_BACKFILL_EVENT_VERSION}:${incident.id}:${nextCycle}`;
+        const replay = await transaction.courseMonitoringEvent.findUnique({
+          where: { idempotencyKey },
+          select: { id: true }
+        });
+        if (replay) {
+          return null;
+        }
+        const reopeningAutomaticFinal = target === "AUTOMATIC_TECHNICAL_FINAL";
+        const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+          where: {
+            id: incident.id,
+            cycle: incident.cycle,
+            revision: incident.revision,
+            status: incident.status,
+            activeBatchId: null,
+            attemptLedger: { equals: Prisma.DbNull }
+          },
+          data: {
+            cycle: { increment: 1 },
+            status: "AUTO_INVESTIGATING",
+            attemptLedger: EMPTY_AUTOMATION_PLAYBOOK_LEDGER,
+            engineeringOnly: demand._count.id > 0 ? false : incident.engineeringOnly,
+            nextAttemptAt: now,
+            confirmedAt: now,
+            escalationDeadlineAt: getCourseMonitoringEscalationDeadline(now, demand._count.id),
+            humanReviewReason: null,
+            nextReminderAt: null,
+            ...(reopeningAutomaticFinal
+              ? {
+                  resolvedAt: null,
+                  resolution: null,
+                  resolutionMessage: null,
+                  resolutionNotifiedAt: null,
+                  decisionActorId: null,
+                  decisionAt: null,
+                  decisionNote: null,
+                  decisionEvidenceUrl: null,
+                  decisionIdempotencyKey: null
+                }
+              : {}),
+            activeRealSearchCount: demand._count.id,
+            earliestTargetDate: demand._min.date,
+            nextAction:
+              "Run the current ordered playbook from official identity through independent confirmation.",
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (incidentUpdated.count !== 1) {
+          return null;
+        }
+
+        let monitoringStatusesCreated = 0;
+        let monitoringStatusesUpdated = 0;
+        if (status) {
+          const statusUpdated = await transaction.courseMonitoringStatus.updateMany({
+            where: {
+              courseId: incident.courseId,
+              revision: status.revision,
+              state: status.state
+            },
+            data: {
+              state: "AUTO_INVESTIGATING",
+              lastFailureAt: now,
+              failureFingerprint: incident.failureFingerprint,
+              firstDegradedAt: now,
+              nextAutomaticAttemptAt: now,
+              revalidationRequestedAt: now,
+              stateChangedAt: now,
+              revision: { increment: 1 }
+            }
+          });
+          if (statusUpdated.count !== 1) {
+            throw new Error(
+              "The monitoring status changed while the playbook backfill opened a fresh cycle."
+            );
+          }
+          monitoringStatusesUpdated = 1;
+        } else {
+          await transaction.courseMonitoringStatus.create({
+            data: {
+              courseId: incident.courseId,
+              reference: createMonitoringReference(),
+              state: "AUTO_INVESTIGATING",
+              lastFailureAt: now,
+              consecutiveFailures: Math.max(incident.occurrenceCount, 1),
+              failureFingerprint: incident.failureFingerprint,
+              firstDegradedAt: now,
+              nextAutomaticAttemptAt: now,
+              revalidationRequestedAt: now,
+              stateChangedAt: now,
+              updatedAt: now
+            }
+          });
+          monitoringStatusesCreated = 1;
+        }
+
+        const queued = await transaction.teeSearch.updateMany({
+          where: demandWhere,
+          data: {
+            nextCheckAt: now,
+            recheckRequestedAt: now
+          }
+        });
+        await transaction.courseMonitoringEvent.create({
+          data: {
+            courseId: incident.courseId,
+            incidentId: incident.id,
+            eventType: "REVALIDATION_REQUESTED",
+            source: "MAINTENANCE",
+            fromState: status?.state ?? null,
+            toState: "AUTO_INVESTIGATING",
+            failureFingerprint: incident.failureFingerprint,
+            message:
+              "Legacy monitoring work was opened as a fresh current-runtime playbook cycle without inferring any completed stage.",
+            idempotencyKey,
+            occurredAt: now,
+            audit: {
+              backfillVersion: PLAYBOOK_BACKFILL_EVENT_VERSION,
+              priorCycle: incident.cycle,
+              cycle: nextCycle,
+              reason: reopeningAutomaticFinal
+                ? "ACTIVE_DEMAND_AUTOMATIC_TECHNICAL_FINAL_WITHOUT_LEDGER"
+                : "OPEN_INCIDENT_WITHOUT_LEDGER",
+              playbookVersion: AUTOMATION_PLAYBOOK_VERSION,
+              inferredPlaybookStages: false,
+              activeRealSearchCount: demand._count.id,
+              customerDataIncluded: false
+            }
+          }
+        });
+        return {
+          monitoringStatusesCreated,
+          monitoringStatusesUpdated,
+          searchesQueued: queued.count
+        };
+      }
+    );
+    if (!outcome) {
+      report.applied.skippedAfterRefresh += 1;
+      continue;
+    }
+    report.applied.freshCyclesOpened += 1;
+    report.applied.monitoringStatusesCreated += outcome.monitoringStatusesCreated;
+    report.applied.monitoringStatusesUpdated += outcome.monitoringStatusesUpdated;
+    report.applied.eventsCreated += 1;
+    report.applied.searchesQueued += outcome.searchesQueued;
+  }
+
+  for (const plan of incidentlessTechnicalFinals) {
+    const outcome = await runSerializedCourseMonitoringWrite(
+      plan.course.id,
+      async (transaction) => {
+        const course = await transaction.course.findUnique({
+          where: { id: plan.course.id },
+          include: {
+            monitoringStatus: true,
+            supportIncident: { select: { id: true } }
+          }
+        });
+        if (!course || course.supportIncident || !isIncidentlessAutomaticTechnicalFinal(course)) {
+          return null;
+        }
+
+        const demandWhere = buildActiveCourseDemandWhere(course.id, course.timeZone, now);
+        const demand = await transaction.teeSearch.aggregate({
+          where: demandWhere,
+          _count: { id: true },
+          _min: { date: true }
+        });
+        if (demand._count.id === 0) {
+          return null;
+        }
+
+        const idempotencyKey = `course-monitoring-playbook-backfill-v${PLAYBOOK_BACKFILL_EVENT_VERSION}:legacy-course:${course.id}:1`;
+        const replay = await transaction.courseMonitoringEvent.findUnique({
+          where: { idempotencyKey },
+          select: { id: true }
+        });
+        if (replay) {
+          return null;
+        }
+
+        const provider = resolveProviderCapability(course);
+        const failureClass = getLegacyAutomaticTechnicalFailureClass(course);
+        const failureFingerprint = buildProviderFailureFingerprint({
+          providerFamilyKey: provider.providerFamilyKey,
+          failureClass,
+          operation: "AVAILABILITY",
+          httpStatus: null
+        });
+        const incidentId = randomUUID();
+        const incidentCreated = await transaction.courseSupportIncident.createMany({
+          data: [
+            {
+              id: incidentId,
+              reference: createIncidentReference(),
+              courseId: course.id,
+              status: "AUTO_INVESTIGATING",
+              kind: "BLOCKED_AUTH",
+              providerFamilyKey: provider.providerFamilyKey,
+              failureClass,
+              failureFingerprint,
+              courseNameSnapshot: course.name,
+              platformSnapshot: course.detectedPlatform,
+              bookingUrlSnapshot: course.detectedBookingUrl ?? course.website,
+              initialMessage:
+                "A legacy automatic technical classification requires the current ordered playbook.",
+              latestMessage:
+                "Active demand reopened this course for current-runtime verification.",
+              nextAction:
+                "Run the current ordered playbook from official identity through independent confirmation.",
+              affectedSearchCount: demand._count.id,
+              engineeringOnly: false,
+              attemptLedger: EMPTY_AUTOMATION_PLAYBOOK_LEDGER,
+              nextAttemptAt: now,
+              confirmedAt: now,
+              escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+                now,
+                demand._count.id
+              ),
+              activeRealSearchCount: demand._count.id,
+              earliestTargetDate: demand._min.date,
+              firstSeenAt: now,
+              lastSeenAt: now
+            }
+          ],
+          skipDuplicates: true
+        });
+        if (incidentCreated.count !== 1) {
+          return null;
+        }
+
+        const courseUpdated = await transaction.course.updateMany({
+          where: {
+            id: course.id,
+            automationEligibility: "BLOCKED",
+            supportIncident: { is: { id: incidentId } }
+          },
+          data: {
+            automationEligibility: "NEEDS_REVIEW",
+            intelligenceReviewAt: null
+          }
+        });
+        if (courseUpdated.count !== 1) {
+          throw new Error(
+            "The legacy technical final changed while the playbook backfill opened its incident."
+          );
+        }
+
+        let monitoringStatusesCreated = 0;
+        let monitoringStatusesUpdated = 0;
+        if (course.monitoringStatus) {
+          const statusUpdated = await transaction.courseMonitoringStatus.updateMany({
+            where: {
+              courseId: course.id,
+              revision: course.monitoringStatus.revision,
+              state: course.monitoringStatus.state
+            },
+            data: {
+              state: "AUTO_INVESTIGATING",
+              lastSuccessfulAt: null,
+              lastFailureAt: now,
+              consecutiveFailures: 1,
+              failureFingerprint,
+              firstDegradedAt: now,
+              nextAutomaticAttemptAt: now,
+              revalidationRequestedAt: now,
+              stateChangedAt: now,
+              revision: { increment: 1 }
+            }
+          });
+          if (statusUpdated.count !== 1) {
+            throw new Error(
+              "The monitoring status changed while the legacy technical final was reopened."
+            );
+          }
+          monitoringStatusesUpdated = 1;
+        } else {
+          await transaction.courseMonitoringStatus.create({
+            data: {
+              courseId: course.id,
+              reference: createMonitoringReference(),
+              state: "AUTO_INVESTIGATING",
+              lastFailureAt: now,
+              consecutiveFailures: 1,
+              failureFingerprint,
+              firstDegradedAt: now,
+              nextAutomaticAttemptAt: now,
+              revalidationRequestedAt: now,
+              stateChangedAt: now,
+              updatedAt: now
+            }
+          });
+          monitoringStatusesCreated = 1;
+        }
+
+        const queued = await transaction.teeSearch.updateMany({
+          where: demandWhere,
+          data: {
+            nextCheckAt: now,
+            recheckRequestedAt: now
+          }
+        });
+        await transaction.courseMonitoringEvent.create({
+          data: {
+            courseId: course.id,
+            incidentId,
+            eventType: "REVALIDATION_REQUESTED",
+            source: "MAINTENANCE",
+            fromState: course.monitoringStatus?.state ?? null,
+            toState: "AUTO_INVESTIGATING",
+            failureFingerprint,
+            message:
+              "An active-demand legacy technical final was opened as a current unexhausted playbook cycle.",
+            idempotencyKey,
+            occurredAt: now,
+            audit: {
+              backfillVersion: PLAYBOOK_BACKFILL_EVENT_VERSION,
+              cycle: 1,
+              reason: "ACTIVE_DEMAND_TECHNICAL_FINAL_WITHOUT_INCIDENT_OR_LEDGER",
+              playbookVersion: AUTOMATION_PLAYBOOK_VERSION,
+              inferredPlaybookStages: false,
+              activeRealSearchCount: demand._count.id,
+              customerDataIncluded: false
+            }
+          }
+        });
+        return {
+          monitoringStatusesCreated,
+          monitoringStatusesUpdated,
+          searchesQueued: queued.count
+        };
+      }
+    );
+    if (!outcome) {
+      report.applied.skippedAfterRefresh += 1;
+      continue;
+    }
+    report.applied.freshCyclesOpened += 1;
+    report.applied.incidentsCreated += 1;
+    report.applied.monitoringStatusesCreated += outcome.monitoringStatusesCreated;
+    report.applied.monitoringStatusesUpdated += outcome.monitoringStatusesUpdated;
+    report.applied.eventsCreated += 1;
+    report.applied.searchesQueued += outcome.searchesQueued;
+  }
+  return report;
+}
+
+function buildActiveCourseDemandWhere(
+  courseId: string,
+  timeZone: string | null | undefined,
+  now: Date
+): Prisma.TeeSearchWhereInput {
+  return {
+    status: "ACTIVE",
+    date: {
+      gte: getCourseLocalDateStorageBoundary(timeZone, now)
+    },
+    trafficClass: {
+      notIn: [...syntheticWebsiteTrafficClasses]
+    },
+    preferences: {
+      some: { courseId }
+    }
+  };
+}
+
+function needsPlaybookBackfillDemandLookup(input: {
+  status: string;
+  resolution: string | null;
+  attemptLedger: unknown;
+  activeBatchId: string | null;
+  monitoringState: CourseMonitoringState | null;
+}) {
+  if (
+    input.attemptLedger !== null ||
+    input.activeBatchId ||
+    input.monitoringState === "FINAL_MANUAL" ||
+    input.monitoringState === "FINAL_IDENTITY" ||
+    input.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION"
+  ) {
+    return false;
+  }
+  return (
+    input.status === "AUTO_INVESTIGATING" ||
+    input.status === "NEEDS_HUMAN" ||
+    (input.status === "RESOLVED" &&
+      input.resolution === "TECHNICAL_LIMITATION_CLASSIFIED" &&
+      input.monitoringState === "FINAL_TECHNICAL")
+  );
+}
+
+function getCourseMonitoringPlaybookBackfillTarget(input: {
+  status: string;
+  resolution: string | null;
+  attemptLedger: unknown;
+  activeBatchId: string | null;
+  monitoringState: CourseMonitoringState | null;
+  activeRealSearchCount: number;
+}): CourseMonitoringPlaybookBackfillTarget {
+  if (input.attemptLedger !== null) {
+    return "EXISTING_LEDGER";
+  }
+  if (input.activeBatchId) {
+    return "ACTIVE_BATCH";
+  }
+  if (input.monitoringState === "FINAL_MANUAL") {
+    return "FINAL_MANUAL";
+  }
+  if (input.monitoringState === "FINAL_IDENTITY") {
+    return "FINAL_IDENTITY";
+  }
+  if (input.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION") {
+    return "HUMAN_APPROVED_TECHNICAL_FINAL";
+  }
+  if (input.status === "AUTO_INVESTIGATING" || input.status === "NEEDS_HUMAN") {
+    return "OPEN_INCIDENT";
+  }
+  if (
+    input.status === "RESOLVED" &&
+    input.resolution === "TECHNICAL_LIMITATION_CLASSIFIED" &&
+    input.monitoringState === "FINAL_TECHNICAL"
+  ) {
+    return input.activeRealSearchCount > 0
+      ? "AUTOMATIC_TECHNICAL_FINAL"
+      : "INACTIVE_AUTOMATIC_TECHNICAL_FINAL";
+  }
+  return "NOT_ELIGIBLE";
+}
+
+function isPlaybookBackfillCandidate(target: CourseMonitoringPlaybookBackfillTarget) {
+  return target === "OPEN_INCIDENT" || target === "AUTOMATIC_TECHNICAL_FINAL";
+}
+
 export async function backfillCourseMonitoringLifecycle(input: {
   apply: boolean;
   now?: Date;
@@ -230,6 +888,8 @@ export async function backfillCourseMonitoringLifecycle(input: {
       );
       const technicalAutomatedFinal =
         isAutomatedTechnicalFinal(course) &&
+        realDemand._count.id > 0 &&
+        (course.supportIncident?.attemptLedger ?? null) === null &&
         course.supportIncident?.resolution !== "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
       const humanApprovedTechnicalFinal =
         course.supportIncident?.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
@@ -654,6 +1314,29 @@ function isAutomatedTechnicalFinal(course: {
         course.automationReason
       ))
   );
+}
+
+function isIncidentlessAutomaticTechnicalFinal(
+  course: Parameters<typeof isAutomatedTechnicalFinal>[0] & {
+    monitoringStatus?: { state: CourseMonitoringState } | null;
+  }
+) {
+  return (
+    isAutomatedTechnicalFinal(course) &&
+    (!course.monitoringStatus || course.monitoringStatus.state === "FINAL_TECHNICAL")
+  );
+}
+
+function getLegacyAutomaticTechnicalFailureClass(course: {
+  bookingAccessMode: string;
+}) {
+  if (course.bookingAccessMode === "CAPTCHA_OR_QUEUE") {
+    return "CHALLENGE" as const;
+  }
+  if (course.bookingAccessMode.startsWith("ACCOUNT")) {
+    return "AUTH" as const;
+  }
+  return "UNKNOWN" as const;
 }
 
 function buildBaselineFingerprint(

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
+import { webcrypto } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
@@ -194,6 +195,85 @@ function loadProphetReader() {
   return context.TeeTimeSpotProphetReader as Reader;
 }
 
+function loadBackgroundHarness(initialPendingJobs: Record<string, unknown> = {}) {
+  const source = readFileSync(
+    resolve(process.cwd(), "tools", "local-chrome-reader", "background.js"),
+    "utf8"
+  );
+  const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+  const storage: Record<string, unknown> = {
+    enabled: true,
+    backendOrigin: "https://teetimespot.com",
+    deviceId: "chrome-test",
+    deviceToken: "test-device-secret-1234",
+    pendingJobs: clone(initialPendingJobs)
+  };
+  const submittedJobIds: string[] = [];
+  const addListener = () => undefined;
+  const context: Record<string, unknown> = {
+    URL,
+    AbortController,
+    TextEncoder,
+    clearTimeout,
+    console,
+    crypto: webcrypto,
+    setTimeout,
+    fetch: async (_url: string, init?: { body?: string }) => {
+      if (init?.body) {
+        submittedJobIds.push(
+          (JSON.parse(init.body) as { jobId: string }).jobId
+        );
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ job: null })
+      };
+    },
+    chrome: {
+      alarms: {
+        create: async () => undefined,
+        onAlarm: { addListener }
+      },
+      runtime: {
+        getManifest: () => ({ version: "test" }),
+        onInstalled: { addListener },
+        onMessage: { addListener },
+        onStartup: { addListener },
+        openOptionsPage: async () => undefined
+      },
+      storage: {
+        local: {
+          get: async (keys: string | string[]) => {
+            const selectedKeys = Array.isArray(keys) ? keys : [keys];
+            return Object.fromEntries(
+              selectedKeys.map((key) => [key, clone(storage[key])])
+            );
+          },
+          set: async (values: Record<string, unknown>) => {
+            Object.assign(storage, clone(values));
+          }
+        }
+      },
+      tabs: {
+        create: async () => ({ id: 1 }),
+        get: async () => ({ id: 1 }),
+        onUpdated: { addListener },
+        query: async () => [],
+        remove: async () => undefined,
+        sendMessage: async () => undefined
+      }
+    }
+  };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return {
+    context,
+    getPendingJobs: () => clone(storage.pendingJobs),
+    submittedJobIds
+  };
+}
+
 describe("local Chrome reader contract", () => {
   it("accepts every exact allowlisted reader route and rejects other routes", () => {
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
@@ -233,7 +313,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.10.2");
+    expect(manifest.version).toBe("1.10.5");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
@@ -251,7 +331,11 @@ describe("local Chrome reader contract", () => {
     expect(backgroundSource).toContain('["EZLINKS_RENDERED", 1]');
     expect(backgroundSource).toContain('["WEBTRAC_RENDERED", 1]');
     expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
-    expect(backgroundSource).toContain("pending.result = result");
+    expect(backgroundSource).toContain("function withPendingJobsLock(operation)");
+    expect(backgroundSource).toContain("expectJson: true");
+    expect(backgroundSource).toContain(
+      "jobs[String(tabId)] = { ...current, result }"
+    );
     expect(backgroundSource).toContain('"RESULT_RETRY_PENDING"');
     expect(contentSource).toContain(
       "const pending = tabId ? stored.pendingJobs?.[tabId] : null;"
@@ -259,11 +343,15 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).not.toContain("entries.length === 1");
     expect(contentSource).toContain("globalThis.TeeTimeSpotWebTracReader");
     expect(contentSource).toContain("waitForPassiveChallengeClearance");
+    expect(contentSource).toContain("if (pending.result) return;");
+    expect(contentSource).toContain("finally {");
+    expect(contentSource).toContain("running = false;");
     expect(contentSource).toContain(
       "The public page did not return to the allowlisted search route."
     );
     expect(backgroundSource).toContain("pending.job?.leaseExpiresAt");
     expect(backgroundSource).toContain("findReusableEzLinksTab(payload.job)");
+    expect(backgroundSource).toContain("return finishJob(sender.tab.id, message.result)");
     expect(backgroundSource).toContain("pending.closeTabOnFinish !== false");
     expect(backgroundSource).toContain("expired reader job");
     expect(backgroundSource).toContain("requesting fresh signed work");
@@ -283,6 +371,68 @@ describe("local Chrome reader contract", () => {
     expect(backgroundSource).not.toContain("ALLOWED_COURSES");
     expect(backgroundSource).not.toContain("grassy-hill");
     expect(backgroundSource).not.toContain("crestbrook");
+  });
+
+  it("requires the exact provider capability and parser contract", () => {
+    const { context } = loadBackgroundHarness();
+    const isAllowlistedJob = context.isAllowlistedJob as (
+      job: LocalReaderJob
+    ) => boolean;
+    const job = dynamicCpsJob();
+
+    expect(
+      isAllowlistedJob({
+        ...job,
+        requiredCapability: { key: "CPS_RENDERED", parserVersion: 1 }
+      })
+    ).toBe(true);
+    expect(
+      isAllowlistedJob({
+        ...job,
+        requiredCapability: { key: "TENFORE_RENDERED", parserVersion: 1 }
+      })
+    ).toBe(false);
+    expect(
+      isAllowlistedJob({
+        ...job,
+        requiredCapability: { key: "CPS_RENDERED", parserVersion: 0 }
+      })
+    ).toBe(false);
+  });
+
+  it("persists two simultaneous tab results without losing or resurrecting either job", async () => {
+    const pendingJob = (id: string, courseKey: string) => ({
+      job: {
+        id,
+        courseKey,
+        targetDate: "2026-07-25",
+        leaseToken: `lease-${id}`
+      },
+      openedAt: "2026-07-24T12:00:00.000Z",
+      closeTabOnFinish: false
+    });
+    const harness = loadBackgroundHarness({
+      "1": pendingJob("job-1", "cps:one.cps.golf"),
+      "2": pendingJob("job-2", "cps:two.cps.golf")
+    });
+    const finishJob = harness.context.finishJob as (
+      tabId: number,
+      result: Record<string, unknown>
+    ) => Promise<void>;
+    const result = (courseKey: string) => ({
+      courseKey,
+      status: "NO_AVAILABILITY",
+      pageTitle: "Tee Times",
+      slots: []
+    });
+
+    await Promise.all([
+      finishJob(1, result("cps:one.cps.golf")),
+      finishJob(2, result("cps:two.cps.golf"))
+    ]);
+
+    expect(harness.getPendingJobs()).toEqual({});
+    expect(harness.submittedJobIds.sort()).toEqual(["job-1", "job-2"]);
   });
 
   it("accepts future signed CPS jobs while rejecting unsafe hosts and routes", () => {

@@ -1,0 +1,12 @@
+BEGIN;
+
+ALTER TYPE "CourseHumanReviewReason"
+  ADD VALUE IF NOT EXISTS 'AUTOMATION_STALLED';
+
+ALTER TYPE "SearchEmailDeliveryKind"
+  ADD VALUE IF NOT EXISTS 'MONITORING_STATUS_UPDATE';
+
+ALTER TABLE "CourseSupportIncident"
+  ADD COLUMN "attemptLedger" JSONB;
+
+COMMIT;

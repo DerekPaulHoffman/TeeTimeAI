@@ -145,7 +145,7 @@ describe("course support incidents", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           confirmedAt: null,
-          escalationDeadlineAt: null,
+          escalationDeadlineAt: new Date(now.getTime() + 30 * 60 * 1000),
           nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000)
         })
       })
@@ -446,6 +446,36 @@ describe("course support incidents", () => {
 
     expect(result.status).toBe("AUTO_INVESTIGATING");
     expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
+  });
+
+  it("anchors a repaired missing deadline to the first degradation episode", async () => {
+    const firstSeenAt = new Date(now.getTime() - 10 * 60 * 1000);
+    const existing = incident({
+      providerFamilyKey: "FOREUP",
+      failureClass: "AUTH",
+      failureFingerprint: authFailureFingerprint,
+      firstSeenAt,
+      escalationDeadlineAt: null
+    });
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(existing);
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          escalationDeadlineAt: new Date(firstSeenAt.getTime() + 30 * 60 * 1000)
+        })
+      })
+    );
   });
 
   it("makes an unclaimed non-rate-limited incident due when real demand arrives", async () => {

@@ -57,6 +57,25 @@ Farms. The reader ignores session-bearing links on individual tee-time cards,
 returns the stable public search URL, and never clicks a tee time or enters the
 transaction flow.
 
+## Place in the monitoring playbook
+
+The local reader is the last automatic path, not the preferred path for CPS,
+Chronogolf, or another normally runnable provider. A new or materially changed
+course first receives official identity validation, typed-adapter execution,
+bounded official HTTP discovery and adapter retry, then ordinary Playwright
+discovery and another adapter retry. Only an unresolved course with a safe,
+compatible reader capability reaches this worker. Independent confirmation
+follows the reader result.
+
+Each reader attempt has one five-minute window. The backend distinguishes an
+active job, a successful completed job, and a terminal completed job. A
+completed `ACCESS_CHALLENGE`, `PAGE_MISMATCH`, or `READER_ERROR` remains terminal
+evidence for that attempt and must never be shown or queued again as
+`CHECK_PENDING`. It is not by itself an automatic technical final: technical
+finality also requires the complete current playbook and a matching independent
+current observation. Otherwise the course enters human review at the truthful
+30-minute endpoint and its alert remains active for six-hour safe rechecks.
+
 ## Run the local proof backend
 
 Set a temporary device token without committing it, then start the loopback-only
@@ -100,6 +119,20 @@ route match its bounded public-route rules.
 A completed read requeues the normal search workflow, which owns match
 persistence and alert email delivery.
 
+The worker may run two isolated tabs globally. The backend prioritizes active
+customer jobs ahead of detached verification and leases no more than one job
+for the same provider family at a time. A stalled or failed tab therefore does
+not block an unrelated provider job, and each job retains its own lease and
+five-minute deadline.
+
+Every compatible signed poll records reader worker health. The expected
+heartbeat cadence is two minutes with three minutes of grace, so five minutes
+without a compatible reader heartbeat is an operator-visible outage. Each
+outage and later recovery is notified once when operator email is configured.
+The deployed recovery cron also expires individual reader jobs at five minutes;
+job expiry is terminal evidence and never suppresses recovery for searches or
+other reader jobs.
+
 ## Security and product boundary
 
 The home machine polls outbound; the backend never opens an inbound connection
@@ -107,3 +140,9 @@ to the machine or submits arbitrary URLs, prompts, or commands. The reader does
 not inspect cookies or browser storage, sign in, choose a tee time, enter a cart,
 book, reserve, pay, or continue to checkout. Chrome must be running and the
 extension enabled when a local-reader job is queued.
+
+The reader never solves or bypasses CAPTCHA, Turnstile, Cloudflare, login,
+waiting-room, or queue controls and never replays challenge tokens. Do not pair
+it with stealth drivers, proxy rotation, CAPTCHA solvers, FlareSolverr, or a
+browser-bypass vendor. Ordinary page JavaScript and a bounded passive wait are
+allowed; a persistent access control is returned as evidence.

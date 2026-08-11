@@ -15,6 +15,13 @@ import { prisma } from "@/lib/prisma";
 import { normalizeTimeZone } from "@/lib/timezones";
 
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import {
+  AUTOMATION_PLAYBOOK_VERSION,
+  assessAutomationPlaybook,
+  parseAutomationPlaybookLedger,
+  type AutomationPlaybookEvent,
+  type AutomationPlaybookFactualDisposition
+} from "./course-monitoring-playbook";
 import { evaluateMonitoringGate } from "./policy";
 import { normalizeProviderFamilyKey } from "./provider-capabilities";
 import { sanitizeResponderText } from "./course-support-responder-policy";
@@ -22,7 +29,7 @@ import { getAutomationRuntimeVersion } from "./runtime-version";
 
 export const COURSE_SUPPORT_VERIFICATION_LEASE_MS = 10 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_MAX_DUE = 20;
-export const COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS = 12 * 60 * 1000;
+export const COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS = 35 * 60 * 1000;
 const COURSE_SUPPORT_VERIFICATION_LEGACY_HORIZON_MS = 24 * 60 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_START_TIME = "06:00";
 export const COURSE_SUPPORT_VERIFICATION_END_TIME = "20:00";
@@ -87,6 +94,10 @@ const requestExecutionSelect = {
       incidentId: true,
       courseId: true,
       cycle: true,
+      result: true,
+      proofSnapshot: true,
+      verifiedAt: true,
+      updatedAt: true,
       batch: {
         select: {
           id: true,
@@ -103,6 +114,8 @@ const requestExecutionSelect = {
           engineeringOnly: true,
           activeRealSearchCount: true,
           earliestTargetDate: true,
+          firstSeenAt: true,
+          attemptLedger: true,
           updatedAt: true,
           status: true
         }
@@ -138,6 +151,25 @@ export type CourseSupportVerificationObservation = {
   httpStatus?: number | null;
   failureClass?: CourseSupportFailureClass | null;
   message?: string | null;
+};
+
+export type CourseSupportFactualFinalProof = Prisma.JsonObject & {
+  schemaVersion: 1;
+  kind: "PLAYBOOK_FACTUAL_FINAL";
+  playbookVersion: typeof AUTOMATION_PLAYBOOK_VERSION;
+  disposition: AutomationPlaybookFactualDisposition;
+  outcome: "MANUAL_DIRECT" | "IDENTITY_FINAL";
+  cycle: number;
+  stage: "OFFICIAL_IDENTITY" | "RENDERED_BROWSER_DISCOVERY" | "INDEPENDENT_CONFIRMATION";
+  sequence: number;
+  readPath: "OFFICIAL_IDENTITY" | "RENDERED_BROWSER" | "INDEPENDENT_CONFIRMATION";
+  evidenceKind: "OFFICIAL_SOURCE" | "RENDERED_PAGE";
+  failureFingerprint: string;
+  observedAt: string;
+  completedAt: string;
+  releaseSha: string;
+  runtimeVersion: string;
+  providerExecution: false;
 };
 
 export type CourseSupportVerificationRejectionReason =
@@ -199,6 +231,8 @@ export async function scheduleCourseSupportVerificationRequests(input: {
                   engineeringOnly: true,
                   activeRealSearchCount: true,
                   earliestTargetDate: true,
+                  firstSeenAt: true,
+                  attemptLedger: true,
                   updatedAt: true,
                   status: true
                 }
@@ -816,6 +850,133 @@ export async function completeCourseSupportVerificationRequest(input: {
   );
 }
 
+export async function completeCourseSupportVerificationFactualFinal(input: {
+  requestId: string;
+  expectedRevision: number;
+  leaseToken: string;
+  runtimeVersion: string;
+  disposition: AutomationPlaybookFactualDisposition;
+  message: string;
+  now?: Date;
+}) {
+  const now = validDate(input.now ?? new Date(), "factual completion time");
+  validateReleaseSha(input.runtimeVersion);
+
+  return prisma.$transaction(
+    async (transaction) => {
+      const request = await transaction.courseSupportVerificationRequest.findUnique({
+        where: { id: input.requestId },
+        select: requestExecutionSelect
+      });
+      const ownership = validateExecutionOwnership(request, input, now);
+      if (!ownership.valid) {
+        return rejectedCompletion(ownership.reason);
+      }
+      const ownedRequest = ownership.request;
+      const eligibility = await evaluateDetachedEligibility(
+        transaction,
+        buildDetachedEligibilityInputFromRequest(ownedRequest),
+        now
+      );
+      if (!eligibility.eligible) {
+        await markRequestStale(transaction, ownedRequest, now, eligibility.reason);
+        return rejectedCompletion(eligibility.reason);
+      }
+      if (ownedRequest.batchIncident.batch.releaseSha !== ownedRequest.releaseSha) {
+        await markRequestStale(transaction, ownedRequest, now, "batch_release_changed");
+        return rejectedCompletion("batch_release_changed");
+      }
+
+      const factualEvent = getCurrentCourseSupportFactualFinalEvent({
+        attemptLedger: ownedRequest.batchIncident.incident.attemptLedger,
+        cycle: ownedRequest.batchIncident.incident.cycle,
+        firstSeenAt: ownedRequest.batchIncident.incident.firstSeenAt,
+        runtimeVersion: input.runtimeVersion,
+        disposition: input.disposition,
+        notBefore: new Date(now.getTime() - MAX_EVIDENCE_AGE_MS),
+        now
+      });
+      if (!factualEvent) {
+        await markRequestStale(transaction, ownedRequest, now, "invalid_evidence");
+        return rejectedCompletion("invalid_evidence");
+      }
+
+      const proof = buildCourseSupportFactualFinalProof({
+        event: factualEvent,
+        completedAt: now,
+        runtimeVersion: input.runtimeVersion
+      });
+      const outcome = factualOutcome(input.disposition);
+      const message = boundedMessage(input.message);
+      const requestUpdated = await transaction.courseSupportVerificationRequest.updateMany({
+        where: ownedCheckingWhere(input, now),
+        data: {
+          status: "SUCCEEDED",
+          revision: { increment: 1 },
+          leaseToken: null,
+          leaseExpiresAt: null,
+          nextAttemptAt: null,
+          outcome,
+          failureClass: null,
+          evidence: proof as Prisma.InputJsonObject,
+          lastError: null,
+          completedAt: now,
+          updatedAt: now
+        }
+      });
+      if (requestUpdated.count !== 1) {
+        return rejectedCompletion("lease_lost");
+      }
+
+      const batchIncidentUpdated = await transaction.courseSupportBatchIncident.updateMany({
+        where: {
+          id: ownedRequest.batchIncident.id,
+          batchId: ownedRequest.batchIncident.batchId,
+          incidentId: ownedRequest.batchIncident.incidentId,
+          courseId: ownedRequest.batchIncident.courseId,
+          cycle: ownedRequest.batchIncident.cycle,
+          result: ownedRequest.batchIncident.result,
+          updatedAt: ownedRequest.batchIncident.updatedAt,
+          verifiedIncidentUpdatedAt: ownedRequest.batchIncident.verifiedIncidentUpdatedAt,
+          batch: {
+            status: "VERIFYING",
+            releaseSha: input.runtimeVersion,
+            completedAt: null
+          },
+          incident: {
+            cycle: ownedRequest.batchIncident.incident.cycle,
+            activeBatchId: ownedRequest.batchIncident.batchId,
+            status: "AUTO_INVESTIGATING",
+            updatedAt: ownedRequest.batchIncident.incident.updatedAt
+          }
+        },
+        data: {
+          result: "FINAL_DISPOSITION",
+          postProbeId: null,
+          message,
+          proofSnapshot: proof as Prisma.InputJsonObject,
+          verifiedIncidentUpdatedAt: ownedRequest.batchIncident.incident.updatedAt,
+          verifiedAt: now
+        }
+      });
+      if (batchIncidentUpdated.count !== 1) {
+        throw new Error(
+          "Responder factual-final evidence changed during delegated verification completion."
+        );
+      }
+
+      return {
+        completed: true as const,
+        status: "SUCCEEDED" as const,
+        revision: ownedRequest.revision + 1,
+        outcome,
+        evidence: proof
+      };
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+  );
+}
+
 export async function failCourseSupportVerificationRequest(input: {
   requestId: string;
   expectedRevision: number;
@@ -950,6 +1111,45 @@ export async function getEligibleCourseSupportVerificationProof(input: {
       ) {
         return rejectedProof("not_succeeded");
       }
+      if (request.batchIncident.batch.releaseSha !== releaseSha) {
+        await markRequestStale(transaction, request, now, "batch_release_changed");
+        return rejectedProof("batch_release_changed");
+      }
+      if (asJsonRecord(request.evidence).kind === "PLAYBOOK_FACTUAL_FINAL") {
+        if (
+          !isCourseSupportFactualFinalProof({
+            proof: request.evidence,
+            attemptLedger: request.batchIncident.incident.attemptLedger,
+            cycle: request.batchIncident.incident.cycle,
+            firstSeenAt: request.batchIncident.incident.firstSeenAt,
+            releaseSha,
+            verifiedAt: request.completedAt,
+            now
+          })
+        ) {
+          await markRequestStale(transaction, request, now, "invalid_evidence");
+          return rejectedProof("invalid_evidence");
+        }
+        const eligibility = await evaluateDetachedEligibility(
+          transaction,
+          buildDetachedEligibilityInputFromRequest(request),
+          now
+        );
+        if (!eligibility.eligible) {
+          await markRequestStale(transaction, request, now, eligibility.reason);
+          return rejectedProof(eligibility.reason);
+        }
+        return {
+          eligible: true as const,
+          releaseSha,
+          runtimeVersion: request.runtimeVersion,
+          outcome: request.outcome,
+          providerExecution: false as const,
+          completedAt: request.completedAt,
+          providerSnapshotFingerprint: request.providerSnapshotFingerprint,
+          evidence: request.evidence
+        };
+      }
       if (
         !hasCoherentVerifiedDiscovery(
           request,
@@ -969,11 +1169,6 @@ export async function getEligibleCourseSupportVerificationProof(input: {
         await markRequestStale(transaction, request, now, "invalid_evidence");
         return rejectedProof("invalid_evidence");
       }
-      if (request.batchIncident.batch.releaseSha !== releaseSha) {
-        await markRequestStale(transaction, request, now, "batch_release_changed");
-        return rejectedProof("batch_release_changed");
-      }
-
       const eligibility = await evaluateDetachedEligibility(
         transaction,
         buildDetachedEligibilityInputFromRequest(request),
@@ -1214,6 +1409,8 @@ type DetachedEligibilityInput = {
     engineeringOnly: boolean;
     activeRealSearchCount: number;
     earliestTargetDate: Date | null;
+    firstSeenAt: Date;
+    attemptLedger: Prisma.JsonValue | null;
     updatedAt: Date;
     status: string;
   };
@@ -1293,6 +1490,17 @@ async function evaluateDetachedEligibility(
   }
   if (input.incident.status !== "AUTO_INVESTIGATING") {
     return { eligible: false, reason: "incident_resolved" };
+  }
+  if (
+    getCurrentCourseSupportFactualFinalEvent({
+      attemptLedger: input.incident.attemptLedger,
+      cycle: input.incident.cycle,
+      firstSeenAt: input.incident.firstSeenAt,
+      runtimeVersion: input.releaseSha,
+      now
+    })
+  ) {
+    return { eligible: true };
   }
   if (evaluateMonitoringGate({ ...input.course, now }).disposition !== "ACTIONABLE") {
     return { eligible: false, reason: "monitoring_not_actionable" };
@@ -1527,6 +1735,156 @@ function buildAllowlistedEvidence(
     ...(observation.failureClass ? { failureClass: observation.failureClass } : {}),
     ...(message ? { message } : {})
   };
+}
+
+function getCurrentCourseSupportFactualFinalEvent(input: {
+  attemptLedger: unknown;
+  cycle: number;
+  firstSeenAt: Date;
+  runtimeVersion: string;
+  disposition?: AutomationPlaybookFactualDisposition;
+  notBefore?: Date;
+  now: Date;
+}) {
+  const ledger = parseAutomationPlaybookLedger(input.attemptLedger);
+  const assessment = assessAutomationPlaybook(ledger, input.cycle);
+  if (
+    !ledger ||
+    !assessment.valid ||
+    assessment.conclusion !== "FACTUAL_FINAL" ||
+    !assessment.factualDisposition ||
+    (input.disposition && assessment.factualDisposition !== input.disposition)
+  ) {
+    return null;
+  }
+  const event = [...ledger.events]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.cycle === input.cycle && candidate.transition === "FACTUAL_FINAL"
+    );
+  if (
+    !event ||
+    event.factualDisposition !== assessment.factualDisposition ||
+    event.runtimeVersion !== input.runtimeVersion ||
+    !["OFFICIAL_IDENTITY", "RENDERED_BROWSER_DISCOVERY", "INDEPENDENT_CONFIRMATION"].includes(
+      event.stage
+    ) ||
+    !["OFFICIAL_SOURCE", "RENDERED_PAGE"].includes(event.evidenceKind)
+  ) {
+    return null;
+  }
+  const observedAt = new Date(event.observedAt);
+  if (
+    !Number.isFinite(observedAt.getTime()) ||
+    observedAt.getTime() < input.firstSeenAt.getTime() ||
+    observedAt.getTime() < (input.notBefore?.getTime() ?? Number.NEGATIVE_INFINITY) ||
+    observedAt.getTime() > input.now.getTime() + MAX_EVIDENCE_FUTURE_SKEW_MS
+  ) {
+    return null;
+  }
+  return event;
+}
+
+function buildCourseSupportFactualFinalProof(input: {
+  event: AutomationPlaybookEvent;
+  completedAt: Date;
+  runtimeVersion: string;
+}): CourseSupportFactualFinalProof {
+  const disposition = input.event.factualDisposition;
+  if (!disposition) {
+    throw new Error("A factual completion requires a factual playbook disposition.");
+  }
+  return {
+    schemaVersion: 1,
+    kind: "PLAYBOOK_FACTUAL_FINAL",
+    playbookVersion: AUTOMATION_PLAYBOOK_VERSION,
+    disposition,
+    outcome: factualOutcome(disposition),
+    cycle: input.event.cycle,
+    stage: input.event.stage as CourseSupportFactualFinalProof["stage"],
+    sequence: input.event.sequence,
+    readPath: input.event.readPath as CourseSupportFactualFinalProof["readPath"],
+    evidenceKind: input.event.evidenceKind as CourseSupportFactualFinalProof["evidenceKind"],
+    failureFingerprint: input.event.failureFingerprint,
+    observedAt: input.event.observedAt,
+    completedAt: input.completedAt.toISOString(),
+    releaseSha: input.runtimeVersion,
+    runtimeVersion: input.runtimeVersion,
+    providerExecution: false
+  };
+}
+
+export function isCourseSupportFactualFinalProof(input: {
+  proof: unknown;
+  attemptLedger: unknown;
+  cycle: number;
+  firstSeenAt: Date;
+  releaseSha: string;
+  verifiedAt?: Date | null;
+  notBefore?: readonly Date[];
+  now?: Date;
+}) {
+  const proof = asJsonRecord(input.proof);
+  const disposition =
+    proof.disposition === "MANUAL_DIRECT" || proof.disposition === "IDENTITY_FINAL"
+      ? proof.disposition
+      : null;
+  if (!disposition) {
+    return false;
+  }
+  const now = input.now ?? new Date();
+  const event = getCurrentCourseSupportFactualFinalEvent({
+    attemptLedger: input.attemptLedger,
+    cycle: input.cycle,
+    firstSeenAt: input.firstSeenAt,
+    runtimeVersion: input.releaseSha,
+    disposition,
+    now
+  });
+  const observedAt = typeof proof.observedAt === "string" ? new Date(proof.observedAt) : null;
+  const completedAt = typeof proof.completedAt === "string" ? new Date(proof.completedAt) : null;
+  if (
+    !event ||
+    !observedAt ||
+    !completedAt ||
+    !Number.isFinite(observedAt.getTime()) ||
+    !Number.isFinite(completedAt.getTime()) ||
+    completedAt.getTime() < observedAt.getTime() ||
+    (input.verifiedAt && input.verifiedAt.getTime() < completedAt.getTime()) ||
+    (input.notBefore ?? []).some((boundary) => observedAt.getTime() < boundary.getTime())
+  ) {
+    return false;
+  }
+  return (
+    proof.schemaVersion === 1 &&
+    proof.kind === "PLAYBOOK_FACTUAL_FINAL" &&
+    proof.playbookVersion === AUTOMATION_PLAYBOOK_VERSION &&
+    proof.disposition === disposition &&
+    proof.outcome === factualOutcome(disposition) &&
+    proof.cycle === event.cycle &&
+    proof.stage === event.stage &&
+    proof.sequence === event.sequence &&
+    proof.readPath === event.readPath &&
+    proof.evidenceKind === event.evidenceKind &&
+    proof.failureFingerprint === event.failureFingerprint &&
+    proof.observedAt === event.observedAt &&
+    proof.releaseSha === input.releaseSha &&
+    proof.runtimeVersion === input.releaseSha &&
+    proof.providerExecution === false
+  );
+}
+
+function factualOutcome(disposition: AutomationPlaybookFactualDisposition) {
+  return disposition === "IDENTITY_FINAL"
+    ? ("IDENTITY_FINAL" as const)
+    : ("MANUAL_DIRECT" as const);
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function isCoherentVerificationEvidence(

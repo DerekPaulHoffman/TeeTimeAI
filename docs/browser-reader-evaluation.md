@@ -1,6 +1,6 @@
 # Browser Reader Evaluation and Monitoring Strategy
 
-Last reviewed: 2026-07-23 America/New_York
+Last reviewed: 2026-08-10 America/New_York
 
 ## Goal
 
@@ -81,24 +81,31 @@ technical, 16 manual-booking, and 36 private/invalid final dispositions.
 
 ## Implemented Decision Ladder
 
-`src/lib/automation/monitoring-strategy.ts` selects one explicit action:
+The shared current-cycle playbook records every stage in this exact order:
 
-1. `RUN_TYPED_ADAPTER` for validated provider metadata.
-2. `DISCOVER_WITH_HTTP` for a missing or conflicting source.
-3. `DISCOVER_WITH_BROWSER` only after direct HTTP is inconclusive.
-4. `VERIFY_TECHNICAL_CONSTRAINT` for a new authentication or challenge
-   observation; the standard browser stops at the access control.
-5. `RETRY_PROVIDER` for bounded rate-limit, provider 5xx, timeout, or network
-   failures.
-6. `REPAIR_PROVIDER_ADAPTER` for schema defects and recognized unsupported
-   families.
-7. Final technical, manual-booking, and private/invalid actions when current
-   evidence supports them.
+1. `OFFICIAL_IDENTITY`: validate current official identity and booking facts.
+2. `TYPED_ADAPTER`: run validated provider support when runnable.
+3. `OFFICIAL_HTTP_DISCOVERY`: learn bounded official source/config metadata.
+4. `HTTP_ADAPTER_RETRY`: retry the adapter with newly validated metadata.
+5. `RENDERED_BROWSER_DISCOVERY`: use ordinary Playwright only after HTTP is
+   inconclusive.
+6. `BROWSER_ADAPTER_RETRY`: retry the adapter with rendered-page metadata.
+7. `LOCAL_READER`: use the signed Chrome reader only as the last automatic path
+   and only when a safe compatible parser exists.
+8. `INDEPENDENT_CONFIRMATION`: confirm monitoring, a factual final, or the same
+   technical observation from an independent current path.
 
-The browser worker now stops navigation immediately after a 401/403 or strong
+The first retry completes by T+2 minutes. Browser work is claimed by T+10 and
+normally completes near T+15. The local reader gets one five-minute bounded
+window, independent confirmation completes by T+25, and every unresolved
+course reaches explicit human review by T+30. A missing or unavailable stage is
+an automation-stalled human-review reason, not proof of exhaustion.
+
+The browser worker stops navigation immediately after a 401/403 or strong
 managed-access-control signal. It does not click another booking link or fill a
-date after that point. Known unsupported families such as TenFore route to one
-provider-family repair instead of repeated browser probes.
+date after that point. A challenge observation remains evidence, not an
+automatic final; technical finality requires the complete playbook, a terminal
+local-reader observation, and a matching independent current observation.
 
 The aggregate coverage report includes `recommendedActions`, making the next
 reusable work visible without exposing course ids, customer data, URLs, or raw
@@ -111,8 +118,11 @@ The highest-leverage architecture is:
 ```text
 typed adapter
   -> bounded HTTP discovery
+  -> typed adapter retry
   -> ordinary Playwright discovery when JavaScript is necessary
-  -> typed adapter proof
+  -> typed adapter retry
+  -> signed local reader as the last automatic path
+  -> independent confirmation
 ```
 
 Browsers learn stable public tenant/course/provider metadata; recurring
@@ -125,11 +135,18 @@ technical constraints or 16 phone/walk-in courses into legitimate monitoring.
 
 - Unit-test every strategy transition.
 - Prove private/local discovery sources never reach the browser.
-- Prove current challenges, queues, manual booking, and private identities are
-  final rather than bypass candidates.
+- Prove manual booking and private identities short-circuit only from current
+  authoritative facts.
+- Prove challenges and queues are evidence rather than bypass candidates, and
+  cannot become automatic technical finals without terminal local-reader and
+  independent current proof.
 - Prove a new challenge observation is verification-only.
 - Prove unknown sources use HTTP before browser discovery.
 - Prove known unsupported families route to reusable adapter repair.
+- Prove the local reader is always last and terminal results never return to
+  `CHECK_PENDING`.
+- Prove unresolved courses enter active human review by 30 minutes and receive
+  safe rechecks every six hours.
 - Run provider capability, browser discovery, coverage, full tests, typecheck,
   lint, build, UI smoke, and diff checks.
 - Claim newly monitored coverage only after a fresh probe from the exact

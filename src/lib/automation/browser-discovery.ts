@@ -8371,10 +8371,17 @@ function resolveTeesnapCourseMetadata(
 
 function isTenForeBookingUrl(value: string) {
   const url = parseUrl(value);
+  const hostname = url ? normalizeHostname(url.hostname) : null;
+  const canonicalUrl = url ? new URL(url) : null;
+  if (canonicalUrl && hostname === "tenfore.golf") {
+    canonicalUrl.hostname = "fox.tenfore.golf";
+  }
   return Boolean(
-    url?.hostname.toLowerCase() === "fox.tenfore.golf" &&
+    url &&
+      canonicalUrl &&
+      (hostname === "fox.tenfore.golf" || hostname === "tenfore.golf") &&
       /^\/[a-z0-9-]+\/?$/i.test(url.pathname) &&
-      isProviderPublicBookingLandingUrl(url)
+      isProviderPublicBookingLandingUrl(canonicalUrl)
   );
 }
 
@@ -8402,7 +8409,7 @@ function getGolfBackCourseId(value: string) {
 function canonicalizeTenForeBookingUrl(value: string) {
   const url = new URL(value);
   const vanityName = url.pathname.split("/").filter(Boolean)[0];
-  return `${url.origin}/${vanityName}`;
+  return `https://fox.tenfore.golf/${vanityName}`;
 }
 
 function parseTeesnapCourseConfigs(text?: string): {

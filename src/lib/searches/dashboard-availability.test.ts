@@ -79,7 +79,7 @@ describe("dashboard availability", () => {
     });
   });
 
-  it("treats a completed unsupported-course check as a current final result", () => {
+  it("treats an unsupported-course check as a retrying current status", () => {
     expect(
       getDashboardAvailabilityView({
         outcome: "NEEDS_ADAPTER",
@@ -91,7 +91,7 @@ describe("dashboard availability", () => {
     ).toEqual({
       label: "Current availability unavailable",
       detail:
-        "We could not confirm the current tee sheet. Use the official course site while Tee Time Spot keeps working on coverage.",
+        "We could not confirm the current tee sheet. Your alert remains active. Use the official course site while Tee Time Spot keeps trying.",
       tone: "unavailable"
     });
   });

@@ -73,8 +73,10 @@ describe("course monitoring lifecycle", () => {
       INACTIVE_INVESTIGATION_MS
     );
     expect(INACTIVE_INVESTIGATION_MS).toBe(30 * 60 * 1000);
+    expect(ACTIVE_DEMAND_ESCALATION_MS).toBe(30 * 60 * 1000);
     expect(getHumanReviewRetryAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_HUMAN_RETRY_MS);
     expect(getHumanReviewRetryAt(now, 0).getTime() - now.getTime()).toBe(INACTIVE_HUMAN_RETRY_MS);
+    expect(INACTIVE_HUMAN_RETRY_MS).toBe(6 * 60 * 60 * 1000);
     expect(getHumanReviewReminderAt(now, 1).getTime() - now.getTime()).toBe(ACTIVE_REMINDER_MS);
     expect(getHumanReviewReminderAt(now, 0).getTime() - now.getTime()).toBe(INACTIVE_REMINDER_MS);
     expect(FAILURE_CONFIRMATION_WINDOW_MS).toBe(15 * 60 * 1000);
@@ -155,6 +157,17 @@ describe("course monitoring lifecycle", () => {
         {
           monitoringStatus: {
             state: "ENGINEERING_VERIFICATION_NEEDED",
+            revalidationRequestedAt: null,
+            nextAutomaticAttemptAt: new Date()
+          }
+        }
+      ])
+    ).toBe(false);
+    expect(
+      shouldSleepTechnicalFinalSearch([
+        {
+          monitoringStatus: {
+            state: "ENGINEERING_VERIFICATION_NEEDED",
             revalidationRequestedAt: null
           }
         }
@@ -181,6 +194,12 @@ describe("course monitoring lifecycle", () => {
   });
 
   it("maps precise human review reasons without policy classifications", () => {
+    expect(
+      inferHumanReviewReason({
+        kind: "BLOCKED_TOOLING",
+        failureClass: "UNKNOWN"
+      })
+    ).toBe("AUTOMATION_STALLED");
     expect(
       inferHumanReviewReason({
         kind: "READER_CANDIDATE",

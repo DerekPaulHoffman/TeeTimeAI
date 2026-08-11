@@ -40,6 +40,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import {
+  completeCourseSupportVerificationFactualFinal,
   attachCourseSupportVerificationProviderSnapshot,
   attachCourseSupportVerificationWorkflow,
   buildCourseSupportProviderSnapshotFingerprint,
@@ -57,6 +58,7 @@ import {
   resolveCourseSupportVerificationRetryAt,
   scheduleCourseSupportVerificationRequests
 } from "./course-support-verification";
+import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 
 const releaseSha = "a".repeat(40);
 const newerReleaseSha = "b".repeat(40);
@@ -112,6 +114,8 @@ function incident(overrides: Record<string, unknown> = {}) {
     engineeringOnly: true,
     activeRealSearchCount: 0,
     earliestTargetDate: null,
+    firstSeenAt: new Date("2026-07-21T11:00:00.000Z"),
+    attemptLedger: null,
     updatedAt: new Date("2026-07-21T11:55:00.000Z"),
     status: "AUTO_INVESTIGATING",
     ...overrides
@@ -147,6 +151,10 @@ function request(overrides: Record<string, unknown> = {}) {
       incidentId: "incident-1",
       courseId: "course-1",
       cycle: 1,
+      result: "PENDING",
+      proofSnapshot: null,
+      verifiedAt: null,
+      updatedAt: new Date("2026-07-21T11:55:00.000Z"),
       verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
       batch: {
         id: "batch-1",
@@ -172,6 +180,48 @@ function verificationEvidence(outcome = "NO_MATCH", providerExecution = true) {
     outcome,
     providerSnapshotFingerprint: fingerprint()
   };
+}
+
+function independentFactualFinalLedger(
+  disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL"
+) {
+  let ledger: unknown = null;
+  const terminalStages = [
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "COMPLETED", "OFFICIAL_SOURCE"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "FAILED_TERMINAL", "PROVIDER_RESPONSE"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "COMPLETED", "OFFICIAL_SOURCE"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "FAILED_TERMINAL", "PROVIDER_RESPONSE"],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "COMPLETED", "RENDERED_PAGE"],
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "FAILED_TERMINAL", "PROVIDER_RESPONSE"],
+    ["LOCAL_READER", "LOCAL_READER", "NOT_APPLICABLE", "TOOLING"]
+  ] as const;
+  for (const [stage, readPath, transition, evidenceKind] of terminalStages) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage,
+      readPath,
+      transition,
+      evidenceKind,
+      failureFingerprint: `PLAYBOOK:${stage}:${transition}`,
+      runtimeVersion: releaseSha,
+      observedAt: new Date("2026-07-21T11:58:00.000Z"),
+      ...(transition === "FAILED_TERMINAL" ? { failureClass: "CHALLENGE" as const } : {}),
+      ...(transition === "NOT_APPLICABLE"
+        ? { skipReason: "NO_LOCAL_READER_CAPABILITY" as const }
+        : {})
+    });
+  }
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "INDEPENDENT_CONFIRMATION",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    transition: "FACTUAL_FINAL",
+    evidenceKind: "RENDERED_PAGE",
+    factualDisposition: disposition,
+    failureFingerprint: `PLAYBOOK:INDEPENDENT_CONFIRMATION:${disposition}`,
+    runtimeVersion: releaseSha,
+    observedAt: new Date("2026-07-21T11:59:00.000Z")
+  });
 }
 
 beforeEach(() => {
@@ -305,6 +355,7 @@ describe("course-support verification scheduling", () => {
       batchIncidentId: "batch-incident-1",
       courseId: "course-1",
       releaseSha,
+      deadlineAt: new Date("2026-07-21T12:35:00.000Z"),
       targetDateLocal: "2026-07-21",
       startTimeLocal: "06:00",
       endTimeLocal: "20:00",
@@ -1153,6 +1204,94 @@ describe("course-support verification execution fencing", () => {
 });
 
 describe("course-support verification terminal evidence", () => {
+  it.each(["MANUAL_DIRECT", "IDENTITY_FINAL"] as const)(
+    "atomically records an independent %s factual final on the delegated batch entry",
+    async (disposition) => {
+      const attemptLedger = independentFactualFinalLedger(disposition);
+      prismaMocks.requestFindUnique.mockResolvedValue(
+        request({
+          batchIncident: {
+            ...request().batchIncident,
+            incident: incident({ attemptLedger })
+          }
+        })
+      );
+
+      const result = await completeCourseSupportVerificationFactualFinal({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        disposition,
+        message: "Current independent public-page evidence is conclusive.",
+        now
+      });
+
+      expect(result).toMatchObject({
+        completed: true,
+        status: "SUCCEEDED",
+        outcome: disposition
+      });
+      expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "request-1",
+            revision: 1,
+            leaseToken: "lease-1"
+          }),
+          data: expect.objectContaining({
+            status: "SUCCEEDED",
+            outcome: disposition,
+            failureClass: null,
+            evidence: expect.objectContaining({
+              kind: "PLAYBOOK_FACTUAL_FINAL",
+              disposition,
+              stage: "INDEPENDENT_CONFIRMATION",
+              runtimeVersion: releaseSha,
+              providerExecution: false
+            })
+          })
+        })
+      );
+      expect(prismaMocks.batchIncidentUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "batch-incident-1",
+            batchId: "batch-1",
+            incidentId: "incident-1",
+            cycle: 1,
+            result: "PENDING"
+          }),
+          data: expect.objectContaining({
+            result: "FINAL_DISPOSITION",
+            verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+            proofSnapshot: expect.objectContaining({
+              kind: "PLAYBOOK_FACTUAL_FINAL",
+              disposition
+            })
+          })
+        })
+      );
+    }
+  );
+
+  it("refuses factual completion without current-cycle ordered-ledger proof", async () => {
+    prismaMocks.requestFindUnique.mockResolvedValue(request());
+
+    await expect(
+      completeCourseSupportVerificationFactualFinal({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        disposition: "MANUAL_DIRECT",
+        message: "Current evidence is conclusive.",
+        now
+      })
+    ).resolves.toEqual({ completed: false, reason: "invalid_evidence" });
+    expect(prismaMocks.batchIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("preserves valid long provider cooldowns and drops invalid values", () => {
     expect(
       resolveCourseSupportProviderRetryNotBeforeAt({

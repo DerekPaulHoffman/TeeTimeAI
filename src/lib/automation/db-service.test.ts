@@ -90,6 +90,52 @@ describe("automation query payloads", () => {
     expect(query?.include).not.toHaveProperty("matches");
   });
 
+  it("loads a still-active course-local target date after UTC midnight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T02:00:00.000Z"));
+    const search = {
+      id: "search-local-day",
+      status: "ACTIVE",
+      date: new Date("2026-07-20T00:00:00.000Z"),
+      endTime: "23:00",
+      userTimeZone: "America/New_York",
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    };
+    mockedPrisma.teeSearch.findFirst.mockResolvedValue(search as never);
+
+    try {
+      await expect(getActiveSearchForAutomation(search.id)).resolves.toBe(search);
+      expect(mockedPrisma.teeSearch.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            date: { gte: new Date("2026-07-20T00:00:00.000Z") }
+          })
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects an active row after its exact course-local search window ends", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T03:00:00.000Z"));
+    mockedPrisma.teeSearch.findFirst.mockResolvedValue({
+      id: "search-ended",
+      status: "ACTIVE",
+      date: new Date("2026-07-20T00:00:00.000Z"),
+      endTime: "23:00",
+      userTimeZone: "America/New_York",
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    } as never);
+
+    try {
+      await expect(getActiveSearchForAutomation("search-ended")).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("limits pending alert hydration to the current rendered matches", async () => {
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
 
@@ -540,6 +586,26 @@ describe("schedule recovery fairness", () => {
         take: 50
       })
     );
+  });
+
+  it("keeps the prior UTC date in the recovery cohort until exact local expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T02:00:00.000Z"));
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
+
+    try {
+      await listSearchesNeedingScheduleRecovery();
+
+      expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            date: { gte: new Date("2026-07-20T00:00:00.000Z") }
+          })
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recovers QUEUED rows after two minutes while retaining ten-minute waiting thresholds", async () => {

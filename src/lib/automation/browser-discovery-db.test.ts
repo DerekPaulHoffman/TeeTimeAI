@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { buildBrowserDiscovery } from "./browser-discovery";
+import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 import {
   applyBrowserDiscoveryToCourse,
   listBrowserProbeTargets,
@@ -11,6 +12,8 @@ import {
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
+    $queryRawUnsafe: vi.fn(),
+    $transaction: vi.fn(),
     course: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
@@ -22,10 +25,22 @@ vi.mock("@/lib/prisma", () => ({
       findMany: vi.fn()
     },
     courseSupportIncident: {
-      findMany: vi.fn()
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn()
+    },
+    courseMonitoringStatus: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn()
+    },
+    courseMonitoringEvent: {
+      create: vi.fn(),
+      findUnique: vi.fn()
     },
     teeSearch: {
-      findMany: vi.fn()
+      findMany: vi.fn(),
+      updateMany: vi.fn()
     }
   }
 }));
@@ -38,10 +53,62 @@ const chronogolfOfficialLinkProof = {
   providerUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
 };
 
+function browserReadyAttemptLedger() {
+  const observedAt = new Date("2026-08-10T12:00:00.000Z");
+  let ledger: unknown = null;
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "OFFICIAL_IDENTITY",
+    transition: "COMPLETED",
+    readPath: "OFFICIAL_IDENTITY",
+    evidenceKind: "OFFICIAL_SOURCE",
+    failureFingerprint: "IDENTITY:CURRENT",
+    runtimeVersion: "test-runtime",
+    observedAt
+  });
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "TYPED_ADAPTER",
+    transition: "FAILED_TERMINAL",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "PROVIDER_RESPONSE",
+    failureClass: "NOT_FOUND",
+    failureFingerprint: "ADAPTER:NOT_FOUND",
+    runtimeVersion: "test-runtime",
+    observedAt
+  });
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "OFFICIAL_HTTP_DISCOVERY",
+    transition: "COMPLETED",
+    readPath: "OFFICIAL_HTTP",
+    evidenceKind: "OFFICIAL_SOURCE",
+    failureFingerprint: "HTTP:COMPLETE",
+    runtimeVersion: "test-runtime",
+    observedAt
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "HTTP_ADAPTER_RETRY",
+    transition: "FAILED_TERMINAL",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "PROVIDER_RESPONSE",
+    failureClass: "NOT_FOUND",
+    failureFingerprint: "ADAPTER:NOT_FOUND",
+    runtimeVersion: "test-runtime",
+    observedAt
+  });
+}
+
 describe("browser discovery persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (worker) =>
+      worker(mockedPrisma as never)
+    );
+    mockedPrisma.$queryRawUnsafe.mockResolvedValue([] as never);
     mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([]);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue(null);
   });
 
   it("records browser evidence and learned API metadata", async () => {
@@ -148,6 +215,106 @@ describe("browser discovery persistence", () => {
         intelligenceReviewAt: null,
         intelligenceConfidence: 0.95
       }
+    });
+  });
+
+  it("atomically opens a fresh human-review cycle when learned adapter metadata changes", async () => {
+    const updatedAt = new Date("2026-08-11T12:00:00.000Z");
+    const current = {
+      id: "course-1",
+      name: "Public Course",
+      providerFamilyKey: "FOREUP",
+      detectedPlatform: "FOREUP",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+      website: "https://course.example.com",
+      bookingMetadata: {
+        scheduleId: 11739,
+        parserVersion: 1,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+      },
+      isPublic: true,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      monitoringMode: "AUTOMATIC",
+      intelligenceVerifiedAt: updatedAt,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: 0.95,
+      updatedAt
+    };
+    const applied = {
+      ...current,
+      bookingMetadata: {
+        ...current.bookingMetadata,
+        parserVersion: 2
+      },
+      updatedAt: new Date("2026-08-11T12:01:00.000Z")
+    };
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce(current as never)
+      .mockResolvedValueOnce(applied as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-1",
+      cycle: 3,
+      revision: 8,
+      status: "NEEDS_HUMAN",
+      activeBatchId: null,
+      activeRealSearchCount: 1,
+      failureFingerprint: "FOREUP:SCHEMA",
+      humanReviewReason: "OTHER_TECHNICAL_LIMITATION",
+      resolution: null
+    } as never);
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "ENGINEERING_VERIFICATION_NEEDED",
+      revision: 4
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(
+      applyBrowserDiscoveryToCourse({
+        courseId: "course-1",
+        status: "LEARNED",
+        detectedPlatform: "FOREUP",
+        sourceUrl: "https://course.example.com",
+        bookingUrl:
+          "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+        apiMetadata: applied.bookingMetadata,
+        confidence: 0.97,
+        evidence: {
+          learnedFrom: "foreup-api-request",
+          observedUrls: []
+        }
+      })
+    ).resolves.toEqual(applied);
+
+    expect(mockedPrisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "incident-1", cycle: 3 }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          status: "AUTO_INVESTIGATING"
+        })
+      })
+    );
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledOnce();
+    expect(mockedPrisma.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "REVALIDATION_REQUESTED",
+        idempotencyKey: expect.stringMatching(/^course-provider-evidence-revalidate:/u),
+        audit: expect.objectContaining({
+          priorCycle: 3,
+          cycle: 4,
+          changedFields: ["bookingMetadata"]
+        })
+      })
     });
   });
 
@@ -582,6 +749,69 @@ describe("browser discovery persistence", () => {
 
     expect(result).toBeNull();
     expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps a first browser challenge actionable while retaining learned metadata", async () => {
+    const updatedAt = new Date("2026-07-16T12:06:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "westwoods.example",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://westwoods.example/",
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        bookingAccessMode: "UNKNOWN",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "course-westwoods" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await applyBrowserDiscoveryToCourse({
+      courseId: "course-westwoods",
+      status: "VERIFIED",
+      detectedPlatform: "FOREUP",
+      sourceUrl: "https://westwoods.example/",
+      bookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+      apiMetadata: {
+        bookingClassId: 22518,
+        scheduleId: 6123,
+        bookingBaseUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      },
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      intelligenceReviewAt: "2026-08-16T00:00:00.000Z",
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "foreup-access-control",
+        observedUrls: []
+      }
+    });
+
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "course-westwoods", updatedAt },
+      data: expect.objectContaining({
+        providerFamilyKey: "FOREUP",
+        detectedPlatform: "FOREUP",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        bookingMethod: "PUBLIC_ONLINE",
+        detectedBookingUrl:
+          "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes"
+      })
+    });
+    expect(
+      mockedPrisma.course.updateMany.mock.calls[0]?.[0].data
+    ).not.toMatchObject({ automationEligibility: "BLOCKED" });
   });
 
   it("does not let discovery metadata alone overwrite a current technical final", async () => {
@@ -1518,6 +1748,68 @@ describe("browser discovery persistence", () => {
         })
       })
     );
+  });
+
+  it("filters non-browser incidents before limiting active-demand targets", async () => {
+    const firstSeenAt = new Date("2026-08-10T12:00:00.000Z");
+    const readyCourse = {
+      id: "course-ready",
+      name: "New Alert Course",
+      website: "https://new-alert-course.example/",
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      automationEligibility: "UNKNOWN",
+      automationReason: "OTHER",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "UNKNOWN",
+      bookingMethod: "UNKNOWN",
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      probes: []
+    };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-new",
+        preferences: [{ rank: 1, course: readyCourse }]
+      }
+    ] as never);
+    mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([
+      ...Array.from({ length: 5 }, (_, index) => ({
+        courseId: `course-human-${index}`,
+        status: "NEEDS_HUMAN",
+        cycle: 1,
+        attemptLedger: null,
+        activeRealSearchCount: 1,
+        firstSeenAt: new Date(firstSeenAt.getTime() - (index + 1) * 60_000),
+        nextAttemptAt: new Date("2026-08-10T18:00:00.000Z"),
+        kind: "NEEDS_ADAPTER",
+        occurrenceCount: 1,
+        lastSeenAt: firstSeenAt,
+        course: null
+      })),
+      {
+        courseId: "course-ready",
+        status: "AUTO_INVESTIGATING",
+        cycle: 1,
+        attemptLedger: browserReadyAttemptLedger(),
+        activeRealSearchCount: 1,
+        firstSeenAt,
+        nextAttemptAt: firstSeenAt,
+        kind: "NEEDS_ADAPTER",
+        occurrenceCount: 1,
+        lastSeenAt: firstSeenAt,
+        course: readyCourse
+      }
+    ] as never);
+
+    const targets = await listBrowserProbeTargets(1);
+
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.course.id).toBe("course-ready");
   });
 
   it("keeps repeated runnable-provider failures on the non-interactive adapter path", async () => {

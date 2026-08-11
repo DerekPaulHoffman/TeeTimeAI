@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
   listSearchesNeedingScheduleRecovery: vi.fn(),
   checkAutomationWorkerHealth: vi.fn(),
+  expireOverdueLocalReaderJobs: vi.fn(),
+  revalidateHumanReviewCoursesForDeployment: vi.fn(),
   runCourseMonitoringWatchdog: vi.fn(),
   recoverDueCourseSupportVerificationRequests: vi.fn(),
   recoverPendingClerkEmailUpdates: vi.fn(),
@@ -27,7 +29,13 @@ vi.mock("@/lib/automation/worker-state", () => ({
   checkAutomationWorkerHealth: mocks.checkAutomationWorkerHealth
 }));
 
+vi.mock("@/lib/local-reader/service", () => ({
+  expireOverdueLocalReaderJobs: mocks.expireOverdueLocalReaderJobs
+}));
+
 vi.mock("@/lib/automation/course-monitoring", () => ({
+  revalidateHumanReviewCoursesForDeployment:
+    mocks.revalidateHumanReviewCoursesForDeployment,
   runCourseMonitoringWatchdog: mocks.runCourseMonitoringWatchdog
 }));
 
@@ -44,11 +52,13 @@ vi.mock("@/lib/env", () => ({
 }));
 
 const originalCronSecret = process.env.CRON_SECRET;
+const originalDeploymentSha = process.env.VERCEL_GIT_COMMIT_SHA;
 
 describe("GET /api/cron/recover-search-schedules", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.CRON_SECRET = "test-cron-secret";
+    process.env.VERCEL_GIT_COMMIT_SHA = "a".repeat(40);
     mocks.hasDatabaseConfig.mockReturnValue(false);
     mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
       considered: 0,
@@ -68,12 +78,22 @@ describe("GET /api/cron/recover-search-schedules", () => {
       notified: 0,
       recovered: 0
     });
+    mocks.expireOverdueLocalReaderJobs.mockResolvedValue({
+      considered: 0,
+      expired: 0,
+      notified: 0
+    });
     mocks.runCourseMonitoringWatchdog.mockResolvedValue({
       checked: 0,
       scheduled: 0,
       escalated: 0,
       remindersSent: 0,
       failed: 0
+    });
+    mocks.revalidateHumanReviewCoursesForDeployment.mockResolvedValue({
+      considered: 0,
+      requeued: 0,
+      retainedAuthoritativeFinals: 0
     });
   });
 
@@ -82,6 +102,11 @@ describe("GET /api/cron/recover-search-schedules", () => {
       delete process.env.CRON_SECRET;
     } else {
       process.env.CRON_SECRET = originalCronSecret;
+    }
+    if (originalDeploymentSha === undefined) {
+      delete process.env.VERCEL_GIT_COMMIT_SHA;
+    } else {
+      process.env.VERCEL_GIT_COMMIT_SHA = originalDeploymentSha;
     }
   });
 
@@ -99,6 +124,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
     expect(mocks.listSearchesNeedingScheduleRecovery).not.toHaveBeenCalled();
     expect(mocks.recoverPendingClerkEmailUpdates).not.toHaveBeenCalled();
     expect(mocks.recoverDueCourseSupportVerificationRequests).not.toHaveBeenCalled();
+    expect(mocks.expireOverdueLocalReaderJobs).not.toHaveBeenCalled();
     expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
@@ -147,6 +173,18 @@ describe("GET /api/cron/recover-search-schedules", () => {
         recovered: 0,
         failed: 0
       },
+      localReaderJobDeadlines: {
+        considered: 0,
+        expired: 0,
+        notified: 0,
+        failed: 0
+      },
+      deploymentCourseRevalidation: {
+        considered: 0,
+        requeued: 0,
+        retainedAuthoritativeFinals: 0,
+        failed: 0
+      },
       courseMonitoring: {
         checked: 0,
         scheduled: 0,
@@ -164,6 +202,36 @@ describe("GET /api/cron/recover-search-schedules", () => {
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(3, "search-3");
     expect(mocks.recoverPendingClerkEmailUpdates).toHaveBeenCalledTimes(1);
     expect(mocks.recoverDueCourseSupportVerificationRequests).toHaveBeenCalledTimes(1);
+    expect(mocks.expireOverdueLocalReaderJobs).toHaveBeenCalledTimes(1);
+    expect(mocks.revalidateHumanReviewCoursesForDeployment).toHaveBeenCalledWith({
+      deploymentSha: "a".repeat(40)
+    });
+  });
+
+  it("reconciles course deadlines before selecting and starting due searches", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([
+      { id: "search-deadline" }
+    ]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-deadline" });
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.runCourseMonitoringWatchdog).toHaveBeenCalledTimes(1);
+    expect(mocks.listSearchesNeedingScheduleRecovery).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.runCourseMonitoringWatchdog.mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      mocks.listSearchesNeedingScheduleRecovery.mock.invocationCallOrder[0]
+    );
+    expect(
+      mocks.listSearchesNeedingScheduleRecovery.mock.invocationCallOrder[0]
+    ).toBeLessThan(mocks.startSearchSchedule.mock.invocationCallOrder[0]);
   });
 
   it("continues customer schedule recovery when provider verification recovery fails", async () => {
@@ -191,6 +259,26 @@ describe("GET /api/cron/recover-search-schedules", () => {
       considered: 1,
       restarted: 1,
       failed: 0
+    });
+  });
+
+  it("continues recovery when deployment course revalidation fails", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.revalidateHumanReviewCoursesForDeployment.mockRejectedValue(
+      new Error("deployment revalidation unavailable")
+    );
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    await expect(response.json()).resolves.toMatchObject({
+      deploymentCourseRevalidation: { failed: 1 },
+      restarted: 1
     });
   });
 
@@ -223,6 +311,50 @@ describe("GET /api/cron/recover-search-schedules", () => {
       pendingEmailRecovery: { applied: 1 },
       courseSupportVerification: { started: 1 },
       automationWorkerHealth: { failed: 1 },
+      restarted: 1
+    });
+  });
+
+  it("continues every other recovery path when the reader deadline sweep fails", async () => {
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.expireOverdueLocalReaderJobs.mockRejectedValue(new Error("reader sweep unavailable"));
+    mocks.recoverPendingClerkEmailUpdates.mockResolvedValue({
+      considered: 1,
+      applied: 1,
+      deferred: 0,
+      failed: 0
+    });
+    mocks.revalidateHumanReviewCoursesForDeployment.mockResolvedValue({
+      considered: 0,
+      requeued: 0,
+      retainedAuthoritativeFinals: 0
+    });
+    mocks.recoverDueCourseSupportVerificationRequests.mockResolvedValue({
+      considered: 1,
+      started: 1,
+      skipped: 0,
+      failed: 0
+    });
+    mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
+    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
+
+    const response = await GET(
+      new Request("http://localhost/api/cron/recover-search-schedules", {
+        headers: { authorization: "Bearer test-cron-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      pendingEmailRecovery: { applied: 1 },
+      courseSupportVerification: { started: 1 },
+      automationWorkerHealth: { failed: 0 },
+      localReaderJobDeadlines: {
+        considered: 0,
+        expired: 0,
+        notified: 0,
+        failed: 1
+      },
       restarted: 1
     });
   });

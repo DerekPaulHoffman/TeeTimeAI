@@ -14,7 +14,7 @@ import {
   type CourseBookingWindowFields
 } from "@/lib/courses/booking-window";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
-import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
+import { calculateSearchWindowEnd } from "@/lib/automation/date-boundary";
 
 const FAILED_CHECK_RETRY_MINUTES = 5;
 const SUPPORT_DISCOVERY_RETRY_MINUTES = 15;
@@ -251,25 +251,7 @@ function applySupportDiscoveryRetry(
   return supportRetryAt < normalNextCheckAt ? supportRetryAt : normalNextCheckAt;
 }
 
-export function calculateSearchWindowEnd(
-  date: Date,
-  endTime: string,
-  courseTimeZones: string[],
-  fallbackTimeZone: string
-) {
-  const dateValue = date.toISOString().slice(0, 10);
-  const timeZones = courseTimeZones.length > 0 ? courseTimeZones : [fallbackTimeZone];
-  return new Date(
-    Math.max(
-      ...timeZones.map((timeZone) =>
-        zonedDateTimeToDate(
-          `${dateValue}T${endTime}:00`,
-          normalizeTimeZone(timeZone, fallbackTimeZone)
-        ).getTime()
-      )
-    )
-  );
-}
+export { calculateSearchWindowEnd } from "@/lib/automation/date-boundary";
 
 function endOfSearchDate(date: Date) {
   const searchExpiresAt = new Date(date);

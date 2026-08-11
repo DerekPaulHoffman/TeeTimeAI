@@ -12,7 +12,9 @@ export const MAX_EMAIL_AVAILABILITY_PILLS_PER_COURSE = 16;
 export type CustomerEmailVariant =
   | "setup"
   | "morning"
-  | "instant";
+  | "instant"
+  | "outage"
+  | "recovery";
 
 export type CustomerEmailSearchSummary = {
   targetDate: string;
@@ -243,7 +245,11 @@ function renderHero(input: CustomerEmailRenderInput) {
       ? "SEARCH IS ACTIVE"
       : input.variant === "morning"
         ? "MORNING UPDATE"
-        : "NEW TEE TIME ALERT";
+        : input.variant === "outage"
+          ? "STATUS UPDATE"
+          : input.variant === "recovery"
+            ? "AUTOMATIC CHECKS RESUMED"
+            : "NEW TEE TIME ALERT";
 
   return `
     <tr>

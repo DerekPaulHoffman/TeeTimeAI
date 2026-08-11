@@ -24,6 +24,7 @@ import {
   inspectCourseSupportQueue,
   markCourseSupportBatchNeedsHuman,
   recoverCourseSupportBatch,
+  renewCourseSupportBatchOperationLease,
   resolveCourseSupportBatchReference,
   verifyCourseSupportBatch,
   type CourseSupportReleaseAdvanceProof
@@ -31,6 +32,9 @@ import {
 import {
   AUTOMATION_WORKERS,
   completeAutomationWorker,
+  isAutomationWorkerExecutionAllowed,
+  runWithAutomationWorkerHeartbeat,
+  shouldRecordAutomationWorkerCycle,
   startAutomationWorker
 } from "@/lib/automation/worker-state";
 import { runCourseSupportLeaseWatch } from "@/lib/automation/course-support-lease-watch";
@@ -74,9 +78,19 @@ const FAILURE_DOMAINS = new Set<ResponderFailureDomain>([
   "GIT",
   "SLA"
 ]);
+const COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS = 4 * 60 * 1_000;
 
 async function main() {
-  const command = process.argv[2] ?? "inspect";
+  const [command = "inspect", ...args] = process.argv.slice(2);
+  const scheduledCycle = shouldRecordAutomationWorkerCycle({ command, args });
+  if (!scheduledCycle) {
+    if (!(await isAutomationWorkerExecutionAllowed(AUTOMATION_WORKERS.COURSE_SUPPORT))) {
+      writeResult({ outcome: "paused_by_control_plane" });
+      return;
+    }
+    await runCommand(command, args);
+    return;
+  }
   const worker = await startAutomationWorker(AUTOMATION_WORKERS.COURSE_SUPPORT, {
     runnerVersion: "course-support-v3"
   });
@@ -85,7 +99,11 @@ async function main() {
     return;
   }
   try {
-    await runCommand();
+    await runWithAutomationWorkerHeartbeat(
+      AUTOMATION_WORKERS.COURSE_SUPPORT,
+      () => runCommand(command, args),
+      { intervalMs: COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS }
+    );
     await completeAutomationWorker(
       AUTOMATION_WORKERS.COURSE_SUPPORT,
       `${command}_completed`
@@ -99,8 +117,7 @@ async function main() {
   }
 }
 
-async function runCommand() {
-  const [command = "inspect", ...args] = process.argv.slice(2);
+async function runCommand(command: string, args: string[]) {
   switch (command) {
     case "inspect":
       writeResult(
@@ -252,21 +269,36 @@ async function heartbeat(args: string[]) {
       { allowUnchangedRuntime: currentRuntime }
     ));
   }
-  const renew = async () =>
+  const leaseToken = await getOwnedCourseSupportLeaseToken({
+    batchId,
+    ownerThreadId
+  });
+  const transition = async () =>
     heartbeatCourseSupportBatch({
       batchId,
-      leaseToken: await getOwnedCourseSupportLeaseToken({
-        batchId,
-        ownerThreadId
-      }),
+      leaseToken,
       ownerThreadId,
       status: requestedStatus as "IMPLEMENTING" | "VERIFYING" | undefined,
       releaseSha,
       releaseAdvanceProof
     });
   if (!watch) {
-    return renew();
+    return transition();
   }
+
+  let statusRecorded = !requestedStatus;
+  const renew = async () => {
+    if (!statusRecorded) {
+      const result = await transition();
+      statusRecorded = result.heartbeatRecorded;
+      return result;
+    }
+    return renewCourseSupportBatchOperationLease({
+      batchId,
+      leaseToken,
+      ownerThreadId
+    });
+  };
 
   const intervalSeconds =
     readIntegerOption(args, "--interval-seconds") ?? 4 * 60;
@@ -305,13 +337,17 @@ async function verify(args: string[]) {
       allowUnchangedRuntime: currentRuntime
     });
   }
-  return verifyCourseSupportBatch({
-    batchId,
-    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
-    ownerThreadId,
-    releaseSha,
-    deployedAt
-  });
+  return runWithCourseSupportOperationHeartbeat(
+    { batchId, ownerThreadId },
+    (leaseToken) =>
+      verifyCourseSupportBatch({
+        batchId,
+        leaseToken,
+        ownerThreadId,
+        releaseSha,
+        deployedAt
+      })
+  );
 }
 
 async function closeout(args: string[]) {
@@ -330,17 +366,77 @@ async function closeout(args: string[]) {
   }
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
-  return closeoutCourseSupportBatch({
-    batchId,
-    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
-    ownerThreadId,
-    requestedOutcome: requestedOutcome as ResponderOutcome | undefined,
-    failureDomain: failureDomain as ResponderFailureDomain | undefined,
-    retryAfterSeconds:
-      readIntegerOption(args, "--retry-after-seconds") ??
-      numberValue(payload.retryAfterSeconds),
-    summary: payload.summary ?? payload
-  });
+  return runWithCourseSupportOperationHeartbeat(
+    { batchId, ownerThreadId, allowDurableCloseout: true },
+    (leaseToken) =>
+      closeoutCourseSupportBatch({
+        batchId,
+        leaseToken,
+        ownerThreadId,
+        requestedOutcome: requestedOutcome as ResponderOutcome | undefined,
+        failureDomain: failureDomain as ResponderFailureDomain | undefined,
+        retryAfterSeconds:
+          readIntegerOption(args, "--retry-after-seconds") ??
+          numberValue(payload.retryAfterSeconds),
+        summary: payload.summary ?? payload
+      })
+  );
+}
+
+async function runWithCourseSupportOperationHeartbeat<T>(
+  input: {
+    batchId: string;
+    ownerThreadId: string;
+    allowDurableCloseout?: boolean;
+  },
+  operation: (leaseToken: string) => Promise<T>
+) {
+  const leaseToken = await getOwnedCourseSupportLeaseToken(input);
+  const renew = async () => {
+    const result = await renewCourseSupportBatchOperationLease({
+      batchId: input.batchId,
+      leaseToken,
+      ownerThreadId: input.ownerThreadId
+    });
+    if (!result.heartbeatRecorded) {
+      throw new Error("Course-support operation heartbeat lost durable batch ownership.");
+    }
+  };
+  await renew();
+
+  let heartbeatFailure: unknown = null;
+  let heartbeatInFlight: Promise<void> | null = null;
+  const interval = setInterval(() => {
+    if (heartbeatInFlight || heartbeatFailure) {
+      return;
+    }
+    heartbeatInFlight = renew()
+      .catch((error) => {
+        heartbeatFailure = error;
+      })
+      .finally(() => {
+        heartbeatInFlight = null;
+      });
+  }, COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS);
+  interval.unref?.();
+
+  let result: T;
+  try {
+    result = await operation(leaseToken);
+  } finally {
+    clearInterval(interval);
+    await heartbeatInFlight;
+  }
+  const durableCloseout = Boolean(
+    result &&
+    typeof result === "object" &&
+    "durableCloseoutRecorded" in result &&
+    result.durableCloseoutRecorded === true
+  );
+  if (heartbeatFailure && !(input.allowDurableCloseout && durableCloseout)) {
+    throw heartbeatFailure;
+  }
+  return result;
 }
 
 async function recover(args: string[]) {

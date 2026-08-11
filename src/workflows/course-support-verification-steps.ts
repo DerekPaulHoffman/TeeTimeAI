@@ -1,19 +1,34 @@
-import type { CourseSupportFailureClass } from "@prisma/client";
+import type {
+  AutomationEligibility,
+  AutomationReason,
+  BookingMethod,
+  CourseMonitoringMode,
+  CourseSupportFailureClass,
+  DetectedPlatform,
+} from "@prisma/client";
 
 import { fetchCourseTeeSheet } from "@/lib/automation/course-provider-read";
+import { recordCourseMonitoringFinalClassification } from "@/lib/automation/course-monitoring";
+import type { AutomationPlaybookFactualDisposition } from "@/lib/automation/course-monitoring-playbook";
+import {
+  loadCourseMonitoringPlaybookRuntime,
+  recordRuntimePlaybookTransition,
+  type CourseMonitoringPlaybookRuntime,
+} from "@/lib/automation/course-monitoring-playbook-runtime";
 import {
   attachCourseSupportVerificationProviderSnapshot,
+  completeCourseSupportVerificationFactualFinal,
   completeCourseSupportVerificationRequest,
   failCourseSupportVerificationRequest,
   heartbeatCourseSupportVerificationRequest,
   markCourseSupportVerificationDiscoveryAttempted,
-  markCourseSupportVerificationDiscoveryVerified
+  markCourseSupportVerificationDiscoveryVerified,
 } from "@/lib/automation/course-support-verification";
 import { prepareCourseSupportVerificationMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import {
   classifyProviderFailure,
   getProviderReadinessFailure,
-  resolveProviderCapability
+  resolveProviderCapability,
 } from "@/lib/automation/provider-capabilities";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
@@ -22,7 +37,7 @@ import { getSafeOfficialBookingUrl } from "@/lib/email/search-delivery-outbox";
 import {
   getLocalReaderCourseKey,
   getLocalReaderCourseVerification,
-  queueLocalReaderCourseVerification
+  queueLocalReaderCourseVerification,
 } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
 import { filterSlotsForSearch } from "@/lib/tee-times/matching";
@@ -34,7 +49,7 @@ const TRANSIENT_PROVIDER_FAILURES = new Set<CourseSupportFailureClass>([
   "HTTP_5XX",
   "TIMEOUT",
   "NETWORK",
-  "UNKNOWN"
+  "UNKNOWN",
 ]);
 const TRANSIENT_RETRY_MS = 15 * 60 * 1000;
 const LEASE_BUSY_RETRY_MS = 2 * 60 * 1000;
@@ -44,7 +59,15 @@ const LOCAL_READER_FALLBACK_FAILURES = new Set<CourseSupportFailureClass>([
   "CHALLENGE",
   "HTTP_5XX",
   "TIMEOUT",
-  "NETWORK"
+  "NETWORK",
+]);
+const PLAYBOOK_RETRY_MS = 2 * 60 * 1000;
+const PLAYBOOK_RETRYABLE_FAILURES = new Set<CourseSupportFailureClass>([
+  "RATE_LIMIT",
+  "HTTP_5XX",
+  "TIMEOUT",
+  "NETWORK",
+  "UNKNOWN",
 ]);
 
 const providerCourseSelect = {
@@ -63,11 +86,11 @@ const providerCourseSelect = {
   isPublic: true,
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,
-  intelligenceConfidence: true
+  intelligenceConfidence: true,
 } as const;
 
 export async function executeCourseSupportVerificationStep(
-  input: CourseSupportVerificationWorkflowInput
+  input: CourseSupportVerificationWorkflowInput,
 ) {
   "use step";
 
@@ -77,12 +100,14 @@ export async function executeCourseSupportVerificationStep(
   }
 
   let revision = input.expectedRevision;
-  const beforeDiscovery = await attachCourseSupportVerificationProviderSnapshot({
-    requestId: input.requestId,
-    expectedRevision: revision,
-    leaseToken: input.leaseToken,
-    runtimeVersion
-  });
+  const beforeDiscovery = await attachCourseSupportVerificationProviderSnapshot(
+    {
+      requestId: input.requestId,
+      expectedRevision: revision,
+      leaseToken: input.leaseToken,
+      runtimeVersion,
+    },
+  );
   if (!beforeDiscovery.attached) {
     return { outcome: "stopped" as const, reason: beforeDiscovery.reason };
   }
@@ -94,7 +119,7 @@ export async function executeCourseSupportVerificationStep(
     requestId: input.requestId,
     expectedRevision: revision,
     leaseToken: input.leaseToken,
-    runtimeVersion
+    runtimeVersion,
   });
   if (!heartbeat.renewed) {
     return { outcome: "stopped" as const, reason: "lease_lost" as const };
@@ -102,7 +127,7 @@ export async function executeCourseSupportVerificationStep(
 
   const courseBeforeDiscovery = await prisma.course.findUnique({
     where: { id: ownedCourseId },
-    select: providerCourseSelect
+    select: providerCourseSelect,
   });
   if (!courseBeforeDiscovery) {
     return failVerification({
@@ -111,7 +136,7 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "MISSING_SOURCE",
       providerExecution: false,
-      message: "Course-support verification source is no longer available."
+      message: "Course-support verification source is no longer available.",
     });
   }
   if (courseBeforeDiscovery.timeZone !== ownedIntent.timeZone) {
@@ -121,7 +146,22 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "SCHEMA",
       providerExecution: false,
-      message: "Course-support verification timezone changed during execution."
+      message: "Course-support verification timezone changed during execution.",
+    });
+  }
+  const playbookRuntime =
+    await loadCourseMonitoringPlaybookRuntime(ownedCourseId);
+  if (playbookRuntime) {
+    return executeOrderedCourseSupportVerification({
+      input,
+      runtimeVersion,
+      revision,
+      course: courseBeforeDiscovery,
+      ownedCourseId,
+      ownedIntent,
+      discoveryAttemptedAt: beforeDiscovery.discoveryAttemptedAt,
+      discoveryVerifiedAt: beforeDiscovery.discoveryVerifiedAt,
+      playbookRuntime,
     });
   }
   const beforeDiscoveryGate = evaluateMonitoringGate(courseBeforeDiscovery);
@@ -132,12 +172,11 @@ export async function executeCourseSupportVerificationStep(
     courseBeforeDiscovery.monitoringMode !== "CONTACT_ONLY" &&
     getLocalReaderCourseKey(beforeDiscoveryBookingUrl) !== null;
   const localReaderOnly =
-    courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY" ||
-    courseBeforeDiscovery.monitoringMode === "BROWSER_ONLY";
+    courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY";
   const persistedRunnableEvidence = canUsePersistedRunnableEvidence(
     courseBeforeDiscovery,
     beforeDiscoveryGate.adapterAllowed,
-    beforeDiscoveryGate.currentEvidence
+    beforeDiscoveryGate.currentEvidence,
   );
   if (localReaderOnly && !beforeDiscoveryReaderEligible) {
     return failVerification({
@@ -146,7 +185,8 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "READER_PARSER_MISSING",
       providerExecution: false,
-      message: "Local-reader-only monitoring is configured without an allowlisted reader."
+      message:
+        "Local-reader-only monitoring is configured without an allowlisted reader.",
     });
   }
   if (!beforeDiscoveryGate.adapterAllowed && !localReaderOnly) {
@@ -156,14 +196,14 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: getMonitoringGateFailureClass(courseBeforeDiscovery),
       providerExecution: false,
-      message: "Current course evidence is a terminal monitoring disposition."
+      message: "Current course evidence is a terminal monitoring disposition.",
     });
   }
   if (
     beforeDiscovery.discoveryVerifiedAt &&
     !hasCoherentDiscoveryProof(
       beforeDiscovery.discoveryAttemptedAt,
-      beforeDiscovery.discoveryVerifiedAt
+      beforeDiscovery.discoveryVerifiedAt,
     )
   ) {
     return failVerification({
@@ -172,7 +212,7 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "SCHEMA",
       providerExecution: false,
-      message: "Provider discovery proof is inconsistent."
+      message: "Provider discovery proof is inconsistent.",
     });
   }
 
@@ -184,7 +224,7 @@ export async function executeCourseSupportVerificationStep(
         requestId: input.requestId,
         expectedRevision: revision,
         leaseToken: input.leaseToken,
-        runtimeVersion
+        runtimeVersion,
       });
       if (!attempted.marked) {
         return { outcome: "stopped" as const, reason: attempted.reason };
@@ -193,14 +233,15 @@ export async function executeCourseSupportVerificationStep(
       forceFreshDiscovery = true;
     }
 
-    let discovery: Awaited<ReturnType<typeof prepareCourseSupportVerificationMonitoring>> | null =
-      null;
+    let discovery: Awaited<
+      ReturnType<typeof prepareCourseSupportVerificationMonitoring>
+    > | null = null;
     try {
       discovery = await prepareCourseSupportVerificationMonitoring(
         ownedCourseId,
         undefined,
         new Date(),
-        { forceFresh: forceFreshDiscovery }
+        { forceFresh: forceFreshDiscovery },
       );
     } catch {
       if (!persistedRunnableEvidence) {
@@ -211,7 +252,7 @@ export async function executeCourseSupportVerificationStep(
           failureClass: "NETWORK",
           providerExecution: false,
           message: "Official-source verification discovery failed.",
-          retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+          retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS),
         });
       }
       discoveryCompletedThisRun = true;
@@ -225,7 +266,7 @@ export async function executeCourseSupportVerificationStep(
         failureClass: "RATE_LIMIT",
         providerExecution: false,
         message: "Official-source verification discovery was deferred.",
-        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
+        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS),
       });
     }
     if (discovery?.failedCourseIds.includes(ownedCourseId)) {
@@ -237,7 +278,7 @@ export async function executeCourseSupportVerificationStep(
           failureClass: "NETWORK",
           providerExecution: false,
           message: "Official-source verification discovery failed.",
-          retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+          retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS),
         });
       }
       discoveryCompletedThisRun = true;
@@ -257,7 +298,9 @@ export async function executeCourseSupportVerificationStep(
         message: cappedRetry
           ? "Official-source verification discovery is waiting for its bounded retry window."
           : "No safe official source was attempted for provider verification.",
-        retryAt: cappedRetry ? new Date(Date.now() + TRANSIENT_RETRY_MS) : undefined
+        retryAt: cappedRetry
+          ? new Date(Date.now() + TRANSIENT_RETRY_MS)
+          : undefined,
       });
     }
     if (discovery?.attemptedCourseIds.includes(ownedCourseId)) {
@@ -269,7 +312,7 @@ export async function executeCourseSupportVerificationStep(
     requestId: input.requestId,
     expectedRevision: revision,
     leaseToken: input.leaseToken,
-    runtimeVersion
+    runtimeVersion,
   });
   if (!afterDiscovery.attached) {
     return { outcome: "stopped" as const, reason: afterDiscovery.reason };
@@ -285,7 +328,8 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "SCHEMA",
       providerExecution: false,
-      message: "Course-support verification ownership changed during discovery."
+      message:
+        "Course-support verification ownership changed during discovery.",
     });
   }
   const courseId = afterDiscovery.courseId;
@@ -293,7 +337,7 @@ export async function executeCourseSupportVerificationStep(
 
   const course = await prisma.course.findUnique({
     where: { id: courseId },
-    select: providerCourseSelect
+    select: providerCourseSelect,
   });
   if (!course) {
     return failVerification({
@@ -302,7 +346,7 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "MISSING_SOURCE",
       providerExecution: false,
-      message: "Course-support verification source is no longer available."
+      message: "Course-support verification source is no longer available.",
     });
   }
   if (course.timeZone !== intent.timeZone) {
@@ -312,7 +356,7 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "SCHEMA",
       providerExecution: false,
-      message: "Course-support verification timezone changed during execution."
+      message: "Course-support verification timezone changed during execution.",
     });
   }
   if (course.monitoringMode !== courseBeforeDiscovery.monitoringMode) {
@@ -323,7 +367,7 @@ export async function executeCourseSupportVerificationStep(
       failureClass: "SCHEMA",
       providerExecution: false,
       message: "Course monitoring mode changed during verification.",
-      retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+      retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS),
     });
   }
 
@@ -336,14 +380,14 @@ export async function executeCourseSupportVerificationStep(
         runtimeVersion,
         failureClass: "SCHEMA",
         providerExecution: false,
-        message: "Provider discovery attempt ownership was not preserved."
+        message: "Provider discovery attempt ownership was not preserved.",
       });
     }
     const verified = await markCourseSupportVerificationDiscoveryVerified({
       requestId: input.requestId,
       expectedRevision: revision,
       leaseToken: input.leaseToken,
-      runtimeVersion
+      runtimeVersion,
     });
     if (!verified.marked) {
       return { outcome: "stopped" as const, reason: verified.reason };
@@ -352,7 +396,7 @@ export async function executeCourseSupportVerificationStep(
   } else if (
     !hasCoherentDiscoveryProof(
       afterDiscovery.discoveryAttemptedAt,
-      afterDiscovery.discoveryVerifiedAt
+      afterDiscovery.discoveryVerifiedAt,
     )
   ) {
     return failVerification({
@@ -361,8 +405,9 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: "SCHEMA",
       providerExecution: false,
-      message: "Provider discovery proof changed before verification completed.",
-      retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS)
+      message:
+        "Provider discovery proof changed before verification completed.",
+      retryAt: new Date(Date.now() + TRANSIENT_RETRY_MS),
     });
   }
 
@@ -373,7 +418,7 @@ export async function executeCourseSupportVerificationStep(
       runtimeVersion,
       failureClass: getMonitoringGateFailureClass(course),
       providerExecution: false,
-      message: "Current course evidence is a terminal monitoring disposition."
+      message: "Current course evidence is a terminal monitoring disposition.",
     });
   }
 
@@ -383,12 +428,16 @@ export async function executeCourseSupportVerificationStep(
     course.monitoringMode !== "SERVER_ONLY" &&
     course.monitoringMode !== "CONTACT_ONLY" &&
     getLocalReaderCourseKey(bookingUrl) !== null;
-  if (localReaderEligible) {
+
+  const handleLocalReaderVerification = async () => {
+    const readerNotBefore =
+      afterDiscovery.discoveryAttemptedAt ?? new Date(0);
     const readerVerification = await getLocalReaderCourseVerification({
       courseId,
       targetDate: intent.targetDateLocal,
       players: intent.players,
-      notBefore: afterDiscovery.discoveryAttemptedAt ?? new Date(0)
+      bookingUrl: bookingUrl!,
+      notBefore: readerNotBefore,
     });
     if (readerVerification?.status === "PENDING") {
       return failVerification({
@@ -398,7 +447,7 @@ export async function executeCourseSupportVerificationStep(
         failureClass: "HTTP_5XX",
         providerExecution: false,
         message: "Signed local public-page verification is pending.",
-        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
+        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS),
       });
     }
     if (readerVerification?.status === "COMPLETED") {
@@ -408,9 +457,9 @@ export async function executeCourseSupportVerificationStep(
           startTime: intent.startTimeLocal,
           endTime: intent.endTimeLocal,
           players: intent.players,
-          preferredCourses: [{ courseId, rank: 1 }]
+          preferredCourses: [{ courseId, rank: 1 }],
         },
-        readerVerification.slots
+        readerVerification.slots,
       );
       const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
       const completed = await completeCourseSupportVerificationRequest({
@@ -423,19 +472,40 @@ export async function executeCourseSupportVerificationStep(
           observedAt: readerVerification.observedAt,
           adapterKey: `LOCAL_READER:${capability.providerFamilyKey}`,
           availabilityCount: matchingSlots.length,
-          providerExecution: true
-        }
+          providerExecution: true,
+        },
       });
       return completed.completed
         ? { outcome: "completed" as const, providerOutcome: outcome }
         : { outcome: "stopped" as const, reason: completed.reason };
     }
-    if (localReaderOnly && bookingUrl) {
+    if (readerVerification?.status === "TERMINAL") {
+      return failVerification({
+        input,
+        revision,
+        runtimeVersion,
+        failureClass:
+          readerVerification.resultStatus === "ACCESS_CHALLENGE"
+            ? "CHALLENGE"
+            : readerVerification.resultStatus === "PAGE_MISMATCH"
+              ? "SCHEMA"
+              : "UNKNOWN",
+        providerExecution: true,
+        message:
+          readerVerification.resultStatus === "ACCESS_CHALLENGE"
+            ? "The signed local public-page reader stopped at a persistent access control."
+            : readerVerification.resultStatus === "PAGE_MISMATCH"
+              ? "The signed local public-page reader found an unexpected page layout."
+              : "The signed local public-page reader completed with an error.",
+      });
+    }
+    if (bookingUrl) {
       await queueLocalReaderCourseVerification({
         courseId,
         targetDate: intent.targetDateLocal,
         players: intent.players,
-        bookingUrl
+        bookingUrl,
+        notBefore: readerNotBefore,
       });
       return failVerification({
         input,
@@ -444,33 +514,47 @@ export async function executeCourseSupportVerificationStep(
         failureClass: "HTTP_5XX",
         providerExecution: false,
         message: "The required signed local-reader result is not ready.",
-        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
+        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS),
       });
     }
+    return null;
+  };
+
+  if (localReaderOnly && localReaderEligible) {
+    const readerResult = await handleLocalReaderVerification();
+    if (readerResult) return readerResult;
   }
 
   if (!capability.isRunnable) {
+    if (localReaderEligible) {
+      const readerResult = await handleLocalReaderVerification();
+      if (readerResult) return readerResult;
+    }
     return failVerification({
       input,
       revision,
       runtimeVersion,
-      failureClass: getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
+      failureClass:
+        getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
       providerExecution: false,
-      message: "No reusable public read-only provider adapter is runnable."
+      message: "No reusable public read-only provider adapter is runnable.",
     });
   }
 
   let providerExecutionStarted = false;
   try {
-    const execution = await runWithProviderRequestLease(capability.providerFamilyKey, () => {
-      providerExecutionStarted = true;
-      return fetchCourseTeeSheet(
-        course,
-        new Date(`${intent.targetDateLocal}T00:00:00.000Z`),
-        intent.players,
-        true
-      );
-    });
+    const execution = await runWithProviderRequestLease(
+      capability.providerFamilyKey,
+      () => {
+        providerExecutionStarted = true;
+        return fetchCourseTeeSheet(
+          course,
+          new Date(`${intent.targetDateLocal}T00:00:00.000Z`),
+          intent.players,
+          true,
+        );
+      },
+    );
     if (!execution.acquired) {
       return failVerification({
         input,
@@ -479,12 +563,12 @@ export async function executeCourseSupportVerificationStep(
         failureClass: "RATE_LIMIT",
         providerExecution: false,
         message: "Provider verification was deferred by the concurrency guard.",
-        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS)
+        retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS),
       });
     }
 
     const unsafeBookingUrlCount = execution.value.slots.filter(
-      (slot) => !getSafeOfficialBookingUrl(slot.bookingUrl)
+      (slot) => !getSafeOfficialBookingUrl(slot.bookingUrl),
     ).length;
     if (unsafeBookingUrlCount > 0) {
       return failVerification({
@@ -493,7 +577,7 @@ export async function executeCourseSupportVerificationStep(
         runtimeVersion,
         failureClass: "SCHEMA",
         providerExecution: true,
-        message: "The provider returned an unsafe booking destination."
+        message: "The provider returned an unsafe booking destination.",
       });
     }
 
@@ -503,9 +587,9 @@ export async function executeCourseSupportVerificationStep(
         startTime: intent.startTimeLocal,
         endTime: intent.endTimeLocal,
         players: intent.players,
-        preferredCourses: [{ courseId, rank: 1 }]
+        preferredCourses: [{ courseId, rank: 1 }],
       },
-      execution.value.slots
+      execution.value.slots,
     );
     const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
     const completed = await completeCourseSupportVerificationRequest({
@@ -518,8 +602,8 @@ export async function executeCourseSupportVerificationStep(
         observedAt: new Date(),
         adapterKey: capability.providerFamilyKey,
         availabilityCount: matchingSlots.length,
-        providerExecution: true
-      }
+        providerExecution: true,
+      },
     });
     return completed.completed
       ? { outcome: "completed" as const, providerOutcome: outcome }
@@ -532,12 +616,8 @@ export async function executeCourseSupportVerificationStep(
       localReaderEligible &&
       LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass)
     ) {
-      await queueLocalReaderCourseVerification({
-        courseId,
-        targetDate: intent.targetDateLocal,
-        players: intent.players,
-        bookingUrl
-      });
+      const readerResult = await handleLocalReaderVerification();
+      if (readerResult) return readerResult;
     }
     return failVerification({
       input,
@@ -549,17 +629,741 @@ export async function executeCourseSupportVerificationStep(
       retryAfterSeconds: failure.retryAfterSeconds,
       message: "Public provider availability verification failed.",
       retryAt:
-        LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass) && localReaderEligible
+        LOCAL_READER_FALLBACK_FAILURES.has(failure.failureClass) &&
+        localReaderEligible
           ? new Date(failedAt.getTime() + LEASE_BUSY_RETRY_MS)
           : TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
             ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
-            : null
+            : null,
     });
   }
 }
 
-function hasCoherentDiscoveryProof(attemptedAt: Date | null, verifiedAt: Date | null) {
-  return Boolean(attemptedAt && verifiedAt && attemptedAt.getTime() <= verifiedAt.getTime());
+type VerificationCourse = {
+  id: string;
+  timeZone: string;
+  website: string | null;
+  detectedBookingUrl: string | null;
+  providerFamilyKey: string;
+  detectedPlatform: DetectedPlatform;
+  bookingMetadata: unknown;
+  bookingWindowEvidenceUrl: string | null;
+  bookingMethod: BookingMethod;
+  automationEligibility: AutomationEligibility;
+  automationReason: AutomationReason;
+  monitoringMode: CourseMonitoringMode;
+  isPublic: boolean | null;
+  intelligenceVerifiedAt: Date | null;
+  intelligenceReviewAt: Date | null;
+  intelligenceConfidence: number | null;
+};
+
+type VerificationIntent = {
+  targetDateLocal: string;
+  startTimeLocal: string;
+  endTimeLocal: string;
+  timeZone: string;
+  players: number;
+};
+
+async function executeOrderedCourseSupportVerification(input: {
+  input: CourseSupportVerificationWorkflowInput;
+  runtimeVersion: string;
+  revision: number;
+  course: VerificationCourse;
+  ownedCourseId: string;
+  ownedIntent: VerificationIntent;
+  discoveryAttemptedAt: Date | null;
+  discoveryVerifiedAt: Date | null;
+  playbookRuntime: CourseMonitoringPlaybookRuntime;
+}) {
+  let revision = input.revision;
+  let course = input.course;
+  let discoveryAttemptedAt = input.discoveryAttemptedAt;
+  let discoveryVerifiedAt = input.discoveryVerifiedAt;
+  const runtime = input.playbookRuntime;
+  const localReaderOnly = course.monitoringMode === "LOCAL_READER_ONLY";
+
+  if (
+    runtime.assessment.conclusion === "FACTUAL_FINAL" &&
+    runtime.assessment.factualDisposition
+  ) {
+    return completeFactualVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      disposition: runtime.assessment.factualDisposition,
+      message: getFactualDispositionMessage(runtime.assessment.factualDisposition),
+    });
+  }
+  if (runtime.assessment.conclusion !== "INCOMPLETE") {
+    return failVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: "MISSING_SOURCE",
+      providerExecution: false,
+      message:
+        "The current ordered verification cycle already has a truthful endpoint.",
+    });
+  }
+
+  for (let guard = 0; guard < 12; guard += 1) {
+    const stage = runtime.assessment.nextStage;
+    if (!stage) {
+      return failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: "MISSING_SOURCE",
+        providerExecution: false,
+        message:
+          "The ordered verification cycle completed without runnable monitoring.",
+      });
+    }
+
+    if (stage === "OFFICIAL_IDENTITY") {
+      const factualDisposition = getCurrentFactualDisposition(course);
+      if (factualDisposition) {
+        await requireRecordedPlaybookTransition(runtime, {
+          stage,
+          transition: "FACTUAL_FINAL",
+          readPath: "OFFICIAL_IDENTITY",
+          evidenceKind: "OFFICIAL_SOURCE",
+          factualDisposition: factualDisposition.disposition,
+          runtimeVersion: input.runtimeVersion,
+        });
+        await recordCourseMonitoringFinalClassification({
+          courseId: course.id,
+          state: factualDisposition.state,
+          outcome: factualDisposition.outcome,
+          source: "COURSE_SUPPORT_RESPONDER",
+          message: factualDisposition.message,
+          evidenceUrl:
+            course.bookingWindowEvidenceUrl ??
+            course.detectedBookingUrl ??
+            course.website,
+          runtimeVersion: input.runtimeVersion,
+        });
+        return completeFactualVerification({
+          input: input.input,
+          revision,
+          runtimeVersion: input.runtimeVersion,
+          disposition: factualDisposition.disposition,
+          message: factualDisposition.message,
+        });
+      }
+      await requireRecordedPlaybookTransition(runtime, {
+        stage,
+        transition: "COMPLETED",
+        readPath: "OFFICIAL_IDENTITY",
+        evidenceKind: "OFFICIAL_SOURCE",
+        runtimeVersion: input.runtimeVersion,
+      });
+      continue;
+    }
+
+    if (
+      localReaderOnly &&
+      [
+        "TYPED_ADAPTER",
+        "OFFICIAL_HTTP_DISCOVERY",
+        "HTTP_ADAPTER_RETRY",
+        "RENDERED_BROWSER_DISCOVERY",
+        "BROWSER_ADAPTER_RETRY",
+      ].includes(stage)
+    ) {
+      await requireRecordedPlaybookTransition(runtime, {
+        stage,
+        transition: "NOT_APPLICABLE",
+        readPath: getPlaybookReadPath(stage),
+        evidenceKind: "TOOLING",
+        skipReason: "MONITORING_MODE_EXCLUDED",
+        runtimeVersion: input.runtimeVersion,
+      });
+      continue;
+    }
+
+    if (
+      stage === "TYPED_ADAPTER" ||
+      stage === "HTTP_ADAPTER_RETRY" ||
+      stage === "BROWSER_ADAPTER_RETRY"
+    ) {
+      const adapterResult = await executePlaybookAdapterStage({
+        input: input.input,
+        revision,
+        runtime,
+        runtimeVersion: input.runtimeVersion,
+        stage,
+        course,
+        intent: input.ownedIntent,
+      });
+      if (adapterResult.outcome === "returned") {
+        return adapterResult.value;
+      }
+      continue;
+    }
+
+    if (stage === "OFFICIAL_HTTP_DISCOVERY") {
+      const stageAssessment = runtime.assessment.stages.find(
+        (candidate) => candidate.stage === stage,
+      );
+      if (!discoveryAttemptedAt) {
+        const attempted = await markCourseSupportVerificationDiscoveryAttempted(
+          {
+            requestId: input.input.requestId,
+            expectedRevision: revision,
+            leaseToken: input.input.leaseToken,
+            runtimeVersion: input.runtimeVersion,
+          },
+        );
+        if (!attempted.marked) {
+          return { outcome: "stopped" as const, reason: attempted.reason };
+        }
+        revision = attempted.revision;
+        discoveryAttemptedAt = attempted.discoveryAttemptedAt;
+        discoveryVerifiedAt = attempted.discoveryVerifiedAt;
+      }
+
+      let discovery: Awaited<
+        ReturnType<typeof prepareCourseSupportVerificationMonitoring>
+      > | null = null;
+      let discoveryFailure: CourseSupportFailureClass | null = null;
+      try {
+        discovery = await prepareCourseSupportVerificationMonitoring(
+          input.ownedCourseId,
+          undefined,
+          new Date(),
+          { forceFresh: true },
+        );
+      } catch {
+        discoveryFailure = "NETWORK";
+      }
+      if (discovery?.deferredCourseIds.includes(input.ownedCourseId)) {
+        discoveryFailure = "RATE_LIMIT";
+      } else if (discovery?.failedCourseIds.includes(input.ownedCourseId)) {
+        discoveryFailure = "NETWORK";
+      } else if (
+        discovery &&
+        !discovery.attemptedCourseIds.includes(input.ownedCourseId)
+      ) {
+        discoveryFailure = discovery.retryCourseIds.includes(
+          input.ownedCourseId,
+        )
+          ? "RATE_LIMIT"
+          : "MISSING_SOURCE";
+      }
+
+      if (discoveryFailure) {
+        const retryable =
+          PLAYBOOK_RETRYABLE_FAILURES.has(discoveryFailure) &&
+          (stageAssessment?.attemptCount ?? 0) < 1;
+        await requireRecordedPlaybookTransition(runtime, {
+          stage,
+          transition: retryable ? "FAILED_RETRYABLE" : "FAILED_TERMINAL",
+          readPath: "OFFICIAL_HTTP",
+          evidenceKind: "TOOLING",
+          failureClass: discoveryFailure,
+          runtimeVersion: input.runtimeVersion,
+        });
+        if (retryable) {
+          return failVerification({
+            input: input.input,
+            revision,
+            runtimeVersion: input.runtimeVersion,
+            failureClass: discoveryFailure,
+            providerExecution: false,
+            message:
+              "Official public-source discovery will receive its bounded retry.",
+            retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+          });
+        }
+        continue;
+      }
+
+      const afterDiscovery =
+        await attachCourseSupportVerificationProviderSnapshot({
+          requestId: input.input.requestId,
+          expectedRevision: revision,
+          leaseToken: input.input.leaseToken,
+          runtimeVersion: input.runtimeVersion,
+        });
+      if (!afterDiscovery.attached) {
+        return { outcome: "stopped" as const, reason: afterDiscovery.reason };
+      }
+      revision = afterDiscovery.revision;
+      if (
+        afterDiscovery.courseId !== input.ownedCourseId ||
+        !sameVerificationIntent(afterDiscovery.intent, input.ownedIntent)
+      ) {
+        return failVerification({
+          input: input.input,
+          revision,
+          runtimeVersion: input.runtimeVersion,
+          failureClass: "SCHEMA",
+          providerExecution: false,
+          message:
+            "Course-support verification ownership changed during discovery.",
+        });
+      }
+      const refreshedCourse = await prisma.course.findUnique({
+        where: { id: input.ownedCourseId },
+        select: providerCourseSelect,
+      });
+      if (!refreshedCourse) {
+        return failVerification({
+          input: input.input,
+          revision,
+          runtimeVersion: input.runtimeVersion,
+          failureClass: "MISSING_SOURCE",
+          providerExecution: false,
+          message: "Course-support verification source is no longer available.",
+        });
+      }
+      course = refreshedCourse;
+      if (!discoveryVerifiedAt) {
+        const verified = await markCourseSupportVerificationDiscoveryVerified({
+          requestId: input.input.requestId,
+          expectedRevision: revision,
+          leaseToken: input.input.leaseToken,
+          runtimeVersion: input.runtimeVersion,
+        });
+        if (!verified.marked) {
+          return { outcome: "stopped" as const, reason: verified.reason };
+        }
+        revision = verified.revision;
+        discoveryAttemptedAt = verified.discoveryAttemptedAt;
+        discoveryVerifiedAt = verified.discoveryVerifiedAt;
+      }
+      await requireRecordedPlaybookTransition(runtime, {
+        stage,
+        transition: "COMPLETED",
+        readPath: "OFFICIAL_HTTP",
+        evidenceKind: "OFFICIAL_SOURCE",
+        runtimeVersion: input.runtimeVersion,
+      });
+      continue;
+    }
+
+    if (stage === "RENDERED_BROWSER_DISCOVERY") {
+      return failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: "MISSING_METADATA",
+        providerExecution: false,
+        message: "Ordinary rendered-page discovery is the next ordered stage.",
+        retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+      });
+    }
+
+    if (stage === "LOCAL_READER") {
+      const bookingUrl = course.detectedBookingUrl ?? course.website;
+      const localReaderEligible =
+        course.monitoringMode !== "SERVER_ONLY" &&
+        course.monitoringMode !== "CONTACT_ONLY" &&
+        getLocalReaderCourseKey(bookingUrl) !== null;
+      if (!localReaderEligible || !bookingUrl) {
+        await requireRecordedPlaybookTransition(runtime, {
+          stage,
+          transition: "NOT_APPLICABLE",
+          readPath: "LOCAL_READER",
+          evidenceKind: "TOOLING",
+          skipReason: "NO_LOCAL_READER_CAPABILITY",
+          runtimeVersion: input.runtimeVersion,
+        });
+        continue;
+      }
+
+      const browserStage = runtime.assessment.stages.find(
+        (candidate) => candidate.stage === "RENDERED_BROWSER_DISCOVERY",
+      );
+      const browserAdapterRetryStage = runtime.assessment.stages.find(
+        (candidate) => candidate.stage === "BROWSER_ADAPTER_RETRY",
+      );
+      const notBefore = [
+        browserStage?.completedAt
+          ? new Date(browserStage.completedAt)
+          : null,
+        browserAdapterRetryStage?.completedAt
+          ? new Date(browserAdapterRetryStage.completedAt)
+          : null,
+        discoveryAttemptedAt,
+      ].reduce<Date>(
+        (latest, candidate) =>
+          candidate && candidate.getTime() > latest.getTime()
+            ? candidate
+            : latest,
+        new Date(0),
+      );
+      const readerVerification = await getLocalReaderCourseVerification({
+        courseId: course.id,
+        targetDate: input.ownedIntent.targetDateLocal,
+        players: input.ownedIntent.players,
+        bookingUrl,
+        notBefore,
+      });
+      if (readerVerification?.status === "COMPLETED") {
+        const matchingSlots = filterSlotsForSearch(
+          {
+            date: input.ownedIntent.targetDateLocal,
+            startTime: input.ownedIntent.startTimeLocal,
+            endTime: input.ownedIntent.endTimeLocal,
+            players: input.ownedIntent.players,
+            preferredCourses: [{ courseId: course.id, rank: 1 }],
+          },
+          readerVerification.slots,
+        );
+        const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+        await requireRecordedPlaybookTransition(runtime, {
+          stage,
+          transition: "SUCCEEDED",
+          readPath: "LOCAL_READER",
+          evidenceKind: "LOCAL_READER_RESULT",
+          runtimeVersion: readerVerification.readerVersion,
+          now: readerVerification.observedAt,
+        });
+        const completed = await completeCourseSupportVerificationRequest({
+          requestId: input.input.requestId,
+          expectedRevision: revision,
+          leaseToken: input.input.leaseToken,
+          runtimeVersion: input.runtimeVersion,
+          observation: {
+            outcome,
+            observedAt: readerVerification.observedAt,
+            adapterKey: `LOCAL_READER:${resolveProviderCapability(course).providerFamilyKey}`,
+            availabilityCount: matchingSlots.length,
+            providerExecution: true,
+          },
+        });
+        return completed.completed
+          ? { outcome: "completed" as const, providerOutcome: outcome }
+          : { outcome: "stopped" as const, reason: completed.reason };
+      }
+      if (readerVerification?.status === "TERMINAL") {
+        if (readerVerification.resultStatus === "ACCESS_CHALLENGE") {
+          await requireRecordedPlaybookTransition(runtime, {
+            stage,
+            transition: "TECHNICAL_LIMITATION",
+            readPath: "LOCAL_READER",
+            evidenceKind: "LOCAL_READER_RESULT",
+            technicalReason: "CAPTCHA_OR_QUEUE",
+            runtimeVersion: readerVerification.readerVersion,
+            now: readerVerification.observedAt,
+          });
+          return failVerification({
+            input: input.input,
+            revision,
+            runtimeVersion: input.runtimeVersion,
+            failureClass: "CHALLENGE",
+            providerExecution: true,
+            message:
+              "Independent current confirmation is required after the terminal signed-reader observation.",
+            retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+          });
+        }
+        await requireRecordedPlaybookTransition(runtime, {
+          stage,
+          transition: "FAILED_TERMINAL",
+          readPath: "LOCAL_READER",
+          evidenceKind: "LOCAL_READER_RESULT",
+          failureClass:
+            readerVerification.resultStatus === "PAGE_MISMATCH"
+              ? "SCHEMA"
+              : "UNKNOWN",
+          runtimeVersion: readerVerification.readerVersion,
+          now: readerVerification.observedAt,
+        });
+        continue;
+      }
+
+      const currentLocalStage = runtime.assessment.stages.find(
+        (candidate) => candidate.stage === stage,
+      );
+      if (currentLocalStage?.status !== "STARTED") {
+        await requireRecordedPlaybookTransition(runtime, {
+          stage,
+          transition: "STARTED",
+          readPath: "LOCAL_READER",
+          evidenceKind: "TOOLING",
+          runtimeVersion: input.runtimeVersion,
+        });
+      }
+      if (readerVerification?.status !== "PENDING") {
+        await queueLocalReaderCourseVerification({
+          courseId: course.id,
+          targetDate: input.ownedIntent.targetDateLocal,
+          players: input.ownedIntent.players,
+          bookingUrl,
+          notBefore,
+        });
+      }
+      return failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: "HTTP_5XX",
+        providerExecution: false,
+        message:
+          "The signed local public-page verification is in its bounded window.",
+        retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+      });
+    }
+
+    if (stage === "INDEPENDENT_CONFIRMATION") {
+      if (runtime.localReaderTechnicalReason) {
+        return failVerification({
+          input: input.input,
+          revision,
+          runtimeVersion: input.runtimeVersion,
+          failureClass:
+            runtime.localReaderTechnicalReason === "ACCOUNT_REQUIRED"
+              ? "AUTH"
+              : "CHALLENGE",
+          providerExecution: false,
+          message:
+            "A fresh independent public-page observation is still required.",
+          retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+        });
+      }
+      await requireRecordedPlaybookTransition(runtime, {
+        stage,
+        transition: "NOT_APPLICABLE",
+        readPath: "INDEPENDENT_CONFIRMATION",
+        evidenceKind: "TOOLING",
+        skipReason: "NO_INDEPENDENT_CONFIRMATION",
+        runtimeVersion: input.runtimeVersion,
+      });
+      return failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: "MISSING_SOURCE",
+        providerExecution: false,
+        message:
+          "All safe ordered paths completed without conclusive automatic monitoring.",
+      });
+    }
+  }
+
+  return failVerification({
+    input: input.input,
+    revision,
+    runtimeVersion: input.runtimeVersion,
+    failureClass: "SCHEMA",
+    providerExecution: false,
+    message: "The ordered verification stage guard was exceeded.",
+  });
+}
+
+async function executePlaybookAdapterStage(input: {
+  input: CourseSupportVerificationWorkflowInput;
+  revision: number;
+  runtime: CourseMonitoringPlaybookRuntime;
+  runtimeVersion: string;
+  stage: "TYPED_ADAPTER" | "HTTP_ADAPTER_RETRY" | "BROWSER_ADAPTER_RETRY";
+  course: VerificationCourse;
+  intent: VerificationIntent;
+}): Promise<
+  | { outcome: "continued" }
+  | {
+      outcome: "returned";
+      value:
+        | { outcome: "completed"; providerOutcome: "MATCH_FOUND" | "NO_MATCH" }
+        | { outcome: "failed"; retryable: boolean }
+        | { outcome: "stopped"; reason: string };
+    }
+> {
+  const capability = resolveProviderCapability(input.course);
+  if (!capability.isRunnable) {
+    await requireRecordedPlaybookTransition(input.runtime, {
+      stage: input.stage,
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      runtimeVersion: input.runtimeVersion,
+    });
+    return { outcome: "continued" };
+  }
+
+  let providerExecutionStarted = false;
+  let failure: {
+    failureClass: CourseSupportFailureClass;
+    httpStatus: number | null;
+    retryAfterSeconds: number | null;
+  } | null = null;
+  try {
+    const execution = await runWithProviderRequestLease(
+      capability.providerFamilyKey,
+      () => {
+        providerExecutionStarted = true;
+        return fetchCourseTeeSheet(
+          input.course,
+          new Date(`${input.intent.targetDateLocal}T00:00:00.000Z`),
+          input.intent.players,
+          true,
+        );
+      },
+    );
+    if (!execution.acquired) {
+      failure = {
+        failureClass: "RATE_LIMIT",
+        httpStatus: null,
+        retryAfterSeconds: null,
+      };
+    } else if (
+      execution.value.slots.some(
+        (slot) => !getSafeOfficialBookingUrl(slot.bookingUrl),
+      )
+    ) {
+      failure = {
+        failureClass: "SCHEMA",
+        httpStatus: null,
+        retryAfterSeconds: null,
+      };
+    } else {
+      const matchingSlots = filterSlotsForSearch(
+        {
+          date: input.intent.targetDateLocal,
+          startTime: input.intent.startTimeLocal,
+          endTime: input.intent.endTimeLocal,
+          players: input.intent.players,
+          preferredCourses: [{ courseId: input.course.id, rank: 1 }],
+        },
+        execution.value.slots,
+      );
+      const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+      await requireRecordedPlaybookTransition(input.runtime, {
+        stage: input.stage,
+        transition: "SUCCEEDED",
+        readPath: "TYPED_PROVIDER_ADAPTER",
+        evidenceKind: "PROVIDER_RESPONSE",
+        runtimeVersion: input.runtimeVersion,
+      });
+      const completed = await completeCourseSupportVerificationRequest({
+        requestId: input.input.requestId,
+        expectedRevision: input.revision,
+        leaseToken: input.input.leaseToken,
+        runtimeVersion: input.runtimeVersion,
+        observation: {
+          outcome,
+          observedAt: new Date(),
+          adapterKey: capability.providerFamilyKey,
+          availabilityCount: matchingSlots.length,
+          providerExecution: true,
+        },
+      });
+      return {
+        outcome: "returned",
+        value: completed.completed
+          ? { outcome: "completed", providerOutcome: outcome }
+          : { outcome: "stopped", reason: completed.reason },
+      };
+    }
+  } catch (error) {
+    failure = classifyProviderFailure({ error });
+  }
+
+  const stageAssessment = input.runtime.assessment.stages.find(
+    (candidate) => candidate.stage === input.stage,
+  );
+  const retryable =
+    PLAYBOOK_RETRYABLE_FAILURES.has(failure!.failureClass) &&
+    (stageAssessment?.attemptCount ?? 0) < 1;
+  await requireRecordedPlaybookTransition(input.runtime, {
+    stage: input.stage,
+    transition: retryable ? "FAILED_RETRYABLE" : "FAILED_TERMINAL",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: providerExecutionStarted ? "PROVIDER_RESPONSE" : "TOOLING",
+    failureClass: failure!.failureClass,
+    runtimeVersion: input.runtimeVersion,
+  });
+  if (!retryable) {
+    return { outcome: "continued" };
+  }
+  return {
+    outcome: "returned",
+    value: await failVerification({
+      input: input.input,
+      revision: input.revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: failure!.failureClass,
+      providerExecution: providerExecutionStarted,
+      httpStatus: failure!.httpStatus,
+      retryAfterSeconds: failure!.retryAfterSeconds,
+      message:
+        "The typed public provider adapter will receive its bounded retry.",
+      retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+    }),
+  };
+}
+
+async function requireRecordedPlaybookTransition(
+  runtime: CourseMonitoringPlaybookRuntime,
+  input: Parameters<typeof recordRuntimePlaybookTransition>[1],
+) {
+  const recorded = await recordRuntimePlaybookTransition(runtime, input);
+  if (!recorded.recorded) {
+    throw new Error(
+      `Ordered playbook transition was not recorded: ${recorded.reason}.`,
+    );
+  }
+  return recorded.result;
+}
+
+function getPlaybookReadPath(
+  stage: CourseMonitoringPlaybookRuntime["assessment"]["nextStage"],
+) {
+  if (stage === "OFFICIAL_IDENTITY") return "OFFICIAL_IDENTITY" as const;
+  if (stage === "OFFICIAL_HTTP_DISCOVERY") return "OFFICIAL_HTTP" as const;
+  if (stage === "RENDERED_BROWSER_DISCOVERY")
+    return "RENDERED_BROWSER" as const;
+  if (stage === "LOCAL_READER") return "LOCAL_READER" as const;
+  if (stage === "INDEPENDENT_CONFIRMATION") {
+    return "INDEPENDENT_CONFIRMATION" as const;
+  }
+  return "TYPED_PROVIDER_ADAPTER" as const;
+}
+
+function getCurrentFactualDisposition(course: VerificationCourse) {
+  const currentEvidence = evaluateMonitoringGate(course).currentEvidence;
+  if (!currentEvidence) return null;
+  if (course.isPublic === false) {
+    return {
+      disposition: "IDENTITY_FINAL" as const,
+      state: "FINAL_IDENTITY" as const,
+      outcome: "IDENTITY_FINAL" as const,
+      resolution: "IDENTITY_CLASSIFIED" as const,
+      message:
+        "Current authoritative identity evidence shows this is not a monitorable public course.",
+    };
+  }
+  if (
+    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+      course.bookingMethod,
+    ) ||
+    course.automationReason === "NO_ONLINE_BOOKING"
+  ) {
+    return {
+      disposition: "MANUAL_DIRECT" as const,
+      state: "FINAL_MANUAL" as const,
+      outcome: "MANUAL_DIRECT" as const,
+      resolution: "DIRECT_BOOKING_CLASSIFIED" as const,
+      message:
+        "Current official evidence shows the course requires direct customer action instead of online tee-time monitoring.",
+    };
+  }
+  return null;
+}
+
+function hasCoherentDiscoveryProof(
+  attemptedAt: Date | null,
+  verifiedAt: Date | null,
+) {
+  return Boolean(
+    attemptedAt && verifiedAt && attemptedAt.getTime() <= verifiedAt.getTime(),
+  );
 }
 
 function canUsePersistedRunnableEvidence(
@@ -578,7 +1382,7 @@ function canUsePersistedRunnableEvidence(
     intelligenceConfidence: number | null;
   },
   adapterAllowed: boolean,
-  currentEvidence: boolean
+  currentEvidence: boolean,
 ) {
   const capability = resolveProviderCapability(course);
   return Boolean(
@@ -591,7 +1395,7 @@ function canUsePersistedRunnableEvidence(
     course.bookingMethod === "PUBLIC_ONLINE" &&
     course.automationEligibility === "ALLOWED" &&
     course.intelligenceVerifiedAt &&
-    (course.intelligenceConfidence ?? 0) >= 0.9
+    (course.intelligenceConfidence ?? 0) >= 0.9,
   );
 }
 
@@ -611,7 +1415,10 @@ function getMonitoringGateFailureClass(course: {
   return "UNSUPPORTED_FAMILY";
 }
 
-function getTransientProviderRetryAt(now: Date, retryAfterSeconds: number | null) {
+function getTransientProviderRetryAt(
+  now: Date,
+  retryAfterSeconds: number | null,
+) {
   const providerDelayMs =
     retryAfterSeconds === null
       ? 0
@@ -639,7 +1446,7 @@ function sameVerificationIntent(
     endTimeLocal: string;
     timeZone: string;
     players: number;
-  }
+  },
 ) {
   return (
     left.targetDateLocal === right.targetDateLocal &&
@@ -648,6 +1455,37 @@ function sameVerificationIntent(
     left.timeZone === right.timeZone &&
     left.players === right.players
   );
+}
+
+async function completeFactualVerification(input: {
+  input: CourseSupportVerificationWorkflowInput;
+  revision: number;
+  runtimeVersion: string;
+  disposition: AutomationPlaybookFactualDisposition;
+  message: string;
+}) {
+  const completed = await completeCourseSupportVerificationFactualFinal({
+    requestId: input.input.requestId,
+    expectedRevision: input.revision,
+    leaseToken: input.input.leaseToken,
+    runtimeVersion: input.runtimeVersion,
+    disposition: input.disposition,
+    message: input.message,
+  });
+  return completed.completed
+    ? {
+        outcome: "completed" as const,
+        providerOutcome: completed.outcome,
+      }
+    : { outcome: "stopped" as const, reason: completed.reason };
+}
+
+function getFactualDispositionMessage(
+  disposition: AutomationPlaybookFactualDisposition,
+) {
+  return disposition === "IDENTITY_FINAL"
+    ? "Current authoritative rendered-page evidence confirms a non-monitorable course identity."
+    : "Current authoritative rendered-page evidence confirms direct customer action is required instead of online tee-time monitoring.";
 }
 
 async function failVerification(input: {
@@ -674,13 +1512,13 @@ async function failVerification(input: {
       outcome: "FETCH_FAILED",
       observedAt: new Date(),
       httpStatus: input.httpStatus,
-      providerExecution: input.providerExecution
-    }
+      providerExecution: input.providerExecution,
+    },
   });
   return failed.failed
     ? {
         outcome: "failed" as const,
-        retryable: failed.status === "RETRYABLE_FAILED"
+        retryable: failed.status === "RETRYABLE_FAILED",
       }
     : { outcome: "stopped" as const, reason: failed.reason };
 }

@@ -3,6 +3,8 @@
 const DEFAULT_BACKEND_ORIGIN = "https://teetimespot.com";
 const POLL_ALARM = "tee-time-spot-local-reader-poll";
 const POLL_PERIOD_MINUTES = 1;
+const MAX_CONCURRENT_JOBS = 2;
+const BACKEND_FETCH_TIMEOUT_MS = 10_000;
 const READER_CAPABILITIES = Object.freeze([
   ["CPS_RENDERED", 1],
   ["CHRONOGOLF_RENDERED", 1],
@@ -12,15 +14,27 @@ const READER_CAPABILITIES = Object.freeze([
   ["PROPHET_FREAR_RENDERED", 4]
 ]);
 const PROPHET_COURSES = Object.freeze({
-  "frear-park": ["Frear Park Municipal Golf Course", "/FrearParkV3/Home/NIndex", "1,2"],
-  "simsbury-farms": ["Simsbury Farms Golf Course", "/SimsburyFarmsV3/Home/NIndex", "1"]
+  "frear-park": [
+    "Frear Park Municipal Golf Course",
+    "/FrearParkV3/Home/NIndex",
+    "1,2"
+  ],
+  "simsbury-farms": [
+    "Simsbury Farms Golf Course",
+    "/SimsburyFarmsV3/Home/NIndex",
+    "1"
+  ]
 });
 let pollInProgress = false;
+let pendingJobsOperation = Promise.resolve();
+const pendingResultSubmissions = new Map();
 
 function isAllowlistedCpsJob(job) {
   try {
     if (
-      !/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u.test(job?.courseKey || "") ||
+      !/^cps:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cps\.golf$/u.test(
+        job?.courseKey || ""
+      ) ||
       typeof job.courseName !== "string" ||
       job.courseName.trim().length === 0 ||
       job.courseName.length > 160 ||
@@ -94,7 +108,9 @@ function isAllowlistedChronogolfJob(job) {
       url.pathname === `/club/${slug}` &&
       url.searchParams.get("date") === job.targetDate &&
       url.searchParams.get("step") === "teetimes" &&
-      Array.from(url.searchParams.keys()).every((key) => ["date", "step"].includes(key)) &&
+      Array.from(url.searchParams.keys()).every((key) =>
+        ["date", "step"].includes(key)
+      ) &&
       url.username === "" &&
       url.password === "" &&
       url.hash === ""
@@ -105,7 +121,9 @@ function isAllowlistedChronogolfJob(job) {
 }
 
 function isSafeEzLinksHostname(hostname) {
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u.test(hostname)) {
+  if (
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u.test(hostname)
+  ) {
     return false;
   }
   const tenant = hostname.slice(0, -".ezlinksgolf.com".length);
@@ -197,7 +215,9 @@ function isAllowlistedWebTracJob(job) {
       url.pathname === "/webtrac/web/search.html" &&
       url.searchParams.size === allowedKeys.size &&
       Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
-      Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
+      Array.from(url.searchParams.keys()).every((key) =>
+        allowedKeys.has(key)
+      ) &&
       url.searchParams.get("Action") === "Start" &&
       url.searchParams.get("begindate") === `${month}/${day}/${year}` &&
       url.searchParams.get("begintime") === "12:00 am" &&
@@ -239,7 +259,9 @@ function isAllowlistedProphetJob(job) {
       url.pathname === config[1] &&
       url.searchParams.size === allowedKeys.size &&
       Array.from(allowedKeys).every((key) => url.searchParams.has(key)) &&
-      Array.from(url.searchParams.keys()).every((key) => allowedKeys.has(key)) &&
+      Array.from(url.searchParams.keys()).every((key) =>
+        allowedKeys.has(key)
+      ) &&
       url.searchParams.get("CourseId") === config[2] &&
       url.searchParams.get("Date") === job.targetDate &&
       url.searchParams.get("Time") === "AnyTime" &&
@@ -262,24 +284,34 @@ function isAllowlistedJob(job) {
       typeof required.key !== "string" ||
       !Number.isInteger(required.parserVersion) ||
       !READER_CAPABILITIES.some(
-        ([key, parserVersion]) => key === required.key && parserVersion >= required.parserVersion
+        ([key, parserVersion]) =>
+          key === required.key && parserVersion >= required.parserVersion
       )
     ) {
       return false;
     }
-    if (isAllowlistedCpsJob(job)) return true;
-    if (isAllowlistedChronogolfJob(job)) return true;
-    if (isAllowlistedTenForeJob(job)) return true;
-    if (isAllowlistedEzLinksJob(job)) return true;
-    if (isAllowlistedWebTracJob(job)) return true;
-    return isAllowlistedProphetJob(job);
+    const expectedCapability = [
+      [isAllowlistedCpsJob, "CPS_RENDERED", 1],
+      [isAllowlistedChronogolfJob, "CHRONOGOLF_RENDERED", 1],
+      [isAllowlistedTenForeJob, "TENFORE_RENDERED", 1],
+      [isAllowlistedEzLinksJob, "EZLINKS_RENDERED", 1],
+      [isAllowlistedWebTracJob, "WEBTRAC_RENDERED", 1],
+      [isAllowlistedProphetJob, "PROPHET_FREAR_RENDERED", 4]
+    ].find(([isAllowlisted]) => isAllowlisted(job));
+    return Boolean(
+      expectedCapability &&
+        required.key === expectedCapability[1] &&
+        required.parserVersion === expectedCapability[2]
+    );
   } catch {
     return false;
   }
 }
 
 function bytesToHex(bytes) {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    ""
+  );
 }
 
 async function hmacHex(secret, value) {
@@ -291,7 +323,9 @@ async function hmacHex(secret, value) {
     ["sign"]
   );
   return bytesToHex(
-    new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)))
+    new Uint8Array(
+      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value))
+    )
   );
 }
 
@@ -319,17 +353,36 @@ async function signedFetch(path, options = {}) {
     settings.deviceToken,
     `${method}\n${path}\n${timestamp}\n${body}`
   );
-  return fetch(`${settings.backendOrigin}${path}`, {
-    method,
-    body: body || undefined,
-    headers: {
-      "content-type": "application/json",
-      "x-local-reader-timestamp": timestamp,
-      "x-local-reader-signature": signature,
-      ...(options.leaseToken ? { "x-local-reader-lease": options.leaseToken } : {})
-    },
-    cache: "no-store"
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort("Local reader backend request timed out."),
+    BACKEND_FETCH_TIMEOUT_MS
+  );
+  try {
+    const response = await fetch(`${settings.backendOrigin}${path}`, {
+      method,
+      body: body || undefined,
+      headers: {
+        "content-type": "application/json",
+        "x-local-reader-timestamp": timestamp,
+        "x-local-reader-signature": signature,
+        ...(options.leaseToken
+          ? { "x-local-reader-lease": options.leaseToken }
+          : {})
+      },
+      cache: "no-store",
+      signal: controller.signal
+    });
+    if (options.expectJson === true) {
+      return {
+        response,
+        payload: response.ok ? await response.json() : null
+      };
+    }
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function setLastStatus(status, detail) {
@@ -349,8 +402,30 @@ async function savePendingJobs(jobs) {
   await chrome.storage.local.set({ pendingJobs: jobs });
 }
 
+function withPendingJobsLock(operation) {
+  const current = pendingJobsOperation.then(operation);
+  pendingJobsOperation = current.then(
+    () => undefined,
+    () => undefined
+  );
+  return current;
+}
+
+async function readPendingJobsSnapshot() {
+  return withPendingJobsLock(() => pendingJobs());
+}
+
+async function mutatePendingJobs(mutator) {
+  return withPendingJobsLock(async () => {
+    const jobs = await pendingJobs();
+    const mutation = await mutator(jobs);
+    if (mutation.changed) await savePendingJobs(jobs);
+    return mutation.value;
+  });
+}
+
 async function wakePendingTab(tabId) {
-  const jobs = await pendingJobs();
+  const jobs = await readPendingJobsSnapshot();
   if (!jobs[String(tabId)]) return;
   try {
     await chrome.tabs.sendMessage(tabId, { type: "LOCAL_READER_WAKE" });
@@ -371,9 +446,7 @@ function isReusableEzLinksTab(job, tab) {
       url.hash === "#!/search" &&
       url.username === "" &&
       url.password === "" &&
-      [...url.searchParams.keys()].every((key) =>
-        key.startsWith("__cf_chl_"),
-      )
+      [...url.searchParams.keys()].every((key) => key.startsWith("__cf_chl_"))
     );
   } catch {
     return false;
@@ -387,43 +460,45 @@ async function findReusableEzLinksTab(job) {
   return (
     tabs
       .filter((tab) => isReusableEzLinksTab(job, tab))
-      .sort((left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0))[0] ||
-    null
+      .sort(
+        (left, right) => (right.lastAccessed || 0) - (left.lastAccessed || 0)
+      )[0] || null
   );
 }
 
-async function cleanStalePendingJobs(jobs) {
-  const now = Date.now();
-  let changed = false;
-  let removedCount = 0;
-  for (const [tabId, pending] of Object.entries(jobs)) {
-    const openedAt = Date.parse(pending.openedAt || "");
-    const expiresAt = Date.parse(pending.job?.expiresAt || "");
-    const leaseExpiresAt = Date.parse(pending.job?.leaseExpiresAt || "");
-    let tabExists = true;
-    try {
-      await chrome.tabs.get(Number(tabId));
-    } catch {
-      tabExists = false;
-    }
-    if (
-      (!tabExists && !pending.result) ||
-      (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) ||
-      (!Number.isFinite(leaseExpiresAt) &&
-        Number.isFinite(openedAt) &&
-        openedAt + 170_000 <= now) ||
-      (Number.isFinite(expiresAt) && expiresAt <= now)
-    ) {
-      delete jobs[tabId];
-      changed = true;
-      removedCount += 1;
-      if (tabExists && pending.closeTabOnFinish !== false) {
-        await closePendingTab(Number(tabId));
+async function cleanStalePendingJobs() {
+  return mutatePendingJobs(async (jobs) => {
+    const now = Date.now();
+    let changed = false;
+    let removedCount = 0;
+    for (const [tabId, pending] of Object.entries(jobs)) {
+      const openedAt = Date.parse(pending.openedAt || "");
+      const expiresAt = Date.parse(pending.job?.expiresAt || "");
+      const leaseExpiresAt = Date.parse(pending.job?.leaseExpiresAt || "");
+      let tabExists = true;
+      try {
+        await chrome.tabs.get(Number(tabId));
+      } catch {
+        tabExists = false;
+      }
+      if (
+        (!tabExists && !pending.result) ||
+        (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) ||
+        (!Number.isFinite(leaseExpiresAt) &&
+          Number.isFinite(openedAt) &&
+          openedAt + 170_000 <= now) ||
+        (Number.isFinite(expiresAt) && expiresAt <= now)
+      ) {
+        delete jobs[tabId];
+        changed = true;
+        removedCount += 1;
+        if (tabExists && pending.closeTabOnFinish !== false) {
+          await closePendingTab(Number(tabId));
+        }
       }
     }
-  }
-  if (changed) await savePendingJobs(jobs);
-  return removedCount;
+    return { changed, value: removedCount };
+  });
 }
 
 async function closePendingTab(tabId) {
@@ -437,45 +512,67 @@ async function closePendingTab(tabId) {
 async function submitPendingResult(tabId, pending) {
   const result = pending.result;
   if (!result) return false;
-  const body = JSON.stringify({ ...result, jobId: pending.job.id });
-  const path = `/api/local-reader/jobs/${encodeURIComponent(pending.job.id)}/result`;
-  const response = await signedFetch(path, {
-    method: "POST",
-    body,
-    leaseToken: pending.job.leaseToken
-  });
-  if (!response.ok) {
-    throw new Error(`Result API returned ${response.status}`);
+  const jobId = pending.job.id;
+  const activeSubmission = pendingResultSubmissions.get(jobId);
+  if (activeSubmission) return activeSubmission;
+
+  const submission = (async () => {
+    const body = JSON.stringify({ ...result, jobId });
+    const path = `/api/local-reader/jobs/${encodeURIComponent(jobId)}/result`;
+    const response = await signedFetch(path, {
+      method: "POST",
+      body,
+      leaseToken: pending.job.leaseToken
+    });
+    if (!response.ok) {
+      throw new Error(`Result API returned ${response.status}`);
+    }
+    await mutatePendingJobs((jobs) => {
+      if (jobs[String(tabId)]?.job?.id !== jobId) {
+        return { changed: false, value: false };
+      }
+      delete jobs[String(tabId)];
+      return { changed: true, value: true };
+    });
+    const resultDetail =
+      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+        ? `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
+        : `${pending.job.courseKey} ${pending.job.targetDate}: ${result.pageTitle}`;
+    await setLastStatus(
+      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+        ? "COMPLETED"
+        : result.status,
+      resultDetail
+    );
+    return true;
+  })();
+  pendingResultSubmissions.set(jobId, submission);
+  try {
+    return await submission;
+  } finally {
+    if (pendingResultSubmissions.get(jobId) === submission) {
+      pendingResultSubmissions.delete(jobId);
+    }
   }
-  const jobs = await pendingJobs();
-  if (jobs[String(tabId)]?.job?.id === pending.job.id) {
-    delete jobs[String(tabId)];
-    await savePendingJobs(jobs);
-  }
-  const resultDetail =
-    result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
-      ? `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
-      : `${pending.job.courseKey} ${pending.job.targetDate}: ${result.pageTitle}`;
-  await setLastStatus(
-    result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
-      ? "COMPLETED"
-      : result.status,
-    resultDetail
-  );
-  return true;
 }
 
 async function finishJob(tabId, result) {
-  const jobs = await pendingJobs();
-  const pending = jobs[String(tabId)];
+  const pending = await mutatePendingJobs((jobs) => {
+    const current = jobs[String(tabId)];
+    if (!current) return { changed: false, value: null };
+    if (current.result) return { changed: false, value: current };
+    jobs[String(tabId)] = { ...current, result };
+    return { changed: true, value: jobs[String(tabId)] };
+  });
   if (!pending) return;
-  pending.result = result;
-  await savePendingJobs(jobs);
 
   try {
     await submitPendingResult(tabId, pending);
   } catch (error) {
-    await setLastStatus("RESULT_FAILED", error instanceof Error ? error.message : String(error));
+    await setLastStatus(
+      "RESULT_FAILED",
+      error instanceof Error ? error.message : String(error)
+    );
   } finally {
     if (pending.closeTabOnFinish !== false) await closePendingTab(tabId);
   }
@@ -486,76 +583,114 @@ async function poll() {
   pollInProgress = true;
   try {
     const settings = await getSettings();
-    if (!settings.enabled || !settings.deviceId || settings.deviceToken.length < 16) {
+    if (
+      !settings.enabled ||
+      !settings.deviceId ||
+      settings.deviceToken.length < 16
+    ) {
       return;
     }
-    const jobs = await pendingJobs();
-    const removedStaleJobs = await cleanStalePendingJobs(jobs);
+    const removedStaleJobs = await cleanStalePendingJobs();
     if (removedStaleJobs > 0) {
       await setLastStatus(
         "RETRYING",
         `${removedStaleJobs} expired reader job${removedStaleJobs === 1 ? "" : "s"} cleared; requesting fresh signed work.`
       );
     }
-    for (const [tabId, pending] of Object.entries(jobs)) {
-      if (!pending.result) continue;
-      try {
-        await submitPendingResult(Number(tabId), pending);
-      } catch (error) {
+    let jobs = await readPendingJobsSnapshot();
+    const pendingSubmissions = Object.entries(jobs).filter(
+      ([, pending]) => pending.result
+    );
+    const submissionResults = await Promise.allSettled(
+      pendingSubmissions.map(([tabId, pending]) =>
+        submitPendingResult(Number(tabId), pending)
+      )
+    );
+    if (pendingSubmissions.length > 0) {
+      for (let index = 0; index < pendingSubmissions.length; index += 1) {
+        const result = submissionResults[index];
+        if (result?.status === "fulfilled") continue;
         await setLastStatus(
           "RESULT_RETRY_PENDING",
-          error instanceof Error ? error.message : String(error)
+          result?.reason instanceof Error
+            ? result.reason.message
+            : String(result?.reason)
         );
       }
     }
-    if (Object.keys(await pendingJobs()).length > 0) return;
-
+    jobs = await readPendingJobsSnapshot();
     const readerVersion = chrome.runtime.getManifest().version;
     const capabilities = READER_CAPABILITIES.map(
       ([key, parserVersion]) => `${key}:${parserVersion}`
     ).join(",");
-    const path =
-      `/api/local-reader/jobs/next?deviceId=${encodeURIComponent(settings.deviceId)}` +
-      `&readerVersion=${encodeURIComponent(readerVersion)}` +
-      `&buildId=${encodeURIComponent(`chrome-extension-${readerVersion}`)}` +
-      `&capabilities=${encodeURIComponent(capabilities)}`;
-    const response = await signedFetch(path);
-    if (!response.ok) {
-      throw new Error(`Job API returned ${response.status}`);
+    let claimedAny = false;
+    while (Object.keys(jobs).length < MAX_CONCURRENT_JOBS) {
+      const path =
+        `/api/local-reader/jobs/next?deviceId=${encodeURIComponent(settings.deviceId)}` +
+        `&readerVersion=${encodeURIComponent(readerVersion)}` +
+        `&buildId=${encodeURIComponent(`chrome-extension-${readerVersion}`)}` +
+        `&capabilities=${encodeURIComponent(capabilities)}`;
+      const { response, payload } = await signedFetch(path, {
+        expectJson: true
+      });
+      if (!response.ok) {
+        throw new Error(`Job API returned ${response.status}`);
+      }
+      if (!payload.job) break;
+      if (!isAllowlistedJob(payload.job)) {
+        throw new Error("The backend returned a non-allowlisted reader job.");
+      }
+      const reusableTab = await findReusableEzLinksTab(payload.job);
+      const tab =
+        reusableTab ||
+        (await chrome.tabs.create({
+          url: payload.job.bookingUrl,
+          active: false
+        }));
+      if (!tab.id) throw new Error("Chrome did not create a worker tab.");
+      try {
+        await mutatePendingJobs((currentJobs) => {
+          if (currentJobs[String(tab.id)]) {
+            throw new Error("The selected worker tab already has a reader job.");
+          }
+          currentJobs[String(tab.id)] = {
+            job: payload.job,
+            openedAt: new Date().toISOString(),
+            closeTabOnFinish: reusableTab === null
+          };
+          return { changed: true, value: true };
+        });
+      } catch (error) {
+        if (reusableTab === null) await closePendingTab(tab.id);
+        throw error;
+      }
+      jobs = await readPendingJobsSnapshot();
+      claimedAny = true;
+      await setLastStatus(
+        "READING",
+        `${payload.job.courseKey} ${payload.job.targetDate}`
+      );
+      await wakePendingTab(tab.id);
     }
-    const payload = await response.json();
-    if (!payload.job) {
+    if (!claimedAny && Object.keys(jobs).length === 0) {
       await setLastStatus("IDLE", "No reader job is waiting.");
-      return;
     }
-    if (!isAllowlistedJob(payload.job)) {
-      throw new Error("The backend returned a non-allowlisted reader job.");
-    }
-    const reusableTab = await findReusableEzLinksTab(payload.job);
-    const tab =
-      reusableTab ||
-      (await chrome.tabs.create({
-        url: payload.job.bookingUrl,
-        active: false
-      }));
-    if (!tab.id) throw new Error("Chrome did not create a worker tab.");
-    jobs[String(tab.id)] = {
-      job: payload.job,
-      openedAt: new Date().toISOString(),
-      closeTabOnFinish: reusableTab === null
-    };
-    await savePendingJobs(jobs);
-    await setLastStatus("READING", `${payload.job.courseKey} ${payload.job.targetDate}`);
-    await wakePendingTab(tab.id);
   } catch (error) {
-    await setLastStatus("POLL_FAILED", error instanceof Error ? error.message : String(error));
+    await setLastStatus(
+      "POLL_FAILED",
+      error instanceof Error ? error.message : String(error)
+    );
   } finally {
     pollInProgress = false;
   }
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const settings = await chrome.storage.local.get(["backendOrigin", "deviceId", "enabled"]);
+  const settings = await chrome.storage.local.get([
+    "backendOrigin",
+    "deviceId",
+    "enabled"
+  ]);
   await chrome.storage.local.set({
     backendOrigin: settings.backendOrigin || DEFAULT_BACKEND_ORIGIN,
     deviceId: settings.deviceId || `chrome-${crypto.randomUUID()}`,
@@ -589,7 +724,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     return Promise.resolve({ tabId: sender.tab?.id || null });
   }
   if (message?.type === "LOCAL_READER_RESULT" && sender.tab?.id) {
-    void finishJob(sender.tab.id, message.result);
+    return finishJob(sender.tab.id, message.result);
   }
   if (message?.type === "LOCAL_READER_POLL_NOW") {
     void poll();

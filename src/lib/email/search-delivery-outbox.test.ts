@@ -11,6 +11,8 @@ import {
   getSafeOfficialBookingUrl,
   hydrateMatchAlertPayload,
   hydrateSearchStatusEmailPayload,
+  listReachedMonitoringFinals,
+  listReachedMonitoringOutages,
   listRetryableSearchEmailDeliveryGroups,
   lockSearchForAlertMutation,
   lockSearchForEmailReconciliation,
@@ -204,6 +206,196 @@ describe("search email delivery outbox", () => {
     } as never);
     mockedPrisma.teeSearch.update.mockResolvedValue({ id: "search-1" } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("recovers only recipients who received an unavailable customer status", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      {
+        recipient: "owner@example.com",
+        sentAt: new Date("2026-07-15T15:01:00.000Z"),
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusSnapshot: [
+            {
+              courseId: "course-1",
+              courseName: "Course",
+              state: "NEEDS_ADAPTER:ACTIONABLE:IN_OPERATOR_QUEUE:NONE",
+              customerStatus: "RETRYING_AUTOMATICALLY"
+            },
+            {
+              courseId: "course-2",
+              courseName: "Healthy",
+              state: "NO_MATCH:DATE_NOT_VISIBLE",
+              customerStatus: "MONITORED"
+            }
+          ]
+        }
+      },
+      {
+        recipient: "friend@example.com",
+        sentAt: new Date("2026-07-15T15:02:00.000Z"),
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusReport: {
+            kind: "status-update",
+            courses: [{ courseId: "course-1" }]
+          },
+          statusSnapshot: [
+            {
+              courseId: "course-1",
+              courseName: "Course",
+              state: "NEEDS_ADAPTER:ACTIONABLE:NEEDS_HUMAN_REVIEW:NONE",
+              customerStatus: "NEEDS_HUMAN_REVIEW"
+            },
+            {
+              courseId: "course-not-in-update",
+              courseName: "Unreported retry",
+              state: "FETCH_FAILED:ACTIONABLE:IN_OPERATOR_QUEUE:NONE",
+              customerStatus: "RETRYING_AUTOMATICALLY"
+            }
+          ]
+        }
+      }
+    ] as never);
+
+    await expect(
+      listReachedMonitoringOutages({
+        searchId: "search-1",
+        alertGeneration: 3
+      })
+    ).resolves.toEqual([
+      {
+        courseId: "course-1",
+        recipient: "owner@example.com",
+        sentAt: new Date("2026-07-15T15:01:00.000Z"),
+        customerStatus: "RETRYING_AUTOMATICALLY"
+      },
+      {
+        courseId: "course-1",
+        recipient: "friend@example.com",
+        sentAt: new Date("2026-07-15T15:02:00.000Z"),
+        customerStatus: "NEEDS_HUMAN_REVIEW"
+      }
+    ]);
+    expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          kind: {
+            in: [
+              "SETUP",
+              "DAILY",
+              "MONITORING_STATUS_UPDATE",
+              "MONITORING_OUTAGE"
+            ]
+          }
+        })
+      })
+    );
+  });
+
+  it("reads reached factual-final status deliveries for course-level dedupe", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      {
+        recipient: "owner@example.com",
+        sentAt: new Date("2026-07-15T15:01:00.000Z"),
+        status: "SENT",
+        lastError: null,
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusReport: {
+            kind: "status-update",
+            courses: [{ courseId: "course-final" }]
+          },
+          statusSnapshot: [
+            {
+              courseId: "course-final",
+              courseName: "Final Course",
+              state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+              customerStatus: "FINAL_DIRECT_ACTION"
+            },
+            {
+              courseId: "course-not-in-report",
+              courseName: "Other Final",
+              state: "IDENTITY_FINAL:IDENTITY_FINAL:NO_SUPPORT_STATUS:NONE:UNKNOWN:UNKNOWN",
+              customerStatus: "FINAL_DIRECT_ACTION"
+            }
+          ]
+        }
+      },
+      {
+        recipient: "friend@example.com",
+        sentAt: new Date("2026-07-15T15:02:00.000Z"),
+        status: "SENT",
+        lastError: null,
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusReport: {
+            kind: "setup",
+            courses: [{ courseId: "course-legacy-final" }]
+          },
+          statusSnapshot: [
+            {
+              courseId: "course-legacy-final",
+              courseName: "Legacy Final",
+              state: "BLOCKED_AUTH:TECHNICAL_FINAL:NO_SUPPORT_STATUS:ACCOUNT_REQUIRED:ACCOUNT_REQUIRED:PUBLIC_ONLINE"
+            }
+          ]
+        }
+      },
+      {
+        recipient: "suppressed@example.com",
+        sentAt: new Date("2026-07-15T15:03:00.000Z"),
+        status: "SUPPRESSED",
+        lastError: "DELIVERY_RECIPIENT_NO_LONGER_AUTHORIZED",
+        payload: {
+          schemaVersion: 2,
+          checkedAt: "2026-07-15T15:00:00.000Z",
+          statusReport: {
+            kind: "status-update",
+            courses: [{ courseId: "course-suppressed" }]
+          },
+          statusSnapshot: [
+            {
+              courseId: "course-suppressed",
+              courseName: "Suppressed Final",
+              state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+              customerStatus: "FINAL_DIRECT_ACTION"
+            }
+          ]
+        }
+      }
+    ] as never);
+
+    await expect(
+      listReachedMonitoringFinals({
+        searchId: "search-1",
+        alertGeneration: 3
+      })
+    ).resolves.toEqual([
+      {
+        courseId: "course-final",
+        recipient: "owner@example.com",
+        sentAt: new Date("2026-07-15T15:01:00.000Z")
+      },
+      {
+        courseId: "course-legacy-final",
+        recipient: "friend@example.com",
+        sentAt: new Date("2026-07-15T15:02:00.000Z")
+      }
+    ]);
+    expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          kind: {
+            in: ["SETUP", "DAILY", "MONITORING_STATUS_UPDATE"]
+          }
+        })
+      })
+    );
   });
 
   it("reads owner authority in a fresh statement after acquiring the search lock", async () => {
@@ -3821,6 +4013,70 @@ describe("search email delivery outbox", () => {
     );
   });
 
+  it("treats a monitoring status update as a durable status delivery", async () => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      statusSnapshot: [
+        {
+          courseId: "course-1",
+          courseName: "Course",
+          state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+          customerStatus: "FINAL_DIRECT_ACTION"
+        }
+      ],
+      statusReport: {
+        kind: "status-update",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        userTimeZone: "America/New_York",
+        courses: []
+      }
+    };
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      delivery("delivery-1", "owner@example.com", {
+        kind: "MONITORING_STATUS_UPDATE",
+        groupKey: "status-update-group",
+        payload: statusPayload,
+        status: "SENT",
+        sentAt: now
+      }),
+      delivery("delivery-2", "friend@example.com", {
+        kind: "MONITORING_STATUS_UPDATE",
+        groupKey: "status-update-group",
+        payload: statusPayload,
+        status: "SUPPRESSED",
+        sentAt: now
+      })
+    ] as never);
+
+    await expect(
+      finalizeSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        kind: "MONITORING_STATUS_UPDATE",
+        groupKey: "status-update-group"
+      })
+    ).resolves.toEqual({
+      finalized: true,
+      status: "SENT",
+      ownerSent: true,
+      ownerDeliveryOutcome: "SENT",
+      retainedMatchCount: 0,
+      sentMatchCount: 0
+    });
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          statusEmailSentAt: now,
+          statusEmailSnapshot: statusPayload.statusSnapshot
+        }
+      })
+    );
+  });
+
   it("rejects URLs and secret-bearing keys in durable payloads", () => {
     expect(() =>
       assertSafeSearchEmailPayload({
@@ -3936,6 +4192,53 @@ describe("search email delivery outbox", () => {
     expect(mockedPrisma.teeTimeMatch.findMany).not.toHaveBeenCalled();
   });
 
+  it("hydrates a factual-final monitoring status-update retry", async () => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      statusSnapshot: [
+        {
+          courseId: "course-1",
+          courseName: "Course",
+          state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+          customerStatus: "FINAL_DIRECT_ACTION"
+        }
+      ],
+      statusReport: {
+        kind: "status-update",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Course",
+            timeZone: "America/New_York",
+            outcome: "MANUAL_DIRECT",
+            availableMatches: 0,
+            phone: "555-0100"
+          }
+        ]
+      }
+    };
+
+    await expect(hydrateSearchStatusEmailPayload(statusPayload)).resolves.toEqual(
+      expect.objectContaining({
+        kind: "status-update",
+        players: 2,
+        courses: [
+          expect.objectContaining({
+            courseId: "course-1",
+            outcome: "MANUAL_DIRECT"
+          })
+        ]
+      })
+    );
+  });
+
   it("accepts only public official booking URLs and rejects restricted or signed flows", () => {
     expect(
       getSafeOfficialBookingUrl("https://course.example/tee-times?date=2026-07-16")
@@ -3985,7 +4288,7 @@ describe("search email delivery outbox", () => {
     expect(getSafeOfficialBookingUrl("javascript:alert(1)")).toBeUndefined();
   });
 
-  it("lists retryable setup and match groups while daily email stays disabled", async () => {
+  it("lists retryable setup, match, and monitoring transition groups", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: true },
       { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: false },
@@ -4001,7 +4304,15 @@ describe("search email delivery outbox", () => {
     expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          kind: { in: ["SETUP", "MATCH"] }
+          kind: {
+            in: [
+              "SETUP",
+              "MATCH",
+              "MONITORING_STATUS_UPDATE",
+              "MONITORING_OUTAGE",
+              "MONITORING_RECOVERY"
+            ]
+          }
         })
       })
     );

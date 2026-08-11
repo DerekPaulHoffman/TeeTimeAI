@@ -174,7 +174,16 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
 }
 
 export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Promise<EmailDelivery> {
-  const deliveryKind = input.kind === "setup" ? "SETUP" : "DAILY";
+  const deliveryKind =
+    input.kind === "setup"
+      ? "SETUP"
+      : input.kind === "daily"
+        ? "DAILY"
+        : input.kind === "outage"
+          ? "MONITORING_OUTAGE"
+          : input.kind === "recovery"
+            ? "MONITORING_RECOVERY"
+            : "MONITORING_STATUS_UPDATE";
   if (!isSearchEmailDeliveryEnabled(deliveryKind)) {
     console.info("[email:status-disabled]", {
       recipientRef: createLogReference(input.to),
@@ -216,7 +225,13 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
     subject:
       input.kind === "setup"
         ? "Your Tee Time Spot alert is active"
-        : "Your morning Tee Time Spot update",
+        : input.kind === "daily"
+          ? "Your morning Tee Time Spot update"
+          : input.kind === "outage"
+            ? "Your alert is active while automatic checks retry"
+            : input.kind === "recovery"
+              ? "Automatic tee-time checks have resumed"
+              : "A course status has been confirmed",
     html: renderSearchStatusHtml({
       ...input,
       stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate)
@@ -245,11 +260,94 @@ export async function sendSearchStatusEmail(input: SearchStatusEmailInput): Prom
 export async function sendAutomationWorkerHealthEmail(
   input: AutomationWorkerHealthEmailInput
 ): Promise<OperatorEmailDelivery> {
-  console.info("[email:automation-health-disabled]", {
-    workerKey: input.workerKey,
-    event: input.event
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+  const to = normalizeEmailEnvValue(process.env.OPERATOR_ALERT_EMAIL);
+  if (!apiKey || !from || !to) {
+    console.info("[email:automation-health-not-configured]", {
+      workerKey: input.workerKey,
+      event: input.event
+    });
+    return { deliveryStatus: "not_configured" };
+  }
+  if (shouldDryRunRecipient(to)) {
+    console.warn("[email:automation-health-dry-run]", {
+      recipientRef: createLogReference(to),
+      workerKey: input.workerKey,
+      event: input.event
+    });
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+
+  const email = {
+    from,
+    to,
+    subject:
+      input.event === "overdue"
+        ? "Action needed: Tee Time Spot worker is overdue"
+        : "Recovered: Tee Time Spot worker is healthy again",
+    html: renderAutomationWorkerHealthHtml(input)
+  };
+  const result = await new Resend(apiKey).emails.send(email, {
+    headers: {
+      "Idempotency-Key": getAutomationWorkerHealthIdempotencyKey(input)
+    }
   });
-  return { deliveryStatus: "not_configured" };
+  if (result.error) {
+    throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
+  }
+  return { ...result.data, deliveryStatus: "sent" };
+}
+
+export function getAutomationWorkerHealthIdempotencyKey(
+  input: AutomationWorkerHealthEmailInput
+) {
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        workerKey: input.workerKey,
+        event: input.event,
+        expectedAt: input.expectedAt.toISOString()
+      })
+    )
+    .digest("hex")
+    .slice(0, 32);
+  return `tee-time-worker-health-${digest}`;
+}
+
+export function renderAutomationWorkerHealthHtml(
+  input: AutomationWorkerHealthEmailInput
+) {
+  const overdueMinutes = Math.max(
+    0,
+    Math.round(
+      (input.observedAt.getTime() - input.expectedAt.getTime()) / 60_000
+    )
+  );
+  const heading =
+    input.event === "overdue"
+      ? "Automation worker needs attention"
+      : "Automation worker recovered";
+  const detail =
+    input.event === "overdue"
+      ? `The worker was ${overdueMinutes} minute${overdueMinutes === 1 ? "" : "s"} overdue when checked.`
+      : "The worker reported healthy activity again.";
+  return `
+    <div style="background:#f7f4eb;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
+      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">
+        <div style="background:#14231d;color:#ffffff;padding:18px 22px">
+          <strong>Tee Time Spot operations</strong>
+        </div>
+        <div style="padding:22px">
+          <h1 style="font-size:24px;line-height:1.2;margin:0 0 16px">${escapeOperatorEmailHtml(heading)}</h1>
+          <p><strong>Worker:</strong> ${escapeOperatorEmailHtml(input.workerKey)}</p>
+          <p>${escapeOperatorEmailHtml(detail)}</p>
+          <p><strong>Expected activity by:</strong> ${escapeOperatorEmailHtml(input.expectedAt.toISOString())}</p>
+          <p><strong>Observed:</strong> ${escapeOperatorEmailHtml(input.observedAt.toISOString())}</p>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 export function normalizeEmailEnvValue(value?: string) {
@@ -436,6 +534,15 @@ function buildStableEmailStopUrls(searchId: string, targetDate?: string) {
   return buildEmailStopUrls(searchId, {
     expiresAt: Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt
   });
+}
+
+function escapeOperatorEmailHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function createLogReference(value: string) {

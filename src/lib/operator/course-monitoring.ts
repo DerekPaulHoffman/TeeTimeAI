@@ -5,8 +5,13 @@ import {
   createIncidentReference,
   getHumanReviewRetryAt,
   getCourseMonitoringEscalationDeadline,
-  sanitizeEvidenceUrl
+  sanitizeEvidenceUrl,
+  shouldOpenFreshPlaybookCycleForProviderEvidence
 } from "@/lib/automation/course-monitoring";
+import {
+  assessAutomationPlaybook,
+  isAutomationPlaybookExhausted
+} from "@/lib/automation/course-monitoring-playbook";
 import {
   buildProviderFailureFingerprint,
   normalizeProviderFamilyKey,
@@ -41,6 +46,7 @@ export const humanReviewReasonSchema = z.enum([
   "SOURCE_UNVERIFIED",
   "READER_RELOAD_REQUIRED",
   "OFFICIAL_LINK_VERIFICATION_FAILED",
+  "AUTOMATION_STALLED",
   "OTHER_TECHNICAL_LIMITATION"
 ]);
 
@@ -175,6 +181,10 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
           nextAction: sanitizeOperatorText(status.course.supportIncident.nextAction),
           latestMessage: sanitizeOperatorText(status.course.supportIncident.latestMessage),
           attemptCount: status.course.supportIncident.attemptCount,
+          playbook: assessAutomationPlaybook(
+            status.course.supportIncident.attemptLedger,
+            status.course.supportIncident.cycle
+          ),
           activeRealSearchCount: status.course.supportIncident.activeRealSearchCount,
           resolution: status.course.supportIncident.resolution,
           resolutionMessage: sanitizeOperatorText(status.course.supportIncident.resolutionMessage),
@@ -282,7 +292,7 @@ export async function correctOperatorCourseBookingLink(
           failureFingerprint: incident.failureFingerprint,
           firstDegradedAt: current.status.firstDegradedAt ?? now,
           nextAutomaticAttemptAt: now,
-          revalidationRequestedAt: null,
+          revalidationRequestedAt: now,
           stateChangedAt: now,
           revision: { increment: 1 }
         }
@@ -303,6 +313,13 @@ export async function correctOperatorCourseBookingLink(
           audit: {
             action: "correct_booking_link",
             providerFamilyKey: provider.providerFamilyKey,
+            priorCycle: current.incident?.cycle ?? null,
+            cycle: shouldOpenFreshPlaybookCycleForProviderEvidence({
+              status: current.incident?.status ?? "",
+              humanReviewReason: current.incident?.humanReviewReason
+            })
+              ? (current.incident?.cycle ?? 0) + 1
+              : (current.incident?.cycle ?? null),
             customerDataIncluded: false
           }
         }
@@ -453,6 +470,13 @@ export async function updateOperatorCourseOfficialLinks(
           audit: {
             action: "update_official_links",
             providerFamilyKey: provider.providerFamilyKey,
+            priorCycle: current.incident?.cycle ?? null,
+            cycle: shouldOpenFreshPlaybookCycleForProviderEvidence({
+              status: current.incident?.status ?? "",
+              humanReviewReason: current.incident?.humanReviewReason
+            })
+              ? (current.incident?.cycle ?? 0) + 1
+              : (current.incident?.cycle ?? null),
             websiteChanged: website !== current.status.course.website,
             bookingUrlChanged: bookingUrl !== current.status.course.detectedBookingUrl,
             customerDataIncluded: false
@@ -462,14 +486,13 @@ export async function updateOperatorCourseOfficialLinks(
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
   );
-  const localReaderJob = await queueOperatorLocalReaderRecheck(current, now, bookingUrl);
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
     context.dispatchSearches
   );
   return {
     ...preview,
-    localReaderQueued: localReaderJob !== null,
+    localReaderQueued: false,
     applied: true,
     replayed: false
   };
@@ -513,26 +536,38 @@ export async function requestOperatorCourseRecheck(
   }
 
   const now = new Date();
+  const authoritativeFinalRetained =
+    current.status.state === "FINAL_MANUAL" ||
+    current.status.state === "FINAL_IDENTITY";
+  const opensFreshPlaybookCycle = Boolean(
+    current.incident &&
+      !authoritativeFinalRetained &&
+      shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident)
+  );
+  const targetState = authoritativeFinalRetained
+    ? current.status.state
+    : current.status.state === "FINAL_TECHNICAL"
+      ? "REVALIDATING_FINAL"
+      : "AUTO_INVESTIGATING";
   await prisma.$transaction(
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
-      await transaction.courseMonitoringStatus.update({
-        where: {
-          courseId: current.status.courseId,
-          revision: current.status.revision
-        },
-        data: {
-          state:
-            current.status.state === "FINAL_TECHNICAL"
-              ? "REVALIDATING_FINAL"
-              : "AUTO_INVESTIGATING",
-          revalidationRequestedAt: now,
-          nextAutomaticAttemptAt: now,
-          stateChangedAt: now,
-          revision: { increment: 1 }
-        }
-      });
-      if (current.incident) {
+      if (!authoritativeFinalRetained) {
+        await transaction.courseMonitoringStatus.update({
+          where: {
+            courseId: current.status.courseId,
+            revision: current.status.revision
+          },
+          data: {
+            state: targetState,
+            revalidationRequestedAt: now,
+            nextAutomaticAttemptAt: now,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+      }
+      if (current.incident && !authoritativeFinalRetained) {
         await transaction.courseSupportIncident.update({
           where: {
             id: current.incident.id,
@@ -540,11 +575,13 @@ export async function requestOperatorCourseRecheck(
             revision: current.incident.revision
           },
           data: {
-            ...(current.incident.status === "NEEDS_HUMAN"
+            ...(opensFreshPlaybookCycle
               ? {
+                  cycle: { increment: 1 },
                   status: "AUTO_INVESTIGATING" as const,
                   humanReviewReason: null,
-                  nextReminderAt: null
+                  nextReminderAt: null,
+                  confirmedAt: now
                 }
               : {}),
             nextAttemptAt: now,
@@ -572,16 +609,19 @@ export async function requestOperatorCourseRecheck(
           eventType: "REVALIDATION_REQUESTED",
           source: context.source,
           fromState: current.status.state,
-          toState:
-            current.status.state === "FINAL_TECHNICAL"
-              ? "REVALIDATING_FINAL"
-              : "AUTO_INVESTIGATING",
+          toState: targetState,
           message: input.note,
           operatorActorId: normalizeActorId(context.actorId),
           idempotencyKey: input.idempotencyKey,
           occurredAt: now,
           audit: {
             action: "request_recheck",
+            priorCycle: current.incident?.cycle ?? null,
+            cycle: opensFreshPlaybookCycle
+              ? current.incident!.cycle + 1
+              : (current.incident?.cycle ?? null),
+            authoritativeFinalRetained,
+            preservesPriorAttemptEvents: true,
             customerDataIncluded: false
           }
         }
@@ -589,14 +629,13 @@ export async function requestOperatorCourseRecheck(
     },
     { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
   );
-  const localReaderJob = await queueOperatorLocalReaderRecheck(current, now);
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
     context.dispatchSearches
   );
   return {
     ...preview,
-    localReaderQueued: localReaderJob !== null,
+    localReaderQueued: false,
     applied: true,
     replayed: false
   };
@@ -756,7 +795,7 @@ export async function applyOperatorCourseDecision(
 
   if (input.decision === "LOCAL_READER") {
     const message = "Use the local tee-time reader for this course.";
-    const localReaderJob = await queueOperatorLocalReaderRecheck(current, now);
+    const localReaderJob = await queueExplicitOperatorLocalReaderRecheck(current, now);
     if (!localReaderJob) {
       throw new Error(
         "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed."
@@ -804,7 +843,11 @@ export async function applyOperatorCourseDecision(
             revision: current.incident!.revision
           },
           data: {
-            cycle: current.incident!.status === "RESOLVED" ? { increment: 1 } : undefined,
+            cycle:
+              current.incident!.status === "RESOLVED" ||
+              shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident!)
+                ? { increment: 1 }
+                : undefined,
             status: "AUTO_INVESTIGATING",
             kind: "READER_CANDIDATE",
             failureClass: "READER_PARSER_MISSING",
@@ -850,6 +893,12 @@ export async function applyOperatorCourseDecision(
             audit: {
               action: "set_course_outcome",
               decision: input.decision,
+              priorCycle: current.incident!.cycle,
+              cycle:
+                current.incident!.status === "RESOLVED" ||
+                shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident!)
+                  ? current.incident!.cycle + 1
+                  : current.incident!.cycle,
               customerDataIncluded: false
             }
           }
@@ -985,6 +1034,22 @@ export async function approveOperatorCourseTechnicalFinal(
   );
   if (!current.incident) {
     throw new Error("A durable course incident is required before approving a final limitation.");
+  }
+  const playbook = assessAutomationPlaybook(
+    current.incident.attemptLedger,
+    current.incident.cycle
+  );
+  if (
+    !isAutomationPlaybookExhausted(
+      current.incident.attemptLedger,
+      current.incident.cycle
+    ) ||
+    playbook.conclusion !== "TECHNICAL_FINAL" ||
+    playbook.technicalReason !== input.reason
+  ) {
+    throw new Error(
+      "A technical final requires current-cycle terminal local-reader proof and matching independent confirmation."
+    );
   }
   const preview = {
     action: "approve_technical_final" as const,
@@ -1289,15 +1354,11 @@ function hasClosedResponderBatch(incident: {
   );
 }
 
-async function queueOperatorLocalReaderRecheck(
+async function queueExplicitOperatorLocalReaderRecheck(
   current: Awaited<ReturnType<typeof requireMutationTarget>>,
-  now: Date,
-  bookingUrlOverride?: string | null
+  now: Date
 ) {
-  const bookingUrl =
-    bookingUrlOverride === undefined
-      ? current.status.course.detectedBookingUrl
-      : bookingUrlOverride;
+  const bookingUrl = current.status.course.detectedBookingUrl;
   if (!bookingUrl) return null;
   const activeSearch = current.activeSearches[0];
   const fallbackDate = getCourseLocalDateStorageBoundary(
@@ -1378,7 +1439,11 @@ async function ensureOperatorIncident(
         revision: currentIncident.revision
       },
       data: {
-        cycle: currentIncident.status === "RESOLVED" ? { increment: 1 } : undefined,
+        cycle:
+          currentIncident.status === "RESOLVED" ||
+          shouldOpenFreshPlaybookCycleForProviderEvidence(currentIncident)
+            ? { increment: 1 }
+            : undefined,
         status: "AUTO_INVESTIGATING",
         kind: input.kind,
         failureClass: input.failureClass,

@@ -303,6 +303,20 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     } satisfies CourseSupportIssueState;
   }
 
+  const continuesCurrentIncidentEpisode = Boolean(
+    existing &&
+      existing.status !== "RESOLVED" &&
+      existing.providerFamilyKey === provider.providerFamilyKey &&
+      existing.failureFingerprint === failureFingerprint
+  );
+  const episodeStartedAt = continuesCurrentIncidentEpisode
+    ? (monitoringFailure.status?.firstDegradedAt ?? existing?.firstSeenAt ?? now)
+    : now;
+  const episodeEscalationDeadlineAt = getCourseMonitoringEscalationDeadline(
+    episodeStartedAt,
+    activeRealSearchCount
+  );
+
   if (
     existing &&
     !existing.activeBatchId &&
@@ -390,9 +404,10 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           confirmedAt: existing.confirmedAt ?? (monitoringFailure.confirmed ? now : null),
           escalationDeadlineAt:
             existing.escalationDeadlineAt ??
-            (monitoringFailure.confirmed
-              ? getCourseMonitoringEscalationDeadline(now, nextActiveRealSearchCount)
-              : null),
+            getCourseMonitoringEscalationDeadline(
+              existing.firstSeenAt,
+              nextActiveRealSearchCount
+            ),
           revision: { increment: 1 }
         }
       });
@@ -410,9 +425,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       ? getInitialCourseSupportAttemptAt(failure, now)
       : (monitoringFailure.nextAttemptAt ?? now);
   const confirmedAt = monitoringFailure.confirmed ? now : null;
-  const escalationDeadlineAt = confirmedAt
-    ? getCourseMonitoringEscalationDeadline(now, activeRealSearchCount)
-    : null;
+  const escalationDeadlineAt = episodeEscalationDeadlineAt;
   let incident: CourseSupportIncident;
 
   if (!existing) {

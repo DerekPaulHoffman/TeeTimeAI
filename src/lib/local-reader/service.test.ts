@@ -2,67 +2,99 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
   course: {
-    findUnique: vi.fn()
+    findUnique: vi.fn(),
   },
   localReaderJob: {
     findFirst: vi.fn(),
+    findMany: vi.fn(),
     findUnique: vi.fn(),
     updateMany: vi.fn(),
-    upsert: vi.fn()
+    upsert: vi.fn(),
   },
   courseSupportIncident: {
     findUnique: vi.fn(),
     findMany: vi.fn(),
-    updateMany: vi.fn()
+    updateMany: vi.fn(),
   },
   localReaderAgent: {
     findUnique: vi.fn(),
     upsert: vi.fn(),
-    updateMany: vi.fn()
+    updateMany: vi.fn(),
   },
   courseMonitoringStatus: {
-    updateMany: vi.fn()
+    updateMany: vi.fn(),
   },
   courseMonitoringEvent: {
-    create: vi.fn()
+    create: vi.fn(),
   },
-  $transaction: vi.fn()
+  teeSearch: {
+    updateMany: vi.fn(),
+  },
+  $transaction: vi.fn(),
 }));
 
 const monitoringMocks = vi.hoisted(() => ({
   getCourseMonitoringEscalationDeadline: vi.fn(),
   recordCourseMonitoringSuccess: vi.fn(),
-  resolveCourseSupportIncident: vi.fn()
+  resolveCourseSupportIncident: vi.fn(),
+}));
+
+const workerMocks = vi.hoisted(() => ({
+  startAutomationWorker: vi.fn(),
+  completeAutomationWorker: vi.fn(),
+}));
+
+const emailMocks = vi.hoisted(() => ({
+  sendAutomationWorkerHealthEmail: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 vi.mock("@/lib/automation/course-monitoring", () => ({
   getCourseMonitoringEscalationDeadline:
     monitoringMocks.getCourseMonitoringEscalationDeadline,
-  recordCourseMonitoringSuccess: monitoringMocks.recordCourseMonitoringSuccess
+  recordCourseMonitoringSuccess: monitoringMocks.recordCourseMonitoringSuccess,
 }));
 vi.mock("@/lib/automation/support-incidents", () => ({
-  resolveCourseSupportIncident: monitoringMocks.resolveCourseSupportIncident
+  resolveCourseSupportIncident: monitoringMocks.resolveCourseSupportIncident,
+}));
+vi.mock("@/lib/automation/worker-state", () => ({
+  AUTOMATION_WORKERS: {
+    LOCAL_READER: {
+      workerKey: "local-tee-time-reader",
+      cadenceSeconds: 120,
+      graceSeconds: 180,
+    },
+  },
+  startAutomationWorker: workerMocks.startAutomationWorker,
+  completeAutomationWorker: workerMocks.completeAutomationWorker,
+}));
+vi.mock("@/lib/email/alerts", () => ({
+  sendAutomationWorkerHealthEmail: emailMocks.sendAutomationWorkerHealthEmail,
 }));
 
 import {
   claimNextLocalReaderJob,
   completeLocalReaderJob,
+  expireOverdueLocalReaderJobs,
   getFreshLocalReaderObservation,
   getLocalReaderCourseVerification,
   getFreshLocalReaderTeeSheet,
   getLocalReaderCourseKey,
   queueLocalReaderCourseVerification,
-  queueLocalReaderJob
+  queueLocalReaderJob,
 } from "./service";
 
 const bookingUrl = "https://grassyhill.cps.golf/onlineresweb/search-teetime";
-const chronogolfBookingUrl = "https://www.chronogolf.com/club/crestbrook-park-golf-course";
+const chronogolfBookingUrl =
+  "https://www.chronogolf.com/club/crestbrook-park-golf-course";
 const tenForeBookingUrl = "https://fox.tenfore.golf/gainfieldfarms";
 const ezLinksBookingUrl = "https://ballysapi.ezlinksgolf.com/";
-const webTracBookingUrl = "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
-const frearParkBookingUrl = "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex";
-const simsburyBookingUrl = "https://secure.east.prophetservices.com/SimsburyFarmsV3";
+const webTracBookingUrl =
+  "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?module=GR";
+const frearParkBookingUrl =
+  "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex";
+const simsburyBookingUrl =
+  "https://secure.east.prophetservices.com/SimsburyFarmsV3";
 
 describe("local reader job service", () => {
   beforeEach(() => {
@@ -70,14 +102,28 @@ describe("local reader job service", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-24T16:00:00.000Z"));
     prismaMocks.course.findUnique.mockResolvedValue({
-      name: "Grassy Hill Country Club"
+      name: "Grassy Hill Country Club",
     });
     prismaMocks.localReaderAgent.findUnique.mockResolvedValue(null);
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
-    prismaMocks.$transaction.mockImplementation(async (callback) => callback(prismaMocks));
+    prismaMocks.localReaderJob.findFirst.mockReset().mockResolvedValue(null);
+    prismaMocks.localReaderJob.findUnique.mockReset().mockResolvedValue(null);
+    prismaMocks.localReaderJob.findMany.mockReset().mockResolvedValue([]);
+    prismaMocks.localReaderJob.updateMany
+      .mockReset()
+      .mockResolvedValue({ count: 1 });
+    prismaMocks.$transaction.mockImplementation(async (callback) =>
+      callback(prismaMocks),
+    );
+    workerMocks.startAutomationWorker.mockResolvedValue({ allowed: true });
+    workerMocks.completeAutomationWorker.mockResolvedValue(undefined);
+    emailMocks.sendAutomationWorkerHealthEmail.mockResolvedValue({
+      id: "operator-email",
+      deliveryStatus: "sent",
+    });
     monitoringMocks.getCourseMonitoringEscalationDeadline.mockReturnValue(
-      new Date("2026-07-24T16:30:00.000Z")
+      new Date("2026-07-24T16:30:00.000Z"),
     );
   });
 
@@ -85,25 +131,104 @@ describe("local reader job service", () => {
     vi.useRealTimers();
   });
 
+  it("expires overdue reader jobs and sends one privacy-safe operator alert", async () => {
+    prismaMocks.localReaderJob.findMany.mockResolvedValue([
+      {
+        id: "job-overdue-a",
+        status: "PENDING",
+        jobExpiresAt: new Date("2026-07-24T15:55:00.000Z"),
+      },
+      {
+        id: "job-overdue-b",
+        status: "LEASED",
+        jobExpiresAt: new Date("2026-07-24T15:56:00.000Z"),
+      },
+    ]);
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 2 });
+
+    await expect(expireOverdueLocalReaderJobs()).resolves.toEqual({
+      considered: 2,
+      expired: 2,
+      notified: 1,
+    });
+    expect(emailMocks.sendAutomationWorkerHealthEmail).toHaveBeenCalledWith({
+      workerKey: "local-reader-job-deadline",
+      event: "overdue",
+      expectedAt: new Date("2026-07-24T15:55:00.000Z"),
+      observedAt: new Date("2026-07-24T16:00:00.000Z"),
+    });
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["job-overdue-a", "job-overdue-b"] },
+        status: { in: ["PENDING", "LEASED"] },
+        jobExpiresAt: { lte: new Date("2026-07-24T16:00:00.000Z") },
+      },
+      data: {
+        status: "EXPIRED",
+        leaseToken: null,
+        leaseExpiresAt: null,
+      },
+    });
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["job-overdue-a", "job-overdue-b"] },
+        status: "EXPIRED",
+        completedAt: null,
+      },
+      data: { completedAt: new Date("2026-07-24T16:00:00.000Z") },
+    });
+  });
+
+  it("expires reader jobs even when the operator alert must retry", async () => {
+    prismaMocks.localReaderJob.findMany.mockResolvedValue([
+      {
+        id: "job-overdue",
+        status: "PENDING",
+        jobExpiresAt: new Date("2026-07-24T15:55:00.000Z"),
+      },
+    ]);
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+    emailMocks.sendAutomationWorkerHealthEmail.mockRejectedValue(
+      new Error("temporary email failure"),
+    );
+
+    await expect(expireOverdueLocalReaderJobs()).rejects.toThrow(
+      "temporary email failure",
+    );
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "EXPIRED" }) }),
+    );
+  });
+
   it("routes every safe CPS tenant through the local reader", () => {
     expect(getLocalReaderCourseKey(bookingUrl)).toBe("cps:grassyhill.cps.golf");
     expect(
-      getLocalReaderCourseKey("https://shennecossett.cps.golf/onlineresweb/search-teetime")
+      getLocalReaderCourseKey(
+        "https://shennecossett.cps.golf/onlineresweb/search-teetime",
+      ),
     ).toBe("cps:shennecossett.cps.golf");
     expect(
       getLocalReaderCourseKey(
-        "https://colonie.cps.golf/onlineresweb/search-teetime?date=2026-07-25"
-      )
+        "https://colonie.cps.golf/onlineresweb/search-teetime?date=2026-07-25",
+      ),
     ).toBe("cps:colonie.cps.golf");
     expect(
-      getLocalReaderCourseKey("https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout")
+      getLocalReaderCourseKey(
+        "https://grassyhill.cps.golf/onlineresweb/search-teetime/checkout",
+      ),
     ).toBeNull();
-    expect(getLocalReaderCourseKey("https://fenwick.cps.golf/onlineresweb/search-teetime")).toBe(
-      "cps:fenwick.cps.golf"
-    );
-    expect(getLocalReaderCourseKey("https://cps.golf/onlineresweb/search-teetime")).toBeNull();
     expect(
-      getLocalReaderCourseKey("https://nested.future.cps.golf/onlineresweb/search-teetime")
+      getLocalReaderCourseKey(
+        "https://fenwick.cps.golf/onlineresweb/search-teetime",
+      ),
+    ).toBe("cps:fenwick.cps.golf");
+    expect(
+      getLocalReaderCourseKey("https://cps.golf/onlineresweb/search-teetime"),
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey(
+        "https://nested.future.cps.golf/onlineresweb/search-teetime",
+      ),
     ).toBeNull();
   });
 
@@ -118,22 +243,24 @@ describe("local reader job service", () => {
       scheduleVersion: 1,
       targetDate: "2026-07-26",
       players: 2,
-      bookingUrl: "https://future-public.cps.golf/onlineresweb/search-teetime?CourseId=7"
+      bookingUrl:
+        "https://future-public.cps.golf/onlineresweb/search-teetime?CourseId=7",
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
           courseKey: "cps:future-public.cps.golf",
-          bookingUrl: "https://future-public.cps.golf/onlineresweb/search-teetime"
-        })
-      })
+          bookingUrl:
+            "https://future-public.cps.golf/onlineresweb/search-teetime",
+        }),
+      }),
     );
   });
 
   it("queues a safe EZLinks tenant for the rendered reader", async () => {
     prismaMocks.course.findUnique.mockResolvedValue({
-      name: "Bally's Golf Links at Ferry Point"
+      name: "Bally's Golf Links at Ferry Point",
     });
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
     prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
@@ -145,7 +272,7 @@ describe("local reader job service", () => {
       scheduleVersion: 1,
       targetDate: "2026-07-31",
       players: 3,
-      bookingUrl: ezLinksBookingUrl
+      bookingUrl: ezLinksBookingUrl,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
@@ -154,15 +281,15 @@ describe("local reader job service", () => {
           courseKey: "ezlinks:ballysapi.ezlinksgolf.com",
           bookingUrl: "https://ballysapi.ezlinksgolf.com/index.html#!/search",
           requiredCapabilityKey: "EZLINKS_RENDERED",
-          requiredParserVersion: 1
-        })
-      })
+          requiredParserVersion: 1,
+        }),
+      }),
     );
   });
 
   it("normalizes a legacy EZLinks search hash before queueing the reader", async () => {
     prismaMocks.course.findUnique.mockResolvedValue({
-      name: "Harbor Golf Course"
+      name: "Harbor Golf Course",
     });
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
     prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
@@ -173,7 +300,7 @@ describe("local reader job service", () => {
       targetDate: "2026-08-01",
       players: 2,
       bookingUrl: "https://wilddunes.ezlinksgolf.com/index.html#/search",
-      force: true
+      force: true,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
@@ -181,15 +308,15 @@ describe("local reader job service", () => {
         create: expect.objectContaining({
           courseKey: "ezlinks:wilddunes.ezlinksgolf.com",
           bookingUrl: "https://wilddunes.ezlinksgolf.com/index.html#!/search",
-          requiredCapabilityKey: "EZLINKS_RENDERED"
-        })
-      })
+          requiredCapabilityKey: "EZLINKS_RENDERED",
+        }),
+      }),
     );
   });
 
   it("queues a safe MyVSCloud WebTrac tenant with the exact public search parameters", async () => {
     prismaMocks.course.findUnique.mockResolvedValue({
-      name: "Guilford Lakes Golf Course"
+      name: "Guilford Lakes Golf Course",
     });
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
     prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
@@ -200,7 +327,7 @@ describe("local reader job service", () => {
       targetDate: "2026-08-01",
       players: 2,
       bookingUrl: webTracBookingUrl,
-      force: true
+      force: true,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
@@ -208,14 +335,15 @@ describe("local reader job service", () => {
         create: expect.objectContaining({
           courseKey: "webtrac:ctguilfordweb.myvscloud.com",
           bookingUrl: expect.stringContaining(
-            "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?"
+            "https://ctguilfordweb.myvscloud.com/webtrac/web/search.html?",
           ),
           requiredCapabilityKey: "WEBTRAC_RENDERED",
-          requiredParserVersion: 1
-        })
-      })
+          requiredParserVersion: 1,
+        }),
+      }),
     );
-    const create = prismaMocks.localReaderJob.upsert.mock.calls.at(-1)?.[0].create;
+    const create =
+      prismaMocks.localReaderJob.upsert.mock.calls.at(-1)?.[0].create;
     const url = new URL(create.bookingUrl);
     expect(url.searchParams.get("begindate")).toBe("08/01/2026");
     expect(url.searchParams.get("numberofplayers")).toBe("2");
@@ -225,17 +353,27 @@ describe("local reader job service", () => {
 
   it("derives safe Chronogolf jobs from database booking URLs", () => {
     expect(getLocalReaderCourseKey(chronogolfBookingUrl)).toBe(
-      "chronogolf:crestbrook-park-golf-course"
+      "chronogolf:crestbrook-park-golf-course",
     );
     expect(
-      getLocalReaderCourseKey(`${chronogolfBookingUrl}?date=2026-07-26&step=teetimes&groupSize=2`)
+      getLocalReaderCourseKey(
+        `${chronogolfBookingUrl}?date=2026-07-26&step=teetimes&groupSize=2`,
+      ),
     ).toBe("chronogolf:crestbrook-park-golf-course");
-    expect(getLocalReaderCourseKey("https://www.chronogolf.com/club/unclaimed-course")).toBe(
-      "chronogolf:unclaimed-course"
-    );
-    expect(getLocalReaderCourseKey(`${chronogolfBookingUrl}/checkout?date=2026-07-26`)).toBeNull();
     expect(
-      getLocalReaderCourseKey(`${chronogolfBookingUrl}?date=2026-07-26&step=checkout`)
+      getLocalReaderCourseKey(
+        "https://www.chronogolf.com/club/unclaimed-course",
+      ),
+    ).toBe("chronogolf:unclaimed-course");
+    expect(
+      getLocalReaderCourseKey(
+        `${chronogolfBookingUrl}/checkout?date=2026-07-26`,
+      ),
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey(
+        `${chronogolfBookingUrl}?date=2026-07-26&step=checkout`,
+      ),
     ).toBeNull();
   });
 
@@ -243,9 +381,12 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       status: "LEASED",
+      courseKey: "cps:grassyhill.cps.golf",
+      requiredCapabilityKey: "CPS_RENDERED",
+      requiredParserVersion: 1,
       createdAt: new Date("2026-07-24T15:58:00.000Z"),
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
-      jobExpiresAt: new Date("2026-07-24T16:10:00.000Z")
+      jobExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
     });
 
     await expect(
@@ -255,8 +396,8 @@ describe("local reader job service", () => {
         scheduleVersion: 3,
         targetDate: "2026-07-25",
         players: 2,
-        bookingUrl
-      })
+        bookingUrl,
+      }),
     ).resolves.toMatchObject({ id: "job-1", status: "LEASED" });
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
   });
@@ -268,11 +409,11 @@ describe("local reader job service", () => {
       status: "EXPIRED",
       leaseExpiresAt: null,
       jobExpiresAt: new Date("2026-07-24T15:59:00.000Z"),
-      resultExpiresAt: null
+      resultExpiresAt: null,
     });
     prismaMocks.localReaderJob.upsert.mockResolvedValue({
       id: "job-expired",
-      status: "PENDING"
+      status: "PENDING",
     });
 
     await expect(
@@ -282,20 +423,20 @@ describe("local reader job service", () => {
         scheduleVersion: 3,
         targetDate: "2026-07-25",
         players: 2,
-        bookingUrl
-      })
+        bookingUrl,
+      }),
     ).resolves.toMatchObject({
       id: "job-expired",
       status: "PENDING",
-      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE"
+      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE",
     });
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         update: expect.objectContaining({
           status: "PENDING",
-          jobExpiresAt: new Date("2026-07-24T16:30:00.000Z")
-        })
-      })
+          jobExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
+        }),
+      }),
     );
   });
 
@@ -306,11 +447,11 @@ describe("local reader job service", () => {
       status: "LEASED",
       leaseExpiresAt: new Date("2026-07-24T15:59:00.000Z"),
       jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
-      resultExpiresAt: null
+      resultExpiresAt: null,
     });
     prismaMocks.localReaderJob.upsert.mockResolvedValue({
       id: "job-abandoned",
-      status: "PENDING"
+      status: "PENDING",
     });
 
     await expect(
@@ -320,21 +461,21 @@ describe("local reader job service", () => {
         scheduleVersion: 3,
         targetDate: "2026-07-25",
         players: 2,
-        bookingUrl
-      })
+        bookingUrl,
+      }),
     ).resolves.toMatchObject({
       id: "job-abandoned",
       status: "PENDING",
-      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE"
+      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE",
     });
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         update: expect.objectContaining({
           status: "PENDING",
           leaseToken: null,
-          leaseExpiresAt: null
-        })
-      })
+          leaseExpiresAt: null,
+        }),
+      }),
     );
   });
 
@@ -346,11 +487,11 @@ describe("local reader job service", () => {
       createdAt: new Date("2026-07-24T15:54:00.000Z"),
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
       jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
-      resultExpiresAt: null
+      resultExpiresAt: null,
     });
     prismaMocks.localReaderJob.upsert.mockResolvedValue({
       id: "job-renewed",
-      status: "PENDING"
+      status: "PENDING",
     });
 
     await expect(
@@ -360,12 +501,12 @@ describe("local reader job service", () => {
         scheduleVersion: 3,
         targetDate: "2026-07-25",
         players: 2,
-        bookingUrl
-      })
+        bookingUrl,
+      }),
     ).resolves.toMatchObject({
       id: "job-renewed",
       status: "PENDING",
-      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE"
+      queueDisposition: "RETRYING_AFTER_TERMINAL_FAILURE",
     });
     expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -373,11 +514,11 @@ describe("local reader job service", () => {
           OR: expect.arrayContaining([
             expect.objectContaining({
               status: "LEASED",
-              createdAt: { gt: new Date("2026-07-24T15:55:00.000Z") }
-            })
-          ])
-        })
-      })
+              createdAt: { gte: new Date("2026-07-24T15:55:00.000Z") },
+            }),
+          ]),
+        }),
+      }),
     );
   });
 
@@ -392,7 +533,7 @@ describe("local reader job service", () => {
       scheduleVersion: 3,
       targetDate: "2026-07-26",
       players: 2,
-      bookingUrl: chronogolfBookingUrl
+      bookingUrl: chronogolfBookingUrl,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
@@ -400,9 +541,9 @@ describe("local reader job service", () => {
         create: expect.objectContaining({
           courseKey: "chronogolf:crestbrook-park-golf-course",
           bookingUrl:
-            "https://www.chronogolf.com/club/crestbrook-park-golf-course?date=2026-07-26&step=teetimes"
-        })
-      })
+            "https://www.chronogolf.com/club/crestbrook-park-golf-course?date=2026-07-26&step=teetimes",
+        }),
+      }),
     );
   });
 
@@ -415,7 +556,7 @@ describe("local reader job service", () => {
       courseId: "course-frear",
       targetDate: "2026-07-30",
       players: 2,
-      bookingUrl: frearParkBookingUrl
+      bookingUrl: frearParkBookingUrl,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
@@ -423,9 +564,9 @@ describe("local reader job service", () => {
         create: expect.objectContaining({
           courseKey: "frear-park",
           bookingUrl:
-            "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
-        })
-      })
+            "https://secure.east.prophetservices.com/FrearParkV3/Home/NIndex?CourseId=1,2&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18",
+        }),
+      }),
     );
   });
 
@@ -438,7 +579,7 @@ describe("local reader job service", () => {
       courseId: "course-simsbury",
       targetDate: "2026-07-30",
       players: 2,
-      bookingUrl: simsburyBookingUrl
+      bookingUrl: simsburyBookingUrl,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
@@ -446,9 +587,9 @@ describe("local reader job service", () => {
         create: expect.objectContaining({
           courseKey: "simsbury-farms",
           bookingUrl:
-            "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/NIndex?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18"
-        })
-      })
+            "https://secure.east.prophetservices.com/SimsburyFarmsV3/Home/NIndex?CourseId=1&Date=2026-07-30&Time=AnyTime&Player=2&Hole=18",
+        }),
+      }),
     );
   });
 
@@ -456,7 +597,7 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
     prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
     prismaMocks.localReaderJob.upsert.mockResolvedValue({
-      id: "job-tenfore"
+      id: "job-tenfore",
     });
 
     await queueLocalReaderJob({
@@ -465,30 +606,30 @@ describe("local reader job service", () => {
       scheduleVersion: 3,
       targetDate: "2026-07-29",
       players: 3,
-      bookingUrl: tenForeBookingUrl
+      bookingUrl: tenForeBookingUrl,
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
           courseKey: "tenfore:gainfieldfarms",
-          bookingUrl: "https://fox.tenfore.golf/gainfieldfarms?date=2026-07-29"
-        })
-      })
+          bookingUrl: "https://fox.tenfore.golf/gainfieldfarms?date=2026-07-29",
+        }),
+      }),
     );
   });
 
   it("queues a detached verification job without customer demand", async () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue(null);
     prismaMocks.localReaderJob.upsert.mockResolvedValue({
-      id: "job-verification"
+      id: "job-verification",
     });
 
     await queueLocalReaderCourseVerification({
       courseId: "course-lyman",
       targetDate: "2026-07-26",
       players: 2,
-      bookingUrl: "https://www.chronogolf.com/club/lyman-orchards-golf-club"
+      bookingUrl: "https://www.chronogolf.com/club/lyman-orchards-golf-club",
     });
 
     expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith({
@@ -500,12 +641,9 @@ describe("local reader job service", () => {
         verificationKey: expect.stringMatching(/^[a-f0-9]{64}$/u),
         courseKey: "chronogolf:lyman-orchards-golf-club",
         bookingUrl:
-          "https://www.chronogolf.com/club/lyman-orchards-golf-club?date=2026-07-26&step=teetimes"
+          "https://www.chronogolf.com/club/lyman-orchards-golf-club?date=2026-07-26&step=teetimes",
       }),
-      update: expect.objectContaining({
-        purpose: "COURSE_VERIFICATION",
-        status: "PENDING"
-      })
+      update: {},
     });
   });
 
@@ -513,10 +651,17 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-completed",
       status: "COMPLETED",
+      courseKey: "ezlinks:ballysapi.ezlinksgolf.com",
+      requiredCapabilityKey: "EZLINKS_RENDERED",
+      requiredParserVersion: 1,
+      createdAt: new Date("2026-07-24T15:50:00.000Z"),
+      updatedAt: new Date("2026-07-24T15:59:00.000Z"),
+      leaseToken: null,
       leaseExpiresAt: null,
-      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z")
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
+      completedAt: new Date("2026-07-24T15:59:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
     });
-    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "job-retried", status: "PENDING" });
 
     await expect(
       queueLocalReaderCourseVerification({
@@ -524,19 +669,157 @@ describe("local reader job service", () => {
         targetDate: "2026-07-25",
         players: 2,
         bookingUrl: ezLinksBookingUrl,
-        force: true
-      })
-    ).resolves.toMatchObject({ id: "job-retried", status: "PENDING" });
+        force: true,
+      }),
+    ).resolves.toMatchObject({ id: "job-completed", status: "PENDING" });
 
-    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        update: expect.objectContaining({
+        where: expect.objectContaining({
+          id: "job-completed",
+          updatedAt: new Date("2026-07-24T15:59:00.000Z"),
+          status: "COMPLETED",
+        }),
+        data: expect.objectContaining({
           status: "PENDING",
+          createdAt: new Date("2026-07-24T16:00:00.000Z"),
           completedAt: null,
-          readerVersion: null
-        })
-      })
+          readerVersion: null,
+        }),
+      }),
     );
+  });
+
+  it("requeues detached reader proof that predates the browser adapter retry boundary", async () => {
+    const browserAdapterRetryCompletedAt = new Date(
+      "2026-07-24T15:55:00.000Z",
+    );
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-stale-proof",
+      status: "COMPLETED",
+      courseKey: "cps:grassyhill.cps.golf",
+      requiredCapabilityKey: "CPS_RENDERED",
+      requiredParserVersion: 1,
+      createdAt: new Date("2026-07-24T15:45:00.000Z"),
+      updatedAt: new Date("2026-07-24T15:50:00.000Z"),
+      leaseToken: null,
+      completedAt: new Date("2026-07-24T15:50:00.000Z"),
+      leaseExpiresAt: null,
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
+    });
+    await expect(
+      queueLocalReaderCourseVerification({
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+        notBefore: browserAdapterRetryCompletedAt,
+      }),
+    ).resolves.toMatchObject({ id: "job-stale-proof", status: "PENDING" });
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "job-stale-proof",
+          updatedAt: new Date("2026-07-24T15:50:00.000Z"),
+          status: "COMPLETED",
+        }),
+        data: expect.objectContaining({
+          status: "PENDING",
+          createdAt: new Date("2026-07-24T16:00:00.000Z"),
+          result: undefined,
+          completedAt: null,
+        }),
+      }),
+    );
+  });
+
+  it("refreshes a stale attempt then preserves its current lease on a later retry", async () => {
+    const notBefore = new Date("2026-07-24T15:55:00.000Z");
+    const stale = {
+      id: "job-retry-race",
+      status: "COMPLETED",
+      courseKey: "cps:grassyhill.cps.golf",
+      requiredCapabilityKey: "CPS_RENDERED",
+      requiredParserVersion: 1,
+      createdAt: new Date("2026-07-24T15:45:00.000Z"),
+      updatedAt: new Date("2026-07-24T15:50:00.000Z"),
+      leaseToken: null,
+      leaseExpiresAt: null,
+      claimedAt: null,
+      deviceId: null,
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
+      completedAt: new Date("2026-07-24T15:50:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
+      readerVersion: "reader-old",
+    };
+    const activeLease = {
+      ...stale,
+      status: "LEASED",
+      createdAt: new Date("2026-07-24T16:00:00.000Z"),
+      updatedAt: new Date("2026-07-24T16:00:10.000Z"),
+      leaseToken: "lease-current-attempt",
+      leaseExpiresAt: new Date("2026-07-24T16:03:00.000Z"),
+      claimedAt: new Date("2026-07-24T16:00:10.000Z"),
+      deviceId: "reader-home",
+      jobExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
+      completedAt: null,
+      resultExpiresAt: null,
+      readerVersion: null,
+    };
+    prismaMocks.localReaderJob.findUnique
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(activeLease);
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      queueLocalReaderCourseVerification({
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+        notBefore,
+      }),
+    ).resolves.toMatchObject({
+      id: "job-retry-race",
+      status: "PENDING",
+      createdAt: new Date("2026-07-24T16:00:00.000Z"),
+    });
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      ...stale,
+      status: "PENDING",
+      createdAt: new Date("2026-07-24T16:00:00.000Z"),
+      updatedAt: new Date("2026-07-24T16:00:00.000Z"),
+      completedAt: null,
+      resultExpiresAt: null,
+      readerVersion: null,
+      jobExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
+    });
+    await expect(
+      getLocalReaderCourseVerification({
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+        notBefore,
+      }),
+    ).resolves.toEqual({ status: "PENDING" });
+    await expect(
+      queueLocalReaderCourseVerification({
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+        notBefore,
+      }),
+    ).resolves.toMatchObject({
+      id: "job-retry-race",
+      status: "LEASED",
+      leaseToken: "lease-current-attempt",
+      createdAt: new Date("2026-07-24T16:00:00.000Z"),
+    });
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
   });
 
   it("reuses a pending job from an earlier schedule version", async () => {
@@ -544,7 +827,7 @@ describe("local reader job service", () => {
       id: "job-earlier-version",
       scheduleVersion: 2,
       status: "PENDING",
-      jobExpiresAt: new Date("2026-07-24T16:30:00.000Z")
+      jobExpiresAt: new Date("2026-07-24T16:30:00.000Z"),
     });
 
     await expect(
@@ -554,12 +837,12 @@ describe("local reader job service", () => {
         scheduleVersion: 4,
         targetDate: "2026-07-25",
         players: 2,
-        bookingUrl
-      })
+        bookingUrl,
+      }),
     ).resolves.toMatchObject({
       id: "job-earlier-version",
       scheduleVersion: 2,
-      status: "PENDING"
+      status: "PENDING",
     });
     expect(prismaMocks.localReaderJob.findUnique).not.toHaveBeenCalled();
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
@@ -570,13 +853,17 @@ describe("local reader job service", () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       status: "COMPLETED",
+      courseKey: "cps:grassyhill.cps.golf",
+      requiredCapabilityKey: "CPS_RENDERED",
+      requiredParserVersion: 1,
+      completedAt: new Date("2026-07-24T15:59:00.000Z"),
       leaseExpiresAt: null,
       jobExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
       resultExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
       result: {
         status: "NO_AVAILABILITY",
-        slots: []
-      }
+        slots: [],
+      },
     });
 
     await expect(
@@ -586,54 +873,255 @@ describe("local reader job service", () => {
         scheduleVersion: 3,
         targetDate: "2026-07-25",
         players: 4,
-        bookingUrl
-      })
-    ).resolves.toMatchObject({ id: "job-1", status: "COMPLETED" });
+        bookingUrl,
+      }),
+    ).resolves.toMatchObject({
+      id: "job-1",
+      status: "COMPLETED",
+      queueDisposition: "SUCCESS",
+      readerResultStatus: "NO_AVAILABILITY",
+    });
+    expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("reuses a completed terminal result without turning it back into pending work", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      id: "job-challenge",
+      status: "COMPLETED",
+      leaseExpiresAt: null,
+      jobExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
+      result: {
+        status: "ACCESS_CHALLENGE",
+        slots: [],
+      },
+    });
+
+    await expect(
+      queueLocalReaderJob({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 3,
+        targetDate: "2026-07-25",
+        players: 4,
+        bookingUrl,
+      }),
+    ).resolves.toMatchObject({
+      id: "job-challenge",
+      status: "COMPLETED",
+      queueDisposition: "TERMINAL",
+      readerResultStatus: "ACCESS_CHALLENGE",
+    });
+    expect(prismaMocks.localReaderJob.findUnique).not.toHaveBeenCalled();
     expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
   });
 
   it("claims an eligible job with a bounded lease", async () => {
-    prismaMocks.localReaderJob.updateMany
-      .mockResolvedValueOnce({ count: 0 })
-      .mockResolvedValueOnce({ count: 1 });
-    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
-      id: "job-1",
-      courseKey: "cps:grassyhill.cps.golf",
-      targetDate: "2026-07-25",
-      players: 2,
-      createdAt: new Date("2026-07-24T15:59:00.000Z"),
-      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
-      bookingUrl
-    });
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.localReaderJob.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "job-1",
+          teeSearchId: "search-1",
+          purpose: "ALERT_CHECK",
+          courseKey: "cps:grassyhill.cps.golf",
+          requiredCapabilityKey: "CPS_RENDERED",
+          targetDate: "2026-07-25",
+          players: 2,
+          createdAt: new Date("2026-07-24T15:59:00.000Z"),
+          jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+          bookingUrl,
+        },
+      ]);
 
-    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toMatchObject({
-      id: "job-1",
-      courseKey: "cps:grassyhill.cps.golf",
-      targetDate: "2026-07-25",
-      players: 2,
-      courseName: "Grassy Hill Country Club",
-      bookingUrl,
-      cardTextIncludes: [],
-      leaseExpiresAt: "2026-07-24T16:03:00.000Z",
-      leaseToken: expect.any(String)
-    });
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toMatchObject(
+      {
+        id: "job-1",
+        courseKey: "cps:grassyhill.cps.golf",
+        targetDate: "2026-07-25",
+        players: 2,
+        courseName: "Grassy Hill Country Club",
+        bookingUrl,
+        cardTextIncludes: [],
+        leaseExpiresAt: "2026-07-24T16:03:00.000Z",
+        leaseToken: expect.any(String),
+      },
+    );
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "LEASED",
           claimedAt: new Date("2026-07-24T16:00:00.000Z"),
-          deviceId: "chrome-home"
-        })
-      })
+          deviceId: "chrome-home",
+        }),
+      }),
     );
   });
 
+  it("claims active real customer work ahead of more than fifty older verification jobs", async () => {
+    const olderVerificationJobs = Array.from({ length: 51 }, (_, index) => ({
+      id: `verification-${String(index).padStart(2, "0")}`,
+      teeSearchId: null,
+      purpose: "COURSE_VERIFICATION",
+      courseKey: `tenfore:verification-${index}`,
+      requiredCapabilityKey: "TENFORE_RENDERED",
+      targetDate: "2026-07-25",
+      players: 2,
+      createdAt: new Date(2026, 6, 24, 15, index),
+      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+      bookingUrl: `https://fox.tenfore.golf/verification-${index}`,
+    }));
+    const customerJob = {
+      id: "customer-newer",
+      teeSearchId: "search-real",
+      purpose: "ALERT_CHECK",
+      courseId: "course-1",
+      courseKey: "cps:grassyhill.cps.golf",
+      requiredCapabilityKey: "CPS_RENDERED",
+      targetDate: "2026-07-25",
+      players: 2,
+      createdAt: new Date("2026-07-24T15:59:30.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+      bookingUrl,
+    };
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.localReaderJob.findMany.mockImplementation(async (query) => {
+      if (query?.where?.status === "LEASED") return [];
+      if (query?.where?.purpose === "ALERT_CHECK") return [customerJob];
+      return olderVerificationJobs.slice(0, query?.take ?? 50);
+    });
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toMatchObject({
+      id: "customer-newer",
+      courseKey: "cps:grassyhill.cps.golf",
+    });
+    expect(olderVerificationJobs).toHaveLength(51);
+    expect(prismaMocks.localReaderJob.findMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          purpose: "ALERT_CHECK",
+          teeSearch: {
+            is: {
+              status: "ACTIVE",
+              trafficClass: { notIn: ["AUTOMATION", "TEST"] },
+            },
+          },
+        }),
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: 50,
+      }),
+    );
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "customer-newer" }),
+      }),
+    );
+  });
+
+  it("prioritizes active customer work and skips a provider family already leased", async () => {
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.localReaderJob.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "active-cps-job",
+          courseKey: "cps:other.cps.golf",
+          requiredCapabilityKey: "CPS_RENDERED",
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "older-verification",
+          teeSearchId: null,
+          purpose: "COURSE_VERIFICATION",
+          courseKey: "tenfore:older",
+          requiredCapabilityKey: "TENFORE_RENDERED",
+          targetDate: "2026-07-25",
+          players: 2,
+          createdAt: new Date("2026-07-24T15:55:00.000Z"),
+          jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+          bookingUrl: tenForeBookingUrl,
+        },
+        {
+          id: "customer-cps",
+          teeSearchId: "search-1",
+          purpose: "ALERT_CHECK",
+          courseKey: "cps:grassyhill.cps.golf",
+          requiredCapabilityKey: "CPS_RENDERED",
+          targetDate: "2026-07-25",
+          players: 2,
+          createdAt: new Date("2026-07-24T15:58:00.000Z"),
+          jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+          bookingUrl,
+        },
+        {
+          id: "customer-chronogolf",
+          teeSearchId: "search-2",
+          purpose: "ALERT_CHECK",
+          courseKey: "chronogolf:crestbrook-park-golf-course",
+          requiredCapabilityKey: "CHRONOGOLF_RENDERED",
+          targetDate: "2026-07-25",
+          players: 2,
+          createdAt: new Date("2026-07-24T15:59:00.000Z"),
+          jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+          bookingUrl: chronogolfBookingUrl,
+        },
+      ]);
+    prismaMocks.course.findUnique.mockResolvedValue({
+      name: "Crestbrook Park Golf Course",
+    });
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toMatchObject(
+      {
+        id: "customer-chronogolf",
+        courseKey: "chronogolf:crestbrook-park-golf-course",
+      },
+    );
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "customer-chronogolf" }),
+      }),
+    );
+  });
+
+  it("does not lease a third global reader job", async () => {
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 0 });
+    prismaMocks.localReaderJob.findMany.mockResolvedValueOnce([
+      {
+        id: "active-cps-job",
+        courseKey: "cps:other.cps.golf",
+        requiredCapabilityKey: "CPS_RENDERED",
+      },
+      {
+        id: "active-tenfore-job",
+        courseKey: "tenfore:active",
+        requiredCapabilityKey: "TENFORE_RENDERED",
+      },
+    ]);
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toBeNull();
+    expect(prismaMocks.localReaderJob.findMany).toHaveBeenCalledOnce();
+  });
+
+  it("does not claim reader work while the local-reader worker is paused", async () => {
+    workerMocks.startAutomationWorker.mockResolvedValue({ allowed: false });
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toBeNull();
+
+    expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJob.findMany).not.toHaveBeenCalled();
+    expect(workerMocks.completeAutomationWorker).not.toHaveBeenCalled();
+  });
+
   it("does not reopen reader incidents for an unchanged heartbeat", async () => {
-    const capabilities = [{ key: "EZLINKS_RENDERED" as const, parserVersion: 1 }];
+    const capabilities = [
+      { key: "EZLINKS_RENDERED" as const, parserVersion: 1 },
+    ];
     prismaMocks.localReaderAgent.findUnique.mockResolvedValue({
       readerVersion: "1.7.0",
       buildId: "reader-build-7",
-      capabilities
+      capabilities,
     });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 0 });
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
@@ -643,8 +1131,8 @@ describe("local reader job service", () => {
         deviceId: "reader-home",
         readerVersion: "1.7.0",
         buildId: "reader-build-7",
-        capabilities
-      })
+        capabilities,
+      }),
     ).resolves.toBeNull();
 
     expect(prismaMocks.localReaderAgent.upsert).toHaveBeenCalledOnce();
@@ -654,28 +1142,36 @@ describe("local reader job service", () => {
   });
 
   it("gives a new compatible reader build a fresh investigation deadline", async () => {
-    const capabilities = [{ key: "EZLINKS_RENDERED" as const, parserVersion: 1 }];
+    const capabilities = [
+      { key: "EZLINKS_RENDERED" as const, parserVersion: 1 },
+    ];
     prismaMocks.localReaderAgent.findUnique.mockResolvedValue({
       readerVersion: "1.6.0",
       buildId: "reader-build-6",
-      capabilities
+      capabilities,
     });
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([
       {
         id: "incident-harbor",
+        cycle: 7,
         revision: 83,
         courseId: "course-harbor",
         activeRealSearchCount: 0,
         course: {
           name: "Harbor Golf Course",
           detectedBookingUrl: "https://wilddunes.ezlinksgolf.com/index.html",
-          website: "https://www.wilddunesresort.com/activities/golf/golf-courses/harbor-course/",
-          monitoringStatus: { revision: 91 }
-        }
-      }
+          website:
+            "https://www.wilddunesresort.com/activities/golf/golf-courses/harbor-course/",
+          monitoringStatus: { revision: 91 },
+        },
+      },
     ]);
-    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
-    prismaMocks.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1,
+    });
+    prismaMocks.courseMonitoringStatus.updateMany.mockResolvedValue({
+      count: 1,
+    });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 0 });
     prismaMocks.localReaderJob.findFirst.mockResolvedValue(null);
 
@@ -684,21 +1180,21 @@ describe("local reader job service", () => {
         deviceId: "reader-home",
         readerVersion: "1.7.0",
         buildId: "reader-build-7",
-        capabilities
-      })
+        capabilities,
+      }),
     ).resolves.toBeNull();
 
-    expect(monitoringMocks.getCourseMonitoringEscalationDeadline).toHaveBeenCalledWith(
-      new Date("2026-07-24T16:00:00.000Z"),
-      0
-    );
+    expect(
+      monitoringMocks.getCourseMonitoringEscalationDeadline,
+    ).toHaveBeenCalledWith(new Date("2026-07-24T16:00:00.000Z"), 0);
     expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
+          cycle: { increment: 1 },
           status: "AUTO_INVESTIGATING",
-          escalationDeadlineAt: new Date("2026-07-24T16:30:00.000Z")
-        })
-      })
+          escalationDeadlineAt: new Date("2026-07-24T16:30:00.000Z"),
+        }),
+      }),
     );
     expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -706,14 +1202,26 @@ describe("local reader job service", () => {
           courseId: "course-harbor",
           eventType: "REVALIDATION_REQUESTED",
           audit: {
+            priorCycle: 7,
+            cycle: 8,
             parserVersion: 1,
             readerVersion: "1.7.0",
             buildId: "reader-build-7",
-            customerDataIncluded: false
-          }
-        })
-      })
+            customerDataIncluded: false,
+          },
+        }),
+      }),
     );
+    expect(prismaMocks.teeSearch.updateMany).toHaveBeenCalledWith({
+      where: {
+        status: "ACTIVE",
+        preferences: { some: { courseId: "course-harbor" } },
+      },
+      data: {
+        nextCheckAt: new Date("2026-07-24T16:00:00.000Z"),
+        recheckRequestedAt: new Date("2026-07-24T16:00:00.000Z"),
+      },
+    });
   });
 
   it("stores a valid result and returns the search that should resume", async () => {
@@ -730,7 +1238,7 @@ describe("local reader job service", () => {
       status: "LEASED",
       leaseToken: "lease-1",
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
-      bookingUrl
+      bookingUrl,
     });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
     await expect(
@@ -752,15 +1260,15 @@ describe("local reader job service", () => {
               minimumPlayers: 2,
               availableSpots: 4,
               priceCents: 8200,
-              cartIncluded: true
-            }
+              cartIncluded: true,
+            },
           ],
-          readerVersion: "test"
-        }
-      })
+          readerVersion: "test",
+        },
+      }),
     ).resolves.toMatchObject({
       searchId: "search-1",
-      completedAt: new Date("2026-07-24T16:00:00.000Z")
+      completedAt: new Date("2026-07-24T16:00:00.000Z"),
     });
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith({
       where: {
@@ -769,13 +1277,13 @@ describe("local reader job service", () => {
         courseId: "course-1",
         targetDate: "2026-07-25",
         players: 2,
-        status: "PENDING"
+        status: "PENDING",
       },
       data: {
         status: "EXPIRED",
         leaseToken: null,
-        leaseExpiresAt: null
-      }
+        leaseExpiresAt: null,
+      },
     });
   });
 
@@ -793,7 +1301,7 @@ describe("local reader job service", () => {
       status: "LEASED",
       leaseToken: "lease-verification",
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
-      bookingUrl
+      bookingUrl,
     });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
 
@@ -809,32 +1317,21 @@ describe("local reader job service", () => {
           pageUrl: bookingUrl,
           pageTitle: "Grassy Hill Country Club",
           slots: [],
-          readerVersion: "1.3.2"
-        }
-      })
+          readerVersion: "1.3.2",
+        },
+      }),
     ).resolves.toMatchObject({
       searchId: null,
-      completedAt: new Date("2026-07-24T16:00:00.000Z")
+      completedAt: new Date("2026-07-24T16:00:00.000Z"),
     });
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledTimes(1);
-    expect(monitoringMocks.recordCourseMonitoringSuccess).toHaveBeenCalledWith({
-      courseId: "course-1",
-      outcome: "NO_MATCH",
-      source: "LOCAL_READER",
-      message: "Fresh signed local public-page verification completed without availability.",
-      now: new Date("2026-07-24T16:00:00.000Z"),
-      runtimeVersion: "1.3.2"
-    });
-    expect(monitoringMocks.resolveCourseSupportIncident).toHaveBeenCalledWith({
-      courseId: "course-1",
-      resolution: "MONITORING_RESTORED",
-      message:
-        "Fresh signed local public-page verification completed successfully with outcome NO_MATCH.",
-      now: new Date("2026-07-24T16:00:00.000Z")
-    });
+    expect(
+      monitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
+    expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
-  it("leaves incident resolution to the owned responder batch", async () => {
+  it("does not let detached proof from an older cycle reconcile a newer ledgerless incident", async () => {
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-verification",
       teeSearchId: null,
@@ -848,11 +1345,15 @@ describe("local reader job service", () => {
       status: "LEASED",
       leaseToken: "lease-verification",
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
-      bookingUrl
+      bookingUrl,
     });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({
-      activeBatchId: "owned-batch"
+      id: "incident-new-cycle",
+      cycle: 9,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: null,
+      attemptLedger: null,
     });
 
     await completeLocalReaderJob({
@@ -866,11 +1367,58 @@ describe("local reader job service", () => {
         pageUrl: bookingUrl,
         pageTitle: "Grassy Hill Country Club",
         slots: [],
-        readerVersion: "1.7.0"
-      }
+        readerVersion: "1.7.0",
+      },
     });
 
-    expect(monitoringMocks.recordCourseMonitoringSuccess).toHaveBeenCalledOnce();
+    expect(prismaMocks.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(
+      monitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
+    expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
+  });
+
+  it("leaves ordered detached-reader success to the verification consumer", async () => {
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-verification",
+      teeSearchId: null,
+      purpose: "COURSE_VERIFICATION",
+      courseId: "course-1",
+      courseKey: "cps:grassyhill.cps.golf",
+      targetDate: "2026-07-25",
+      players: 2,
+      createdAt: new Date("2026-07-24T15:59:00.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+      status: "LEASED",
+      leaseToken: "lease-verification",
+      leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
+      bookingUrl,
+    });
+    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      activeBatchId: null,
+      status: "AUTO_INVESTIGATING",
+      attemptLedger: { version: 1, events: [] },
+    });
+
+    await completeLocalReaderJob({
+      jobId: "job-verification",
+      leaseToken: "lease-verification",
+      result: {
+        jobId: "job-verification",
+        courseKey: "cps:grassyhill.cps.golf",
+        status: "NO_AVAILABILITY",
+        observedAt: "2026-07-24T16:00:00.000Z",
+        pageUrl: bookingUrl,
+        pageTitle: "Grassy Hill Country Club",
+        slots: [],
+        readerVersion: "1.7.1",
+      },
+    });
+
+    expect(
+      monitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
     expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
@@ -893,8 +1441,8 @@ describe("local reader job service", () => {
         pageUrl: bookingUrl,
         pageTitle: "Tee Times",
         slots: [],
-        readerVersion: "reader-v1"
-      }
+        readerVersion: "reader-v1",
+      },
     });
 
     await expect(
@@ -902,13 +1450,53 @@ describe("local reader job service", () => {
         courseId: "course-1",
         targetDate: "2026-07-25",
         players: 2,
-        notBefore: new Date("2026-07-24T16:00:30.000Z")
-      })
+        bookingUrl,
+        notBefore: new Date("2026-07-24T16:00:30.000Z"),
+      }),
     ).resolves.toEqual({
       status: "COMPLETED",
       observedAt: new Date("2026-07-24T16:01:00.000Z"),
       readerVersion: "reader-v1",
-      slots: []
+      slots: [],
+    });
+  });
+
+  it("returns terminal detached reader evidence instead of making it pending again", async () => {
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      teeSearchId: null,
+      purpose: "COURSE_VERIFICATION",
+      courseId: "course-1",
+      targetDate: "2026-07-25",
+      players: 2,
+      status: "COMPLETED",
+      createdAt: new Date("2026-07-24T16:00:00.000Z"),
+      jobExpiresAt: new Date("2026-07-24T16:20:00.000Z"),
+      resultExpiresAt: new Date("2026-07-24T16:10:00.000Z"),
+      result: {
+        jobId: "job-verification",
+        courseKey: "cps:grassyhill.cps.golf",
+        status: "PAGE_MISMATCH",
+        observedAt: "2026-07-24T16:01:00.000Z",
+        pageUrl: bookingUrl,
+        pageTitle: "Unexpected public page",
+        slots: [],
+        readerVersion: "reader-v1",
+      },
+    });
+
+    await expect(
+      getLocalReaderCourseVerification({
+        courseId: "course-1",
+        targetDate: "2026-07-25",
+        players: 2,
+        bookingUrl,
+        notBefore: new Date("2026-07-24T16:00:30.000Z"),
+      }),
+    ).resolves.toEqual({
+      status: "TERMINAL",
+      observedAt: new Date("2026-07-24T16:01:00.000Z"),
+      readerVersion: "reader-v1",
+      resultStatus: "PAGE_MISMATCH",
     });
   });
 
@@ -926,7 +1514,7 @@ describe("local reader job service", () => {
       status: "LEASED",
       leaseToken: "lease-challenge",
       leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
-      bookingUrl
+      bookingUrl,
     });
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
 
@@ -941,11 +1529,13 @@ describe("local reader job service", () => {
         pageUrl: bookingUrl,
         pageTitle: "Checking your browser",
         slots: [],
-        readerVersion: "1.4.0"
-      }
+        readerVersion: "1.4.0",
+      },
     });
 
-    expect(monitoringMocks.recordCourseMonitoringSuccess).not.toHaveBeenCalled();
+    expect(
+      monitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
     expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
@@ -966,11 +1556,11 @@ describe("local reader job service", () => {
             minimumPlayers: 2,
             availableSpots: 4,
             priceCents: 8200,
-            cartIncluded: true
-          }
+            cartIncluded: true,
+          },
         ],
-        readerVersion: "test"
-      }
+        readerVersion: "test",
+      },
     });
 
     await expect(
@@ -978,17 +1568,18 @@ describe("local reader job service", () => {
         searchId: "search-1",
         courseId: "course-1",
         targetDate: "2026-07-25",
-        players: 2
-      })
+        players: 2,
+        bookingUrl,
+      }),
     ).resolves.toMatchObject({
       slots: [
         {
           sourceId: "local-cps:grassyhill.cps.golf-2026-07-25T09:02:00",
           holes: 18,
           bookableHoleCounts: [9, 18],
-          availableSpots: 4
-        }
-      ]
+          availableSpots: 4,
+        },
+      ],
     });
     expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -997,14 +1588,14 @@ describe("local reader job service", () => {
           courseId: "course-1",
           targetDate: "2026-07-25",
           players: 2,
-          status: "COMPLETED"
+          status: "COMPLETED",
         }),
-        orderBy: { completedAt: "desc" }
-      })
+        orderBy: { completedAt: "desc" },
+      }),
     );
-    expect(prismaMocks.localReaderJob.findFirst.mock.calls[0]?.[0]?.where).not.toHaveProperty(
-      "scheduleVersion"
-    );
+    expect(
+      prismaMocks.localReaderJob.findFirst.mock.calls[0]?.[0]?.where,
+    ).not.toHaveProperty("scheduleVersion");
   });
 
   it("returns a fresh access challenge as a terminal reader observation", async () => {
@@ -1017,8 +1608,8 @@ describe("local reader job service", () => {
         pageUrl: bookingUrl,
         pageTitle: "Checking your browser",
         slots: [],
-        readerVersion: "reader-v1"
-      }
+        readerVersion: "reader-v1",
+      },
     });
 
     await expect(
@@ -1026,12 +1617,26 @@ describe("local reader job service", () => {
         searchId: "search-1",
         courseId: "course-1",
         targetDate: "2026-07-25",
-        players: 2
-      })
+        players: 2,
+        bookingUrl,
+        notBefore: new Date("2026-07-24T15:55:00.000Z"),
+      }),
     ).resolves.toMatchObject({
       status: "ACCESS_CHALLENGE",
       readerVersion: "reader-v1",
-      teeSheet: null
+      teeSheet: null,
     });
+    expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          courseKey: "cps:grassyhill.cps.golf",
+          requiredCapabilityKey: "CPS_RENDERED",
+          requiredParserVersion: 1,
+          completedAt: {
+            gte: new Date("2026-07-24T15:55:00.000Z"),
+          },
+        }),
+      }),
+    );
   });
 });

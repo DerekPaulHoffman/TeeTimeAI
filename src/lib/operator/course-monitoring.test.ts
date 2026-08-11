@@ -36,14 +36,23 @@ const localReaderMocks = vi.hoisted(() => ({
   queueLocalReaderCourseVerification: vi.fn()
 }));
 
-vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
-vi.mock("@/lib/automation/search-scheduler", () => ({
+const schedulerMocks = vi.hoisted(() => ({
   startSearchSchedule: vi.fn()
 }));
+
+vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
+vi.mock("@/lib/automation/search-scheduler", () => schedulerMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
 import {
+  appendAutomationPlaybookEvent,
+  type AutomationPlaybookLedger,
+  type AutomationPlaybookReadPath,
+  type AutomationPlaybookStage
+} from "@/lib/automation/course-monitoring-playbook";
+import {
   applyOperatorCourseDecision,
+  approveOperatorCourseTechnicalFinal,
   correctOperatorCourseBookingLink,
   requestOperatorCourseRecheck,
   updateOperatorCourseOfficialLinks
@@ -73,11 +82,56 @@ function status() {
         revision: 7,
         status: "NEEDS_HUMAN",
         activeRealSearchCount: 1,
+        attemptLedger: null,
         resolution: null,
         failureFingerprint: "SOURCE_MISSING:UNKNOWN"
       }
     }
   };
+}
+
+function technicalFinalLedger(cycle = 2) {
+  const priorStages: Array<[AutomationPlaybookStage, AutomationPlaybookReadPath]> = [
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"],
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"]
+  ];
+  let ledger: AutomationPlaybookLedger | null = null;
+  for (const [stage, readPath] of priorStages) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle,
+      stage,
+      transition: "NOT_APPLICABLE",
+      readPath,
+      evidenceKind: "TOOLING",
+      skipReason: "MONITORING_MODE_EXCLUDED",
+      failureFingerprint: "PLAYBOOK:NOT_APPLICABLE",
+      runtimeVersion: "operator-test"
+    });
+  }
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "LOCAL_READER",
+    transition: "TECHNICAL_LIMITATION",
+    readPath: "LOCAL_READER",
+    evidenceKind: "LOCAL_READER_RESULT",
+    technicalReason: "CAPTCHA_OR_QUEUE",
+    failureFingerprint: "LOCAL_READER:CHALLENGE",
+    runtimeVersion: "operator-test"
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "TECHNICAL_LIMITATION",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "RENDERED_PAGE",
+    technicalReason: "CAPTCHA_OR_QUEUE",
+    failureFingerprint: "CONFIRMATION:CHALLENGE",
+    runtimeVersion: "operator-test"
+  });
 }
 
 const context = {
@@ -93,6 +147,7 @@ describe("operator course monitoring mutations", () => {
     prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue(status());
     prismaMocks.teeSearch.findMany.mockResolvedValue([]);
+    schedulerMocks.startSearchSchedule.mockResolvedValue(undefined);
     localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue(null);
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({ revision: 4 });
@@ -219,9 +274,11 @@ describe("operator course monitoring mutations", () => {
         revision: 7
       },
       data: {
+        cycle: { increment: 1 },
         status: "AUTO_INVESTIGATING",
         humanReviewReason: null,
         nextReminderAt: null,
+        confirmedAt: expect.any(Date),
         nextAttemptAt: expect.any(Date),
         escalationDeadlineAt: expect.any(Date),
         lastSeenAt: expect.any(Date),
@@ -351,7 +408,7 @@ describe("operator course monitoring mutations", () => {
     });
   });
 
-  it("queues an immediate local-reader verification for a CPS course", async () => {
+  it("starts a CPS recheck without queueing the reader before the browser adapter retry", async () => {
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
       ...status(),
       course: {
@@ -368,10 +425,6 @@ describe("operator course monitoring mutations", () => {
         players: 3
       }
     ]);
-    localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
-      id: "local-reader-job-1"
-    });
-
     await expect(
       requestOperatorCourseRecheck(
         {
@@ -386,20 +439,121 @@ describe("operator course monitoring mutations", () => {
       )
     ).resolves.toMatchObject({
       action: "request_recheck",
-      localReaderQueued: true,
+      localReaderQueued: false,
       applied: true
     });
 
-    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
-      courseId: "course-1",
-      targetDate: "2026-08-02",
-      players: 3,
-      bookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime",
-      force: true
-    });
+    expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
   });
 
-  it("saves both editable official links and immediately requests verification", async () => {
+  it("opens a fresh ordered cycle when an automatic investigation stalled", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      state: "AUTO_INVESTIGATING",
+      course: {
+        ...status().course,
+        supportIncident: {
+          ...status().course.supportIncident,
+          status: "AUTO_INVESTIGATING",
+          humanReviewReason: "AUTOMATION_STALLED",
+          nextReminderAt: new Date("2026-08-11T18:00:00.000Z")
+        }
+      }
+    });
+    prismaMocks.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-stalled",
+        date: new Date("2026-08-12T00:00:00.000Z"),
+        players: 2
+      }
+    ]);
+
+    await requestOperatorCourseRecheck(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        note: "Restart the ordered public signed-out verification.",
+        idempotencyKey: "operator-recheck-stalled"
+      },
+      context
+    );
+
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: { id: "incident-1", cycle: 2, revision: 7 },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        humanReviewReason: null,
+        nextReminderAt: null,
+        nextAttemptAt: expect.any(Date)
+      })
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: { courseId: "course-1", revision: 4 },
+      data: expect.objectContaining({
+        state: "AUTO_INVESTIGATING",
+        revalidationRequestedAt: expect.any(Date),
+        nextAutomaticAttemptAt: expect.any(Date)
+      })
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        fromState: "AUTO_INVESTIGATING",
+        toState: "AUTO_INVESTIGATING",
+        audit: expect.objectContaining({
+          priorCycle: 2,
+          cycle: 3,
+          authoritativeFinalRetained: false
+        })
+      })
+    });
+    expect(schedulerMocks.startSearchSchedule).toHaveBeenCalledWith("search-stalled");
+    expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
+  });
+
+  it.each(["FINAL_MANUAL", "FINAL_IDENTITY"] as const)(
+    "preserves authoritative %s while recording an operator recheck request",
+    async (state) => {
+      prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+        ...status(),
+        state,
+        course: {
+          ...status().course,
+          supportIncident: {
+            ...status().course.supportIncident,
+            status: "RESOLVED"
+          }
+        }
+      });
+
+      await requestOperatorCourseRecheck(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          note: "Retain the authoritative factual classification.",
+          idempotencyKey: `operator-recheck-${state.toLowerCase()}`
+        },
+        context
+      );
+
+      expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+      expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          fromState: state,
+          toState: state,
+          audit: expect.objectContaining({ authoritativeFinalRetained: true })
+        })
+      });
+      expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
+    }
+  );
+
+  it("saves changed official links and starts ordered verification without a reader shortcut", async () => {
     await expect(
       updateOperatorCourseOfficialLinks(
         {
@@ -443,9 +597,16 @@ describe("operator course monitoring mutations", () => {
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         eventType: "REVALIDATION_REQUESTED",
-        evidenceUrl: "https://new-course.example/tee-times"
+        evidenceUrl: "https://new-course.example/tee-times",
+        audit: expect.objectContaining({ priorCycle: 2, cycle: 3 })
       })
     });
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ cycle: { increment: 1 } })
+      })
+    );
+    expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
   });
 
   it("keeps a manually selected provider and queues verification when only it changes", async () => {
@@ -538,6 +699,70 @@ describe("operator course monitoring mutations", () => {
         humanReviewReason: null
       })
     });
+  });
+
+  it("rejects a technical final when the current incident cycle lacks playbook proof", async () => {
+    await expect(
+      approveOperatorCourseTechnicalFinal(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          reason: "CAPTCHA_OR_QUEUE",
+          evidenceUrl: "https://course.example/evidence",
+          note: "Confirmed the current signed-out technical limitation.",
+          idempotencyKey: "operator-technical-final-reject"
+        },
+        context
+      )
+    ).rejects.toThrow(/terminal local-reader proof/i);
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("accepts a matching technical final only after reader and independent confirmation", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        supportIncident: {
+          ...status().course.supportIncident,
+          attemptLedger: technicalFinalLedger()
+        }
+      }
+    });
+
+    await expect(
+      approveOperatorCourseTechnicalFinal(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          reason: "CAPTCHA_OR_QUEUE",
+          evidenceUrl: "https://course.example/evidence",
+          note: "Confirmed the current signed-out technical limitation.",
+          idempotencyKey: "operator-technical-final-accept"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "approve_technical_final",
+      applied: true
+    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ state: "FINAL_TECHNICAL" })
+      })
+    );
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION"
+        })
+      })
+    );
   });
 
   it("marks a broken course website as temporary and schedules a retry", async () => {
@@ -651,6 +876,7 @@ describe("operator course monitoring mutations", () => {
         revision: 7
       },
       data: expect.objectContaining({
+        cycle: { increment: 1 },
         status: "AUTO_INVESTIGATING",
         kind: "READER_CANDIDATE",
         failureClass: "READER_PARSER_MISSING"

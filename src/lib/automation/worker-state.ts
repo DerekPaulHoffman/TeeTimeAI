@@ -1,5 +1,6 @@
 import type { AutomationWorkerState } from "@prisma/client";
 
+import { sendAutomationWorkerHealthEmail } from "@/lib/email/alerts";
 import { prisma } from "@/lib/prisma";
 
 import { getAutomationRuntimeVersion } from "./runtime-version";
@@ -10,6 +11,11 @@ export const AUTOMATION_WORKERS = {
     cadenceSeconds: 10 * 60,
     graceSeconds: 10 * 60
   },
+  LOCAL_READER: {
+    workerKey: "local-tee-time-reader",
+    cadenceSeconds: 2 * 60,
+    graceSeconds: 3 * 60
+  },
   IMPROVEMENT: {
     workerKey: "product-improvement",
     cadenceSeconds: 6 * 60 * 60,
@@ -19,6 +25,37 @@ export const AUTOMATION_WORKERS = {
 
 export type AutomationWorkerConfig =
   (typeof AUTOMATION_WORKERS)[keyof typeof AUTOMATION_WORKERS];
+
+export const SCHEDULED_AUTOMATION_CYCLE_FLAG = "--scheduled-cycle";
+
+export function shouldRecordAutomationWorkerCycle(input: {
+  command: string;
+  args: readonly string[];
+}) {
+  const flagCount = input.args.filter(
+    (argument) => argument === SCHEDULED_AUTOMATION_CYCLE_FLAG
+  ).length;
+  if (flagCount === 0) {
+    return false;
+  }
+  if (flagCount > 1) {
+    throw new Error(`${SCHEDULED_AUTOMATION_CYCLE_FLAG} may be provided only once.`);
+  }
+  if (input.command !== "inspect") {
+    throw new Error(
+      `${SCHEDULED_AUTOMATION_CYCLE_FLAG} is reserved for the scheduled inspect entrypoint.`
+    );
+  }
+  return true;
+}
+
+export async function isAutomationWorkerExecutionAllowed(config: AutomationWorkerConfig) {
+  const worker = await prisma.automationWorkerState.findUnique({
+    where: { workerKey: config.workerKey },
+    select: { desiredState: true }
+  });
+  return worker?.desiredState !== "PAUSED";
+}
 
 export function getNextExpectedWorkerRun(
   completedAt: Date,
@@ -66,7 +103,8 @@ export async function startAutomationWorker(
       runnerVersion: input.runnerVersion,
       runtimeVersion: getAutomationRuntimeVersion(),
       lastStartedAt: now,
-      lastHeartbeatAt: now
+      lastHeartbeatAt: now,
+      nextExpectedAt: getNextExpectedWorkerRun(now, config)
     }
   });
   if (!worker.monitoringStartedAt) {
@@ -99,9 +137,55 @@ export async function heartbeatAutomationWorker(
     where: { workerKey: config.workerKey, desiredState: "ACTIVE" },
     data: {
       lastHeartbeatAt: now,
+      nextExpectedAt: getNextExpectedWorkerRun(now, config),
       runtimeVersion: getAutomationRuntimeVersion()
     }
   });
+}
+
+export async function runWithAutomationWorkerHeartbeat<T>(
+  config: AutomationWorkerConfig,
+  operation: () => Promise<T>,
+  input: { intervalMs: number }
+) {
+  if (!Number.isSafeInteger(input.intervalMs) || input.intervalMs <= 0) {
+    throw new Error("Automation worker heartbeat interval must be a positive integer.");
+  }
+
+  let heartbeatFailure: unknown = null;
+  let heartbeatInFlight: Promise<void> | null = null;
+  const interval = setInterval(() => {
+    if (heartbeatInFlight || heartbeatFailure) {
+      return;
+    }
+    heartbeatInFlight = heartbeatAutomationWorker(config)
+      .then((result) => {
+        if (result.count !== 1) {
+          throw new Error(
+            `Automation worker heartbeat lost active ownership for ${config.workerKey}.`
+          );
+        }
+      })
+      .catch((error) => {
+        heartbeatFailure = error;
+      })
+      .finally(() => {
+        heartbeatInFlight = null;
+      });
+  }, input.intervalMs);
+  interval.unref?.();
+
+  try {
+    const result = await operation();
+    await heartbeatInFlight;
+    if (heartbeatFailure) {
+      throw heartbeatFailure;
+    }
+    return result;
+  } finally {
+    clearInterval(interval);
+    await heartbeatInFlight;
+  }
 }
 
 export async function completeAutomationWorker(
@@ -164,26 +248,58 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
     orderBy: { workerKey: "asc" }
   });
   let overdue = 0;
-  const notified = 0;
+  let notified = 0;
   let recovered = 0;
 
   for (const worker of workers) {
     if (isAutomationWorkerOverdue(worker, now)) {
       overdue += 1;
       const expectedAt = worker.nextExpectedAt!;
+      const overdueSince =
+        worker.overdueSince ??
+        new Date(expectedAt.getTime() + worker.graceSeconds * 1000);
+      if (!worker.overdueSince) {
+        await prisma.automationWorkerState.updateMany({
+          where: {
+            workerKey: worker.workerKey,
+            desiredState: "ACTIVE",
+            nextExpectedAt: expectedAt,
+            overdueSince: null
+          },
+          data: { overdueSince }
+        });
+      }
       if (
         !worker.overdueNotifiedFor ||
         worker.overdueNotifiedFor.getTime() !== expectedAt.getTime()
       ) {
-        await prisma.automationWorkerState.update({
-          where: { workerKey: worker.workerKey },
+        const delivery = await sendAutomationWorkerHealthEmail({
+          workerKey: worker.workerKey,
+          event: "overdue",
+          expectedAt,
+          observedAt: now
+        });
+        if (delivery.deliveryStatus === "not_configured") {
+          continue;
+        }
+        const notification = await prisma.automationWorkerState.updateMany({
+          where: {
+            workerKey: worker.workerKey,
+            desiredState: "ACTIVE",
+            nextExpectedAt: expectedAt,
+            OR: [
+              { overdueNotifiedFor: null },
+              { overdueNotifiedFor: { not: expectedAt } }
+            ]
+          },
           data: {
-            overdueSince: worker.overdueSince ?? now,
+            overdueSince,
             overdueNotifiedFor: expectedAt,
             overdueNotifiedAt: now,
             recoveredNotifiedAt: null
           }
         });
+        notified += notification.count;
       }
       continue;
     }
@@ -193,15 +309,58 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
       (!worker.recoveredNotifiedAt ||
         worker.recoveredNotifiedAt.getTime() < worker.overdueSince.getTime())
     ) {
-      await prisma.automationWorkerState.update({
-        where: { workerKey: worker.workerKey },
+      const expectedAt =
+        worker.overdueNotifiedFor ??
+        new Date(worker.overdueSince.getTime() - worker.graceSeconds * 1000);
+      if (!worker.overdueNotifiedFor) {
+        const overdueDelivery = await sendAutomationWorkerHealthEmail({
+          workerKey: worker.workerKey,
+          event: "overdue",
+          expectedAt,
+          observedAt: now
+        });
+        if (overdueDelivery.deliveryStatus === "not_configured") {
+          continue;
+        }
+        const lateNotification = await prisma.automationWorkerState.updateMany({
+          where: {
+            workerKey: worker.workerKey,
+            overdueSince: worker.overdueSince,
+            overdueNotifiedFor: null
+          },
+          data: {
+            overdueNotifiedFor: expectedAt,
+            overdueNotifiedAt: now,
+            recoveredNotifiedAt: null
+          }
+        });
+        notified += lateNotification.count;
+      }
+      const delivery = await sendAutomationWorkerHealthEmail({
+        workerKey: worker.workerKey,
+        event: "recovered",
+        expectedAt,
+        observedAt: now
+      });
+      if (delivery.deliveryStatus === "not_configured") {
+        continue;
+      }
+      const recovery = await prisma.automationWorkerState.updateMany({
+        where: {
+          workerKey: worker.workerKey,
+          overdueSince: worker.overdueSince,
+          OR: [
+            { recoveredNotifiedAt: null },
+            { recoveredNotifiedAt: { lt: worker.overdueSince } }
+          ]
+        },
         data: {
           overdueSince: null,
           overdueNotifiedFor: null,
           recoveredNotifiedAt: now
         }
       });
-      recovered += 1;
+      recovered += recovery.count;
     }
   }
 

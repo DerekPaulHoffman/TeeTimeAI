@@ -2,6 +2,7 @@ import "./load-local-env";
 
 import {
   backfillCourseMonitoringLifecycle,
+  backfillCourseMonitoringPlaybook,
   reconcileCourseMonitoringLifecycle
 } from "@/lib/automation/course-monitoring-backfill";
 import {
@@ -31,6 +32,9 @@ async function main() {
     }
     case "backfill":
       writeResult(await backfillCourseMonitoringLifecycle({ apply }));
+      return;
+    case "backfill-playbook":
+      writeResult(await backfillCourseMonitoringPlaybook({ apply }));
       return;
     case "reconcile":
       writeResult(
@@ -91,7 +95,7 @@ async function main() {
       return;
     default:
       throw new Error(
-        "Unknown command. Use inspect, backfill, reconcile, correct-link, recheck, approve-final, or reopen."
+        "Unknown command. Use inspect, backfill, backfill-playbook, reconcile, correct-link, recheck, approve-final, or reopen."
       );
   }
 }
