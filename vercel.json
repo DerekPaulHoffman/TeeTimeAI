@@ -16,6 +16,10 @@
     {
       "path": "/api/cron/recover-search-schedules",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/recover-course-support-verifications",
+      "schedule": "* * * * *"
     }
   ]
 }

@@ -57,21 +57,23 @@ describe("automation worker state", () => {
 
   it("calculates the next expected run from the configured cadence", () => {
     expect(getNextExpectedWorkerRun(now, AUTOMATION_WORKERS.COURSE_SUPPORT).toISOString()).toBe(
-      "2026-07-27T12:10:00.000Z"
+      "2026-07-27T12:02:00.000Z"
     );
   });
 
-  it("detects course-support liveness at the durable 20-minute deadline", () => {
+  it("detects course-support liveness after the two-minute cadence and three-minute grace", () => {
     const worker = {
       desiredState: "ACTIVE" as const,
       monitoringStartedAt: new Date("2026-07-27T11:00:00.000Z"),
-      nextExpectedAt: new Date("2026-07-27T11:50:00.000Z"),
+      nextExpectedAt: new Date("2026-07-27T11:55:00.000Z"),
       graceSeconds: AUTOMATION_WORKERS.COURSE_SUPPORT.graceSeconds
     };
-    expect(isAutomationWorkerOverdue(worker as never, new Date("2026-07-27T11:59:59.999Z"))).toBe(
+    expect(isAutomationWorkerOverdue(worker as never, new Date("2026-07-27T11:57:59.999Z"))).toBe(
       false
     );
-    expect(isAutomationWorkerOverdue(worker as never, now)).toBe(true);
+    expect(isAutomationWorkerOverdue(worker as never, new Date("2026-07-27T11:58:00.000Z"))).toBe(
+      true
+    );
   });
 
   it("keeps a scheduled inspect healthy after it crosses the prior overdue deadline", async () => {
@@ -98,7 +100,7 @@ describe("automation worker state", () => {
       },
       data: {
         lastHeartbeatAt: new Date("2026-07-27T11:58:00.000Z"),
-        nextExpectedAt: new Date("2026-07-27T12:08:00.000Z"),
+        nextExpectedAt: new Date("2026-07-27T12:00:00.000Z"),
         runtimeVersion: expect.any(String)
       }
     });
@@ -107,7 +109,7 @@ describe("automation worker state", () => {
         {
           desiredState: "ACTIVE",
           monitoringStartedAt: startedAt,
-          nextExpectedAt: new Date("2026-07-27T12:08:00.000Z"),
+          nextExpectedAt: new Date("2026-07-27T12:00:00.000Z"),
           graceSeconds: AUTOMATION_WORKERS.COURSE_SUPPORT.graceSeconds
         } as never,
         new Date("2026-07-27T12:01:00.000Z")
@@ -126,7 +128,7 @@ describe("automation worker state", () => {
       expect.objectContaining({
         update: expect.objectContaining({
           lastHeartbeatAt: now,
-          nextExpectedAt: new Date("2026-07-27T12:10:00.000Z")
+          nextExpectedAt: new Date("2026-07-27T12:02:00.000Z")
         })
       })
     );
@@ -142,7 +144,7 @@ describe("automation worker state", () => {
       },
       data: {
         lastHeartbeatAt: new Date("2026-07-27T12:04:00.000Z"),
-        nextExpectedAt: new Date("2026-07-27T12:14:00.000Z"),
+        nextExpectedAt: new Date("2026-07-27T12:06:00.000Z"),
         runtimeVersion: expect.any(String)
       }
     });

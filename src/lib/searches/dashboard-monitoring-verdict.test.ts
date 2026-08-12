@@ -48,8 +48,8 @@ describe("dashboard monitoring verdict", () => {
     expect(verdict.detail).not.toMatch(/engineering|adapter|automation incident/i);
   });
 
-  it("keeps an unexhausted thirty-minute automation stall retrying", () => {
-    const verdict = getDashboardMonitoringVerdict({
+  it("shows an unexhausted stall only after its durable endpoint proof", () => {
+    const unproven = getDashboardMonitoringVerdict({
       ...base,
       latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: new Date() },
       supportIncidentStatus: "AUTO_INVESTIGATING",
@@ -57,8 +57,20 @@ describe("dashboard monitoring verdict", () => {
       automationPlaybookExhausted: false
     });
 
-    expect(verdict.label).toBe("Automatic checks are still retrying");
-    expect(verdict.detail).toContain("Your alert remains active");
+    expect(unproven.label).toBe("Automatic checks are still retrying");
+    expect(unproven.detail).toContain("Your alert remains active");
+
+    const proven = getDashboardMonitoringVerdict({
+      ...base,
+      latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: new Date() },
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+      supportIncidentStatus: "AUTO_INVESTIGATING",
+      humanReviewReason: "AUTOMATION_STALLED",
+      automationPlaybookExhausted: false,
+      automationStalledAtEndpoint: true
+    });
+    expect(proven.label).toBe("Manual review needed");
+    expect(proven.detail).toContain("official site");
   });
 
   it("shows manual review at the deadline before the watchdog writes its reason", () => {

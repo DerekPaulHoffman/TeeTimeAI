@@ -879,6 +879,101 @@ describe("course monitoring write serialization", () => {
     expect(JSON.stringify(event)).not.toContain("tenant");
   });
 
+  it("queues one fresh real-search recheck when material provider evidence changes after batch dispatch", async () => {
+    const now = new Date("2026-08-11T13:30:00.000Z");
+    const providerSnapshotFingerprint = "a".repeat(64);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-1",
+      cycle: 4,
+      revision: 9,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-1",
+      activeRealSearchCount: 1,
+      failureFingerprint: "CPS:MISSING_METADATA",
+      humanReviewReason: null,
+      resolution: null,
+      activeBatch: {
+        status: "VERIFYING",
+        releaseSha: "b".repeat(40),
+        deployedAt: new Date("2026-08-11T13:20:00.000Z"),
+        recheckDispatchedAt: new Date("2026-08-11T13:21:00.000Z"),
+      },
+    });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "AUTO_INVESTIGATING",
+      revision: 6,
+    });
+    transactionMocks.courseMonitoringEvent.findUnique
+      .mockReset()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ id: "provider-recheck-event" });
+    transactionMocks.teeSearch.updateMany.mockResolvedValue({ count: 1 });
+
+    const revalidate = () =>
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: {
+          timeZone: "America/New_York",
+          detectedBookingUrl: "https://old.example/booking",
+        },
+        after: {
+          timeZone: "America/New_York",
+          detectedBookingUrl: "https://new.example/booking",
+        },
+        providerSnapshotFingerprint,
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      });
+
+    await expect(revalidate()).resolves.toEqual({
+      outcome: "RECHECK_QUEUED",
+      changedFields: ["detectedBookingUrl"],
+      searchesQueued: 1,
+    });
+    await expect(revalidate()).resolves.toEqual({
+      outcome: "REPLAYED",
+      changedFields: ["detectedBookingUrl"],
+      searchesQueued: 0,
+    });
+
+    expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
+      where: {
+        status: "ACTIVE",
+        trafficClass: { notIn: ["AUTOMATION", "TEST"] },
+        date: { gte: expect.any(Date) },
+        preferences: { some: { courseId: "course-1" } },
+      },
+      data: {
+        scheduleVersion: { increment: 1 },
+        checkStatus: "QUEUED",
+        nextCheckAt: now,
+        lastCheckOutcome: null,
+        workflowRunId: null,
+        checkLeaseToken: null,
+        checkLeaseExpiresAt: null,
+        recheckRequestedAt: null,
+      },
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        incidentId: "incident-1",
+        eventType: "REVALIDATION_REQUESTED",
+        idempotencyKey: expect.stringMatching(
+          /^course-provider-evidence-recheck:/u,
+        ),
+        audit: expect.objectContaining({
+          cycle: 4,
+          providerSnapshotFingerprint,
+          exactReleaseProgression: true,
+          postDispatchRecheck: true,
+          customerDataIncluded: false,
+        }),
+      }),
+    });
+  });
+
   it("immediately restarts an automation-stalled cycle when access and monitoring evidence changes", async () => {
     const now = new Date("2026-08-11T14:00:00.000Z");
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({

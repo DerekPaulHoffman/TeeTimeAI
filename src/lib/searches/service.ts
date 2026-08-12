@@ -825,13 +825,25 @@ const searchListInclude = {
           },
           supportIncident: {
             select: {
+              id: true,
               cycle: true,
               status: true,
               attemptLedger: true,
               humanReviewReason: true,
               escalatedAt: true,
               escalationDeadlineAt: true,
-              firstSeenAt: true
+              firstSeenAt: true,
+              monitoringEvents: {
+                where: { eventType: "HUMAN_REVIEW_REQUESTED" },
+                orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+                take: 5,
+                select: {
+                  incidentId: true,
+                  eventType: true,
+                  occurredAt: true,
+                  audit: true
+                }
+              }
             }
           }
         }

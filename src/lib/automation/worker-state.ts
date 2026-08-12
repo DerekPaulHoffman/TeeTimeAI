@@ -8,8 +8,8 @@ import { getAutomationRuntimeVersion } from "./runtime-version";
 export const AUTOMATION_WORKERS = {
   COURSE_SUPPORT: {
     workerKey: "course-support-responder",
-    cadenceSeconds: 10 * 60,
-    graceSeconds: 10 * 60
+    cadenceSeconds: 2 * 60,
+    graceSeconds: 3 * 60
   },
   LOCAL_READER: {
     workerKey: "local-tee-time-reader",

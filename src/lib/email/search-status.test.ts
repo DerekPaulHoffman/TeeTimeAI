@@ -204,6 +204,34 @@ describe("renderSearchStatusHtml", () => {
     expect(html).not.toContain("MANUAL REVIEW NEEDED");
   });
 
+  it("renders the explicitly proven automation-stalled endpoint as manual review", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-stalled-endpoint",
+      to: "player@example.com",
+      kind: "status-update",
+      targetDate: "2026-08-12",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-08-10T14:30:00.000Z"),
+      courses: [
+        {
+          courseId: "course-stalled",
+          courseName: "Course Awaiting Review",
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/tee-times",
+          supportStatus: "NEEDS_HUMAN_REVIEW",
+          automationPlaybookExhausted: false,
+          automationStalledAtEndpoint: true
+        }
+      ]
+    });
+
+    expect(html).toContain("MANUAL REVIEW NEEDED");
+    expect(html).toContain("Use the official site for current tee times");
+  });
+
   it("renders one consolidated outage update after the planner releases it", () => {
     const html = renderSearchStatusHtml({
       searchId: "search-outage",

@@ -320,6 +320,166 @@ describe("alert finality audit", () => {
     expect(afterDeadline.endpointStuck).toBe(true);
   });
 
+  it("counts an exact durable automation-stalled handoff as the delivered endpoint", () => {
+    const endpointAt = new Date("2026-08-10T14:30:00.000Z");
+    const incident = {
+      id: "incident-stalled-endpoint",
+      cycle: 1,
+      status: "AUTO_INVESTIGATING",
+      attemptLedger: renderedBrowserPendingLedger(),
+      humanReviewReason: "AUTOMATION_STALLED",
+      firstAffectedSearchId: "search-1",
+      firstSeenAt: new Date("2026-08-10T14:02:00.000Z"),
+      lastSeenAt: endpointAt,
+      escalationDeadlineAt: endpointAt,
+      escalatedAt: endpointAt,
+      monitoringEvents: [
+        {
+          incidentId: "incident-stalled-endpoint",
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          occurredAt: endpointAt,
+          audit: {
+            cycle: 1,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            automationStalled: true,
+            playbookExhausted: false,
+            escalationDeadlineAt: endpointAt.toISOString()
+          }
+        }
+      ]
+    };
+    const report = buildAlertFinalityReport(
+      search({
+        preferences: [
+          {
+            courseId: "course-1",
+            course: {
+              monitoringStatus: {
+                state: "ENGINEERING_VERIFICATION_NEEDED",
+                stateChangedAt: endpointAt
+              },
+              supportIncident: incident
+            }
+          }
+        ],
+        probes: [
+          {
+            courseId: "course-1",
+            outcome: "FETCH_FAILED",
+            observedAt: new Date("2026-08-10T14:02:00.000Z")
+          }
+        ],
+        emailDeliveries: [
+          delivery(
+            [
+              {
+                courseId: "course-1",
+                courseName: "Retrying at setup",
+                outcome: "FETCH_FAILED",
+                customerStatus: "RETRYING_AUTOMATICALLY"
+              }
+            ],
+            5
+          ),
+          delivery(
+            [
+              {
+                courseId: "course-1",
+                courseName: "Engineering handoff",
+                outcome: "FETCH_FAILED",
+                supportStatus: "NEEDS_HUMAN_REVIEW",
+                customerStatus: "NEEDS_HUMAN_REVIEW"
+              }
+            ],
+            30,
+            "MONITORING_STATUS_UPDATE"
+          )
+        ]
+      }),
+      new Date("2026-08-10T14:31:00.000Z")
+    );
+
+    expect(report.currentHumanReviewCourseCount).toBe(1);
+    expect(report.currentAutomaticRetryCourseCount).toBe(0);
+    expect(report.currentEndpointStateComplete).toBe(true);
+    expect(report.currentEndpointStateSeconds).toBe(1800);
+    expect(report.currentEndpointComplete).toBe(true);
+    expect(report.currentEndpointSeconds).toBe(1800);
+    expect(report.metThirtyMinuteEndpointTarget).toBe(true);
+    expect(report.endpointStuck).toBe(false);
+  });
+
+  it("projects exact stalled proof for a delivered report missing a status snapshot", () => {
+    const endpointAt = new Date("2026-08-10T14:30:00.000Z");
+    const incident = {
+      id: "incident-stalled-delivery-projection",
+      cycle: 1,
+      status: "AUTO_INVESTIGATING",
+      attemptLedger: renderedBrowserPendingLedger(),
+      humanReviewReason: "AUTOMATION_STALLED",
+      firstAffectedSearchId: "search-1",
+      firstSeenAt: new Date("2026-08-10T14:02:00.000Z"),
+      lastSeenAt: endpointAt,
+      escalationDeadlineAt: endpointAt,
+      escalatedAt: endpointAt,
+      monitoringEvents: [
+        {
+          incidentId: "incident-stalled-delivery-projection",
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          occurredAt: endpointAt,
+          audit: {
+            cycle: 1,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            automationStalled: true,
+            playbookExhausted: false,
+            escalationDeadlineAt: endpointAt.toISOString()
+          }
+        }
+      ]
+    };
+    const report = buildAlertFinalityReport(
+      search({
+        preferences: [
+          {
+            courseId: "course-1",
+            course: {
+              monitoringStatus: {
+                state: "ENGINEERING_VERIFICATION_NEEDED",
+                stateChangedAt: endpointAt
+              },
+              supportIncident: incident
+            }
+          }
+        ],
+        probes: [
+          {
+            courseId: "course-1",
+            outcome: "FETCH_FAILED",
+            observedAt: new Date("2026-08-10T14:02:00.000Z")
+          }
+        ],
+        emailDeliveries: [
+          delivery(
+            [
+              {
+                courseId: "course-1",
+                courseName: "Engineering handoff",
+                outcome: "FETCH_FAILED",
+                supportStatus: "NEEDS_HUMAN_REVIEW"
+              }
+            ],
+            30
+          )
+        ]
+      }),
+      new Date("2026-08-10T14:31:00.000Z")
+    );
+
+    expect(report.humanReviewCourseCount).toBe(1);
+    expect(report.automaticRetryCourseCount).toBe(0);
+    expect(report.currentHumanReviewCourseCount).toBe(1);
+  });
+
   it("counts persisted and delivered human review as the customer endpoint", () => {
     const incident = {
       id: "incident-human-review",

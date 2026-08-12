@@ -36,6 +36,7 @@ export type DashboardMonitoringVerdictInput = {
   incidentEscalatedAt?: Date | null;
   escalationDeadlineAt?: Date | null;
   automationPlaybookExhausted?: boolean | null;
+  automationStalledAtEndpoint?: boolean | null;
   now?: Date;
   firstTimeLookup: boolean;
 };
@@ -53,6 +54,7 @@ export function getDashboardMonitoringVerdict(
     incidentEscalatedAt: input.incidentEscalatedAt,
     escalationDeadlineAt: input.escalationDeadlineAt,
     automationPlaybookExhausted: input.automationPlaybookExhausted,
+    automationStalledAtEndpoint: input.automationStalledAtEndpoint,
     now: input.now,
     automationReason: input.automationReason,
     directActionAvailable: Boolean(input.alertSupport)

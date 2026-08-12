@@ -1,18 +1,19 @@
 import { start } from "workflow/api";
 
 import {
+  COURSE_SUPPORT_VERIFICATION_MAX_DUE,
   attachCourseSupportVerificationWorkflow,
   claimCourseSupportVerificationRequest,
   failCourseSupportVerificationRequest,
-  listDueCourseSupportVerificationRequests
+  listDueCourseSupportVerificationRequests,
 } from "@/lib/automation/course-support-verification";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
-import {
-  courseSupportVerificationWorkflow
-} from "@/workflows/course-support-verification";
+import { courseSupportVerificationWorkflow } from "@/workflows/course-support-verification";
 import type { CourseSupportVerificationWorkflowInput } from "@/workflows/course-support-verification-contracts";
 
 const COURSE_SUPPORT_VERIFICATION_START_RETRY_MS = 2 * 60 * 1000;
+export const COURSE_SUPPORT_VERIFICATION_MAX_STARTS_PER_PASS =
+  COURSE_SUPPORT_VERIFICATION_MAX_DUE;
 
 export type CourseSupportVerificationRecoveryResult = {
   considered: number;
@@ -22,19 +23,20 @@ export type CourseSupportVerificationRecoveryResult = {
 };
 
 export async function recoverDueCourseSupportVerificationRequests(
-  input: { now?: Date; limit?: number } = {}
+  input: { now?: Date; limit?: number } = {},
 ): Promise<CourseSupportVerificationRecoveryResult> {
   const now = input.now ?? new Date();
   const runtimeVersion = getAutomationRuntimeVersion();
   const due = await listDueCourseSupportVerificationRequests({
     now,
-    limit: input.limit
+    limit: input.limit ?? COURSE_SUPPORT_VERIFICATION_MAX_STARTS_PER_PASS,
+    runtimeVersion,
   });
   const result: CourseSupportVerificationRecoveryResult = {
     considered: due.length,
     started: 0,
     skipped: 0,
-    failed: 0
+    failed: 0,
   };
 
   for (const request of due) {
@@ -43,7 +45,7 @@ export async function recoverDueCourseSupportVerificationRequests(
         requestId: request.id,
         expectedRevision: request.revision,
         runtimeVersion,
-        now
+        now,
       });
       if (!claim.claimed) {
         result.skipped += 1;
@@ -54,7 +56,7 @@ export async function recoverDueCourseSupportVerificationRequests(
         requestId: claim.requestId,
         expectedRevision: claim.revision,
         leaseToken: claim.leaseToken,
-        runtimeVersion: claim.runtimeVersion
+        runtimeVersion: claim.runtimeVersion,
       };
 
       let run: { runId: string };
@@ -74,7 +76,7 @@ export async function recoverDueCourseSupportVerificationRequests(
         leaseToken: claim.leaseToken,
         runtimeVersion: claim.runtimeVersion,
         workflowRunId: run.runId,
-        now
+        now,
       });
       if (!attachment.attached) {
         result.failed += 1;
@@ -97,7 +99,7 @@ async function persistStartFailure(
     leaseToken: string;
     runtimeVersion: string;
   },
-  now: Date
+  now: Date,
 ) {
   try {
     await failCourseSupportVerificationRequest({
@@ -108,9 +110,9 @@ async function persistStartFailure(
       failureClass: "UNKNOWN",
       message: "Workflow start failed before verification execution.",
       retryAt: new Date(
-        now.getTime() + COURSE_SUPPORT_VERIFICATION_START_RETRY_MS
+        now.getTime() + COURSE_SUPPORT_VERIFICATION_START_RETRY_MS,
       ),
-      now
+      now,
     });
   } catch {
     // The caller still counts the start as failed; an owned lease can be

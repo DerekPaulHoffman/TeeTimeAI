@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   getCustomerMonitoringStatus,
+  hasDurableAutomationStalledEndpointProof,
   isCustomerMonitoringStatusFinalized,
   isCustomerMonitoringStatusReportable,
   isEffectiveCustomerMonitoring,
@@ -104,7 +105,7 @@ describe("customer monitoring status", () => {
     ).toBe("NEEDS_HUMAN_REVIEW");
   });
 
-  it("keeps an unexhausted browser-stage deadline automatic and retryable", () => {
+  it("requires durable endpoint proof before an unexhausted automation stall becomes human review", () => {
     const deadline = new Date("2026-08-10T14:30:00.000Z");
 
     expect(
@@ -119,6 +120,19 @@ describe("customer monitoring status", () => {
         now: deadline
       })
     ).toBe("RETRYING_AUTOMATICALLY");
+    const stalled = getCustomerMonitoringStatus({
+      outcome: "NEEDS_ADAPTER",
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+      incidentStatus: "AUTO_INVESTIGATING",
+      humanReviewReason: "AUTOMATION_STALLED",
+      incidentEscalatedAt: deadline,
+      escalationDeadlineAt: deadline,
+      automationPlaybookExhausted: false,
+      automationStalledAtEndpoint: true,
+      now: deadline
+    });
+    expect(stalled).toBe("NEEDS_HUMAN_REVIEW");
+    expect(isCustomerMonitoringStatusFinalized(stalled)).toBe(true);
     expect(
       getCustomerMonitoringStatus({
         outcome: "NEEDS_ADAPTER",
@@ -144,6 +158,62 @@ describe("customer monitoring status", () => {
         automationPlaybookExhausted: true
       })
     ).toBe("NEEDS_HUMAN_REVIEW");
+  });
+
+  it("recognizes only a current exact automation-stalled endpoint event", () => {
+    const deadline = new Date("2026-08-10T14:30:00.000Z");
+    const event = {
+      incidentId: "incident-1",
+      eventType: "HUMAN_REVIEW_REQUESTED",
+      occurredAt: deadline,
+      audit: {
+        cycle: 3,
+        customerState: "NEEDS_HUMAN_REVIEW",
+        automationStalled: true,
+        playbookExhausted: false,
+        escalationDeadlineAt: deadline.toISOString()
+      }
+    };
+    const input = {
+      incidentId: "incident-1",
+      incidentCycle: 3,
+      incidentStatus: "AUTO_INVESTIGATING" as const,
+      humanReviewReason: "AUTOMATION_STALLED",
+      incidentEscalatedAt: deadline,
+      escalationDeadlineAt: deadline,
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED" as const,
+      endpointEvents: [event]
+    };
+
+    expect(hasDurableAutomationStalledEndpointProof(input)).toBe(true);
+    expect(
+      hasDurableAutomationStalledEndpointProof({
+        ...input,
+        endpointEvents: [
+          {
+            ...event,
+            occurredAt: new Date(deadline.getTime() - 1)
+          }
+        ]
+      })
+    ).toBe(false);
+    expect(
+      hasDurableAutomationStalledEndpointProof({
+        ...input,
+        incidentCycle: 4
+      })
+    ).toBe(false);
+    expect(
+      hasDurableAutomationStalledEndpointProof({
+        ...input,
+        endpointEvents: [
+          {
+            ...event,
+            audit: { ...event.audit, automationStalled: false }
+          }
+        ]
+      })
+    ).toBe(false);
   });
 
   it("does not let an older success mask an unproven automation incident", () => {

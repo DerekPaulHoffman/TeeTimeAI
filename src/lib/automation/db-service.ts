@@ -32,6 +32,7 @@ import {
   runCourseSupportBrowserPersistenceWrite,
   type CourseSupportBrowserPersistenceFence
 } from "./course-support-browser-stages";
+import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import {
   earliestPotentiallyActiveSearchDate,
@@ -74,7 +75,18 @@ const activeSearchCourseInclude = {
       humanReviewReason: true,
       escalatedAt: true,
       escalationDeadlineAt: true,
-      firstSeenAt: true
+      firstSeenAt: true,
+      monitoringEvents: {
+        where: { eventType: "HUMAN_REVIEW_REQUESTED" },
+        orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+        take: 5,
+        select: {
+          incidentId: true,
+          eventType: true,
+          occurredAt: true,
+          audit: true
+        }
+      }
     }
   },
   profile: {
@@ -858,6 +870,8 @@ export async function retireLegacyPolicyOnlyCourseBlock(
           courseId,
           before: current,
           after: applied,
+          providerSnapshotFingerprint:
+            buildCourseSupportProviderSnapshotFingerprint(applied),
           source: "COURSE_SUPPORT_RESPONDER",
           now: new Date()
         }
@@ -987,6 +1001,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
           courseId: input.courseId,
           before: current,
           after: applied,
+          providerSnapshotFingerprint:
+            buildCourseSupportProviderSnapshotFingerprint(applied),
           source: "COURSE_SUPPORT_RESPONDER",
           now: new Date()
         }
@@ -1161,6 +1177,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         courseId: input.courseId,
         before: current,
         after: applied,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(applied),
         source: "COURSE_SUPPORT_RESPONDER",
         now: new Date()
       }
@@ -2326,7 +2344,10 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
   const attachedSetupRecoveryBefore = new Date(
     now.getTime() - 4 * 60 * 1000
   );
-  const endpointRecoveryHorizon = new Date(now.getTime() + 5 * 60 * 1000);
+  // The general recovery cron runs every five minutes. Looking a second full
+  // interval ahead guarantees that even the worst phase offset leaves one
+  // complete cron interval to replace a sleeping endpoint Workflow.
+  const endpointRecoveryHorizon = new Date(now.getTime() + 10 * 60 * 1000);
   const recentEndpointEscalationAfter = new Date(
     now.getTime() - 5 * 60 * 1000
   );

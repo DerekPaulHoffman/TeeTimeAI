@@ -39,9 +39,13 @@ deployment is the release source of truth.
   scheduler.
 - Inspect provider incidents with
   `npm run automation:course-support -- inspect` before any responder action.
-- The five-minute recovery cron owns overdue search schedules, delivery retries,
-  queued verification requests, and engineering-worker health checks. A failure
-  in one recovery class must not suppress the others.
+- The five-minute general recovery cron owns overdue search schedules, delivery
+  retries, and engineering-worker health checks. It selects customer endpoint
+  wake recovery ten minutes ahead so cron phase offset still leaves one full
+  recovery interval. The separate one-minute
+  course-support verification cron starts only due exact-runtime detached
+  requests. Both routes require `CRON_SECRET` and fail closed without database
+  configuration.
 - Database worker state is authoritative for the course-support and product-
   improvement automation controls. A `PAUSED` worker must stop before claiming
   work.

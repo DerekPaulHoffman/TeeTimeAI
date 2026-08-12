@@ -131,7 +131,10 @@ import {
   planMonitoringStatusNotices,
   type MonitoringStatusNoticeCandidate
 } from "@/lib/email/monitoring-status-notices";
-import { getCustomerMonitoringStatus } from "@/lib/customer-monitoring-status";
+import {
+  getCustomerMonitoringStatus,
+  hasDurableAutomationStalledEndpointProof
+} from "@/lib/customer-monitoring-status";
 import {
   preserveAlertGenerationClockInStatusSnapshot,
   readAlertGenerationStartedAt
@@ -206,6 +209,12 @@ type AutomationCourse = AutomationCourseProviderRead & {
     escalatedAt?: Date | null;
     escalationDeadlineAt: Date | null;
     firstSeenAt: Date;
+    monitoringEvents?: Array<{
+      incidentId: string | null;
+      eventType: string;
+      occurredAt: Date;
+      audit: unknown;
+    }>;
   } | null;
 };
 
@@ -575,6 +584,8 @@ async function checkSearch(
           escalationDeadlineAt:
             course.supportIncident?.escalationDeadlineAt ?? null,
           automationPlaybookExhausted: persistedPlaybookExhausted,
+          automationStalledAtEndpoint:
+            hasAutomationStalledEndpointProof(course),
           now: customerStatusObservedAt
         }) === "NEEDS_HUMAN_REVIEW";
       if (waitingForHumanReview) {
@@ -2374,6 +2385,23 @@ function getCustomerBookingUrl(course: AutomationCourse) {
   );
 }
 
+function hasAutomationStalledEndpointProof(course: AutomationCourse) {
+  const incident = course.supportIncident;
+  if (!incident) {
+    return false;
+  }
+  return hasDurableAutomationStalledEndpointProof({
+    incidentId: incident.id,
+    incidentCycle: incident.cycle,
+    incidentStatus: incident.status,
+    humanReviewReason: incident.humanReviewReason,
+    incidentEscalatedAt: incident.escalatedAt ?? null,
+    escalationDeadlineAt: incident.escalationDeadlineAt,
+    monitoringState: course.monitoringStatus?.state ?? null,
+    endpointEvents: incident.monitoringEvents
+  });
+}
+
 function getLiveCustomerMonitoringStatus(
   course: AutomationCourse,
   result: SearchCheckCourseResult,
@@ -2396,6 +2424,8 @@ function getLiveCustomerMonitoringStatus(
           course.supportIncident.cycle
         )
       : null,
+    automationStalledAtEndpoint:
+      hasAutomationStalledEndpointProof(course),
     now: observedAt,
     automationReason: result.automationReason
   });
@@ -2423,11 +2453,16 @@ function applyCustomerMonitoringProjection(
           preference.course.supportIncident.attemptLedger,
           preference.course.supportIncident.cycle
         );
+      result.automationStalledAtEndpoint =
+        hasAutomationStalledEndpointProof(preference.course);
     }
     if (
       customerStatus === "NEEDS_HUMAN_REVIEW" &&
       result.supportStatus !== "NEEDS_HUMAN_REVIEW"
     ) {
+      if (result.outcome === "CHECK_PENDING") {
+        result.outcome = "NEEDS_ADAPTER";
+      }
       result.message = HUMAN_REVIEW_CUSTOMER_MESSAGE;
       result.supportStatus = "NEEDS_HUMAN_REVIEW";
     } else if (customerStatus === "RETRYING_AUTOMATICALLY") {
@@ -2619,6 +2654,8 @@ function buildPlaybookPendingCourseReport(
           course.supportIncident.cycle
         )
       : undefined,
+    automationStalledAtEndpoint:
+      hasAutomationStalledEndpointProof(course),
     bookingUrl: getCustomerBookingUrl(course),
     phone: course.bookingPhone ?? course.phone ?? undefined,
     bookingMethod: course.bookingMethod,

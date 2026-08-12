@@ -41,6 +41,7 @@ import {
 } from "@/lib/places/google";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { isAutomationHumanReviewProofCurrentOrPrior } from "@/lib/automation/course-monitoring-playbook";
+import { hasDurableAutomationStalledEndpointProof } from "@/lib/customer-monitoring-status";
 import {
   getDashboardAvailabilityView,
   readDashboardAvailabilitySnapshot
@@ -467,6 +468,23 @@ function DashboardSearchCard({
                     preference.course.supportIncident.cycle
                   )
                 : null,
+              automationStalledAtEndpoint: preference.course.supportIncident
+                ? hasDurableAutomationStalledEndpointProof({
+                    incidentId: preference.course.supportIncident.id,
+                    incidentCycle: preference.course.supportIncident.cycle,
+                    incidentStatus: preference.course.supportIncident.status,
+                    humanReviewReason:
+                      preference.course.supportIncident.humanReviewReason,
+                    incidentEscalatedAt:
+                      preference.course.supportIncident.escalatedAt,
+                    escalationDeadlineAt:
+                      preference.course.supportIncident.escalationDeadlineAt,
+                    monitoringState:
+                      preference.course.monitoringStatus?.state ?? null,
+                    endpointEvents:
+                      preference.course.supportIncident.monitoringEvents
+                  })
+                : false,
               firstTimeLookup:
                 Math.abs(
                   preference.course.createdAt.getTime() - search.createdAt.getTime()

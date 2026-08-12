@@ -1118,15 +1118,15 @@ describe("schedule recovery fairness", () => {
     }
   });
 
-  it("prioritizes an imminent endpoint whose queued workflow was never attached", async () => {
+  it("looks two cron intervals ahead for an imminent endpoint", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-11T20:23:00.000Z"));
+    vi.setSystemTime(new Date("2026-08-11T20:23:01.000Z"));
     mockedPrisma.teeSearch.findMany.mockClear();
     mockedPrisma.teeSearch.findMany.mockResolvedValue([] as never);
 
     try {
       await listSearchesNeedingScheduleRecovery(
-        new Date("2026-08-11T20:23:00.000Z")
+        new Date("2026-08-11T20:23:01.000Z")
       );
 
       expect(mockedPrisma.teeSearch.findMany).toHaveBeenNthCalledWith(
@@ -1145,7 +1145,7 @@ describe("schedule recovery fairness", () => {
                           status: "AUTO_INVESTIGATING",
                           humanReviewReason: null,
                           escalationDeadlineAt: {
-                            lte: new Date("2026-08-11T20:28:00.000Z")
+                            lte: new Date("2026-08-11T20:33:01.000Z")
                           }
                         })
                       }

@@ -4123,7 +4123,7 @@ describe("runSearchCheck email cadence", () => {
   it("persists and sends one human-review status update at the endpoint deadline", async () => {
     const firstDegradedAt = new Date("2026-07-11T11:40:00.000Z");
     const escalationDeadlineAt = new Date("2026-07-11T12:10:00.000Z");
-    const buildDeadlineSearch = (humanReviewReason: string | null) => ({
+    const buildDeadlineSearch = (automationStalled: boolean) => ({
       ...search,
       statusEmailSentAt: new Date("2026-07-11T11:45:00.000Z"),
       preferences: [
@@ -4139,24 +4139,45 @@ describe("runSearchCheck email cadence", () => {
             automationEligibility: "NEEDS_REVIEW",
             automationReason: "OTHER",
             monitoringStatus: {
-              state: humanReviewReason
+              state: automationStalled
                 ? "ENGINEERING_VERIFICATION_NEEDED"
                 : "AUTO_INVESTIGATING",
               firstDegradedAt,
               failureFingerprint: "FOREUP:UNKNOWN",
               nextAutomaticAttemptAt: null,
               revalidationRequestedAt: null,
-              stateChangedAt: firstDegradedAt
+              stateChangedAt: automationStalled
+                ? escalationDeadlineAt
+                : firstDegradedAt
             },
             supportIncident: {
               id: "incident-1",
               cycle: 1,
               status: "AUTO_INVESTIGATING",
-              attemptLedger: buildExhaustedPlaybook(),
-              humanReviewReason,
-              escalatedAt: humanReviewReason ? escalationDeadlineAt : null,
+              attemptLedger: buildPlaybookAwaitingRenderedBrowser(),
+              humanReviewReason: automationStalled
+                ? "AUTOMATION_STALLED"
+                : null,
+              escalatedAt: automationStalled ? escalationDeadlineAt : null,
               escalationDeadlineAt,
-              firstSeenAt: firstDegradedAt
+              firstSeenAt: firstDegradedAt,
+              monitoringEvents: automationStalled
+                ? [
+                    {
+                      incidentId: "incident-1",
+                      eventType: "HUMAN_REVIEW_REQUESTED",
+                      occurredAt: escalationDeadlineAt,
+                      audit: {
+                        cycle: 1,
+                        customerState: "NEEDS_HUMAN_REVIEW",
+                        automationStalled: true,
+                        playbookExhausted: false,
+                        escalationDeadlineAt:
+                          escalationDeadlineAt.toISOString()
+                      }
+                    }
+                  ]
+                : []
             },
             bookingMetadata: {
               scheduleId: 6123,
@@ -4169,8 +4190,8 @@ describe("runSearchCheck email cadence", () => {
     });
 
     dbMocks.getActiveSearchForAutomation
-      .mockResolvedValueOnce(buildDeadlineSearch(null))
-      .mockResolvedValue(buildDeadlineSearch("AUTOMATION_STALLED"));
+      .mockResolvedValueOnce(buildDeadlineSearch(false))
+      .mockResolvedValue(buildDeadlineSearch(true));
     courseMonitoringMocks.reconcileCourseMonitoringDeadlines
       .mockResolvedValueOnce({
         checked: 1,
@@ -4216,7 +4237,7 @@ describe("runSearchCheck email cadence", () => {
       }
     ]);
     dbMocks.getActiveSearchForAutomation.mockResolvedValue(
-      buildDeadlineSearch("AUTOMATION_STALLED")
+      buildDeadlineSearch(true)
     );
     courseMonitoringMocks.reconcileCourseMonitoringDeadlines.mockResolvedValue({
       checked: 0,

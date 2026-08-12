@@ -82,25 +82,29 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       result.outcome === "success" &&
       isSyntheticWebsiteTrafficClass(timing.trafficClass) &&
       !timing.syntheticMultiCycle;
+    const schedulingCourses =
+      refreshedTiming?.preferences.map((preference) => preference.course) ??
+      timing.preferences.map((preference) => preference.course);
     const nextCheckAt = completeSyntheticSearch
       ? null
       : capAtSyntheticExpiration(
-          calculateNextCheckAt(
-            timing.date,
-            timing.cadenceMinutes,
-            schedulingNow,
-            searchExpiresAt,
-            refreshedTiming?.preferences.map((preference) => preference.course) ??
-              timing.preferences.map((preference) => preference.course),
-            result.supportRetryNeeded,
-            checkStartedAt,
-            {
-              supportRetryAt: result.supportRetryAt,
-              sleepUntilExpiration: shouldSleepTechnicalFinalSearch(
-                refreshedTiming?.preferences.map((preference) => preference.course) ??
-                  timing.preferences.map((preference) => preference.course)
-              )
-            }
+          capAtSearchEndpoint(
+            calculateNextCheckAt(
+              timing.date,
+              timing.cadenceMinutes,
+              schedulingNow,
+              searchExpiresAt,
+              schedulingCourses,
+              result.supportRetryNeeded,
+              checkStartedAt,
+              {
+                supportRetryAt: result.supportRetryAt,
+                sleepUntilExpiration:
+                  shouldSleepTechnicalFinalSearch(schedulingCourses)
+              }
+            ),
+            schedulingCourses,
+            schedulingNow
           ),
           syntheticExpiresAt
         );
@@ -195,6 +199,20 @@ function capAtSyntheticExpiration(
     return nextCheckAt;
   }
   return nextCheckAt < syntheticExpiresAt ? nextCheckAt : syntheticExpiresAt;
+}
+
+function capAtSearchEndpoint(
+  nextCheckAt: Date | null,
+  courses: Parameters<typeof selectSearchEndpointWakeAt>[0],
+  now: Date
+) {
+  if (!nextCheckAt) {
+    return null;
+  }
+  const endpointWakeAt = selectSearchEndpointWakeAt(courses, now);
+  return endpointWakeAt && endpointWakeAt < nextCheckAt
+    ? endpointWakeAt
+    : nextCheckAt;
 }
 
 export function calculateNextCheckAt(

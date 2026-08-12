@@ -29,10 +29,7 @@ import {
   isAutomationHumanReviewProofCurrentOrPrior,
   isAutomationPlaybookExhausted
 } from "./course-monitoring-playbook";
-import {
-  getHumanReviewRetryAt,
-  inferHumanReviewReason
-} from "./course-monitoring";
+import { getHumanReviewRetryAt, inferHumanReviewReason } from "./course-monitoring";
 import { enqueueRemediatedCourseRechecks } from "./search-recheck-queue";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
@@ -82,7 +79,7 @@ const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS = 3;
 const COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS = 25;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
-const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 3;
+const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 5;
 const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
   "HTTP_5XX",
@@ -365,10 +362,7 @@ function isResponderSelectionEligible(input: {
   if (input.activeRealSearchCount <= 0) {
     return false;
   }
-  const assessment = assessAutomationPlaybook(
-    input.attemptLedger,
-    input.cycle
-  );
+  const assessment = assessAutomationPlaybook(input.attemptLedger, input.cycle);
   return (
     assessment.valid &&
     assessment.conclusion === "INCOMPLETE" &&
@@ -384,8 +378,7 @@ function getAuthoritativeCourseMonitoringResolution(
     case "HEALTHY":
       return {
         resolution: "MONITORING_RESTORED" as const,
-        message:
-          "Current authoritative monitoring state already records restored monitoring."
+        message: "Current authoritative monitoring state already records restored monitoring."
       };
     case "FINAL_MANUAL":
       return {
@@ -410,9 +403,7 @@ function getAuthoritativeCourseMonitoringResolution(
   }
 }
 
-function buildDueResponderIncidentWhere(
-  now: Date
-): Prisma.CourseSupportIncidentWhereInput {
+function buildDueResponderIncidentWhere(now: Date): Prisma.CourseSupportIncidentWhereInput {
   return {
     status: "AUTO_INVESTIGATING",
     activeBatchId: null,
@@ -459,6 +450,16 @@ function runCourseSupportSerializableTransactionWithRetry<T>(
   );
 }
 
+async function getCourseSupportDatabaseNow(transaction: Prisma.TransactionClient) {
+  const [row] = await transaction.$queryRaw<Array<{ now: Date }>>(
+    Prisma.sql`SELECT clock_timestamp() AS "now"`
+  );
+  if (!row?.now || !Number.isFinite(row.now.getTime())) {
+    throw new Error("Course-support database time is unavailable.");
+  }
+  return row.now;
+}
+
 export async function getOwnedCourseSupportLeaseToken(input: {
   batchId: string;
   ownerThreadId: string;
@@ -484,8 +485,7 @@ export async function renewCourseSupportBatchOperationLease(input: {
   now?: Date;
 }) {
   const now = input.now ?? new Date();
-  const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
-  const updated = await prisma.courseSupportBatch.updateMany({
+  const batch = await prisma.courseSupportBatch.findFirst({
     where: {
       id: input.batchId,
       leaseToken: input.leaseToken,
@@ -493,15 +493,93 @@ export async function renewCourseSupportBatchOperationLease(input: {
       status: { in: ACTIVE_BATCH_STATUSES },
       leaseExpiresAt: { gte: now }
     },
+    select: {
+      status: true,
+      revision: true,
+      summary: true
+    }
+  });
+  if (!batch) {
+    return operationLeaseRenewalResult(null);
+  }
+  if (courseSupportBatchOwnsCheckout(batch)) {
+    const transition = await runWithCourseSupportWriterTransitionLease(() =>
+      runCourseSupportTransactionWithRetry(async (transaction) => {
+        const databaseNow = await getCourseSupportDatabaseNow(transaction);
+        const current = await transaction.courseSupportBatch.findFirst({
+          where: {
+            id: input.batchId,
+            leaseToken: input.leaseToken,
+            ownerThreadId: input.ownerThreadId,
+            status: { in: ACTIVE_BATCH_STATUSES },
+            leaseExpiresAt: { gt: databaseNow }
+          },
+          select: {
+            status: true,
+            revision: true,
+            summary: true
+          }
+        });
+        if (!current || !courseSupportBatchOwnsCheckout(current)) {
+          return null;
+        }
+        const otherActiveBatches = await transaction.courseSupportBatch.findMany({
+          where: {
+            id: { not: input.batchId },
+            status: { in: ACTIVE_BATCH_STATUSES },
+            leaseExpiresAt: { gt: databaseNow }
+          },
+          select: { status: true, summary: true }
+        });
+        if (otherActiveBatches.some((candidate) => courseSupportBatchOwnsCheckout(candidate))) {
+          return null;
+        }
+        const leaseExpiresAt = new Date(
+          databaseNow.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS
+        );
+        const updated = await transaction.courseSupportBatch.updateMany({
+          where: {
+            id: input.batchId,
+            leaseToken: input.leaseToken,
+            ownerThreadId: input.ownerThreadId,
+            status: current.status,
+            revision: current.revision,
+            leaseExpiresAt: { gt: databaseNow }
+          },
+          data: {
+            heartbeatAt: databaseNow,
+            leaseExpiresAt
+          }
+        });
+        return updated.count === 1 ? leaseExpiresAt : null;
+      })
+    );
+    return operationLeaseRenewalResult(transition.acquired ? transition.value : null);
+  }
+
+  const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
+  const updated = await prisma.courseSupportBatch.updateMany({
+    where: {
+      id: input.batchId,
+      leaseToken: input.leaseToken,
+      ownerThreadId: input.ownerThreadId,
+      status: batch.status,
+      revision: batch.revision,
+      leaseExpiresAt: { gte: now }
+    },
     data: {
       heartbeatAt: now,
       leaseExpiresAt
     }
   });
+  return operationLeaseRenewalResult(updated.count === 1 ? leaseExpiresAt : null);
+}
+
+function operationLeaseRenewalResult(leaseExpiresAt: Date | null) {
   return {
-    outcome: updated.count === 1 ? ("ready" as const) : ("recovery_required" as const),
-    heartbeatRecorded: updated.count === 1,
-    leaseExpiresAt: updated.count === 1 ? leaseExpiresAt.toISOString() : null
+    outcome: leaseExpiresAt ? ("ready" as const) : ("recovery_required" as const),
+    heartbeatRecorded: leaseExpiresAt !== null,
+    leaseExpiresAt: leaseExpiresAt?.toISOString() ?? null
   };
 }
 
@@ -777,8 +855,7 @@ export function classifyDetachedVerificationEvidence(input: {
       evidence.runtimeVersion === input.proof.releaseSha &&
       evidence.releaseSha === input.proof.releaseSha &&
       evidence.outcome === input.proof.outcome &&
-      (evidence.disposition === "MANUAL_DIRECT" ||
-        evidence.disposition === "IDENTITY_FINAL") &&
+      (evidence.disposition === "MANUAL_DIRECT" || evidence.disposition === "IDENTITY_FINAL") &&
       observedAt.getTime() >= input.deployedAt.getTime() &&
       observedAt.getTime() >= input.recheckDispatchStartedAt.getTime() &&
       observedAt.getTime() >= input.incidentLastSeenAt.getTime() &&
@@ -1083,15 +1160,12 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
 }) {
   const now = input.now ?? new Date();
   const hasRecheckDispatch = Boolean(
-    input.recheckDispatchKey ||
-      input.recheckDispatchStartedAt ||
-      input.recheckDispatchedAt
+    input.recheckDispatchKey || input.recheckDispatchStartedAt || input.recheckDispatchedAt
   );
   const hasOnlySafeDispatchedEvidence =
     input.incidentResults.length > 0 &&
     input.incidentResults.every(
-      (result) =>
-        result === "STALE_EVIDENCE" || result === "RETRY_SCHEDULED"
+      (result) => result === "STALE_EVIDENCE" || result === "RETRY_SCHEDULED"
     );
   return Boolean(
     input.leaseExpiresAt.getTime() <= now.getTime() &&
@@ -1102,9 +1176,7 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
     input.incidentResults.length > 0 &&
     input.incidentResults.every(
       (result) =>
-        result === "PENDING" ||
-        result === "STALE_EVIDENCE" ||
-        result === "RETRY_SCHEDULED"
+        result === "PENDING" || result === "STALE_EVIDENCE" || result === "RETRY_SCHEDULED"
     )
   );
 }
@@ -1363,14 +1435,9 @@ export async function inspectCourseSupportQueue(input?: {
           ...incident,
           endpointHumanReviewProven:
             incident.escalatedAt != null &&
-            isAutomationHumanReviewProofCurrentOrPrior(
-              incident.attemptLedger,
-              incident.cycle
-            ),
+            isAutomationHumanReviewProofCurrentOrPrior(incident.attemptLedger, incident.cycle),
           engineeringOnly:
-            currentDemand.activeRealSearchCount > 0
-              ? false
-              : incident.engineeringOnly
+            currentDemand.activeRealSearchCount > 0 ? false : incident.engineeringOnly
         },
         ...currentDemand
       }
@@ -1419,10 +1486,7 @@ export async function inspectCourseSupportQueue(input?: {
           };
           current.activeRealDemandCount += item.activeRealSearchCount;
           current.courseCount += 1;
-          if (
-            item.activeRealSearchCount > 0 &&
-            !item.incident.endpointHumanReviewProven
-          ) {
+          if (item.activeRealSearchCount > 0 && !item.incident.endpointHumanReviewProven) {
             current.pendingInitialEndpointCount += 1;
             if (item.incident.escalationDeadlineAt) {
               current.earliestPendingInitialEndpointDeadlineAt = new Date(
@@ -1472,7 +1536,7 @@ export async function inspectCourseSupportQueue(input?: {
         left.providerFamilyKey.localeCompare(right.providerFamilyKey)
       );
     })
-    .slice(0, 3)
+    .slice(0, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES)
     .map((group, index) => ({
       ordinal: index + 1,
       providerFamilyKey: group.providerFamilyKey,
@@ -1528,7 +1592,7 @@ export async function inspectCourseSupportQueue(input?: {
     activeWriterCount: activeBatches.length,
     availableWriterSlots: Math.max(0, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length),
     readOnlyDispatchPlan: {
-      maxProviderGroups: 3,
+      maxProviderGroups: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
       maxCoursesPerGroup: 5,
       globalProviderRequestLimit: 2,
       perProviderFamilyRequestLimit: 1,
@@ -1537,8 +1601,8 @@ export async function inspectCourseSupportQueue(input?: {
     recoveryContinuation: {
       reinspectAfterRecovery: Boolean(
         expiredBatch &&
-          availableDueIncidents.length > 0 &&
-          activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES
+        availableDueIncidents.length > 0 &&
+        activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES
       ),
       dueIncidentCount: availableDueIncidents.length,
       availableWriterSlots: Math.max(
@@ -1600,6 +1664,7 @@ export async function claimCourseSupportBatch(input: {
     throw new Error("An exact-entry targeted responder retry requires maxCourses to be 1.");
   }
   const maxCourses = clampCourseSupportBatchSize(input.maxCourses);
+  const plannedPaths = normalizePaths(input.plannedPaths ?? []);
   const retrySourceBatchDigest = input.retryBatchId
     ? createHash("sha256").update(input.retryBatchId).digest("hex")
     : null;
@@ -1627,6 +1692,27 @@ export async function claimCourseSupportBatch(input: {
         now,
         summary: {
           activeBatchCount: activeBatches.length
+        }
+      });
+      return {
+        outcome: "deferred_busy" as const,
+        durableCloseoutRecorded: recorded,
+        ...getResponderThreadPolicy({
+          outcome: "deferred_busy",
+          durableCloseoutRecorded: recorded
+        })
+      };
+    }
+    if (
+      plannedPaths.length > 0 &&
+      activeBatches.some((batch) => courseSupportBatchOwnsCheckout(batch))
+    ) {
+      const recorded = await recordRoutineResponderObservation({
+        outcome: "deferred_busy",
+        now,
+        summary: {
+          activeBatchCount: activeBatches.length,
+          sharedCheckoutImplementationBusy: true
         }
       });
       return {
@@ -1757,7 +1843,6 @@ export async function claimCourseSupportBatch(input: {
 
     const leaseToken = randomUUID();
     const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
-    const plannedPaths = normalizePaths(input.plannedPaths ?? []);
     const conflictingInitialPaths = findConflictingResponderPaths(
       plannedPaths,
       activeBatches.flatMap((activeBatch) => readBatchPlannedPaths(activeBatch.summary))
@@ -1832,11 +1917,7 @@ export async function claimCourseSupportBatch(input: {
           if (!current) {
             throw new Error("Course-support demand changed during claim; rerun selection.");
           }
-          if (
-            getAuthoritativeCourseMonitoringResolution(
-              current.course.monitoringStatus?.state
-            )
-          ) {
+          if (getAuthoritativeCourseMonitoringResolution(current.course.monitoringStatus?.state)) {
             continue;
           }
           const currentDemand = deriveCourseSupportCurrentDemand(current.course.preferences, {
@@ -1905,8 +1986,7 @@ export async function claimCourseSupportBatch(input: {
               status: "RESOLVED",
               resolvedAt: now,
               resolution: authoritativeResolution.resolution,
-              resolutionMessage:
-                authoritativeResolution.message,
+              resolutionMessage: authoritativeResolution.message,
               nextAction: null,
               nextAttemptAt: null,
               nextReminderAt: null,
@@ -2009,7 +2089,7 @@ export async function claimCourseSupportBatch(input: {
             reference: createCourseSupportBatchReference(now),
             providerFamilyKey: selected.providerFamilyKey,
             failureFingerprint: selected.failureFingerprint,
-            status: "CLAIMED",
+            status: plannedPaths.length > 0 ? "IMPLEMENTING" : "CLAIMED",
             ownerAutomationRunId: automationRun.id,
             ownerThreadId: input.ownerThreadId,
             leaseToken,
@@ -2147,12 +2227,7 @@ export async function claimCourseSupportBatch(input: {
             where: {
               courseId: { in: humanReviewCourseIds },
               state: {
-                notIn: [
-                  "HEALTHY",
-                  "FINAL_MANUAL",
-                  "FINAL_TECHNICAL",
-                  "FINAL_IDENTITY"
-                ]
+                notIn: ["HEALTHY", "FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"]
               }
             },
             data: {
@@ -2175,8 +2250,7 @@ export async function claimCourseSupportBatch(input: {
       return {
         outcome: "no_due_work" as const,
         durableCloseoutRecorded: true,
-        reconciledAuthoritativeFinalCount:
-          created.reconciledAuthoritativeFinalCount,
+        reconciledAuthoritativeFinalCount: created.reconciledAuthoritativeFinalCount,
         ...getResponderThreadPolicy({
           outcome: "no_due_work",
           durableCloseoutRecorded: true
@@ -2232,23 +2306,107 @@ export async function appendCourseSupportBatchPath(input: {
 }) {
   const now = input.now ?? new Date();
   const path = validatePlannedPath(input.path);
-  const batch = await prisma.courseSupportBatch.findFirst({
-    where: {
-      id: input.batchId,
-      leaseToken: input.leaseToken,
-      ownerThreadId: input.ownerThreadId,
-      status: { in: ACTIVE_BATCH_STATUSES },
-      leaseExpiresAt: { gte: now }
-    },
-    select: {
-      status: true,
-      revision: true,
-      releaseSha: true,
-      summary: true,
-      ownerAutomationRunId: true
+  const lease = await runWithCourseSupportWriterTransitionLease(async () => {
+    const batch = await prisma.courseSupportBatch.findFirst({
+      where: {
+        id: input.batchId,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        status: { in: ACTIVE_BATCH_STATUSES },
+        leaseExpiresAt: { gte: now }
+      },
+      select: {
+        status: true,
+        revision: true,
+        releaseSha: true,
+        summary: true,
+        ownerAutomationRunId: true
+      }
+    });
+    if (!batch) {
+      return null;
     }
+    const summary = asJsonObject(batch.summary);
+    const currentPlannedPaths = normalizePaths(
+      Array.isArray(summary.plannedPaths)
+        ? summary.plannedPaths.filter(
+            (candidate): candidate is string => typeof candidate === "string"
+          )
+        : []
+    );
+    if (
+      !canAppendCourseSupportBatchPath({
+        status: batch.status,
+        releaseSha: batch.releaseSha,
+        plannedPaths: currentPlannedPaths
+      })
+    ) {
+      return { sealed: true as const };
+    }
+    const plannedPaths = normalizePaths([...currentPlannedPaths, path]);
+    const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
+    await prisma.$transaction(async (transaction) => {
+      const otherActiveBatches = await transaction.courseSupportBatch.findMany({
+        where: {
+          id: { not: input.batchId },
+          status: { in: ACTIVE_BATCH_STATUSES },
+          leaseExpiresAt: { gte: now }
+        },
+        select: { status: true, summary: true }
+      });
+      if (otherActiveBatches.some((activeBatch) => courseSupportBatchOwnsCheckout(activeBatch))) {
+        throw new Error(
+          "Responder code changes require exclusive access to the approved checkout."
+        );
+      }
+      const conflicts = findConflictingResponderPaths(
+        [path],
+        otherActiveBatches.flatMap((activeBatch) => readBatchPlannedPaths(activeBatch.summary))
+      );
+      if (conflicts.length > 0) {
+        throw new Error("Responder code scope is already owned by another active provider batch.");
+      }
+      const updated = await transaction.courseSupportBatch.updateMany({
+        where: {
+          id: input.batchId,
+          leaseToken: input.leaseToken,
+          ownerThreadId: input.ownerThreadId,
+          status: batch.status,
+          revision: batch.revision,
+          releaseSha: batch.releaseSha,
+          leaseExpiresAt: { gte: now }
+        },
+        data: {
+          status: "IMPLEMENTING",
+          summary: {
+            ...summary,
+            plannedPaths
+          } as Prisma.InputJsonValue,
+          heartbeatAt: now,
+          leaseExpiresAt,
+          revision: { increment: 1 }
+        }
+      });
+      if (updated.count !== 1) {
+        throw new Error("Responder batch ownership changed while claiming a path.");
+      }
+      if (batch.ownerAutomationRunId) {
+        await transaction.automationRun.updateMany({
+          where: { id: batch.ownerAutomationRunId, completedAt: null },
+          data: {
+            notes: JSON.stringify({
+              schemaVersion: 1,
+              lifecycle: "implementing",
+              plannedPaths,
+              plannedPathCount: plannedPaths.length
+            })
+          }
+        });
+      }
+    });
+    return { sealed: false as const, plannedPaths, leaseExpiresAt };
   });
-  if (!batch) {
+  if (!lease.acquired || lease.value === null) {
     return {
       outcome: "recovery_required" as const,
       pathRecorded: false,
@@ -2256,21 +2414,7 @@ export async function appendCourseSupportBatchPath(input: {
       archiveReason: "Responder batch ownership or lease freshness was lost."
     };
   }
-  const summary = asJsonObject(batch.summary);
-  const currentPlannedPaths = normalizePaths(
-    Array.isArray(summary.plannedPaths)
-      ? summary.plannedPaths.filter(
-          (candidate): candidate is string => typeof candidate === "string"
-        )
-      : []
-  );
-  if (
-    !canAppendCourseSupportBatchPath({
-      status: batch.status,
-      releaseSha: batch.releaseSha,
-      plannedPaths: currentPlannedPaths
-    })
-  ) {
+  if (lease.value.sealed) {
     return {
       outcome: "recovery_required" as const,
       pathRecorded: false,
@@ -2278,67 +2422,11 @@ export async function appendCourseSupportBatchPath(input: {
       archiveReason: "Responder verification provenance is sealed and cannot add paths."
     };
   }
-  const plannedPaths = normalizePaths([...currentPlannedPaths, path]);
-  const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
-  await prisma.$transaction(async (transaction) => {
-    const otherActiveBatches = await transaction.courseSupportBatch.findMany({
-      where: {
-        id: { not: input.batchId },
-        status: { in: ACTIVE_BATCH_STATUSES },
-        leaseExpiresAt: { gte: now }
-      },
-      select: { summary: true }
-    });
-    const conflicts = findConflictingResponderPaths(
-      [path],
-      otherActiveBatches.flatMap((activeBatch) => readBatchPlannedPaths(activeBatch.summary))
-    );
-    if (conflicts.length > 0) {
-      throw new Error("Responder code scope is already owned by another active provider batch.");
-    }
-    const updated = await transaction.courseSupportBatch.updateMany({
-      where: {
-        id: input.batchId,
-        leaseToken: input.leaseToken,
-        ownerThreadId: input.ownerThreadId,
-        status: batch.status,
-        revision: batch.revision,
-        releaseSha: batch.releaseSha,
-        leaseExpiresAt: { gte: now }
-      },
-      data: {
-        status: "IMPLEMENTING",
-        summary: {
-          ...summary,
-          plannedPaths
-        } as Prisma.InputJsonValue,
-        heartbeatAt: now,
-        leaseExpiresAt,
-        revision: { increment: 1 }
-      }
-    });
-    if (updated.count !== 1) {
-      throw new Error("Responder batch ownership changed while claiming a path.");
-    }
-    if (batch.ownerAutomationRunId) {
-      await transaction.automationRun.updateMany({
-        where: { id: batch.ownerAutomationRunId, completedAt: null },
-        data: {
-          notes: JSON.stringify({
-            schemaVersion: 1,
-            lifecycle: "implementing",
-            plannedPaths,
-            plannedPathCount: plannedPaths.length
-          })
-        }
-      });
-    }
-  });
   return {
     outcome: "ready" as const,
     pathRecorded: true,
-    plannedPathCount: plannedPaths.length,
-    leaseExpiresAt: leaseExpiresAt.toISOString(),
+    plannedPathCount: lease.value.plannedPaths.length,
+    leaseExpiresAt: lease.value.leaseExpiresAt.toISOString(),
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason: "The responder batch is still in progress."
   };
@@ -2378,6 +2466,9 @@ export async function getCourseSupportBatchPacket(input: {
       providerFamilyKey: true,
       failureFingerprint: true,
       createdAt: true,
+      releaseSha: true,
+      deployedAt: true,
+      recheckDispatchStartedAt: true,
       incidents: {
         orderBy: [{ course: { name: "asc" } }, { createdAt: "asc" }, { id: "asc" }],
         select: {
@@ -2385,26 +2476,27 @@ export async function getCourseSupportBatchPacket(input: {
           createdAt: true,
           cycle: true,
           result: true,
+          proofSnapshot: true,
+          verifiedAt: true,
+          verifiedIncidentUpdatedAt: true,
           course: {
             select: {
               name: true,
-              website: true,
-              detectedBookingUrl: true,
-              detectedPlatform: true,
-              bookingMethod: true,
-              automationEligibility: true,
-              automationReason: true,
-              providerFamilyKey: true
+              ...DETACHED_VERIFICATION_COURSE_SELECT
             }
           },
           incident: {
             select: {
+              cycle: true,
               kind: true,
+              providerFamilyKey: true,
               failureClass: true,
               engineeringOnly: true,
               activeRealSearchCount: true,
               earliestTargetDate: true,
+              escalationDeadlineAt: true,
               attemptCount: true,
+              attemptLedger: true,
               latestMessage: true,
               nextAction: true,
               firstSeenAt: true,
@@ -2428,32 +2520,50 @@ export async function getCourseSupportBatchPacket(input: {
     providerFamilyKey: batch.providerFamilyKey,
     failureFingerprint: batch.failureFingerprint,
     claimedAt: batch.createdAt.toISOString(),
-    courses: orderCourseSupportBatchIncidents(batch.incidents).map((entry, index) => ({
-      ordinal: String(index + 1).padStart(2, "0"),
-      name: entry.course.name,
-      providerFamilyKey: entry.course.providerFamilyKey,
-      detectedPlatform: entry.course.detectedPlatform,
-      failureClass: entry.incident.failureClass,
-      kind: entry.incident.kind,
-      result: entry.result,
-      engineeringOnly: entry.incident.engineeringOnly,
-      activeRealSearchCount: entry.incident.activeRealSearchCount,
-      earliestTargetDate: entry.incident.earliestTargetDate?.toISOString().slice(0, 10) ?? null,
-      attemptCount: entry.incident.attemptCount,
-      bookingMethod: entry.course.bookingMethod,
-      automationEligibility: entry.course.automationEligibility,
-      automationReason: entry.course.automationReason,
-      officialSiteRoot: getSafePublicRoot(entry.course.website),
-      officialBookingRoot: getSafePublicRoot(entry.course.detectedBookingUrl),
-      latestEvidence: sanitizeResponderText(
-        entry.incident.latestMessage ?? "No bounded failure message was recorded."
-      ),
-      nextAction: entry.incident.nextAction
-        ? sanitizeResponderText(entry.incident.nextAction)
-        : null,
-      firstSeenAt: entry.incident.firstSeenAt.toISOString(),
-      lastSeenAt: entry.incident.lastSeenAt.toISOString()
-    })),
+    courses: orderCourseSupportBatchIncidents(batch.incidents).map((entry, index) => {
+      const currentProviderSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(
+        entry.course
+      );
+      const terminalProofDurable =
+        (entry.result === "RESTORED" || entry.result === "FINAL_DISPOSITION") &&
+        isDurableTerminalProof(
+          {
+            ...entry,
+            currentProviderSnapshotFingerprint,
+            normalizedResult: entry.result
+          },
+          batch
+        );
+      return {
+        ordinal: String(index + 1).padStart(2, "0"),
+        name: entry.course.name,
+        providerFamilyKey: entry.course.providerFamilyKey,
+        detectedPlatform: entry.course.detectedPlatform,
+        failureClass: entry.incident.failureClass,
+        kind: entry.incident.kind,
+        result: entry.result,
+        terminalProofDurable,
+        engineeringOnly: entry.incident.engineeringOnly,
+        activeRealSearchCount: entry.incident.activeRealSearchCount,
+        earliestTargetDate: entry.incident.earliestTargetDate?.toISOString().slice(0, 10) ?? null,
+        escalationDeadlineAt: entry.incident.escalationDeadlineAt?.toISOString() ?? null,
+        attemptCount: entry.incident.attemptCount,
+        playbookExhausted: isAutomationPlaybookExhausted(entry.incident.attemptLedger, entry.cycle),
+        bookingMethod: entry.course.bookingMethod,
+        automationEligibility: entry.course.automationEligibility,
+        automationReason: entry.course.automationReason,
+        officialSiteRoot: getSafePublicRoot(entry.course.website),
+        officialBookingRoot: getSafePublicRoot(entry.course.detectedBookingUrl),
+        latestEvidence: sanitizeResponderText(
+          entry.incident.latestMessage ?? "No bounded failure message was recorded."
+        ),
+        nextAction: entry.incident.nextAction
+          ? sanitizeResponderText(entry.incident.nextAction)
+          : null,
+        firstSeenAt: entry.incident.firstSeenAt.toISOString(),
+        lastSeenAt: entry.incident.lastSeenAt.toISOString()
+      };
+    }),
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason: "The responder batch is still in progress."
   };
@@ -2589,7 +2699,35 @@ export async function markCourseSupportBatchNeedsHuman(input: {
   };
 }
 
-export async function heartbeatCourseSupportBatch(input: {
+const courseSupportHeartbeatBatchSelect = {
+  status: true,
+  revision: true,
+  releaseSha: true,
+  deployedAt: true,
+  recheckDispatchKey: true,
+  recheckDispatchStartedAt: true,
+  recheckDispatchedAt: true,
+  summary: true,
+  incidents: {
+    orderBy: [{ course: { name: "asc" } }, { createdAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      createdAt: true,
+      result: true,
+      message: true,
+      proofSnapshot: true,
+      verifiedIncidentUpdatedAt: true,
+      verifiedAt: true,
+      course: { select: { name: true } }
+    }
+  }
+} satisfies Prisma.CourseSupportBatchSelect;
+
+type CourseSupportHeartbeatBatch = Prisma.CourseSupportBatchGetPayload<{
+  select: typeof courseSupportHeartbeatBatchSelect;
+}>;
+
+type CourseSupportHeartbeatInput = {
   batchId: string;
   leaseToken: string;
   ownerThreadId: string;
@@ -2597,7 +2735,9 @@ export async function heartbeatCourseSupportBatch(input: {
   releaseSha?: string | null;
   releaseAdvanceProof?: CourseSupportReleaseAdvanceProof;
   now?: Date;
-}) {
+};
+
+export async function heartbeatCourseSupportBatch(input: CourseSupportHeartbeatInput) {
   const now = input.now ?? new Date();
   if (input.releaseSha) {
     validateGitSha(input.releaseSha, "release SHA");
@@ -2610,29 +2750,7 @@ export async function heartbeatCourseSupportBatch(input: {
       status: { in: ACTIVE_BATCH_STATUSES },
       leaseExpiresAt: { gte: now }
     },
-    select: {
-      status: true,
-      revision: true,
-      releaseSha: true,
-      deployedAt: true,
-      recheckDispatchKey: true,
-      recheckDispatchStartedAt: true,
-      recheckDispatchedAt: true,
-      summary: true,
-      incidents: {
-        orderBy: [{ course: { name: "asc" } }, { createdAt: "asc" }, { id: "asc" }],
-        select: {
-          id: true,
-          createdAt: true,
-          result: true,
-          message: true,
-          proofSnapshot: true,
-          verifiedIncidentUpdatedAt: true,
-          verifiedAt: true,
-          course: { select: { name: true } }
-        }
-      }
-    }
+    select: courseSupportHeartbeatBatchSelect
   });
   if (!batch) {
     return {
@@ -2642,12 +2760,80 @@ export async function heartbeatCourseSupportBatch(input: {
       archiveReason: "Responder batch ownership or lease freshness was lost."
     };
   }
-  const summary = asJsonObject(batch.summary);
-  const plannedPaths = Array.isArray(summary.plannedPaths)
-    ? normalizePaths(
-        summary.plannedPaths.filter((path): path is string => typeof path === "string")
+  const initialPlan = prepareCourseSupportHeartbeat(batch, input);
+  const initialWouldOwnCheckout = courseSupportBatchOwnsCheckout({
+    status: initialPlan.status,
+    summary: batch.summary
+  });
+  const persisted = initialWouldOwnCheckout
+    ? await runWithCourseSupportWriterTransitionLease(() =>
+        runCourseSupportTransactionWithRetry(async (transaction) => {
+          const databaseNow = await getCourseSupportDatabaseNow(transaction);
+          const current = await transaction.courseSupportBatch.findFirst({
+            where: {
+              id: input.batchId,
+              leaseToken: input.leaseToken,
+              ownerThreadId: input.ownerThreadId,
+              status: { in: ACTIVE_BATCH_STATUSES },
+              leaseExpiresAt: { gt: databaseNow }
+            },
+            select: courseSupportHeartbeatBatchSelect
+          });
+          if (!current) {
+            return null;
+          }
+          const plan = prepareCourseSupportHeartbeat(current, input);
+          const wouldOwnCheckout = courseSupportBatchOwnsCheckout({
+            status: plan.status,
+            summary: current.summary
+          });
+          if (!wouldOwnCheckout) {
+            return null;
+          }
+          const otherActiveBatches = await transaction.courseSupportBatch.findMany({
+            where: {
+              id: { not: input.batchId },
+              status: { in: ACTIVE_BATCH_STATUSES },
+              leaseExpiresAt: { gt: databaseNow }
+            },
+            select: { status: true, summary: true }
+          });
+          if (
+            otherActiveBatches.some((candidate) => courseSupportBatchOwnsCheckout(candidate))
+          ) {
+            return null;
+          }
+          return persistCourseSupportHeartbeat(transaction, input, current, plan, databaseNow, true);
+        })
       )
-    : [];
+    : {
+        acquired: true as const,
+        value: await runCourseSupportTransactionWithRetry((transaction) =>
+          persistCourseSupportHeartbeat(transaction, input, batch, initialPlan, now, false)
+        )
+      };
+  const heartbeat = persisted.acquired ? persisted.value : null;
+  return {
+    outcome: heartbeat ? ("ready" as const) : ("recovery_required" as const),
+    heartbeatRecorded: heartbeat !== null,
+    status: heartbeat?.status ?? initialPlan.status,
+    releaseSha: heartbeat?.releaseSha ?? null,
+    releaseAdvanced: heartbeat?.releaseAdvanced ?? false,
+    leaseExpiresAt: heartbeat?.leaseExpiresAt.toISOString() ?? null,
+    threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason:
+      heartbeat
+        ? "The responder batch is still in progress."
+        : "Responder batch ownership changed during heartbeat."
+  };
+}
+
+function prepareCourseSupportHeartbeat(
+  batch: CourseSupportHeartbeatBatch,
+  input: CourseSupportHeartbeatInput
+) {
+  const summary = asJsonObject(batch.summary);
+  const plannedPaths = readBatchPlannedPaths(batch.summary);
   const releaseTransition = assessCourseSupportReleaseTransition({
     persistedReleaseSha: batch.releaseSha,
     requestedReleaseSha: input.releaseSha,
@@ -2662,89 +2848,97 @@ export async function heartbeatCourseSupportBatch(input: {
   if (releaseAdvanced && input.status !== "VERIFYING") {
     throw new Error("A follow-up release must explicitly enter VERIFYING.");
   }
-
-  const status = nextBatchStatus(batch.status, input.status);
-  const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
-  const updated = await runCourseSupportTransactionWithRetry(
-    async (tx) => {
-      const batchUpdated = await tx.courseSupportBatch.updateMany({
-        where: {
-          id: input.batchId,
-          leaseToken: input.leaseToken,
-          ownerThreadId: input.ownerThreadId,
-          status: batch.status,
-          revision: batch.revision,
-          leaseExpiresAt: { gte: now },
-          releaseSha: batch.releaseSha,
-          deployedAt: batch.deployedAt
-        },
-        data: {
-          status,
-          heartbeatAt: now,
-          leaseExpiresAt,
-          releaseSha: input.releaseSha ?? batch.releaseSha,
-          ...(releaseAdvanced && batch.releaseSha && input.releaseSha
-            ? {
-                deployedAt: null,
-                recheckDispatchKey: null,
-                recheckDispatchStartedAt: null,
-                recheckDispatchedAt: null,
-                summary: buildCourseSupportReleaseHistory({
-                  summary: batch.summary,
-                  previousReleaseSha: batch.releaseSha,
-                  previousDeployedAt: batch.deployedAt,
-                  previousRecheckDispatchKey: batch.recheckDispatchKey,
-                  previousRecheckDispatchStartedAt: batch.recheckDispatchStartedAt,
-                  previousRecheckDispatchedAt: batch.recheckDispatchedAt,
-                  previousIncidentVerifications: orderCourseSupportBatchIncidents(
-                    batch.incidents
-                  ).map((entry, index) => ({
-                    ordinal: index + 1,
-                    result: entry.result,
-                    message: entry.message,
-                    proofSnapshot: entry.proofSnapshot,
-                    verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
-                    verifiedAt: entry.verifiedAt
-                  })),
-                  nextReleaseSha: input.releaseSha,
-                  advancedAt: now
-                })
-              }
-            : {}),
-          revision: { increment: 1 }
-        }
-      });
-      if (batchUpdated.count === 1 && releaseAdvanced) {
-        await tx.courseSupportBatchIncident.updateMany({
-          where: {
-            batchId: input.batchId,
-            result: { not: "NEEDS_HUMAN" }
-          },
-          data: {
-            result: "PENDING",
-            postProbeId: null,
-            message: null,
-            proofSnapshot: Prisma.DbNull,
-            verifiedIncidentUpdatedAt: null,
-            verifiedAt: null
-          }
-        });
-      }
-      return batchUpdated;
-    }
-  );
+  if (input.status === "IMPLEMENTING" && batch.status !== "IMPLEMENTING") {
+    throw new Error(
+      "Responder code changes must claim a planned path before entering IMPLEMENTING."
+    );
+  }
   return {
-    outcome: updated.count === 1 ? ("ready" as const) : ("recovery_required" as const),
-    heartbeatRecorded: updated.count === 1,
-    status,
-    releaseSha: updated.count === 1 ? (input.releaseSha ?? batch.releaseSha) : null,
-    releaseAdvanced: updated.count === 1 && releaseAdvanced,
-    leaseExpiresAt: updated.count === 1 ? leaseExpiresAt.toISOString() : null,
-    threadDisposition: "KEEP_VISIBLE" as const,
-    archiveReason:
-      updated.count === 1
-        ? "The responder batch is still in progress."
-        : "Responder batch ownership changed during heartbeat."
+    status: nextBatchStatus(batch.status, input.status),
+    releaseAdvanced
+  };
+}
+
+async function persistCourseSupportHeartbeat(
+  transaction: Prisma.TransactionClient,
+  input: CourseSupportHeartbeatInput,
+  batch: CourseSupportHeartbeatBatch,
+  plan: ReturnType<typeof prepareCourseSupportHeartbeat>,
+  now: Date,
+  useStrictDatabaseTime: boolean
+) {
+  const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
+  const batchUpdated = await transaction.courseSupportBatch.updateMany({
+    where: {
+      id: input.batchId,
+      leaseToken: input.leaseToken,
+      ownerThreadId: input.ownerThreadId,
+      status: batch.status,
+      revision: batch.revision,
+      leaseExpiresAt: useStrictDatabaseTime ? { gt: now } : { gte: now },
+      releaseSha: batch.releaseSha,
+      deployedAt: batch.deployedAt
+    },
+    data: {
+      status: plan.status,
+      heartbeatAt: now,
+      leaseExpiresAt,
+      releaseSha: input.releaseSha ?? batch.releaseSha,
+      ...(plan.releaseAdvanced && batch.releaseSha && input.releaseSha
+        ? {
+            deployedAt: null,
+            recheckDispatchKey: null,
+            recheckDispatchStartedAt: null,
+            recheckDispatchedAt: null,
+            summary: buildCourseSupportReleaseHistory({
+              summary: batch.summary,
+              previousReleaseSha: batch.releaseSha,
+              previousDeployedAt: batch.deployedAt,
+              previousRecheckDispatchKey: batch.recheckDispatchKey,
+              previousRecheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+              previousRecheckDispatchedAt: batch.recheckDispatchedAt,
+              previousIncidentVerifications: orderCourseSupportBatchIncidents(batch.incidents).map(
+                (entry, index) => ({
+                  ordinal: index + 1,
+                  result: entry.result,
+                  message: entry.message,
+                  proofSnapshot: entry.proofSnapshot,
+                  verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
+                  verifiedAt: entry.verifiedAt
+                })
+              ),
+              nextReleaseSha: input.releaseSha,
+              advancedAt: now
+            })
+          }
+        : {}),
+      revision: { increment: 1 }
+    }
+  });
+  if (batchUpdated.count !== 1) {
+    return null;
+  }
+  if (plan.releaseAdvanced) {
+    await transaction.courseSupportBatchIncident.updateMany({
+      where: {
+        batchId: input.batchId,
+        result: { not: "NEEDS_HUMAN" }
+      },
+      data: {
+        result: "PENDING",
+        postProbeId: null,
+        message: null,
+        proofSnapshot: Prisma.DbNull,
+        verifiedIncidentUpdatedAt: null,
+        verifiedAt: null
+      }
+    });
+  }
+  return {
+    status: plan.status,
+    releaseSha: input.releaseSha ?? batch.releaseSha,
+    releaseAdvanced: plan.releaseAdvanced,
+    leaseExpiresAt
   };
 }
 
@@ -2999,15 +3193,15 @@ export async function verifyCourseSupportBatch(input: {
         ? detachedFactualVerification
           ? detachedFactualVerification
           : currentCourseVerification?.result === "FINAL_DISPOSITION"
-          ? currentCourseVerification
-          : (explicitHumanVerification ??
-            newestProviderVerification ??
-            currentCourseVerification ?? {
-              result: "STALE_EVIDENCE" as const,
-              postProbeId: null,
-              message: "Current course verification evidence is unavailable.",
-              proofSnapshot: null
-            })
+            ? currentCourseVerification
+            : (explicitHumanVerification ??
+              newestProviderVerification ??
+              currentCourseVerification ?? {
+                result: "STALE_EVIDENCE" as const,
+                postProbeId: null,
+                message: "Current course verification evidence is unavailable.",
+                proofSnapshot: null
+              })
         : {
             result: "STALE_EVIDENCE" as const,
             postProbeId: null,
@@ -3034,104 +3228,102 @@ export async function verifyCourseSupportBatch(input: {
   const recheckDispatchStartedAt =
     batch.recheckDispatchStartedAt ?? (shouldOwnRecheckDispatch ? now : null);
   const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
-  await runCourseSupportSerializableTransactionWithRetry(
-    async (tx) => {
-      const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
-      const updated = await tx.courseSupportBatch.updateMany({
-        where: {
-          id: batch.id,
+  await runCourseSupportSerializableTransactionWithRetry(async (tx) => {
+    const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
+    const updated = await tx.courseSupportBatch.updateMany({
+      where: {
+        id: batch.id,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        status: batch.status,
+        revision: batch.revision,
+        leaseExpiresAt: { gte: now },
+        releaseSha: batch.releaseSha,
+        deployedAt: batch.deployedAt
+      },
+      data: {
+        status: "VERIFYING",
+        releaseSha,
+        deployedAt,
+        heartbeatAt: now,
+        leaseExpiresAt,
+        recheckDispatchKey,
+        recheckDispatchStartedAt,
+        revision: { increment: 1 }
+      }
+    });
+    if (updated.count !== 1) {
+      throw new Error("Responder batch ownership changed during verification.");
+    }
+    for (const candidate of verifications) {
+      const { entry } = candidate;
+      let verification = candidate.verification;
+      if (isDetachedRestoredVerification(verification)) {
+        const detachedProofIsCurrent = await revalidateDetachedVerificationProof(tx, {
+          batchId: batch.id,
+          batchIncidentId: entry.id,
+          incidentId: entry.incidentId,
+          courseId: entry.courseId,
+          cycle: entry.cycle,
+          releaseSha: releaseSha ?? "",
           leaseToken: input.leaseToken,
           ownerThreadId: input.ownerThreadId,
-          status: batch.status,
-          revision: batch.revision,
-          leaseExpiresAt: { gte: now },
-          releaseSha: batch.releaseSha,
-          deployedAt: batch.deployedAt
+          proofSnapshot: verification.proofSnapshot,
+          now
+        });
+        if (!detachedProofIsCurrent) {
+          verification = {
+            result: "STALE_EVIDENCE",
+            postProbeId: null,
+            message:
+              "Detached provider verification changed before its atomic proof could be recorded.",
+            proofSnapshot: null
+          };
+          candidate.verification = verification;
+        }
+      }
+      const entryUpdated = await tx.courseSupportBatchIncident.updateMany({
+        where: {
+          id: entry.id,
+          result: entry.result,
+          updatedAt: entry.updatedAt
         },
         data: {
-          status: "VERIFYING",
-          releaseSha,
-          deployedAt,
-          heartbeatAt: now,
-          leaseExpiresAt,
-          recheckDispatchKey,
-          recheckDispatchStartedAt,
-          revision: { increment: 1 }
+          result: verification.result,
+          postProbeId: verification.postProbeId,
+          message: sanitizeResponderText(verification.message),
+          proofSnapshot:
+            verification.proofSnapshot === null ? Prisma.DbNull : verification.proofSnapshot,
+          verifiedIncidentUpdatedAt: entry.incident.updatedAt,
+          verifiedAt: now
         }
       });
-      if (updated.count !== 1) {
-        throw new Error("Responder batch ownership changed during verification.");
-      }
-      for (const candidate of verifications) {
-        const { entry } = candidate;
-        let verification = candidate.verification;
-        if (isDetachedRestoredVerification(verification)) {
-          const detachedProofIsCurrent = await revalidateDetachedVerificationProof(tx, {
-            batchId: batch.id,
-            batchIncidentId: entry.id,
-            incidentId: entry.incidentId,
-            courseId: entry.courseId,
-            cycle: entry.cycle,
-            releaseSha: releaseSha ?? "",
-            leaseToken: input.leaseToken,
-            ownerThreadId: input.ownerThreadId,
-            proofSnapshot: verification.proofSnapshot,
-            now
-          });
-          if (!detachedProofIsCurrent) {
-            verification = {
-              result: "STALE_EVIDENCE",
-              postProbeId: null,
-              message:
-                "Detached provider verification changed before its atomic proof could be recorded.",
-              proofSnapshot: null
-            };
-            candidate.verification = verification;
-          }
-        }
-        const entryUpdated = await tx.courseSupportBatchIncident.updateMany({
-          where: {
-            id: entry.id,
-            result: entry.result,
-            updatedAt: entry.updatedAt
-          },
-          data: {
-            result: verification.result,
-            postProbeId: verification.postProbeId,
-            message: sanitizeResponderText(verification.message),
-            proofSnapshot:
-              verification.proofSnapshot === null ? Prisma.DbNull : verification.proofSnapshot,
-            verifiedIncidentUpdatedAt: entry.incident.updatedAt,
-            verifiedAt: now
-          }
-        });
-        if (entryUpdated.count !== 1) {
-          throw new Error("Responder evidence changed during verification.");
-        }
-      }
-      if (courseMonitoringAvailable && releaseSha && deployedAt) {
-        await tx.courseMonitoringEvent.createMany({
-          data: batch.incidents.map((entry) => ({
-            courseId: entry.courseId,
-            incidentId: entry.incidentId,
-            eventType: "DEPLOYMENT_VERIFIED" as const,
-            source: "DEPLOYMENT" as const,
-            runtimeVersion: releaseSha,
-            deploymentSha: releaseSha,
-            message:
-              "The responder recorded the exact deployed release before fresh course verification.",
-            idempotencyKey: `course-support-deployment:${batch.id}:${entry.id}:${releaseSha}`,
-            occurredAt: deployedAt,
-            audit: {
-              batchRef: batch.reference,
-              customerDataIncluded: false
-            }
-          })),
-          skipDuplicates: true
-        });
+      if (entryUpdated.count !== 1) {
+        throw new Error("Responder evidence changed during verification.");
       }
     }
-  );
+    if (courseMonitoringAvailable && releaseSha && deployedAt) {
+      await tx.courseMonitoringEvent.createMany({
+        data: batch.incidents.map((entry) => ({
+          courseId: entry.courseId,
+          incidentId: entry.incidentId,
+          eventType: "DEPLOYMENT_VERIFIED" as const,
+          source: "DEPLOYMENT" as const,
+          runtimeVersion: releaseSha,
+          deploymentSha: releaseSha,
+          message:
+            "The responder recorded the exact deployed release before fresh course verification.",
+          idempotencyKey: `course-support-deployment:${batch.id}:${entry.id}:${releaseSha}`,
+          occurredAt: deployedAt,
+          audit: {
+            batchRef: batch.reference,
+            customerDataIncluded: false
+          }
+        })),
+        skipDuplicates: true
+      });
+    }
+  });
 
   const recheckVerifications = verifications.filter(
     ({ entry, verification }) =>
@@ -3703,9 +3895,11 @@ export async function closeoutCourseSupportBatch(input: {
   failureDomain?: ResponderFailureDomain;
   retryAfterSeconds?: number | null;
   summary?: unknown;
+  verificationWatchMode?: "WATCH_SETTLED" | "EARLY_RETRY" | "ENDPOINT";
   now?: Date;
 }) {
   const now = input.now ?? new Date();
+  const verificationWatchMode = input.verificationWatchMode ?? "STANDARD";
   const batch = await prisma.courseSupportBatch.findFirst({
     where: {
       id: input.batchId,
@@ -3740,7 +3934,9 @@ export async function closeoutCourseSupportBatch(input: {
   }
 
   const currentDetachedFailureBatchIncidentIds = new Set(
-    batch.releaseSha
+    batch.releaseSha &&
+      verificationWatchMode !== "EARLY_RETRY" &&
+      verificationWatchMode !== "ENDPOINT"
       ? (
           await Promise.all(
             batch.incidents.map(async (entry) => {
@@ -3762,11 +3958,112 @@ export async function closeoutCourseSupportBatch(input: {
         ).filter((entryId): entryId is string => entryId !== null)
       : []
   );
+  const ownershipReleaseMode =
+    verificationWatchMode === "EARLY_RETRY" || verificationWatchMode === "ENDPOINT";
 
   const normalizedEntries = batch.incidents.map((entry) => {
     const currentProviderSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(
       entry.course
     );
+    const playbookExhausted = isAutomationPlaybookExhausted(
+      entry.incident.attemptLedger,
+      entry.incident.cycle
+    );
+    const endpointReached = Boolean(
+      entry.incident.escalationDeadlineAt &&
+      entry.incident.escalationDeadlineAt.getTime() <= now.getTime()
+    );
+    const terminalProofIsDurable =
+      entry.result === "RESTORED" || entry.result === "FINAL_DISPOSITION"
+        ? isDurableTerminalProof(
+            {
+              ...entry,
+              currentProviderSnapshotFingerprint,
+              normalizedResult: entry.result
+            },
+            batch
+          )
+        : false;
+    const authoritativeMonitoringResolution = ownershipReleaseMode
+      ? getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
+      : null;
+    if (authoritativeMonitoringResolution && entry.course.monitoringStatus) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        normalizedResult:
+          entry.course.monitoringStatus.state === "HEALTHY"
+            ? ("RESTORED" as const)
+            : ("FINAL_DISPOSITION" as const),
+        message: authoritativeMonitoringResolution.message
+      };
+    }
+    if (
+      verificationWatchMode === "EARLY_RETRY" &&
+      (entry.result === "RESTORED" ||
+        entry.result === "PENDING" ||
+        entry.result === "STALE_EVIDENCE" ||
+        entry.result === "RETRY_SCHEDULED" ||
+        (entry.result === "NEEDS_HUMAN" && !playbookExhausted) ||
+        (entry.result === "FINAL_DISPOSITION" && !terminalProofIsDurable))
+    ) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        normalizedResult: "RETRY_SCHEDULED" as const,
+        message:
+          "Verification stopped before authoritative customer monitoring proof could be completed."
+      };
+    }
+    if (
+      verificationWatchMode === "ENDPOINT" &&
+      endpointReached &&
+      ((entry.result === "RESTORED" &&
+        (!terminalProofIsDurable || !isRecheckDispatchHealthy(batch.summary, now))) ||
+        (entry.result === "FINAL_DISPOSITION" && !terminalProofIsDurable) ||
+        (entry.result === "NEEDS_HUMAN" && !playbookExhausted))
+    ) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: true,
+        normalizedResult: "NEEDS_HUMAN" as const,
+        message:
+          "The automatic verification endpoint elapsed before authoritative customer monitoring proof could be completed."
+      };
+    }
+    if (
+      verificationWatchMode === "ENDPOINT" &&
+      endpointReached &&
+      (entry.result === "PENDING" ||
+        entry.result === "STALE_EVIDENCE" ||
+        entry.result === "RETRY_SCHEDULED")
+    ) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: !playbookExhausted,
+        normalizedResult: "NEEDS_HUMAN" as const,
+        message: playbookExhausted
+          ? "Every safe signed-out read path was exhausted without current reusable provider proof."
+          : "The automatic verification endpoint elapsed before every safe signed-out read path could finish."
+      };
+    }
+    if (
+      verificationWatchMode === "WATCH_SETTLED" &&
+      (entry.result === "PENDING" ||
+        entry.result === "STALE_EVIDENCE" ||
+        entry.result === "RETRY_SCHEDULED")
+    ) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        normalizedResult: "RETRY_SCHEDULED" as const
+      };
+    }
     if (
       shouldFinalizeSourceUnverified({
         providerFamilyKey: entry.incident.providerFamilyKey,
@@ -3783,6 +4080,7 @@ export async function closeoutCourseSupportBatch(input: {
       return {
         ...entry,
         currentProviderSnapshotFingerprint,
+        automationStalled: false,
         normalizedResult: "NEEDS_HUMAN" as const,
         proofSnapshot: {
           kind: "HUMAN_REVIEW_REQUIRED",
@@ -3799,13 +4097,19 @@ export async function closeoutCourseSupportBatch(input: {
           "Repeated current checks could not establish one trustworthy public provider source; an engineer must verify the official link before approving a final limitation."
       };
     }
-    if (entry.result === "PENDING" || entry.result === "STALE_EVIDENCE") {
+    if (
+      entry.result === "PENDING" ||
+      entry.result === "STALE_EVIDENCE" ||
+      entry.result === "RETRY_SCHEDULED"
+    ) {
       return {
         ...entry,
         currentProviderSnapshotFingerprint,
-        normalizedResult: entry.incident.humanReviewReason
-          ? ("NEEDS_HUMAN" as const)
-          : ("RETRY_SCHEDULED" as const)
+        automationStalled: false,
+        normalizedResult:
+          verificationWatchMode === "STANDARD" && entry.incident.humanReviewReason
+            ? ("NEEDS_HUMAN" as const)
+            : ("RETRY_SCHEDULED" as const)
       };
     }
     const proof = asJsonObject(entry.proofSnapshot);
@@ -3817,6 +4121,7 @@ export async function closeoutCourseSupportBatch(input: {
       return {
         ...entry,
         currentProviderSnapshotFingerprint,
+        automationStalled: false,
         normalizedResult: "NEEDS_HUMAN" as const,
         proofSnapshot: {
           ...proof,
@@ -3830,19 +4135,15 @@ export async function closeoutCourseSupportBatch(input: {
     return {
       ...entry,
       currentProviderSnapshotFingerprint,
-      normalizedResult:
-        entry.result === "RETRY_SCHEDULED" && entry.incident.humanReviewReason
-          ? ("NEEDS_HUMAN" as const)
-          : entry.result
+      automationStalled: false,
+      normalizedResult: entry.result
     };
   });
   for (const entry of normalizedEntries) {
     if (
       entry.normalizedResult === "NEEDS_HUMAN" &&
-      !isAutomationPlaybookExhausted(
-        entry.incident.attemptLedger,
-        entry.incident.cycle
-      )
+      !entry.automationStalled &&
+      !isAutomationPlaybookExhausted(entry.incident.attemptLedger, entry.incident.cycle)
     ) {
       throw new Error(
         "Course-support closeout cannot request human review before the current automation playbook is exhausted."
@@ -3850,6 +4151,7 @@ export async function closeoutCourseSupportBatch(input: {
     }
     if (
       entry.normalizedResult === "RETRY_SCHEDULED" &&
+      verificationWatchMode === "STANDARD" &&
       !canCloseCourseSupportRetry(entry.incident.failureClass, input.requestedOutcome)
     ) {
       throw new Error(
@@ -3858,6 +4160,10 @@ export async function closeoutCourseSupportBatch(input: {
     }
     if (
       ["RESTORED", "FINAL_DISPOSITION"].includes(entry.normalizedResult) &&
+      !(
+        ownershipReleaseMode &&
+        getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
+      ) &&
       !isDurableTerminalProof(entry, batch)
     ) {
       throw new Error("Terminal course-support evidence is missing or stale.");
@@ -3872,6 +4178,9 @@ export async function closeoutCourseSupportBatch(input: {
   const needsHumanCount = normalizedEntries.filter(
     (entry) => entry.normalizedResult === "NEEDS_HUMAN"
   ).length;
+  const automationStalledCount = normalizedEntries.filter(
+    (entry) => entry.automationStalled
+  ).length;
   const hasHuman = needsHumanCount > 0;
   const terminalCount = normalizedEntries.filter((entry) =>
     ["RESTORED", "FINAL_DISPOSITION"].includes(entry.normalizedResult)
@@ -3882,7 +4191,15 @@ export async function closeoutCourseSupportBatch(input: {
   const retryCount = normalizedEntries.filter(
     (entry) => entry.normalizedResult === "RETRY_SCHEDULED"
   ).length;
-  if (restoredCount > 0 && !isRecheckDispatchHealthy(batch.summary, now)) {
+  const restoredRequiringBatchDispatchCount = normalizedEntries.filter(
+    (entry) =>
+      entry.normalizedResult === "RESTORED" &&
+      !(
+        ownershipReleaseMode &&
+        getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
+      )
+  ).length;
+  if (restoredRequiringBatchDispatchCount > 0 && !isRecheckDispatchHealthy(batch.summary, now)) {
     throw new Error(
       "Affected searches do not yet have complete durable recheck and scheduler evidence."
     );
@@ -3920,82 +4237,81 @@ export async function closeoutCourseSupportBatch(input: {
   const retryTimes: Date[] = [];
   const safeSummary = sanitizeResponderCloseoutSummary(input.summary);
 
-  await runCourseSupportSerializableTransactionWithRetry(
-    async (tx) => {
-      const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
-      const persistCourseMonitoringCloseout = async (input: {
-        courseId: string;
-        snapshot:
-          | {
-              state: CourseMonitoringState;
-              lastSuccessfulAt: Date | null;
-              revision: number;
+  await runCourseSupportSerializableTransactionWithRetry(async (tx) => {
+    const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
+    const persistCourseMonitoringCloseout = async (input: {
+      courseId: string;
+      snapshot:
+        | {
+            state: CourseMonitoringState;
+            lastSuccessfulAt: Date | null;
+            revision: number;
+          }
+        | null
+        | undefined;
+      targetState: CourseMonitoringState;
+      data: Prisma.CourseMonitoringStatusUpdateManyMutationInput;
+    }) => {
+      if (!courseMonitoringAvailable || !input.snapshot) {
+        return false;
+      }
+      const snapshotIsAuthoritative =
+        input.snapshot.state === "HEALTHY" ||
+        input.snapshot.state === "FINAL_MANUAL" ||
+        input.snapshot.state === "FINAL_IDENTITY" ||
+        input.snapshot.state === "FINAL_TECHNICAL";
+      if (snapshotIsAuthoritative) {
+        if (input.snapshot.state === input.targetState) {
+          // Lock and CAS the unchanged authoritative row so a newer search
+          // observation cannot be hidden by the batch's stale snapshot.
+          const monitoringAsserted = await tx.courseMonitoringStatus.updateMany({
+            where: {
+              courseId: input.courseId,
+              state: input.snapshot.state,
+              revision: input.snapshot.revision,
+              lastSuccessfulAt: input.snapshot.lastSuccessfulAt
+            },
+            data: {
+              revision: { increment: 0 }
             }
-          | null
-          | undefined;
-        targetState: CourseMonitoringState;
-        data: Prisma.CourseMonitoringStatusUpdateManyMutationInput;
-      }) => {
-        if (!courseMonitoringAvailable || !input.snapshot) {
+          });
+          if (monitoringAsserted.count !== 1) {
+            throw new Error(
+              "Course monitoring changed during responder closeout; reverify before closing the batch."
+            );
+          }
           return false;
         }
-        const snapshotIsAuthoritative =
-          input.snapshot.state === "HEALTHY" ||
-          input.snapshot.state === "FINAL_MANUAL" ||
-          input.snapshot.state === "FINAL_IDENTITY" ||
-          input.snapshot.state === "FINAL_TECHNICAL";
-        if (snapshotIsAuthoritative) {
-          if (input.snapshot.state === input.targetState) {
-            // Lock and CAS the unchanged authoritative row so a newer search
-            // observation cannot be hidden by the batch's stale snapshot.
-            const monitoringAsserted =
-              await tx.courseMonitoringStatus.updateMany({
-                where: {
-                  courseId: input.courseId,
-                  state: input.snapshot.state,
-                  revision: input.snapshot.revision,
-                  lastSuccessfulAt: input.snapshot.lastSuccessfulAt
-                },
-                data: {
-                  revision: { increment: 0 }
-                }
-              });
-            if (monitoringAsserted.count !== 1) {
-              throw new Error(
-                "Course monitoring changed during responder closeout; reverify before closing the batch."
-              );
-            }
-            return false;
-          }
-          throw new Error(
-            "Course monitoring reached a newer authoritative state during responder closeout; reverify before closing the batch."
-          );
-        }
-        const monitoringUpdated = await tx.courseMonitoringStatus.updateMany({
+        throw new Error(
+          "Course monitoring reached a newer authoritative state during responder closeout; reverify before closing the batch."
+        );
+      }
+      const monitoringUpdated = await tx.courseMonitoringStatus.updateMany({
+        where: {
+          courseId: input.courseId,
+          state: input.snapshot.state,
+          revision: input.snapshot.revision,
+          lastSuccessfulAt: input.snapshot.lastSuccessfulAt
+        },
+        data: input.data
+      });
+      if (monitoringUpdated.count !== 1) {
+        throw new Error(
+          "Course monitoring changed during responder closeout; reverify before closing the batch."
+        );
+      }
+      return true;
+    };
+    const detachedRequestStates = batch.releaseSha
+      ? await tx.courseSupportVerificationRequest.findMany({
           where: {
-            courseId: input.courseId,
-            state: input.snapshot.state,
-            revision: input.snapshot.revision,
-            lastSuccessfulAt: input.snapshot.lastSuccessfulAt
+            batchIncident: { batchId: batch.id },
+            releaseSha: batch.releaseSha
           },
-          data: input.data
-        });
-        if (monitoringUpdated.count !== 1) {
-          throw new Error(
-            "Course monitoring changed during responder closeout; reverify before closing the batch."
-          );
-        }
-        return true;
-      };
-      const detachedRequestStates = batch.releaseSha
-        ? await tx.courseSupportVerificationRequest.findMany({
-            where: {
-              batchIncident: { batchId: batch.id },
-              releaseSha: batch.releaseSha
-            },
-            select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT
-          })
-        : [];
+          select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT
+        })
+      : [];
+    if (verificationWatchMode === "STANDARD" || verificationWatchMode === "WATCH_SETTLED") {
       assertDetachedVerificationReadyForCloseout({
         requests: detachedRequestStates,
         verificationByBatchIncidentId: new Map(
@@ -4011,383 +4327,443 @@ export async function closeoutCourseSupportBatch(input: {
         ),
         currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds
       });
+    }
 
-      for (const entry of normalizedEntries) {
-        const proof = asJsonObject(entry.proofSnapshot);
-        if (entry.normalizedResult === "RESTORED" && proof.kind === "PROVIDER_VERIFICATION") {
-          const detachedProofIsCurrent = await revalidateDetachedVerificationProof(tx, {
-            batchId: batch.id,
-            batchIncidentId: entry.id,
-            incidentId: entry.incidentId,
-            courseId: entry.courseId,
-            cycle: entry.cycle,
-            releaseSha: batch.releaseSha ?? "",
-            leaseToken: input.leaseToken,
-            ownerThreadId: input.ownerThreadId,
-            proofSnapshot: proof,
-            now
-          });
-          if (!detachedProofIsCurrent) {
-            throw new Error("Detached provider verification changed before terminal closeout.");
-          }
-        }
-      }
-
-      const ownership = await tx.courseSupportBatch.updateMany({
-        where: {
-          id: batch.id,
+    for (const entry of normalizedEntries) {
+      const proof = asJsonObject(entry.proofSnapshot);
+      const authoritativeMonitoringResolution = ownershipReleaseMode
+        ? getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
+        : null;
+      if (
+        !authoritativeMonitoringResolution &&
+        entry.normalizedResult === "RESTORED" &&
+        proof.kind === "PROVIDER_VERIFICATION"
+      ) {
+        const detachedProofIsCurrent = await revalidateDetachedVerificationProof(tx, {
+          batchId: batch.id,
+          batchIncidentId: entry.id,
+          incidentId: entry.incidentId,
+          courseId: entry.courseId,
+          cycle: entry.cycle,
+          releaseSha: batch.releaseSha ?? "",
           leaseToken: input.leaseToken,
           ownerThreadId: input.ownerThreadId,
-          status: batch.status,
-          revision: batch.revision,
-          leaseExpiresAt: { gte: now }
-        },
-        data: {
-          status: batchStatus,
-          completedAt: now,
-          heartbeatAt: now,
-          leaseExpiresAt: now,
-          summary: {
-            ...asJsonObject(batch.summary),
-            closeout: {
-              outcome,
-              derivedOutcome,
-              failureDomain: input.failureDomain ?? "NONE",
-              terminalCount,
-              retryCount,
-              needsHumanCount,
-              summary: safeSummary
-            }
-          } as Prisma.InputJsonValue,
-          revision: { increment: 1 }
-        }
-      });
-      if (ownership.count !== 1) {
-        throw new Error("Responder batch ownership changed during closeout.");
-      }
-
-      for (const entry of normalizedEntries) {
-        const message = sanitizeResponderText(
-          entry.message ?? "Course-support responder closeout recorded."
-        );
-        const expectedIncidentUpdatedAt =
-          entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt;
-        let incidentUpdated: { count: number };
-        if (entry.normalizedResult === "RESTORED") {
-          incidentUpdated = await tx.courseSupportIncident.updateMany({
-            where: {
-              id: entry.incidentId,
-              cycle: entry.cycle,
-              activeBatchId: batch.id,
-              status: "AUTO_INVESTIGATING",
-              updatedAt: expectedIncidentUpdatedAt
-            },
-            data: {
-              status: "RESOLVED",
-              activeBatchId: null,
-              nextAttemptAt: null,
-              nextReminderAt: null,
-              resolvedAt: now,
-              resolution: "MONITORING_RESTORED",
-              resolutionMessage: message,
-              nextAction: null,
-              lastSeenAt: now,
-              revision: { increment: 1 }
-            }
-          });
-          const monitoringUpdated = await persistCourseMonitoringCloseout({
-            courseId: entry.courseId,
-            snapshot: entry.course.monitoringStatus,
-            targetState: "HEALTHY",
-            data: {
-                state: "HEALTHY",
-                lastSuccessfulAt: now,
-                consecutiveFailures: 0,
-                failureFingerprint: null,
-                firstDegradedAt: null,
-                nextAutomaticAttemptAt: null,
-                revalidationRequestedAt: null,
-                stateChangedAt: now,
-                revision: { increment: 1 }
-            }
-          });
-          if (monitoringUpdated) {
-            await tx.courseMonitoringEvent.create({
-              data: {
-                courseId: entry.courseId,
-                incidentId: entry.incidentId,
-                eventType: "RECOVERED",
-                source: "COURSE_SUPPORT_RESPONDER",
-                fromState: "AUTO_INVESTIGATING",
-                toState: "HEALTHY",
-                outcome: "NO_MATCH",
-                message,
-                runtimeVersion: batch.releaseSha,
-                deploymentSha: batch.releaseSha,
-                occurredAt: now,
-                audit: {
-                  freshRuntimeProof: true,
-                  customerDataIncluded: false
-                }
-              }
-            });
-          }
-        } else if (entry.normalizedResult === "FINAL_DISPOSITION") {
-          const resolution = getFinalDispositionResolution(entry.proofSnapshot);
-          const proof = asJsonObject(entry.proofSnapshot);
-          const finalMonitoringState =
-            proof.kind === "EXACT_PLACE_REVIEW" ||
-            proof.kind === "BROWSER_PRIVATE_IDENTITY" ||
-            (proof.kind === "PLAYBOOK_FACTUAL_FINAL" &&
-              proof.disposition === "IDENTITY_FINAL")
-              ? ("FINAL_IDENTITY" as const)
-              : proof.kind === "FINAL_DISPOSITION" && proof.disposition !== "MANUAL_DIRECT"
-                ? ("FINAL_TECHNICAL" as const)
-                : ("FINAL_MANUAL" as const);
-          incidentUpdated = await tx.courseSupportIncident.updateMany({
-            where: {
-              id: entry.incidentId,
-              cycle: entry.cycle,
-              activeBatchId: batch.id,
-              status: "AUTO_INVESTIGATING",
-              updatedAt: expectedIncidentUpdatedAt
-            },
-            data: {
-              status: "RESOLVED",
-              activeBatchId: null,
-              nextAttemptAt: null,
-              nextReminderAt: null,
-              resolvedAt: now,
-              resolution,
-              resolutionMessage: message,
-              nextAction: null,
-              lastSeenAt: now,
-              revision: { increment: 1 }
-            }
-          });
-          const monitoringUpdated = await persistCourseMonitoringCloseout({
-            courseId: entry.courseId,
-            snapshot: entry.course.monitoringStatus,
-            targetState: finalMonitoringState,
-            data: {
-                state: finalMonitoringState,
-                consecutiveFailures: 0,
-                failureFingerprint: null,
-                firstDegradedAt: null,
-                nextAutomaticAttemptAt: null,
-                revalidationRequestedAt: null,
-                stateChangedAt: now,
-                revision: { increment: 1 }
-            }
-          });
-          if (monitoringUpdated) {
-            await tx.courseMonitoringEvent.create({
-              data: {
-                courseId: entry.courseId,
-                incidentId: entry.incidentId,
-                eventType: "STATE_CHANGED",
-                source: "COURSE_SUPPORT_RESPONDER",
-                fromState: "AUTO_INVESTIGATING",
-                toState: finalMonitoringState,
-                message,
-                occurredAt: now,
-                audit: {
-                  automatedFinal: true,
-                  finalKind:
-                    finalMonitoringState === "FINAL_IDENTITY"
-                      ? "identity"
-                      : finalMonitoringState === "FINAL_TECHNICAL"
-                        ? "known_technical_limitation"
-                        : "manual_direct",
-                  customerDataIncluded: false
-                }
-              }
-            });
-          }
-        } else if (entry.normalizedResult === "NEEDS_HUMAN") {
-          const humanReviewReason = inferHumanReviewReason({
-            kind: entry.incident.kind,
-            failureClass: entry.incident.failureClass,
-            bookingAccessMode: entry.course.bookingAccessMode,
-            automationReason: entry.course.automationReason
-          });
-          const humanRetryAt = getHumanReviewRetryAt(
-            now,
-            entry.incident.activeRealSearchCount
-          );
-          incidentUpdated = await tx.courseSupportIncident.updateMany({
-            where: {
-              id: entry.incidentId,
-              cycle: entry.cycle,
-              activeBatchId: batch.id,
-              status: "AUTO_INVESTIGATING",
-              updatedAt: expectedIncidentUpdatedAt
-            },
-            data: {
-              status: "NEEDS_HUMAN",
-              activeBatchId: null,
-              nextAttemptAt: humanRetryAt,
-              humanReviewReason,
-              nextReminderAt: now,
-              escalatedAt: entry.incident.escalatedAt ?? now,
-              latestMessage: message,
-              lastSeenAt: now,
-              revision: { increment: 1 }
-            }
-          });
-          const monitoringUpdated = await persistCourseMonitoringCloseout({
-            courseId: entry.courseId,
-            snapshot: entry.course.monitoringStatus,
-            targetState: "ENGINEERING_VERIFICATION_NEEDED",
-            data: {
-                state: "ENGINEERING_VERIFICATION_NEEDED",
-                nextAutomaticAttemptAt: humanRetryAt,
-                revalidationRequestedAt: null,
-                stateChangedAt: now,
-                revision: { increment: 1 }
-            }
-          });
-          if (monitoringUpdated) {
-            await tx.courseMonitoringEvent.create({
-              data: {
-                courseId: entry.courseId,
-                incidentId: entry.incidentId,
-                eventType: "HUMAN_REVIEW_REQUESTED",
-                source: "COURSE_SUPPORT_RESPONDER",
-                fromState: "AUTO_INVESTIGATING",
-                toState: "ENGINEERING_VERIFICATION_NEEDED",
-                failureFingerprint: entry.incident.failureFingerprint,
-                message,
-                occurredAt: now,
-                audit: {
-                  humanReviewReason,
-                  activeDemand: entry.incident.activeRealSearchCount > 0,
-                  customerDataIncluded: false
-                }
-              }
-            });
-          }
-          await tx.teeSearch.updateMany({
-            where: {
-              status: "ACTIVE",
-              trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-              date: {
-                gte: getCourseLocalDateStorageBoundary(
-                  entry.course.timeZone,
-                  now
-                )
-              },
-              preferences: { some: { courseId: entry.courseId } }
-            },
-            data: {
-              nextCheckAt: now,
-              recheckRequestedAt: now
-            }
-          });
-        } else {
-          const normalNextAttemptAt = computeCourseSupportNextAttemptAt({
-            failureClass: entry.incident.failureClass,
-            failureFingerprint: entry.incident.failureFingerprint,
-            attemptCount: Math.max(1, entry.incident.attemptCount),
-            retryAfterSeconds: input.retryAfterSeconds,
-            now
-          });
-          const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
-            proofSnapshot: entry.proofSnapshot,
-            releaseSha: batch.releaseSha,
-            now
-          });
-          const nextAttemptAt =
-            detachedFailureNotBefore &&
-            detachedFailureNotBefore.getTime() > normalNextAttemptAt.getTime()
-              ? detachedFailureNotBefore
-              : normalNextAttemptAt;
-          retryTimes.push(nextAttemptAt);
-          incidentUpdated = await tx.courseSupportIncident.updateMany({
-            where: {
-              id: entry.incidentId,
-              cycle: entry.cycle,
-              activeBatchId: batch.id,
-              status: "AUTO_INVESTIGATING",
-              updatedAt: expectedIncidentUpdatedAt
-            },
-            data: {
-              status: "AUTO_INVESTIGATING",
-              activeBatchId: null,
-              nextAttemptAt,
-              latestMessage: message,
-              lastSeenAt: now,
-              revision: { increment: 1 }
-            }
-          });
-          await persistCourseMonitoringCloseout({
-            courseId: entry.courseId,
-            snapshot: entry.course.monitoringStatus,
-            targetState: "AUTO_INVESTIGATING",
-            data: {
-                state: "AUTO_INVESTIGATING",
-                nextAutomaticAttemptAt: nextAttemptAt,
-                stateChangedAt: now,
-                revision: { increment: 1 }
-            }
-          });
-        }
-        if (incidentUpdated.count !== 1) {
-          throw new Error("A course-support incident changed during closeout.");
-        }
-        if (entry.result !== entry.normalizedResult) {
-          const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
-            where: {
-              id: entry.id,
-              result: entry.result,
-              updatedAt: entry.updatedAt
-            },
-            data: { result: entry.normalizedResult }
-          });
-          if (batchEntryUpdated.count !== 1) {
-            throw new Error("Responder batch evidence changed during closeout.");
-          }
+          proofSnapshot: proof,
+          now
+        });
+        if (!detachedProofIsCurrent) {
+          throw new Error("Detached provider verification changed before terminal closeout.");
         }
       }
+    }
 
-      await tx.courseSupportVerificationRequest.updateMany({
-        where: {
-          batchIncident: { batchId: batch.id },
-          status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
-        },
-        data: {
-          status: "STALE",
-          revision: { increment: 1 },
-          leaseToken: null,
-          leaseExpiresAt: null,
-          nextAttemptAt: null,
-          completedAt: now,
-          lastError: "batch_closed",
-          updatedAt: now
-        }
-      });
-
-      if (batch.ownerAutomationRunId) {
-        await tx.automationRun.updateMany({
-          where: { id: batch.ownerAutomationRunId, completedAt: null },
-          data: {
-            completedAt: now,
+    const ownership = await tx.courseSupportBatch.updateMany({
+      where: {
+        id: batch.id,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        status: batch.status,
+        revision: batch.revision,
+        leaseExpiresAt: { gte: now }
+      },
+      data: {
+        status: batchStatus,
+        completedAt: now,
+        heartbeatAt: now,
+        leaseExpiresAt: now,
+        summary: {
+          ...asJsonObject(batch.summary),
+          closeout: {
             outcome,
-            notes: JSON.stringify({
-              schemaVersion: 1,
-              lifecycle: "closeout",
-              status: batchStatus,
-              outcome,
-              derivedOutcome,
-              terminalCount,
-              retryCount,
-              failureDomain: input.failureDomain ?? "NONE"
-            })
+            derivedOutcome,
+            failureDomain: input.failureDomain ?? "NONE",
+            terminalCount,
+            retryCount,
+            needsHumanCount,
+            automationStalledCount,
+            verificationWatchMode,
+            summary: safeSummary
+          }
+        } as Prisma.InputJsonValue,
+        revision: { increment: 1 }
+      }
+    });
+    if (ownership.count !== 1) {
+      throw new Error("Responder batch ownership changed during closeout.");
+    }
+
+    for (const entry of normalizedEntries) {
+      const message = sanitizeResponderText(
+        entry.message ?? "Course-support responder closeout recorded."
+      );
+      const expectedIncidentUpdatedAt = entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt;
+      let incidentUpdated: { count: number };
+      const authoritativeMonitoringResolution = ownershipReleaseMode
+        ? getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
+        : null;
+      if (authoritativeMonitoringResolution && entry.course.monitoringStatus) {
+        incidentUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: entry.incidentId,
+            cycle: entry.cycle,
+            activeBatchId: batch.id,
+            status: "AUTO_INVESTIGATING",
+            updatedAt: expectedIncidentUpdatedAt
+          },
+          data: {
+            status: "RESOLVED",
+            activeBatchId: null,
+            nextAttemptAt: null,
+            nextReminderAt: null,
+            resolvedAt: now,
+            resolution: authoritativeMonitoringResolution.resolution,
+            resolutionMessage: message,
+            nextAction: null,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        await persistCourseMonitoringCloseout({
+          courseId: entry.courseId,
+          snapshot: entry.course.monitoringStatus,
+          targetState: entry.course.monitoringStatus.state,
+          data: { revision: { increment: 0 } }
+        });
+      } else if (entry.normalizedResult === "RESTORED") {
+        incidentUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: entry.incidentId,
+            cycle: entry.cycle,
+            activeBatchId: batch.id,
+            status: "AUTO_INVESTIGATING",
+            updatedAt: expectedIncidentUpdatedAt
+          },
+          data: {
+            status: "RESOLVED",
+            activeBatchId: null,
+            nextAttemptAt: null,
+            nextReminderAt: null,
+            resolvedAt: now,
+            resolution: "MONITORING_RESTORED",
+            resolutionMessage: message,
+            nextAction: null,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        const monitoringUpdated = await persistCourseMonitoringCloseout({
+          courseId: entry.courseId,
+          snapshot: entry.course.monitoringStatus,
+          targetState: "HEALTHY",
+          data: {
+            state: "HEALTHY",
+            lastSuccessfulAt: now,
+            consecutiveFailures: 0,
+            failureFingerprint: null,
+            firstDegradedAt: null,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (monitoringUpdated) {
+          await tx.courseMonitoringEvent.create({
+            data: {
+              courseId: entry.courseId,
+              incidentId: entry.incidentId,
+              eventType: "RECOVERED",
+              source: "COURSE_SUPPORT_RESPONDER",
+              fromState: "AUTO_INVESTIGATING",
+              toState: "HEALTHY",
+              outcome: "NO_MATCH",
+              message,
+              runtimeVersion: batch.releaseSha,
+              deploymentSha: batch.releaseSha,
+              occurredAt: now,
+              audit: {
+                freshRuntimeProof: true,
+                customerDataIncluded: false
+              }
+            }
+          });
+        }
+      } else if (entry.normalizedResult === "FINAL_DISPOSITION") {
+        const resolution = getFinalDispositionResolution(entry.proofSnapshot);
+        const proof = asJsonObject(entry.proofSnapshot);
+        const finalMonitoringState =
+          proof.kind === "EXACT_PLACE_REVIEW" ||
+          proof.kind === "BROWSER_PRIVATE_IDENTITY" ||
+          (proof.kind === "PLAYBOOK_FACTUAL_FINAL" && proof.disposition === "IDENTITY_FINAL")
+            ? ("FINAL_IDENTITY" as const)
+            : proof.kind === "FINAL_DISPOSITION" && proof.disposition !== "MANUAL_DIRECT"
+              ? ("FINAL_TECHNICAL" as const)
+              : ("FINAL_MANUAL" as const);
+        incidentUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: entry.incidentId,
+            cycle: entry.cycle,
+            activeBatchId: batch.id,
+            status: "AUTO_INVESTIGATING",
+            updatedAt: expectedIncidentUpdatedAt
+          },
+          data: {
+            status: "RESOLVED",
+            activeBatchId: null,
+            nextAttemptAt: null,
+            nextReminderAt: null,
+            resolvedAt: now,
+            resolution,
+            resolutionMessage: message,
+            nextAction: null,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        const monitoringUpdated = await persistCourseMonitoringCloseout({
+          courseId: entry.courseId,
+          snapshot: entry.course.monitoringStatus,
+          targetState: finalMonitoringState,
+          data: {
+            state: finalMonitoringState,
+            consecutiveFailures: 0,
+            failureFingerprint: null,
+            firstDegradedAt: null,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (monitoringUpdated) {
+          await tx.courseMonitoringEvent.create({
+            data: {
+              courseId: entry.courseId,
+              incidentId: entry.incidentId,
+              eventType: "STATE_CHANGED",
+              source: "COURSE_SUPPORT_RESPONDER",
+              fromState: "AUTO_INVESTIGATING",
+              toState: finalMonitoringState,
+              message,
+              occurredAt: now,
+              audit: {
+                automatedFinal: true,
+                finalKind:
+                  finalMonitoringState === "FINAL_IDENTITY"
+                    ? "identity"
+                    : finalMonitoringState === "FINAL_TECHNICAL"
+                      ? "known_technical_limitation"
+                      : "manual_direct",
+                customerDataIncluded: false
+              }
+            }
+          });
+        }
+      } else if (entry.normalizedResult === "NEEDS_HUMAN") {
+        const humanReviewReason = entry.automationStalled
+          ? ("AUTOMATION_STALLED" as const)
+          : inferHumanReviewReason({
+              kind: entry.incident.kind,
+              failureClass: entry.incident.failureClass,
+              bookingAccessMode: entry.course.bookingAccessMode,
+              automationReason: entry.course.automationReason
+            });
+        const humanRetryAt = getHumanReviewRetryAt(now, entry.incident.activeRealSearchCount);
+        incidentUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: entry.incidentId,
+            cycle: entry.cycle,
+            activeBatchId: batch.id,
+            status: "AUTO_INVESTIGATING",
+            updatedAt: expectedIncidentUpdatedAt
+          },
+          data: entry.automationStalled
+            ? {
+                status: "AUTO_INVESTIGATING",
+                kind: "BLOCKED_TOOLING",
+                activeBatchId: null,
+                nextAttemptAt: humanRetryAt,
+                humanReviewReason,
+                nextReminderAt: now,
+                escalatedAt: now,
+                latestMessage: message,
+                nextAction:
+                  "Review the automation stall and restart the ordered playbook when tooling is ready.",
+                lastSeenAt: now,
+                revision: { increment: 1 }
+              }
+            : {
+                status: "NEEDS_HUMAN",
+                activeBatchId: null,
+                nextAttemptAt: humanRetryAt,
+                humanReviewReason,
+                nextReminderAt: now,
+                escalatedAt: entry.incident.escalatedAt ?? now,
+                latestMessage: message,
+                lastSeenAt: now,
+                revision: { increment: 1 }
+              }
+        });
+        const monitoringUpdated = await persistCourseMonitoringCloseout({
+          courseId: entry.courseId,
+          snapshot: entry.course.monitoringStatus,
+          targetState: "ENGINEERING_VERIFICATION_NEEDED",
+          data: {
+            state: "ENGINEERING_VERIFICATION_NEEDED",
+            nextAutomaticAttemptAt: humanRetryAt,
+            revalidationRequestedAt: null,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (monitoringUpdated) {
+          await tx.courseMonitoringEvent.create({
+            data: {
+              courseId: entry.courseId,
+              incidentId: entry.incidentId,
+              eventType: "HUMAN_REVIEW_REQUESTED",
+              source: "COURSE_SUPPORT_RESPONDER",
+              fromState: "AUTO_INVESTIGATING",
+              toState: "ENGINEERING_VERIFICATION_NEEDED",
+              failureFingerprint: entry.incident.failureFingerprint,
+              message,
+              occurredAt: now,
+              audit: {
+                humanReviewReason,
+                cycle: entry.cycle,
+                customerState: "NEEDS_HUMAN_REVIEW",
+                automationStalled: entry.automationStalled,
+                endpointStalled: entry.automationStalled,
+                escalationDeadlineAt: entry.incident.escalationDeadlineAt?.toISOString() ?? null,
+                playbookExhausted: isAutomationPlaybookExhausted(
+                  entry.incident.attemptLedger,
+                  entry.incident.cycle
+                ),
+                activeDemand: entry.incident.activeRealSearchCount > 0,
+                customerDataIncluded: false
+              }
+            }
+          });
+        }
+        await tx.teeSearch.updateMany({
+          where: {
+            status: "ACTIVE",
+            trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+            date: {
+              gte: getCourseLocalDateStorageBoundary(entry.course.timeZone, now)
+            },
+            preferences: { some: { courseId: entry.courseId } }
+          },
+          data: {
+            nextCheckAt: now,
+            recheckRequestedAt: now
+          }
+        });
+      } else {
+        const normalNextAttemptAt = computeCourseSupportNextAttemptAt({
+          failureClass: entry.incident.failureClass,
+          failureFingerprint: entry.incident.failureFingerprint,
+          attemptCount: Math.max(1, entry.incident.attemptCount),
+          retryAfterSeconds: input.retryAfterSeconds,
+          now
+        });
+        const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
+          proofSnapshot: entry.proofSnapshot,
+          releaseSha: batch.releaseSha,
+          now
+        });
+        const nextAttemptAt =
+          detachedFailureNotBefore &&
+          detachedFailureNotBefore.getTime() > normalNextAttemptAt.getTime()
+            ? detachedFailureNotBefore
+            : normalNextAttemptAt;
+        retryTimes.push(nextAttemptAt);
+        incidentUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: entry.incidentId,
+            cycle: entry.cycle,
+            activeBatchId: batch.id,
+            status: "AUTO_INVESTIGATING",
+            updatedAt: expectedIncidentUpdatedAt
+          },
+          data: {
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: null,
+            nextAttemptAt,
+            latestMessage: message,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        await persistCourseMonitoringCloseout({
+          courseId: entry.courseId,
+          snapshot: entry.course.monitoringStatus,
+          targetState: "AUTO_INVESTIGATING",
+          data: {
+            state: "AUTO_INVESTIGATING",
+            nextAutomaticAttemptAt: nextAttemptAt,
+            stateChangedAt: now,
+            revision: { increment: 1 }
           }
         });
       }
+      if (incidentUpdated.count !== 1) {
+        throw new Error("A course-support incident changed during closeout.");
+      }
+      if (entry.result !== entry.normalizedResult) {
+        const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
+          where: {
+            id: entry.id,
+            result: entry.result,
+            updatedAt: entry.updatedAt
+          },
+          data: { result: entry.normalizedResult }
+        });
+        if (batchEntryUpdated.count !== 1) {
+          throw new Error("Responder batch evidence changed during closeout.");
+        }
+      }
     }
-  );
+
+    await tx.courseSupportVerificationRequest.updateMany({
+      where: {
+        batchIncident: { batchId: batch.id },
+        status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
+      },
+      data: {
+        status: "STALE",
+        revision: { increment: 1 },
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        completedAt: now,
+        lastError: "batch_closed",
+        updatedAt: now
+      }
+    });
+
+    if (batch.ownerAutomationRunId) {
+      await tx.automationRun.updateMany({
+        where: { id: batch.ownerAutomationRunId, completedAt: null },
+        data: {
+          completedAt: now,
+          outcome,
+          notes: JSON.stringify({
+            schemaVersion: 1,
+            lifecycle: "closeout",
+            status: batchStatus,
+            outcome,
+            derivedOutcome,
+            terminalCount,
+            retryCount,
+            automationStalledCount,
+            verificationWatchMode,
+            failureDomain: input.failureDomain ?? "NONE"
+          })
+        }
+      });
+    }
+  });
 
   const finalOutcome = outcome;
   const finalBatchStatus = batchStatus;
@@ -4407,6 +4783,7 @@ export async function closeoutCourseSupportBatch(input: {
     durableCloseoutRecorded: true,
     terminalCount,
     retryCount,
+    automationStalledCount,
     notificationPendingCount: 0,
     leverage: {
       providerGroupResolvedCount: retryCount === 0 && needsHumanCount === 0 ? 1 : 0,
@@ -4531,9 +4908,7 @@ export async function recoverCourseSupportBatch(input: {
       ["NEEDS_HUMAN", "RESOLVED"].includes(entry.incident.status)
     );
     if (terminalIncidents.length === batch.incidents.length && batch.incidents.length > 0) {
-      const hasHuman = terminalIncidents.some(
-        (entry) => entry.incident.status === "NEEDS_HUMAN"
-      );
+      const hasHuman = terminalIncidents.some((entry) => entry.incident.status === "NEEDS_HUMAN");
       const restoredCount = terminalIncidents.filter(
         (entry) =>
           entry.incident.status === "RESOLVED" &&
@@ -4726,20 +5101,27 @@ export async function recoverCourseSupportBatch(input: {
       },
       select: {
         id: true,
+        status: true,
         providerFamilyKey: true,
         failureFingerprint: true,
         summary: true
       }
     });
+    const recoveringWouldOwnCheckout = courseSupportBatchOwnsCheckout(batch);
+    const sharedCheckoutConflict =
+      recoveringWouldOwnCheckout &&
+      otherBatches.some((otherBatch) => courseSupportBatchOwnsCheckout(otherBatch));
     const conflictingBatch = otherBatches.find((otherBatch) =>
       courseSupportRecoveryBatchesConflict(batch, otherBatch)
     );
-    if (conflictingBatch) {
+    if (sharedCheckoutConflict || conflictingBatch) {
       return {
         outcome: "deferred_busy" as const,
         recovered: false,
         reasons: [
-          "Another course-support writer with overlapping provider or code scope must finish before this responder batch can be recovered."
+          sharedCheckoutConflict
+            ? "The approved responder checkout must be exclusive while implementation work is active."
+            : "Another course-support writer with overlapping provider or code scope must finish before this responder batch can be recovered."
         ],
         threadDisposition: "KEEP_VISIBLE" as const,
         archiveReason: "Responder recovery is blocked by another course-support writer."
@@ -4821,9 +5203,7 @@ export async function recoverCourseSupportBatch(input: {
           terminalIncidents.length > 0
             ? "expired_mixed_reconciled_without_adoption"
             : "expired_retry_reconciled_without_adoption";
-        const retryFloor = new Date(
-          now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS
-        );
+        const retryFloor = new Date(now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS);
         const retryAtByBatchIncidentId = new Map(
           retryIncidents.map((entry) => {
             const detachedFailureNotBefore =
@@ -4836,16 +5216,14 @@ export async function recoverCourseSupportBatch(input: {
                 : null;
             return [
               entry.id,
-              detachedFailureNotBefore &&
-              detachedFailureNotBefore.getTime() > retryFloor.getTime()
+              detachedFailureNotBefore && detachedFailureNotBefore.getTime() > retryFloor.getTime()
                 ? detachedFailureNotBefore
                 : retryFloor
             ] as const;
           })
         );
         const nextAttemptAt = [...retryAtByBatchIncidentId.values()].reduce(
-          (earliest, candidate) =>
-            candidate.getTime() < earliest.getTime() ? candidate : earliest
+          (earliest, candidate) => (candidate.getTime() < earliest.getTime() ? candidate : earliest)
         );
         const message =
           terminalIncidents.length > 0
@@ -4941,8 +5319,7 @@ export async function recoverCourseSupportBatch(input: {
                 }
                 continue;
               }
-              const entryNextAttemptAt =
-                retryAtByBatchIncidentId.get(entry.id) ?? retryFloor;
+              const entryNextAttemptAt = retryAtByBatchIncidentId.get(entry.id) ?? retryFloor;
               const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
                 where: {
                   id: entry.id,
@@ -5589,19 +5966,13 @@ async function listDueCourseSupportCandidates(now: Date) {
         failureClass: incident.failureClass,
         failureFingerprint: incident.failureFingerprint,
         humanReviewReason: incident.humanReviewReason,
-        engineeringOnly:
-          currentDemand.activeRealSearchCount > 0
-            ? false
-            : incident.engineeringOnly,
+        engineeringOnly: currentDemand.activeRealSearchCount > 0 ? false : incident.engineeringOnly,
         activeRealSearchCount: currentDemand.activeRealSearchCount,
         earliestTargetDate: currentDemand.earliestTargetDate,
         escalationDeadlineAt: incident.escalationDeadlineAt,
         endpointHumanReviewProven:
           incident.escalatedAt != null &&
-          isAutomationHumanReviewProofCurrentOrPrior(
-            incident.attemptLedger,
-            incident.cycle
-          ),
+          isAutomationHumanReviewProofCurrentOrPrior(incident.attemptLedger, incident.cycle),
         firstSeenAt: incident.firstSeenAt,
         lastSeenAt: incident.lastSeenAt,
         lastAttemptAt: incident.lastAttemptAt,
@@ -5643,7 +6014,7 @@ function nextBatchStatus(
   requested: "IMPLEMENTING" | "VERIFYING" | undefined
 ): CourseSupportBatchStatus {
   if (!requested) {
-    return current === "CLAIMED" ? "IMPLEMENTING" : current;
+    return current;
   }
   if (current === "VERIFYING" && requested === "IMPLEMENTING") {
     return current;
@@ -5739,6 +6110,13 @@ function readBatchPlannedPaths(summary: Prisma.JsonValue | null) {
       ? object.plannedPaths.filter((path): path is string => typeof path === "string")
       : []
   );
+}
+
+function courseSupportBatchOwnsCheckout(batch: {
+  status: CourseSupportBatchStatus;
+  summary: Prisma.JsonValue | null;
+}) {
+  return batch.status === "IMPLEMENTING" || readBatchPlannedPaths(batch.summary).length > 0;
 }
 
 export function findConflictingResponderPaths(requestedPaths: string[], ownedPaths: string[]) {
@@ -6530,10 +6908,7 @@ function detachedSuccessIsReflected(
   verification: BatchIncidentVerification | undefined,
   request: DetachedVerificationRequestState
 ) {
-  if (
-    verification?.result !== "RESTORED" &&
-    verification?.result !== "FINAL_DISPOSITION"
-  ) {
+  if (verification?.result !== "RESTORED" && verification?.result !== "FINAL_DISPOSITION") {
     return false;
   }
   const proof = asJsonObject(verification.proofSnapshot as Prisma.JsonValue | null);

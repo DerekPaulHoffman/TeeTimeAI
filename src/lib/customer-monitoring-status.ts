@@ -32,10 +32,29 @@ export type CustomerMonitoringStatusInput = {
   outcomeObservedAt?: Date | null;
   escalationDeadlineAt?: Date | null;
   automationPlaybookExhausted?: boolean | null;
+  automationStalledAtEndpoint?: boolean | null;
   now?: Date;
   supportStatus?: "IN_OPERATOR_QUEUE" | "NEEDS_HUMAN_REVIEW" | null;
   automationReason?: string | null;
   directActionAvailable?: boolean;
+};
+
+export type AutomationStalledEndpointEvent = {
+  incidentId?: string | null;
+  eventType?: string | null;
+  occurredAt?: Date | null;
+  audit?: unknown;
+};
+
+export type AutomationStalledEndpointProofInput = {
+  incidentId?: string | null;
+  incidentCycle?: number | null;
+  incidentStatus?: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED" | null;
+  humanReviewReason?: string | null;
+  incidentEscalatedAt?: Date | null;
+  escalationDeadlineAt?: Date | null;
+  monitoringState?: CustomerMonitoringStatusInput["monitoringState"];
+  endpointEvents?: readonly AutomationStalledEndpointEvent[] | null;
 };
 
 const FINAL_MONITORING_STATES = new Set([
@@ -62,6 +81,51 @@ const RETRYING_OUTCOMES = new Set([
   "BLOCKED_TOOLING"
 ]);
 
+export function hasDurableAutomationStalledEndpointProof(
+  input: AutomationStalledEndpointProofInput
+) {
+  if (
+    !input.incidentId ||
+    !Number.isInteger(input.incidentCycle) ||
+    input.incidentStatus !== "AUTO_INVESTIGATING" ||
+    input.humanReviewReason !== "AUTOMATION_STALLED" ||
+    input.monitoringState !== "ENGINEERING_VERIFICATION_NEEDED" ||
+    !input.incidentEscalatedAt ||
+    !input.escalationDeadlineAt ||
+    input.incidentEscalatedAt < input.escalationDeadlineAt
+  ) {
+    return false;
+  }
+
+  const endpointAt = input.incidentEscalatedAt.getTime();
+  const escalationDeadlineAt = input.escalationDeadlineAt;
+  const deadlineIso = escalationDeadlineAt.toISOString();
+  return Boolean(
+    input.endpointEvents?.some((event) => {
+      if (
+        event.incidentId !== input.incidentId ||
+        event.eventType !== "HUMAN_REVIEW_REQUESTED" ||
+        !event.occurredAt ||
+        event.occurredAt.getTime() !== endpointAt ||
+        event.occurredAt < escalationDeadlineAt ||
+        !event.audit ||
+        typeof event.audit !== "object" ||
+        Array.isArray(event.audit)
+      ) {
+        return false;
+      }
+      const audit = event.audit as Record<string, unknown>;
+      return (
+        audit.cycle === input.incidentCycle &&
+        audit.customerState === "NEEDS_HUMAN_REVIEW" &&
+        audit.automationStalled === true &&
+        audit.playbookExhausted === false &&
+        audit.escalationDeadlineAt === deadlineIso
+      );
+    })
+  );
+}
+
 export function getCustomerMonitoringStatus(
   input: CustomerMonitoringStatusInput
 ): CustomerMonitoringStatus {
@@ -75,8 +139,11 @@ export function getCustomerMonitoringStatus(
     input.incidentStatus &&
     input.incidentStatus !== "RESOLVED"
   );
+  const automationHumanReviewProven =
+    input.automationPlaybookExhausted === true ||
+    input.automationStalledAtEndpoint === true;
   const unprovenAutomationEscalation = Boolean(
-    input.automationPlaybookExhausted !== true &&
+    !automationHumanReviewProven &&
     (input.monitoringState === "ENGINEERING_VERIFICATION_NEEDED" ||
       input.incidentStatus === "NEEDS_HUMAN" ||
       Boolean(input.humanReviewReason) ||

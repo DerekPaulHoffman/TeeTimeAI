@@ -1,7 +1,6 @@
 import { listSearchesNeedingScheduleRecovery } from "@/lib/automation/db-service";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { consumeSearchScheduleQueueMessage } from "@/lib/automation/search-schedule-consumer";
-import { recoverDueCourseSupportVerificationRequests } from "@/lib/automation/course-support-verification-scheduler";
 import { checkAutomationWorkerHealth } from "@/lib/automation/worker-state";
 import {
   revalidateHumanReviewCoursesForDeployment,
@@ -104,18 +103,6 @@ export async function GET(request: Request) {
     })
   );
 
-  let courseSupportVerification = {
-    considered: 0,
-    started: 0,
-    skipped: 0,
-    failed: 1
-  };
-  try {
-    courseSupportVerification = await recoverDueCourseSupportVerificationRequests();
-  } catch {
-    // Provider-verification recovery must not suppress customer schedule recovery.
-  }
-
   let automationWorkerHealth = {
     considered: 0,
     overdue: 0,
@@ -151,7 +138,6 @@ export async function GET(request: Request) {
 
   return Response.json({
     pendingEmailRecovery,
-    courseSupportVerification,
     automationWorkerHealth,
     localReaderJobDeadlines,
     deploymentCourseRevalidation,

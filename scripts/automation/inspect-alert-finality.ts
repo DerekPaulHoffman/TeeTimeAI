@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 
 import {
   getCustomerMonitoringStatus,
+  hasDurableAutomationStalledEndpointProof,
   type CustomerMonitoringStatus
 } from "@/lib/customer-monitoring-status";
 import { isAutomationHumanReviewProofCurrentOrPrior } from "@/lib/automation/course-monitoring-playbook";
@@ -51,6 +52,12 @@ type AlertFinalitySearch = {
         escalationDeadlineAt?: Date | null;
         escalatedAt?: Date | null;
         resolvedAt?: Date | null;
+        monitoringEvents?: Array<{
+          incidentId: string | null;
+          eventType: string;
+          occurredAt: Date;
+          audit: Prisma.JsonValue | null;
+        }>;
       } | null;
     };
   }>;
@@ -387,13 +394,29 @@ function getCurrentCourseAssessment(input: {
       ? incident?.humanReviewReason ?? null
       : null,
     incidentEscalatedAt: currentIncident ? incident?.escalatedAt ?? null : null,
+    escalationDeadlineAt: currentIncident
+      ? incident?.escalationDeadlineAt ?? null
+      : null,
     automationPlaybookExhausted:
       currentIncident && incident
         ? isAutomationHumanReviewProofCurrentOrPrior(
             incident.attemptLedger ?? null,
             incident.cycle
           )
-        : null
+        : null,
+    automationStalledAtEndpoint:
+      currentIncident && incident
+        ? hasDurableAutomationStalledEndpointProof({
+            incidentId: incident.id,
+            incidentCycle: incident.cycle,
+            incidentStatus,
+            humanReviewReason: incident.humanReviewReason ?? null,
+            incidentEscalatedAt: incident.escalatedAt ?? null,
+            escalationDeadlineAt: incident.escalationDeadlineAt ?? null,
+            monitoringState: monitoringStateIsCurrent ? monitoringState : null,
+            endpointEvents: incident.monitoringEvents ?? []
+          })
+        : false
   });
 
   const observedAtCandidates: Date[] = [];
@@ -569,6 +592,13 @@ export function buildAlertFinalityReport(
         currentMonitoringState !== "HEALTHY")
         ? currentMonitoringState
         : null;
+    const currentIncidentStatus =
+      currentIncident &&
+      (preference?.course.supportIncident?.status === "AUTO_INVESTIGATING" ||
+        preference?.course.supportIncident?.status === "NEEDS_HUMAN" ||
+        preference?.course.supportIncident?.status === "RESOLVED")
+        ? preference.course.supportIncident.status
+        : null;
     return getCustomerMonitoringStatus({
       outcome: course.outcome,
       monitoringDisposition: isMonitoringDisposition(
@@ -581,18 +611,15 @@ export function buildAlertFinalityReport(
         monitoringStateRelevantToDeliveredStatus && currentMonitoringStatus
           ? currentMonitoringStatus.stateChangedAt
           : null,
-      incidentStatus:
-        currentIncident &&
-        (preference?.course.supportIncident?.status === "AUTO_INVESTIGATING" ||
-          preference?.course.supportIncident?.status === "NEEDS_HUMAN" ||
-          preference?.course.supportIncident?.status === "RESOLVED")
-          ? preference.course.supportIncident.status
-          : null,
+      incidentStatus: currentIncidentStatus,
       humanReviewReason: currentIncident
         ? preference?.course.supportIncident?.humanReviewReason ?? null
         : null,
       incidentEscalatedAt: currentIncident
         ? preference?.course.supportIncident?.escalatedAt ?? null
+        : null,
+      escalationDeadlineAt: currentIncident
+        ? preference?.course.supportIncident?.escalationDeadlineAt ?? null
         : null,
       automationPlaybookExhausted:
         currentIncident && preference?.course.supportIncident
@@ -601,6 +628,23 @@ export function buildAlertFinalityReport(
               preference.course.supportIncident.cycle
             )
           : null,
+      automationStalledAtEndpoint:
+        currentIncident && preference?.course.supportIncident
+          ? hasDurableAutomationStalledEndpointProof({
+              incidentId: preference.course.supportIncident.id,
+              incidentCycle: preference.course.supportIncident.cycle,
+              incidentStatus: currentIncidentStatus,
+              humanReviewReason:
+                preference.course.supportIncident.humanReviewReason ?? null,
+              incidentEscalatedAt:
+                preference.course.supportIncident.escalatedAt ?? null,
+              escalationDeadlineAt:
+                preference.course.supportIncident.escalationDeadlineAt ?? null,
+              monitoringState: monitoringStateRelevantToDeliveredStatus,
+              endpointEvents:
+                preference.course.supportIncident.monitoringEvents ?? []
+            })
+          : false,
       supportStatus:
         course.supportStatus === "IN_OPERATOR_QUEUE" ||
         course.supportStatus === "NEEDS_HUMAN_REVIEW"
@@ -996,7 +1040,18 @@ async function main() {
                   confirmedAt: true,
                   escalationDeadlineAt: true,
                   escalatedAt: true,
-                  resolvedAt: true
+                  resolvedAt: true,
+                  monitoringEvents: {
+                    where: { eventType: "HUMAN_REVIEW_REQUESTED" },
+                    orderBy: { occurredAt: "desc" },
+                    take: 5,
+                    select: {
+                      incidentId: true,
+                      eventType: true,
+                      occurredAt: true,
+                      audit: true
+                    }
+                  }
                 }
               }
             }

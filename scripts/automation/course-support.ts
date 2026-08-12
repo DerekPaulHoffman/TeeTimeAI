@@ -38,6 +38,14 @@ import {
   startAutomationWorker
 } from "@/lib/automation/worker-state";
 import { runCourseSupportLeaseWatch } from "@/lib/automation/course-support-lease-watch";
+import {
+  assertCourseSupportVerificationWatchFlags,
+  closeoutSettledCourseSupportVerification,
+  runWithBoundedCourseSupportHeartbeat,
+  runCourseSupportVerificationPass,
+  runCourseSupportVerificationWatch,
+  selectCourseSupportVerificationEndpointDeadline
+} from "@/lib/automation/course-support-verification-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import { persistOwnedCourseSupportBrowserPlaybookStages } from "@/lib/automation/course-support-browser-stages";
 import {
@@ -326,6 +334,17 @@ async function verify(args: string[]) {
   }
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
+  const watch = args.includes("--watch");
+  const closeoutAfterWatch = args.includes("--closeout");
+  const maxMinutes = readSingleIntegerOption(args, "--max-minutes");
+  const pollSeconds = readSingleIntegerOption(args, "--poll-seconds");
+  assertCourseSupportVerificationWatchFlags({
+    watch,
+    closeout: closeoutAfterWatch
+  });
+  if (!watch && (maxMinutes !== undefined || pollSeconds !== undefined)) {
+    throw new Error("Verification watch timing options require --watch.");
+  }
   const currentRuntime = args.includes("--current-runtime");
   const requestedReleaseSha = readOption(args, "--release-sha");
   if (currentRuntime && requestedReleaseSha) {
@@ -341,55 +360,205 @@ async function verify(args: string[]) {
     });
   }
   return runWithCourseSupportOperationHeartbeat(
-    { batchId, ownerThreadId },
+    {
+      batchId,
+      ownerThreadId,
+      allowDurableCloseout: closeoutAfterWatch
+    },
     async (leaseToken) => {
-      const browserStages =
-        await persistOwnedCourseSupportBrowserPlaybookStages(
-          {
-            batchId,
-            leaseToken,
-            ownerThreadId,
-            requestedReleaseSha: releaseSha,
-            requestedDeployedAt: deployedAt
-          },
-          {
-            validateReleaseFence: async (fence) => {
-              await assertReleaseGitProvenance(batchId, fence.releaseSha, {
-                allowUnchangedRuntime: currentRuntime
-              });
-            },
-            runBrowserProbe: ({
-              courseId,
-              beforePersist,
-              persistenceFence,
-              deferTerminalCloseout,
-              persistSearchProbe
-            }) =>
-              runBrowserProbe({
-                courseName: undefined,
-                courseId,
-                dryRun: false,
-                expectedDisposition: undefined,
-                limit: 1,
-                traceJson: false,
-                persistenceFence,
-                deferTerminalCloseout,
-                persistSearchProbe,
-                beforePersist: ({ requireCurrentStage }) =>
-                  beforePersist({ requireCurrentStage })
-              })
-          }
-        );
-      const result = await verifyCourseSupportBatch({
+      const runPass = (signal?: AbortSignal) =>
+        runCourseSupportVerificationPass({
+          signal,
+          persistBrowserStages: () =>
+            persistOwnedCourseSupportBrowserPlaybookStages(
+              {
+                batchId,
+                leaseToken,
+                ownerThreadId,
+                requestedReleaseSha: releaseSha,
+                requestedDeployedAt: deployedAt
+              },
+              {
+                validateReleaseFence: async (fence) => {
+                  await assertReleaseGitProvenance(batchId, fence.releaseSha, {
+                    allowUnchangedRuntime: currentRuntime
+                  });
+                },
+                runBrowserProbe: ({
+                  courseId,
+                  beforePersist,
+                  persistenceFence,
+                  deferTerminalCloseout,
+                  persistSearchProbe
+                }) =>
+                  runBrowserProbe({
+                    courseName: undefined,
+                    courseId,
+                    dryRun: false,
+                    expectedDisposition: undefined,
+                    limit: 1,
+                    traceJson: false,
+                    persistenceFence,
+                    deferTerminalCloseout,
+                    persistSearchProbe,
+                    beforePersist: ({ requireCurrentStage }) =>
+                      signal?.aborted
+                        ? Promise.reject(signal.reason)
+                        : beforePersist({ requireCurrentStage })
+                  })
+              }
+            ),
+          verifyBatch: () =>
+            verifyCourseSupportBatch({
+              batchId,
+              leaseToken,
+              ownerThreadId,
+              releaseSha,
+              deployedAt
+            })
+        });
+
+      if (!watch) {
+        const pass = await runPass();
+        return { ...pass.verification, browserStages: pass.browserStages };
+      }
+
+      const initialPacket = await getCourseSupportBatchPacket({
         batchId,
         leaseToken,
-        ownerThreadId,
-        releaseSha,
-        deployedAt
+        ownerThreadId
       });
-      return { ...result, browserStages };
+      if (initialPacket.outcome !== "ready") {
+        throw new Error(
+          "Course-support verification watch lost ownership before it started."
+        );
+      }
+      const endpointDeadlineAt =
+        selectCourseSupportVerificationEndpointDeadline(initialPacket.courses);
+
+      const watchResult = await runCourseSupportVerificationWatch({
+        pass: runPass,
+        maxMinutes,
+        pollMs: pollSeconds === undefined ? undefined : pollSeconds * 1_000,
+        deadlineAt: endpointDeadlineAt,
+        closeout: closeoutAfterWatch
+          ? async ({ passCount, signal }) =>
+              closeoutSettledCourseSupportBatch({
+                batchId,
+                leaseToken,
+                ownerThreadId,
+                passCount,
+                signal
+              })
+          : undefined,
+        onStopped: closeoutAfterWatch
+          ? ({ reason, passCount, signal }) =>
+              closeoutStoppedCourseSupportBatch({
+                batchId,
+                leaseToken,
+                ownerThreadId,
+                passCount,
+                signal,
+                mode:
+                  reason === "endpoint" ||
+                  (endpointDeadlineAt !== undefined &&
+                    Date.now() >= endpointDeadlineAt)
+                    ? "ENDPOINT"
+                    : "EARLY_RETRY"
+              })
+          : undefined
+      });
+      return closeoutAfterWatch
+        ? {
+            ...watchResult,
+            durableCloseoutRecorded:
+              watchResult.closeout?.durableCloseoutRecorded === true
+          }
+        : watchResult;
     }
   );
+}
+
+async function closeoutSettledCourseSupportBatch(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  passCount: number;
+  signal?: AbortSignal;
+}) {
+  input.signal?.throwIfAborted();
+  const packet = await getCourseSupportBatchPacket({
+    batchId: input.batchId,
+    leaseToken: input.leaseToken,
+    ownerThreadId: input.ownerThreadId
+  });
+  input.signal?.throwIfAborted();
+  if (packet.outcome !== "ready") {
+    throw new Error(
+      "Course-support verification watch lost ownership before closeout."
+    );
+  }
+
+  const settled = await closeoutSettledCourseSupportVerification({
+    courses: packet.courses,
+    closeout: (humanReviewCount) =>
+      closeoutCourseSupportBatch({
+        batchId: input.batchId,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        verificationWatchMode: "WATCH_SETTLED",
+        summary: {
+          verificationWatch: {
+            settled: true,
+            passCount: input.passCount,
+            humanReviewCount
+          }
+        }
+      })
+  });
+  input.signal?.throwIfAborted();
+  const result = settled.closeout;
+  if (!result.durableCloseoutRecorded) {
+    throw new Error(
+      "Course-support verification watch did not record durable closeout."
+    );
+  }
+  return { ...result, humanReviewCount: settled.humanReviewCount };
+}
+
+async function closeoutStoppedCourseSupportBatch(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  passCount: number;
+  mode: "EARLY_RETRY" | "ENDPOINT";
+  signal?: AbortSignal;
+}) {
+  input.signal?.throwIfAborted();
+  const result = await closeoutCourseSupportBatch({
+    batchId: input.batchId,
+    leaseToken: input.leaseToken,
+    ownerThreadId: input.ownerThreadId,
+    requestedOutcome:
+      input.mode === "EARLY_RETRY" ? "command_failed" : undefined,
+    failureDomain: "SLA",
+    verificationWatchMode: input.mode,
+    summary: {
+      verificationWatch: {
+        settled: false,
+        stopped: true,
+        stopMode: input.mode,
+        passCount: input.passCount
+      }
+    }
+  });
+  input.signal?.throwIfAborted();
+  if (!result.durableCloseoutRecorded) {
+    throw new Error(
+      "Course-support verification watch could not release durable batch ownership."
+    );
+  }
+  return result;
 }
 
 async function closeout(args: string[]) {
@@ -434,51 +603,24 @@ async function runWithCourseSupportOperationHeartbeat<T>(
   operation: (leaseToken: string) => Promise<T>
 ) {
   const leaseToken = await getOwnedCourseSupportLeaseToken(input);
-  const renew = async () => {
+  const renewWithSignal = async (signal?: AbortSignal) => {
+    signal?.throwIfAborted();
     const result = await renewCourseSupportBatchOperationLease({
       batchId: input.batchId,
       leaseToken,
       ownerThreadId: input.ownerThreadId
     });
+    signal?.throwIfAborted();
     if (!result.heartbeatRecorded) {
       throw new Error("Course-support operation heartbeat lost durable batch ownership.");
     }
   };
-  await renew();
-
-  let heartbeatFailure: unknown = null;
-  let heartbeatInFlight: Promise<void> | null = null;
-  const interval = setInterval(() => {
-    if (heartbeatInFlight || heartbeatFailure) {
-      return;
-    }
-    heartbeatInFlight = renew()
-      .catch((error) => {
-        heartbeatFailure = error;
-      })
-      .finally(() => {
-        heartbeatInFlight = null;
-      });
-  }, COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS);
-  interval.unref?.();
-
-  let result: T;
-  try {
-    result = await operation(leaseToken);
-  } finally {
-    clearInterval(interval);
-    await heartbeatInFlight;
-  }
-  const durableCloseout = Boolean(
-    result &&
-    typeof result === "object" &&
-    "durableCloseoutRecorded" in result &&
-    result.durableCloseoutRecorded === true
-  );
-  if (heartbeatFailure && !(input.allowDurableCloseout && durableCloseout)) {
-    throw heartbeatFailure;
-  }
-  return result;
+  return runWithBoundedCourseSupportHeartbeat({
+    renew: renewWithSignal,
+    operation: () => operation(leaseToken),
+    intervalMs: COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS,
+    allowDurableCloseout: input.allowDurableCloseout
+  });
 }
 
 async function recover(args: string[]) {

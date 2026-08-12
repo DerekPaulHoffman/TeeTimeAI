@@ -7,24 +7,26 @@ const mocks = vi.hoisted(() => ({
   failCourseSupportVerificationRequest: vi.fn(),
   getAutomationRuntimeVersion: vi.fn(),
   listDueCourseSupportVerificationRequests: vi.fn(),
-  start: vi.fn()
+  start: vi.fn(),
 }));
 
 vi.mock("workflow/api", () => ({ start: mocks.start }));
 vi.mock("@/lib/automation/course-support-verification", () => ({
+  COURSE_SUPPORT_VERIFICATION_MAX_DUE: 25,
   attachCourseSupportVerificationWorkflow:
     mocks.attachCourseSupportVerificationWorkflow,
   claimCourseSupportVerificationRequest:
     mocks.claimCourseSupportVerificationRequest,
-  failCourseSupportVerificationRequest: mocks.failCourseSupportVerificationRequest,
+  failCourseSupportVerificationRequest:
+    mocks.failCourseSupportVerificationRequest,
   listDueCourseSupportVerificationRequests:
-    mocks.listDueCourseSupportVerificationRequests
+    mocks.listDueCourseSupportVerificationRequests,
 }));
 vi.mock("@/lib/automation/runtime-version", () => ({
-  getAutomationRuntimeVersion: mocks.getAutomationRuntimeVersion
+  getAutomationRuntimeVersion: mocks.getAutomationRuntimeVersion,
 }));
 vi.mock("@/workflows/course-support-verification", () => ({
-  courseSupportVerificationWorkflow: mocks.courseSupportVerificationWorkflow
+  courseSupportVerificationWorkflow: mocks.courseSupportVerificationWorkflow,
 }));
 
 import { recoverDueCourseSupportVerificationRequests } from "./course-support-verification-scheduler";
@@ -36,7 +38,7 @@ const intent = {
   startTimeLocal: "06:00" as const,
   endTimeLocal: "20:00" as const,
   timeZone: "America/New_York",
-  players: 1 as const
+  players: 1 as const,
 };
 
 function dueRequest(id: string, revision = 3) {
@@ -44,7 +46,7 @@ function dueRequest(id: string, revision = 3) {
     id,
     releaseSha: runtimeVersion,
     status: "QUEUED",
-    revision
+    revision,
   };
 }
 
@@ -59,7 +61,7 @@ function claimedRequest(id: string, revision = 4) {
     leaseToken: `lease-${id}`,
     leaseExpiresAt: new Date("2026-07-21T07:40:00.000Z"),
     providerSnapshotFingerprint: `fingerprint-${id}`,
-    intent
+    intent,
   };
 }
 
@@ -68,36 +70,39 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
     vi.clearAllMocks();
     mocks.getAutomationRuntimeVersion.mockReturnValue(runtimeVersion);
     mocks.attachCourseSupportVerificationWorkflow.mockResolvedValue({
-      attached: true
+      attached: true,
     });
     mocks.failCourseSupportVerificationRequest.mockResolvedValue({
       failed: true,
-      status: "RETRYABLE_FAILED"
+      status: "RETRYABLE_FAILED",
     });
   });
 
   it("claims, starts, and attaches a due verification under exact ownership", async () => {
     mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
-      dueRequest("request-1")
+      dueRequest("request-1"),
     ]);
     mocks.claimCourseSupportVerificationRequest.mockResolvedValue(
-      claimedRequest("request-1")
+      claimedRequest("request-1"),
     );
     mocks.start.mockResolvedValue({ runId: "workflow-run-1" });
 
     await expect(
-      recoverDueCourseSupportVerificationRequests({ now, limit: 7 })
+      recoverDueCourseSupportVerificationRequests({ now, limit: 7 }),
     ).resolves.toEqual({ considered: 1, started: 1, skipped: 0, failed: 0 });
 
-    expect(mocks.listDueCourseSupportVerificationRequests).toHaveBeenCalledWith({
-      now,
-      limit: 7
-    });
+    expect(mocks.listDueCourseSupportVerificationRequests).toHaveBeenCalledWith(
+      {
+        now,
+        limit: 7,
+        runtimeVersion,
+      },
+    );
     expect(mocks.claimCourseSupportVerificationRequest).toHaveBeenCalledWith({
       requestId: "request-1",
       expectedRevision: 3,
       runtimeVersion,
-      now
+      now,
     });
     expect(mocks.start).toHaveBeenCalledWith(
       mocks.courseSupportVerificationWorkflow,
@@ -106,9 +111,9 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
           requestId: "request-1",
           expectedRevision: 4,
           leaseToken: "lease-request-1",
-          runtimeVersion
-        }
-      ]
+          runtimeVersion,
+        },
+      ],
     );
     expect(mocks.start.mock.calls[0]).toHaveLength(2);
     expect(mocks.attachCourseSupportVerificationWorkflow).toHaveBeenCalledWith({
@@ -117,38 +122,71 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
       leaseToken: "lease-request-1",
       runtimeVersion,
       workflowRunId: "workflow-run-1",
-      now
+      now,
     });
     expect(mocks.failCourseSupportVerificationRequest).not.toHaveBeenCalled();
   });
 
   it("skips a request whose guarded claim is rejected", async () => {
     mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
-      dueRequest("request-1")
+      dueRequest("request-1"),
     ]);
     mocks.claimCourseSupportVerificationRequest.mockResolvedValue({
       claimed: false,
-      reason: "runtime_mismatch"
+      reason: "runtime_mismatch",
     });
 
     await expect(
-      recoverDueCourseSupportVerificationRequests({ now })
+      recoverDueCourseSupportVerificationRequests({ now }),
     ).resolves.toEqual({ considered: 1, started: 0, skipped: 1, failed: 0 });
     expect(mocks.start).not.toHaveBeenCalled();
-    expect(mocks.attachCourseSupportVerificationWorkflow).not.toHaveBeenCalled();
+    expect(
+      mocks.attachCourseSupportVerificationWorkflow,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("starts an exact-release request selected during mismatch grace", async () => {
+    mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
+      {
+        ...dueRequest("request-1", 5),
+        lastError: "runtime_release_mismatch:2026-07-21T07:30:00.000Z",
+        nextAttemptAt: new Date("2026-07-21T07:31:00.000Z"),
+      },
+    ]);
+    mocks.claimCourseSupportVerificationRequest.mockResolvedValue(
+      claimedRequest("request-1", 6),
+    );
+    mocks.start.mockResolvedValue({ runId: "workflow-run-1" });
+
+    await expect(
+      recoverDueCourseSupportVerificationRequests({ now }),
+    ).resolves.toEqual({ considered: 1, started: 1, skipped: 0, failed: 0 });
+    expect(mocks.listDueCourseSupportVerificationRequests).toHaveBeenCalledWith(
+      {
+        now,
+        limit: 25,
+        runtimeVersion,
+      },
+    );
+    expect(mocks.claimCourseSupportVerificationRequest).toHaveBeenCalledWith({
+      requestId: "request-1",
+      expectedRevision: 5,
+      runtimeVersion,
+      now,
+    });
   });
 
   it("durably schedules a short retry when Workflow start fails", async () => {
     mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
-      dueRequest("request-1")
+      dueRequest("request-1"),
     ]);
     mocks.claimCourseSupportVerificationRequest.mockResolvedValue(
-      claimedRequest("request-1")
+      claimedRequest("request-1"),
     );
     mocks.start.mockRejectedValue(new Error("Workflow unavailable"));
 
     await expect(
-      recoverDueCourseSupportVerificationRequests({ now })
+      recoverDueCourseSupportVerificationRequests({ now }),
     ).resolves.toEqual({ considered: 1, started: 0, skipped: 0, failed: 1 });
     expect(mocks.failCourseSupportVerificationRequest).toHaveBeenCalledWith({
       requestId: "request-1",
@@ -158,15 +196,17 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
       failureClass: "UNKNOWN",
       message: "Workflow start failed before verification execution.",
       retryAt: new Date("2026-07-21T07:32:00.000Z"),
-      now
+      now,
     });
-    expect(mocks.attachCourseSupportVerificationWorkflow).not.toHaveBeenCalled();
+    expect(
+      mocks.attachCourseSupportVerificationWorkflow,
+    ).not.toHaveBeenCalled();
   });
 
   it("continues starting other due work after one Workflow start fails", async () => {
     mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
       dueRequest("request-1"),
-      dueRequest("request-2", 8)
+      dueRequest("request-2", 8),
     ]);
     mocks.claimCourseSupportVerificationRequest
       .mockResolvedValueOnce(claimedRequest("request-1"))
@@ -176,7 +216,7 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
       .mockResolvedValueOnce({ runId: "workflow-run-2" });
 
     await expect(
-      recoverDueCourseSupportVerificationRequests({ now })
+      recoverDueCourseSupportVerificationRequests({ now }),
     ).resolves.toEqual({ considered: 2, started: 1, skipped: 0, failed: 1 });
     expect(mocks.start).toHaveBeenCalledTimes(2);
     expect(mocks.failCourseSupportVerificationRequest).toHaveBeenCalledTimes(1);
@@ -186,7 +226,53 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
       leaseToken: "lease-request-2",
       runtimeVersion,
       workflowRunId: "workflow-run-2",
-      now
+      now,
     });
+  });
+
+  it("attempts all 25 synchronized requests before their final minute expires", async () => {
+    const finalMinuteDeadline = new Date(now.getTime() + 60 * 1000);
+    const synchronizedDue = Array.from({ length: 25 }, (_, index) => ({
+      ...dueRequest(`request-${index + 1}`, index + 1),
+      nextAttemptAt: new Date(now.getTime() - 60 * 1000),
+      deadlineAt: finalMinuteDeadline,
+    }));
+    mocks.listDueCourseSupportVerificationRequests.mockResolvedValue(
+      synchronizedDue,
+    );
+    mocks.claimCourseSupportVerificationRequest.mockImplementation(
+      async (input: { requestId: string; expectedRevision: number }) =>
+        claimedRequest(input.requestId, input.expectedRevision + 1),
+    );
+    mocks.start.mockImplementation(async (_workflow, [input]) => ({
+      runId: `workflow-${input.requestId}`,
+    }));
+
+    await expect(
+      recoverDueCourseSupportVerificationRequests({ now }),
+    ).resolves.toEqual({ considered: 25, started: 25, skipped: 0, failed: 0 });
+
+    expect(mocks.listDueCourseSupportVerificationRequests).toHaveBeenCalledWith(
+      {
+        now,
+        limit: 25,
+        runtimeVersion,
+      },
+    );
+    expect(mocks.claimCourseSupportVerificationRequest).toHaveBeenCalledTimes(
+      25,
+    );
+    expect(mocks.start).toHaveBeenCalledTimes(25);
+    expect(
+      mocks.claimCourseSupportVerificationRequest.mock.calls
+        .slice(20)
+        .map(([input]) => input.requestId),
+    ).toEqual([
+      "request-21",
+      "request-22",
+      "request-23",
+      "request-24",
+      "request-25",
+    ]);
   });
 });

@@ -232,6 +232,135 @@ describe("executeScheduledSearchCheck", () => {
       nextCheckAt: "2026-07-15T12:01:00.000Z"
     });
   });
+
+  it("keeps a successful long-cadence check awake for the earliest unresolved endpoint", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 120,
+      trafficClass: "PUBLIC",
+      syntheticMultiCycle: false,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:28:00.000Z")
+            }
+          }
+        },
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:25:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-08-11T20:25:00.000Z"
+    });
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nextCheckAt: new Date("2026-08-11T20:25:00.000Z")
+      })
+    );
+  });
+
+  it("keeps a successful booking-window sleep awake for an unresolved endpoint", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-08-30T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 120,
+      trafficClass: "PUBLIC",
+      syntheticMultiCycle: false,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            bookingWindowDaysAhead: 14,
+            bookingReleaseTimeLocal: "05:00",
+            ...SOURCE_BACKED_BOOKING_WINDOW,
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-01T12:28:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-08-01T12:28:00.000Z"
+    });
+  });
+
+  it("does not shorten a successful wake for an incident that already has a human reason", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 120,
+      trafficClass: "PUBLIC",
+      syntheticMultiCycle: false,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: "AUTOMATION_STALLED",
+              escalationDeadlineAt: new Date("2026-08-11T20:28:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: false,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-08-11T22:20:00.000Z"
+    });
+  });
 });
 
 describe("calculateNextCheckAt", () => {

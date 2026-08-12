@@ -76,6 +76,7 @@ export type SearchStatusCourseReport = {
   monitoringDisposition?: MonitoringDisposition;
   supportStatus?: "IN_OPERATOR_QUEUE" | "NEEDS_HUMAN_REVIEW";
   automationPlaybookExhausted?: boolean;
+  automationStalledAtEndpoint?: boolean;
   firstTimeLookup?: boolean;
   bookingAccess?:
     | "BOOKING_PAGE"
@@ -817,7 +818,8 @@ export function getCustomerCourseMonitoringStatus(
     outcome: course.outcome,
     monitoringDisposition: course.monitoringDisposition,
     supportStatus: course.supportStatus,
-    automationPlaybookExhausted: course.automationPlaybookExhausted
+    automationPlaybookExhausted: course.automationPlaybookExhausted,
+    automationStalledAtEndpoint: course.automationStalledAtEndpoint
   });
 }
 
