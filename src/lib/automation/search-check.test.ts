@@ -4427,6 +4427,72 @@ describe("runSearchCheck email cadence", () => {
     expect(result.supportRetryNeeded).toBe(true);
   });
 
+  it("advances to rendered-browser discovery after one deferred official HTTP retry", async () => {
+    let ledger = buildPlaybookThroughTypedAdapter();
+    ledger = appendPlaybookEvent(ledger, {
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "STARTED",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "OFFICIAL_HTTP:DISCOVERY"
+    });
+    ledger = appendPlaybookEvent(ledger, {
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "FAILED_RETRYABLE",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "OFFICIAL_HTTP:DISCOVERY",
+      failureClass: "UNKNOWN"
+    });
+    const playbook = installPlaybookPersistence(ledger);
+    const unsupportedSearch = {
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            automationEligibility: "UNKNOWN",
+            automationReason: "OTHER",
+            policyNotes: null,
+            supportIncident: playbook.context()
+          }
+        }
+      ]
+    };
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue(unsupportedSearch);
+    monitoringDiscoveryMocks.prepareSearchMonitoring.mockResolvedValue({
+      attemptedCourseIds: [],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: ["course-1"],
+      retryCourseIds: ["course-1"]
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(
+      playbook.getLedger().events.slice(-3).map((event) => [
+        event.stage,
+        event.transition
+      ])
+    ).toEqual([
+      ["OFFICIAL_HTTP_DISCOVERY", "STARTED"],
+      ["OFFICIAL_HTTP_DISCOVERY", "FAILED_TERMINAL"],
+      ["HTTP_ADAPTER_RETRY", "NOT_APPLICABLE"]
+    ]);
+    expect(assessAutomationPlaybook(playbook.getLedger(), 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "RENDERED_BROWSER_DISCOVERY"
+    });
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("rendered-browser")
+    });
+  });
+
   it("does not open an unsupported incident when discovery preparation fails", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,

@@ -2489,15 +2489,22 @@ async function recordOfficialDiscoveryResult(input: {
     input.preparationFailed ||
     input.preparation.deferredCourseIds.includes(input.courseId)
   ) {
+    const priorAttemptCount =
+      input.runtime.assessment.stages.find(
+        (stage) => stage.stage === "OFFICIAL_HTTP_DISCOVERY"
+      )?.attemptCount ?? 0;
+    const retryExhausted = priorAttemptCount >= 1;
     return recordSearchPlaybookAttempt(input.runtime, {
       stage: "OFFICIAL_HTTP_DISCOVERY",
-      transition: "FAILED_RETRYABLE",
+      transition: retryExhausted ? "FAILED_TERMINAL" : "FAILED_RETRYABLE",
       readPath: "OFFICIAL_HTTP",
       evidenceKind: "OFFICIAL_SOURCE",
       failureFingerprint:
         SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
       failureClass: "UNKNOWN",
-      note: "Official HTTP discovery was deferred and will retry."
+      note: retryExhausted
+        ? "The bounded official HTTP discovery retry was unavailable; continue to rendered-browser discovery."
+        : "Official HTTP discovery was deferred and will retry once."
     });
   }
   if (input.preparation.failedCourseIds.includes(input.courseId)) {
