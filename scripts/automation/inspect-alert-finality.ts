@@ -6,6 +6,7 @@ import {
   getCustomerMonitoringStatus,
   type CustomerMonitoringStatus
 } from "@/lib/customer-monitoring-status";
+import { isAutomationHumanReviewProofCurrentOrPrior } from "@/lib/automation/course-monitoring-playbook";
 import { prisma } from "@/lib/prisma";
 
 const DEFAULT_LIMIT = 20;
@@ -40,6 +41,7 @@ type AlertFinalitySearch = {
       supportIncident: {
         id: string;
         cycle: number;
+        attemptLedger?: Prisma.JsonValue | null;
         status: string;
         humanReviewReason?: string | null;
         firstAffectedSearchId: string | null;
@@ -384,7 +386,14 @@ function getCurrentCourseAssessment(input: {
     humanReviewReason: currentIncident
       ? incident?.humanReviewReason ?? null
       : null,
-    incidentEscalatedAt: currentIncident ? incident?.escalatedAt ?? null : null
+    incidentEscalatedAt: currentIncident ? incident?.escalatedAt ?? null : null,
+    automationPlaybookExhausted:
+      currentIncident && incident
+        ? isAutomationHumanReviewProofCurrentOrPrior(
+            incident.attemptLedger ?? null,
+            incident.cycle
+          )
+        : null
   });
 
   const observedAtCandidates: Date[] = [];
@@ -585,6 +594,13 @@ export function buildAlertFinalityReport(
       incidentEscalatedAt: currentIncident
         ? preference?.course.supportIncident?.escalatedAt ?? null
         : null,
+      automationPlaybookExhausted:
+        currentIncident && preference?.course.supportIncident
+          ? isAutomationHumanReviewProofCurrentOrPrior(
+              preference.course.supportIncident.attemptLedger ?? null,
+              preference.course.supportIncident.cycle
+            )
+          : null,
       supportStatus:
         course.supportStatus === "IN_OPERATOR_QUEUE" ||
         course.supportStatus === "NEEDS_HUMAN_REVIEW"
@@ -971,6 +987,7 @@ async function main() {
                 select: {
                   id: true,
                   cycle: true,
+                  attemptLedger: true,
                   status: true,
                   humanReviewReason: true,
                   firstAffectedSearchId: true,

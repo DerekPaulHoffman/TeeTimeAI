@@ -505,10 +505,12 @@ function candidate(overrides: Partial<CourseSupportCandidate> = {}): CourseSuppo
     providerFamilyKey: "CHRONOGOLF",
     failureClass: "UNSUPPORTED_FAMILY",
     failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
+    humanReviewReason: null,
     engineeringOnly: true,
     activeRealSearchCount: 0,
     earliestTargetDate: null,
     escalationDeadlineAt: null,
+    endpointHumanReviewProven: false,
     firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
     lastSeenAt: new Date("2026-07-15T18:00:00.000Z"),
     lastAttemptAt: null,
@@ -636,7 +638,7 @@ describe("course-support batch selection", () => {
     expect(selected?.incidents.map((incident) => incident.id)).toEqual(["real"]);
   });
 
-  it("keeps aged synthetic fairness eligible beside noncritical active demand", () => {
+  it("keeps aged synthetic fairness eligible beside already-escalated noncritical demand", () => {
     const selected = selectCourseSupportBatch({
       candidates: [
         candidate({
@@ -646,6 +648,7 @@ describe("course-support batch selection", () => {
           failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
           engineeringOnly: false,
           activeRealSearchCount: 1,
+          endpointHumanReviewProven: true,
           firstSeenAt: new Date("2026-07-15T18:00:00.000Z")
         }),
         candidate({
@@ -697,6 +700,46 @@ describe("course-support batch selection", () => {
 
     expect(selected?.providerFamilyKey).toBe("NEW_ALERT");
     expect(selected?.incidents.map((incident) => incident.id)).toEqual(["new-alert"]);
+  });
+
+  it("prioritizes a never-escalated customer endpoint over an earlier human-review recheck", () => {
+    const selected = selectCourseSupportBatch({
+      candidates: [
+        candidate({
+          id: "already-human-recheck",
+          courseId: "already-human-course",
+          cycle: 2,
+          kind: "FETCH_FAILED",
+          providerFamilyKey: "ALREADY_HUMAN",
+          failureClass: "NETWORK",
+          failureFingerprint: "already-human-failure",
+          engineeringOnly: false,
+          activeRealSearchCount: 1,
+          earliestTargetDate: new Date("2026-07-18T00:00:00.000Z"),
+          escalationDeadlineAt: new Date("2026-07-15T20:05:00.000Z"),
+          endpointHumanReviewProven: true
+        }),
+        candidate({
+          id: "new-alert-endpoint",
+          courseId: "new-alert-course",
+          providerFamilyKey: "NEW_ALERT",
+          failureFingerprint: "new-alert-failure",
+          engineeringOnly: false,
+          activeRealSearchCount: 1,
+          escalationDeadlineAt: new Date("2026-07-15T20:08:00.000Z"),
+          firstSeenAt: new Date("2026-07-15T19:38:00.000Z")
+        })
+      ],
+      now
+    });
+
+    expect(selected).toMatchObject({
+      providerFamilyKey: "NEW_ALERT",
+      containsCriticalRealDemand: false
+    });
+    expect(selected?.incidents.map((incident) => incident.id)).toEqual([
+      "new-alert-endpoint"
+    ]);
   });
 
   it("keeps a provider/fingerprint batch bounded at twenty", () => {
@@ -3841,6 +3884,7 @@ describe("course-support inspection ownership", () => {
         select: expect.objectContaining({
           confirmedAt: true,
           attemptLedger: true,
+          escalatedAt: true,
           course: expect.objectContaining({ select: expect.any(Object) })
         })
       })
@@ -3949,6 +3993,125 @@ describe("course-support inspection ownership", () => {
       "OLDER_GROUP"
     ]);
   });
+
+  it("shows a never-escalated customer endpoint before an earlier human-review recheck", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        cycle: 2,
+        confirmedAt: now,
+        attemptLedger: exhaustedAttemptLedger(),
+        providerFamilyKey: "ALREADY_HUMAN_GROUP",
+        failureFingerprint: "already-human",
+        engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:05:00.000Z"),
+        escalatedAt: new Date("2026-07-15T14:00:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T14:00:00.000Z"),
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "already-human-search",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      },
+      {
+        cycle: 1,
+        confirmedAt: null,
+        attemptLedger: browserReadyAttemptLedger(),
+        providerFamilyKey: "NEW_ALERT_GROUP",
+        failureFingerprint: "new-alert",
+        engineeringOnly: false,
+        escalationDeadlineAt: new Date("2026-07-15T20:08:00.000Z"),
+        escalatedAt: null,
+        firstSeenAt: new Date("2026-07-15T19:38:00.000Z"),
+        course: {
+          timeZone: "America/New_York",
+          preferences: [
+            {
+              teeSearch: {
+                id: "new-alert-search",
+                date: new Date("2026-07-18T00:00:00.000Z")
+              }
+            }
+          ]
+        }
+      }
+    ]);
+
+    const result = await inspectCourseSupportQueue({ now });
+
+    expect(result.readOnlyDispatchPlan.groups.map((group) => group.providerFamilyKey)).toEqual([
+      "NEW_ALERT_GROUP",
+      "ALREADY_HUMAN_GROUP"
+    ]);
+  });
+
+  it.each([
+    ["missing", null],
+    ["invalid", { version: 1, events: "invalid" }],
+    ["unexhausted", browserReadyAttemptLedger(2)]
+  ])(
+    "keeps a stale escalation marker with %s playbook proof in the initial-endpoint tier",
+    async (_proofState, staleAttemptLedger) => {
+      prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+        {
+          cycle: 2,
+          confirmedAt: now,
+          attemptLedger: exhaustedAttemptLedger(),
+          providerFamilyKey: "PROVEN_HUMAN_GROUP",
+          failureFingerprint: "proven-human",
+          engineeringOnly: false,
+          escalationDeadlineAt: new Date("2026-07-15T20:05:00.000Z"),
+          escalatedAt: new Date("2026-07-15T14:00:00.000Z"),
+          firstSeenAt: new Date("2026-07-15T14:00:00.000Z"),
+          course: {
+            timeZone: "America/New_York",
+            preferences: [
+              {
+                teeSearch: {
+                  id: "proven-human-search",
+                  date: new Date("2026-07-18T00:00:00.000Z")
+                }
+              }
+            ]
+          }
+        },
+        {
+          cycle: 2,
+          confirmedAt: now,
+          attemptLedger: staleAttemptLedger,
+          providerFamilyKey: "STALE_MARKER_GROUP",
+          failureFingerprint: "stale-marker",
+          engineeringOnly: false,
+          escalationDeadlineAt: new Date("2026-07-15T20:08:00.000Z"),
+          escalatedAt: new Date("2026-07-15T13:00:00.000Z"),
+          firstSeenAt: new Date("2026-07-15T13:00:00.000Z"),
+          course: {
+            timeZone: "America/New_York",
+            preferences: [
+              {
+                teeSearch: {
+                  id: "stale-marker-search",
+                  date: new Date("2026-07-18T00:00:00.000Z")
+                }
+              }
+            ]
+          }
+        }
+      ]);
+
+      const result = await inspectCourseSupportQueue({ now });
+
+      expect(result.readOnlyDispatchPlan.groups.map((group) => group.providerFamilyKey)).toEqual([
+        "STALE_MARKER_GROUP",
+        "PROVEN_HUMAN_GROUP"
+      ]);
+    }
+  );
 
   it("preserves due dispatch work for one reinspection after expired recovery", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([

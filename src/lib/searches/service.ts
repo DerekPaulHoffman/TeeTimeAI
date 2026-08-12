@@ -825,7 +825,9 @@ const searchListInclude = {
           },
           supportIncident: {
             select: {
+              cycle: true,
               status: true,
+              attemptLedger: true,
               humanReviewReason: true,
               escalatedAt: true,
               escalationDeadlineAt: true,

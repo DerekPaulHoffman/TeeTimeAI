@@ -40,6 +40,7 @@ import {
   type GooglePlacePhoto
 } from "@/lib/places/google";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
+import { isAutomationHumanReviewProofCurrentOrPrior } from "@/lib/automation/course-monitoring-playbook";
 import {
   getDashboardAvailabilityView,
   readDashboardAvailabilitySnapshot
@@ -460,6 +461,12 @@ function DashboardSearchCard({
                 preference.course.supportIncident?.escalatedAt ?? null,
               escalationDeadlineAt:
                 preference.course.supportIncident?.escalationDeadlineAt ?? null,
+              automationPlaybookExhausted: preference.course.supportIncident
+                ? isAutomationHumanReviewProofCurrentOrPrior(
+                    preference.course.supportIncident.attemptLedger,
+                    preference.course.supportIncident.cycle
+                  )
+                : null,
               firstTimeLookup:
                 Math.abs(
                   preference.course.createdAt.getTime() - search.createdAt.getTime()

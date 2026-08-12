@@ -26,6 +26,7 @@ import {
 } from "./course-support-verification";
 import {
   assessAutomationPlaybook,
+  isAutomationHumanReviewProofCurrentOrPrior,
   isAutomationPlaybookExhausted
 } from "./course-monitoring-playbook";
 import {
@@ -1281,6 +1282,7 @@ export async function inspectCourseSupportQueue(input?: {
         failureFingerprint: true,
         engineeringOnly: true,
         escalationDeadlineAt: true,
+        escalatedAt: true,
         firstSeenAt: true,
         course: {
           select: {
@@ -1359,6 +1361,12 @@ export async function inspectCourseSupportQueue(input?: {
       {
         incident: {
           ...incident,
+          endpointHumanReviewProven:
+            incident.escalatedAt != null &&
+            isAutomationHumanReviewProofCurrentOrPrior(
+              incident.attemptLedger,
+              incident.cycle
+            ),
           engineeringOnly:
             currentDemand.activeRealSearchCount > 0
               ? false
@@ -1402,6 +1410,8 @@ export async function inspectCourseSupportQueue(input?: {
           const key = `${item.incident.providerFamilyKey}\u0000${item.incident.failureFingerprint}`;
           const current = groups.get(key) ?? {
             providerFamilyKey: item.incident.providerFamilyKey,
+            pendingInitialEndpointCount: 0,
+            earliestPendingInitialEndpointDeadlineAt: null as Date | null,
             activeRealDemandCount: 0,
             courseCount: 0,
             earliestEscalationDeadlineAt: null as Date | null,
@@ -1409,6 +1419,21 @@ export async function inspectCourseSupportQueue(input?: {
           };
           current.activeRealDemandCount += item.activeRealSearchCount;
           current.courseCount += 1;
+          if (
+            item.activeRealSearchCount > 0 &&
+            !item.incident.endpointHumanReviewProven
+          ) {
+            current.pendingInitialEndpointCount += 1;
+            if (item.incident.escalationDeadlineAt) {
+              current.earliestPendingInitialEndpointDeadlineAt = new Date(
+                Math.min(
+                  current.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
+                    Number.MAX_SAFE_INTEGER,
+                  item.incident.escalationDeadlineAt.getTime()
+                )
+              );
+            }
+          }
           if (item.activeRealSearchCount > 0 && item.incident.escalationDeadlineAt) {
             current.earliestEscalationDeadlineAt = new Date(
               Math.min(
@@ -1427,6 +1452,8 @@ export async function inspectCourseSupportQueue(input?: {
           string,
           {
             providerFamilyKey: string;
+            pendingInitialEndpointCount: number;
+            earliestPendingInitialEndpointDeadlineAt: Date | null;
             activeRealDemandCount: number;
             courseCount: number;
             earliestEscalationDeadlineAt: Date | null;
@@ -5390,6 +5417,7 @@ async function listDueCourseSupportCandidates(now: Date) {
       activeRealSearchCount: true,
       earliestTargetDate: true,
       escalationDeadlineAt: true,
+      escalatedAt: true,
       firstSeenAt: true,
       lastSeenAt: true,
       lastAttemptAt: true,
@@ -5446,6 +5474,12 @@ async function listDueCourseSupportCandidates(now: Date) {
         activeRealSearchCount: currentDemand.activeRealSearchCount,
         earliestTargetDate: currentDemand.earliestTargetDate,
         escalationDeadlineAt: incident.escalationDeadlineAt,
+        endpointHumanReviewProven:
+          incident.escalatedAt != null &&
+          isAutomationHumanReviewProofCurrentOrPrior(
+            incident.attemptLedger,
+            incident.cycle
+          ),
         firstSeenAt: incident.firstSeenAt,
         lastSeenAt: incident.lastSeenAt,
         lastAttemptAt: incident.lastAttemptAt,

@@ -36,7 +36,8 @@ describe("dashboard monitoring verdict", () => {
     const verdict = getDashboardMonitoringVerdict({
       ...base,
       latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: new Date() },
-      supportIncidentStatus: "NEEDS_HUMAN"
+      supportIncidentStatus: "NEEDS_HUMAN",
+      automationPlaybookExhausted: true
     });
 
     expect(verdict.label).toBe("Manual review needed");
@@ -47,18 +48,17 @@ describe("dashboard monitoring verdict", () => {
     expect(verdict.detail).not.toMatch(/engineering|adapter|automation incident/i);
   });
 
-  it("shows an incomplete thirty-minute automation stall as manual review without falsely closing the incident", () => {
+  it("keeps an unexhausted thirty-minute automation stall retrying", () => {
     const verdict = getDashboardMonitoringVerdict({
       ...base,
       latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: new Date() },
       supportIncidentStatus: "AUTO_INVESTIGATING",
-      humanReviewReason: "AUTOMATION_STALLED"
+      humanReviewReason: "AUTOMATION_STALLED",
+      automationPlaybookExhausted: false
     });
 
-    expect(verdict.label).toBe("Manual review needed");
-    expect(verdict.detail).toContain(
-      "Manual review needed; your alert remains active"
-    );
+    expect(verdict.label).toBe("Automatic checks are still retrying");
+    expect(verdict.detail).toContain("Your alert remains active");
   });
 
   it("shows manual review at the deadline before the watchdog writes its reason", () => {
@@ -68,6 +68,7 @@ describe("dashboard monitoring verdict", () => {
       latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: deadline },
       supportIncidentStatus: "AUTO_INVESTIGATING",
       escalationDeadlineAt: deadline,
+      automationPlaybookExhausted: true,
       now: deadline
     });
 
@@ -84,7 +85,8 @@ describe("dashboard monitoring verdict", () => {
       latestProbe: { outcome: "NEEDS_ADAPTER", observedAt: escalatedAt },
       monitoringState: "AUTO_INVESTIGATING",
       supportIncidentStatus: "AUTO_INVESTIGATING",
-      incidentEscalatedAt: escalatedAt
+      incidentEscalatedAt: escalatedAt,
+      automationPlaybookExhausted: true
     });
     expect(revalidating.label).toBe("Manual review needed");
 
@@ -98,7 +100,8 @@ describe("dashboard monitoring verdict", () => {
       monitoringState: "HEALTHY",
       monitoringStateChangedAt: new Date("2026-08-10T14:29:00.000Z"),
       supportIncidentStatus: "AUTO_INVESTIGATING",
-      incidentEscalatedAt: escalatedAt
+      incidentEscalatedAt: escalatedAt,
+      automationPlaybookExhausted: true
     });
     expect(staleHealthy.label).toBe("Manual review needed");
 

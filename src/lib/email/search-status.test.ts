@@ -162,7 +162,8 @@ describe("renderSearchStatusHtml", () => {
           outcome: "NEEDS_ADAPTER",
           availableMatches: 0,
           bookingUrl: "https://course.example/tee-times",
-          supportStatus: "NEEDS_HUMAN_REVIEW"
+          supportStatus: "NEEDS_HUMAN_REVIEW",
+          automationPlaybookExhausted: true
         }
       ]
     });
@@ -174,6 +175,33 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Use the official site for current tee times");
     expect(html).toContain("Open official booking page");
     expect(html).not.toMatch(/engineering|adapter|automation incident/i);
+  });
+
+  it("keeps an unproven human marker automatic in customer email", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-automatic-retry",
+      to: "player@example.com",
+      kind: "setup",
+      targetDate: "2026-08-12",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-08-10T14:10:00.000Z"),
+      courses: [
+        {
+          courseId: "course-retrying",
+          courseName: "Course Still Retrying",
+          outcome: "NEEDS_ADAPTER",
+          availableMatches: 0,
+          bookingUrl: "https://course.example/tee-times",
+          supportStatus: "NEEDS_HUMAN_REVIEW",
+          automationPlaybookExhausted: false
+        }
+      ]
+    });
+
+    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
+    expect(html).not.toContain("MANUAL REVIEW NEEDED");
   });
 
   it("renders one consolidated outage update after the planner releases it", () => {

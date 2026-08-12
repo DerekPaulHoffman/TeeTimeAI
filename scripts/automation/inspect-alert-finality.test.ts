@@ -5,8 +5,75 @@ import {
   buildAlertFinalitySummary,
   isCurrentIncidentCycleForSearch
 } from "./inspect-alert-finality";
+import {
+  appendAutomationPlaybookEvent,
+  type AutomationPlaybookLedger,
+  type AutomationPlaybookReadPath,
+  type AutomationPlaybookStage
+} from "../../src/lib/automation/course-monitoring-playbook";
 
 const createdAt = new Date("2026-08-10T14:00:00.000Z");
+
+function playbookLedgerThrough(
+  stages: Array<[AutomationPlaybookStage, AutomationPlaybookReadPath]>
+) {
+  let ledger: AutomationPlaybookLedger | null = null;
+  for (const [stage, readPath] of stages) {
+    const failed =
+      stage === "TYPED_ADAPTER" ||
+      stage === "HTTP_ADAPTER_RETRY" ||
+      stage === "BROWSER_ADAPTER_RETRY";
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage,
+      transition: failed ? "FAILED_TERMINAL" : "NOT_APPLICABLE",
+      readPath,
+      evidenceKind: failed ? "PROVIDER_RESPONSE" : "TOOLING",
+      failureFingerprint: `FINALITY:${stage}`,
+      failureClass: failed ? "UNKNOWN" : undefined,
+      skipReason: failed ? undefined : "MONITORING_MODE_EXCLUDED",
+      runtimeVersion: "finality-test",
+      observedAt: new Date("2026-08-10T14:20:00.000Z")
+    });
+  }
+  return ledger;
+}
+
+function renderedBrowserPendingLedger() {
+  return playbookLedgerThrough([
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"]
+  ]);
+}
+
+function exhaustedLedger() {
+  return playbookLedgerThrough([
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"],
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+    ["LOCAL_READER", "LOCAL_READER"],
+    ["INDEPENDENT_CONFIRMATION", "INDEPENDENT_CONFIRMATION"]
+  ]);
+}
+
+function revalidatingLedger() {
+  return appendAutomationPlaybookEvent(exhaustedLedger(), {
+    cycle: 2,
+    stage: "OFFICIAL_IDENTITY",
+    transition: "NOT_APPLICABLE",
+    readPath: "OFFICIAL_IDENTITY",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "FINALITY:OFFICIAL_IDENTITY",
+    skipReason: "MONITORING_MODE_EXCLUDED",
+    runtimeVersion: "finality-test",
+    observedAt: new Date("2026-08-10T14:25:00.000Z")
+  });
+}
 
 function delivery(
   courses: Array<Record<string, unknown>>,
@@ -180,9 +247,9 @@ describe("alert finality audit", () => {
     expect(report.currentEndpointComplete).toBe(true);
     expect(report.currentEndpointSeconds).toBe(1800);
     expect(report.metThirtyMinuteEndpointTarget).toBe(true);
-    expect(report.deliveredCurrentCustomerStatusCounts.FINAL_DIRECT_ACTION).toBe(
-      1
-    );
+    expect(
+      report.deliveredCurrentCustomerStatusCounts.FINAL_DIRECT_ACTION
+    ).toBe(1);
     expect(report.monitoringStatusUpdateDeliveryCount).toBe(1);
     expect(report.latestStatusDeliveryKind).toBe("MONITORING_STATUS_UPDATE");
     expect(report.latestStatusDeliverySeconds).toBe(1800);
@@ -193,16 +260,25 @@ describe("alert finality audit", () => {
       id: "incident-deadline",
       cycle: 1,
       status: "AUTO_INVESTIGATING",
+      attemptLedger: renderedBrowserPendingLedger(),
+      humanReviewReason: "AUTOMATION_STALLED",
       firstAffectedSearchId: "search-1",
       firstSeenAt: new Date("2026-08-10T14:02:00.000Z"),
       lastSeenAt: new Date("2026-08-10T14:12:00.000Z"),
-      escalationDeadlineAt: new Date("2026-08-10T14:30:00.000Z")
+      escalationDeadlineAt: new Date("2026-08-10T14:30:00.000Z"),
+      escalatedAt: new Date("2026-08-10T14:30:00.000Z")
     };
     const input = search({
       preferences: [
         {
           courseId: "course-1",
-          course: { monitoringStatus: null, supportIncident: incident }
+          course: {
+            monitoringStatus: {
+              state: "ENGINEERING_VERIFICATION_NEEDED",
+              stateChangedAt: new Date("2026-08-10T14:30:00.000Z")
+            },
+            supportIncident: incident
+          }
         }
       ],
       probes: [
@@ -249,6 +325,7 @@ describe("alert finality audit", () => {
       id: "incident-human-review",
       cycle: 1,
       status: "NEEDS_HUMAN",
+      attemptLedger: exhaustedLedger(),
       humanReviewReason: "AUTOMATION_STALLED",
       firstAffectedSearchId: "search-1",
       firstSeenAt: new Date("2026-08-10T14:02:00.000Z"),
@@ -303,6 +380,7 @@ describe("alert finality audit", () => {
       id: "incident-human-review-undelivered",
       cycle: 1,
       status: "NEEDS_HUMAN",
+      attemptLedger: exhaustedLedger(),
       humanReviewReason: "AUTOMATION_STALLED",
       firstAffectedSearchId: "search-1",
       firstSeenAt: new Date("2026-08-10T14:02:00.000Z"),
@@ -474,14 +552,17 @@ describe("alert finality audit", () => {
       alertGeneration: 1
     };
     const currentPendingSetup = {
-      ...delivery([
-        {
-          courseId: "course-1",
-          courseName: "Current generation pending",
-          outcome: "CHECK_PENDING",
-          customerStatus: "CHECKING"
-        }
-      ], 20),
+      ...delivery(
+        [
+          {
+            courseId: "course-1",
+            courseName: "Current generation pending",
+            outcome: "CHECK_PENDING",
+            customerStatus: "CHECKING"
+          }
+        ],
+        20
+      ),
       alertGeneration: 2,
       status: "PENDING",
       sentAt: null
@@ -685,9 +766,9 @@ describe("alert finality audit", () => {
     );
 
     expect(report.currentEndpointStateComplete).toBe(true);
-    expect(report.deliveredCurrentCustomerStatusCounts.FINAL_DIRECT_ACTION).toBe(
-      1
-    );
+    expect(
+      report.deliveredCurrentCustomerStatusCounts.FINAL_DIRECT_ACTION
+    ).toBe(1);
     expect(report.deliveredCurrentCustomerStatusCounts.MONITORED).toBe(0);
     expect(report.currentEndpointComplete).toBe(false);
     expect(report.metThirtyMinuteEndpointTarget).toBe(false);
@@ -761,9 +842,9 @@ describe("alert finality audit", () => {
       new Date("2026-08-10T14:26:00.000Z")
     );
 
-    expect(report.deliveredCurrentCustomerStatusCounts.FINAL_DIRECT_ACTION).toBe(
-      1
-    );
+    expect(
+      report.deliveredCurrentCustomerStatusCounts.FINAL_DIRECT_ACTION
+    ).toBe(1);
     expect(report.currentEndpointComplete).toBe(true);
     expect(report.currentEndpointSeconds).toBe(1500);
   });
@@ -865,6 +946,7 @@ describe("alert finality audit", () => {
                 id: "incident-revalidating",
                 cycle: 2,
                 status: "AUTO_INVESTIGATING",
+                attemptLedger: revalidatingLedger(),
                 firstAffectedSearchId: "search-1",
                 firstSeenAt: new Date("2026-08-10T14:10:00.000Z"),
                 lastSeenAt: new Date("2026-08-10T14:25:00.000Z"),
@@ -1074,9 +1156,9 @@ describe("alert finality audit", () => {
       ]
     });
 
-    expect(buildAlertFinalityReport(input).currentIncidentCycleCourseCount).toBe(
-      1
-    );
+    expect(
+      buildAlertFinalityReport(input).currentIncidentCycleCourseCount
+    ).toBe(1);
     expect(buildAlertFinalityReport(input).issueRecordingComplete).toBe(true);
   });
 
@@ -1113,44 +1195,54 @@ describe("alert finality audit", () => {
       search({
         id: "search-fast",
         emailDeliveries: [
-          delivery([
-            {
-              courseId: "course-1",
-              courseName: "One",
-              outcome: "NO_MATCH",
-              customerStatus: "MONITORED"
-            },
-            {
-              courseId: "course-2",
-              courseName: "Two",
-              outcome: "NO_MATCH",
-              customerStatus: "MONITORED"
-            }
-          ], 4)
+          delivery(
+            [
+              {
+                courseId: "course-1",
+                courseName: "One",
+                outcome: "NO_MATCH",
+                customerStatus: "MONITORED"
+              },
+              {
+                courseId: "course-2",
+                courseName: "Two",
+                outcome: "NO_MATCH",
+                customerStatus: "MONITORED"
+              }
+            ],
+            4
+          )
         ]
       }),
       search({
         id: "search-slow",
         emailDeliveries: [
-          delivery([
-            {
-              courseId: "course-1",
-              courseName: "One",
-              outcome: "NO_MATCH",
-              customerStatus: "MONITORED"
-            },
-            {
-              courseId: "course-2",
-              courseName: "Two",
-              outcome: "MANUAL_DIRECT",
-              customerStatus: "FINAL_DIRECT_ACTION"
-            }
-          ], 8)
+          delivery(
+            [
+              {
+                courseId: "course-1",
+                courseName: "One",
+                outcome: "NO_MATCH",
+                customerStatus: "MONITORED"
+              },
+              {
+                courseId: "course-2",
+                courseName: "Two",
+                outcome: "MANUAL_DIRECT",
+                customerStatus: "FINAL_DIRECT_ACTION"
+              }
+            ],
+            8
+          )
         ]
       })
     ]);
 
-    expect(summary.deliverySeconds).toEqual({ p50: 240, p95: 480, maximum: 480 });
+    expect(summary.deliverySeconds).toEqual({
+      p50: 240,
+      p95: 480,
+      maximum: 480
+    });
     expect(summary.tenMinuteReportSuccessCount).toBe(2);
   });
 });

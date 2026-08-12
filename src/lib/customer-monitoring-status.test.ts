@@ -40,26 +40,35 @@ describe("customer monitoring status", () => {
         automationReason: "TEMPORARILY_UNAVAILABLE"
       })
     ).toBe("RETRYING_AUTOMATICALLY");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "CHECK_PENDING",
+        supportStatus: "IN_OPERATOR_QUEUE"
+      })
+    ).toBe("RETRYING_AUTOMATICALLY");
   });
 
   it("uses a distinct human-review state", () => {
     expect(
       getCustomerMonitoringStatus({
         outcome: "NEEDS_ADAPTER",
-        incidentStatus: "NEEDS_HUMAN"
+        incidentStatus: "NEEDS_HUMAN",
+        automationPlaybookExhausted: true
       })
     ).toBe("NEEDS_HUMAN_REVIEW");
     expect(
       getCustomerMonitoringStatus({
         outcome: "NEEDS_ADAPTER",
-        supportStatus: "NEEDS_HUMAN_REVIEW"
+        supportStatus: "NEEDS_HUMAN_REVIEW",
+        automationPlaybookExhausted: true
       })
     ).toBe("NEEDS_HUMAN_REVIEW");
     expect(
       getCustomerMonitoringStatus({
         outcome: "NEEDS_ADAPTER",
         incidentStatus: "AUTO_INVESTIGATING",
-        humanReviewReason: "AUTOMATION_STALLED"
+        humanReviewReason: "AUTOMATION_STALLED",
+        automationPlaybookExhausted: true
       })
     ).toBe("NEEDS_HUMAN_REVIEW");
   });
@@ -72,6 +81,7 @@ describe("customer monitoring status", () => {
         outcome: "NEEDS_ADAPTER",
         incidentStatus: "AUTO_INVESTIGATING",
         escalationDeadlineAt: deadline,
+        automationPlaybookExhausted: true,
         now: new Date("2026-08-10T14:29:59.999Z")
       })
     ).toBe("RETRYING_AUTOMATICALLY");
@@ -82,7 +92,83 @@ describe("customer monitoring status", () => {
         escalationDeadlineAt: deadline,
         now: deadline
       })
+    ).toBe("RETRYING_AUTOMATICALLY");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        incidentStatus: "AUTO_INVESTIGATING",
+        escalationDeadlineAt: deadline,
+        automationPlaybookExhausted: true,
+        now: deadline
+      })
     ).toBe("NEEDS_HUMAN_REVIEW");
+  });
+
+  it("keeps an unexhausted browser-stage deadline automatic and retryable", () => {
+    const deadline = new Date("2026-08-10T14:30:00.000Z");
+
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+        incidentStatus: "AUTO_INVESTIGATING",
+        humanReviewReason: "AUTOMATION_STALLED",
+        incidentEscalatedAt: deadline,
+        escalationDeadlineAt: deadline,
+        automationPlaybookExhausted: false,
+        now: deadline
+      })
+    ).toBe("RETRYING_AUTOMATICALLY");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+        incidentStatus: "NEEDS_HUMAN",
+        incidentEscalatedAt: deadline,
+        supportStatus: "NEEDS_HUMAN_REVIEW"
+      })
+    ).toBe("RETRYING_AUTOMATICALLY");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        incidentStatus: "AUTO_INVESTIGATING",
+        incidentEscalatedAt: deadline,
+        automationPlaybookExhausted: false
+      })
+    ).toBe("RETRYING_AUTOMATICALLY");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        incidentStatus: "AUTO_INVESTIGATING",
+        incidentEscalatedAt: deadline,
+        automationPlaybookExhausted: true
+      })
+    ).toBe("NEEDS_HUMAN_REVIEW");
+  });
+
+  it("does not let an older success mask an unproven automation incident", () => {
+    const stateChangedAt = new Date("2026-08-10T14:20:00.000Z");
+
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        outcomeObservedAt: new Date("2026-08-10T14:10:00.000Z"),
+        monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+        monitoringStateChangedAt: stateChangedAt,
+        incidentStatus: "AUTO_INVESTIGATING",
+        automationPlaybookExhausted: false
+      })
+    ).toBe("RETRYING_AUTOMATICALLY");
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NO_MATCH",
+        outcomeObservedAt: new Date("2026-08-10T14:21:00.000Z"),
+        monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+        monitoringStateChangedAt: stateChangedAt,
+        incidentStatus: "AUTO_INVESTIGATING",
+        automationPlaybookExhausted: false
+      })
+    ).toBe("MONITORED");
   });
 
   it("keeps human review customer-visible through unresolved internal revalidation", () => {
@@ -93,6 +179,7 @@ describe("customer monitoring status", () => {
         outcome: "NEEDS_ADAPTER",
         incidentStatus: "AUTO_INVESTIGATING",
         incidentEscalatedAt: escalatedAt,
+        automationPlaybookExhausted: true,
         escalationDeadlineAt: new Date("2026-08-10T21:00:00.000Z"),
         now: new Date("2026-08-10T15:00:00.000Z")
       })
@@ -119,6 +206,7 @@ describe("customer monitoring status", () => {
         monitoringState: "AUTO_INVESTIGATING",
         incidentStatus: "AUTO_INVESTIGATING",
         incidentEscalatedAt: escalatedAt,
+        automationPlaybookExhausted: true,
         outcomeObservedAt: new Date("2026-08-10T14:29:59.000Z")
       })
     ).toBe("NEEDS_HUMAN_REVIEW");
@@ -129,6 +217,7 @@ describe("customer monitoring status", () => {
         monitoringStateChangedAt: new Date("2026-08-10T14:29:00.000Z"),
         incidentStatus: "AUTO_INVESTIGATING",
         incidentEscalatedAt: escalatedAt,
+        automationPlaybookExhausted: true,
         outcomeObservedAt: new Date("2026-08-10T14:29:00.000Z")
       })
     ).toBe("NEEDS_HUMAN_REVIEW");
@@ -154,9 +243,9 @@ describe("customer monitoring status", () => {
       expect(status).toBe("FINAL_DIRECT_ACTION");
       expect(isFactualCustomerFinality(status)).toBe(true);
     }
-    expect(
-      getCustomerMonitoringStatus({ directActionAvailable: true })
-    ).toBe("FINAL_DIRECT_ACTION");
+    expect(getCustomerMonitoringStatus({ directActionAvailable: true })).toBe(
+      "FINAL_DIRECT_ACTION"
+    );
   });
 
   it("does not let a stale human incident override a durable final state", () => {

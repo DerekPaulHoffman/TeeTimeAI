@@ -31,6 +31,7 @@ export type CustomerMonitoringStatusInput = {
   incidentEscalatedAt?: Date | null;
   outcomeObservedAt?: Date | null;
   escalationDeadlineAt?: Date | null;
+  automationPlaybookExhausted?: boolean | null;
   now?: Date;
   supportStatus?: "IN_OPERATOR_QUEUE" | "NEEDS_HUMAN_REVIEW" | null;
   automationReason?: string | null;
@@ -66,29 +67,51 @@ export function getCustomerMonitoringStatus(
 ): CustomerMonitoringStatus {
   const escalationDeadlineReached = Boolean(
     input.incidentStatus === "AUTO_INVESTIGATING" &&
-      input.escalationDeadlineAt &&
-      input.escalationDeadlineAt.getTime() <= (input.now ?? new Date()).getTime()
+    input.escalationDeadlineAt &&
+    input.escalationDeadlineAt.getTime() <= (input.now ?? new Date()).getTime()
   );
   const unresolvedHumanReview = Boolean(
     input.incidentEscalatedAt &&
-      input.incidentStatus &&
-      input.incidentStatus !== "RESOLVED"
+    input.incidentStatus &&
+    input.incidentStatus !== "RESOLVED"
   );
+  const unprovenAutomationEscalation = Boolean(
+    input.automationPlaybookExhausted !== true &&
+    (input.monitoringState === "ENGINEERING_VERIFICATION_NEEDED" ||
+      input.incidentStatus === "NEEDS_HUMAN" ||
+      Boolean(input.humanReviewReason) ||
+      unresolvedHumanReview ||
+      escalationDeadlineReached ||
+      input.supportStatus === "NEEDS_HUMAN_REVIEW")
+  );
+  const automationEscalationAnchors = [
+    input.incidentEscalatedAt,
+    input.monitoringState === "ENGINEERING_VERIFICATION_NEEDED" ||
+    input.monitoringState === "AUTO_INVESTIGATING" ||
+    input.monitoringState === "DEGRADED_RETRYING"
+      ? input.monitoringStateChangedAt
+      : null,
+    escalationDeadlineReached ? input.escalationDeadlineAt : null
+  ].filter((value): value is Date => value instanceof Date);
+  const latestAutomationEscalationAt = automationEscalationAnchors.sort(
+    (left, right) => right.getTime() - left.getTime()
+  )[0];
   const freshMonitoredOutcome = Boolean(
     input.outcome &&
-      MONITORED_OUTCOMES.has(input.outcome) &&
-      input.outcomeObservedAt &&
-      input.incidentEscalatedAt &&
-      input.outcomeObservedAt >= input.incidentEscalatedAt
+    MONITORED_OUTCOMES.has(input.outcome) &&
+    input.outcomeObservedAt &&
+    latestAutomationEscalationAt &&
+    input.outcomeObservedAt >= latestAutomationEscalationAt
   );
   const freshHealthyState = Boolean(
     input.monitoringState === "HEALTHY" &&
-      input.monitoringStateChangedAt &&
-      input.incidentEscalatedAt &&
-      input.monitoringStateChangedAt >= input.incidentEscalatedAt
+    input.monitoringStateChangedAt &&
+    input.incidentEscalatedAt &&
+    input.monitoringStateChangedAt >= input.incidentEscalatedAt
   );
   if (
-    (input.monitoringState && FINAL_MONITORING_STATES.has(input.monitoringState)) ||
+    (input.monitoringState &&
+      FINAL_MONITORING_STATES.has(input.monitoringState)) ||
     (input.monitoringDisposition &&
       FINAL_MONITORING_DISPOSITIONS.has(input.monitoringDisposition)) ||
     (input.outcome && DIRECT_ACTION_OUTCOMES.has(input.outcome))
@@ -116,12 +139,13 @@ export function getCustomerMonitoringStatus(
   }
 
   if (
-    input.monitoringState === "ENGINEERING_VERIFICATION_NEEDED" ||
-    input.incidentStatus === "NEEDS_HUMAN" ||
-    input.humanReviewReason === "AUTOMATION_STALLED" ||
-    unresolvedHumanReview ||
-    escalationDeadlineReached ||
-    input.supportStatus === "NEEDS_HUMAN_REVIEW"
+    !unprovenAutomationEscalation &&
+    (input.monitoringState === "ENGINEERING_VERIFICATION_NEEDED" ||
+      input.incidentStatus === "NEEDS_HUMAN" ||
+      input.supportStatus === "NEEDS_HUMAN_REVIEW" ||
+      Boolean(input.humanReviewReason) ||
+      unresolvedHumanReview ||
+      escalationDeadlineReached)
   ) {
     return "NEEDS_HUMAN_REVIEW";
   }
@@ -131,15 +155,19 @@ export function getCustomerMonitoringStatus(
   }
 
   if (
-    input.outcome && MONITORED_OUTCOMES.has(input.outcome)
+    input.outcome &&
+    MONITORED_OUTCOMES.has(input.outcome) &&
+    (!unprovenAutomationEscalation || freshMonitoredOutcome)
   ) {
     return "MONITORED";
   }
 
   if (
+    unprovenAutomationEscalation ||
     input.monitoringState === "DEGRADED_RETRYING" ||
     input.monitoringState === "AUTO_INVESTIGATING" ||
     input.incidentStatus === "AUTO_INVESTIGATING" ||
+    input.supportStatus === "IN_OPERATOR_QUEUE" ||
     input.automationReason === "TEMPORARILY_UNAVAILABLE" ||
     (input.outcome && RETRYING_OUTCOMES.has(input.outcome))
   ) {

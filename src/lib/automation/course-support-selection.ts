@@ -25,6 +25,7 @@ export type CourseSupportCandidate = {
   activeRealSearchCount: number;
   earliestTargetDate: Date | null;
   escalationDeadlineAt: Date | null;
+  endpointHumanReviewProven: boolean;
   firstSeenAt: Date;
   lastSeenAt: Date;
   lastAttemptAt: Date | null;
@@ -47,6 +48,8 @@ export type SelectedCourseSupportBatch = {
 };
 
 export type CourseSupportGroupPriority = {
+  pendingInitialEndpointCount: number;
+  earliestPendingInitialEndpointDeadlineAt: Date | null;
   activeRealDemandCount: number;
   earliestEscalationDeadlineAt: Date | null;
 };
@@ -80,6 +83,9 @@ export function selectCourseSupportBatch(input: {
   const criticalGroups = rankedGroups.filter((group) =>
     group.some((candidate) => isCriticalRealDemand(candidate, now))
   );
+  const pendingInitialEndpointGroups = rankedGroups.filter(
+    (group) => candidateGroupPriority(group).pendingInitialEndpointCount > 0
+  );
   const recentFairnessWindow = (input.recentBatches ?? []).slice(
     0,
     COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW
@@ -102,6 +108,7 @@ export function selectCourseSupportBatch(input: {
     .sort((left, right) => oldestSeenAt(left) - oldestSeenAt(right))[0];
 
   const selectedGroup =
+    pendingInitialEndpointGroups[0] ??
     criticalGroups[0] ??
     (syntheticReservationDue ? agedSyntheticGroup : undefined) ??
     rankedGroups[0];
@@ -228,6 +235,26 @@ export function compareCourseSupportGroupPriority(
   left: CourseSupportGroupPriority,
   right: CourseSupportGroupPriority
 ) {
+  const leftHasPendingInitialEndpoint = left.pendingInitialEndpointCount > 0;
+  const rightHasPendingInitialEndpoint = right.pendingInitialEndpointCount > 0;
+  if (leftHasPendingInitialEndpoint !== rightHasPendingInitialEndpoint) {
+    return leftHasPendingInitialEndpoint ? -1 : 1;
+  }
+  if (leftHasPendingInitialEndpoint) {
+    const pendingDeadlineOrder =
+      (left.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
+        Number.MAX_SAFE_INTEGER) -
+      (right.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
+        Number.MAX_SAFE_INTEGER);
+    if (pendingDeadlineOrder !== 0) {
+      return pendingDeadlineOrder;
+    }
+    const pendingCountOrder =
+      right.pendingInitialEndpointCount - left.pendingInitialEndpointCount;
+    if (pendingCountOrder !== 0) {
+      return pendingCountOrder;
+    }
+  }
   const leftHasRealDemand = left.activeRealDemandCount > 0;
   const rightHasRealDemand = right.activeRealDemandCount > 0;
   if (leftHasRealDemand !== rightHasRealDemand) {
@@ -254,10 +281,24 @@ function candidateGroupPriority(
   const activeRealCandidates = candidates.filter(
     (candidate) => candidate.activeRealSearchCount > 0
   );
+  const pendingInitialEndpointCandidates = activeRealCandidates.filter(
+    (candidate) => !candidate.endpointHumanReviewProven
+  );
+  const pendingInitialEndpointDeadlines = pendingInitialEndpointCandidates.flatMap(
+    (candidate) =>
+      candidate.escalationDeadlineAt
+        ? [candidate.escalationDeadlineAt.getTime()]
+        : []
+  );
   const deadlines = activeRealCandidates.flatMap((candidate) =>
     candidate.escalationDeadlineAt ? [candidate.escalationDeadlineAt.getTime()] : []
   );
   return {
+    pendingInitialEndpointCount: pendingInitialEndpointCandidates.length,
+    earliestPendingInitialEndpointDeadlineAt:
+      pendingInitialEndpointDeadlines.length > 0
+        ? new Date(Math.min(...pendingInitialEndpointDeadlines))
+        : null,
     activeRealDemandCount: activeRealCandidates.reduce(
       (sum, candidate) => sum + candidate.activeRealSearchCount,
       0

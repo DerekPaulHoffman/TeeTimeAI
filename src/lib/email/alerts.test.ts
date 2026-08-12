@@ -234,7 +234,8 @@ describe("email alert delivery helpers", () => {
       courseName: "Course awaiting review",
       outcome: "NEEDS_ADAPTER" as const,
       availableMatches: 0,
-      supportStatus: "NEEDS_HUMAN_REVIEW" as const
+      supportStatus: "NEEDS_HUMAN_REVIEW" as const,
+      automationPlaybookExhausted: true
     };
 
     expect(

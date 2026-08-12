@@ -592,6 +592,19 @@ export function isAutomationPlaybookExhausted(
   );
 }
 
+export function isAutomationHumanReviewProofCurrentOrPrior(
+  value: unknown,
+  cycle?: number | null,
+) {
+  if (!cycle || cycle < 1) {
+    return false;
+  }
+  return (
+    isAutomationPlaybookExhausted(value, cycle) ||
+    (cycle > 1 && isAutomationPlaybookExhausted(value, cycle - 1))
+  );
+}
+
 export function serializeAutomationPlaybookLedger(
   ledger: AutomationPlaybookLedger,
 ): Prisma.InputJsonObject {

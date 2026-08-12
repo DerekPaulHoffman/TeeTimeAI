@@ -221,7 +221,10 @@ const PLAYBOOK_OBSERVED_AT = new Date("2026-07-11T12:00:00.000Z");
 
 function appendPlaybookEvent(
   ledger: AutomationPlaybookLedger | null,
-  input: Omit<AutomationPlaybookEventInput, "cycle" | "observedAt" | "runtimeVersion">
+  input: Omit<
+    AutomationPlaybookEventInput,
+    "cycle" | "observedAt" | "runtimeVersion"
+  >
 ) {
   return appendAutomationPlaybookEvent(ledger, {
     ...input,
@@ -251,7 +254,7 @@ function buildPlaybookThroughTypedAdapter() {
   return ledger;
 }
 
-function buildPlaybookThroughBrowserRetry() {
+function buildPlaybookAwaitingRenderedBrowser() {
   let ledger = buildPlaybookThroughTypedAdapter();
   ledger = appendPlaybookEvent(ledger, {
     stage: "OFFICIAL_HTTP_DISCOVERY",
@@ -260,7 +263,7 @@ function buildPlaybookThroughBrowserRetry() {
     evidenceKind: "OFFICIAL_SOURCE",
     failureFingerprint: "OFFICIAL_HTTP:COMPLETE"
   });
-  ledger = appendPlaybookEvent(ledger, {
+  return appendPlaybookEvent(ledger, {
     stage: "HTTP_ADAPTER_RETRY",
     transition: "FAILED_TERMINAL",
     readPath: "TYPED_PROVIDER_ADAPTER",
@@ -268,6 +271,10 @@ function buildPlaybookThroughBrowserRetry() {
     failureFingerprint: "HTTP_ADAPTER:FAILED",
     failureClass: "CHALLENGE"
   });
+}
+
+function buildPlaybookThroughBrowserRetry() {
+  let ledger = buildPlaybookAwaitingRenderedBrowser();
   ledger = appendPlaybookEvent(ledger, {
     stage: "RENDERED_BROWSER_DISCOVERY",
     transition: "COMPLETED",
@@ -282,6 +289,39 @@ function buildPlaybookThroughBrowserRetry() {
     evidenceKind: "PROVIDER_RESPONSE",
     failureFingerprint: "BROWSER_ADAPTER:FAILED",
     failureClass: "CHALLENGE"
+  });
+}
+
+function buildExhaustedPlaybook() {
+  let ledger = buildPlaybookThroughBrowserRetry();
+  ledger = appendPlaybookEvent(ledger, {
+    stage: "LOCAL_READER",
+    transition: "NOT_APPLICABLE",
+    readPath: "LOCAL_READER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "LOCAL_READER:NOT_APPLICABLE",
+    skipReason: "NO_LOCAL_READER_CAPABILITY"
+  });
+  return appendPlaybookEvent(ledger, {
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "NOT_APPLICABLE",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "INDEPENDENT_CONFIRMATION:NOT_APPLICABLE",
+    skipReason: "NO_INDEPENDENT_CONFIRMATION"
+  });
+}
+
+function buildRevalidatingPlaybook() {
+  return appendAutomationPlaybookEvent(buildExhaustedPlaybook(), {
+    cycle: 2,
+    observedAt: new Date("2026-07-11T12:05:00.000Z"),
+    runtimeVersion: "search-check-test-v1",
+    stage: "OFFICIAL_IDENTITY",
+    transition: "COMPLETED",
+    readPath: "OFFICIAL_IDENTITY",
+    evidenceKind: "OFFICIAL_SOURCE",
+    failureFingerprint: "OFFICIAL_IDENTITY:REVALIDATION"
   });
 }
 
@@ -388,6 +428,7 @@ describe("runSearchCheck email cadence", () => {
     courseMonitoringMocks.reconcileCourseMonitoringDeadlines.mockResolvedValue({
       checked: 0,
       escalated: 0,
+      retrying: 0,
       humanReviewIncidentIds: []
     });
     courseMonitoringMocks.recordCourseMonitoringFinalClassification.mockResolvedValue(
@@ -1762,6 +1803,16 @@ describe("runSearchCheck email cadence", () => {
               nextAutomaticAttemptAt: null,
               revalidationRequestedAt: null,
               stateChangedAt: episodeStartedAt
+            },
+            supportIncident: {
+              id: "incident-human",
+              cycle: 1,
+              status: "NEEDS_HUMAN",
+              attemptLedger: buildExhaustedPlaybook(),
+              humanReviewReason: "OTHER_TECHNICAL_LIMITATION",
+              escalatedAt: episodeStartedAt,
+              escalationDeadlineAt: episodeStartedAt,
+              firstSeenAt: episodeStartedAt
             }
           }
         }
@@ -2182,10 +2233,7 @@ describe("runSearchCheck email cadence", () => {
     deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockImplementationOnce(
       async (input) => {
         const deliveries = [];
-        for (const recipient of [
-          "player@resend.dev",
-          "friend@example.com"
-        ]) {
+        for (const recipient of ["player@resend.dev", "friend@example.com"]) {
           await input.send({
             recipient,
             idempotencyKey: `tee-search-delivery-${recipient}`,
@@ -2387,10 +2435,11 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
-    expect(playbook.getLedger().events.map((event) => [
-      event.stage,
-      event.transition
-    ])).toEqual([
+    expect(
+      playbook
+        .getLedger()
+        .events.map((event) => [event.stage, event.transition])
+    ).toEqual([
       ["OFFICIAL_IDENTITY", "STARTED"],
       ["OFFICIAL_IDENTITY", "COMPLETED"],
       ["TYPED_ADAPTER", "STARTED"],
@@ -2471,7 +2520,9 @@ describe("runSearchCheck email cadence", () => {
 
     const result = await runSearchCheck("search-1", "test");
 
-    expect(monitoringDiscoveryMocks.prepareSearchMonitoring).toHaveBeenCalledWith(
+    expect(
+      monitoringDiscoveryMocks.prepareSearchMonitoring
+    ).toHaveBeenCalledWith(
       initialSearch,
       undefined,
       new Date("2026-07-11T12:10:00.000Z"),
@@ -2973,7 +3024,9 @@ describe("runSearchCheck email cadence", () => {
     });
     expect(second.courseResults[0]?.outcome).not.toBe("CHECK_PENDING");
     expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledOnce();
-    expect(localReaderMocks.getFreshLocalReaderObservation).toHaveBeenCalledOnce();
+    expect(
+      localReaderMocks.getFreshLocalReaderObservation
+    ).toHaveBeenCalledOnce();
     expect(assessAutomationPlaybook(playbook.getLedger(), 1)).toMatchObject({
       conclusion: "INCOMPLETE",
       nextStage: "INDEPENDENT_CONFIRMATION"
@@ -3738,6 +3791,85 @@ describe("runSearchCheck email cadence", () => {
     expect(result.newlyAlertedMatches).toBe(0);
   });
 
+  it("continues to rendered-browser discovery after an unexhausted deadline", async () => {
+    const deadline = new Date("2026-07-11T12:10:00.000Z");
+    const attemptLedger = buildPlaybookAwaitingRenderedBrowser();
+    expect(assessAutomationPlaybook(attemptLedger, 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "RENDERED_BROWSER_DISCOVERY"
+    });
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            isPublic: true,
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            automationEligibility: "NEEDS_REVIEW",
+            automationReason: "OTHER",
+            monitoringStatus: {
+              state: "ENGINEERING_VERIFICATION_NEEDED",
+              firstDegradedAt: new Date("2026-07-11T11:40:00.000Z"),
+              failureFingerprint: "FOREUP:UNKNOWN",
+              nextAutomaticAttemptAt: deadline,
+              revalidationRequestedAt: null,
+              stateChangedAt: deadline
+            },
+            supportIncident: {
+              id: "incident-browser-pending",
+              cycle: 1,
+              status: "AUTO_INVESTIGATING",
+              attemptLedger,
+              humanReviewReason: "AUTOMATION_STALLED",
+              escalatedAt: deadline,
+              escalationDeadlineAt: deadline,
+              firstSeenAt: new Date("2026-07-11T11:40:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "CHECK_PENDING",
+      message: expect.stringContaining("rendered-browser")
+    });
+    expect(result.courseResults[0]?.supportStatus).toBe("IN_OPERATOR_QUEUE");
+    expect(
+      providerRequestLeaseMocks.runWithProviderRequestLease
+    ).not.toHaveBeenCalled();
+    expect(
+      supportIncidentMocks.reportCourseSupportIssue
+    ).not.toHaveBeenCalled();
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mock.calls.some(
+        ([input]) =>
+          input.payload.statusSnapshot?.some(
+            (course: { customerStatus?: string }) =>
+              course.customerStatus === "NEEDS_HUMAN_REVIEW"
+          ) ||
+          input.payload.statusReport?.courses?.some(
+            (course: { supportStatus?: string }) =>
+              course.supportStatus === "NEEDS_HUMAN_REVIEW"
+          )
+      )
+    ).toBe(false);
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mock.calls.some(
+        ([input]) =>
+          input.payload.statusSnapshot?.some(
+            (course: { customerStatus?: string }) =>
+              course.customerStatus === "RETRYING_AUTOMATICALLY"
+          )
+      )
+    ).toBe(true);
+  });
+
   it("does not re-run a provider while the course is waiting for human review", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
@@ -3757,6 +3889,16 @@ describe("runSearchCheck email cadence", () => {
               state: "ENGINEERING_VERIFICATION_NEEDED",
               nextAutomaticAttemptAt: null,
               revalidationRequestedAt: null
+            },
+            supportIncident: {
+              id: "incident-human-review",
+              cycle: 1,
+              status: "NEEDS_HUMAN",
+              attemptLedger: buildExhaustedPlaybook(),
+              humanReviewReason: "CAPTCHA_OR_QUEUE",
+              escalatedAt: new Date("2026-07-11T12:00:00.000Z"),
+              escalationDeadlineAt: new Date("2026-07-11T12:00:00.000Z"),
+              firstSeenAt: new Date("2026-07-11T11:30:00.000Z")
             },
             bookingMetadata: {
               scheduleId: 6123,
@@ -3828,10 +3970,10 @@ describe("runSearchCheck email cadence", () => {
             },
             supportIncident: {
               id: "incident-escalated",
-              cycle: 1,
+              cycle: 2,
               status: "AUTO_INVESTIGATING",
-              attemptLedger: null,
-              humanReviewReason: null,
+              attemptLedger: buildRevalidatingPlaybook(),
+              humanReviewReason: "OTHER_TECHNICAL_LIMITATION",
               escalatedAt,
               escalationDeadlineAt: new Date("2026-07-11T13:00:00.000Z"),
               firstSeenAt: firstDegradedAt
@@ -4010,7 +4152,7 @@ describe("runSearchCheck email cadence", () => {
               id: "incident-1",
               cycle: 1,
               status: "AUTO_INVESTIGATING",
-              attemptLedger: null,
+              attemptLedger: buildExhaustedPlaybook(),
               humanReviewReason,
               escalatedAt: humanReviewReason ? escalationDeadlineAt : null,
               escalationDeadlineAt,
@@ -4033,11 +4175,13 @@ describe("runSearchCheck email cadence", () => {
       .mockResolvedValueOnce({
         checked: 1,
         escalated: 0,
+        retrying: 0,
         humanReviewIncidentIds: []
       })
       .mockResolvedValueOnce({
         checked: 1,
         escalated: 1,
+        retrying: 0,
         humanReviewIncidentIds: []
       });
     const first = await runSearchCheck("search-1", "test");
@@ -4077,6 +4221,7 @@ describe("runSearchCheck email cadence", () => {
     courseMonitoringMocks.reconcileCourseMonitoringDeadlines.mockResolvedValue({
       checked: 0,
       escalated: 0,
+      retrying: 0,
       humanReviewIncidentIds: []
     });
 
@@ -4474,10 +4619,10 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(
-      playbook.getLedger().events.slice(-3).map((event) => [
-        event.stage,
-        event.transition
-      ])
+      playbook
+        .getLedger()
+        .events.slice(-3)
+        .map((event) => [event.stage, event.transition])
     ).toEqual([
       ["OFFICIAL_HTTP_DISCOVERY", "STARTED"],
       ["OFFICIAL_HTTP_DISCOVERY", "FAILED_TERMINAL"],
@@ -4786,7 +4931,9 @@ describe("runSearchCheck email cadence", () => {
         bookableHoleCounts: [9, 18]
       })
     );
-    expect(courseMonitoringMocks.recordCourseMonitoringSuccess).toHaveBeenCalledWith(
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringSuccess
+    ).toHaveBeenCalledWith(
       expect.objectContaining({
         courseId: "blue-rock",
         outcome: "NO_MATCH"

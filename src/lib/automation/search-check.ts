@@ -34,7 +34,11 @@ import {
   recordCourseMonitoringFinalClassification,
   recordCourseMonitoringSuccess
 } from "@/lib/automation/course-monitoring";
-import { assessAutomationPlaybook } from "@/lib/automation/course-monitoring-playbook";
+import {
+  assessAutomationPlaybook,
+  isAutomationHumanReviewProofCurrentOrPrior,
+  isAutomationPlaybookExhausted
+} from "@/lib/automation/course-monitoring-playbook";
 import {
   getBestProbeUrl,
   shouldQueueBrowserProbe
@@ -340,7 +344,10 @@ async function checkSearch(
       now: customerStatusObservedAt,
       source: "SEARCH_WORKFLOW"
     });
-  if (initialDeadlineReconciliation.escalated > 0) {
+  if (
+    initialDeadlineReconciliation.escalated > 0 ||
+    initialDeadlineReconciliation.retrying > 0
+  ) {
     search = (await getActiveSearchForAutomation(searchId)) ?? search;
   }
 
@@ -487,6 +494,12 @@ async function checkSearch(
             course.supportIncident.cycle
           )
         : null;
+      const persistedPlaybookExhausted = course.supportIncident
+        ? isAutomationPlaybookExhausted(
+            course.supportIncident.attemptLedger,
+            course.supportIncident.cycle
+          )
+        : null;
       if (
         persistedPlaybookAssessment?.conclusion === "FACTUAL_FINAL" &&
         persistedPlaybookAssessment.factualDisposition
@@ -554,13 +567,14 @@ async function checkSearch(
         return;
       }
       const waitingForHumanReview =
-        (course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED" &&
-          !course.monitoringStatus.revalidationRequestedAt) ||
-        course.supportIncident?.humanReviewReason === "AUTOMATION_STALLED" ||
         getCustomerMonitoringStatus({
+          monitoringState: course.monitoringStatus?.state ?? null,
           incidentStatus: course.supportIncident?.status ?? null,
+          humanReviewReason:
+            course.supportIncident?.humanReviewReason ?? null,
           escalationDeadlineAt:
             course.supportIncident?.escalationDeadlineAt ?? null,
+          automationPlaybookExhausted: persistedPlaybookExhausted,
           now: customerStatusObservedAt
         }) === "NEEDS_HUMAN_REVIEW";
       if (waitingForHumanReview) {
@@ -1839,7 +1853,10 @@ async function checkSearch(
     now: retryCalculationStartedAt,
     source: "SEARCH_WORKFLOW"
   });
-  if (deadlineReconciliation.escalated > 0) {
+  if (
+    deadlineReconciliation.escalated > 0 ||
+    deadlineReconciliation.retrying > 0
+  ) {
     search = (await getActiveSearchForAutomation(searchId)) ?? search;
   }
   const persistedSupportRetryAt = await getCourseMonitoringRetryAt(
@@ -2373,8 +2390,13 @@ function getLiveCustomerMonitoringStatus(
     incidentEscalatedAt: course.supportIncident?.escalatedAt ?? null,
     outcomeObservedAt: observedAt,
     escalationDeadlineAt: course.supportIncident?.escalationDeadlineAt ?? null,
+    automationPlaybookExhausted: course.supportIncident
+      ? isAutomationHumanReviewProofCurrentOrPrior(
+          course.supportIncident.attemptLedger,
+          course.supportIncident.cycle
+        )
+      : null,
     now: observedAt,
-    supportStatus: result.supportStatus,
     automationReason: result.automationReason
   });
 }
@@ -2395,15 +2417,26 @@ function applyCustomerMonitoringProjection(
       result,
       observedAt
     );
+    if (preference.course.supportIncident) {
+      result.automationPlaybookExhausted =
+        isAutomationHumanReviewProofCurrentOrPrior(
+          preference.course.supportIncident.attemptLedger,
+          preference.course.supportIncident.cycle
+        );
+    }
     if (
       customerStatus === "NEEDS_HUMAN_REVIEW" &&
       result.supportStatus !== "NEEDS_HUMAN_REVIEW"
     ) {
       result.message = HUMAN_REVIEW_CUSTOMER_MESSAGE;
       result.supportStatus = "NEEDS_HUMAN_REVIEW";
+    } else if (customerStatus === "RETRYING_AUTOMATICALLY") {
+      if (result.message === HUMAN_REVIEW_CUSTOMER_MESSAGE) {
+        delete result.message;
+      }
+      result.supportStatus = "IN_OPERATOR_QUEUE";
     } else if (
-      (customerStatus === "MONITORED" ||
-        customerStatus === "FINAL_DIRECT_ACTION") &&
+      customerStatus !== "NEEDS_HUMAN_REVIEW" &&
       result.supportStatus === "NEEDS_HUMAN_REVIEW"
     ) {
       delete result.supportStatus;
@@ -2580,6 +2613,12 @@ function buildPlaybookPendingCourseReport(
     outcome: "CHECK_PENDING",
     availableMatches: 0,
     message,
+    automationPlaybookExhausted: course.supportIncident
+      ? isAutomationHumanReviewProofCurrentOrPrior(
+          course.supportIncident.attemptLedger,
+          course.supportIncident.cycle
+        )
+      : undefined,
     bookingUrl: getCustomerBookingUrl(course),
     phone: course.bookingPhone ?? course.phone ?? undefined,
     bookingMethod: course.bookingMethod,
