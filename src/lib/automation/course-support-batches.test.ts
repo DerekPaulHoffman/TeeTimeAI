@@ -3079,6 +3079,66 @@ describe("remediated scheduler health", () => {
   });
 });
 
+function expiredRecoveryBatch(
+  incidentStates: Array<"AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED">
+) {
+  const releaseSha = "c".repeat(40);
+  return {
+    id: "batch-1",
+    status: "VERIFYING",
+    leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+    ownerThreadId: "old-thread",
+    ownerAutomationRunId: "run-1",
+    providerFamilyKey: "UNKNOWN",
+    failureFingerprint: "unknown-provider",
+    baseSha: releaseSha,
+    releaseSha,
+    deployedAt: new Date("2026-07-15T19:05:00.000Z"),
+    recheckDispatchKey: null,
+    recheckDispatchStartedAt: null,
+    recheckDispatchedAt: null,
+    revision: 3,
+    summary: {
+      branch: "automation/course-support-old",
+      plannedPaths: ["src/lib/provider.ts"]
+    },
+    incidents: incidentStates.map((status, index) => {
+      const suffix = index + 1;
+      const updatedAt = new Date(`2026-07-15T19:${30 + index}:00.000Z`);
+      const resolution =
+        status === "RESOLVED"
+          ? index % 2 === 0
+            ? "MONITORING_RESTORED"
+            : "IDENTITY_CLASSIFIED"
+          : null;
+      return {
+        id: `batch-entry-${suffix}`,
+        incidentId: `incident-${suffix}`,
+        courseId: `course-${suffix}`,
+        cycle: 2,
+        result: "STALE_EVIDENCE",
+        proofSnapshot: null,
+        updatedAt: new Date(`2026-07-15T19:${40 + index}:00.000Z`),
+        course: {
+          monitoringStatus: {
+            state: status === "AUTO_INVESTIGATING" ? "DEGRADED_RETRYING" : "AUTO_INVESTIGATING",
+            revision: 7 + index,
+            lastSuccessfulAt: null
+          }
+        },
+        incident: {
+          status,
+          resolution,
+          decisionAt: status === "RESOLVED" ? updatedAt : null,
+          cycle: 2,
+          activeBatchId: "batch-1",
+          updatedAt
+        }
+      };
+    })
+  };
+}
+
 describe("course-support recovery", () => {
   it("allows a clean expired batch to move to a new task", () => {
     expect(
@@ -3333,7 +3393,14 @@ describe("course-support recovery", () => {
               lastSuccessfulAt: null
             }
           },
-          incident: { updatedAt: incidentUpdatedAt }
+          incident: {
+            status: "AUTO_INVESTIGATING",
+            resolution: null,
+            decisionAt: null,
+            cycle: 2,
+            activeBatchId: "batch-1",
+            updatedAt: incidentUpdatedAt
+          }
         }
       ]
     });
@@ -3434,6 +3501,206 @@ describe("course-support recovery", () => {
         })
       })
     );
+  });
+
+  it("atomically closes terminal members and requeues only unresolved work in an expired batch", async () => {
+    const batch = expiredRecoveryBatch([
+      "NEEDS_HUMAN",
+      "NEEDS_HUMAN",
+      "NEEDS_HUMAN",
+      "AUTO_INVESTIGATING"
+    ]);
+    const retryAt = new Date(now.getTime() + 60_000);
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    const result = await recoverCourseSupportBatch({
+      batchId: batch.id,
+      requestingThreadId: "new-thread",
+      currentBranch: "fix/recover-mixed-expired-work",
+      currentHeadSha: "b".repeat(40),
+      dirtyPaths: [],
+      releaseIsPublished: true,
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human",
+      recovered: false,
+      safelyRequeued: true,
+      superseded: true,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: retryAt.toISOString(),
+      threadDisposition: "KEEP_VISIBLE"
+    });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: batch.id,
+          status: "VERIFYING",
+          revision: 3,
+          leaseExpiresAt: { lte: now },
+          releaseSha: batch.releaseSha,
+          deployedAt: batch.deployedAt,
+          completedAt: null
+        }),
+        data: expect.objectContaining({
+          status: "PARTIAL",
+          completedAt: now,
+          summary: expect.objectContaining({
+            closeout: {
+              outcome: "needs_human",
+              derivedOutcome: "needs_human",
+              failureDomain: "GIT",
+              terminalCount: 0,
+              retryCount: 1,
+              needsHumanCount: 3,
+              reason: "expired_mixed_reconciled_without_adoption"
+            }
+          })
+        })
+      })
+    );
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledTimes(4);
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "batch-entry-4", result: "STALE_EVIDENCE" }),
+        data: expect.objectContaining({ result: "RETRY_SCHEDULED" })
+      })
+    );
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "batch-entry-1", result: "STALE_EVIDENCE" }),
+        data: expect.objectContaining({ result: "NEEDS_HUMAN" })
+      })
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(4);
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-4",
+        cycle: 2,
+        activeBatchId: batch.id,
+        status: "AUTO_INVESTIGATING"
+      }),
+      data: expect.objectContaining({
+        activeBatchId: null,
+        nextAttemptAt: retryAt
+      })
+    });
+    expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-4",
+        state: "DEGRADED_RETRYING",
+        revision: 10,
+        lastSuccessfulAt: null
+      },
+      data: {
+        state: "AUTO_INVESTIGATING",
+        nextAutomaticAttemptAt: retryAt,
+        stateChangedAt: now,
+        revision: { increment: 1 }
+      }
+    });
+    expect(prismaMocks.verificationRequestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          batchIncident: { batchId: batch.id },
+          status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] }
+        }),
+        data: expect.objectContaining({
+          status: "STALE",
+          completedAt: now,
+          lastError: "batch_mixed_reconciled"
+        })
+      })
+    );
+  });
+
+  it("releases stale batch ownership from every member of an all-terminal expired batch", async () => {
+    const batch = expiredRecoveryBatch(["NEEDS_HUMAN", "RESOLVED"]);
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+    prismaMocks.supportIncidentFindMany.mockResolvedValue(
+      batch.incidents.map((entry) => ({ id: entry.incidentId, ...entry.incident }))
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    const result = await recoverCourseSupportBatch({
+      batchId: batch.id,
+      requestingThreadId: "new-thread",
+      currentBranch: "fix/recover-all-terminal-work",
+      currentHeadSha: "b".repeat(40),
+      dirtyPaths: [],
+      releaseIsPublished: true,
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human",
+      recovered: false,
+      superseded: true,
+      durableCloseoutRecorded: true
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(2);
+    for (const entry of batch.incidents) {
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith({
+        where: {
+          id: entry.incidentId,
+          cycle: entry.cycle,
+          activeBatchId: batch.id,
+          status: entry.incident.status,
+          resolution: entry.incident.resolution,
+          decisionAt: entry.incident.decisionAt,
+          updatedAt: entry.incident.updatedAt
+        },
+        data: {
+          activeBatchId: null,
+          revision: { increment: 1 }
+        }
+      });
+    }
+    expect(prismaMocks.verificationRequestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "STALE", lastError: "batch_superseded" })
+      })
+    );
+  });
+
+  it("fails mixed recovery when terminal ownership changes after the batch snapshot", async () => {
+    const batch = expiredRecoveryBatch(["NEEDS_HUMAN", "AUTO_INVESTIGATING"]);
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: batch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/recover-raced-work",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: true,
+        now
+      })
+    ).rejects.toThrow("mixed terminal ownership release");
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-1",
+        cycle: 2,
+        activeBatchId: batch.id,
+        status: "NEEDS_HUMAN",
+        updatedAt: batch.incidents[0].incident.updatedAt
+      }),
+      data: {
+        activeBatchId: null,
+        revision: { increment: 1 }
+      }
+    });
   });
 
   it("recovers beside an unrelated active provider group", async () => {
@@ -3576,6 +3843,8 @@ describe("course-support recovery", () => {
       status: "RESOLVED",
       resolution: "IDENTITY_CLASSIFIED",
       decisionAt: decidedAt,
+      cycle: 2,
+      activeBatchId: "batch-1",
       updatedAt: incidentUpdatedAt
     };
     prismaMocks.batchFindUnique.mockResolvedValue({
@@ -3607,6 +3876,8 @@ describe("course-support recovery", () => {
             status: terminalIncident.status,
             resolution: terminalIncident.resolution,
             decisionAt: terminalIncident.decisionAt,
+            cycle: terminalIncident.cycle,
+            activeBatchId: terminalIncident.activeBatchId,
             updatedAt: terminalIncident.updatedAt
           }
         }
@@ -3647,7 +3918,21 @@ describe("course-support recovery", () => {
         })
       })
     );
-    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        activeBatchId: "batch-1",
+        status: "RESOLVED",
+        resolution: "IDENTITY_CLASSIFIED",
+        decisionAt: decidedAt,
+        updatedAt: incidentUpdatedAt
+      },
+      data: {
+        activeBatchId: null,
+        revision: { increment: 1 }
+      }
+    });
   });
 });
 

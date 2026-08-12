@@ -4509,6 +4509,8 @@ export async function recoverCourseSupportBatch(input: {
                 status: true,
                 resolution: true,
                 decisionAt: true,
+                cycle: true,
+                activeBatchId: true,
                 updatedAt: true
               }
             }
@@ -4565,6 +4567,8 @@ export async function recoverCourseSupportBatch(input: {
               status: true,
               resolution: true,
               decisionAt: true,
+              cycle: true,
+              activeBatchId: true,
               updatedAt: true
             }
           });
@@ -4576,6 +4580,8 @@ export async function recoverCourseSupportBatch(input: {
               current.status === entry.incident.status &&
               current.resolution === entry.incident.resolution &&
               current.decisionAt?.getTime() === entry.incident.decisionAt?.getTime() &&
+              current.cycle === entry.cycle &&
+              current.activeBatchId === batch.id &&
               current.updatedAt.getTime() === entry.incident.updatedAt.getTime()
             );
           });
@@ -4589,6 +4595,11 @@ export async function recoverCourseSupportBatch(input: {
               status: batch.status,
               revision: batch.revision,
               leaseExpiresAt: { lte: now },
+              releaseSha: batch.releaseSha,
+              deployedAt: batch.deployedAt,
+              recheckDispatchKey: batch.recheckDispatchKey,
+              recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+              recheckDispatchedAt: batch.recheckDispatchedAt,
               completedAt: null
             },
             data: {
@@ -4631,6 +4642,26 @@ export async function recoverCourseSupportBatch(input: {
             });
             if (entryUpdated.count !== 1) {
               throw new Error("Expired responder evidence changed during terminal reconciliation.");
+            }
+            const incidentUpdated = await tx.courseSupportIncident.updateMany({
+              where: {
+                id: entry.incidentId,
+                cycle: entry.cycle,
+                activeBatchId: batch.id,
+                status: entry.incident.status,
+                resolution: entry.incident.resolution,
+                decisionAt: entry.incident.decisionAt,
+                updatedAt: entry.incident.updatedAt
+              },
+              data: {
+                activeBatchId: null,
+                revision: { increment: 1 }
+              }
+            });
+            if (incidentUpdated.count !== 1) {
+              throw new Error(
+                "Expired responder incident changed during terminal ownership release."
+              );
             }
           }
 
@@ -4753,11 +4784,48 @@ export async function recoverCourseSupportBatch(input: {
           now
         })
       ) {
+        const retryIncidents = batch.incidents.filter(
+          (entry) => entry.incident.status === "AUTO_INVESTIGATING"
+        );
+        if (
+          retryIncidents.length === 0 ||
+          retryIncidents.length + terminalIncidents.length !== batch.incidents.length
+        ) {
+          throw new Error(
+            "Expired responder incidents no longer match a recoverable lifecycle state."
+          );
+        }
+        const needsHumanCount = terminalIncidents.filter(
+          (entry) => entry.incident.status === "NEEDS_HUMAN"
+        ).length;
+        const restoredCount = terminalIncidents.filter(
+          (entry) =>
+            entry.incident.status === "RESOLVED" &&
+            entry.incident.resolution === "MONITORING_RESTORED"
+        ).length;
+        const finalCount = terminalIncidents.filter(
+          (entry) =>
+            entry.incident.status === "RESOLVED" &&
+            entry.incident.resolution !== "MONITORING_RESTORED"
+        ).length;
+        const terminalCount = restoredCount + finalCount;
+        const hasHuman = needsHumanCount > 0;
+        const derivedOutcome: ResponderOutcome = hasHuman
+          ? "needs_human"
+          : terminalCount > 0
+            ? "partial"
+            : "retryable_failed";
+        const batchStatus: CourseSupportBatchStatus =
+          hasHuman || terminalCount > 0 ? "PARTIAL" : "RETRYABLE_FAILED";
+        const closeoutReason =
+          terminalIncidents.length > 0
+            ? "expired_mixed_reconciled_without_adoption"
+            : "expired_retry_reconciled_without_adoption";
         const retryFloor = new Date(
           now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS
         );
         const retryAtByBatchIncidentId = new Map(
-          batch.incidents.map((entry) => {
+          retryIncidents.map((entry) => {
             const detachedFailureNotBefore =
               entry.result === "RETRY_SCHEDULED"
                 ? getDetachedFailureRetryNotBefore({
@@ -4780,7 +4848,13 @@ export async function recoverCourseSupportBatch(input: {
             candidate.getTime() < earliest.getTime() ? candidate : earliest
         );
         const message =
-          "Expired responder retry evidence was safely requeued without adopting local changes.";
+          terminalIncidents.length > 0
+            ? "Expired responder terminal decisions were reconciled and unresolved work was safely requeued without adopting local changes."
+            : "Expired responder retry evidence was safely requeued without adopting local changes.";
+        const verificationLastError =
+          terminalIncidents.length > 0 ? "batch_mixed_reconciled" : "batch_requeued";
+        const terminalMessage =
+          "Expired responder ownership was superseded by a later durable course decision.";
         const summary = asJsonObject(batch.summary);
         await prisma.$transaction(
           async (tx) => {
@@ -4798,20 +4872,20 @@ export async function recoverCourseSupportBatch(input: {
                 completedAt: null
               },
               data: {
-                status: "RETRYABLE_FAILED",
+                status: batchStatus,
                 completedAt: now,
                 heartbeatAt: now,
                 leaseExpiresAt: now,
                 summary: {
                   ...summary,
                   closeout: {
-                    outcome: "retryable_failed",
-                    derivedOutcome: "retryable_failed",
+                    outcome: derivedOutcome,
+                    derivedOutcome,
                     failureDomain: "GIT",
-                    terminalCount: 0,
-                    retryCount: batch.incidents.length,
-                    needsHumanCount: 0,
-                    reason: "expired_retry_reconciled_without_adoption"
+                    terminalCount,
+                    retryCount: retryIncidents.length,
+                    needsHumanCount,
+                    reason: closeoutReason
                   }
                 } as Prisma.InputJsonValue,
                 revision: { increment: 1 }
@@ -4822,6 +4896,51 @@ export async function recoverCourseSupportBatch(input: {
             }
 
             for (const entry of batch.incidents) {
+              if (entry.incident.status !== "AUTO_INVESTIGATING") {
+                const result =
+                  entry.incident.status === "NEEDS_HUMAN"
+                    ? ("NEEDS_HUMAN" as const)
+                    : entry.incident.resolution === "MONITORING_RESTORED"
+                      ? ("RESTORED" as const)
+                      : ("FINAL_DISPOSITION" as const);
+                const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
+                  where: {
+                    id: entry.id,
+                    result: entry.result,
+                    updatedAt: entry.updatedAt
+                  },
+                  data: {
+                    result,
+                    message: terminalMessage
+                  }
+                });
+                if (batchEntryUpdated.count !== 1) {
+                  throw new Error(
+                    "Expired responder evidence changed during mixed terminal reconciliation."
+                  );
+                }
+                const incidentUpdated = await tx.courseSupportIncident.updateMany({
+                  where: {
+                    id: entry.incidentId,
+                    cycle: entry.cycle,
+                    activeBatchId: batch.id,
+                    status: entry.incident.status,
+                    resolution: entry.incident.resolution,
+                    decisionAt: entry.incident.decisionAt,
+                    updatedAt: entry.incident.updatedAt
+                  },
+                  data: {
+                    activeBatchId: null,
+                    revision: { increment: 1 }
+                  }
+                });
+                if (incidentUpdated.count !== 1) {
+                  throw new Error(
+                    "Expired responder incident changed during mixed terminal ownership release."
+                  );
+                }
+                continue;
+              }
               const entryNextAttemptAt =
                 retryAtByBatchIncidentId.get(entry.id) ?? retryFloor;
               const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
@@ -4893,7 +5012,7 @@ export async function recoverCourseSupportBatch(input: {
                 leaseExpiresAt: null,
                 nextAttemptAt: null,
                 completedAt: now,
-                lastError: "batch_requeued",
+                lastError: verificationLastError,
                 updatedAt: now
               }
             });
@@ -4903,17 +5022,18 @@ export async function recoverCourseSupportBatch(input: {
                 where: { id: batch.ownerAutomationRunId, completedAt: null },
                 data: {
                   completedAt: now,
-                  outcome: "retryable_failed",
+                  outcome: derivedOutcome,
                   notes: JSON.stringify({
                     schemaVersion: 1,
                     lifecycle: "closeout",
-                    status: "RETRYABLE_FAILED",
-                    outcome: "retryable_failed",
-                    derivedOutcome: "retryable_failed",
-                    terminalCount: 0,
-                    retryCount: batch.incidents.length,
+                    status: batchStatus,
+                    outcome: derivedOutcome,
+                    derivedOutcome,
+                    terminalCount,
+                    retryCount: retryIncidents.length,
+                    needsHumanCount,
                     failureDomain: "GIT",
-                    reason: "expired_retry_reconciled_without_adoption"
+                    reason: closeoutReason
                   })
                 }
               });
@@ -4922,15 +5042,17 @@ export async function recoverCourseSupportBatch(input: {
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
         );
         return {
-          outcome: "retryable_failed" as const,
+          outcome: derivedOutcome,
           recovered: false,
           safelyRequeued: true,
+          superseded: terminalIncidents.length > 0,
           durableCloseoutRecorded: true,
           nextAttemptAt: nextAttemptAt.toISOString(),
           reasons: [message],
           ...getResponderThreadPolicy({
-            outcome: "retryable_failed",
+            outcome: derivedOutcome,
             nextAttemptAt,
+            requiresHuman: hasHuman,
             durableCloseoutRecorded: true,
             now
           })
