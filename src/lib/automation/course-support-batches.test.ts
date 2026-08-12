@@ -1191,10 +1191,12 @@ describe("course-support claim demand fencing", () => {
   });
 
   it.each([
+    ["HEALTHY", "MONITORING_RESTORED"],
     ["FINAL_MANUAL", "DIRECT_BOOKING_CLASSIFIED"],
+    ["FINAL_TECHNICAL", "TECHNICAL_LIMITATION_CLASSIFIED"],
     ["FINAL_IDENTITY", "IDENTITY_CLASSIFIED"],
   ] as const)(
-    "reconciles a persisted %s classification before responder ownership",
+    "reconciles a persisted authoritative %s state before responder ownership",
     async (state, resolution) => {
       const selected = incidentRecord({
         engineeringOnly: true,
@@ -1210,7 +1212,14 @@ describe("course-support claim demand fencing", () => {
             revision: 7,
             course: {
               ...selected.course,
-              monitoringStatus: { state },
+              monitoringStatus: {
+                state,
+                revision: 11,
+                lastSuccessfulAt:
+                  state === "HEALTHY"
+                    ? new Date("2026-07-21T01:36:30.000Z")
+                    : null,
+              },
             },
           },
         ]);
@@ -1239,6 +1248,18 @@ describe("course-support claim demand fencing", () => {
           status: "RESOLVED",
           resolution,
         }),
+      });
+      expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith({
+        where: {
+          courseId: selected.courseId,
+          state,
+          revision: 11,
+          lastSuccessfulAt:
+            state === "HEALTHY"
+              ? new Date("2026-07-21T01:36:30.000Z")
+              : null,
+        },
+        data: { revision: { increment: 0 } },
       });
       expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
       expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
@@ -3154,6 +3175,18 @@ describe("course-support recovery", () => {
     expect(
       canSafelyRequeueExpiredCourseSupportBatch({
         ...safeInput,
+        releaseSha: safeInput.baseSha,
+        releaseIsPublished: true,
+        deployedAt: new Date("2026-07-15T19:10:00.000Z"),
+        recheckDispatchKey: "dispatch-key",
+        recheckDispatchStartedAt: new Date("2026-07-15T19:15:00.000Z"),
+        recheckDispatchedAt: new Date("2026-07-15T19:16:00.000Z"),
+        incidentResults: ["RETRY_SCHEDULED"]
+      })
+    ).toBe(true);
+    expect(
+      canSafelyRequeueExpiredCourseSupportBatch({
+        ...safeInput,
         releaseSha: "a".repeat(40),
         releaseIsPublished: true
       })
@@ -3203,7 +3236,7 @@ describe("course-support recovery", () => {
     ).toBe(false);
   });
 
-  it("durably requeues an expired unpublished candidate instead of deadlocking on provenance", async () => {
+  it("durably reconciles an expired deployed retry instead of deadlocking on provenance", async () => {
     const expiredAt = new Date("2026-07-15T19:00:00.000Z");
     const incidentUpdatedAt = new Date("2026-07-15T19:30:00.000Z");
     const batchEntryUpdatedAt = new Date("2026-07-15T19:31:00.000Z");
@@ -3211,6 +3244,7 @@ describe("course-support recovery", () => {
     const recheckDispatchStartedAt = new Date("2026-07-15T19:15:00.000Z");
     const recheckDispatchedAt = new Date("2026-07-15T19:16:00.000Z");
     const deployedAt = new Date("2026-07-15T19:05:00.000Z");
+    const providerRetryNotBeforeAt = new Date("2026-07-15T20:30:00.000Z");
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
       status: "VERIFYING",
@@ -3234,8 +3268,28 @@ describe("course-support recovery", () => {
           incidentId: "incident-1",
           courseId: "course-1",
           cycle: 2,
-          result: "STALE_EVIDENCE",
+          result: "RETRY_SCHEDULED",
+          proofSnapshot: {
+            kind: "PROVIDER_VERIFICATION_FAILURE",
+            status: "RETRYABLE_FAILED",
+            outcome: "FETCH_FAILED",
+            failureClass: "RATE_LIMIT",
+            observedAt: "2026-07-15T19:45:00.000Z",
+            completedAt: "2026-07-15T19:46:00.000Z",
+            nextAttemptAt: "2026-07-15T20:20:00.000Z",
+            providerRetryNotBeforeAt: providerRetryNotBeforeAt.toISOString(),
+            runtimeVersion: candidateReleaseSha,
+            providerExecution: true,
+            providerSnapshotFingerprint: "a".repeat(64)
+          },
           updatedAt: batchEntryUpdatedAt,
+          course: {
+            monitoringStatus: {
+              state: "DEGRADED_RETRYING",
+              revision: 7,
+              lastSuccessfulAt: null
+            }
+          },
           incident: { updatedAt: incidentUpdatedAt }
         }
       ]
@@ -3243,6 +3297,7 @@ describe("course-support recovery", () => {
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.monitoringStatusUpdateMany.mockResolvedValue({ count: 0 });
 
     const result = await recoverCourseSupportBatch({
       batchId: "batch-1",
@@ -3250,7 +3305,7 @@ describe("course-support recovery", () => {
       currentBranch: "fix/release-expired-responder-work",
       currentHeadSha: "b".repeat(40),
       dirtyPaths: [],
-      releaseIsPublished: false,
+      releaseIsPublished: true,
       baseIsAncestor: false,
       committedPaths: [],
       now
@@ -3261,6 +3316,7 @@ describe("course-support recovery", () => {
       recovered: false,
       safelyRequeued: true,
       durableCloseoutRecorded: true,
+      nextAttemptAt: providerRetryNotBeforeAt.toISOString(),
       threadDisposition: "ARCHIVE"
     });
     expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
@@ -3285,7 +3341,7 @@ describe("course-support recovery", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           id: "batch-entry-1",
-          result: "STALE_EVIDENCE",
+          result: "RETRY_SCHEDULED",
           updatedAt: batchEntryUpdatedAt
         }),
         data: expect.objectContaining({
@@ -3302,10 +3358,24 @@ describe("course-support recovery", () => {
         }),
         data: expect.objectContaining({
           activeBatchId: null,
-          nextAttemptAt: new Date("2026-07-15T20:01:00.000Z")
+          nextAttemptAt: providerRetryNotBeforeAt
         })
       })
     );
+    expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        state: "DEGRADED_RETRYING",
+        revision: 7,
+        lastSuccessfulAt: null
+      },
+      data: {
+        state: "AUTO_INVESTIGATING",
+        nextAutomaticAttemptAt: providerRetryNotBeforeAt,
+        stateChangedAt: now,
+        revision: { increment: 1 }
+      }
+    });
     expect(prismaMocks.automationRunUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "run-1", completedAt: null },

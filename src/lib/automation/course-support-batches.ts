@@ -376,6 +376,39 @@ function isResponderSelectionEligible(input: {
   );
 }
 
+function getAuthoritativeCourseMonitoringResolution(
+  state: CourseMonitoringState | null | undefined
+) {
+  switch (state) {
+    case "HEALTHY":
+      return {
+        resolution: "MONITORING_RESTORED" as const,
+        message:
+          "Current authoritative monitoring state already records restored monitoring."
+      };
+    case "FINAL_MANUAL":
+      return {
+        resolution: "DIRECT_BOOKING_CLASSIFIED" as const,
+        message:
+          "Current authoritative monitoring state already records the direct booking classification."
+      };
+    case "FINAL_IDENTITY":
+      return {
+        resolution: "IDENTITY_CLASSIFIED" as const,
+        message:
+          "Current authoritative monitoring state already records the identity classification."
+      };
+    case "FINAL_TECHNICAL":
+      return {
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED" as const,
+        message:
+          "Current authoritative monitoring state already records the proof-backed technical classification."
+      };
+    default:
+      return null;
+  }
+}
+
 function buildDueResponderIncidentWhere(
   now: Date
 ): Prisma.CourseSupportIncidentWhereInput {
@@ -1053,17 +1086,25 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
       input.recheckDispatchStartedAt ||
       input.recheckDispatchedAt
   );
-  const hasOnlyStaleEvidence =
+  const hasOnlySafeDispatchedEvidence =
     input.incidentResults.length > 0 &&
-    input.incidentResults.every((result) => result === "STALE_EVIDENCE");
+    input.incidentResults.every(
+      (result) =>
+        result === "STALE_EVIDENCE" || result === "RETRY_SCHEDULED"
+    );
   return Boolean(
     input.leaseExpiresAt.getTime() <= now.getTime() &&
     (!input.releaseSha || input.releaseSha === input.baseSha || !input.releaseIsPublished) &&
     (!input.deployedAt || input.releaseSha === input.baseSha) &&
-    (!hasRecheckDispatch || hasOnlyStaleEvidence) &&
+    (!hasRecheckDispatch || hasOnlySafeDispatchedEvidence) &&
     input.dirtyPaths.length === 0 &&
     input.incidentResults.length > 0 &&
-    input.incidentResults.every((result) => result === "PENDING" || result === "STALE_EVIDENCE")
+    input.incidentResults.every(
+      (result) =>
+        result === "PENDING" ||
+        result === "STALE_EVIDENCE" ||
+        result === "RETRY_SCHEDULED"
+    )
   );
 }
 
@@ -1733,7 +1774,11 @@ export async function claimCourseSupportBatch(input: {
               select: {
                 timeZone: true,
                 monitoringStatus: {
-                  select: { state: true }
+                  select: {
+                    state: true,
+                    revision: true,
+                    lastSuccessfulAt: true
+                  }
                 },
                 preferences: {
                   where: {
@@ -1759,6 +1804,13 @@ export async function claimCourseSupportBatch(input: {
           const current = currentIncidentById.get(incident.id);
           if (!current) {
             throw new Error("Course-support demand changed during claim; rerun selection.");
+          }
+          if (
+            getAuthoritativeCourseMonitoringResolution(
+              current.course.monitoringStatus?.state
+            )
+          ) {
+            continue;
           }
           const currentDemand = deriveCourseSupportCurrentDemand(current.course.preferences, {
             timeZone: current.course.timeZone,
@@ -1793,9 +1845,26 @@ export async function claimCourseSupportBatch(input: {
           if (!current) {
             throw new Error("Course-support demand changed during claim; rerun selection.");
           }
-          const finalState = current.course.monitoringStatus?.state;
-          if (finalState !== "FINAL_MANUAL" && finalState !== "FINAL_IDENTITY") {
+          const monitoringStatus = current.course.monitoringStatus;
+          const authoritativeResolution = getAuthoritativeCourseMonitoringResolution(
+            monitoringStatus?.state
+          );
+          if (!monitoringStatus || !authoritativeResolution) {
             continue;
+          }
+          const monitoringFence = await tx.courseMonitoringStatus.updateMany({
+            where: {
+              courseId: incident.courseId,
+              state: monitoringStatus.state,
+              revision: monitoringStatus.revision,
+              lastSuccessfulAt: monitoringStatus.lastSuccessfulAt
+            },
+            data: { revision: { increment: 0 } }
+          });
+          if (monitoringFence.count !== 1) {
+            throw new Error(
+              "Course-support authoritative monitoring state changed during claim; rerun selection."
+            );
           }
           const reconciled = await tx.courseSupportIncident.updateMany({
             where: {
@@ -1808,12 +1877,9 @@ export async function claimCourseSupportBatch(input: {
             data: {
               status: "RESOLVED",
               resolvedAt: now,
-              resolution:
-                finalState === "FINAL_IDENTITY"
-                  ? "IDENTITY_CLASSIFIED"
-                  : "DIRECT_BOOKING_CLASSIFIED",
+              resolution: authoritativeResolution.resolution,
               resolutionMessage:
-                "Current authoritative monitoring state already records the factual final classification.",
+                authoritativeResolution.message,
               nextAction: null,
               nextAttemptAt: null,
               nextReminderAt: null,
@@ -2037,7 +2103,12 @@ export async function claimCourseSupportBatch(input: {
             incident.humanReviewReason ? [] : [incident.courseId]
           );
           await tx.courseMonitoringStatus.updateMany({
-            where: { courseId: { in: automatedCourseIds } },
+            where: {
+              courseId: { in: automatedCourseIds },
+              state: {
+                in: ["UNKNOWN", "DEGRADED_RETRYING", "AUTO_INVESTIGATING"]
+              }
+            },
             data: {
               state: "AUTO_INVESTIGATING",
               nextAutomaticAttemptAt: null,
@@ -2046,7 +2117,17 @@ export async function claimCourseSupportBatch(input: {
             }
           });
           await tx.courseMonitoringStatus.updateMany({
-            where: { courseId: { in: humanReviewCourseIds } },
+            where: {
+              courseId: { in: humanReviewCourseIds },
+              state: {
+                notIn: [
+                  "HEALTHY",
+                  "FINAL_MANUAL",
+                  "FINAL_TECHNICAL",
+                  "FINAL_IDENTITY"
+                ]
+              }
+            },
             data: {
               state: "ENGINEERING_VERIFICATION_NEEDED",
               nextAutomaticAttemptAt: null,
@@ -4383,7 +4464,19 @@ export async function recoverCourseSupportBatch(input: {
             courseId: true,
             cycle: true,
             result: true,
+            proofSnapshot: true,
             updatedAt: true,
+            course: {
+              select: {
+                monitoringStatus: {
+                  select: {
+                    state: true,
+                    revision: true,
+                    lastSuccessfulAt: true
+                  }
+                }
+              }
+            },
             incident: {
               select: {
                 status: true,
@@ -4633,9 +4726,34 @@ export async function recoverCourseSupportBatch(input: {
           now
         })
       ) {
-        const nextAttemptAt = new Date(now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS);
+        const retryFloor = new Date(
+          now.getTime() + EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS
+        );
+        const retryAtByBatchIncidentId = new Map(
+          batch.incidents.map((entry) => {
+            const detachedFailureNotBefore =
+              entry.result === "RETRY_SCHEDULED"
+                ? getDetachedFailureRetryNotBefore({
+                    proofSnapshot: entry.proofSnapshot,
+                    releaseSha: batch.releaseSha,
+                    now
+                  })
+                : null;
+            return [
+              entry.id,
+              detachedFailureNotBefore &&
+              detachedFailureNotBefore.getTime() > retryFloor.getTime()
+                ? detachedFailureNotBefore
+                : retryFloor
+            ] as const;
+          })
+        );
+        const nextAttemptAt = [...retryAtByBatchIncidentId.values()].reduce(
+          (earliest, candidate) =>
+            candidate.getTime() < earliest.getTime() ? candidate : earliest
+        );
         const message =
-          "Expired unreleased responder work was safely requeued without adopting local changes.";
+          "Expired responder retry evidence was safely requeued without adopting local changes.";
         const summary = asJsonObject(batch.summary);
         await prisma.$transaction(
           async (tx) => {
@@ -4666,7 +4784,7 @@ export async function recoverCourseSupportBatch(input: {
                     terminalCount: 0,
                     retryCount: batch.incidents.length,
                     needsHumanCount: 0,
-                    reason: "expired_unreleased_provenance_mismatch"
+                    reason: "expired_retry_reconciled_without_adoption"
                   }
                 } as Prisma.InputJsonValue,
                 revision: { increment: 1 }
@@ -4677,6 +4795,8 @@ export async function recoverCourseSupportBatch(input: {
             }
 
             for (const entry of batch.incidents) {
+              const entryNextAttemptAt =
+                retryAtByBatchIncidentId.get(entry.id) ?? retryFloor;
               const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
                 where: {
                   id: entry.id,
@@ -4701,7 +4821,7 @@ export async function recoverCourseSupportBatch(input: {
                 },
                 data: {
                   activeBatchId: null,
-                  nextAttemptAt,
+                  nextAttemptAt: entryNextAttemptAt,
                   latestMessage: message,
                   lastSeenAt: now,
                   revision: { increment: 1 }
@@ -4710,15 +4830,28 @@ export async function recoverCourseSupportBatch(input: {
               if (incidentUpdated.count !== 1) {
                 throw new Error("Expired responder incident changed during safe requeue.");
               }
-              await tx.courseMonitoringStatus.updateMany({
-                where: { courseId: entry.courseId },
-                data: {
-                  state: "AUTO_INVESTIGATING",
-                  nextAutomaticAttemptAt: nextAttemptAt,
-                  stateChangedAt: now,
-                  revision: { increment: 1 }
-                }
-              });
+              const monitoringStatus = entry.course.monitoringStatus;
+              if (
+                monitoringStatus &&
+                ["UNKNOWN", "DEGRADED_RETRYING", "AUTO_INVESTIGATING"].includes(
+                  monitoringStatus.state
+                )
+              ) {
+                await tx.courseMonitoringStatus.updateMany({
+                  where: {
+                    courseId: entry.courseId,
+                    state: monitoringStatus.state,
+                    revision: monitoringStatus.revision,
+                    lastSuccessfulAt: monitoringStatus.lastSuccessfulAt
+                  },
+                  data: {
+                    state: "AUTO_INVESTIGATING",
+                    nextAutomaticAttemptAt: entryNextAttemptAt,
+                    stateChangedAt: now,
+                    revision: { increment: 1 }
+                  }
+                });
+              }
             }
 
             await tx.courseSupportVerificationRequest.updateMany({
@@ -4753,7 +4886,7 @@ export async function recoverCourseSupportBatch(input: {
                     terminalCount: 0,
                     retryCount: batch.incidents.length,
                     failureDomain: "GIT",
-                    reason: "expired_unreleased_provenance_mismatch"
+                    reason: "expired_retry_reconciled_without_adoption"
                   })
                 }
               });
