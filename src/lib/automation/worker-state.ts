@@ -304,11 +304,7 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
       continue;
     }
 
-    if (
-      worker.overdueSince &&
-      (!worker.recoveredNotifiedAt ||
-        worker.recoveredNotifiedAt.getTime() < worker.overdueSince.getTime())
-    ) {
+    if (worker.overdueSince) {
       const expectedAt =
         worker.overdueNotifiedFor ??
         new Date(worker.overdueSince.getTime() - worker.graceSeconds * 1000);
@@ -336,23 +332,10 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
         });
         notified += lateNotification.count;
       }
-      const delivery = await sendAutomationWorkerHealthEmail({
-        workerKey: worker.workerKey,
-        event: "recovered",
-        expectedAt,
-        observedAt: now
-      });
-      if (delivery.deliveryStatus === "not_configured") {
-        continue;
-      }
       const recovery = await prisma.automationWorkerState.updateMany({
         where: {
           workerKey: worker.workerKey,
-          overdueSince: worker.overdueSince,
-          OR: [
-            { recoveredNotifiedAt: null },
-            { recoveredNotifiedAt: { lt: worker.overdueSince } }
-          ]
+          overdueSince: worker.overdueSince
         },
         data: {
           overdueSince: null,

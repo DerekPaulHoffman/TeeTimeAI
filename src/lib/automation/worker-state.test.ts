@@ -286,7 +286,7 @@ describe("automation worker state", () => {
     });
   });
 
-  it("records one deduplicated durable recovery notification", async () => {
+  it("records recovery without sending an automatic recovery email", async () => {
     mocks.findMany.mockResolvedValue([
       {
         workerKey: "product-improvement",
@@ -311,12 +311,7 @@ describe("automation worker state", () => {
         })
       })
     );
-    expect(emailMocks.sendAutomationWorkerHealthEmail).toHaveBeenCalledWith({
-      workerKey: "product-improvement",
-      event: "recovered",
-      expectedAt: new Date("2026-07-27T07:00:00.000Z"),
-      observedAt: now
-    });
+    expect(emailMocks.sendAutomationWorkerHealthEmail).not.toHaveBeenCalled();
   });
 
   it("leaves the overdue notification marker retryable when delivery fails", async () => {

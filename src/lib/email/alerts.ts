@@ -111,7 +111,7 @@ export type OperatorEmailDelivery =
 
 export type AutomationWorkerHealthEmailInput = {
   workerKey: string;
-  event: "overdue" | "recovered";
+  event: "overdue";
   expectedAt: Date;
   observedAt: Date;
 };
@@ -274,10 +274,7 @@ export async function sendAutomationWorkerHealthEmail(
   const email = {
     from,
     to,
-    subject:
-      input.event === "overdue"
-        ? "Action needed: Tee Time Spot worker is overdue"
-        : "Recovered: Tee Time Spot worker is healthy again",
+    subject: "Action needed: Tee Time Spot worker is overdue",
     html: renderAutomationWorkerHealthHtml(input)
   };
   const result = await new Resend(apiKey).emails.send(email, {
@@ -320,7 +317,6 @@ export function getAutomationWorkerHealthIdempotencyKey(
     .update(
       JSON.stringify({
         workerKey: input.workerKey,
-        event: input.event,
         expectedAt: input.expectedAt.toISOString()
       })
     )
@@ -338,14 +334,8 @@ export function renderAutomationWorkerHealthHtml(
       (input.observedAt.getTime() - input.expectedAt.getTime()) / 60_000
     )
   );
-  const heading =
-    input.event === "overdue"
-      ? "Automation worker needs attention"
-      : "Automation worker recovered";
-  const detail =
-    input.event === "overdue"
-      ? `The worker was ${overdueMinutes} minute${overdueMinutes === 1 ? "" : "s"} overdue when checked.`
-      : "The worker reported healthy activity again.";
+  const heading = "Automation worker needs attention";
+  const detail = `The worker was ${overdueMinutes} minute${overdueMinutes === 1 ? "" : "s"} overdue when checked.`;
   return `
     <div style="background:#f7f4eb;padding:24px;font-family:Inter,Arial,sans-serif;color:#14231d;line-height:1.5">
       <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #d9e3dc;border-radius:12px;overflow:hidden">

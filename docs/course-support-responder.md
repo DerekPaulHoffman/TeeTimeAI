@@ -136,8 +136,8 @@ An older success, a local check, a Workflow id by itself, or a new probe from a 
 ## Worker Health And Deadlines
 
 - Only the 2-minute scheduled responder invocation with `inspect --scheduled-cycle` updates responder worker health. Manual commands must remain diagnostically read-only with respect to worker health.
-- The responder's expected cadence is 2 minutes with a 3-minute grace period. At 5 minutes overdue, persist the durable overdue state and send one deduplicated operator notice when operator email is configured. Send one recovery notice after a later healthy scheduled cycle.
-- A compatible local reader is expected to heartbeat at least every two minutes and has three minutes of grace. Five minutes without a compatible heartbeat is an operator-visible reader outage; one notice and one later recovery notice are deduplicated per outage.
+- The responder's expected cadence is 2 minutes with a 3-minute grace period. At 5 minutes overdue, persist the durable overdue state and send one deduplicated operator notice when operator email is configured. A later healthy scheduled cycle clears the overdue state without sending a recovery email.
+- A compatible local reader is expected to heartbeat at least every two minutes and has three minutes of grace. Five minutes without a compatible heartbeat is an operator-visible reader outage with one deduplicated notice; a later healthy heartbeat clears that outage state silently.
 - Every reader job has its own five-minute deadline. Expiry produces a terminal reader result and one privacy-safe operator notification for the deadline sweep; it does not block schedule recovery, detached verification recovery, monitoring watchdog work, or unrelated reader jobs.
 - Long responder `verify` and `closeout` operations renew the owned batch lease while they run. Prisma deadlock and write-conflict failures receive bounded retries; they do not justify duplicate closeout or skipped proof.
 

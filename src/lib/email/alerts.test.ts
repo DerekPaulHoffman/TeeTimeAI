@@ -439,12 +439,6 @@ describe("email alert delivery helpers", () => {
         observedAt: new Date("2026-08-10T12:25:00.000Z")
       })
     ).toBe(key);
-    expect(
-      getAutomationWorkerHealthIdempotencyKey({
-        ...input,
-        event: "recovered"
-      })
-    ).not.toBe(key);
     expect(key).not.toContain(input.workerKey);
   });
 
@@ -473,23 +467,15 @@ describe("email alert delivery helpers", () => {
     }
   });
 
-  it("renders privacy-safe overdue and recovery operator messages", () => {
+  it("renders a privacy-safe overdue operator message", () => {
     const overdue = renderAutomationWorkerHealthHtml({
       workerKey: "reader-<primary>",
       event: "overdue",
       expectedAt: new Date("2026-08-10T12:00:00.000Z"),
       observedAt: new Date("2026-08-10T12:21:00.000Z")
     });
-    const recovered = renderAutomationWorkerHealthHtml({
-      workerKey: "course-support-responder",
-      event: "recovered",
-      expectedAt: new Date("2026-08-10T12:00:00.000Z"),
-      observedAt: new Date("2026-08-10T12:22:00.000Z")
-    });
-
     expect(overdue).toContain("21 minutes overdue");
     expect(overdue).toContain("reader-&lt;primary&gt;");
-    expect(recovered).toContain("reported healthy activity again");
   });
 });
 

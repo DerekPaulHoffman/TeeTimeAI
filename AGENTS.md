@@ -178,7 +178,7 @@ Core data:
 - `TeeTimeMatch`: normalized matching slot.
 - `AutomationRun`: durable poll/improvement run record.
 - `AutomationWorkerState`: durable desired state, cadence, heartbeat, completion,
-  and overdue/recovery notification state for engineering automation workers.
+  overdue notification state, and recorded recovery state for engineering automation workers.
 - `CourseAutomationDiscovery`: append-only provider/booking discovery evidence; an accepted finding can update the reusable `Course` snapshot.
 - `CourseSupportIncident`: one deduplicated unresolved monitoring incident per course, including provider family/fingerprint, retry schedule, and demand priority.
 - `CourseSupportBatch` / `CourseSupportBatchIncident`: durable ownership, provenance, lease, release verification, and per-course results for one responder provider-family/fingerprint batch.
