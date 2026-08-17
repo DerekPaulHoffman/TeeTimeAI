@@ -6931,6 +6931,62 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
+  it("releases early watch ownership from the freshly reread incident revision", async () => {
+    const batch = closeoutBatch("PENDING");
+    const currentIncidentUpdatedAt = new Date(now.getTime() - 30_000);
+    batch.incidents[0].incident.updatedAt = currentIncidentUpdatedAt;
+    batch.incidents[0].incident.lastSeenAt = currentIncidentUpdatedAt;
+    batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "command_failed",
+        failureDomain: "SLA",
+        verificationWatchMode: "EARLY_RETRY",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      derivedOutcome: "retryable_failed",
+      durableCloseoutRecorded: true,
+      retryCount: 1
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-1",
+          activeBatchId: "batch-1",
+          updatedAt: currentIncidentUpdatedAt
+        }),
+        data: expect.objectContaining({ activeBatchId: null })
+      })
+    );
+  });
+
+  it("keeps settled closeout fenced to the verified incident revision", async () => {
+    const batch = closeoutBatch("PENDING");
+    batch.incidents[0].incident.updatedAt = new Date(now.getTime() - 30_000);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now
+      })
+    ).rejects.toThrow("A course-support incident changed after verification.");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("releases early watch ownership without repeating a failed detached read", async () => {
     const batch = closeoutBatch("PENDING");
     batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);

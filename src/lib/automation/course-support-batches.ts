@@ -4172,6 +4172,7 @@ export async function closeoutCourseSupportBatch(input: {
       throw new Error("Terminal course-support evidence is missing or stale.");
     }
     if (
+      !ownershipReleaseMode &&
       entry.verifiedIncidentUpdatedAt &&
       entry.incident.updatedAt.getTime() !== entry.verifiedIncidentUpdatedAt.getTime()
     ) {
@@ -4399,7 +4400,9 @@ export async function closeoutCourseSupportBatch(input: {
       const message = sanitizeResponderText(
         entry.message ?? "Course-support responder closeout recorded."
       );
-      const expectedIncidentUpdatedAt = entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt;
+      const expectedIncidentUpdatedAt = ownershipReleaseMode
+        ? entry.incident.updatedAt
+        : (entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt);
       let incidentUpdated: { count: number };
       const authoritativeMonitoringResolution = ownershipReleaseMode
         ? getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
