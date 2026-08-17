@@ -190,7 +190,11 @@ export function isCurrentIncidentCycleForSearch(input: {
         )
     )
     .sort((left, right) => right.observedAt.getTime() - left.observedAt.getTime())[0];
-  return Boolean(issueProbe && incident.lastSeenAt >= issueProbe.observedAt);
+  return Boolean(
+    issueProbe &&
+      (incident.status !== "RESOLVED" ||
+        incident.lastSeenAt >= issueProbe.observedAt)
+  );
 }
 
 function getLatestDeliveredStatusByCourse(

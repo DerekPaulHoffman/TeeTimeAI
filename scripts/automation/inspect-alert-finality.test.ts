@@ -1322,6 +1322,80 @@ describe("alert finality audit", () => {
     expect(buildAlertFinalityReport(input).issueRecordingComplete).toBe(true);
   });
 
+  it("keeps an open endpoint incident current when a later failure probe wins the search check", () => {
+    const endpointAt = new Date("2026-08-10T14:30:00.000Z");
+    const currentIncident = {
+      id: "incident-open-endpoint",
+      cycle: 2,
+      status: "AUTO_INVESTIGATING",
+      attemptLedger: renderedBrowserPendingLedger(),
+      humanReviewReason: "AUTOMATION_STALLED",
+      firstAffectedSearchId: "search-old",
+      firstSeenAt: new Date("2026-08-10T14:02:00.000Z"),
+      lastSeenAt: endpointAt,
+      escalationDeadlineAt: endpointAt,
+      escalatedAt: endpointAt,
+      monitoringEvents: [
+        {
+          incidentId: "incident-open-endpoint",
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          occurredAt: endpointAt,
+          audit: {
+            cycle: 2,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            automationStalled: true,
+            playbookExhausted: false,
+            escalationDeadlineAt: endpointAt.toISOString()
+          }
+        }
+      ]
+    };
+    const report = buildAlertFinalityReport(
+      search({
+        preferences: [
+          {
+            courseId: "course-1",
+            course: {
+              monitoringStatus: {
+                state: "ENGINEERING_VERIFICATION_NEEDED",
+                stateChangedAt: endpointAt
+              },
+              supportIncident: currentIncident
+            }
+          }
+        ],
+        probes: [
+          {
+            courseId: "course-1",
+            outcome: "FETCH_FAILED",
+            observedAt: new Date("2026-08-10T14:30:20.000Z")
+          }
+        ],
+        emailDeliveries: [
+          delivery(
+            [
+              {
+                courseId: "course-1",
+                courseName: "Endpoint handoff",
+                outcome: "FETCH_FAILED",
+                customerStatus: "NEEDS_HUMAN_REVIEW"
+              }
+            ],
+            30,
+            "MONITORING_STATUS_UPDATE"
+          )
+        ]
+      }),
+      new Date("2026-08-10T14:31:00.000Z")
+    );
+
+    expect(report.currentIncidentCycleCourseCount).toBe(1);
+    expect(report.currentHumanReviewCourseCount).toBe(1);
+    expect(report.currentAutomaticRetryCourseCount).toBe(0);
+    expect(report.currentEndpointComplete).toBe(true);
+    expect(report.metThirtyMinuteEndpointTarget).toBe(true);
+  });
+
   it("marks a ten-minute-old checking report as stuck", () => {
     const report = buildAlertFinalityReport(
       search({
