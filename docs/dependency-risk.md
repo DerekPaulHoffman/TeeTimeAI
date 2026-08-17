@@ -1,9 +1,28 @@
 # Dependency risk register
 
-Last reviewed: 2026-07-27
+Last reviewed: 2026-08-17
 
 Owner: Tee Time Spot engineering
-Next review: 2026-08-03
+Next review: 2026-08-24
+
+## Nano ID patch
+
+The PostCSS-scoped Nano ID dependency is overridden to `3.3.18`, the first
+patched 3.x release for `GHSA-2v37-7h3g-55p8`. The Workflow core override
+remains on `5.1.16`, the first patched 5.x release. The application does not
+use Nano ID's custom generators directly, but pinning both transitive copies
+removes the known denial-of-service advisory without changing their major
+versions.
+
+## Prisma DeepmergeTS advisory
+
+`npm audit --omit=dev` reports `GHSA-ggr8-5vv4-36mx` through
+`prisma -> @prisma/config -> deepmerge-ts@7.1.5`. The first patched
+DeepmergeTS release is `8.0.0`, while Prisma currently declares the affected
+7.x version. Do not force a transitive major override without Prisma
+compatibility evidence. Track a coordinated Prisma patch or supported
+dependency update, then verify client generation, schema validation,
+migrations, tests, and the production build before release.
 
 ## Workflow toolchain advisory
 
