@@ -1078,11 +1078,9 @@ describe("course-support claim demand fencing", () => {
     };
   }
 
-  it("admits a fifth unrelated provider group", async () => {
+  it("admits a second unrelated provider group", async () => {
     const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
-    prismaMocks.batchFindMany.mockResolvedValueOnce(
-      Array.from({ length: 4 }, (_, index) => activeBatch(index + 1))
-    );
+    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1)]);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([incident]);
@@ -1097,14 +1095,14 @@ describe("course-support claim demand fencing", () => {
     ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
 
     expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ take: 5 })
+      expect.objectContaining({ take: 2 })
     );
     expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a sixth concurrent provider group", async () => {
+  it("rejects a third concurrent provider group", async () => {
     prismaMocks.batchFindMany.mockResolvedValueOnce(
-      Array.from({ length: 5 }, (_, index) => activeBatch(index + 1))
+      Array.from({ length: 2 }, (_, index) => activeBatch(index + 1))
     );
 
     await expect(
@@ -4504,7 +4502,7 @@ describe("course-support inspection ownership", () => {
     ]);
   });
 
-  it("publishes a deadline-ordered dispatch plan for up to five provider groups", async () => {
+  it("publishes a deadline-ordered dispatch plan for up to two provider groups", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce(
       Array.from({ length: 6 }, (_, index) => ({
         confirmedAt: now,
@@ -4533,20 +4531,17 @@ describe("course-support inspection ownership", () => {
 
     expect(result).toMatchObject({
       outcome: "ready",
-      availableWriterSlots: 5,
+      availableWriterSlots: 2,
       readOnlyDispatchPlan: {
-        maxProviderGroups: 5
+        maxProviderGroups: 2
       }
     });
     expect(result.readOnlyDispatchPlan.groups.map((group) => group.providerFamilyKey)).toEqual([
       "GROUP_1",
-      "GROUP_2",
-      "GROUP_3",
-      "GROUP_4",
-      "GROUP_5"
+      "GROUP_2"
     ]);
     expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ take: 5 })
+      expect.objectContaining({ take: 2 })
     );
   });
 
@@ -4703,7 +4698,7 @@ describe("course-support inspection ownership", () => {
       recoveryContinuation: {
         reinspectAfterRecovery: true,
         dueIncidentCount: 1,
-        availableWriterSlots: 5
+        availableWriterSlots: 2
       },
       readOnlyDispatchPlan: {
         groups: [{ providerFamilyKey: "DUE_GROUP" }]

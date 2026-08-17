@@ -79,7 +79,10 @@ const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS = 3;
 const COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS = 25;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
-const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 5;
+// Keep long-lived Codex ownership aligned with the global provider I/O limit.
+// Additional owners cannot make provider progress and can starve unrelated
+// interactive/release work on the local Codex host.
+const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 2;
 const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
   "HTTP_5XX",
