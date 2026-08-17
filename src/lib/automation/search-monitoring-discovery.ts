@@ -412,12 +412,17 @@ export async function prepareSearchMonitoring(
         ) ||
         isLegacyPolicyOnlyBlock(course)
     );
-  const candidateInputs = probeCourses.map((course) => ({
-    course,
-    sourceUrl: shouldRevalidatePrivateCourseIdentity(course, now)
-      ? getSafePrivateIdentityRevalidationUrl(course)
-      : getSafeMonitoringProbeUrl(course)
-  }));
+  const candidateInputs = probeCourses.map((course) => {
+    const repeatedFailureEvidence = repeatedFailureEvidenceByCourse.get(course.id);
+    return {
+      course,
+      sourceUrl: shouldRevalidatePrivateCourseIdentity(course, now)
+        ? getSafePrivateIdentityRevalidationUrl(course)
+        : shouldRediscoverFailedRunnableProvider(course, repeatedFailureEvidence, now)
+          ? getSafeRunnableProviderRediscoveryUrl(course)
+          : getSafeMonitoringProbeUrl(course)
+    };
+  });
   const appliedCourseIds: string[] = [];
   for (const { course, sourceUrl } of candidateInputs) {
     if (sourceUrl || !isLegacyPolicyOnlyBlock(course)) {
@@ -873,6 +878,15 @@ function getLegacyProphetFallbackEvidenceKind(
 function getSafeMonitoringProbeUrl(course: MonitoringDiscoveryCandidate["course"]) {
   const safeUrl = readSafePublicUrl(getBestProbeUrl(course));
   return safeUrl ? parseSafePublicUrl(safeUrl).toString() : null;
+}
+
+function getSafeRunnableProviderRediscoveryUrl(
+  course: MonitoringDiscoveryCandidate["course"]
+) {
+  const officialUrl = readSafePublicUrl(course.website);
+  return officialUrl
+    ? parseSafePublicUrl(officialUrl).toString()
+    : getSafeMonitoringProbeUrl(course);
 }
 
 function shouldRediscoverFailedRunnableProvider(

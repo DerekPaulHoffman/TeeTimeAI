@@ -14,6 +14,12 @@ describe("course support preflight checkout selection", () => {
   const currentMain = "a".repeat(40);
   const wrongCheckout = "C:\\dev\\TeeTimeAI-clean-wrong-worktree";
 
+  it("pins scheduled responder work to the clean approved checkout", () => {
+    expect(approvedCourseSupportResponderCheckout).toBe(
+      "C:\\dev\\TeeTimeAI-course-support-clean"
+    );
+  });
+
   it("rejects a clean exact-main worktree when the approved dispatch checkout is unavailable", () => {
     expect(
       selectApprovedCourseSupportResponderCheckout({

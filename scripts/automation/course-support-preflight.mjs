@@ -19,7 +19,7 @@ const responderArgs = [
 ];
 
 export const approvedCourseSupportResponderCheckout =
-  "C:\\dev\\TeeTimeAI-course-support-dispatch";
+  "C:\\dev\\TeeTimeAI-course-support-clean";
 
 export const requiredCourseSupportIncidentScalarFields = Object.freeze([
   "attemptLedger",
@@ -181,7 +181,7 @@ function main() {
             ? "UNAPPROVED_RESPONDER_CHECKOUT"
             : "APPROVED_RESPONDER_CHECKOUT_UNAVAILABLE",
         nextAction:
-          "Prepare C:\\dev\\TeeTimeAI-course-support-dispatch at exact origin/main and refresh dependencies only when the lockfile changed."
+          "Prepare C:\\dev\\TeeTimeAI-course-support-clean at exact origin/main and refresh dependencies only when the lockfile changed."
       })}\n`
     );
     process.exitCode = 2;

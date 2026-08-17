@@ -53,6 +53,14 @@ const chronogolfOfficialLinkProof = {
   providerUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
 };
 
+function currentIntelligenceEvidence() {
+  const now = Date.now();
+  return {
+    intelligenceVerifiedAt: new Date(now - 60 * 60 * 1000),
+    intelligenceReviewAt: new Date(now + 30 * 24 * 60 * 60 * 1000)
+  };
+}
+
 function browserReadyAttemptLedger() {
   const observedAt = new Date("2026-08-10T12:00:00.000Z");
   let ledger: unknown = null;
@@ -789,7 +797,9 @@ describe("browser discovery persistence", () => {
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "CAPTCHA_OR_QUEUE",
-      intelligenceReviewAt: "2026-08-16T00:00:00.000Z",
+      intelligenceReviewAt: new Date(
+        Date.now() + 30 * 24 * 60 * 60 * 1000
+      ).toISOString(),
       confidence: 0.95,
       evidence: {
         learnedFrom: "foreup-access-control",
@@ -829,8 +839,7 @@ describe("browser discovery persistence", () => {
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "BLOCKED",
       automationReason: "ACCOUNT_REQUIRED",
-      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
-      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      ...currentIntelligenceEvidence(),
       intelligenceConfidence: 0.95,
       updatedAt
     } as never);
@@ -986,8 +995,7 @@ describe("browser discovery persistence", () => {
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "ALLOWED",
       automationReason: "NONE",
-      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
-      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      ...currentIntelligenceEvidence(),
       intelligenceConfidence: 0.95,
       updatedAt: new Date("2026-07-16T12:05:00.000Z")
     } as never);
@@ -1187,8 +1195,7 @@ describe("browser discovery persistence", () => {
       bookingMethod: "CONTACT_COURSE",
       automationEligibility: "BLOCKED",
       automationReason: "NO_ONLINE_BOOKING",
-      intelligenceVerifiedAt: new Date("2026-07-16T12:00:00.000Z"),
-      intelligenceReviewAt: new Date("2026-08-16T00:00:00.000Z"),
+      ...currentIntelligenceEvidence(),
       intelligenceConfidence: 0.95,
       updatedAt: new Date("2026-07-16T12:05:00.000Z")
     } as never);
