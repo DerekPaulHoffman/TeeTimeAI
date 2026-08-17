@@ -78,14 +78,15 @@ describe("runCourseSupportVerificationWatch", () => {
         browserStages: { eligibleCount: 0, persistedCount: 0 },
         verification: { detachedVerification: { rerunNeeded: true } }
       })
+      .mockResolvedValueOnce(cleanPass())
       .mockResolvedValueOnce(cleanPass());
     const sleep = vi.fn(async () => undefined);
 
     const result = await runCourseSupportVerificationWatch({ pass, sleep });
 
-    expect(result.passCount).toBe(2);
-    expect(pass).toHaveBeenCalledTimes(2);
-    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(result.passCount).toBe(3);
+    expect(pass).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
   });
 
   it("requires an extra clean pass after browser work", async () => {
@@ -95,6 +96,7 @@ describe("runCourseSupportVerificationWatch", () => {
         browserStages: { eligibleCount: 1, persistedCount: 0 },
         verification: { detachedVerification: { rerunNeeded: false } }
       })
+      .mockResolvedValueOnce(cleanPass())
       .mockResolvedValueOnce(cleanPass());
 
     const result = await runCourseSupportVerificationWatch({
@@ -102,8 +104,33 @@ describe("runCourseSupportVerificationWatch", () => {
       sleep: async () => undefined
     });
 
-    expect(result.passCount).toBe(2);
-    expect(pass).toHaveBeenCalledTimes(2);
+    expect(result.passCount).toBe(3);
+    expect(pass).toHaveBeenCalledTimes(3);
+  });
+
+  it("rescans after detached verification exposes a browser-owned stage", async () => {
+    const pass = vi
+      .fn()
+      // The detached result applied by this apparently clean pass advances the
+      // ledger into independent confirmation after its browser-stage scan.
+      .mockResolvedValueOnce(cleanPass())
+      .mockResolvedValueOnce({
+        browserStages: { eligibleCount: 1, persistedCount: 1 },
+        verification: { detachedVerification: { rerunNeeded: false } }
+      })
+      .mockResolvedValueOnce(cleanPass())
+      .mockResolvedValueOnce(cleanPass());
+    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      sleep: async () => undefined
+    });
+
+    expect(result.passCount).toBe(4);
+    expect(pass).toHaveBeenCalledTimes(4);
+    expect(closeout).toHaveBeenCalledOnce();
   });
 
   it("uses a provisional restored course deadline for endpoint closeout", async () => {
@@ -221,6 +248,7 @@ describe("runCourseSupportVerificationWatch", () => {
     await expect(
       runCourseSupportVerificationWatch({
         pass: async () => cleanPass(),
+        sleep: async () => undefined,
         closeout: async () => {
           throw new Error("closeout compare-and-set changed");
         },
@@ -233,7 +261,7 @@ describe("runCourseSupportVerificationWatch", () => {
     });
     expect(onStopped).toHaveBeenCalledOnce();
     expect(onStopped).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "error", passCount: 1 })
+      expect.objectContaining({ reason: "error", passCount: 2 })
     );
   });
 
@@ -286,6 +314,7 @@ describe("runCourseSupportVerificationWatch", () => {
       deadlineAt: 10_000,
       now: () => currentTime,
       pass: async () => cleanPass(),
+      sleep: async () => undefined,
       closeout: ({ signal }) => {
         closeoutSignal = signal;
         return new Promise(() => undefined);
@@ -297,12 +326,12 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(result).toMatchObject({
       outcome: "verification_watch_closed",
       stoppedReason: "endpoint",
-      passCount: 1
+      passCount: 2
     });
     expect(closeoutSignal?.aborted).toBe(true);
     expect(onStopped).toHaveBeenCalledOnce();
     expect(onStopped).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "endpoint", passCount: 1 })
+      expect.objectContaining({ reason: "endpoint", passCount: 2 })
     );
   });
 
@@ -354,16 +383,17 @@ describe("runCourseSupportVerificationWatch", () => {
         events.push("pass");
         return cleanPass();
       },
+      sleep: async () => undefined,
       closeout: async ({ passCount }) => {
         events.push("closeout");
         return { durableCloseoutRecorded: true, passCount };
       }
     });
 
-    expect(events).toEqual(["pass", "closeout"]);
+    expect(events).toEqual(["pass", "pass", "closeout"]);
     expect(result.closeout).toEqual({
       durableCloseoutRecorded: true,
-      passCount: 1
+      passCount: 2
     });
   });
 });

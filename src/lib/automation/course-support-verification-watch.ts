@@ -322,6 +322,7 @@ export async function runCourseSupportVerificationWatch<
       : ("max" as const);
   let passCount = 0;
   let lastPass: CourseSupportVerificationPassResult<TVerification> | null = null;
+  let consecutiveCleanPassCount = 0;
 
   const runForBudget = async <T>(
     operation: (signal: AbortSignal) => Promise<T>,
@@ -435,7 +436,16 @@ export async function runCourseSupportVerificationWatch<
       settledPass.browserStages.eligibleCount > 0 ||
       settledPass.browserStages.persistedCount > 0 ||
       settledPass.verification.detachedVerification?.rerunNeeded === true;
-    if (!needsAnotherPass) {
+    // Verification can apply a detached result that advances the ledger into
+    // an owner-only browser stage after this pass's browser scan. Requiring
+    // two consecutive clean scans prevents that phase change from being
+    // mistaken for a settled batch.
+    if (needsAnotherPass) {
+      consecutiveCleanPassCount = 0;
+    } else {
+      consecutiveCleanPassCount += 1;
+    }
+    if (!needsAnotherPass && consecutiveCleanPassCount >= 2) {
       let closeout: TCloseout | null;
       if (input.closeout) {
         const closeoutResult = await runBounded((signal) =>
