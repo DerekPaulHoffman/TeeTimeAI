@@ -128,6 +128,17 @@ function OperatorDashboard({
         </div>
       </header>
 
+      {overview.operations.courseSupportAlert ? (
+        <aside className="operator-responder-alert" role="alert">
+          <AlertTriangle aria-hidden="true" size={22} />
+          <div>
+            <strong>{overview.operations.courseSupportAlert.title}</strong>
+            <span>{overview.operations.courseSupportAlert.detail}</span>
+          </div>
+          <a href="#workers-heading">View worker health</a>
+        </aside>
+      ) : null}
+
       <section
         aria-labelledby="course-work-heading"
         className="operator-section operator-course-command"

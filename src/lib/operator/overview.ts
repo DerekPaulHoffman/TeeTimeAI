@@ -34,6 +34,50 @@ type TrackedEventName = (typeof EVENT_NAMES)[number];
 
 export type OperatorOverview = Awaited<ReturnType<typeof loadOperatorOverview>>;
 
+export function buildCourseSupportResponderAlert(input: {
+  now: Date;
+  openIncidentCount: number;
+  worker?: {
+    desiredState: string;
+    monitoringStartedAt: Date | null;
+    nextExpectedAt: Date | null;
+    graceSeconds: number;
+  };
+}) {
+  if (input.openIncidentCount === 0) {
+    return null;
+  }
+  const worker = input.worker;
+  if (!worker) {
+    return {
+      status: "MISSING" as const,
+      title: "Course investigations are not reporting",
+      detail: `${input.openIncidentCount} open course investigations have no responder health record.`
+    };
+  }
+  if (worker.desiredState === "PAUSED") {
+    return {
+      status: "PAUSED" as const,
+      title: "Course investigations are paused",
+      detail: `${input.openIncidentCount} open course investigations will wait until the responder is resumed.`
+    };
+  }
+  const overdue = Boolean(
+    worker.desiredState === "ACTIVE" &&
+      worker.monitoringStartedAt &&
+      worker.nextExpectedAt &&
+      worker.nextExpectedAt.getTime() + worker.graceSeconds * 1000 <= input.now.getTime()
+  );
+  if (!overdue) {
+    return null;
+  }
+  return {
+    status: "OVERDUE" as const,
+    title: "Course investigations are stalled",
+    detail: `${input.openIncidentCount} open course investigations are waiting because the responder missed its expected run.`
+  };
+}
+
 export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) {
   const now = input.now ?? new Date();
   const range = getOperatorDateRange(input.days, now);
@@ -632,9 +676,11 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
       select: {
         workerKey: true,
         desiredState: true,
+        graceSeconds: true,
         lastHeartbeatAt: true,
         lastCompletedAt: true,
         lastOutcome: true,
+        monitoringStartedAt: true,
         nextExpectedAt: true,
         overdueSince: true,
         runtimeVersion: true
@@ -662,6 +708,14 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
       where: { status: { in: ["PENDING", "SENDING"] } }
     })
   ]);
+  const courseSupportWorker = workerStates.find(
+    (worker) => worker.workerKey === "course-support-responder"
+  );
+  const courseSupportAlert = buildCourseSupportResponderAlert({
+    now,
+    openIncidentCount: openIncidents.length,
+    worker: courseSupportWorker
+  });
 
   return {
     generatedAt: now,
@@ -729,6 +783,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
     unresolvedFeedback,
     operations: {
       workers: workerStates,
+      courseSupportAlert,
       recentRuns: recentAutomationRuns,
       activeSearches: {
         public: activePublicSearches,

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   approvedCourseSupportResponderCheckout,
+  approvedCourseSupportResponderCheckouts,
   generatedPrismaSetupRequiredResult,
+  getResponderCheckoutRefreshPlan,
   inspectGeneratedPrismaClient,
   launchFailureResult,
   requiredCourseSupportIncidentScalarFields,
@@ -20,10 +22,17 @@ describe("course support preflight checkout selection", () => {
     );
   });
 
+  it("keeps an approved standby checkout available for safe failover", () => {
+    expect(approvedCourseSupportResponderCheckouts).toEqual([
+      "C:\\dev\\TeeTimeAI-course-support-clean",
+      "C:\\dev\\TeeTimeAI-responder-self-healing"
+    ]);
+  });
+
   it("rejects a clean exact-main worktree when the approved dispatch checkout is unavailable", () => {
     expect(
       selectApprovedCourseSupportResponderCheckout({
-        approvedCheckout: approvedCourseSupportResponderCheckout,
+        approvedCheckouts: approvedCourseSupportResponderCheckouts,
         preparedCheckouts: [wrongCheckout],
         currentMain,
         readHead: () => currentMain,
@@ -35,7 +44,7 @@ describe("course support preflight checkout selection", () => {
   it("selects only the approved dispatch checkout when another clean exact-main worktree is present", () => {
     expect(
       selectApprovedCourseSupportResponderCheckout({
-        approvedCheckout: approvedCourseSupportResponderCheckout,
+        approvedCheckouts: approvedCourseSupportResponderCheckouts,
         preparedCheckouts: [wrongCheckout, approvedCourseSupportResponderCheckout],
         currentMain,
         readHead: () => currentMain,
@@ -43,14 +52,28 @@ describe("course support preflight checkout selection", () => {
       })
     ).toEqual({
       outcome: "selected",
-      checkout: approvedCourseSupportResponderCheckout
+      checkout: approvedCourseSupportResponderCheckout,
+      failover: false
     });
+  });
+
+  it("selects the approved standby without modifying an unavailable primary", () => {
+    const standbyCheckout = approvedCourseSupportResponderCheckouts[1];
+    expect(
+      selectApprovedCourseSupportResponderCheckout({
+        approvedCheckouts: approvedCourseSupportResponderCheckouts,
+        preparedCheckouts: [standbyCheckout],
+        currentMain,
+        readHead: () => currentMain,
+        platform: "win32"
+      })
+    ).toEqual({ outcome: "selected", checkout: standbyCheckout, failover: true });
   });
 
   it("rejects an environment override to a different prepared checkout", () => {
     expect(
       selectApprovedCourseSupportResponderCheckout({
-        approvedCheckout: approvedCourseSupportResponderCheckout,
+        approvedCheckouts: approvedCourseSupportResponderCheckouts,
         requestedCheckout: wrongCheckout,
         preparedCheckouts: [approvedCourseSupportResponderCheckout],
         currentMain,
@@ -58,6 +81,49 @@ describe("course support preflight checkout selection", () => {
         platform: "win32"
       })
     ).toEqual({ outcome: "rejected_requested_checkout" });
+  });
+});
+
+describe("course support checkout refresh planning", () => {
+  const currentMain = "a".repeat(40);
+
+  it("fast-forwards a clean behind checkout and refreshes dependencies when needed", () => {
+    expect(
+      getResponderCheckoutRefreshPlan({
+        prepared: true,
+        clean: true,
+        currentMain,
+        head: "b".repeat(40),
+        aheadCount: 0,
+        behindCount: 2,
+        lockfileChanged: true
+      })
+    ).toEqual({ outcome: "fast_forward", refreshDependencies: true });
+  });
+
+  it("leaves dirty or diverged checkouts unavailable for their owner", () => {
+    expect(
+      getResponderCheckoutRefreshPlan({
+        prepared: true,
+        clean: false,
+        currentMain,
+        head: currentMain,
+        aheadCount: 0,
+        behindCount: 0,
+        lockfileChanged: false
+      })
+    ).toEqual({ outcome: "unavailable" });
+    expect(
+      getResponderCheckoutRefreshPlan({
+        prepared: true,
+        clean: true,
+        currentMain,
+        head: "c".repeat(40),
+        aheadCount: 1,
+        behindCount: 1,
+        lockfileChanged: false
+      })
+    ).toEqual({ outcome: "unavailable" });
   });
 });
 

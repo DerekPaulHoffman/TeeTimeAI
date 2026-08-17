@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildTopCourses, countEvents } from "./overview";
+import { buildCourseSupportResponderAlert, buildTopCourses, countEvents } from "./overview";
 
 describe("operator overview aggregation", () => {
   it("ranks courses by real saved selections and counts distinct owners", () => {
@@ -59,6 +59,47 @@ describe("operator overview aggregation", () => {
       search_submitted: 1,
       course_discovery_completed: 0
     });
+  });
+
+  it("elevates an overdue responder while investigations are waiting", () => {
+    expect(
+      buildCourseSupportResponderAlert({
+        now: new Date("2026-08-17T14:10:00.000Z"),
+        openIncidentCount: 65,
+        worker: {
+          desiredState: "ACTIVE",
+          monitoringStartedAt: new Date("2026-08-16T12:00:00.000Z"),
+          nextExpectedAt: new Date("2026-08-17T14:04:00.000Z"),
+          graceSeconds: 300
+        }
+      })
+    ).toEqual({
+      status: "OVERDUE",
+      title: "Course investigations are stalled",
+      detail:
+        "65 open course investigations are waiting because the responder missed its expected run."
+    });
+  });
+
+  it("does not show a stall warning for a current responder or an empty queue", () => {
+    expect(
+      buildCourseSupportResponderAlert({
+        now: new Date("2026-08-17T14:05:00.000Z"),
+        openIncidentCount: 65,
+        worker: {
+          desiredState: "ACTIVE",
+          monitoringStartedAt: new Date("2026-08-17T14:00:00.000Z"),
+          nextExpectedAt: new Date("2026-08-17T14:04:00.000Z"),
+          graceSeconds: 300
+        }
+      })
+    ).toBeNull();
+    expect(
+      buildCourseSupportResponderAlert({
+        now: new Date("2026-08-17T14:10:00.000Z"),
+        openIncidentCount: 0
+      })
+    ).toBeNull();
   });
 });
 

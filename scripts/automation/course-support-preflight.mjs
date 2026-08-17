@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,10 @@ const responderArgs = [
 
 export const approvedCourseSupportResponderCheckout =
   "C:\\dev\\TeeTimeAI-course-support-clean";
+export const approvedCourseSupportResponderCheckouts = Object.freeze([
+  approvedCourseSupportResponderCheckout,
+  "C:\\dev\\TeeTimeAI-responder-self-healing"
+]);
 
 export const requiredCourseSupportIncidentScalarFields = Object.freeze([
   "attemptLedger",
@@ -118,48 +123,75 @@ export function launchFailureResult(command) {
 export function selectApprovedCourseSupportResponderCheckout(input) {
   const normalize = (value) =>
     input.platform === "win32" ? value.toLowerCase() : value;
-  const approvedCheckout = normalize(input.approvedCheckout);
+  const approvedCheckouts = (
+    input.approvedCheckouts ?? [input.approvedCheckout]
+  ).filter(Boolean);
+  const normalizedApprovedCheckouts = approvedCheckouts.map(normalize);
   if (
     input.requestedCheckout &&
-    normalize(input.requestedCheckout) !== approvedCheckout
+    !normalizedApprovedCheckouts.includes(normalize(input.requestedCheckout))
   ) {
     return { outcome: "rejected_requested_checkout" };
   }
 
-  const checkout = input.preparedCheckouts.find(
-    (candidate) => normalize(candidate) === approvedCheckout
+  const eligibleCheckouts = input.requestedCheckout
+    ? [input.requestedCheckout]
+    : approvedCheckouts;
+  const checkout = eligibleCheckouts.find((approvedCheckout) =>
+    input.preparedCheckouts.some(
+      (candidate) => normalize(candidate) === normalize(approvedCheckout)
+    )
   );
-  if (
-    !checkout ||
-    !input.currentMain ||
-    input.readHead(checkout) !== input.currentMain
-  ) {
+  if (!checkout || !input.currentMain || input.readHead(checkout) !== input.currentMain) {
     return { outcome: "unavailable" };
   }
-  return { outcome: "selected", checkout };
+  return {
+    outcome: "selected",
+    checkout,
+    failover: normalize(checkout) !== normalizedApprovedCheckouts[0]
+  };
+}
+
+export function getResponderCheckoutRefreshPlan(input) {
+  if (!input.prepared || !input.clean || !input.currentMain || !input.head) {
+    return { outcome: "unavailable" };
+  }
+  if (input.head === input.currentMain) {
+    return { outcome: "ready", refreshDependencies: false };
+  }
+  if (input.aheadCount === 0 && input.behindCount > 0) {
+    return {
+      outcome: "fast_forward",
+      refreshDependencies: input.lockfileChanged === true
+    };
+  }
+  return { outcome: "unavailable" };
 }
 
 function main() {
   const requestedCheckoutValue =
     process.env.TEE_TIME_SPOT_RESPONDER_CHECKOUT?.trim();
-  const approvedCheckout = resolveCheckoutPath(
-    approvedCourseSupportResponderCheckout
+  const approvedCheckouts = approvedCourseSupportResponderCheckouts.map(
+    resolveCheckoutPath
   );
   const requestedCheckout = requestedCheckoutValue
     ? resolveCheckoutPath(requestedCheckoutValue)
     : undefined;
-  const candidates = [approvedCheckout];
-
-  const preparedCheckouts = candidates.filter(
-    (candidate) =>
-      existsSync(resolve(candidate, "package.json")) &&
-      existsSync(resolve(candidate, "node_modules")) &&
-      existsSync(resolve(candidate, ".vercel", "project.json")) &&
-      git(["status", "--porcelain"], realpathSync(candidate)) === ""
+  const repositoryCheckout = approvedCheckouts.find((candidate) =>
+    existsSync(resolve(candidate, ".git"))
   );
-  const currentMain = git(["rev-parse", "origin/main"], approvedCheckout);
+  const fetchedMain = repositoryCheckout
+    ? git(["fetch", "origin", "main"], repositoryCheckout)
+    : null;
+  const currentMain =
+    repositoryCheckout && fetchedMain !== null
+      ? git(["rev-parse", "origin/main"], repositoryCheckout)
+      : null;
+  const preparedCheckouts = approvedCheckouts.filter((candidate) =>
+    prepareApprovedResponderCheckout(candidate, currentMain)
+  );
   const selection = selectApprovedCourseSupportResponderCheckout({
-    approvedCheckout,
+    approvedCheckouts,
     requestedCheckout,
     preparedCheckouts,
     currentMain,
@@ -174,21 +206,27 @@ function main() {
         outcome: "setup_required",
         reason:
           selection.outcome === "rejected_requested_checkout"
-            ? "The configured responder checkout is not the approved dispatch checkout."
-            : "The approved dispatch checkout is not clean, prepared, and exactly at origin/main.",
+            ? "The configured responder checkout is not in the approved responder pool."
+            : "No approved responder checkout is clean, prepared, and safely synchronized with origin/main.",
         failureClass:
           selection.outcome === "rejected_requested_checkout"
             ? "UNAPPROVED_RESPONDER_CHECKOUT"
             : "APPROVED_RESPONDER_CHECKOUT_UNAVAILABLE",
         nextAction:
-          "Prepare C:\\dev\\TeeTimeAI-course-support-clean at exact origin/main and refresh dependencies only when the lockfile changed."
+          "Keep at least one approved responder checkout clean and prepared; preserve dirty checkouts for their owner."
       })}\n`
     );
     process.exitCode = 2;
   } else {
     const resolvedCheckout = realpathSync(checkout);
     const checkoutHead = git(["rev-parse", "HEAD"], resolvedCheckout);
-    const generatedPrismaInspection = inspectGeneratedPrismaClient(resolvedCheckout);
+    let generatedPrismaInspection = inspectGeneratedPrismaClient(resolvedCheckout);
+    if (
+      generatedPrismaInspection.status === "stale" &&
+      runNpm(["run", "prisma:generate"], resolvedCheckout)
+    ) {
+      generatedPrismaInspection = inspectGeneratedPrismaClient(resolvedCheckout);
+    }
     const generatedPrismaSetupRequired = generatedPrismaSetupRequiredResult(
       generatedPrismaInspection
     );
@@ -211,6 +249,7 @@ function main() {
           outcome: "ready",
           checkout: resolvedCheckout,
           exactHead: true,
+          failover: selection.failover,
           command: "npm run automation:course-support:preflight -- --run"
         })}\n`
       );
@@ -231,6 +270,96 @@ function main() {
       }
     }
   }
+}
+
+function prepareApprovedResponderCheckout(candidate, currentMain) {
+  if (
+    !existsSync(resolve(candidate, "package.json")) ||
+    !existsSync(resolve(candidate, "node_modules")) ||
+    !existsSync(resolve(candidate, ".vercel", "project.json"))
+  ) {
+    return false;
+  }
+  const checkout = realpathSync(candidate);
+  const clean = git(["status", "--porcelain"], checkout) === "";
+  const head = git(["rev-parse", "HEAD"], checkout);
+  const counts = git(["rev-list", "--left-right", "--count", "HEAD...origin/main"], checkout)
+    ?.split(/\s+/u)
+    .map(Number);
+  const lockfileChanged = Boolean(
+    git(["diff", "--name-only", "HEAD..origin/main", "--", "package-lock.json"], checkout)
+  );
+  const plan = getResponderCheckoutRefreshPlan({
+    prepared: true,
+    clean,
+    currentMain,
+    head,
+    aheadCount: counts?.[0],
+    behindCount: counts?.[1],
+    lockfileChanged
+  });
+  if (plan.outcome === "unavailable") {
+    return false;
+  }
+  if (plan.outcome === "fast_forward") {
+    if (git(["merge", "--ff-only", "origin/main"], checkout) === null) {
+      return false;
+    }
+  }
+  if (dependenciesNeedRefresh(checkout, plan.refreshDependencies)) {
+    markDependencyRefreshRequired(checkout);
+    if (!runNpm(["ci"], checkout)) return false;
+    markDependenciesCurrent(checkout);
+  }
+  return (
+    git(["status", "--porcelain"], checkout) === "" &&
+    git(["rev-parse", "HEAD"], checkout) === currentMain
+  );
+}
+
+function dependenciesNeedRefresh(checkout, forced) {
+  if (forced) return true;
+  const marker = dependencyMarkerPath(checkout);
+  if (!existsSync(marker)) return false;
+  return readFileSync(marker, "utf8").trim() !== packageLockHash(checkout);
+}
+
+function markDependencyRefreshRequired(checkout) {
+  writeFileSync(dependencyMarkerPath(checkout), "refresh-required\n", "utf8");
+}
+
+function markDependenciesCurrent(checkout) {
+  writeFileSync(dependencyMarkerPath(checkout), `${packageLockHash(checkout)}\n`, "utf8");
+}
+
+function dependencyMarkerPath(checkout) {
+  return resolve(checkout, "node_modules", ".tee-time-spot-package-lock.sha256");
+}
+
+function packageLockHash(checkout) {
+  return createHash("sha256")
+    .update(readFileSync(resolve(checkout, "package-lock.json")))
+    .digest("hex");
+}
+
+function runNpm(args, cwd) {
+  const invocation = npmInvocation(args);
+  return spawnSync(invocation.command, invocation.args, {
+    cwd,
+    encoding: "utf8",
+    shell: false,
+    stdio: ["ignore", "pipe", "ignore"]
+  }).status === 0;
+}
+
+function npmInvocation(args, platform = process.platform, commandInterpreter = process.env.ComSpec) {
+  if (platform === "win32") {
+    return {
+      command: commandInterpreter?.trim() || "cmd.exe",
+      args: ["/d", "/s", "/c", ["npm", ...args].join(" ")]
+    };
+  }
+  return { command: "npm", args };
 }
 
 function loadPrismaClientFromCheckout(checkout) {
