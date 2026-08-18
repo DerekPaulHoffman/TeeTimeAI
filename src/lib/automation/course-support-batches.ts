@@ -4677,13 +4677,26 @@ async function closeoutCourseSupportBatchAttempt(
           }
         });
       } else {
-        const normalNextAttemptAt = computeCourseSupportNextAttemptAt({
+        const playbookAssessment = assessAutomationPlaybook(
+          entry.incident.attemptLedger,
+          entry.incident.cycle
+        );
+        const watchContinuationAt =
+          verificationWatchMode === "WATCH_SETTLED" &&
+          playbookAssessment.conclusion === "INCOMPLETE" &&
+          (playbookAssessment.nextStage === "RENDERED_BROWSER_DISCOVERY" ||
+            playbookAssessment.nextStage === "INDEPENDENT_CONFIRMATION")
+            ? new Date(now.getTime() + 60 * 1000)
+            : null;
+        const normalNextAttemptAt =
+          watchContinuationAt ??
+          computeCourseSupportNextAttemptAt({
           failureClass: entry.incident.failureClass,
           failureFingerprint: entry.incident.failureFingerprint,
           attemptCount: Math.max(1, entry.incident.attemptCount),
           retryAfterSeconds: input.retryAfterSeconds,
           now
-        });
+          });
         const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
           proofSnapshot: entry.proofSnapshot,
           releaseSha: batch.releaseSha,

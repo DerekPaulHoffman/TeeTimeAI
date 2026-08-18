@@ -6732,7 +6732,9 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("derives retry closeout for a clean watch pass without marking human", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RETRY_SCHEDULED"));
+    const batch = closeoutBatch("RETRY_SCHEDULED");
+    batch.incidents[0].incident.attemptLedger = independentReadyAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
@@ -6762,7 +6764,8 @@ describe("detached verification atomic batch fences", () => {
         where: expect.objectContaining({ activeBatchId: "batch-1" }),
         data: expect.objectContaining({
           status: "AUTO_INVESTIGATING",
-          activeBatchId: null
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 60 * 1000)
         })
       })
     );
