@@ -626,8 +626,8 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
         <CourseFleetCount
           count={counts.watch}
           icon={<Wrench size={17} />}
-          label="Investigate next"
-          detail="Important, but no urgent impact"
+          label="Investigation backlog"
+          detail="Includes due, active, and scheduled work"
           tone="warning"
         />
         <CourseFleetCount
@@ -929,7 +929,7 @@ function CourseFilters({
           <option value="fix-now">{`Needs attention (${
             diagnostics.find((group) => group.key === "ACTION")?.count ?? 0
           })`}</option>
-          <option value="investigate">{`Investigate next (${
+          <option value="investigate">{`Investigation backlog (${
             diagnostics.find((group) => group.key === "WATCH")?.count ?? 0
           })`}</option>
           <option value="limitations">{`Known limitations (${
@@ -1163,7 +1163,7 @@ function CourseDeepLinks({
 
 function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
   if (value === "ACTION") return "Needs attention";
-  if (value === "WATCH") return "Investigate next";
+  if (value === "WATCH") return "Investigation backlog";
   if (value === "LIMITATION") return "Known limitation";
   if (value === "UNCHECKED") return "Verify when needed";
   return "Monitoring works";

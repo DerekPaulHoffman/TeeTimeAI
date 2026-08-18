@@ -508,7 +508,7 @@ describe("operator course inventory", () => {
       (group) => group.key === "WATCH"
     );
     expect(investigate).toMatchObject({
-      label: "Investigate next",
+      label: "Investigation backlog",
       count: 3,
       subcategories: [
         { key: "SOURCE_MISSING", count: 2 },
@@ -850,7 +850,7 @@ describe("operator course inventory", () => {
     expect(result.recommendedAction).toContain("will be emailed when tee-time checks resume");
   });
 
-  it("distinguishes an operator-requested AI recheck from generic investigation", () => {
+  it("shows when an operator-requested AI recheck is waiting for worker capacity", () => {
     const [result] = buildCourseInventory(
       [
         course({
@@ -864,13 +864,59 @@ describe("operator course inventory", () => {
     );
 
     expect(result).toMatchObject({
-      statusLabel: "AI recheck queued",
-      statusMeaning: "Your note is saved and waiting for AI to run a fresh course verification.",
+      statusLabel: "Waiting for AI capacity",
+      statusMeaning:
+        "Your note is saved and this course is eligible for a fresh verification, but no worker owns it yet.",
       automationQueueState: "DUE_NOW"
     });
-    expect(result.recommendedAction).toContain(
-      "move to Engineering verification needed only if you must confirm"
+    expect(result.recommendedAction).toContain("a verification slot opens");
+  });
+
+  it("distinguishes a running operator recheck from a scheduled retry", () => {
+    const sharedMonitoringStatus = monitoringStatus("AUTO_INVESTIGATING", {
+      revalidationRequestedAt: new Date("2026-07-24T17:50:00.000Z")
+    });
+    const [running, scheduled] = buildCourseInventory(
+      [
+        course({
+          id: "running",
+          monitoringStatus: sharedMonitoringStatus,
+          incident: {
+            id: "incident-running",
+            status: "AUTO_INVESTIGATING",
+            kind: "FETCH_FAILED",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "Verification is running.",
+            nextAction: null,
+            failureClass: "UNKNOWN",
+            activeBatchId: "batch-live",
+            activeBatch: {
+              status: "VERIFYING",
+              leaseExpiresAt: new Date("2026-07-24T18:15:00.000Z")
+            }
+          }
+        }),
+        course({
+          id: "scheduled",
+          monitoringStatus: {
+            ...sharedMonitoringStatus,
+            nextAutomaticAttemptAt: new Date("2026-07-24T18:30:00.000Z")
+          }
+        })
+      ],
+      NOW
     );
+
+    expect(running).toMatchObject({
+      statusLabel: "AI recheck running",
+      automationQueueState: "IN_PROGRESS"
+    });
+    expect(scheduled).toMatchObject({
+      statusLabel: "AI retry scheduled",
+      automationQueueState: "SCHEDULED_RETRY"
+    });
+    expect(scheduled.statusMeaning).toContain("not checking this course right now");
   });
 
   it("explains that engineering verification is waiting on the operator", () => {

@@ -220,10 +220,8 @@ export function buildCourseInventory(
   return courses
     .map((course) => {
       const classified = classifyCourseStatus(course, now);
-      return {
-        ...classified,
-        automationQueueState: deriveAutomationQueueState(classified, now)
-      };
+      const automationQueueState = deriveAutomationQueueState(classified, now);
+      return applyAutomationQueueCopy(classified, automationQueueState);
     })
     .sort(
       (left, right) =>
@@ -335,7 +333,7 @@ export function getCourseSummaryCopy(counts: {
 export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
   const groups = [
     { key: "ACTION", label: "Needs attention" },
-    { key: "WATCH", label: "Investigate next" },
+    { key: "WATCH", label: "Investigation backlog" },
     { key: "LIMITATION", label: "Known limitations" },
     { key: "UNCHECKED", label: "Verify when needed" },
     { key: "WORKING", label: "Monitoring works" }
@@ -443,7 +441,7 @@ function classifyCourseStatus(
       priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
       priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
       tone: hasActivePriorityAlert(course) ? "critical" : "warning",
-      labelOverride: operatorRecheckQueued ? "AI recheck queued" : "Auto investigating",
+      labelOverride: operatorRecheckQueued ? "AI recheck requested" : "Auto investigating",
       meaningOverride: operatorRecheckQueued
         ? "Your note is saved and waiting for AI to run a fresh course verification."
         : "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
@@ -587,7 +585,7 @@ function classifyCourseStatus(
       priorityGroup: hasActivePriorityAlert(course) ? "ACTION" : "WATCH",
       priorityScore: hasActivePriorityAlert(course) ? 0 : 1,
       tone: hasActivePriorityAlert(course) ? "critical" : "warning",
-      labelOverride: operatorRecheckQueued ? "AI recheck queued" : "Auto investigating",
+      labelOverride: operatorRecheckQueued ? "AI recheck requested" : "Auto investigating",
       meaningOverride: operatorRecheckQueued
         ? "Your note is saved and waiting for AI to run a fresh course verification."
         : "Repeated evidence confirmed a monitoring issue and the bounded automated recovery playbook is active.",
@@ -1089,4 +1087,63 @@ function deriveAutomationQueueState(
   return course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH"
     ? "NEEDS_HUMAN"
     : null;
+}
+
+function applyAutomationQueueCopy(
+  course: Omit<CourseInventoryItem, "automationQueueState">,
+  automationQueueState: CourseAutomationQueueState | null
+): CourseInventoryItem {
+  const operatorRecheckRequested =
+    course.monitoringStatus?.revalidationRequestedAt !== null &&
+    course.monitoringStatus?.revalidationRequestedAt !== undefined &&
+    (course.incident?.status === "AUTO_INVESTIGATING" ||
+      course.monitoringStatus?.state === "AUTO_INVESTIGATING");
+
+  if (!operatorRecheckRequested) {
+    return { ...course, automationQueueState };
+  }
+
+  if (automationQueueState === "IN_PROGRESS") {
+    return {
+      ...course,
+      automationQueueState,
+      statusLabel: "AI recheck running",
+      statusMeaning: "AI currently owns this course in an active bounded verification batch.",
+      recommendedAction:
+        "No action is needed while the active verification finishes and records its durable result."
+    };
+  }
+  if (automationQueueState === "DUE_NOW") {
+    return {
+      ...course,
+      automationQueueState,
+      statusLabel: "Waiting for AI capacity",
+      statusMeaning:
+        "Your note is saved and this course is eligible for a fresh verification, but no worker owns it yet.",
+      recommendedAction:
+        "No action is needed yet. AI will claim it when a verification slot opens."
+    };
+  }
+  if (automationQueueState === "SCHEDULED_RETRY") {
+    return {
+      ...course,
+      automationQueueState,
+      statusLabel: "AI retry scheduled",
+      statusMeaning:
+        "AI completed a bounded attempt and scheduled another safe retry; it is not checking this course right now.",
+      recommendedAction: "No action is needed until the scheduled retry becomes due."
+    };
+  }
+  if (automationQueueState === "RECOVERY_REQUIRED") {
+    return {
+      ...course,
+      automationQueueState,
+      statusLabel: "AI recheck needs recovery",
+      statusMeaning:
+        "The prior verification owner expired before closeout, so the batch must be safely recovered before checking continues.",
+      recommendedAction: "Wait for the responder to recover the fenced batch."
+    };
+  }
+
+  return { ...course, automationQueueState };
 }

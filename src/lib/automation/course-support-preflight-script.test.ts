@@ -159,6 +159,26 @@ describe("course support preflight process launch", () => {
     });
   });
 
+  it("can make the fast preflight inspection health-bearing for scheduled launches", () => {
+    expect(responderInvocation("linux", undefined, true)).toEqual({
+      command: "npx",
+      args: [
+        "vercel",
+        "env",
+        "run",
+        "-e",
+        "production",
+        "--",
+        "npm",
+        "run",
+        "automation:course-support",
+        "--",
+        "inspect",
+        "--scheduled-cycle"
+      ]
+    });
+  });
+
   it("reports spawn errors without exposing their message", () => {
     const result = launchFailureResult({
       error: Object.assign(new Error("sensitive local path"), { code: "EINVAL" }),

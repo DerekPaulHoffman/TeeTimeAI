@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const responderArgs = [
+const baseResponderArgs = [
   "vercel",
   "env",
   "run",
@@ -82,8 +82,12 @@ export function generatedPrismaSetupRequiredResult(inspection) {
 
 export function responderInvocation(
   platform = process.platform,
-  commandInterpreter = process.env.ComSpec
+  commandInterpreter = process.env.ComSpec,
+  scheduledCycle = false
 ) {
+  const responderArgs = scheduledCycle
+    ? [...baseResponderArgs, "--scheduled-cycle"]
+    : baseResponderArgs;
   if (platform === "win32") {
     return {
       command: commandInterpreter?.trim() || "cmd.exe",
@@ -254,7 +258,11 @@ function main() {
         })}\n`
       );
     } else {
-      const invocation = responderInvocation();
+      const invocation = responderInvocation(
+        process.platform,
+        process.env.ComSpec,
+        process.argv.includes("--scheduled-cycle")
+      );
       const command = spawnSync(invocation.command, invocation.args, {
         cwd: resolvedCheckout,
         stdio: "inherit",
