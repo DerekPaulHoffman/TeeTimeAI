@@ -8,7 +8,6 @@ import {
   completeAutomationWorker,
   startAutomationWorker,
 } from "@/lib/automation/worker-state";
-import { sendAutomationWorkerHealthEmail } from "@/lib/email/alerts";
 import { prisma } from "@/lib/prisma";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
@@ -76,27 +75,18 @@ export async function expireOverdueLocalReaderJobs(now = new Date()) {
       leaseExpiresAt: null,
     },
   });
-  const delivery = await sendAutomationWorkerHealthEmail({
-    workerKey: "local-reader-job-deadline",
-    event: "overdue",
-    expectedAt: overdueJobs[0].jobExpiresAt,
-    observedAt: now,
+  await prisma.localReaderJob.updateMany({
+    where: {
+      id: { in: overdueJobs.map((job) => job.id) },
+      status: "EXPIRED",
+      completedAt: null,
+    },
+    data: { completedAt: now },
   });
-  const notified = delivery.deliveryStatus === "not_configured" ? 0 : 1;
-  if (notified) {
-    await prisma.localReaderJob.updateMany({
-      where: {
-        id: { in: overdueJobs.map((job) => job.id) },
-        status: "EXPIRED",
-        completedAt: null,
-      },
-      data: { completedAt: now },
-    });
-  }
   return {
     considered: overdueJobs.length,
     expired: expired.count,
-    notified,
+    notified: 0,
   };
 }
 

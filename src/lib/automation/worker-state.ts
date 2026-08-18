@@ -1,6 +1,5 @@
 import type { AutomationWorkerState } from "@prisma/client";
 
-import { sendAutomationWorkerHealthEmail } from "@/lib/email/alerts";
 import { prisma } from "@/lib/prisma";
 
 import { getAutomationRuntimeVersion } from "./runtime-version";
@@ -248,7 +247,6 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
     orderBy: { workerKey: "asc" }
   });
   let overdue = 0;
-  let notified = 0;
   let recovered = 0;
 
   for (const worker of workers) {
@@ -269,69 +267,10 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
           data: { overdueSince }
         });
       }
-      if (
-        !worker.overdueNotifiedFor ||
-        worker.overdueNotifiedFor.getTime() !== expectedAt.getTime()
-      ) {
-        const delivery = await sendAutomationWorkerHealthEmail({
-          workerKey: worker.workerKey,
-          event: "overdue",
-          expectedAt,
-          observedAt: now
-        });
-        if (delivery.deliveryStatus === "not_configured") {
-          continue;
-        }
-        const notification = await prisma.automationWorkerState.updateMany({
-          where: {
-            workerKey: worker.workerKey,
-            desiredState: "ACTIVE",
-            nextExpectedAt: expectedAt,
-            OR: [
-              { overdueNotifiedFor: null },
-              { overdueNotifiedFor: { not: expectedAt } }
-            ]
-          },
-          data: {
-            overdueSince,
-            overdueNotifiedFor: expectedAt,
-            overdueNotifiedAt: now,
-            recoveredNotifiedAt: null
-          }
-        });
-        notified += notification.count;
-      }
       continue;
     }
 
     if (worker.overdueSince) {
-      const expectedAt =
-        worker.overdueNotifiedFor ??
-        new Date(worker.overdueSince.getTime() - worker.graceSeconds * 1000);
-      if (!worker.overdueNotifiedFor) {
-        const overdueDelivery = await sendAutomationWorkerHealthEmail({
-          workerKey: worker.workerKey,
-          event: "overdue",
-          expectedAt,
-          observedAt: now
-        });
-        if (overdueDelivery.deliveryStatus === "not_configured") {
-          continue;
-        }
-        const lateNotification = await prisma.automationWorkerState.updateMany({
-          where: {
-            workerKey: worker.workerKey,
-            overdueSince: worker.overdueSince,
-            overdueNotifiedFor: null
-          },
-          data: {
-            overdueNotifiedFor: expectedAt,
-            overdueNotifiedAt: now,
-            recoveredNotifiedAt: null
-          }
-        });
-        notified += lateNotification.count;
-      }
       const recovery = await prisma.automationWorkerState.updateMany({
         where: {
           workerKey: worker.workerKey,
@@ -347,5 +286,5 @@ export async function checkAutomationWorkerHealth(now = new Date()) {
     }
   }
 
-  return { considered: workers.length, overdue, notified, recovered };
+  return { considered: workers.length, overdue, notified: 0, recovered };
 }

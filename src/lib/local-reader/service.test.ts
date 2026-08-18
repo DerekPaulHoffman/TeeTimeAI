@@ -44,10 +44,6 @@ const workerMocks = vi.hoisted(() => ({
   completeAutomationWorker: vi.fn(),
 }));
 
-const emailMocks = vi.hoisted(() => ({
-  sendAutomationWorkerHealthEmail: vi.fn(),
-}));
-
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 vi.mock("@/lib/automation/course-monitoring", () => ({
   getCourseMonitoringEscalationDeadline:
@@ -68,10 +64,6 @@ vi.mock("@/lib/automation/worker-state", () => ({
   startAutomationWorker: workerMocks.startAutomationWorker,
   completeAutomationWorker: workerMocks.completeAutomationWorker,
 }));
-vi.mock("@/lib/email/alerts", () => ({
-  sendAutomationWorkerHealthEmail: emailMocks.sendAutomationWorkerHealthEmail,
-}));
-
 import {
   claimNextLocalReaderJob,
   completeLocalReaderJob,
@@ -118,10 +110,6 @@ describe("local reader job service", () => {
     );
     workerMocks.startAutomationWorker.mockResolvedValue({ allowed: true });
     workerMocks.completeAutomationWorker.mockResolvedValue(undefined);
-    emailMocks.sendAutomationWorkerHealthEmail.mockResolvedValue({
-      id: "operator-email",
-      deliveryStatus: "sent",
-    });
     monitoringMocks.getCourseMonitoringEscalationDeadline.mockReturnValue(
       new Date("2026-07-24T16:30:00.000Z"),
     );
@@ -131,7 +119,7 @@ describe("local reader job service", () => {
     vi.useRealTimers();
   });
 
-  it("expires overdue reader jobs and sends one privacy-safe operator alert", async () => {
+  it("expires overdue reader jobs without sending operator email", async () => {
     prismaMocks.localReaderJob.findMany.mockResolvedValue([
       {
         id: "job-overdue-a",
@@ -149,13 +137,7 @@ describe("local reader job service", () => {
     await expect(expireOverdueLocalReaderJobs()).resolves.toEqual({
       considered: 2,
       expired: 2,
-      notified: 1,
-    });
-    expect(emailMocks.sendAutomationWorkerHealthEmail).toHaveBeenCalledWith({
-      workerKey: "local-reader-job-deadline",
-      event: "overdue",
-      expectedAt: new Date("2026-07-24T15:55:00.000Z"),
-      observedAt: new Date("2026-07-24T16:00:00.000Z"),
+      notified: 0,
     });
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith({
       where: {
@@ -177,27 +159,6 @@ describe("local reader job service", () => {
       },
       data: { completedAt: new Date("2026-07-24T16:00:00.000Z") },
     });
-  });
-
-  it("expires reader jobs even when the operator alert must retry", async () => {
-    prismaMocks.localReaderJob.findMany.mockResolvedValue([
-      {
-        id: "job-overdue",
-        status: "PENDING",
-        jobExpiresAt: new Date("2026-07-24T15:55:00.000Z"),
-      },
-    ]);
-    prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 1 });
-    emailMocks.sendAutomationWorkerHealthEmail.mockRejectedValue(
-      new Error("temporary email failure"),
-    );
-
-    await expect(expireOverdueLocalReaderJobs()).rejects.toThrow(
-      "temporary email failure",
-    );
-    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: "EXPIRED" }) }),
-    );
   });
 
   it("routes every safe CPS tenant through the local reader", () => {

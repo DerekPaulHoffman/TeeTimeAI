@@ -2,14 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildContentScopedEmailIdempotencyKey,
-  getAutomationWorkerHealthIdempotencyKey,
   getRenderedTeeTimeAlertMatchIds,
   getMatchAlertSubject,
   getSearchStatusEmailSubject,
   normalizeEmailEnvValue,
   renderAlertHtml,
-  renderAutomationWorkerHealthHtml,
-  sendAutomationWorkerHealthEmail,
   sendSearchStatusEmail,
   sendTeeTimeAlert,
   shouldDryRunRecipient
@@ -411,72 +408,6 @@ describe("email alert delivery helpers", () => {
     });
   });
 
-  it("returns not configured for worker health email without operator email env", async () => {
-    await withMissingProductionEmailConfiguration(async () => {
-      await expect(
-        sendAutomationWorkerHealthEmail({
-          workerKey: "course-support-responder",
-          event: "overdue",
-          expectedAt: new Date("2026-07-27T12:00:00.000Z"),
-          observedAt: new Date("2026-07-27T12:10:00.000Z")
-        })
-      ).resolves.toEqual({ deliveryStatus: "not_configured" });
-    });
-  });
-
-  it("uses stable episode-scoped worker health idempotency", () => {
-    const input = {
-      workerKey: "course-support-responder",
-      event: "overdue" as const,
-      expectedAt: new Date("2026-08-10T12:00:00.000Z"),
-      observedAt: new Date("2026-08-10T12:21:00.000Z")
-    };
-    const key = getAutomationWorkerHealthIdempotencyKey(input);
-
-    expect(
-      getAutomationWorkerHealthIdempotencyKey({
-        ...input,
-        observedAt: new Date("2026-08-10T12:25:00.000Z")
-      })
-    ).toBe(key);
-    expect(key).not.toContain(input.workerKey);
-  });
-
-  it("dry-runs worker health email only for a reserved operator recipient", async () => {
-    const original = {
-      resendApiKey: process.env.RESEND_API_KEY,
-      alertEmailFrom: process.env.ALERT_EMAIL_FROM,
-      operatorAlertEmail: process.env.OPERATOR_ALERT_EMAIL
-    };
-    process.env.RESEND_API_KEY = "re_test_placeholder";
-    process.env.ALERT_EMAIL_FROM = "alerts@teetimespot.test";
-    process.env.OPERATOR_ALERT_EMAIL = "operator@example.com";
-    try {
-      await expect(
-        sendAutomationWorkerHealthEmail({
-          workerKey: "course-support-responder",
-          event: "overdue",
-          expectedAt: new Date("2026-08-10T12:00:00.000Z"),
-          observedAt: new Date("2026-08-10T12:21:00.000Z")
-        })
-      ).resolves.toEqual({ id: "dry-run", deliveryStatus: "dry_run" });
-    } finally {
-      restoreEnvironment("RESEND_API_KEY", original.resendApiKey);
-      restoreEnvironment("ALERT_EMAIL_FROM", original.alertEmailFrom);
-      restoreEnvironment("OPERATOR_ALERT_EMAIL", original.operatorAlertEmail);
-    }
-  });
-
-  it("renders a privacy-safe overdue operator message", () => {
-    const overdue = renderAutomationWorkerHealthHtml({
-      workerKey: "reader-<primary>",
-      event: "overdue",
-      expectedAt: new Date("2026-08-10T12:00:00.000Z"),
-      observedAt: new Date("2026-08-10T12:21:00.000Z")
-    });
-    expect(overdue).toContain("21 minutes overdue");
-    expect(overdue).toContain("reader-&lt;primary&gt;");
-  });
 });
 
 async function withMissingProductionEmailConfiguration(worker: () => Promise<void>) {

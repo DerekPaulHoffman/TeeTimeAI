@@ -7,10 +7,6 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   updateMany: vi.fn()
 }));
-const emailMocks = vi.hoisted(() => ({
-  sendAutomationWorkerHealthEmail: vi.fn()
-}));
-
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     automationWorkerState: {
@@ -22,8 +18,6 @@ vi.mock("@/lib/prisma", () => ({
     }
   }
 }));
-vi.mock("@/lib/email/alerts", () => emailMocks);
-
 import {
   AUTOMATION_WORKERS,
   checkAutomationWorkerHealth,
@@ -49,10 +43,6 @@ describe("automation worker state", () => {
     });
     mocks.update.mockResolvedValue({});
     mocks.updateMany.mockResolvedValue({ count: 1 });
-    emailMocks.sendAutomationWorkerHealthEmail.mockResolvedValue({
-      id: "operator-notice",
-      deliveryStatus: "sent"
-    });
   });
 
   it("calculates the next expected run from the configured cadence", () => {
@@ -228,7 +218,7 @@ describe("automation worker state", () => {
     );
   });
 
-  it("deduplicates overdue alerts for the same expected interval", async () => {
+  it("keeps existing overdue state without sending a notification", async () => {
     mocks.findMany.mockResolvedValue([
       {
         workerKey: "course-support-responder",
@@ -246,10 +236,9 @@ describe("automation worker state", () => {
       overdue: 1,
       notified: 0
     });
-    expect(emailMocks.sendAutomationWorkerHealthEmail).not.toHaveBeenCalled();
   });
 
-  it("records one durable operator-visible notification for a newly overdue interval", async () => {
+  it("records newly overdue state without sending email", async () => {
     mocks.findMany.mockResolvedValue([
       {
         workerKey: "course-support-responder",
@@ -265,25 +254,22 @@ describe("automation worker state", () => {
 
     await expect(checkAutomationWorkerHealth(now)).resolves.toMatchObject({
       overdue: 1,
-      notified: 1
+      notified: 0
     });
     expect(mocks.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
+      {
+        where: {
           workerKey: "course-support-responder",
-          nextExpectedAt: new Date("2026-07-27T11:00:00.000Z")
-        }),
-        data: expect.objectContaining({
-          recoveredNotifiedAt: null
-        })
-      })
+          desiredState: "ACTIVE",
+          nextExpectedAt: new Date("2026-07-27T11:00:00.000Z"),
+          overdueSince: null
+        },
+        data: { overdueSince: new Date("2026-07-27T11:10:00.000Z") }
+      }
     );
-    expect(emailMocks.sendAutomationWorkerHealthEmail).toHaveBeenCalledWith({
-      workerKey: "course-support-responder",
-      event: "overdue",
-      expectedAt: new Date("2026-07-27T11:00:00.000Z"),
-      observedAt: now
-    });
+    expect(mocks.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ overdueNotifiedFor: expect.any(Date) }) })
+    );
   });
 
   it("records recovery without sending an automatic recovery email", async () => {
@@ -308,42 +294,6 @@ describe("automation worker state", () => {
         data: expect.objectContaining({
           overdueSince: null,
           overdueNotifiedFor: null
-        })
-      })
-    );
-    expect(emailMocks.sendAutomationWorkerHealthEmail).not.toHaveBeenCalled();
-  });
-
-  it("leaves the overdue notification marker retryable when delivery fails", async () => {
-    mocks.findMany.mockResolvedValue([
-      {
-        workerKey: "course-support-responder",
-        desiredState: "ACTIVE",
-        monitoringStartedAt: new Date("2026-07-27T10:00:00.000Z"),
-        nextExpectedAt: new Date("2026-07-27T11:00:00.000Z"),
-        graceSeconds: 600,
-        overdueSince: null,
-        overdueNotifiedFor: null,
-        recoveredNotifiedAt: null
-      }
-    ]);
-    emailMocks.sendAutomationWorkerHealthEmail.mockRejectedValue(
-      new Error("operator delivery failed")
-    );
-
-    await expect(checkAutomationWorkerHealth(now)).rejects.toThrow("operator delivery failed");
-    expect(mocks.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ overdueSince: null }),
-        data: {
-          overdueSince: new Date("2026-07-27T11:10:00.000Z")
-        }
-      })
-    );
-    expect(mocks.updateMany).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          overdueNotifiedFor: expect.any(Date)
         })
       })
     );
