@@ -6970,6 +6970,57 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
+  it("resnapshots early watch closeout after a concurrent incident write", async () => {
+    const staleBatch = closeoutBatch("PENDING");
+    const currentBatch = closeoutBatch("PENDING");
+    const staleIncidentUpdatedAt = new Date(now.getTime() - 60_000);
+    const currentIncidentUpdatedAt = new Date(now.getTime() - 30_000);
+    staleBatch.incidents[0].incident.updatedAt = staleIncidentUpdatedAt;
+    staleBatch.incidents[0].incident.lastSeenAt = staleIncidentUpdatedAt;
+    currentBatch.incidents[0].incident.updatedAt = currentIncidentUpdatedAt;
+    currentBatch.incidents[0].incident.lastSeenAt = currentIncidentUpdatedAt;
+    for (const batch of [staleBatch, currentBatch]) {
+      batch.incidents[0].incident.escalationDeadlineAt = new Date(
+        now.getTime() + 10 * 60_000
+      );
+    }
+    prismaMocks.batchFindFirst
+      .mockResolvedValueOnce(staleBatch)
+      .mockResolvedValueOnce(currentBatch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "command_failed",
+        failureDomain: "SLA",
+        verificationWatchMode: "EARLY_RETRY",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      derivedOutcome: "retryable_failed",
+      durableCloseoutRecorded: true,
+      retryCount: 1
+    });
+    expect(prismaMocks.batchFindFirst).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-1",
+          activeBatchId: "batch-1",
+          updatedAt: currentIncidentUpdatedAt
+        })
+      })
+    );
+  });
+
   it("keeps settled closeout fenced to the verified incident revision", async () => {
     const batch = closeoutBatch("PENDING");
     batch.incidents[0].incident.updatedAt = new Date(now.getTime() - 30_000);

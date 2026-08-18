@@ -3890,7 +3890,7 @@ export function isRemediatedSearchSchedulerHealthy(
   return false;
 }
 
-export async function closeoutCourseSupportBatch(input: {
+type CloseoutCourseSupportBatchInput = {
   batchId: string;
   leaseToken: string;
   ownerThreadId: string;
@@ -3900,7 +3900,18 @@ export async function closeoutCourseSupportBatch(input: {
   summary?: unknown;
   verificationWatchMode?: "WATCH_SETTLED" | "EARLY_RETRY" | "ENDPOINT";
   now?: Date;
-}) {
+};
+
+class CourseSupportCloseoutSnapshotChangedError extends Error {
+  constructor() {
+    super("A course-support incident changed during closeout.");
+    this.name = "CourseSupportCloseoutSnapshotChangedError";
+  }
+}
+
+async function closeoutCourseSupportBatchAttempt(
+  input: CloseoutCourseSupportBatchInput
+) {
   const now = input.now ?? new Date();
   const verificationWatchMode = input.verificationWatchMode ?? "STANDARD";
   const batch = await prisma.courseSupportBatch.findFirst({
@@ -4714,7 +4725,7 @@ export async function closeoutCourseSupportBatch(input: {
         });
       }
       if (incidentUpdated.count !== 1) {
-        throw new Error("A course-support incident changed during closeout.");
+        throw new CourseSupportCloseoutSnapshotChangedError();
       }
       if (entry.result !== entry.normalizedResult) {
         const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
@@ -4814,6 +4825,32 @@ export async function closeoutCourseSupportBatch(input: {
     nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
     ...policy
   };
+}
+
+export async function closeoutCourseSupportBatch(
+  input: CloseoutCourseSupportBatchInput
+) {
+  const ownershipReleaseMode =
+    input.verificationWatchMode === "EARLY_RETRY" ||
+    input.verificationWatchMode === "ENDPOINT";
+  const maxAttempts = ownershipReleaseMode ? 3 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await closeoutCourseSupportBatchAttempt(input);
+    } catch (error) {
+      if (
+        attempt === maxAttempts ||
+        !(error instanceof CourseSupportCloseoutSnapshotChangedError)
+      ) {
+        throw error;
+      }
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS * attempt)
+      );
+    }
+  }
+  throw new Error("Course-support closeout retry exhausted unexpectedly.");
 }
 
 function getFinalDispositionResolution(proofSnapshot: unknown) {
