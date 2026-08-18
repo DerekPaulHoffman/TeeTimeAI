@@ -78,6 +78,8 @@ const providerCourseSelect = {
   intelligenceReviewAt: true,
   intelligenceConfidence: true,
   bookingMetadata: true,
+  layoutHoleCounts: true,
+  layoutHolesVerifiedAt: true,
 } satisfies Prisma.CourseSelect;
 
 const requestExecutionSelect = {
@@ -1698,6 +1700,8 @@ export function buildCourseSupportProviderSnapshotFingerprint(input: {
   intelligenceReviewAt?: Date | null;
   intelligenceConfidence?: number | null;
   bookingMetadata?: unknown;
+  layoutHoleCounts?: number[];
+  layoutHolesVerifiedAt?: Date | null;
 }) {
   return createHash("sha256")
     .update(

@@ -850,7 +850,7 @@ function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]
                 <StatusPill course={course} />
               </div>
               <p className="operator-course-work-context">
-                {formatProvider(course.providerFamilyKey)}
+                {course.discoveryProviderLabel ?? formatProvider(course.providerFamilyKey)}
                 {course.address ? (
                   <>
                     <span aria-hidden="true">·</span>
@@ -863,9 +863,10 @@ function CourseWorkQueue({ courses }: { courses: OperatorOverview["courseFleet"]
                   : "No real-customer check yet"}
                 {course.incident ? (
                   <>
-                    <span aria-hidden="true">Â·</span>
-                    {formatEnum(course.incident.failureClass ?? "UNKNOWN")}
-                    <span aria-hidden="true">Â·</span>
+                    <span aria-hidden="true">·</span>
+                    {course.discoveryStatusLabel ??
+                      formatEnum(course.incident.failureClass ?? "UNKNOWN")}
+                    <span aria-hidden="true">·</span>
                     {course.incident.attemptCount ?? 0}{" "}
                     {(course.incident.attemptCount ?? 0) === 1 ? "attempt" : "attempts"}
                   </>
@@ -1010,7 +1011,9 @@ function CourseInventoryTable({ courses }: { courses: CourseInventoryItem[] }) {
               <td data-label="Course">
                 <span>
                   <strong>{course.name}</strong>
-                  <small>{formatProvider(course.providerFamilyKey)}</small>
+                  <small>
+                    {course.discoveryProviderLabel ?? formatProvider(course.providerFamilyKey)}
+                  </small>
                 </span>
               </td>
               <td data-label="Location">

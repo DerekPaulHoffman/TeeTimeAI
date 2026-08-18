@@ -49,3 +49,36 @@ The investigation backlog could grow while responders remained active because a 
 - Use one shared semantic provider projection for retry signatures and material-change detection. Configuration that affects execution may reopen work; refresh timestamps alone may not.
 - A successful deployed reusable provider repair may wake eligible parked incidents for that same family. An unrelated deployment must not reopen them.
 - Parked state, exact-runtime success, and factual final classifications use serialized compare-and-set transitions so a stale responder cannot overwrite newer truth.
+
+## 2026-08-18 - Preserve Discovery Before Classifying It
+
+### Observed Pattern
+
+The official-site reader could observe a useful booking link and still leave the canonical course classified as source missing. Evidence was lost when a safe account landing was filtered with runnable-provider rules, when a one-sided leading-initial or page-extension difference prevented official-page scope, or when navigation links were truncated before booking links were prioritized. Repeating the same discovery then produced more attempts without improving the course record.
+
+### What Helped
+
+- Raw official anchors provided stronger source evidence than search snippets or extracted prose alone.
+- Recognizing a provider from the official CTA before fetching its destination avoided treating crawler-specific denial as missing source.
+- Keeping evidence-only account landings separate from runnable tee-sheet URLs preserved a truthful technical-access result without weakening provider safety.
+- Rechecking an explicit bounded cohort exposed whether the producer fix generalized without waking the full parked inventory.
+
+### What Did Not Work
+
+- Using the runnable URL allowlist as the evidence-retention allowlist.
+- Treating a physical-layout qualifier as harmless can collapse numbered sibling courses. A one-sided leading-initial prefix may be omitted only when the full remainder matches. A one-sided 9/18 qualifier is accepted only after a dry-run-first operator write verifies one exact physical layout from a corroborating official title/H1; unverified or multi-layout records remain strict.
+- Comparing a page slug while retaining its file extension.
+- Taking the first navigation anchors before ranking booking CTAs.
+- Treating any title or provider alias containing `city` and `golf` as harmless organization branding. That let a sibling name such as Papago hide inside an organization-shaped label and bind its facility to Aguila.
+- Fetching layout evidence against one course snapshot and then writing it without carrying that snapshot through the serialized write. A concurrent rename or layout update could make otherwise valid evidence stale before persistence.
+- Showing a generic source-missing label when structured discovery had already identified a booking surface or access constraint.
+
+### Process Decision
+
+- Preserve safe official CTA evidence first, then separately decide whether it is runnable, account-gated, challenged, or still ambiguous.
+- Scope provider identity from the official course page and CTA before interpreting a downstream fetch failure.
+- Treat organization-shaped title segments and shared provider aliases as neutral only when their organization name is corroborated by the official page origin. Evaluate target-overlapping layout or sibling discriminators first; `Aguila 9 Golf Courses` remains course identity, while `City of Phoenix` on `phoenix.gov` is narrowly neutral.
+- Reject future-dated layout evidence at both command and persistence boundaries. Carry the pre-fetch course name and `updatedAt` through the advisory-locked write and fail closed if either changed while the official source was being read.
+- Keep production validation bounded to explicit ordinals, record sanitized normalized outcomes, and leave unresolved browser/adapter work with the owned responder instead of auto-retrying everything.
+- Operator text must summarize the newest structured discovery reason so a developer sees what was actually found and what concrete step remains.
+- When an official page qualifies an otherwise exact stored course name with 9 or 18, record the singleton physical layout through `automation:course-profile -- physical-layout` before retrying discovery. The command safety-checks redirects, never follows account routes, and rejects a source whose title/H1 contains a conflicting course identity.

@@ -4,7 +4,14 @@ import {
   areEquivalentNamedCourses,
   findUniqueGenericCourseMatch,
   haveCompatibleCourseNames,
-  isGenericCourseName
+  haveCompatibleOfficialPageCourseNames,
+  haveCompatibleOfficialPageCourseNamesWithVerifiedLayout,
+  haveSameOfficialCourseIdentityCore,
+  hasConflictingOfficialCourseIdentityDiscriminator,
+  isConflictingOfficialPageCourseIdentity,
+  isExplicitCourseIdentityName,
+  isGenericCourseName,
+  isOfficialOrganizationIdentityCorroboratedByUrl
 } from "./course-identity";
 
 describe("course identity matching", () => {
@@ -155,4 +162,254 @@ describe("course identity matching", () => {
       )
     ).toBe(true);
   });
+
+  it("matches a live official course name that omits only one-sided leading initials", () => {
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "A.H. Blank Golf Course",
+        "Blank Golf Course"
+      )
+    ).toBe(true);
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "Blank Golf Course",
+        "A. H. Blank Golf Course"
+      )
+    ).toBe(true);
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "A.H. Blank Golf Course",
+        "a h blank golf course"
+      )
+    ).toBe(true);
+});
+
+  it("matches a one-sided municipal descriptor before the same golf-course name", () => {
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "Frear Park Municipal Golf Course",
+        "Frear Park Golf Course"
+      )
+    ).toBe(true);
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "Rock Creek Park Golf",
+        "Rock Creek Park Golf Course"
+      )
+    ).toBe(true);
+  });
+
+  it("accepts a one-sided layout qualifier only when that physical layout is verified", () => {
+    expect(
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        "Aguila Golf Course",
+        "Aguila 18 Golf Course",
+        [18]
+      )
+    ).toBe(true);
+    expect(
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        "Aguila Golf Course",
+        "Aguila 18 Golf Courses",
+        [18]
+      )
+    ).toBe(true);
+    expect(
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        "Aguila Golf Course",
+        "Aguila 9 Golf Course",
+        [18]
+      )
+    ).toBe(false);
+    expect(
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        "Aguila Golf Course",
+        "Aguila 18 Golf Course",
+        []
+      )
+    ).toBe(false);
+    expect(
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        "Aguila Golf Course",
+        "Aguila 18 Golf Courses",
+        []
+      )
+    ).toBe(false);
+    expect(
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        "Aguila 9 Golf Course",
+        "Aguila 18 Golf Course",
+        [18]
+      )
+    ).toBe(false);
+  });
+
+  it("rejects conflicting initials and non-exact initial-free remainders", () => {
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "A.H. Blank Golf Course",
+        "B.H. Blank Golf Course"
+      )
+    ).toBe(false);
+    expect(
+      haveSameOfficialCourseIdentityCore(
+        "A.H. Blank Golf Course",
+        "B H Blank Golf Course"
+      )
+    ).toBe(false);
+    expect(
+      haveSameOfficialCourseIdentityCore(
+        "A.H. Blank Golf Course",
+        "Blank Golf Course"
+      )
+    ).toBe(true);
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "A.H. Blank Golf Course",
+        "Blank Park Golf Course"
+      )
+    ).toBe(false);
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "A.H. Blank Golf Course",
+        "Blank Golf Club"
+      )
+    ).toBe(false);
+  });
+
+  it("treats singular municipal courses and one-token sibling names as conflicts", () => {
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "Cave Creek Municipal Golf Course"
+      )
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity("Aguila Golf Course", "Papago")
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "Phoenix Golf Courses"
+      )
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "City of Phoenix"
+      )
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "Aguila 9 Golf Courses"
+      )
+    ).toBe(true);
+  });
+
+  it("does not treat a numbered sibling as an official-page name variant", () => {
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "Aguila Golf Course",
+        "Aguila 9 Golf Course"
+      )
+    ).toBe(false);
+    expect(
+      haveCompatibleOfficialPageCourseNames(
+        "Blank Golf Course",
+        "Blank Park Golf Course"
+      )
+    ).toBe(false);
+  });
+
+  it("distinguishes explicit course identities from generic facility headings", () => {
+    expect(isExplicitCourseIdentityName("Aguila 9 Golf Course")).toBe(true);
+    expect(isExplicitCourseIdentityName("Pine Hills Executive Golf Club")).toBe(
+      true
+    );
+    expect(isExplicitCourseIdentityName("City of Phoenix Golf")).toBe(false);
+    expect(isExplicitCourseIdentityName("Phoenix Golf Courses")).toBe(false);
+    expect(isExplicitCourseIdentityName("Golf Course")).toBe(false);
+  });
+
+  it("detects abbreviated sibling identities without treating site brands as courses", () => {
+    expect(
+      isConflictingOfficialPageCourseIdentity("Aguila Golf Course", "Aguila 9")
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Pine Hills Golf Course",
+        "Pine Hills Executive"
+      )
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "City of Phoenix Golf"
+      )
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "Phoenix Golf Courses"
+      )
+    ).toBe(true);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Aguila Golf Course",
+        "Cave Creek"
+      )
+    ).toBe(true);
+    expect(
+      hasConflictingOfficialCourseIdentityDiscriminator(
+        "Winter Park Golf Course",
+        "Winter Park Country Club"
+      )
+    ).toBe(false);
+  });
+
+  it("requires official-origin corroboration before treating organization branding as neutral", () => {
+    const officialUrl =
+      "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+
+    expect(
+      isOfficialOrganizationIdentityCorroboratedByUrl(
+        "City of Phoenix",
+        officialUrl
+      )
+    ).toBe(true);
+    expect(
+      isOfficialOrganizationIdentityCorroboratedByUrl(
+        "Phoenix Golf Courses",
+        officialUrl
+      )
+    ).toBe(true);
+    expect(
+      isOfficialOrganizationIdentityCorroboratedByUrl(
+        "Papago City Golf Courses",
+        officialUrl
+      )
+    ).toBe(false);
+    expect(
+      isOfficialOrganizationIdentityCorroboratedByUrl(
+        "City of Papago Golf Courses",
+        officialUrl
+      )
+    ).toBe(false);
+  });
+
+  it.each([
+    ["Pine Hills Golf Course", "Pine Hills Executive Golf Course"],
+    ["Bay Hill Golf Course", "Bay Hill Lakes Golf Course"]
+  ])(
+    "does not treat %s and %s as the same official page",
+    (target, sibling) => {
+      expect(haveCompatibleOfficialPageCourseNames(target, sibling)).toBe(
+        false
+      );
+      expect(haveCompatibleOfficialPageCourseNames(sibling, target)).toBe(
+        false
+      );
+    }
+  );
 });

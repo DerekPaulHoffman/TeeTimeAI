@@ -46,6 +46,13 @@ npx vercel env run -e production -- npm run automation:course-profile -- booking
 
 Omit `--release-time` only when the official source verifies the number of days but not a release time. ForeUP courses will reuse the stored official evidence URL during later booking-window refreshes.
 
+When an official title or H1 qualifies an otherwise exact course name with one physical layout, record that fact separately before discovery uses it for identity. The command fetches the credential-free official page through the bounded public transport, validates every redirect, requires the title/H1 to corroborate the exact course and requested hole count, and is dry-run-first:
+
+```powershell
+npx vercel env run -e production -- npm run automation:course-profile -- physical-layout --course-id <course-id> --holes 18 --evidence-url <official-url> --verified-at <YYYY-MM-DD>
+npx vercel env run -e production -- npm run automation:course-profile -- physical-layout --course-id <course-id> --holes 18 --evidence-url <official-url> --verified-at <YYYY-MM-DD> --apply
+```
+
 Validation requires authoritative sources, claim keys for every notable fact, original wording, and a current verification date. A failed first-time draft becomes `BLOCKED_EVIDENCE`; a failed refresh preserves previously published content as `STALE` with its prior review date and records the refresh failure for another attempt. Published profiles are queued for review after 180 days, but their content does not expire or disappear because of age. A material change to course identity, access, support, official website, or booking URL immediately marks the profile stale and queues revalidation while keeping the last published guide available.
 
 Profile drafts may also carry source-backed `physicalLayout` and `par` objects.

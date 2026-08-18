@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dbMocks = vi.hoisted(() => ({
   applyBrowserDiscoveryToCourse: vi.fn(),
   listRecentCourseAutomationDiscoveries: vi.fn(),
+  recordAndApplyBrowserDiscoveryToCourse: vi.fn(),
   recordBrowserDiscovery: vi.fn(),
   retireLegacyPolicyOnlyCourseBlock: vi.fn()
 }));
@@ -112,6 +113,10 @@ describe("search monitoring discovery", () => {
     vi.clearAllMocks();
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([]);
     dbMocks.recordBrowserDiscovery.mockResolvedValue({ id: "discovery-1" });
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValue({
+      applied: { id: "course-1" },
+      discovery: { id: "discovery-1" }
+    });
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue({ id: "course-1" });
     dbMocks.retireLegacyPolicyOnlyCourseBlock.mockResolvedValue({ id: "course-1" });
     prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([]);
@@ -716,6 +721,115 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(result.attemptedCourseIds).toEqual([course.id]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists neither evidence nor course changes when an owner appears during a bounded fresh recheck", async () => {
+    const course = {
+      id: "bounded-race-course",
+      name: "Bounded Race Golf Course",
+      website: "https://bounded-race.example/",
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      bookingMethod: "UNKNOWN",
+      bookingMetadata: null,
+      isPublic: true,
+      monitoringMode: "AUTOMATIC",
+      updatedAt: now
+    };
+    prismaMocks.course.findUnique.mockResolvedValue(course);
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValueOnce(null);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response("<html><h1>Bounded Race Golf Course</h1></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+    const expectedUnownedIncident = {
+      id: "incident-1",
+      cycle: 2,
+      revision: 4,
+      status: "NEEDS_HUMAN" as const
+    };
+
+    const result = await prepareCourseSupportVerificationMonitoring(
+      course.id,
+      fetchImpl as typeof fetch,
+      now,
+      { expectedUnownedIncident }
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({ courseId: course.id }),
+      expect.objectContaining({ updatedAt: now }),
+      expectedUnownedIncident
+    );
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      attemptedCourseIds: [course.id],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: [course.id],
+      retryCourseIds: [course.id]
+    });
+  });
+
+  it("does not persist failure evidence when incident state changes during a bounded fresh recheck", async () => {
+    const course = {
+      id: "bounded-failure-race",
+      name: "Bounded Failure Race Golf Course",
+      website: "https://bounded-failure.example/",
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      bookingMethod: "UNKNOWN",
+      bookingMetadata: null,
+      isPublic: true,
+      monitoringMode: "AUTOMATIC",
+      updatedAt: now
+    };
+    prismaMocks.course.findUnique.mockResolvedValue(course);
+    dbMocks.recordBrowserDiscovery.mockResolvedValueOnce(null);
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValue(new Error("provider unavailable"));
+    const expectedUnownedIncident = {
+      id: "incident-2",
+      cycle: 3,
+      revision: 8,
+      status: "AUTO_INVESTIGATING" as const
+    };
+
+    const result = await prepareCourseSupportVerificationMonitoring(
+      course.id,
+      fetchImpl as typeof fetch,
+      now,
+      { expectedUnownedIncident }
+    );
+
+    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect.objectContaining({ courseId: course.id, status: "FAILED" }),
+      undefined,
+      undefined,
+      expectedUnownedIncident
+    );
+    expect(
+      dbMocks.recordAndApplyBrowserDiscoveryToCourse
+    ).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      attemptedCourseIds: [course.id],
+      appliedCourseIds: [],
+      failedCourseIds: [],
+      deferredCourseIds: [course.id],
+      retryCourseIds: [course.id]
+    });
   });
 
   it("honors the normal discovery cap after a detached request used its one-shot attempt", async () => {
@@ -1374,7 +1488,7 @@ describe("search monitoring discovery", () => {
             bookingBaseUrl: "https://capitalhillsny.cps.golf/",
             courseIds: [7],
             holes: [18, 9]
-          },
+          }
         }
       }]
     } as never;
@@ -6020,6 +6134,596 @@ describe("search monitoring discovery", () => {
         facilityIds: [24680]
       }
     });
+  });
+
+  it("learns Aguila TeeItUp scope from its official HTML link before a downstream 403", async () => {
+    const sourceUrl =
+      "https://www.phoenix.gov/administration/departments/parks/activities-facilities/phoenix-golf-courses/aguila-golf-course.html";
+    const bookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=287";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>City of Phoenix Golf</title><h1>Phoenix Golf Courses</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (url.toString() === bookingUrl) {
+        return new Response("Provider-specific crawler rejection", {
+          status: 403,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`Unexpected URL ${url.toString()}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course"
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      bookingUrl
+    ]);
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: bookingUrl,
+      label: "Book a tee time"
+    });
+    expect(
+      buildBrowserDiscovery({
+        ...evidence,
+        courseId: "aguila-golf-course",
+        courseName: "Aguila Golf Course"
+      })
+    ).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl,
+      apiMetadata: {
+        aliases: ["city-of-phoenix-golf-courses"],
+        bookingBaseUrl: bookingUrl,
+        facilityIds: [287]
+      },
+      evidence: { learnedFrom: "teeitup-booking-url" }
+    });
+  });
+
+  it("prioritizes an official TeeItUp CTA after more than 200 navigation links", async () => {
+    const sourceUrl =
+      "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+    const bookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=287";
+    const navigationLinks = Array.from(
+      { length: 205 },
+      (_, index) =>
+        `<a href="/about/navigation-${index}">Navigation ${index}</a>`
+    ).join("");
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>City of Phoenix Golf</title><h1>Phoenix Golf Courses</h1>${navigationLinks}<a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (url.toString() === bookingUrl) {
+        return new Response("Provider-specific crawler rejection", {
+          status: 403,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`Unexpected URL ${url.toString()}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(evidence.linkCandidates).toHaveLength(200);
+    expect(evidence.linkCandidates).toContainEqual({
+      url: bookingUrl,
+      label: "Book a tee time"
+    });
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: bookingUrl,
+      label: "Book a tee time"
+    });
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl,
+      apiMetadata: { facilityIds: [287] }
+    });
+  });
+
+  it("prefers an official public TeeItUp link over a separate account-only CTA", async () => {
+    const sourceUrl = "https://dual-link-golf.example/";
+    const accountBookingUrl = "https://www.driverpos.io/example/sign-in";
+    const publicBookingUrl =
+      "https://dual-link-golf.book.teeitup.com/?course=9182";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const value = url.toString();
+      if (value === sourceUrl) {
+        return new Response(
+          `<html><title>Dual Link Golf Course</title><h1>Dual Link Golf Course</h1><a href="${accountBookingUrl}">Book Tee Time</a><a href="${publicBookingUrl}">General Public Tee Times</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (value === publicBookingUrl) {
+        return new Response("Provider-specific crawler rejection", {
+          status: 403,
+          headers: { "content-type": "text/html" }
+        });
+      }
+      throw new Error(`Unexpected URL ${value}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Dual Link Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "dual-link-golf-course",
+      courseName: "Dual Link Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([
+      sourceUrl,
+      publicBookingUrl
+    ]);
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl: publicBookingUrl,
+      apiMetadata: {
+        aliases: ["dual-link-golf"],
+        bookingBaseUrl: publicBookingUrl,
+        facilityIds: [9182]
+      }
+    });
+    expect(discovery.bookingUrl).not.toBe(accountBookingUrl);
+  });
+
+  it("does not let an unqualified course accept a numbered sibling from page markup", async () => {
+    const sourceUrl = "https://parks.example/course-details.html";
+    const bookingUrl = "https://aguila-nine.book.teeitup.com/?course=289";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><h1>Aguila 9 Golf Course</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("Provider-specific crawler rejection", {
+        status: 403,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course"
+    );
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course"
+    });
+
+    expect(evidence.officialPage).toBeUndefined();
+    expect(discovery.status).not.toBe("LEARNED");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("lets an abbreviated sibling heading veto an otherwise exact official URL path", async () => {
+    const sourceUrl = "https://parks.example/aguila-golf-course.html";
+    const bookingUrl = "https://shared-courses.book.teeitup.com/?course=999";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Aguila 9</title><h1>Aguila 9</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("Provider-specific crawler rejection", {
+        status: 403,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(evidence.officialPage).toBeUndefined();
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("lets a conflicting sibling H1 veto a matching decorated title", async () => {
+    const sourceUrl = "https://parks.example/aguila-golf-course.html";
+    const bookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Aguila Golf Course | Phoenix Golf Courses</title><h1>Aguila 9</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("Provider-specific crawler rejection", {
+        status: 403,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course",
+      undefined,
+      undefined,
+      sourceUrl
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(evidence.officialPage).toBeUndefined();
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it.each(["Aguila Golf Course | Aguila 9", "Aguila Golf Course | Cave Creek"])(
+    "rejects a compound official title with sibling identity: %s",
+    async (title) => {
+      const sourceUrl = "https://parks.example/aguila-golf-course.html";
+      const bookingUrl =
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+      const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+        if (url.toString() === sourceUrl) {
+          return new Response(
+            `<html><title>${title}</title><a href="${bookingUrl}">Book a tee time</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        }
+        return new Response("Provider-specific crawler rejection", {
+          status: 403,
+          headers: { "content-type": "text/html" }
+        });
+      });
+
+      const evidence = await collectOfficialSiteEvidence(
+        sourceUrl,
+        fetchImpl as typeof fetch,
+        "Aguila Golf Course"
+      );
+      expect(evidence.officialPage).toBeUndefined();
+      expect(
+        buildBrowserDiscovery({
+          ...evidence,
+          courseId: "aguila",
+          courseName: "Aguila Golf Course",
+          officialCourseWebsite: sourceUrl
+        }).status
+      ).not.toBe("LEARNED");
+    }
+  );
+
+  it.each(["Papago", "Cave Creek Municipal Golf Course"])(
+    "lets the page-local sibling identity %s veto an exact target path",
+    async (identity) => {
+      const sourceUrl = "https://parks.example/aguila-golf-course.html";
+      const bookingUrl =
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+      const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+        if (url.toString() === sourceUrl) {
+          return new Response(
+            `<html><title>${identity}</title><h1>${identity}</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        }
+        return new Response("Provider-specific crawler rejection", {
+          status: 403,
+          headers: { "content-type": "text/html" }
+        });
+      });
+
+      const evidence = await collectOfficialSiteEvidence(
+        sourceUrl,
+        fetchImpl as typeof fetch,
+        "Aguila Golf Course"
+      );
+      expect(evidence.officialPage).toBeUndefined();
+      expect(
+        buildBrowserDiscovery({
+          ...evidence,
+          courseId: "aguila",
+          courseName: "Aguila Golf Course",
+          officialCourseWebsite: sourceUrl
+        }).status
+      ).not.toBe("LEARNED");
+    }
+  );
+
+  it.each([
+    {
+      identity: "Papago City Golf Courses",
+      alias: "papago-city-golf-courses"
+    },
+    {
+      identity: "Papago City Golf Courses",
+      alias: "city-of-papago-golf-courses"
+    },
+    {
+      identity: "Aguila 9 Golf Courses",
+      alias: "city-of-phoenix-golf-courses"
+    }
+  ])(
+    "rejects source-uncorroborated organization or plural sibling identity $identity with alias $alias",
+    async ({ identity, alias }) => {
+      const sourceUrl =
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+      const bookingUrl = `https://${alias}.book.teeitup.com/?course=999`;
+      const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+        if (url.toString() === sourceUrl) {
+          return new Response(
+            `<html><title>${identity}</title><h1>${identity}</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+            { status: 200, headers: { "content-type": "text/html" } }
+          );
+        }
+        return new Response("Provider-specific crawler rejection", {
+          status: 403,
+          headers: { "content-type": "text/html" }
+        });
+      });
+
+      const evidence = await collectOfficialSiteEvidence(
+        sourceUrl,
+        fetchImpl as typeof fetch,
+        "Aguila Golf Course",
+        undefined,
+        undefined,
+        sourceUrl
+      );
+      const discovery = buildBrowserDiscovery({
+        ...evidence,
+        courseId: "aguila",
+        courseName: "Aguila Golf Course",
+        officialCourseWebsite: sourceUrl
+      });
+
+      expect(evidence.officialPage).toBeUndefined();
+      expect(discovery.status).not.toBe("LEARNED");
+      expect(discovery.apiMetadata).toBeUndefined();
+    }
+  );
+
+  it("uses singleton verified layout evidence for the live Aguila 18 official page", async () => {
+    const sourceUrl =
+      "https://www.phoenix.gov/administration/departments/parks/activities-facilities/phoenix-golf-courses/aguila-golf-course.html";
+    const bookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=287";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Aguila 18 Golf Course | City of Phoenix</title><h1>Aguila 18 Golf Course</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("Provider-specific crawler rejection", {
+        status: 403,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course",
+      undefined,
+      undefined,
+      sourceUrl,
+      [18]
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      officialCourseWebsite: sourceUrl,
+      verifiedLayoutHoleCounts: [18]
+    });
+
+    expect(evidence.officialPage).toMatchObject({
+      url: sourceUrl,
+      courseName: "Aguila Golf Course"
+    });
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl,
+      apiMetadata: { facilityIds: [287] }
+    });
+  });
+
+  it("lets a disjoint sibling heading veto an otherwise exact official URL path", async () => {
+    const sourceUrl = "https://parks.example/aguila-golf-course.html";
+    const bookingUrl = "https://shared-courses.book.teeitup.com/?course=999";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Cave Creek</title><h1>Cave Creek</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("Provider-specific crawler rejection", {
+        status: 403,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(evidence.officialPage).toBeUndefined();
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not collapse conflicting 9-hole and 18-hole course identities", async () => {
+    const sourceUrl = "https://parks.example/course-details.html";
+    const bookingUrl = "https://aguila-18.book.teeitup.com/?course=287";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><h1>Aguila 18 Golf Course</h1><a href="${bookingUrl}">Book a tee time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("Provider-specific crawler rejection", {
+        status: 403,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Aguila 9 Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "aguila-nine-golf-course",
+      courseName: "Aguila 9 Golf Course"
+    });
+
+    expect(evidence.officialPage).toBeUndefined();
+    expect(discovery.status).not.toBe("LEARNED");
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("classifies the live initial-free Blank official page without following its DriverPOS login", async () => {
+    const sourceUrl = "https://golfblank.com/";
+    const accountBookingUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const unrelatedLoginUrl = "https://accounts.example/member/login";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      expect(url.toString()).toBe(sourceUrl);
+      return new Response(
+        `<html><title>Blank Golf Course</title><h1>Welcome to The Blank Golf Course</h1><a href="${accountBookingUrl}">Book Tee Time</a><a href="${unrelatedLoginUrl}">Member login</a></html>`,
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "A.H. Blank Golf Course"
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evidence.observedUrls).toContain(accountBookingUrl);
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: accountBookingUrl,
+      label: "Book Tee Time"
+    });
+    expect(evidence.observedUrls).not.toContain(unrelatedLoginUrl);
+    expect(evidence.officialPage?.linkCandidates).not.toContainEqual(
+      expect.objectContaining({ url: unrelatedLoginUrl })
+    );
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "ah-blank-golf-course",
+      courseName: "A.H. Blank Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: accountBookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_REQUIRED",
+      evidence: { learnedFrom: "official-booking-cta-account-sign-in" }
+    });
+  });
+
+  it.each([
+    ["conflicting initials", "B.H. Blank Golf Course"],
+    ["sibling name", "Blank Park Golf Course"]
+  ])("rejects a Blank official-page %s", async (_label, officialName) => {
+    const sourceUrl = "https://golfblank.example/";
+    const accountBookingUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          `<html><title>${officialName}</title><h1>${officialName}</h1><a href="${accountBookingUrl}">Book Tee Time</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        )
+    );
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "A.H. Blank Golf Course"
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "ah-blank-golf-course",
+      courseName: "A.H. Blank Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evidence.officialPage).toBeUndefined();
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
   });
 
   it("does not learn a sibling provider from a shared booking index", async () => {

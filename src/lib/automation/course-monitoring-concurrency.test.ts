@@ -1693,6 +1693,183 @@ describe("course monitoring write serialization", () => {
     expect(JSON.stringify(event)).not.toContain("tenant");
   });
 
+  it("keeps a trusted account-required discovery in parked engineering review", async () => {
+    const now = new Date("2026-08-18T17:15:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-account-required",
+      cycle: 3,
+      revision: 7,
+      status: "NEEDS_HUMAN",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "UNSUPPORTED_FAMILY",
+      activeBatchId: null,
+      activeRealSearchCount: 0,
+      failureFingerprint: "old-source-fingerprint",
+      humanReviewReason: "AUTOMATION_STALLED",
+      resolution: null,
+    });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "ENGINEERING_VERIFICATION_NEEDED",
+      revision: 5,
+    });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-account-required",
+        before: {
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          automationReason: "OTHER",
+          bookingAccessMode: "UNKNOWN",
+        },
+        after: {
+          providerFamilyKey: "driverpos.io",
+          detectedBookingUrl: "https://provider.example/tenant/sign-in",
+          automationReason: "ACCOUNT_REQUIRED",
+          bookingAccessMode: "ACCOUNT_REQUIRED",
+        },
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "HUMAN_REVIEW_PRESERVED",
+      searchesQueued: 0,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        id: "incident-account-required",
+        cycle: 3,
+        revision: 7,
+        activeBatchId: null,
+        status: "NEEDS_HUMAN",
+      },
+      data: expect.objectContaining({
+        status: "NEEDS_HUMAN",
+        providerFamilyKey: "driverpos.io",
+        failureClass: "AUTH",
+        humanReviewReason: "ACCOUNT_REQUIRED",
+        latestMessage:
+          "Verified official course evidence indicates an account is required to view tee times.",
+        nextAttemptAt: null,
+        escalatedAt: now,
+        nextReminderAt: now,
+        revision: { increment: 1 },
+      }),
+    });
+    const incidentUpdate =
+      transactionMocks.courseSupportIncident.updateMany.mock.calls.at(-1)?.[0]
+        ?.data;
+    expect(incidentUpdate).toHaveProperty("status", "NEEDS_HUMAN");
+    expect(incidentUpdate).not.toHaveProperty("cycle");
+    expect(
+      transactionMocks.courseMonitoringStatus.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-account-required",
+        revision: 5,
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+      },
+      data: expect.objectContaining({
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+      }),
+    });
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        toState: "ENGINEERING_VERIFICATION_NEEDED",
+        audit: expect.objectContaining({
+          cycle: 3,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          humanReviewReason: "ACCOUNT_REQUIRED",
+          parkedUntilMaterialChange: true,
+          automaticRetrySuppressed: true,
+          customerDataIncluded: false,
+        }),
+      }),
+    });
+  });
+
+  it("parks an unowned stalled automatic incident when account-required evidence is conclusive", async () => {
+    const now = new Date("2026-08-18T17:30:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-auto-account-required",
+      cycle: 4,
+      revision: 9,
+      status: "AUTO_INVESTIGATING",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "UNSUPPORTED_FAMILY",
+      activeBatchId: null,
+      activeRealSearchCount: 1,
+      failureFingerprint: "old-source-fingerprint",
+      humanReviewReason: "AUTOMATION_STALLED",
+      resolution: null,
+    });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "AUTO_INVESTIGATING",
+      revision: 6,
+    });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-auto-account-required",
+        before: {
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          automationReason: "OTHER",
+          bookingAccessMode: "UNKNOWN",
+        },
+        after: {
+          providerFamilyKey: "driverpos.io",
+          detectedBookingUrl: "https://provider.example/tenant/sign-in",
+          automationReason: "ACCOUNT_REQUIRED",
+          bookingAccessMode: "ACCOUNT_REQUIRED",
+        },
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "HUMAN_REVIEW_PRESERVED",
+      searchesQueued: 0,
+    });
+
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-auto-account-required",
+        cycle: 4,
+        revision: 9,
+        activeBatchId: null,
+        status: "AUTO_INVESTIGATING",
+      },
+      data: expect.objectContaining({
+        status: "NEEDS_HUMAN",
+        humanReviewReason: "ACCOUNT_REQUIRED",
+        nextAttemptAt: null,
+        escalatedAt: now,
+      }),
+    });
+    expect(transactionMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-auto-account-required",
+        revision: 6,
+        state: "AUTO_INVESTIGATING",
+      },
+      data: expect.objectContaining({
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+      }),
+    });
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
   it("re-reads an eligible parked incident after a stale provider-evidence CAS", async () => {
     const now = new Date("2026-08-11T13:02:00.000Z");
     transactionMocks.courseSupportIncident.findUnique

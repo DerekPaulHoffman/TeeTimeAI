@@ -219,6 +219,7 @@ describe("browser probe evidence pipeline", () => {
     const landing = prepareBrowserPageEvidence(
       {
         ...emptyPage,
+        identityCandidates: [fictionalCourse.courseName],
         visibleText:
           "Call the Pro Shop at 919-555-0142 to reserve a tee time.",
         structuredActionScripts: [
@@ -319,6 +320,352 @@ describe("browser probe evidence pipeline", () => {
 
     expect(evidence.officialPage?.visibleText).not.toContain("555-010-3333");
   });
+
+  it("keeps cross-origin booking-surface text separate from official-page text", () => {
+    const accountUrl = "https://accounts.example/tenant/sign-in";
+    const landing = prepareBrowserPageEvidence({
+      ...emptyPage,
+      linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }],
+      visibleText: `${fictionalCourse.courseName}. Book Tee Time.`
+    });
+    const accountSurface = prepareBrowserPageEvidence({
+      ...emptyPage,
+      visibleText: `${fictionalCourse.courseName}. Sign in with your account to book the tee time.`
+    });
+    const externalEvidence = finalizeBrowserEvidenceSnapshots({
+      course: fictionalCourse,
+      finalUrl: accountUrl,
+      observedUrls: [accountUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: fictionalCourse.sourceUrl,
+      landingPageEvidence: landing,
+      firstDestinationPageUrl: accountUrl,
+      firstDestinationPageEvidence: accountSurface,
+      destinationPageUrl: accountUrl,
+      destinationPageEvidence: accountSurface
+    });
+    const sameOriginEvidence = finalizeBrowserEvidenceSnapshots({
+      course: fictionalCourse,
+      finalUrl: `${fictionalCourse.sourceUrl}/rates`,
+      observedUrls: [],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: fictionalCourse.sourceUrl,
+      landingPageEvidence: landing,
+      firstDestinationPageUrl: `${fictionalCourse.sourceUrl}/rates`,
+      firstDestinationPageEvidence: landing,
+      destinationPageUrl: `${fictionalCourse.sourceUrl}/rates`,
+      destinationPageEvidence: landing
+    });
+
+    expect(externalEvidence.bookingSurfaceText).toBe(
+      `${fictionalCourse.courseName}. Sign in with your account to book the tee time.`
+    );
+    expect(externalEvidence.officialPage?.visibleText).not.toContain(
+      "Sign in with your account"
+    );
+    expect(sameOriginEvidence.bookingSurfaceText).toBeUndefined();
+  });
+
+  it("does not let a verified landing page authorize a later same-origin sibling page", () => {
+    const targetUrl = "https://courses.example/target-course";
+    const siblingUrl = "https://courses.example/sibling-course";
+    const siblingBookingUrl =
+      "https://shared-courses.book.teeitup.com/?course=999";
+    const target = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: ["Target Course Golf Club"],
+      visibleText: "Target Course Golf Club"
+    });
+    const sibling = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: ["Sibling Course Golf Club"],
+      linkCandidates: [{ url: siblingBookingUrl, label: "Book a tee time" }],
+      visibleText: "Target Course Golf Club\nSibling Course Golf Club"
+    });
+
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: {
+        courseId: "target-course",
+        courseName: "Target Course Golf Club",
+        sourceUrl: targetUrl,
+        officialCourseWebsite: targetUrl
+      },
+      finalUrl: siblingUrl,
+      observedUrls: [targetUrl, siblingUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: targetUrl,
+      landingPageEvidence: target,
+      firstDestinationPageUrl: siblingUrl,
+      firstDestinationPageEvidence: sibling,
+      destinationPageUrl: siblingUrl,
+      destinationPageEvidence: sibling
+    });
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(evidence.officialPage).toMatchObject({
+      url: targetUrl,
+      courseName: "Target Course Golf Club",
+      linkCandidates: []
+    });
+    expect(discovery).not.toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP"
+    });
+  });
+
+  it("lets an abbreviated sibling title veto an otherwise exact target URL path", () => {
+    const targetUrl = "https://courses.example/aguila-golf-course.html";
+    const siblingBookingUrl =
+      "https://shared-courses.book.teeitup.com/?course=999";
+    const sibling = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: ["Aguila 9"],
+      linkCandidates: [{ url: siblingBookingUrl, label: "Book a tee time" }],
+      visibleText: "Aguila 9"
+    });
+
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: {
+        courseId: "aguila",
+        courseName: "Aguila Golf Course",
+        sourceUrl: targetUrl,
+        officialCourseWebsite: targetUrl
+      },
+      finalUrl: targetUrl,
+      observedUrls: [targetUrl, siblingBookingUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: targetUrl,
+      landingPageEvidence: sibling,
+      firstDestinationPageUrl: targetUrl,
+      firstDestinationPageEvidence: sibling,
+      destinationPageUrl: targetUrl,
+      destinationPageEvidence: sibling
+    });
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(evidence.officialPage?.courseName).toBeUndefined();
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("lets a conflicting sibling H1 veto a matching decorated rendered title", () => {
+    const targetUrl = "https://courses.example/aguila-golf-course.html";
+    const siblingBookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+    const page = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: [
+        "Aguila Golf Course | Phoenix Golf Courses",
+        "Aguila 9"
+      ],
+      linkCandidates: [{ url: siblingBookingUrl, label: "Book a tee time" }],
+      visibleText: "Aguila Golf Course. Aguila 9."
+    });
+
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: {
+        courseId: "aguila",
+        courseName: "Aguila Golf Course",
+        sourceUrl: targetUrl,
+        officialCourseWebsite: targetUrl
+      },
+      finalUrl: targetUrl,
+      observedUrls: [targetUrl, siblingBookingUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: targetUrl,
+      landingPageEvidence: page,
+      firstDestinationPageUrl: targetUrl,
+      firstDestinationPageEvidence: page,
+      destinationPageUrl: targetUrl,
+      destinationPageEvidence: page
+    });
+
+    expect(evidence.officialPage?.courseName).toBeUndefined();
+    expect(buildBrowserDiscovery(evidence)).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP"
+    });
+  });
+
+  it("uses singleton verified layout evidence for the live rendered Aguila 18 page", () => {
+    const targetUrl =
+      "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+    const bookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=287";
+    const page = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: [
+        "Aguila 18 Golf Course | City of Phoenix",
+        "Aguila 18 Golf Course"
+      ],
+      linkCandidates: [{ url: bookingUrl, label: "Book a tee time" }],
+      visibleText: "Aguila 18 Golf Course. Book a tee time."
+    });
+
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: {
+        courseId: "aguila",
+        courseName: "Aguila Golf Course",
+        sourceUrl: targetUrl,
+        officialCourseWebsite: targetUrl,
+        verifiedLayoutHoleCounts: [18]
+      },
+      finalUrl: targetUrl,
+      observedUrls: [targetUrl, bookingUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: targetUrl,
+      landingPageEvidence: page,
+      firstDestinationPageUrl: targetUrl,
+      firstDestinationPageEvidence: page,
+      destinationPageUrl: targetUrl,
+      destinationPageEvidence: page
+    });
+
+    expect(evidence.officialPage).toMatchObject({
+      url: targetUrl,
+      courseName: "Aguila Golf Course"
+    });
+    expect(buildBrowserDiscovery(evidence)).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingUrl,
+      apiMetadata: { facilityIds: [287] }
+    });
+  });
+
+  it("rejects a compound rendered title whose suffix identifies a sibling", () => {
+    const targetUrl = "https://courses.example/aguila-golf-course.html";
+    const bookingUrl =
+      "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+    const page = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: ["Aguila Golf Course | Aguila 9"],
+      linkCandidates: [{ url: bookingUrl, label: "Book a tee time" }],
+      visibleText: "Aguila Golf Course. Aguila 9."
+    });
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: {
+        courseId: "aguila",
+        courseName: "Aguila Golf Course",
+        sourceUrl: targetUrl,
+        officialCourseWebsite: targetUrl
+      },
+      finalUrl: targetUrl,
+      observedUrls: [bookingUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: targetUrl,
+      landingPageEvidence: page,
+      firstDestinationPageUrl: targetUrl,
+      firstDestinationPageEvidence: page,
+      destinationPageUrl: targetUrl,
+      destinationPageEvidence: page
+    });
+
+    expect(evidence.officialPage?.courseName).toBeUndefined();
+    expect(buildBrowserDiscovery(evidence).status).not.toBe("LEARNED");
+  });
+
+  it("lets a disjoint sibling title veto an otherwise exact target URL path", () => {
+    const targetUrl = "https://courses.example/aguila-golf-course.html";
+    const siblingBookingUrl =
+      "https://shared-courses.book.teeitup.com/?course=999";
+    const sibling = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: ["Cave Creek"],
+      linkCandidates: [{ url: siblingBookingUrl, label: "Book a tee time" }],
+      visibleText: "Cave Creek"
+    });
+
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course: {
+        courseId: "aguila",
+        courseName: "Aguila Golf Course",
+        sourceUrl: targetUrl,
+        officialCourseWebsite: targetUrl
+      },
+      finalUrl: targetUrl,
+      observedUrls: [targetUrl, siblingBookingUrl],
+      successfulProviderUrls: [],
+      accessBarrierUrls: [],
+      accessBarriers: [],
+      landingPageUrl: targetUrl,
+      landingPageEvidence: sibling,
+      firstDestinationPageUrl: targetUrl,
+      firstDestinationPageEvidence: sibling,
+      destinationPageUrl: targetUrl,
+      destinationPageEvidence: sibling
+    });
+    const discovery = buildBrowserDiscovery(evidence);
+
+    expect(evidence.officialPage?.courseName).toBeUndefined();
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it.each([
+    "Papago",
+    "Papago City Golf Courses",
+    "Aguila 9 Golf Courses",
+    "Cave Creek Municipal Golf Course"
+  ])(
+    "lets rendered sibling identity %s veto an exact target URL path",
+    (identity) => {
+      const targetUrl =
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+      const siblingBookingUrl =
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+      const sibling = prepareBrowserPageEvidence({
+        ...emptyPage,
+        identityCandidates: [identity],
+        linkCandidates: [{ url: siblingBookingUrl, label: "Book a tee time" }],
+        visibleText: identity
+      });
+      const evidence = finalizeBrowserEvidenceSnapshots({
+        course: {
+          courseId: "aguila",
+          courseName: "Aguila Golf Course",
+          sourceUrl: targetUrl,
+          officialCourseWebsite: targetUrl
+        },
+        finalUrl: targetUrl,
+        observedUrls: [targetUrl, siblingBookingUrl],
+        successfulProviderUrls: [],
+        accessBarrierUrls: [],
+        accessBarriers: [],
+        landingPageUrl: targetUrl,
+        landingPageEvidence: sibling,
+        firstDestinationPageUrl: targetUrl,
+        firstDestinationPageEvidence: sibling,
+        destinationPageUrl: targetUrl,
+        destinationPageEvidence: sibling
+      });
+
+      expect(evidence.officialPage?.courseName).toBeUndefined();
+      expect(buildBrowserDiscovery(evidence).status).not.toBe("LEARNED");
+    }
+  );
 
   it("fails a release expectation with redacted target ordinals", () => {
     const trace = {

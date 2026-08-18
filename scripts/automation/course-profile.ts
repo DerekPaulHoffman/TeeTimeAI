@@ -7,7 +7,17 @@ import {
   MAX_BOOKING_WINDOW_DAYS_AHEAD,
   normalizeReleaseTime
 } from "@/lib/courses/booking-window";
-import { recordCourseBookingWindowEvidence } from "@/lib/automation/db-service";
+import { recordCourseBookingWindowEvidence,
+  recordCoursePhysicalLayoutEvidence } from "@/lib/automation/db-service";
+import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
+import { isSafeManualEvidenceUrl } from "@/lib/automation/browser-discovery";
+import { normalizeLayoutHoleCounts } from "@/lib/courses/course-layout";
+import {
+  haveCompatibleOfficialPageCourseNames,
+  isConflictingOfficialPageCourseIdentity,
+  isOfficialOrganizationIdentityCorroboratedByUrl,
+  normalizeOfficialPagePresentationIdentity
+} from "@/lib/places/course-identity";
 import { applyCourseProfileDraft, createCourseProfileSlugAlias, getCourseProfileResearchPacket, listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { prisma } from "@/lib/prisma";
 
@@ -81,6 +91,53 @@ export function parseCourseProfileCommand(args: readonly string[]) {
       apply
     } as const;
   }
+  if (action === "physical-layout") {
+    const courseId = value("--course-id");
+    const holesValue = value("--holes");
+    const evidenceUrl = value("--evidence-url");
+    const verifiedAtValue = value("--verified-at");
+    if (!courseId || !holesValue || !evidenceUrl || !verifiedAtValue) {
+      throw new Error(
+        "physical-layout requires --course-id, --holes, --evidence-url, and --verified-at"
+      );
+    }
+    const requestedHoleCounts = holesValue
+      .split(",")
+      .map((entry) => Number(entry.trim()));
+    const holeCounts = normalizeLayoutHoleCounts(requestedHoleCounts);
+    if (
+      holeCounts.length === 0 ||
+      holeCounts.length !== requestedHoleCounts.length
+    ) {
+      throw new Error("--holes must contain unique 9 and/or 18 values");
+    }
+    const parsedEvidenceUrl = parsePublicEvidenceUrl(evidenceUrl);
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(verifiedAtValue)) {
+      throw new Error(
+        "--verified-at must be a calendar date in YYYY-MM-DD form"
+      );
+    }
+    const verifiedAt = new Date(`${verifiedAtValue}T00:00:00.000Z`);
+    if (
+      !Number.isFinite(verifiedAt.getTime()) ||
+      verifiedAt.toISOString().slice(0, 10) !== verifiedAtValue
+    ) {
+      throw new Error(
+        "--verified-at must be a calendar date in YYYY-MM-DD form"
+      );
+    }
+    if (verifiedAt.getTime() > Date.now()) {
+      throw new Error("--verified-at cannot be in the future");
+    }
+    return {
+      action,
+      courseId,
+      holeCounts,
+      evidenceUrl: parsedEvidenceUrl.toString(),
+      verifiedAt,
+      apply
+    } as const;
+  }
   if (action === "alias") {
     const courseId = value("--course-id");
     const slug = value("--slug");
@@ -88,10 +145,31 @@ export function parseCourseProfileCommand(args: readonly string[]) {
     return { action, courseId, slug, apply } as const;
   }
   if (action === "upsert") return { action, apply, file: value("--file") } as const;
-  throw new Error('Expected "cohort", "queue", "research", "verify-profiles", "booking-window", "alias", or "upsert"');
+  throw new Error(
+    'Expected "cohort", "queue", "research", "verify-profiles", "booking-window", "physical-layout", "alias", or "upsert"');
 }
 
-export async function executeCourseProfileCommand(command: ReturnType<typeof parseCourseProfileCommand>, stdin = process.stdin) {
+function parsePublicEvidenceUrl(value: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("--evidence-url must be an HTTP(S) URL");
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    /^(?:localhost|127\.|0\.0\.0\.0$|\[?::1\]?$)/iu.test(parsed.hostname) ||
+    !isSafeManualEvidenceUrl(parsed)
+  ) {
+    throw new Error("--evidence-url must be an HTTP(S) URL");
+  }
+  return parsed;
+}
+
+export async function executeCourseProfileCommand(command: ReturnType<typeof parseCourseProfileCommand>, stdin = process.stdin,
+  fetchImpl?: typeof fetch) {
   if (command.action === "cohort") {
     return prisma.course.findMany({
       where: { automationEligibility: "ALLOWED", address: { contains: "CT" } },
@@ -192,9 +270,231 @@ export async function executeCourseProfileCommand(command: ReturnType<typeof par
       }
     };
   }
+  if (command.action === "physical-layout") {
+    const course = await prisma.course.findUnique({
+      where: { id: command.courseId },
+      select: {
+        id: true,
+        name: true,
+        layoutHoleCounts: true,
+        layoutHolesEvidenceUrl: true,
+        layoutHolesVerifiedAt: true,
+        updatedAt: true
+      }
+    });
+    if (!course) throw new Error(`Course ${command.courseId} was not found`);
+
+    const source = await fetchPhysicalLayoutEvidence(
+      command.evidenceUrl,
+      fetchImpl ?? createPhysicalLayoutEvidenceFetch()
+    );
+    if (
+      !doesOfficialPageCorroboratePhysicalLayout(
+        source.html,
+        course.name,
+        command.holeCounts,
+        source.finalUrl
+      )
+    ) {
+      throw new Error(
+        "The physical-layout source title/H1 does not corroborate the exact course and requested hole count"
+      );
+    }
+
+    const proposed = {
+      layoutHoleCounts: command.holeCounts,
+      layoutHolesEvidenceUrl: source.finalUrl,
+      layoutHolesVerifiedAt: command.verifiedAt
+    };
+    if (!command.apply) {
+      return { apply: false, course, proposed };
+    }
+
+    const updated = await recordCoursePhysicalLayoutEvidence({
+      courseId: command.courseId,
+      holeCounts: command.holeCounts,
+      evidenceUrl: source.finalUrl,
+      verifiedAt: command.verifiedAt,
+      expectedUpdatedAt: course.updatedAt,
+      expectedName: course.name,
+      source: "OPERATOR_CLI"
+    });
+    return {
+      apply: true,
+      course: {
+        id: updated.id,
+        name: updated.name,
+        layoutHoleCounts: updated.layoutHoleCounts,
+        layoutHolesEvidenceUrl: updated.layoutHolesEvidenceUrl,
+        layoutHolesVerifiedAt: updated.layoutHolesVerifiedAt
+      }
+    };
+  }
   if (command.action === "alias") return createCourseProfileSlugAlias(command.courseId, command.slug, command.apply);
   const input = command.file ? await readFile(command.file, "utf8") : await readStdin(stdin);
   return applyCourseProfileDraft(JSON.parse(input) as unknown, command.apply);
+}
+
+function createPhysicalLayoutEvidenceFetch() {
+  return createAddressPinnedPublicFetchTransport({
+    parseUrl: (value) => parsePublicEvidenceUrl(value),
+    maxResponseBytes: 1_500_000,
+    redirectLimit: 0,
+    timeoutMs: 10_000
+  });
+}
+
+async function fetchPhysicalLayoutEvidence(
+  sourceUrl: string,
+  fetchImpl: typeof fetch
+) {
+  let currentUrl = parsePublicEvidenceUrl(sourceUrl).toString();
+  for (let redirectCount = 0; redirectCount <= 4; redirectCount += 1) {
+    const response = await fetchImpl(currentUrl, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        Accept: "text/html,application/xhtml+xml;q=0.9",
+        "User-Agent":
+          "Tee Time Spot course evidence verifier (+https://teetimespot.com/)"
+      }
+    });
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location || redirectCount === 4) {
+        throw new Error(
+          "The physical-layout evidence source returned an incomplete redirect"
+        );
+      }
+      currentUrl = parsePublicEvidenceUrl(
+        new URL(location, currentUrl).toString()
+      ).toString();
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(
+        `The physical-layout evidence source returned HTTP ${response.status}`
+      );
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    if (
+      contentType &&
+      !/\b(?:text\/html|application\/xhtml\+xml)\b/iu.test(contentType)
+    ) {
+      throw new Error(
+        "The physical-layout evidence source is not an HTML page"
+      );
+    }
+    const html = await response.text();
+    if (Buffer.byteLength(html, "utf8") > 1_500_000) {
+      throw new Error(
+        "The physical-layout evidence source is too large to inspect safely"
+      );
+    }
+    return { finalUrl: currentUrl, html };
+  }
+  throw new Error(
+    "The physical-layout evidence source exceeded the redirect limit"
+  );
+}
+
+function doesOfficialPageCorroboratePhysicalLayout(
+  html: string,
+  courseName: string,
+  holeCounts: readonly (9 | 18)[],
+  pageUrl: string
+) {
+  const identities = [
+    ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
+    ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
+  ]
+    .map((match) => decodeHtmlText(match[1] ?? ""))
+    .filter(Boolean);
+  if (identities.length === 0) {
+    return false;
+  }
+
+  const identityStatuses = identities.map((identity) => {
+    const variants = getOfficialIdentityVariants(identity);
+    const statuses = variants.map((variant) => {
+      if (
+        haveCompatibleOfficialPageCourseNames(courseName, variant) ||
+        holeCounts.some((holes) =>
+          doesIdentityMatchVerifiedPhysicalLayout(courseName, variant, holes)
+        )
+      ) {
+        return "MATCH" as const;
+      }
+      if (isOfficialOrganizationIdentityCorroboratedByUrl(variant, pageUrl)) {
+        return "ABSENT" as const;
+      }
+      return isConflictingOfficialPageCourseIdentity(courseName, variant)
+        ? ("CONFLICT" as const)
+        : ("ABSENT" as const);
+    });
+    if (statuses.includes("CONFLICT")) {
+      return "CONFLICT" as const;
+    }
+    return statuses.includes("MATCH")
+      ? ("MATCH" as const)
+      : ("ABSENT" as const);
+  });
+  if (identityStatuses.includes("CONFLICT")) {
+    return false;
+  }
+  return holeCounts.every((holes) =>
+    identities.some((identity) =>
+      getOfficialIdentityVariants(identity).some((variant) =>
+        doesIdentityMatchVerifiedPhysicalLayout(courseName, variant, holes)
+      )
+    )
+  );
+}
+
+function doesIdentityMatchVerifiedPhysicalLayout(
+  courseName: string,
+  pageIdentity: string,
+  holes: 9 | 18
+) {
+  const words = holes === 9 ? "nine" : "eighteen";
+  const qualifier = new RegExp(
+    `\\b(?:${holes}|${words})(?:\\s*[- ]?\\s*holes?)?\\b`,
+    "iu"
+  );
+  if (!qualifier.test(pageIdentity)) {
+    return false;
+  }
+  const unqualified = pageIdentity
+    .replace(qualifier, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return haveCompatibleOfficialPageCourseNames(courseName, unqualified);
+}
+
+function getOfficialIdentityVariants(identity: string) {
+  const segments = identity
+    .split(/\s+(?:\||[–—]|-\s)\s*/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return (segments.length > 1 ? segments : [identity])
+    .map(normalizeOfficialPagePresentationIdentity)
+    .filter(
+      (value, index, values): value is string =>
+        Boolean(value) && values.indexOf(value) === index
+    );
+}
+
+function decodeHtmlText(value: string) {
+  return value
+    .replace(/<[^>]*>/gu, " ")
+    .replace(/&nbsp;|&#160;/giu, " ")
+    .replace(/&amp;|&#38;/giu, "&")
+    .replace(/&quot;|&#34;/giu, '"')
+    .replace(/&#39;|&apos;/giu, "'")
+    .replace(/&lt;|&#60;/giu, "<")
+    .replace(/&gt;|&#62;/giu, ">")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function readStdin(stream: NodeJS.ReadableStream) {

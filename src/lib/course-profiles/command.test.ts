@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbServiceMocks = vi.hoisted(() => ({
-  recordCourseBookingWindowEvidence: vi.fn()
+  recordCourseBookingWindowEvidence: vi.fn(),
+  recordCoursePhysicalLayoutEvidence: vi.fn()
 }));
 const prismaMocks = vi.hoisted(() => ({
   course: {
@@ -47,6 +48,20 @@ describe("automation:course-profile", () => {
       evidenceUrl: "https://example.com/booking-policy",
       apply: false
     });
+    expect(parseCourseProfileCommand([
+      "physical-layout",
+      "--course-id", "course-1",
+      "--holes", "18",
+      "--evidence-url", "https://parks.example/aguila-golf-course.html",
+      "--verified-at", "2026-08-18"
+    ])).toEqual({
+      action: "physical-layout",
+      courseId: "course-1",
+      holeCounts: [18],
+      evidenceUrl: "https://parks.example/aguila-golf-course.html",
+      verifiedAt: new Date("2026-08-18T00:00:00.000Z"),
+      apply: false
+    });
   });
 
   it("rejects invalid booking-window facts before touching the database", () => {
@@ -69,6 +84,37 @@ describe("automation:course-profile", () => {
     expect(() => parseCourseProfileCommand(["verify-profiles"])).toThrow(
       "verify-profiles requires a two-letter --state"
     );
+  });
+
+  it("rejects invalid physical-layout evidence before touching the database", () => {
+    expect(() => parseCourseProfileCommand([
+      "physical-layout",
+      "--course-id", "course-1",
+      "--holes", "9,27",
+      "--evidence-url", "https://parks.example/aguila",
+      "--verified-at", "2026-08-18"
+    ])).toThrow("--holes must contain unique 9 and/or 18 values");
+    expect(() => parseCourseProfileCommand([
+      "physical-layout",
+      "--course-id", "course-1",
+      "--holes", "18",
+      "--evidence-url", "https://user:secret@parks.example/aguila",
+      "--verified-at", "2026-08-18"
+    ])).toThrow("--evidence-url must be an HTTP(S) URL");
+    expect(() => parseCourseProfileCommand([
+      "physical-layout",
+      "--course-id", "course-1",
+      "--holes", "18",
+      "--evidence-url", "https://parks.example/aguila",
+      "--verified-at", "2026-02-30"
+    ])).toThrow("--verified-at must be a calendar date");
+    expect(() => parseCourseProfileCommand([
+      "physical-layout",
+      "--course-id", "course-1",
+      "--holes", "18",
+      "--evidence-url", "https://parks.example/aguila",
+      "--verified-at", "2999-01-01"
+    ])).toThrow("--verified-at cannot be in the future");
   });
 
   it("applies booking-window facts through monitoring-aware persistence", async () => {
@@ -117,5 +163,129 @@ describe("automation:course-profile", () => {
       observedAt: expect.any(Date),
       source: "OPERATOR_CLI"
     });
+  });
+
+  it("applies physical-layout facts through serialized monitoring-aware persistence", async () => {
+    const expectedUpdatedAt = new Date("2026-08-18T14:00:00.000Z");
+    const current = {
+      id: "aguila",
+      name: "Aguila Golf Course",
+      layoutHoleCounts: [],
+      layoutHolesEvidenceUrl: null,
+      layoutHolesVerifiedAt: null,
+      updatedAt: expectedUpdatedAt
+    };
+    const updated = {
+      ...current,
+      layoutHoleCounts: [18],
+      layoutHolesEvidenceUrl:
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html",
+      layoutHolesVerifiedAt: new Date("2026-08-18T00:00:00.000Z")
+    };
+    prismaMocks.course.findUnique.mockResolvedValue(current);
+    dbServiceMocks.recordCoursePhysicalLayoutEvidence.mockResolvedValue(updated);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        "<html><title>Aguila 18 Golf Course | Phoenix Golf Courses</title><h1>Aguila 18 Golf Course</h1></html>",
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    const result = await executeCourseProfileCommand(
+      parseCourseProfileCommand([
+        "physical-layout",
+        "--course-id", "aguila",
+        "--holes", "18",
+        "--evidence-url",
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html",
+        "--verified-at", "2026-08-18",
+        "--apply"
+      ]),
+      process.stdin,
+      fetchImpl as typeof fetch
+    );
+
+    expect(result).toEqual({
+      apply: true,
+      course: {
+        id: updated.id,
+        name: updated.name,
+        layoutHoleCounts: updated.layoutHoleCounts,
+        layoutHolesEvidenceUrl: updated.layoutHolesEvidenceUrl,
+        layoutHolesVerifiedAt: updated.layoutHolesVerifiedAt
+      }
+    });
+    expect(dbServiceMocks.recordCoursePhysicalLayoutEvidence).toHaveBeenCalledWith({
+      courseId: "aguila",
+      holeCounts: [18],
+      evidenceUrl:
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html",
+      verifiedAt: new Date("2026-08-18T00:00:00.000Z"),
+      expectedUpdatedAt,
+      expectedName: "Aguila Golf Course",
+      source: "OPERATOR_CLI"
+    });
+  });
+
+  it("requires exact page-local course and layout corroboration even for dry-run", async () => {
+    prismaMocks.course.findUnique.mockResolvedValue({
+      id: "aguila",
+      name: "Aguila Golf Course",
+      layoutHoleCounts: [],
+      layoutHolesEvidenceUrl: null,
+      layoutHolesVerifiedAt: null
+    });
+    const siblingFetch = vi.fn().mockResolvedValue(
+      new Response(
+        "<html><title>Aguila 18 Golf Course | Aguila 9</title><h1>Aguila 18 Golf Course</h1></html>",
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    await expect(
+      executeCourseProfileCommand(
+        parseCourseProfileCommand([
+          "physical-layout",
+          "--course-id", "aguila",
+          "--holes", "18",
+          "--evidence-url", "https://parks.example/aguila-golf-course.html",
+          "--verified-at", "2026-08-18"
+        ]),
+        process.stdin,
+        siblingFetch as typeof fetch
+      )
+    ).rejects.toThrow("does not corroborate the exact course");
+    expect(dbServiceMocks.recordCoursePhysicalLayoutEvidence).not.toHaveBeenCalled();
+  });
+
+  it("never follows a physical-layout evidence redirect to an account route", async () => {
+    prismaMocks.course.findUnique.mockResolvedValue({
+      id: "aguila",
+      name: "Aguila Golf Course",
+      layoutHoleCounts: [],
+      layoutHolesEvidenceUrl: null,
+      layoutHolesVerifiedAt: null
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://accounts.example/sign-in" }
+      })
+    );
+
+    await expect(
+      executeCourseProfileCommand(
+        parseCourseProfileCommand([
+          "physical-layout",
+          "--course-id", "aguila",
+          "--holes", "18",
+          "--evidence-url", "https://parks.example/aguila-golf-course.html",
+          "--verified-at", "2026-08-18"
+        ]),
+        process.stdin,
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toThrow("--evidence-url must be an HTTP(S) URL");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

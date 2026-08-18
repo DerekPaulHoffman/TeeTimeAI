@@ -13,10 +13,18 @@ import {
   isProviderInfrastructureUrl,
   isProviderPublicBookingLandingUrl
 } from "@/lib/automation/provider-capabilities";
+import {
+  haveCompatibleOfficialPageCourseNames,
+  haveCompatibleOfficialPageCourseNamesWithVerifiedLayout,
+  isConflictingOfficialPageCourseIdentity,
+  isOfficialOrganizationIdentityCorroboratedByUrl,
+  normalizeOfficialPagePresentationIdentity
+} from "@/lib/places/course-identity";
 
 export type RawBrowserPageEvidence = {
   anchors: string[];
   accessControlDetected: boolean;
+  identityCandidates?: string[];
   structuredActionScripts: string[];
   linkCandidates: Array<{ url: string; label: string }>;
   scripts: string[];
@@ -38,8 +46,7 @@ export type RawBrowserFrameCandidate = {
   baseUrl: string;
 };
 
-export type BrowserProbeExpectedDisposition =
-  | "ACTIONABLE"
+export type BrowserProbeExpectedDisposition = "ACTIONABLE"
   | "MANUAL_FINAL"
   | "IDENTITY_FINAL"
   | "TECHNICAL_FINAL";
@@ -322,6 +329,9 @@ export function prepareBrowserPageEvidence(
   return {
     anchors: linkCandidates.map(({ url }) => url),
     accessControlDetected: evidence.accessControlDetected,
+    ...(evidence.identityCandidates?.length
+      ? { identityCandidates: evidence.identityCandidates.slice(0, 50) }
+      : {}),
     linkCandidates,
     scripts: evidence.scripts,
     structuredPhoneBookingEvidence,
@@ -341,11 +351,16 @@ export function prepareBrowserPageEvidence(
 export function finalizeBrowserEvidenceSnapshots(input: {
   course: Pick<
     BrowserDiscoveryEvidence,
+    |
     "courseId" | "courseName" | "sourceUrl" | "officialCourseWebsite"
+    | "verifiedLayoutHoleCounts"
   >;
   finalUrl: string;
   observedUrls: string[];
   successfulProviderUrls: string[];
+  teeItUpFacilityResponses?: NonNullable<
+    BrowserDiscoveryEvidence["teeItUpFacilityResponses"]
+  >;
   accessBarrierUrls: string[];
   accessBarriers: BrowserAccessBarrier[];
   landingPageUrl: string;
@@ -364,17 +379,28 @@ export function finalizeBrowserEvidenceSnapshots(input: {
     destinationPageUrl,
     destinationPageEvidence
   } = input;
-  const officialPageEvidence = haveSamePublicWebsiteOrigin(
-    landingPageUrl,
-    destinationPageUrl
+  const sameOriginOfficialPageEvidence = [
+    { url: landingPageUrl, evidence: landingPageEvidence },
+    ...( haveSamePublicWebsiteOrigin(
+    landingPageUrl, firstDestinationPageUrl
   )
-    ? { url: destinationPageUrl, evidence: destinationPageEvidence }
-    : haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
-      ? {
-          url: firstDestinationPageUrl,
-          evidence: firstDestinationPageEvidence
-        }
-      : { url: landingPageUrl, evidence: landingPageEvidence };
+    ? [ { url: firstDestinationPageUrl, evidence: firstDestinationPageEvidence }
+        ]
+    : []),
+    ...( haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
+      ? [ {
+          url: destinationPageUrl,
+          evidence: destinationPageEvidence
+        }]
+      : [])
+  ];
+  const verifiedOfficialPageEvidence = [...sameOriginOfficialPageEvidence]
+    .reverse()
+    .find(( { url, evidence }) =>
+      doesRenderedOfficialPageIdentifyCourse(url, evidence, course)
+    );
+  const officialPageEvidence =
+    verifiedOfficialPageEvidence ?? sameOriginOfficialPageEvidence.at(-1)!;
   const officialStructuredPhoneBookingText = [
     landingPageEvidence.structuredPhoneBookingEvidence,
     haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
@@ -405,6 +431,12 @@ export function finalizeBrowserEvidenceSnapshots(input: {
       : officialFullPageVisibleText
   ).slice(0, 12_000);
   const observedUrls = new Set(input.observedUrls);
+  const bookingSurfaceText = !haveSamePublicWebsiteOrigin(
+    landingPageUrl,
+    destinationPageUrl
+  )
+    ? destinationPageEvidence.visibleText.slice(0, 12_000)
+    : undefined;
 
   for (const url of [
     ...landingPageEvidence.anchors,
@@ -423,6 +455,9 @@ export function finalizeBrowserEvidenceSnapshots(input: {
     finalUrl: input.finalUrl,
     observedUrls: [...observedUrls],
     successfulProviderUrls: input.successfulProviderUrls,
+    ...(input.teeItUpFacilityResponses?.length
+      ? { teeItUpFacilityResponses: input.teeItUpFacilityResponses }
+      : {}),
     linkCandidates: [
       ...landingPageEvidence.linkCandidates,
       ...firstDestinationPageEvidence.linkCandidates,
@@ -431,11 +466,15 @@ export function finalizeBrowserEvidenceSnapshots(input: {
     officialPage: {
       url: officialPageEvidence.url,
       linkCandidates: officialPageEvidence.evidence.linkCandidates,
-      courseName: course.courseName,
+      ...(verifiedOfficialPageEvidence
+        ? {
+      courseName: course.courseName }
+        : {}),
       visibleText: officialPageVisibleText
     },
     accessBarrierUrls: input.accessBarrierUrls,
     accessBarriers: input.accessBarriers,
+    ...(bookingSurfaceText ? { bookingSurfaceText } : {}),
     visibleText: [
       landingPageEvidence.visibleText,
       firstDestinationPageEvidence.visibleText,
@@ -444,6 +483,89 @@ export function finalizeBrowserEvidenceSnapshots(input: {
       .filter((text, index, values) => Boolean(text) && values.indexOf(text) === index)
       .join("\n")
   };
+}
+
+function doesRenderedOfficialPageIdentifyCourse(
+  pageUrl: string,
+  evidence: PreparedBrowserPageEvidence,
+  course: Pick<
+    BrowserDiscoveryEvidence,
+    "courseName" | "verifiedLayoutHoleCounts"
+  >
+) {
+  const identityStatuses = (evidence.identityCandidates ?? []).map(
+    (identity) => {
+      const exactIdentityCandidates =
+        getRenderedOfficialIdentityVariants(identity);
+      const statuses = exactIdentityCandidates.map((candidate) => {
+        if (
+          haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+            course.courseName,
+            candidate,
+            course.verifiedLayoutHoleCounts
+          )
+        ) {
+          return "MATCH" as const;
+        }
+        if (
+          isOfficialOrganizationIdentityCorroboratedByUrl(candidate, pageUrl)
+        ) {
+          return "ABSENT" as const;
+        }
+        return isConflictingOfficialPageCourseIdentity(
+          course.courseName,
+          candidate
+        )
+          ? ("CONFLICT" as const)
+          : ("ABSENT" as const);
+      });
+      if (statuses.includes("CONFLICT")) {
+        return "CONFLICT" as const;
+      }
+      return statuses.includes("MATCH")
+        ? ("MATCH" as const)
+        : ("ABSENT" as const);
+    }
+  );
+  if (identityStatuses.includes("CONFLICT")) {
+    return false;
+  }
+  if (identityStatuses.includes("MATCH")) {
+    return true;
+  }
+  try {
+    const page = new URL(pageUrl);
+    const pathIdentity = decodeURIComponent(page.pathname)
+      .split("/")
+      .filter(Boolean)
+      .at(-1)
+      ?.replace(/\.(?:html?|xhtml)$/iu, "")
+      .replace(/[-_]+/gu, " ")
+      .replace(/\btee\s*times?\b/giu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    return Boolean(
+      pathIdentity &&
+      haveCompatibleOfficialPageCourseNames(course.courseName, pathIdentity)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function getRenderedOfficialIdentityVariants(identity: string) {
+  const decoratedSegments = identity
+    .split(/\s+(?:\||[–—]|-\s)\s*/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const baseIdentities =
+    decoratedSegments.length > 1 ? decoratedSegments : [identity];
+  return baseIdentities
+    .map(normalizeOfficialPagePresentationIdentity)
+    .filter(
+      (candidate, index, candidates): candidate is string =>
+        Boolean(candidate) && candidates.indexOf(candidate) === index
+    );
 }
 
 export function buildBrowserProbeDecisionTrace(

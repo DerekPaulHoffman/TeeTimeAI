@@ -390,7 +390,7 @@ export async function recordCourseMonitoringFailure(input: {
       ) {
         const potentiallyParkedUntilMaterialChange =
           incident?.status === "NEEDS_HUMAN" &&
-          incident.humanReviewReason === "AUTOMATION_STALLED" &&
+          Boolean(incident.humanReviewReason) &&
           incident.activeBatchId === null &&
           incident.nextAttemptAt === null &&
           incident.failureFingerprint === failureFingerprint &&
@@ -1154,6 +1154,7 @@ export type ProviderEvidenceRevalidationOutcome =
   | "NOT_ACTIONABLE"
   | "REPLAYED"
   | "RECHECK_QUEUED"
+  | "HUMAN_REVIEW_PRESERVED"
   | "AUTHORITATIVE_FINAL_PRESERVED"
   | "REQUEUED";
 
@@ -1483,6 +1484,117 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
       };
     }
 
+    if (incident.status !== "RESOLVED" && isAccountRequiredProviderEvidence(input.after)) {
+      const accountFailureFingerprint = buildProviderFailureFingerprint({
+        providerFamilyKey: nextProviderFamilyKey,
+        failureClass: "AUTH",
+        operation:
+          incident.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
+        httpStatus: null,
+      });
+      const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+        where: {
+          id: incident.id,
+          cycle: incident.cycle,
+          revision: incident.revision,
+          activeBatchId: null,
+          status: incident.status,
+        },
+        data: {
+          status: "NEEDS_HUMAN",
+          providerFamilyKey: nextProviderFamilyKey,
+          failureClass: "AUTH",
+          failureFingerprint: accountFailureFingerprint,
+          humanReviewReason: "ACCOUNT_REQUIRED",
+          latestMessage:
+            "Verified official course evidence indicates an account is required to view tee times.",
+          nextAction:
+            "Confirm the account-required technical limitation; retry only after the official site exposes signed-out tee-time availability.",
+          nextAttemptAt: null,
+          escalatedAt: input.now,
+          nextReminderAt: input.now,
+          confirmedAt: input.now,
+          lastSeenAt: input.now,
+          revision: { increment: 1 },
+        },
+      });
+      if (incidentUpdated.count !== 1) {
+        if (attempt >= PROVIDER_EVIDENCE_REVALIDATION_CAS_ATTEMPTS) {
+          throw new Error(
+            "Course provider-evidence revalidation write conflict while preserving account-required human review.",
+          );
+        }
+        return attemptRevalidation(attempt + 1);
+      }
+
+      if (status) {
+        const statusUpdated = await transaction.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: input.courseId,
+            revision: status.revision,
+            state: status.state,
+          },
+          data: {
+            state: "ENGINEERING_VERIFICATION_NEEDED",
+            failureFingerprint: accountFailureFingerprint,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+            stateChangedAt: input.now,
+            revision: { increment: 1 },
+          },
+        });
+        if (statusUpdated.count !== 1) {
+          throw new Error(
+            "The monitoring state changed while account-required human review was preserved.",
+          );
+        }
+      } else {
+        await transaction.courseMonitoringStatus.create({
+          data: {
+            courseId: input.courseId,
+            reference: createMonitoringReference(),
+            state: "ENGINEERING_VERIFICATION_NEEDED",
+            failureFingerprint: accountFailureFingerprint,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+            stateChangedAt: input.now,
+            updatedAt: input.now,
+          },
+        });
+      }
+
+      await transaction.courseMonitoringEvent.create({
+        data: {
+          courseId: input.courseId,
+          incidentId: incident.id,
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          source: input.source,
+          fromState: status?.state ?? null,
+          toState: "ENGINEERING_VERIFICATION_NEEDED",
+          failureFingerprint: accountFailureFingerprint,
+          message:
+            "Material provider evidence confirmed an account-required booking surface, so engineering review remained parked without another automatic attempt.",
+          idempotencyKey,
+          occurredAt: input.now,
+          audit: {
+            cycle: incident.cycle,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            changedFields,
+            evidenceFingerprint,
+            humanReviewReason: "ACCOUNT_REQUIRED",
+            parkedUntilMaterialChange: true,
+            automaticRetrySuppressed: true,
+            customerDataIncluded: false,
+          },
+        },
+      });
+      return {
+        outcome: "HUMAN_REVIEW_PRESERVED" as const,
+        changedFields,
+        searchesQueued: 0,
+      };
+    }
+
     const automationStalled =
       incident.humanReviewReason === "AUTOMATION_STALLED";
     if (!shouldOpenFreshPlaybookCycleForProviderEvidence(incident)) {
@@ -1636,6 +1748,23 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
   };
 
   return attemptRevalidation(1);
+}
+
+function isAccountRequiredProviderEvidence(
+  evidence: CourseProviderEvidenceSnapshot,
+) {
+  return Boolean(
+    evidence.automationReason === "ACCOUNT_REQUIRED" ||
+      [
+        "ACCOUNT_REQUIRED",
+        "ACCOUNT_SELF_SERVICE",
+        "ACCOUNT_STAFF_PROVISIONED",
+      ].includes(
+        typeof evidence.bookingAccessMode === "string"
+          ? evidence.bookingAccessMode
+          : "",
+      ),
+  );
 }
 
 export function getNextMonitoringWakeAt(
@@ -2409,7 +2538,7 @@ async function reconcileCourseMonitoringDeadline(input: {
 
       const parkedWithoutNewMaterial =
         incident.status === "NEEDS_HUMAN" &&
-        incident.humanReviewReason === "AUTOMATION_STALLED" &&
+        Boolean(incident.humanReviewReason) &&
         incident.nextAttemptAt === null &&
         status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
         status.nextAutomaticAttemptAt === null &&

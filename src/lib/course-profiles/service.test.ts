@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const monitoringMocks = vi.hoisted(() => ({
   revalidateCourseMonitoringForProviderEvidenceChangeInTransaction: vi.fn(),
@@ -26,6 +26,7 @@ import {
   applyCourseProfileDraft,
   createCourseProfileSlugAlias,
   ensurePendingCourseProfile,
+  getCourseProfileResearchPacket,
   getPublishedCourseProfile,
   getRelatedSupportedCourses,
   listPublishedDirectCourseProfiles,
@@ -47,6 +48,80 @@ describe("course profile service", () => {
       changedFields: [],
       searchesQueued: 0
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches the official website without opening an evidence-only account sign-in URL", async () => {
+    const officialWebsite = "https://golf-course.example/about";
+    const accountSignInUrl = "https://booking.example/sign-in";
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "account-course",
+      website: officialWebsite,
+      detectedBookingUrl: accountSignInUrl,
+      profile: null
+    } as never);
+    const fetchMock = vi.fn(async () =>
+      new Response("<html><body>Official public golf course</body></html>", {
+        status: 200
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const packet = await getCourseProfileResearchPacket("account-course");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(officialWebsite);
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ redirect: "manual" })
+    );
+    expect(packet.course.detectedBookingUrl).toBe(accountSignInUrl);
+    expect(packet.sourcePages).toEqual([
+      expect.objectContaining({
+        url: officialWebsite,
+        status: 200,
+        text: "Official public golf course"
+      })
+    ]);
+  });
+
+  it("does not follow an otherwise safe research URL when it redirects to sign-in", async () => {
+    const officialWebsite = "https://golf-course.example/book";
+    const accountSignInUrl = "https://booking.example/sign-in";
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "redirect-course",
+      website: officialWebsite,
+      detectedBookingUrl: null,
+      profile: null
+    } as never);
+    const loginDestinationHandler = vi.fn(() =>
+      new Response("<html><body>Sign in</body></html>", { status: 200 })
+    );
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const requestedUrl = String(input);
+      if (requestedUrl === accountSignInUrl) {
+        return loginDestinationHandler();
+      }
+      return new Response(null, {
+        status: 302,
+        headers: { location: accountSignInUrl }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const packet = await getCourseProfileResearchPacket("redirect-course");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(loginDestinationHandler).not.toHaveBeenCalled();
+    expect(packet.sourcePages).toEqual([
+      {
+        url: officialWebsite,
+        status: 302,
+        text: null
+      }
+    ]);
   });
 
   it("creates a stable suffixed slug when the readable slug already exists", async () => {

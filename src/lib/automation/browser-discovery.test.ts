@@ -112,7 +112,7 @@ describe("structured phone-booking evidence", () => {
 
 describe("booking-link selection", () => {
   it("retains late official booking links inside the bounded evidence set", () => {
-    const genericLinks = Array.from({ length: 120 }, (_, index) => ({
+    const genericLinks = Array.from({ length: 350 }, (_, index) => ({
       url: `https://course.example/page-${index}`,
       label: `Page ${index}`
     }));
@@ -121,7 +121,7 @@ describe("booking-link selection", () => {
       label: "Book Tee Times"
     };
     expect(
-      prioritizeBrowserDiscoveryLinks([...genericLinks, bookingLink], 80)
+      prioritizeBrowserDiscoveryLinks([...genericLinks, bookingLink], 200)
     ).toContainEqual(bookingLink);
   });
 
@@ -189,6 +189,40 @@ describe("booking-link selection", () => {
           }
         ],
         "https://course.example/"
+      )
+    ).toBeNull();
+  });
+
+  it("retains external account landings as evidence without navigating them", () => {
+    const driverPosUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+
+    expect(
+      pickLikelyBookingHref(
+        [
+          {
+            href: "https://golfblank.com/course-details/?tab=Tee_Time_Policies",
+            text: "Tee Time Policies"
+          },
+          { href: driverPosUrl, text: "Book Tee Time" }
+        ],
+        "https://golfblank.com/"
+      )
+    ).not.toBe(driverPosUrl);
+    expect(
+      pickLikelyBookingHref(
+        [{ href: driverPosUrl, text: "Sign in" }],
+        "https://golfblank.com/"
+      )
+    ).toBeNull();
+    expect(
+      pickLikelyBookingHref(
+        [
+          {
+            href: `${driverPosUrl}?returnUrl=%2Ftee-times`,
+            text: "Book Tee Time"
+          }
+        ],
+        "https://golfblank.com/"
       )
     ).toBeNull();
   });
@@ -831,7 +865,7 @@ describe("buildBrowserDiscovery", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it("does not enrich a legacy TeeItUp embed whose configured course identity differs", async () => {
+  it("does not enrich a legacy TeeItUp embed whose configuration names a sibling", async () => {
     const alias = "11111111-2222-4333-8444-555555555555";
     const providerUrl = `https://${alias}.play.teeitup.golf/`;
     const discovery = buildBrowserDiscovery({
@@ -852,7 +886,7 @@ describe("buildBrowserDiscovery", () => {
       "Wampanoag Golf Course",
       vi.fn(async () =>
         new Response(
-          '<script>self.__next_f.push([1,"{\\\"gnFacilityIds\\\":[15969],\\\"name\\\":\\\"Different Golf Course\\\"}"])</script>',
+            '<script>self.__next_f.push([1,"{\\\"gnFacilityIds\\\":[15969],\\\"name\\\":\\\"Wampanoag Park Golf Course\\\"}"])</script>',
           { status: 200 }
         )
       ) as typeof fetch
@@ -907,6 +941,37 @@ describe("buildBrowserDiscovery", () => {
       detectedPlatform: "TEEITUP",
       bookingUrl:
         "https://www.wampanoaggolfcourseswansea.com/teetimes/",
+      evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("rejects a legacy TeeItUp configuration for a similarly named sibling", () => {
+    const alias = "11111111-2222-4333-8444-555555555555";
+    const providerUrl = `https://${alias}.play.teeitup.golf/`;
+    const discovery = buildBrowserDiscovery({
+      courseId: "blank",
+      courseName: "Blank Golf Course",
+      sourceUrl: "https://blank.example/tee-times/",
+      observedUrls: [providerUrl],
+      officialPage: {
+        url: "https://blank.example/tee-times/",
+        courseName: "Blank Golf Course",
+        linkCandidates: [{ url: providerUrl, label: "Book tee times" }]
+      },
+      teeItUpLegacyConfigurations: [
+        {
+          providerUrl,
+          alias,
+          facilityIds: [999],
+          courseName: "Blank Park Golf Course"
+        }
+      ]
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
       evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
     });
     expect(discovery.apiMetadata).toBeUndefined();
@@ -1231,6 +1296,302 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.evidence.learnedFrom).toBe(
       "teeitup-target-scope-ambiguous"
     );
+  });
+
+  it.each([false, true])(
+    "fails closed when an exact target CTA and a public-labeled TeeItUp sibling disagree (reversed=%s)",
+    (reversed) => {
+      const officialUrl =
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+      const targetUrl =
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=287";
+      const siblingUrl =
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+      const candidates = [
+        { url: targetUrl, label: "Book a tee time" },
+        { url: siblingUrl, label: "General Public Tee Times" }
+      ];
+      if (reversed) {
+        candidates.reverse();
+      }
+      const discovery = buildBrowserDiscovery({
+        courseId: "aguila-golf-course",
+        courseName: "Aguila Golf Course",
+        sourceUrl: officialUrl,
+        finalUrl: officialUrl,
+        observedUrls: candidates.map(({ url }) => url),
+        officialPage: {
+          url: officialUrl,
+          courseName: "Aguila Golf Course",
+          linkCandidates: candidates,
+          visibleText:
+            "Aguila Golf Course. Book a tee time. General Public Tee Times."
+        },
+        visibleText: "Aguila Golf Course public tee times"
+      });
+
+      expect(discovery).toMatchObject({
+        status: "INSPECTED",
+        detectedPlatform: "TEEITUP",
+        evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
+      });
+      expect(discovery.apiMetadata).toBeUndefined();
+    }
+  );
+
+  it.each([false, true])(
+    "fails closed when one TeeItUp URL has matching and sibling labels (reversed=%s)",
+    (reversed) => {
+      const officialUrl =
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+      const bookingUrl =
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999";
+      const candidates = [
+        {
+          url: bookingUrl,
+          label: "Aguila Golf Course - General Public Tee Times"
+        },
+        { url: bookingUrl, label: "Aguila 9 - General Public Tee Times" }
+      ];
+      if (reversed) {
+        candidates.reverse();
+      }
+
+      const discovery = buildBrowserDiscovery({
+        courseId: "aguila-golf-course",
+        courseName: "Aguila Golf Course",
+        sourceUrl: officialUrl,
+        finalUrl: officialUrl,
+        observedUrls: [bookingUrl],
+        officialPage: {
+          url: officialUrl,
+          courseName: "Aguila Golf Course",
+          linkCandidates: candidates
+        }
+      });
+
+      expect(discovery).toMatchObject({
+        status: "INSPECTED",
+        detectedPlatform: "TEEITUP",
+        evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
+      });
+      expect(discovery.apiMetadata).toBeUndefined();
+      expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+    }
+  );
+
+  it.each([
+    {
+      target: "Aguila Golf Course",
+      siblingLabel: "Aguila 9 Golf Course - General Public Tee Times",
+      siblingUrl:
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=289"
+    },
+    {
+      target: "Pine Hills Golf Course",
+      siblingLabel:
+        "Pine Hills Executive Golf Course - General Public Tee Times",
+      siblingUrl: "https://pine-hills.book.teeitup.com/?course=999"
+    },
+    {
+      target: "Blank Golf Course",
+      siblingLabel: "Blank Park Golf Course - General Public Tee Times",
+      siblingUrl: "https://blank-city.book.teeitup.com/?course=999"
+    },
+    {
+      target: "Aguila Golf Course",
+      siblingLabel: "Aguila 9 - General Public Tee Times",
+      siblingUrl:
+        "https://city-of-phoenix-golf-courses.book.teeitup.com/?course=999"
+    }
+  ])(
+    "rejects an explicitly named TeeItUp sibling for $target",
+    ({ target, siblingLabel, siblingUrl }) => {
+      const officialUrl = `https://parks.example/${target
+        .toLocaleLowerCase("en-US")
+        .replace(/[^a-z0-9]+/gu, "-")
+        .replace(/^-|-$/gu, "")}.html`;
+      const discovery = buildBrowserDiscovery({
+        courseId: "explicit-teeitup-sibling",
+        courseName: target,
+        sourceUrl: officialUrl,
+        finalUrl: officialUrl,
+        observedUrls: [siblingUrl],
+        officialPage: {
+          url: officialUrl,
+          courseName: target,
+          linkCandidates: [{ url: siblingUrl, label: siblingLabel }],
+          visibleText: `${target}. ${siblingLabel}.`
+        },
+        visibleText: `${target}. ${siblingLabel}.`
+      });
+
+      expect(discovery).toMatchObject({
+        status: "INSPECTED",
+        detectedPlatform: "TEEITUP",
+        evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+      });
+      expect(discovery.apiMetadata).toBeUndefined();
+    }
+  );
+
+  it("rejects a generic TeeItUp CTA whose provider alias identifies a sibling", () => {
+    const officialUrl =
+      "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+    const siblingUrl =
+      "https://aguila-9-golf-course.book.teeitup.com/?course=999";
+    const discovery = buildBrowserDiscovery({
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [siblingUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Aguila Golf Course",
+        linkCandidates: [{ url: siblingUrl, label: "Book a tee time" }],
+        visibleText: "Aguila Golf Course. Book a tee time."
+      },
+      visibleText: "Aguila Golf Course. Book a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not erase conflicting provider-alias initials", () => {
+    const officialUrl = "https://golfblank.com/";
+    const siblingUrl = "https://b-h-blank.book.teeitup.com/?course=999";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank-golf-course",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [siblingUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "A.H. Blank Golf Course",
+        linkCandidates: [{ url: siblingUrl, label: "Book a tee time" }]
+      }
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP"
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not let a persisted TeeItUp URL authorize a conflicting alias", () => {
+    const officialUrl = "https://golfblank.com/";
+    const siblingUrl = "https://b-h-blank.book.teeitup.com/?course=999";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank-golf-course",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [siblingUrl],
+      persistedTeeItUpBookingUrl: "https://b-h-blank.book.teeitup.com/",
+      officialPage: {
+        url: officialUrl,
+        courseName: "A.H. Blank Golf Course",
+        linkCandidates: [{ url: siblingUrl, label: "Book a tee time" }]
+      }
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP"
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("rejects a generic TeeItUp CTA with a disjoint course-like alias", () => {
+    const officialUrl =
+      "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+    const siblingUrl = "https://cave-creek.book.teeitup.com/?course=999";
+    const discovery = buildBrowserDiscovery({
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [siblingUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Aguila Golf Course",
+        linkCandidates: [{ url: siblingUrl, label: "Book a tee time" }],
+        visibleText: "Aguila Golf Course. Book a tee time."
+      },
+      visibleText: "Aguila Golf Course. Book a tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it.each([
+    "papago",
+    "papago-city-golf-courses",
+    "city-of-papago-golf-courses",
+    "cave-creek-municipal-golf-course"
+  ])(
+    "rejects a generic TeeItUp CTA whose alias names Phoenix sibling %s",
+    (alias) => {
+      const officialUrl =
+        "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+      const siblingUrl = `https://${alias}.book.teeitup.com/?course=999`;
+      const discovery = buildBrowserDiscovery({
+        courseId: "aguila-golf-course",
+        courseName: "Aguila Golf Course",
+        sourceUrl: officialUrl,
+        finalUrl: officialUrl,
+        observedUrls: [siblingUrl],
+        officialPage: {
+          url: officialUrl,
+          courseName: "Aguila Golf Course",
+          linkCandidates: [{ url: siblingUrl, label: "Book a tee time" }]
+        }
+      });
+
+      expect(discovery).toMatchObject({
+        status: "INSPECTED",
+        detectedPlatform: "TEEITUP"
+      });
+      expect(discovery.apiMetadata).toBeUndefined();
+    }
+  );
+
+  it("does not learn an unscoped shared TeeItUp alias that can reopen as ambiguous", () => {
+    const officialUrl =
+      "https://www.phoenix.gov/parks/golf/aguila-golf-course.html";
+    const bookingUrl = "https://city-of-phoenix-golf-courses.book.teeitup.com/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "aguila-golf-course",
+      courseName: "Aguila Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      observedUrls: [bookingUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Aguila Golf Course",
+        linkCandidates: [{ url: bookingUrl, label: "Book a tee time" }]
+      }
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("fails closed when a TeeItUp booking URL repeats its facility selector", () => {
@@ -2841,6 +3202,309 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official DriverPOS booking CTA as account-required evidence", () => {
+    const officialUrl = "https://golfblank.com/";
+    const accountUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: accountUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl],
+      linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }],
+      officialPage: {
+        url: officialUrl,
+        courseName: "A.H. Blank Golf Course",
+        visibleText: "A.H. Blank Golf Course. Book Tee Time.",
+        linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }]
+      },
+      bookingSurfaceText:
+        "Welcome Back to A.H. Blank Golf Course. Login into your account. Not registered yet? Create a new account. Use the new credentials to login and book the tee time."
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: true,
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: accountUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+      evidence: {
+        observedUrls: expect.arrayContaining([accountUrl]),
+        learnedFrom: "official-booking-cta-account-access"
+      }
+    });
+    expect(discovery.apiEndpoint).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("classifies an unfetched official sign-in CTA as lower-confidence account-required evidence", () => {
+    const officialUrl = "https://golfblank.com/";
+    const accountUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank-http",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl],
+      linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Blank Golf Course",
+        visibleText: "Blank Golf Course. Book Tee Time.",
+        linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }]
+      },
+      visibleText: "Blank Golf Course. Book Tee Time."
+    });
+
+    expect(discovery).toMatchObject({
+      isPublic: true,
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: accountUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_REQUIRED",
+      confidence: 0.94,
+      evidence: {
+        finalUrl: officialUrl,
+        learnedFrom: "official-booking-cta-account-sign-in"
+      }
+    });
+    expect(discovery.apiEndpoint).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not make a CTA-only account finding when a distinct public booking CTA exists", () => {
+    const officialUrl = "https://golfblank.com/";
+    const accountUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const publicBookingUrl = "https://booking.example/public/tee-times";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank-ambiguous-account-cta",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl, publicBookingUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Blank Golf Course",
+        visibleText: "Blank Golf Course. Book Tee Time. View Public Tee Times.",
+        linkCandidates: [
+          { url: accountUrl, label: "Book Tee Time" },
+          { url: publicBookingUrl, label: "View Public Tee Times" }
+        ]
+      }
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+    expect(discovery.bookingUrl).not.toBe(accountUrl);
+  });
+
+  it("rejects an account CTA whose label identifies a sibling course", () => {
+    const officialUrl = "https://golfblank.com/";
+    const accountUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank-sibling-account-cta",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Blank Golf Course",
+        visibleText: "Blank Golf Course. Book Tee Time.",
+        linkCandidates: [
+          {
+            url: accountUrl,
+            label: "Blank Park Golf Course Book a tee time"
+          }
+        ]
+      }
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+    expect(discovery.bookingUrl).not.toBe(accountUrl);
+  });
+
+  it.each([false, true])(
+    "fails closed on multiple distinct account CTA destinations (reversed=%s)",
+    (reversed) => {
+      const officialUrl = "https://golfblank.com/";
+      const accountLinks = [
+        {
+          url: "https://www.driverpos.io/ixUNO1vB/sign-in",
+          label: "Book Tee Time"
+        },
+        {
+          url: "https://www.bookingvendor.com/blank/login",
+          label: "Reserve Tee Time"
+        }
+      ];
+      if (reversed) {
+        accountLinks.reverse();
+      }
+      const discovery = buildBrowserDiscovery({
+        courseId: "ah-blank-ambiguous-account-destinations",
+        courseName: "A.H. Blank Golf Course",
+        sourceUrl: officialUrl,
+        finalUrl: officialUrl,
+        officialCourseWebsite: officialUrl,
+        observedUrls: [officialUrl, ...accountLinks.map(({ url }) => url)],
+        officialPage: {
+          url: officialUrl,
+          courseName: "Blank Golf Course",
+          visibleText: "Blank Golf Course. Book Tee Time. Reserve Tee Time.",
+          linkCandidates: accountLinks
+        }
+      });
+
+      expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+      expect(accountLinks.map(({ url }) => url)).not.toContain(
+        discovery.bookingUrl
+      );
+    }
+  );
+
+  it.each([
+    ["conflicting initials", "B.H. Blank Golf Course"],
+    ["sibling name", "Blank Park Golf Course"]
+  ])("rejects an account CTA from a Blank page with %s", (_label, pageName) => {
+    const officialUrl = "https://golfblank.com/";
+    const accountUrl = "https://www.driverpos.io/ixUNO1vB/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "ah-blank-negative",
+      courseName: "A.H. Blank Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: pageName,
+        visibleText: `${pageName}. Book Tee Time.`,
+        linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }]
+      }
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+    expect(discovery.bookingUrl).not.toBe(accountUrl);
+  });
+
+  it("does not infer account-required access from a generic official member login", () => {
+    const officialUrl = "https://public-course.example/";
+    const accountUrl = "https://accounts.example/tenant/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "generic-member-login",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Example Public Golf Course",
+        visibleText: "Example Public Golf Course. Member services.",
+        linkCandidates: [{ url: accountUrl, label: "Member Login" }]
+      }
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+    expect(discovery.bookingUrl).not.toBe(accountUrl);
+  });
+
+  it("does not infer account-required access from a mismatched official course page", () => {
+    const officialUrl = "https://public-course.example/";
+    const accountUrl = "https://accounts.example/tenant/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "mismatched-official-account-cta",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: officialUrl,
+      officialCourseWebsite: officialUrl,
+      observedUrls: [officialUrl, accountUrl],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Different Hills Golf Course",
+        visibleText: "Different Hills Golf Course. Book Tee Time.",
+        linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }]
+      }
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+    expect(discovery.bookingUrl).not.toBe(accountUrl);
+  });
+
+  it("does not classify an unverified external sign-in page as course booking evidence", () => {
+    const officialUrl = "https://public-course.example/";
+    const accountUrl = "https://accounts.example/tenant/login";
+    const discovery = buildBrowserDiscovery({
+      courseId: "unverified-account-page",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: accountUrl,
+      observedUrls: [accountUrl],
+      linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }],
+      bookingSurfaceText:
+        "Example Public Golf Course. Create an account, sign in, and book the tee time."
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+    expect(discovery.bookingUrl).not.toBe(accountUrl);
+  });
+
+  it("does not classify a random official sign-in CTA without an account booking gate", () => {
+    const officialUrl = "https://public-course.example/";
+    const accountUrl = "https://accounts.example/tenant/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "random-sign-in",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: accountUrl,
+      observedUrls: [officialUrl, accountUrl],
+      officialCourseWebsite: officialUrl,
+      officialPage: {
+        url: officialUrl,
+        courseName: "Example Public Golf Course",
+        visibleText: "Example Public Golf Course.",
+        linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }]
+      },
+      bookingSurfaceText:
+        "Example Public Golf Course member profile. Sign in to manage your account."
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+  });
+
+  it("does not classify a login landing that lacks target-course identity", () => {
+    const officialUrl = "https://public-course.example/";
+    const accountUrl = "https://accounts.example/tenant/sign-in";
+    const discovery = buildBrowserDiscovery({
+      courseId: "wrong-course-sign-in",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: accountUrl,
+      observedUrls: [officialUrl, accountUrl],
+      officialCourseWebsite: officialUrl,
+      officialPage: {
+        url: officialUrl,
+        courseName: "Example Public Golf Course",
+        visibleText: "Example Public Golf Course.",
+        linkCandidates: [{ url: accountUrl, label: "Book Tee Time" }]
+      },
+      bookingSurfaceText:
+        "Different Hills Golf Course. Create an account, sign in, and book the tee time."
+    });
+
+    expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+  });
+
   it("prefers a successful public TeeItUp read over booking account guidance", () => {
     const bookingUrl =
       "https://public-course.book.teeitup.golf/";
@@ -2853,6 +3517,13 @@ describe("buildBrowserDiscovery", () => {
       finalUrl: bookingUrl,
       observedUrls: [bookingUrl, facilitiesUrl],
       successfulProviderUrls: [facilitiesUrl],
+      teeItUpFacilityResponses: [
+        {
+          url: facilitiesUrl,
+          alias: "public-course",
+          facilityIds: [24680]
+        }
+      ],
       bookingCallToAction: true,
       officialPage: {
         url: "https://public-course.example/tee-times",
@@ -2867,14 +3538,49 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery).toMatchObject({
       status: "LEARNED",
       detectedPlatform: "TEEITUP",
-      bookingUrl,
+      bookingUrl: `${bookingUrl}?course=24680`,
       apiMetadata: {
         aliases: ["public-course"],
-        bookingBaseUrl: bookingUrl
+        bookingBaseUrl: `${ bookingUrl}?course=24680`,
+        facilityIds: [24680]
       },
       evidence: { learnedFrom: "teeitup-booking-url" }
     });
     expect(discovery.automationReason).not.toBe("ACCOUNT_REQUIRED");
+  });
+
+  it("does not treat a multi-facility response as proof for an unscoped shared TeeItUp alias", () => {
+    const officialUrl = "https://shared.example/public-course/tee-times";
+    const bookingUrl = "https://shared-city-golf-courses.book.teeitup.com/";
+    const facilitiesUrl =
+      "https://phx-api-be-east-1b.kenna.io/alias/shared-city-golf-courses/facilities";
+    const discovery = buildBrowserDiscovery({
+      courseId: "public-teeitup-ambiguous",
+      courseName: "Example Public Golf Course",
+      sourceUrl: officialUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [bookingUrl, facilitiesUrl],
+      successfulProviderUrls: [facilitiesUrl],
+      teeItUpFacilityResponses: [
+        {
+          url: facilitiesUrl,
+          alias: "shared-city-golf-courses",
+          facilityIds: [24680, 13579]
+        }
+      ],
+      officialPage: {
+        url: officialUrl,
+        courseName: "Example Public Golf Course",
+        linkCandidates: [{ url: bookingUrl, label: "Book a Tee Time" }]
+      }
+    });
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      evidence: { learnedFrom: "teeitup-target-scope-ambiguous" }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
   });
 
   it("preserves direct public Whoosh booking while keeping policy evidence non-terminal", () => {

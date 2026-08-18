@@ -1,9 +1,11 @@
 import {
   applyBrowserDiscoveryToCourse,
   listRecentCourseAutomationDiscoveries,
+  recordAndApplyBrowserDiscoveryToCourse,
   recordBrowserDiscovery,
   retireLegacyPolicyOnlyCourseBlock,
-  type ActiveAutomationSearch
+  type ActiveAutomationSearch,
+  type BrowserDiscoveryUnownedIncidentExpectation
 } from "@/lib/automation/db-service";
 import {
   buildBrowserDiscovery,
@@ -13,8 +15,10 @@ import {
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
   hasCurrentRepeatedMonitoringFailure,
+  isEvidenceOnlyOfficialBookingAccountLink,
   isLegacyTeeItUpPlayUrl,
   keepPolicyOnlyDiscoveryActionable,
+  prioritizeBrowserDiscoveryLinks,
   sanitizeBrowserDiscoveryAccessEvidence,
   shouldQueueBrowserProbe,
   type BrowserProbeCourseInput,
@@ -37,8 +41,14 @@ import {
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import {
   haveCompatibleCourseNames,
+  haveCompatibleOfficialPageCourseNames,
+  haveCompatibleOfficialPageCourseNamesWithVerifiedLayout,
+  isConflictingOfficialPageCourseIdentity,
+  isOfficialOrganizationIdentityCorroboratedByUrl,
+  normalizeOfficialPagePresentationIdentity,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
+import { normalizeLayoutHoleCounts } from "@/lib/courses/course-layout";
 import { getGooglePlacesApiKey } from "@/lib/places/google";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
@@ -138,6 +148,7 @@ type CollectedPageEvidence = Pick<
 type CollectedLinkCandidate = {
   url: string;
   label: string;
+  evidenceOnlyAccountAccess?: boolean;
   targetScopedRedirect?: boolean;
   inferredCourseBookingRoute?: boolean;
   embeddedProviderEvidence?: boolean;
@@ -313,6 +324,10 @@ export type SearchMonitoringDiscoveryResult = {
 type SearchMonitoringDiscoveryOptions = {
   includeCourseIds?: readonly string[];
   forceFreshCourseIds?: readonly string[];
+  expectedUnownedIncidentsByCourseId?: ReadonlyMap<
+    string,
+    BrowserDiscoveryUnownedIncidentExpectation
+  >;
 };
 
 type MissingOfficialWebsiteCourse = {
@@ -321,6 +336,44 @@ type MissingOfficialWebsiteCourse = {
   website: string | null;
   detectedBookingUrl: string | null;
 };
+
+function applyMonitoringDiscovery(
+  discovery: BrowserDiscovery,
+  expectedCourse: Parameters<typeof applyBrowserDiscoveryToCourse>[1],
+  expectedUnownedIncident:
+    BrowserDiscoveryUnownedIncidentExpectation | undefined
+) {
+  if (expectedUnownedIncident) {
+    return applyBrowserDiscoveryToCourse(
+      discovery,
+      expectedCourse,
+      undefined,
+      undefined,
+      expectedUnownedIncident
+    );
+  }
+  return expectedCourse
+    ? applyBrowserDiscoveryToCourse(discovery, expectedCourse)
+    : applyBrowserDiscoveryToCourse(discovery);
+}
+
+function retireMonitoringLegacyPolicyBlock(
+  courseId: string,
+  expectedCourse: Parameters<typeof retireLegacyPolicyOnlyCourseBlock>[1],
+  preservation: Parameters<typeof retireLegacyPolicyOnlyCourseBlock>[2],
+  expectedUnownedIncident: Parameters<
+    typeof retireLegacyPolicyOnlyCourseBlock
+  >[3]
+) {
+  return expectedUnownedIncident
+    ? retireLegacyPolicyOnlyCourseBlock(
+        courseId,
+        expectedCourse,
+        preservation,
+        expectedUnownedIncident
+      )
+    : retireLegacyPolicyOnlyCourseBlock(courseId, expectedCourse, preservation);
+}
 
 async function refreshMissingOfficialWebsites(
   courses: MissingOfficialWebsiteCourse[],
@@ -424,21 +477,27 @@ export async function prepareSearchMonitoring(
     };
   });
   const appliedCourseIds: string[] = [];
+  const deferredCourseIds: string[] = [];
   for (const { course, sourceUrl } of candidateInputs) {
     if (sourceUrl || !isLegacyPolicyOnlyBlock(course)) {
       continue;
     }
     const expectedCourse = getMonitoringCourseExpectation(course);
+    const expectedUnownedIncident =
+      options.expectedUnownedIncidentsByCourseId?.get(course.id);
     const retired = expectedCourse
-      ? await retireLegacyPolicyOnlyCourseBlock(
+      ? await retireMonitoringLegacyPolicyBlock(
           course.id,
           expectedCourse,
-          getLegacyPolicyEvidencePreservation(course)
+          getLegacyPolicyEvidencePreservation(course),
+          expectedUnownedIncident
         )
       : null;
     if (retired) {
       appliedCourseIds.push(course.id);
-    }
+    } else if (expectedUnownedIncident) {
+      deferredCourseIds.push(course.id);
+  }
   }
   const candidates = candidateInputs.filter(
     (candidate): candidate is typeof candidate & { sourceUrl: string } =>
@@ -450,7 +509,7 @@ export async function prepareSearchMonitoring(
       attemptedCourseIds: [],
       appliedCourseIds,
       failedCourseIds: [],
-      deferredCourseIds: [],
+      deferredCourseIds,
       retryCourseIds: []
     };
   }
@@ -496,7 +555,6 @@ export async function prepareSearchMonitoring(
 
   const attemptedCourseIds: string[] = [];
   const failedCourseIds: string[] = [];
-  const deferredCourseIds: string[] = [];
   const resolvedLegacyPolicyCourseIds = new Set<string>();
   const replayAppliedCourseIds = new Set<string>();
 
@@ -518,11 +576,24 @@ export async function prepareSearchMonitoring(
       continue;
     }
     const expectedCourse = getMonitoringCourseExpectation(candidate.course);
-    const applied = expectedCourse
-      ? await applyBrowserDiscoveryToCourse(replayed, expectedCourse)
-      : await applyBrowserDiscoveryToCourse(replayed);
+    const expectedUnownedIncident =
+      options.expectedUnownedIncidentsByCourseId?.get(candidate.course.id);
+    const fencedReplay = expectedUnownedIncident
+      ? await recordAndApplyBrowserDiscoveryToCourse(replayed, expectedCourse,
+          expectedUnownedIncident,
+          { recordIfNotApplied: false })
+      : null;
+    if (expectedUnownedIncident && !fencedReplay) {
+      deferredCourseIds.push(candidate.course.id);
+      continue;
+    }
+    const applied = expectedUnownedIncident
+      ? fencedReplay?.applied
+      : await applyMonitoringDiscovery(replayed, expectedCourse, undefined);
     if (applied) {
+      if (!expectedUnownedIncident) {
       await recordBrowserDiscovery(replayed);
+      }
       appliedCourseIds.push(candidate.course.id);
       replayAppliedCourseIds.add(candidate.course.id);
       if (isLegacyPolicyOnlyBlock(candidate.course) && replacesLegacyPolicyOnlyBlock(replayed)) {
@@ -579,10 +650,14 @@ export async function prepareSearchMonitoring(
       };
       try {
         const officialWebsite = readSafePublicUrl(course.website);
+        const verifiedLayoutHoleCounts = course.layoutHolesVerifiedAt
+          ? normalizeLayoutHoleCounts(course.layoutHoleCounts)
+          : [];
         const sourceKey = `${normalizeSourceKey(
           sourceUrl
         )}|${normalizeCourseLinkName(course.name)}|${
           officialWebsite ? normalizeSourceKey(officialWebsite) : "SOURCE_MISSING"
+        }|layout:${verifiedLayoutHoleCounts.join(",") || "UNVERIFIED"
         }`;
         let evidencePromise = evidenceBySource.get(sourceKey);
         if (!evidencePromise) {
@@ -592,7 +667,8 @@ export async function prepareSearchMonitoring(
             course.name,
             pageFetches,
             wordpressContentFetches,
-            course.website
+            course.website,
+            verifiedLayoutHoleCounts
           );
           evidenceBySource.set(sourceKey, evidencePromise);
         }
@@ -606,7 +682,18 @@ export async function prepareSearchMonitoring(
               collected.accessBarriers
             ) ?? undefined,
           courseId: course.id,
-          courseName: course.name
+          courseName: course.name,
+          ...(course.detectedPlatform === "TEEITUP" &&
+          readSafePublicUrl(course.detectedBookingUrl)
+            ? {
+                persistedTeeItUpBookingUrl: readSafePublicUrl(
+                  course.detectedBookingUrl
+                )
+        }
+            : {}),
+          ...(verifiedLayoutHoleCounts.length > 0
+            ? { verifiedLayoutHoleCounts }
+            : {})
         };
         const initialDiscovery = buildBrowserDiscovery(collectedWithCorroboration);
         const legacyProphetAwareDiscovery = buildLegacyProphetFallbackDiscovery(
@@ -633,16 +720,42 @@ export async function prepareSearchMonitoring(
           ? markLegacyPolicyReconciliation(reasonAwareDiscovery)
           : reasonAwareDiscovery;
         markAttempted();
-        await recordBrowserDiscovery(discovery);
         const expectedCourse = getMonitoringCourseExpectation(course);
+        const expectedUnownedIncident =
+          options.expectedUnownedIncidentsByCourseId?.get(course.id);
         const replacesLegacyPolicy =
           isLegacyPolicyOnlyBlock(course) && replacesLegacyPolicyOnlyBlock(discovery);
-        const applied =
-          isLegacyPolicyOnlyBlock(course) && !replacesLegacyPolicy
-            ? null
-            : expectedCourse
-              ? await applyBrowserDiscoveryToCourse(discovery, expectedCourse)
-              : await applyBrowserDiscoveryToCourse(discovery);
+        let applied = null;
+        if (
+          isLegacyPolicyOnlyBlock(course) && !replacesLegacyPolicy) {
+          const persisted = expectedUnownedIncident
+            ? await recordBrowserDiscovery(
+                discovery,
+                undefined,
+                undefined,
+                expectedUnownedIncident
+              )
+            : await recordBrowserDiscovery(discovery);
+          if (expectedUnownedIncident && !persisted) {
+            deferredCourseIds.push(course.id);
+            return;
+          }
+        } else if (expectedUnownedIncident) {
+          const persisted = await recordAndApplyBrowserDiscoveryToCourse(
+            discovery, expectedCourse,
+            expectedUnownedIncident);
+          if (!persisted) {
+            deferredCourseIds.push(course.id);
+            return;
+          }
+          applied = persisted.applied;
+        } else { await recordBrowserDiscovery(discovery);
+          applied = await applyMonitoringDiscovery(
+            discovery,
+            expectedCourse,
+            undefined
+          );
+        }
         if (applied) {
           appliedCourseIds.push(course.id);
           if (replacesLegacyPolicy) {
@@ -655,19 +768,33 @@ export async function prepareSearchMonitoring(
           return;
         }
         markAttempted();
-        failedCourseIds.push(course.id);
         const failedDiscovery = buildFailedDiscovery({
           courseId: course.id,
           sourceUrl,
           detectedPlatform: course.detectedPlatform,
           message: error instanceof Error ? error.message : "Official-site discovery failed"
         });
-        await recordBrowserDiscovery(
+        const persistenceInput =
           forcedPolicyReconciliation
             ? markLegacyPolicyReconciliation(failedDiscovery)
-            : failedDiscovery
+            : failedDiscovery;
+        const expectedUnownedIncident =
+          options.expectedUnownedIncidentsByCourseId?.get(course.id
         );
+        const persisted = expectedUnownedIncident
+          ? await recordBrowserDiscovery(
+              persistenceInput,
+              undefined,
+              undefined,
+              expectedUnownedIncident
+            )
+          : await recordBrowserDiscovery(persistenceInput);
+        if (expectedUnownedIncident && !persisted) {
+          deferredCourseIds.push(course.id);
+          return;
       }
+        failedCourseIds.push(course.id);
+    }
     }
   );
 
@@ -682,16 +809,25 @@ export async function prepareSearchMonitoring(
       continue;
     }
     const expectedCourse = getMonitoringCourseExpectation(course);
+    const expectedUnownedIncident =
+      options.expectedUnownedIncidentsByCourseId?.get(course.id);
     const retired = expectedCourse
-      ? await retireLegacyPolicyOnlyCourseBlock(
+      ? await retireMonitoringLegacyPolicyBlock(
           course.id,
           expectedCourse,
-          getLegacyPolicyEvidencePreservation(course)
+          getLegacyPolicyEvidencePreservation(course),
+          expectedUnownedIncident
         )
       : null;
     if (retired && !appliedCourseIds.includes(course.id)) {
       appliedCourseIds.push(course.id);
-    }
+    } else if (
+      expectedUnownedIncident &&
+      !retired &&
+      !deferredCourseIds.includes(course.id)
+    ) {
+      deferredCourseIds.push(course.id);
+  }
   }
   const appliedCourseIdSet = new Set(appliedCourseIds);
   const retryCourseIds = candidates
@@ -713,7 +849,8 @@ export async function prepareSearchMonitoring(
       }
       const persistedAttempts = discoveriesByCourse.get(course.id)?.length ?? 0;
       const completedThisRun = attemptedCourseIdSet.has(course.id) ? 1 : 0;
-      return persistedAttempts + completedThisRun < MAX_DISCOVERY_ATTEMPTS_PER_DAY;
+      return ( persistedAttempts + completedThisRun < MAX_DISCOVERY_ATTEMPTS_PER_DAY
+      );
     })
     .map(({ course }) => course.id);
 
@@ -1115,7 +1252,8 @@ function hasOnlySafePersistedProviderMetadata(
     return true;
   }
   if (typeof value === "string") {
-    return !/^https?:/iu.test(value.trim()) || Boolean(readSafePublicUrl(value));
+    return ( !/^https?:/iu.test(value.trim()) || Boolean(readSafePublicUrl(value))
+    );
   }
   if (typeof value !== "object" || depth > 6 || seen.has(value)) {
     return false;
@@ -1215,7 +1353,8 @@ function hasDiscoveryRetryDelayElapsed(attempts: Date[], now: Date) {
     (latest, attempt) => (!latest || attempt > latest ? attempt : latest),
     null
   );
-  return !latestAttempt || now.getTime() - latestAttempt.getTime() >= DISCOVERY_RETRY_DELAY_MS;
+  return ( !latestAttempt || now.getTime() - latestAttempt.getTime() >= DISCOVERY_RETRY_DELAY_MS
+  );
 }
 
 export function shouldAttemptMonitoringDiscovery(attempts: Date[], now = new Date()) {
@@ -1363,7 +1502,8 @@ function isCurrentBookingUrlRepresented(
         return false;
       }
       try {
-        return normalizeSourceKey(parseSafePublicUrl(value).toString()) === normalizedCurrent;
+        return ( normalizeSourceKey(parseSafePublicUrl(value).toString()) === normalizedCurrent
+        );
       } catch {
         return false;
       }
@@ -1539,7 +1679,9 @@ export async function collectOfficialSiteEvidence(
   courseName?: string,
   pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>(),
   wordpressContentFetches = new Map<string, Promise<string | null>>(),
-  expectedOfficialWebsite: string | null | undefined = null
+  expectedOfficialWebsite: string | null | undefined = null,
+  verifiedLayoutHoleCounts: readonly (9 | 18
+)[] = []
 ): Promise<CollectedPageEvidence> {
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   let providerHandoffScopeUrl: string | null = null;
@@ -1632,14 +1774,28 @@ export async function collectOfficialSiteEvidence(
   ];
   let matchedCoursePage =
     courseName &&
-    (doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
-      doesPageMarkupIdentifyCourse(firstPage.html, courseName) ||
-      hasTargetScopedDirectLegacyProphetLink(pages[0].evidence.linkCandidates))
+    doesPageMarkupOrFallbackIdentifyCourse(
+      firstPage.html,
+      courseName,
+      doesPageUrlIdentifyCourse(firstPage.finalUrl, courseName) ||
+        hasTargetScopedDirectLegacyProphetLink(
+          pages[0].evidence.linkCandidates
+        ),
+      verifiedLayoutHoleCounts,
+      firstPage.finalUrl
+    )
       ? pages[0]
       : undefined;
   const sourcePageSupportsBookingRouteInference = Boolean(
     courseName &&
-    (matchedCoursePage || doesSecondaryHeadingIdentifyCourse(firstPage.html, courseName))
+    (matchedCoursePage ||
+      doesPageMarkupOrFallbackIdentifyCourse(
+        firstPage.html,
+        courseName,
+        doesSecondaryHeadingIdentifyCourse(firstPage.html, courseName),
+        verifiedLayoutHoleCounts,
+        firstPage.finalUrl
+      ))
   );
   const visited = new Set([normalizeSourceKey(firstPage.finalUrl)]);
   const targetScopedOfficialRedirects: Array<{
@@ -1664,6 +1820,7 @@ export async function collectOfficialSiteEvidence(
     const unvisitedCandidates = linkCandidates.filter(
       (candidate) =>
         !candidate.embeddedProviderEvidence &&
+        !candidate.evidenceOnlyAccountAccess &&
         !visited.has(normalizeSourceKey(candidate.url)) &&
         isInspectablePublicHtmlLink(candidate.url)
     );
@@ -1776,19 +1933,30 @@ export async function collectOfficialSiteEvidence(
             )
           : extractedEvidence
       };
-      if (
-        followsBookingPageFromMatchedCourse &&
-        courseName &&
-        (doesPageMarkupIdentifyCourse(fetched.html, courseName) ||
-          doesOfficialHostnameIdentifyCourse(firstPage.finalUrl, courseName))
-      ) {
+      if (followsBookingPageFromMatchedCourse && courseName) {
         const providerLink = getUniqueTargetScopedBookingProviderLink(
           page.evidence.linkCandidates,
           firstPage.finalUrl,
           page.finalUrl,
           courseName
         );
-        if (providerLink) {
+        if (
+          providerLink &&
+          doesPageMarkupOrFallbackIdentifyCourse(
+            fetched.html,
+            courseName,
+            doesOfficialHostnameIdentifyCourse(
+              firstPage.finalUrl,
+              courseName
+            ) ||
+              doesProviderLandingHostnameIdentifyCourse(
+                providerLink.url,
+                courseName
+              ),
+            verifiedLayoutHoleCounts,
+            fetched.finalUrl
+          )
+        ) {
           targetScopedBookingProviderLinks.push(providerLink);
         }
       }
@@ -1832,11 +2000,30 @@ export async function collectOfficialSiteEvidence(
         courseName &&
         haveSameReplayHostname(firstPage.finalUrl, page.finalUrl) &&
         ((identifiesTargetCourse &&
-          (doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
-            doesPageMarkupIdentifyCourse(fetched.html, courseName) ||
-            hasTargetScopedDirectLegacyProphetLink(page.evidence.linkCandidates))) ||
+          doesPageMarkupOrFallbackIdentifyCourse(
+            fetched.html,
+            courseName,
+            doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
+              hasTargetScopedDirectLegacyProphetLink(
+                page.evidence.linkCandidates
+              ) ||
+              (identifiesTargetCourse &&
+                normalizeSourceKey(followupCandidate) ===
+                  normalizeSourceKey(page.finalUrl)),
+            verifiedLayoutHoleCounts,
+            page.finalUrl
+          )) ||
           (followedLinkCandidate?.inferredCourseBookingRoute &&
-            page.evidence.linkCandidates.some((candidate) => candidate.targetScopedRedirect)))
+            page.evidence.linkCandidates.some(
+              (candidate) => candidate.targetScopedRedirect
+            ) &&
+            doesPageMarkupOrFallbackIdentifyCourse(
+              fetched.html,
+              courseName,
+              true,
+              verifiedLayoutHoleCounts,
+              page.finalUrl
+            )))
       ) {
         matchedCoursePage = page;
       }
@@ -1869,9 +2056,13 @@ export async function collectOfficialSiteEvidence(
             if (!haveSameReplayHostname(firstPage.finalUrl, page.finalUrl)) {
               return [];
             }
-            const pageIdentifiesCourse =
-              doesPageUrlIdentifyCourse(page.finalUrl, courseName) ||
-              doesPageMarkupIdentifyCourse(page.html, courseName);
+            const pageIdentifiesCourse = doesPageMarkupOrFallbackIdentifyCourse(
+              page.html,
+              courseName,
+              doesPageUrlIdentifyCourse(page.finalUrl, courseName),
+              verifiedLayoutHoleCounts,
+              page.finalUrl
+            );
             return page.evidence.linkCandidates.filter(
               (candidate) =>
                 !haveSameReplayHostname(firstPage.finalUrl, candidate.url) &&
@@ -1885,11 +2076,10 @@ export async function collectOfficialSiteEvidence(
       : [];
   const officialPageLinkCandidates =
     matchedCoursePage && courseName
-      ? uniqueLinkCandidates([
+      ? prioritizeBrowserDiscoveryLinks( uniqueLinkCandidates([
           ...matchedCoursePage.evidence.linkCandidates,
           ...targetScopedOfficialLinks
-        ])
-          .slice(0, 200)
+        ]), 200)
           .map(({ url, label }) => ({ url, label }))
       : [];
   const officialPageLinkKeys = new Set(
@@ -1910,8 +2100,7 @@ export async function collectOfficialSiteEvidence(
       ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
       ...failedFollowupObservedUrls
     ]),
-    linkCandidates: uniqueLinkCandidates(pages.flatMap((page) => page.evidence.linkCandidates))
-      .slice(0, 200)
+    linkCandidates: prioritizeBrowserDiscoveryLinks( uniqueLinkCandidates(pages.flatMap((page) => page.evidence.linkCandidates)), 200)
       .map(({ url, label }) => ({ url, label })),
     ...(matchedCoursePage && courseName
       ? {
@@ -1987,7 +2176,7 @@ function doesFollowupIdentifyCourse(
   return candidates.some(
     (candidate) =>
       normalizeSourceKey(candidate.url) === key &&
-      haveCompatibleCourseNames(courseName, candidate.label)
+      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, candidate.label)
   );
 }
 
@@ -1996,12 +2185,18 @@ function doesPageUrlIdentifyCourse(value: string, courseName: string) {
     const url = new URL(value);
     const decodedPath = decodeURIComponent(url.pathname);
     const pathIdentities = [...decodedPath.split("/").filter(Boolean).slice(-1), decodedPath].map(
-      (identity) => identity.replace(/[-_]+/g, " ").replace(/\btee\s*times?\b/gi, " ")
+      (identity) =>
+      stripSafeOfficialPageExtension( identity).replace(/[-_]+/g, " ").replace(/\btee\s*times?\b/gi, " ")
     );
-    return pathIdentities.some((identity) => haveCompatibleCourseNames(courseName, identity));
+    return pathIdentities.some((identity) =>
+      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, identity));
   } catch {
     return false;
   }
+}
+
+function stripSafeOfficialPageExtension(value: string) {
+  return value.replace(/\.(?:html?|xhtml)$/iu, "");
 }
 
 async function fetchPublicHtml(
@@ -2269,14 +2464,139 @@ function canonicalizeCollectedOfficialUrl(value: string) {
   return url.toString();
 }
 
-function doesPageMarkupIdentifyCourse(html: string, courseName: string) {
+function getPageMarkupCourseIdentityStatus(
+  html: string,
+  courseName: string,
+  verifiedLayoutHoleCounts: readonly (9 | 18)[] = [],
+  pageUrl?: string
+): "MATCH" | "CONFLICT" | "ABSENT" {
   const identities = [
     ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
     ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
   ]
     .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
     .filter(Boolean);
-  return identities.some((identity) => haveCompatibleCourseNames(courseName, identity));
+  const statuses = identities.map((identity) =>
+    getFirstPartyOfficialPageIdentityStatus(
+      courseName,
+      identity,
+      verifiedLayoutHoleCounts,
+      pageUrl
+    )
+  );
+  if (statuses.includes("CONFLICT")) {
+    return "CONFLICT";
+  }
+  return statuses.includes("MATCH") ? "MATCH" : "ABSENT";
+}
+
+function doesPageMarkupOrFallbackIdentifyCourse(
+  html: string,
+  courseName: string,
+  fallbackIdentifiesCourse: boolean,
+  verifiedLayoutHoleCounts: readonly (9 | 18)[] = [],
+  pageUrl?: string
+) {
+  const markupStatus = getPageMarkupCourseIdentityStatus(
+    html,
+    courseName,
+    verifiedLayoutHoleCounts,
+    pageUrl
+  );
+  return (
+    markupStatus === "MATCH" ||
+    (markupStatus === "ABSENT" && fallbackIdentifiesCourse)
+  );
+}
+
+function haveCompatibleFirstPartyOfficialPageCourseNames(
+  courseName: string,
+  pageIdentity: string,
+  verifiedLayoutHoleCounts: readonly (9 | 18)[] = []
+) {
+  return (
+    getFirstPartyOfficialPageIdentityStatus(
+      courseName,
+      pageIdentity,
+      verifiedLayoutHoleCounts
+    ) === "MATCH"
+  );
+}
+
+function getFirstPartyOfficialPageIdentityStatus(
+  courseName: string,
+  pageIdentity: string,
+  verifiedLayoutHoleCounts: readonly (9 | 18)[] = [],
+  pageUrl?: string
+): "MATCH" | "CONFLICT" | "ABSENT" {
+  const courseNames = [courseName, getHostedCourseCoreName(courseName)].filter(
+    (value): value is string => Boolean(value)
+  );
+  const targetCourseNames = [
+    ...courseNames,
+    ...courseNames.map(stripTrailingGolfEntityType)
+  ].filter(
+    (value, index, values): value is string =>
+      Boolean(value) && values.indexOf(value) === index
+  );
+  const pageIdentities = getFirstPartyOfficialIdentityVariants(pageIdentity);
+  const statuses = pageIdentities.map((identity) => {
+    if (
+      targetCourseNames.some((targetName) =>
+        haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+          targetName,
+          identity,
+          verifiedLayoutHoleCounts
+        )
+      )
+    ) {
+      return "MATCH" as const;
+    }
+    if (
+      pageUrl &&
+      isOfficialOrganizationIdentityCorroboratedByUrl(identity, pageUrl)
+    ) {
+      return "ABSENT" as const;
+    }
+    return targetCourseNames.some((targetName) =>
+      isConflictingOfficialPageCourseIdentity(targetName, identity)
+    )
+      ? ("CONFLICT" as const)
+      : ("ABSENT" as const);
+  });
+  if (statuses.includes("CONFLICT")) {
+    return "CONFLICT";
+  }
+  return statuses.includes("MATCH") ? "MATCH" : "ABSENT";
+}
+
+function getFirstPartyOfficialIdentityVariants(pageIdentity: string) {
+  const decoratedSegments = pageIdentity
+    .split(/\s+(?:\||[–—]|-\s)\s*/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const baseIdentities =
+    decoratedSegments.length > 1 ? decoratedSegments : [pageIdentity];
+  return baseIdentities
+    .map(normalizeOfficialPagePresentationIdentity)
+    .filter(
+      (value, index, values): value is string =>
+        Boolean(value) && values.indexOf(value) === index
+    );
+}
+
+function stripTrailingGolfEntityType(value: string) {
+  return value
+    .replace(/\s+(?:golf\s+(?:club|course|links)|country\s+club)\s*$/iu, "")
+    .trim();
+}
+
+function getHostedCourseCoreName(courseName: string) {
+  return courseName
+    .match(
+      /^(.+?\b(?:golf\s+(?:club|course)|country\s+club|links))\s+at\s+(?:the\s+)?\S[\s\S]*$/iu
+    )?.[1]
+    ?.trim();
 }
 
 function doesOfficialHostnameIdentifyCourse(pageUrl: string, courseName: string) {
@@ -2300,11 +2620,43 @@ function doesOfficialHostnameIdentifyCourse(pageUrl: string, courseName: string)
   }
 }
 
+function doesProviderLandingHostnameIdentifyCourse(
+  pageUrl: string,
+  courseName: string
+) {
+  try {
+    const page = parseSafePublicUrl(pageUrl);
+    const aliasIdentity = page.hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./u, "")
+      .split(".")[0]
+      ?.replace(/[-_]+/gu, " ")
+      .trim();
+    if (!aliasIdentity) {
+      return false;
+    }
+    const courseNames = [
+      courseName,
+      getHostedCourseCoreName(courseName),
+      stripTrailingGolfEntityType(courseName)
+    ].filter((value): value is string => Boolean(value));
+    return courseNames.some(
+      (targetName) =>
+        haveCompatibleOfficialPageCourseNames(targetName, aliasIdentity) ||
+        normalizeCourseLinkName(targetName) ===
+          normalizeCourseLinkName(aliasIdentity)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function doesSecondaryHeadingIdentifyCourse(html: string, courseName: string) {
   return [...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/giu)]
     .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
     .filter(Boolean)
-    .some((identity) => haveCompatibleCourseNames(courseName, identity));
+    .some((identity) =>
+      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, identity));
 }
 
 async function fetchWordPressRenderedPageContent(
@@ -2407,7 +2759,7 @@ function readHtmlTagAttribute(tag: string, attribute: string) {
   return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
-function isBookingLikeOfficialFollowup(candidate: { url: string; label: string }) {
+function isBookingLikeOfficialFollowup(candidate: { url: string; label: string; }) {
   const parsed = parseSafePublicUrl(candidate.url);
   return /\b(?:book(?:ing)?|tee\s*times?|reservations?|reserve)\b/iu.test(
     `${candidate.label} ${parsed.hostname.replace(
@@ -2436,6 +2788,7 @@ function getUniqueTargetScopedBookingProviderLink(
   const externalBookingLinks = new Map<string, CollectedLinkCandidate[]>();
   for (const candidate of candidates) {
     if (
+      candidate.evidenceOnlyAccountAccess ||
       haveSameReplayHostname(officialUrl, candidate.url) ||
       !isBookingLikeOfficialFollowup(candidate)
     ) {
@@ -2601,6 +2954,9 @@ function deriveSameOriginBookingRouteCandidates(
 ): CollectedLinkCandidate[] {
   const official = parseSafePublicUrl(officialUrl);
   return candidates.flatMap((candidate) => {
+    if (candidate.evidenceOnlyAccountAccess) {
+      return [];
+    }
     const label = candidate.label
       .replace(/[\u200B-\u200D\uFEFF]/gu, "")
       .replace(/\s+/gu, " ")
@@ -2651,7 +3007,8 @@ export async function prepareCourseSupportVerificationMonitoring(
   courseId: string,
   fetchImpl: typeof fetch | undefined = undefined,
   now = new Date(),
-  options: { forceFresh?: boolean } = {}
+  options: { forceFresh?: boolean;
+    expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation; } = {}
 ): Promise<SearchMonitoringDiscoveryResult> {
   const course = await prisma.course.findUnique({ where: { id: courseId } });
   if (!course) {
@@ -2697,7 +3054,14 @@ export async function prepareCourseSupportVerificationMonitoring(
   const forceFresh = options.forceFresh ?? true;
   return prepareSearchMonitoring(detachedSearch, fetchImpl, now, {
     includeCourseIds: [courseId],
-    forceFreshCourseIds: forceFresh ? [courseId] : []
+    forceFreshCourseIds: forceFresh ? [courseId] : [],
+    ...(options.expectedUnownedIncident
+      ? {
+          expectedUnownedIncidentsByCourseId: new Map([
+            [courseId, options.expectedUnownedIncident]
+          ])
+  }
+      : {})
   });
 }
 
@@ -2710,12 +3074,21 @@ function extractHtmlEvidence(html: string, pageUrl: string, courseName?: string)
   for (const match of decodedHtml.matchAll(
     /<a\b[^>]*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi
   )) {
-    const url = resolveHttpUrl(match[1] ?? match[2] ?? match[3], pageUrl);
+    const rawHref =match[1] ?? match[2] ?? match[3];
+    const label = stripHtml(match[4] ?? "");
+    const publicUrl = resolveHttpUrl(rawHref, pageUrl);
+    const evidenceOnlyAccountAccessUrl = publicUrl
+      ? null
+      : resolveEvidenceOnlyOfficialBookingAccountUrl(rawHref, label, pageUrl);
+    const url = publicUrl ?? evidenceOnlyAccountAccessUrl;
     if (!url) {
       continue;
     }
     observedUrls.push(url);
-    linkCandidates.push({ url, label: stripHtml(match[4] ?? "") });
+    linkCandidates.push({ url, label,
+      ...(evidenceOnlyAccountAccessUrl
+        ? { evidenceOnlyAccountAccess: true }
+        : {}) });
   }
 
   for (const match of decodedHtml.matchAll(
@@ -2992,12 +3365,13 @@ function pickOfficialCourseDetailCandidate(
     const normalizedLabel = normalizeCourseLinkName(
       candidate.label.replace(/\s*\([^)]*\)\s*$/u, "")
     );
-    const pathSegment = parsed.pathname.split("/").filter(Boolean).at(-1) ?? "";
+    const pathSegment = stripSafeOfficialPageExtension( parsed.pathname.split("/").filter(Boolean).at(-1) ?? ""
+    );
     return (
       normalizedLabel === normalizedTarget ||
       normalizeCourseLinkName(pathSegment) === normalizedTarget ||
-      haveCompatibleCourseNames(courseName, candidate.label) ||
-      haveCompatibleCourseNames(courseName, pathSegment.replace(/[-_]+/g, " "))
+      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, candidate.label) ||
+      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, pathSegment.replace(/[-_]+/g, " "))
     );
   })?.url;
 }
@@ -3533,13 +3907,15 @@ function isContextualSensitivePublicUrlParameter(key: string, value: string, url
       .normalize("NFKC")
       .replace(/[^a-z0-9]/gi, "")
       .toLowerCase();
-    return normalizedCandidate !== normalizedKey && isSensitivePublicUrlKey(candidate);
+    return ( normalizedCandidate !== normalizedKey && isSensitivePublicUrlKey(candidate)
+      );
   });
   const hasSecretShapedValue =
     /(?:^|[^a-z0-9])(?:private|secret|token|credential|signature|session|nonce|ticket|auth)(?:[^a-z0-9]|$)/i.test(
       value
     );
-  return hasAuthenticationContext || hasSensitiveCompanion || hasSecretShapedValue;
+  return ( hasAuthenticationContext || hasSensitiveCompanion || hasSecretShapedValue
+  );
 }
 
 function isOpaquePublicCredentialValue(value: string) {
@@ -3631,6 +4007,35 @@ function resolveHttpUrl(value: string | undefined, baseUrl: string) {
       return null;
     }
     return parseSafePublicUrl(resolved).toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolveEvidenceOnlyOfficialBookingAccountUrl(
+  value: string | undefined,
+  label: string,
+  officialPageUrl: string
+) {
+  const normalized = value?.trim();
+  if (
+    !normalized ||
+    normalized.startsWith("#") ||
+    normalized.startsWith("mailto:") ||
+    normalized.startsWith("tel:") ||
+    normalized.includes("\\") ||
+    /(?:%22|<%|%3c%25)/iu.test(normalized)
+  ) {
+    return null;
+  }
+  try {
+    const url = new URL(normalized, officialPageUrl).toString();
+    return isEvidenceOnlyOfficialBookingAccountLink(
+      { url, label },
+      officialPageUrl
+    )
+      ? url
+      : null;
   } catch {
     return null;
   }

@@ -24,6 +24,47 @@ const LAYOUT_DISTINGUISHING_TOKENS = new Set([
   "west",
   "yellow"
 ]);
+const OFFICIAL_IDENTITY_NEUTRAL_TOKENS = new Set([
+  "a",
+  "an",
+  "and",
+  "at",
+  "book",
+  "booking",
+  "center",
+  "centre",
+  "club",
+  "course",
+  "courses",
+  "country",
+  "facility",
+  "general",
+  "golf",
+  "home",
+  "links",
+  "like",
+  "municipal",
+  "no",
+  "of",
+  "official",
+  "online",
+  "other",
+  "page",
+  "public",
+  "reservation",
+  "reservations",
+  "reserve",
+  "resort",
+  "site",
+  "tee",
+  "teeitup",
+  "the",
+  "time",
+  "times",
+  "to",
+  "website",
+  "welcome"
+]);
 
 export type CourseIdentity = {
   googlePlaceId?: string | null;
@@ -42,6 +83,141 @@ export function normalizeCourseIdentityName(name: string) {
 
 export function isGenericCourseName(name: string) {
   return getMeaningfulCourseNameTokens(name).length === 0;
+}
+
+export function normalizeOfficialPagePresentationIdentity(value: string) {
+  let normalized = value
+    .replace(/^\s*welcome\s+to(?:\s+the)?\s+/iu, "")
+    .replace(/\s*&\s*event\s+venue(?=\s+at\b)/iu, "")
+    .trim();
+  if (
+    /^(?:(?:book|reserve|find|view|search)(?:\s+(?:a|your))?\s+tee\s*times?|book\s+now|online\s+booking|(?:private\s+)?golf\s+club\s+memberships?)$/iu.test(
+      normalized
+    )
+  ) {
+    return "";
+  }
+  normalized = normalized
+    .replace(/\s+(?:(?:general\s+)?public\s+)?tee\s*times?\s*$/iu, "")
+    .replace(/\s+details\s*$/iu, "")
+    .trim();
+  return normalized;
+}
+
+export function isExplicitCourseIdentityName(name: string) {
+  return Boolean(
+    normalizeCourseIdentityName(name) &&
+    /\b(?:golf\s+(?:club|course|links?|center|centre|resort)|country\s+club)\b/iu.test(
+      name
+    )
+  );
+}
+
+export function isConflictingOfficialPageCourseIdentity(
+  courseName: string,
+  pageIdentity: string
+) {
+  if (
+    haveCompatibleOfficialPageCourseNames(courseName, pageIdentity) ||
+    !pageIdentity.trim()
+  ) {
+    return false;
+  }
+  if (
+    hasConflictingOfficialCourseIdentityDiscriminator(courseName, pageIdentity)
+  ) {
+    return true;
+  }
+  if (isNeutralOfficialSiteBrandIdentity(pageIdentity)) {
+    return false;
+  }
+  if (isExplicitCourseIdentityName(pageIdentity)) {
+    return true;
+  }
+  return getOfficialIdentityCoreTokens(pageIdentity).length > 0;
+}
+
+export function isOfficialOrganizationIdentityCorroboratedByUrl(
+  identity: string,
+  pageUrl: string
+) {
+  const organizationCore = getOfficialOrganizationIdentityCore(identity);
+  if (!organizationCore) {
+    return false;
+  }
+  try {
+    const hostname = new URL(pageUrl).hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./u, "")
+      .replace(/[^a-z0-9]+/gu, " ")
+      .trim();
+    const hostCompact = hostname.replace(/\s+/gu, "");
+    const coreCompact = organizationCore.replace(/\s+/gu, "");
+    return Boolean(
+      coreCompact.length >= 2 &&
+      (hostCompact.includes(coreCompact) ||
+        organizationCore
+          .split(" ")
+          .every((token) => hostname.split(" ").includes(token)))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function hasConflictingOfficialCourseIdentityDiscriminator(
+  courseName: string,
+  pageIdentity: string
+) {
+  const targetTokens = getOfficialIdentityCoreTokens(courseName);
+  const pageTokens = getOfficialIdentityCoreTokens(pageIdentity);
+  if (targetTokens.length === 0 || pageTokens.length === 0) {
+    return false;
+  }
+  const targetSet = new Set(targetTokens);
+  const pageSet = new Set(pageTokens);
+  return Boolean(
+    targetTokens.every((token) => pageSet.has(token)) &&
+    pageTokens.some((token) => !targetSet.has(token))
+  );
+}
+
+export function haveSameOfficialCourseIdentityCore(
+  courseName: string,
+  candidateIdentity: string
+) {
+  let courseInitialName = splitLeadingInitialCourseName(courseName);
+  let candidateInitialName = splitLeadingInitialCourseName(candidateIdentity);
+  if (courseInitialName && !candidateInitialName) {
+    candidateInitialName = splitLeadingUndottedInitialCourseName(
+      candidateIdentity,
+      courseInitialName.initials.length
+    );
+  } else if (candidateInitialName && !courseInitialName) {
+    courseInitialName = splitLeadingUndottedInitialCourseName(
+      courseName,
+      candidateInitialName.initials.length
+    );
+  }
+  if (
+    courseInitialName &&
+    candidateInitialName &&
+    courseInitialName.initials !== candidateInitialName.initials
+  ) {
+    return false;
+  }
+  const targetTokens = getOfficialIdentityCoreTokens(courseName);
+  const candidateTokens = getOfficialIdentityCoreTokens(candidateIdentity);
+  return Boolean(
+    targetTokens.length > 0 &&
+    (targetTokens.join(" ") === candidateTokens.join(" ") ||
+      normalizeExactCourseName(courseName).replace(/\s+/gu, "") ===
+        normalizeExactCourseName(candidateIdentity).replace(/\s+/gu, ""))
+  );
+}
+
+export function isNonSpecificOfficialCourseIdentity(value: string) {
+  return getOfficialIdentityCoreTokens(value).length === 0;
 }
 
 export function areEquivalentNamedCourses(left: CourseIdentity, right: CourseIdentity) {
@@ -82,6 +258,110 @@ export function haveCompatibleCourseNames(leftName: string, rightName: string) {
     smaller.every((token) => largerSet.has(token)) &&
     !extraTokens.some(isLayoutDistinguishingToken)
   );
+}
+
+export function haveCompatibleOfficialPageCourseNames(
+  leftName: string,
+  rightName: string
+) {
+  let leftInitialName = splitLeadingInitialCourseName(leftName);
+  let rightInitialName = splitLeadingInitialCourseName(rightName);
+  if (leftInitialName && !rightInitialName) {
+    rightInitialName = splitLeadingUndottedInitialCourseName(
+      rightName,
+      leftInitialName.initials.length
+    );
+  } else if (rightInitialName && !leftInitialName) {
+    leftInitialName = splitLeadingUndottedInitialCourseName(
+      leftName,
+      rightInitialName.initials.length
+    );
+  }
+  if (!leftInitialName && !rightInitialName) {
+    const normalizedLeftName = normalizeExactCourseName(
+      stripOfficialMunicipalQualifier(leftName)
+    );
+    const normalizedRightName = normalizeExactCourseName(
+      stripOfficialMunicipalQualifier(rightName)
+    );
+    return Boolean(
+      normalizedLeftName &&
+      (normalizedLeftName === normalizedRightName ||
+        ((`${normalizedLeftName} course` === normalizedRightName ||
+          `${normalizedRightName} course` === normalizedLeftName) &&
+          (normalizedLeftName.endsWith(" golf") ||
+            normalizedRightName.endsWith(" golf"))))
+    );
+  }
+  if (
+    leftInitialName &&
+    rightInitialName &&
+    leftInitialName.initials !== rightInitialName.initials
+  ) {
+    return false;
+  }
+
+  const leftRemainder = leftInitialName?.remainder ?? leftName;
+  const rightRemainder = rightInitialName?.remainder ?? rightName;
+  const normalizedLeftRemainder = normalizeExactCourseName(
+    stripOfficialMunicipalQualifier(leftRemainder)
+  );
+  const normalizedRightRemainder = normalizeExactCourseName(
+    stripOfficialMunicipalQualifier(rightRemainder)
+  );
+  return Boolean(
+    normalizedLeftRemainder &&
+    normalizedLeftRemainder === normalizedRightRemainder
+  );
+}
+
+export function haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+  courseName: string,
+  pageIdentity: string,
+  verifiedLayoutHoleCounts: readonly unknown[] | null | undefined
+) {
+  if (haveCompatibleOfficialPageCourseNames(courseName, pageIdentity)) {
+    return true;
+  }
+  const verifiedLayouts = new Set(
+    (verifiedLayoutHoleCounts ?? []).filter(
+      (value): value is 9 | 18 => value === 9 || value === 18
+    )
+  );
+  if (
+    verifiedLayouts.size !== 1 ||
+    /\b(?:9|18|nine|eighteen)(?:\s*[- ]?\s*holes?)?\b/iu.test(courseName)
+  ) {
+    return false;
+  }
+  const qualifiers = [
+    ...pageIdentity.matchAll(
+      /\b(9|18|nine|eighteen)(?:\s*[- ]?\s*holes?)?\b/giu
+    )
+  ];
+  if (qualifiers.length !== 1) {
+    return false;
+  }
+  const qualifier = qualifiers[0]?.[1]?.toLocaleLowerCase("en-US");
+  const holes = qualifier === "9" || qualifier === "nine" ? 9 : 18;
+  if (!verifiedLayouts.has(holes)) {
+    return false;
+  }
+  const unqualifiedPageIdentity = pageIdentity
+    .replace(/\b(?:9|18|nine|eighteen)(?:\s*[- ]?\s*holes?)?\b/iu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return (
+    haveCompatibleOfficialPageCourseNames(courseName, unqualifiedPageIdentity) ||
+    haveCompatibleOfficialPageCourseNames(
+      courseName,
+      unqualifiedPageIdentity.replace(/\bgolf\s+courses\b/iu, "Golf Course")
+    )
+  );
+}
+
+function stripOfficialMunicipalQualifier(value: string) {
+  return value.replace(/\bmunicipal(?=\s+golf\s+course\b)/giu, "");
 }
 
 export function findUniqueGenericCourseMatch<T extends CourseIdentity>(
@@ -136,6 +416,97 @@ function getMeaningfulCourseNameTokens(name: string) {
     .trim()
     .split(/\s+/)
     .filter((token) => token && !COURSE_NAME_STOP_WORDS.has(token));
+}
+
+function splitLeadingInitialCourseName(value: string) {
+  const match = value.match(/^\s*((?:[a-z]\s*\.\s*){1,4})([^\s].*?)\s*$/iu);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  const initials = [...match[1].matchAll(/[a-z]/giu)]
+    .map((initial) => initial[0].toLocaleLowerCase("en-US"))
+    .join("");
+  return initials
+    ? {
+        initials,
+        remainder: match[2]
+      }
+    : null;
+}
+
+function splitLeadingUndottedInitialCourseName(
+  value: string,
+  expectedInitialCount: number
+) {
+  if (expectedInitialCount < 1 || expectedInitialCount > 4) {
+    return null;
+  }
+  const tokens = value.trim().split(/\s+/u);
+  const initialTokens = tokens.slice(0, expectedInitialCount);
+  const remainder = tokens.slice(expectedInitialCount).join(" ");
+  if (
+    initialTokens.length !== expectedInitialCount ||
+    initialTokens.some((token) => !/^[a-z]$/iu.test(token)) ||
+    !remainder
+  ) {
+    return null;
+  }
+  return {
+    initials: initialTokens
+      .map((initial) => initial.toLocaleLowerCase("en-US"))
+      .join(""),
+    remainder
+  };
+}
+
+function normalizeExactCourseName(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/&/gu, " and ")
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim()
+    .replace(/\s+/gu, " ");
+}
+
+function getOfficialIdentityCoreTokens(value: string) {
+  const tokens = normalizeExactCourseName(value).split(" ").filter(Boolean);
+  while (tokens[0]?.length === 1 && /^[a-z]$/u.test(tokens[0])) {
+    tokens.shift();
+  }
+  return tokens.filter((token) => !OFFICIAL_IDENTITY_NEUTRAL_TOKENS.has(token));
+}
+
+function isNeutralOfficialSiteBrandIdentity(value: string) {
+  const normalized = normalizeExactCourseName(value);
+  if (isExplicitCourseIdentityName(value)) {
+    return false;
+  }
+  return /^(?:golf\s+courses|city\s+golf|municipal\s+golf)$/u.test(normalized);
+}
+
+function getOfficialOrganizationIdentityCore(value: string) {
+  if (isExplicitCourseIdentityName(value)) {
+    return null;
+  }
+  const normalized = normalizeExactCourseName(value);
+  const patterns = [
+    /^city\s+of\s+(.+?)(?:\s+golf(?:\s+courses)?)?$/u,
+    /^(.+?)\s+golf\s+courses$/u,
+    /^(.+?)\s+city\s+golf\s+courses$/u,
+    /^play\s+(.+?)\s+golf\s+public$/u
+  ];
+  for (const pattern of patterns) {
+    const core = normalized.match(pattern)?.[1]
+      ?.replace(/\b(?:city|county|department|parks?)\b/gu, " ")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (core) {
+      return core;
+    }
+  }
+  return null;
 }
 
 function isLayoutDistinguishingToken(token: string) {

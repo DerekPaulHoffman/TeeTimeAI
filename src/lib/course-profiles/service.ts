@@ -4,6 +4,7 @@ import {
   revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
   runSerializedCourseMonitoringWrite
 } from "@/lib/automation/course-monitoring";
+import { isSafeManualEvidenceUrl } from "@/lib/automation/browser-discovery";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { prisma } from "@/lib/prisma";
 import { buildCourseProfileSlug, withStableSlugSuffix } from "@/lib/course-profiles/slug";
@@ -180,7 +181,13 @@ export async function getCourseProfileResearchPacket(courseId: string) {
     include: { profile: { include: { sources: true } } }
   });
   if (!course) throw new Error(`Course ${courseId} was not found`);
-  const sourceUrls = [...new Set([course.website, course.detectedBookingUrl].filter((value): value is string => Boolean(value)))];
+  const sourceUrls = [
+    ...new Set(
+      [course.website, course.detectedBookingUrl]
+        .map(getSafeCourseProfileResearchUrl)
+        .filter((value): value is string => value !== null)
+    )
+  ];
   const sourcePages = await Promise.all(sourceUrls.map(fetchResearchPage));
   return { course, sourcePages };
 }
@@ -496,13 +503,47 @@ function profileCreateData(courseId: string, canonicalSlug: string, draft: Cours
   };
 }
 
+const COURSE_PROFILE_RESEARCH_REDIRECT_LIMIT = 3;
+
+function getSafeCourseProfileResearchUrl(value: string | null) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return isSafeManualEvidenceUrl(parsed) ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchResearchPage(url: string) {
   try {
-    const response = await fetch(url, { headers: { "User-Agent": "TeeTimeSpotCourseResearch/1.0 (+https://teetimespot.com/about)" }, signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) return { url, status: response.status, text: null };
-    const html = (await response.text()).slice(0, 400_000);
-    const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&#39;/g, "'").replace(/&quot;/gi, '"').replace(/\s+/g, " ").trim().slice(0, 8_000);
-    return { url: response.url, status: response.status, text };
+    let currentUrl = new URL(url);
+    for (let redirectCount = 0; redirectCount <= COURSE_PROFILE_RESEARCH_REDIRECT_LIMIT; redirectCount += 1) {
+      const response = await fetch(currentUrl, {
+        headers: { "User-Agent": "TeeTimeSpotCourseResearch/1.0 (+https://teetimespot.com/about)" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location || redirectCount === COURSE_PROFILE_RESEARCH_REDIRECT_LIMIT) {
+          return { url: currentUrl.toString(), status: response.status, text: null };
+        }
+        const redirectUrl = new URL(location, currentUrl);
+        if (!isSafeManualEvidenceUrl(redirectUrl)) {
+          return { url: currentUrl.toString(), status: response.status, text: null };
+        }
+        currentUrl = redirectUrl;
+        continue;
+      }
+      if (!response.ok) {
+        return { url: currentUrl.toString(), status: response.status, text: null };
+      }
+      const html = (await response.text()).slice(0, 400_000);
+      const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&#39;/g, "'").replace(/&quot;/gi, '"').replace(/\s+/g, " ").trim().slice(0, 8_000);
+      return { url: currentUrl.toString(), status: response.status, text };
+    }
+    return { url, status: null, text: null, error: "Redirect limit reached" };
   } catch (error) {
     return { url, status: null, text: null, error: error instanceof Error ? error.message : "Fetch failed" };
   }

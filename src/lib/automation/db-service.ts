@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 
-import { Prisma, type CourseMonitoringEventSource } from "@prisma/client";
+import {
+  Prisma,
+  type CourseMonitoringEventSource,
+  type CourseSupportIncidentStatus
+} from "@prisma/client";
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
+import {
+  normalizeLayoutHoleCounts,
+  type CourseLayoutHoleCount
+} from "@/lib/courses/course-layout";
 import { resolveBookingAccessMode } from "@/lib/courses/intelligence";
 import {
   lockSearchForAlertMutation,
@@ -18,6 +26,7 @@ import {
   evaluateBrowserDiscoveryMonitoringGate,
   getBestProbeUrl,
   getBestUnsupportedCoverageProbeUrl,
+  isSafeManualEvidenceUrl,
   keepPolicyOnlyDiscoveryActionable,
   OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES,
   shouldQueueBrowserProbe,
@@ -183,6 +192,7 @@ export type BrowserProbeTarget = {
     intelligenceReviewAt: Date | null;
     intelligenceConfidence: number | null;
     bookingMetadata: unknown;
+    verifiedLayoutHoleCounts?: CourseLayoutHoleCount[];
     monitoringFailureEvidence?: BrowserProbeCourseInput["monitoringFailureEvidence"];
   };
   probeUrl: string;
@@ -409,6 +419,8 @@ export async function listBrowserProbeTargets(
             intelligenceReviewAt: true,
             intelligenceConfidence: true,
             bookingMetadata: true,
+            layoutHoleCounts: true,
+            layoutHolesVerifiedAt: true,
             probes: {
               orderBy: { observedAt: "desc" },
               take: 1,
@@ -483,6 +495,13 @@ export async function listBrowserProbeTargets(
           intelligenceReviewAt: course.intelligenceReviewAt,
           intelligenceConfidence: course.intelligenceConfidence,
           bookingMetadata: course.bookingMetadata,
+          ...(course.layoutHolesVerifiedAt
+            ? {
+                verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
+                  course.layoutHoleCounts
+                )
+              }
+            : {}),
           monitoringFailureEvidence
         },
         probeUrl,
@@ -523,6 +542,13 @@ export async function listBrowserProbeTargets(
         intelligenceReviewAt: course.intelligenceReviewAt,
         intelligenceConfidence: course.intelligenceConfidence,
         bookingMetadata: course.bookingMetadata,
+        ...(course.layoutHolesVerifiedAt
+          ? {
+              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
+                course.layoutHoleCounts
+              )
+            }
+          : {}),
         monitoringFailureEvidence
       },
       probeUrl,
@@ -662,6 +688,13 @@ async function listExactIncidentBrowserProbeTarget(input: {
         intelligenceReviewAt: course.intelligenceReviewAt,
         intelligenceConfidence: course.intelligenceConfidence,
         bookingMetadata: course.bookingMetadata,
+        ...(course.layoutHolesVerifiedAt
+          ? {
+              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
+                course.layoutHoleCounts
+              )
+            }
+          : {}),
         monitoringFailureEvidence
       },
       probeUrl
@@ -762,47 +795,77 @@ export async function recordCourseProbe(input: CourseProbeInput) {
 export async function recordBrowserDiscovery(
   input: BrowserDiscovery,
   persistenceFence?: CourseSupportBrowserPersistenceFence,
-  runtimeVersion?: string | null
+  runtimeVersion?: string | null,
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation
 ) {
-  input = normalizeBrowserDiscoveryForMonitoring(input);
-  const learnedOnline = input.status === "LEARNED" && Boolean(input.apiMetadata);
-  const automationEligibility =
-    input.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN");
-  const bookingMethod =
-    input.bookingMethod ?? (learnedOnline && input.bookingUrl ? "PUBLIC_ONLINE" : "UNKNOWN");
-  const data = {
-    courseId: input.courseId,
-    status: input.status,
-    detectedPlatform: input.detectedPlatform,
-    bookingMethod,
-    bookingPhone: input.bookingPhone,
-    automationEligibility,
-    automationReason: input.automationReason ?? "NONE",
-    bookingAccessMode: resolveBookingAccessMode({
-      automationEligibility,
-      automationReason: input.automationReason,
-      bookingMethod,
-      bookingAccessMode: input.bookingAccessMode
-    }),
-    sourceUrl: input.sourceUrl,
-    bookingUrl: input.bookingUrl,
-    apiEndpoint: input.apiEndpoint,
-    apiMetadata: input.apiMetadata as Prisma.InputJsonValue | undefined,
-    confidence: input.confidence,
-    evidence: input.evidence as Prisma.InputJsonValue
-  };
+  const data = buildBrowserDiscoveryPersistenceData(input);
   if (!persistenceFence) {
-    return prisma.courseAutomationDiscovery.create({ data });
+    if (!expectedUnownedIncident) {
+      return prisma.courseAutomationDiscovery.create({ data });
+    }
+    return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+      if (
+        !(await reserveUnownedIncidentForBrowserDiscovery(
+          transaction,
+          input.courseId,
+          expectedUnownedIncident
+        ))
+      ) {
+        return null;
+      }
+      return transaction.courseAutomationDiscovery.create({ data });
+    });
   }
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
     runCourseSupportBrowserPersistenceWrite({
       transaction,
       fence: persistenceFence,
       runtimeVersion,
-      mutate: (ownedTransaction) =>
-        ownedTransaction.courseAutomationDiscovery.create({ data })
+      mutate: async (ownedTransaction) => {
+        if (
+          !(await reserveUnownedIncidentForBrowserDiscovery(
+            ownedTransaction,
+            input.courseId,
+            expectedUnownedIncident
+          ))
+        ) {
+          return null;
+        }
+        return ownedTransaction.courseAutomationDiscovery.create({ data });
+      }
     })
   );
+}
+
+function buildBrowserDiscoveryPersistenceData(input: BrowserDiscovery) {
+  const normalized = normalizeBrowserDiscoveryForMonitoring(input);
+  const learnedOnline = normalized.status === "LEARNED" && Boolean(normalized.apiMetadata);
+  const automationEligibility =
+    normalized.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN");
+  const bookingMethod =
+    normalized.bookingMethod ??
+    (learnedOnline && normalized.bookingUrl ? "PUBLIC_ONLINE" : "UNKNOWN");
+  return {
+    courseId: normalized.courseId,
+    status: normalized.status,
+    detectedPlatform: normalized.detectedPlatform,
+    bookingMethod,
+    bookingPhone: normalized.bookingPhone,
+    automationEligibility,
+    automationReason: normalized.automationReason ?? "NONE",
+    bookingAccessMode: resolveBookingAccessMode({
+      automationEligibility,
+      automationReason: normalized.automationReason,
+      bookingMethod,
+      bookingAccessMode: normalized.bookingAccessMode
+    }),
+    sourceUrl: normalized.sourceUrl,
+    bookingUrl: normalized.bookingUrl,
+    apiEndpoint: normalized.apiEndpoint,
+    apiMetadata: normalized.apiMetadata as Prisma.InputJsonValue | undefined,
+    confidence: normalized.confidence,
+    evidence: normalized.evidence as Prisma.InputJsonValue
+  };
 }
 
 export type BrowserDiscoveryCourseExpectation = {
@@ -812,6 +875,13 @@ export type BrowserDiscoveryCourseExpectation = {
   automationEligibility: string;
 };
 
+export type BrowserDiscoveryUnownedIncidentExpectation = {
+  id: string;
+  cycle: number;
+  revision: number;
+  status: CourseSupportIncidentStatus;
+};
+
 export async function retireLegacyPolicyOnlyCourseBlock(
   courseId: string,
   expectedCourse: BrowserDiscoveryCourseExpectation,
@@ -819,7 +889,8 @@ export async function retireLegacyPolicyOnlyCourseBlock(
     preserveWebsite: boolean;
     preserveDetectedBookingUrl: boolean;
     preserveBookingMetadata: boolean;
-  }
+  },
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation
 ) {
   return runSerializedCourseMonitoringWrite(courseId, async (transaction) => {
     const current = await transaction.course.findUnique({
@@ -830,6 +901,15 @@ export async function retireLegacyPolicyOnlyCourseBlock(
     }
     const preserveProviderAccess =
       preservation.preserveDetectedBookingUrl || preservation.preserveBookingMetadata;
+    if (
+      !(await reserveUnownedIncidentForBrowserDiscovery(
+        transaction,
+        courseId,
+        expectedUnownedIncident
+      ))
+    ) {
+      return null;
+    }
     const updated = await transaction.course.updateMany({
       where: {
         id: courseId,
@@ -885,7 +965,8 @@ export async function applyBrowserDiscoveryToCourse(
   input: BrowserDiscovery,
   expectedCourse?: BrowserDiscoveryCourseExpectation,
   persistenceFence?: CourseSupportBrowserPersistenceFence,
-  runtimeVersion?: string | null
+  runtimeVersion?: string | null,
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation
 ) {
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
     persistenceFence
@@ -897,17 +978,55 @@ export async function applyBrowserDiscoveryToCourse(
             applyBrowserDiscoveryToCourseInTransaction(
               input,
               expectedCourse,
-              ownedTransaction
+              ownedTransaction,
+              expectedUnownedIncident
             )
         })
-      : applyBrowserDiscoveryToCourseInTransaction(input, expectedCourse, transaction)
+      : applyBrowserDiscoveryToCourseInTransaction(
+          input,
+          expectedCourse,
+          transaction,
+          expectedUnownedIncident
+        )
   );
+}
+
+export async function recordAndApplyBrowserDiscoveryToCourse(
+  input: BrowserDiscovery,
+  expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
+  expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation,
+  options: { recordIfNotApplied?: boolean } = {}
+) {
+  const data = buildBrowserDiscoveryPersistenceData(input);
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    if (
+      !(await reserveUnownedIncidentForBrowserDiscovery(
+        transaction,
+        input.courseId,
+        expectedUnownedIncident
+      ))
+    ) {
+      return null;
+    }
+    const applied = await applyBrowserDiscoveryToCourseInTransaction(
+      input,
+      expectedCourse,
+      transaction,
+      undefined
+    );
+    if (!applied && options.recordIfNotApplied === false) {
+      return { applied: null, discovery: null };
+    }
+    const discovery = await transaction.courseAutomationDiscovery.create({ data });
+    return { applied, discovery };
+  });
 }
 
 async function applyBrowserDiscoveryToCourseInTransaction(
   input: BrowserDiscovery,
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
-  transaction: Prisma.TransactionClient
+  transaction: Prisma.TransactionClient,
+  expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation | undefined
 ) {
   input = normalizeAutomatedTechnicalDiscovery(normalizeBrowserDiscoveryForMonitoring(input));
   const provider = resolveProviderCapability({
@@ -981,6 +1100,16 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       persistedProvider.isRunnable ||
       (persistedProvider.capability &&
         persistedProvider.providerFamilyKey !== inspectedProviderIdentity.providerFamilyKey)
+    ) {
+      return null;
+    }
+
+    if (
+      !(await reserveUnownedIncidentForBrowserDiscovery(
+        transaction,
+        input.courseId,
+        expectedUnownedIncident
+      ))
     ) {
       return null;
     }
@@ -1122,6 +1251,16 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     return null;
   }
 
+  if (
+    !(await reserveUnownedIncidentForBrowserDiscovery(
+      transaction,
+      input.courseId,
+      expectedUnownedIncident
+    ))
+  ) {
+    return null;
+  }
+
   const updated = await transaction.course.updateMany({
     where: { id: input.courseId, updatedAt: current.updatedAt },
     data: sourceUnavailableClassification
@@ -1197,6 +1336,26 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     );
   }
   return applied;
+}
+
+async function reserveUnownedIncidentForBrowserDiscovery(
+  transaction: Prisma.TransactionClient,
+  courseId: string,
+  expected: BrowserDiscoveryUnownedIncidentExpectation | undefined
+) {
+  if (!expected) return true;
+  const reserved = await transaction.courseSupportIncident.updateMany({
+    where: {
+      id: expected.id,
+      courseId,
+      cycle: expected.cycle,
+      revision: expected.revision,
+      status: expected.status,
+      activeBatchId: null
+    },
+    data: { revision: { increment: 0 } }
+  });
+  return reserved.count === 1;
 }
 
 function normalizeAutomatedTechnicalDiscovery(discovery: BrowserDiscovery): BrowserDiscovery {
@@ -2853,6 +3012,93 @@ export async function recordCourseBookingWindowEvidence(input: {
           buildCourseSupportProviderSnapshotFingerprint(applied),
         source: input.source ?? "SEARCH_WORKFLOW",
         now: observedAt
+      }
+    );
+    return applied;
+  });
+}
+
+export async function recordCoursePhysicalLayoutEvidence(input: {
+  courseId: string;
+  holeCounts: readonly CourseLayoutHoleCount[];
+  evidenceUrl: string;
+  verifiedAt: Date;
+  expectedUpdatedAt: Date;
+  expectedName: string;
+  source?: CourseMonitoringEventSource;
+}) {
+  const operationTime = new Date();
+  const holeCounts = normalizeLayoutHoleCounts(input.holeCounts);
+  if (
+    holeCounts.length === 0 ||
+    holeCounts.length !== input.holeCounts.length ||
+    !Number.isFinite(input.verifiedAt.getTime()) ||
+    input.verifiedAt.getTime() > operationTime.getTime()
+  ) {
+    throw new Error(
+      "Physical layout evidence must contain unique 9- and/or 18-hole values and a valid non-future verification date"
+    );
+  }
+  if (
+    !Number.isFinite(input.expectedUpdatedAt.getTime()) ||
+    !input.expectedName.trim()
+  ) {
+    throw new Error("Physical layout evidence requires a valid pre-fetch course snapshot");
+  }
+  let evidenceUrl: URL;
+  try {
+    evidenceUrl = new URL(input.evidenceUrl);
+  } catch {
+    throw new Error("Physical layout evidence URL must be a credential-free public HTTP(S) URL");
+  }
+  if (
+    !["http:", "https:"].includes(evidenceUrl.protocol) ||
+    evidenceUrl.username ||
+    evidenceUrl.password ||
+    /^(?:localhost|127\.|0\.0\.0\.0$|\[?::1\]?$)/iu.test(evidenceUrl.hostname) ||
+    !isSafeManualEvidenceUrl(evidenceUrl)
+  ) {
+    throw new Error("Physical layout evidence URL must be a credential-free public HTTP(S) URL");
+  }
+
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await transaction.course.findUnique({
+      where: { id: input.courseId }
+    });
+    if (!current) {
+      throw new Error(`Course ${input.courseId} was not found`);
+    }
+    if (
+      current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+      current.name !== input.expectedName
+    ) {
+      throw new Error(
+        "Course identity or layout changed while physical-layout evidence was being verified; rerun the command"
+      );
+    }
+
+    const applied = await transaction.course.update({
+      where: {
+        id: input.courseId,
+        updatedAt: input.expectedUpdatedAt,
+        name: input.expectedName
+      },
+      data: {
+        layoutHoleCounts: holeCounts,
+        layoutHolesEvidenceUrl: evidenceUrl.toString(),
+        layoutHolesVerifiedAt: input.verifiedAt
+      }
+    });
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+      transaction,
+      {
+        courseId: input.courseId,
+        before: current,
+        after: applied,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(applied),
+        source: input.source ?? "OPERATOR_CLI",
+        now: operationTime
       }
     );
     return applied;

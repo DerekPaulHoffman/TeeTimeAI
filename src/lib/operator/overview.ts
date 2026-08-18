@@ -428,6 +428,22 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
         intelligenceConfidence: true,
         detectedBookingUrl: true,
         website: true,
+        automationDiscoveries: {
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: 1,
+          select: {
+            status: true,
+            detectedPlatform: true,
+            bookingMethod: true,
+            automationEligibility: true,
+            automationReason: true,
+            bookingAccessMode: true,
+            bookingUrl: true,
+            confidence: true,
+            evidence: true,
+            createdAt: true
+          }
+        },
         profile: {
           select: {
             canonicalSlug: true,
@@ -645,6 +661,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
               evidenceUrl: sanitizeOperatorUrl(latestProbe.evidenceUrl)
             }
           : null,
+        latestDiscovery: buildOperatorDiscoverySummary(course.automationDiscoveries[0] ?? null),
         coverageCategory,
         profileSlug: course.profile?.status === "PUBLISHED" ? course.profile.canonicalSlug : null
       };
@@ -812,6 +829,118 @@ function sanitizeOperatorUrl(value: string | null) {
   } catch {
     return null;
   }
+}
+
+export function buildOperatorDiscoverySummary(
+  discovery: {
+    status: string;
+    detectedPlatform: string;
+    bookingMethod: string;
+    automationEligibility: string;
+    automationReason: string;
+    bookingAccessMode: string;
+    bookingUrl: string | null;
+    confidence: number;
+    evidence: unknown;
+    createdAt: Date;
+  } | null
+) {
+  if (!discovery) return null;
+  const bookingUrl = sanitizeOperatorUrl(discovery.bookingUrl);
+  const evidence = readOperatorEvidenceRecord(discovery.evidence);
+  const learnedFrom = readOperatorEvidenceString(evidence, "learnedFrom");
+  const finalUrl = sanitizeOperatorUrl(readOperatorEvidenceString(evidence, "finalUrl"));
+  const accountRequired =
+    discovery.automationReason === "ACCOUNT_REQUIRED" &&
+    ["ACCOUNT_REQUIRED", "ACCOUNT_SELF_SERVICE", "ACCOUNT_STAFF_PROVISIONED"].includes(
+      discovery.bookingAccessMode
+    );
+  const officialAccountFinding = Boolean(
+    discovery.status === "VERIFIED" &&
+      bookingUrl &&
+      accountRequired &&
+      learnedFrom &&
+      [
+        "official-booking-cta-account-access",
+        "official-booking-cta-account-sign-in"
+      ].includes(learnedFrom)
+  );
+  const officialLinkCorroborated = Boolean(
+    discovery.status !== "FAILED" &&
+      bookingUrl &&
+      (officialAccountFinding ||
+        hasOperatorOfficialLinkCorroboration(evidence, bookingUrl))
+  );
+  const providerLandingFound = Boolean(
+    bookingUrl &&
+      finalUrl &&
+      ["LEARNED", "VERIFIED", "BLOCKED"].includes(discovery.status) &&
+      haveSameOperatorUrlOrigin(bookingUrl, finalUrl)
+  );
+  return {
+    status: discovery.status,
+    detectedPlatform: discovery.detectedPlatform,
+    bookingMethod: discovery.bookingMethod,
+    automationEligibility: discovery.automationEligibility,
+    automationReason: discovery.automationReason,
+    bookingAccessMode: discovery.bookingAccessMode,
+    bookingCandidateRecorded: Boolean(
+      discovery.status !== "FAILED" &&
+        (bookingUrl || discovery.detectedPlatform !== "UNKNOWN")
+    ),
+    officialLinkCorroborated,
+    providerLandingFound,
+    confidence: discovery.confidence,
+    observedAt: discovery.createdAt
+  };
+}
+
+function readOperatorEvidenceRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readOperatorEvidenceString(
+  value: Record<string, unknown> | null,
+  key: string
+) {
+  const candidate = value?.[key];
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function hasOperatorOfficialLinkCorroboration(
+  evidence: Record<string, unknown> | null,
+  bookingUrl: string
+) {
+  const proof = readOperatorEvidenceRecord(evidence?.courseIdentityCorroboration);
+  if (proof?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK") return false;
+  const officialWebsiteUrl = sanitizeOperatorUrl(
+    readOperatorEvidenceString(proof, "officialWebsiteUrl")
+  );
+  const officialPageUrl = sanitizeOperatorUrl(
+    readOperatorEvidenceString(proof, "officialPageUrl")
+  );
+  const providerUrl = sanitizeOperatorUrl(readOperatorEvidenceString(proof, "providerUrl"));
+  return Boolean(
+    officialWebsiteUrl &&
+      officialPageUrl &&
+      providerUrl === bookingUrl &&
+      haveSameOperatorUrlOrigin(officialWebsiteUrl, officialPageUrl)
+  );
+}
+
+function haveSameOperatorUrlOrigin(left: string, right: string) {
+  const leftUrl = new URL(left);
+  const rightUrl = new URL(right);
+  const normalizeHostname = (hostname: string) =>
+    hostname.toLocaleLowerCase("en-US").replace(/^www\./u, "");
+  return (
+    normalizeHostname(leftUrl.hostname) === normalizeHostname(rightUrl.hostname) &&
+    leftUrl.port === rightUrl.port &&
+    (leftUrl.protocol === rightUrl.protocol ||
+      (leftUrl.protocol === "http:" && rightUrl.protocol === "https:"))
+  );
 }
 
 type CoursePreferenceSummary = {

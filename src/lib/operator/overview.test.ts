@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCourseSupportResponderAlert, buildTopCourses, countEvents } from "./overview";
+import {
+  buildCourseSupportResponderAlert,
+  buildOperatorDiscoverySummary,
+  buildTopCourses,
+  countEvents
+} from "./overview";
 
 describe("operator overview aggregation", () => {
   it("ranks courses by real saved selections and counts distinct owners", () => {
@@ -100,6 +105,179 @@ describe("operator overview aggregation", () => {
         openIncidentCount: 0
       })
     ).toBeNull();
+  });
+
+  it("reduces discovery evidence to structured operator facts without returning its URL", () => {
+    const summary = buildOperatorDiscoverySummary({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+      bookingUrl: "https://booking.example/sign-in",
+      confidence: 0.98,
+      evidence: {
+        finalUrl: "https://booking.example/sign-in",
+        learnedFrom: "official-booking-cta-account-access"
+      },
+      createdAt: new Date("2026-08-17T14:00:00.000Z")
+    });
+
+    expect(summary).toEqual({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+      bookingCandidateRecorded: true,
+      officialLinkCorroborated: true,
+      providerLandingFound: true,
+      confidence: 0.98,
+      observedAt: new Date("2026-08-17T14:00:00.000Z")
+    });
+    expect(summary).not.toHaveProperty("bookingUrl");
+  });
+
+  it("does not treat a credential-bearing discovery URL as corroborated or reached", () => {
+    const summary = buildOperatorDiscoverySummary({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN",
+      bookingUrl: "https://golfer:secret@booking.example/tee-times",
+      confidence: 0.7,
+      evidence: {
+        learnedFrom: "teeitup-target-scope-unconfirmed"
+      },
+      createdAt: new Date("2026-08-17T14:00:00.000Z")
+    });
+
+    expect(summary).toMatchObject({
+      bookingCandidateRecorded: true,
+      officialLinkCorroborated: false,
+      providerLandingFound: false
+    });
+  });
+
+  it("does not describe text-only account guidance as an official booking link", () => {
+    const summary = buildOperatorDiscoverySummary({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "BLOCKED",
+      automationReason: "ACCOUNT_REQUIRED",
+      bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+      bookingUrl: "https://course.example/",
+      confidence: 0.9,
+      evidence: {
+        finalUrl: "https://course.example/",
+        learnedFrom: "official-self-service-account-access"
+      },
+      createdAt: new Date("2026-08-17T14:00:00.000Z")
+    });
+
+    expect(summary).toMatchObject({
+      bookingCandidateRecorded: true,
+      officialLinkCorroborated: false,
+      providerLandingFound: true
+    });
+  });
+
+  it("keeps an uncorroborated inspected provider signal as a candidate only", () => {
+    const summary = buildOperatorDiscoverySummary({
+      status: "INSPECTED",
+      detectedPlatform: "TEEITUP",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN",
+      bookingUrl: "https://course.example/tee-times",
+      confidence: 0.45,
+      evidence: {
+        finalUrl: "https://course.example/tee-times",
+        learnedFrom: "teeitup-target-scope-unconfirmed",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          officialWebsiteUrl: "https://course.example/",
+          officialPageUrl: "https://course.example/tee-times",
+          providerUrl: "https://city.book.teeitup.com/?course=287"
+        }
+      },
+      createdAt: new Date("2026-08-17T14:00:00.000Z")
+    });
+
+    expect(summary).toMatchObject({
+      bookingCandidateRecorded: true,
+      officialLinkCorroborated: false,
+      providerLandingFound: false
+    });
+    expect(summary).not.toHaveProperty("evidence");
+  });
+
+  it("derives corroboration only when the official-page proof matches the saved provider URL", () => {
+    const bookingUrl = "https://city.book.teeitup.com/?course=287";
+    const summary = buildOperatorDiscoverySummary({
+      status: "LEARNED",
+      detectedPlatform: "TEEITUP",
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      bookingUrl,
+      confidence: 0.95,
+      evidence: {
+        finalUrl: bookingUrl,
+        learnedFrom: "teeitup-public-facility",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          officialWebsiteUrl: "https://course.example/",
+          officialPageUrl: "https://course.example/tee-times",
+          providerUrl: bookingUrl
+        }
+      },
+      createdAt: new Date("2026-08-17T14:00:00.000Z")
+    });
+
+    expect(summary).toMatchObject({
+      bookingCandidateRecorded: true,
+      officialLinkCorroborated: true,
+      providerLandingFound: true
+    });
+  });
+
+  it("preserves an absolute latest failed discovery instead of reviving older proof", () => {
+    const summary = buildOperatorDiscoverySummary({
+      status: "FAILED",
+      detectedPlatform: "TEEITUP",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN",
+      bookingUrl: "https://city.book.teeitup.com/?course=287",
+      confidence: 0,
+      evidence: {
+        learnedFrom: "official-site-fetch-failed",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          officialWebsiteUrl: "https://course.example/",
+          officialPageUrl: "https://course.example/tee-times",
+          providerUrl: "https://city.book.teeitup.com/?course=287"
+        }
+      },
+      createdAt: new Date("2026-08-17T14:05:00.000Z")
+    });
+
+    expect(summary).toMatchObject({
+      status: "FAILED",
+      bookingCandidateRecorded: false,
+      officialLinkCorroborated: false,
+      providerLandingFound: false,
+      observedAt: new Date("2026-08-17T14:05:00.000Z")
+    });
   });
 });
 

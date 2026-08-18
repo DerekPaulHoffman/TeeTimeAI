@@ -194,6 +194,19 @@ export type CourseStatusInput = {
     message: string | null;
     evidenceUrl: string | null;
   } | null;
+  latestDiscovery: {
+    status: string;
+    detectedPlatform: string;
+    bookingMethod: string;
+    automationEligibility: string;
+    automationReason: string;
+    bookingAccessMode: string;
+    bookingCandidateRecorded: boolean;
+    officialLinkCorroborated: boolean;
+    providerLandingFound: boolean;
+    confidence: number;
+    observedAt: Date;
+  } | null;
   profileSlug: string | null;
   coverageCategory: ProviderCoverageCategory;
 };
@@ -209,6 +222,8 @@ export type CourseInventoryItem = CourseStatusInput & {
   tone: CourseStatusTone;
   automationQueueState: CourseAutomationQueueState | null;
   problemSummary: string | null;
+  discoveryProviderLabel: string | null;
+  discoveryStatusLabel: string | null;
 };
 
 const STALE_WITH_DEMAND_MS = 24 * 60 * 60 * 1000;
@@ -281,6 +296,8 @@ export function filterCourseInventory(
       course.city,
       course.stateCode,
       course.providerFamilyKey,
+      course.discoveryProviderLabel,
+      course.discoveryStatusLabel,
       course.statusLabel,
       course.statusMeaning,
       course.recommendedAction
@@ -410,14 +427,16 @@ function classifyCourseStatus(
   now: Date
 ): Omit<CourseInventoryItem, "automationQueueState"> {
   if (course.incident?.status === "NEEDS_HUMAN") {
+    const discoveryCopy = getLatestDiscoveryOperatorCopy(course);
     return withStatus(course, "REVIEW_REQUIRED", {
       priorityGroup: "ACTION",
       priorityScore: 0,
       tone: "critical",
       labelOverride: "Engineering verification needed",
-      meaningOverride:
+      meaningOverride: discoveryCopy?.meaning ??
         "AI finished its bounded checks but still needs you to confirm the course works or provide more course information.",
       actionOverride:
+        discoveryCopy?.recommendedAction ??
         "Open the redacted course history, check the official course surface again, then confirm the result or add the missing details and request another AI recheck."
     });
   }
@@ -596,14 +615,16 @@ function classifyCourseStatus(
     });
   }
   if (course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED") {
+    const discoveryCopy = getLatestDiscoveryOperatorCopy(course);
     return withStatus(course, "REVIEW_REQUIRED", {
       priorityGroup: "ACTION",
       priorityScore: 0,
       tone: "critical",
       labelOverride: "Engineering verification needed",
-      meaningOverride:
+      meaningOverride: discoveryCopy?.meaning ??
         "AI finished its bounded checks but still needs you to confirm the course works or provide more course information.",
       actionOverride:
+        discoveryCopy?.recommendedAction ??
         course.incident?.nextAction ??
         "Open the redacted course history, check the official course surface again, then confirm the result or add the missing details and request another AI recheck."
     });
@@ -936,22 +957,30 @@ function withStatus(
   if (!guide) {
     throw new Error(`Missing operator course status guide for ${statusKey}`);
   }
+  const discoveryCopy = getLatestDiscoveryOperatorCopy(course);
   const statusMeaning = options.meaningOverride ?? guide.meaning;
   return {
     ...course,
     statusKey,
     statusLabel: options.labelOverride ?? guide.label,
     statusMeaning,
-    recommendedAction: options.actionOverride ?? guide.action,
+    recommendedAction:
+      options.actionOverride ?? discoveryCopy?.recommendedAction ?? guide.action,
     diagnosticKey: options.diagnosticKeyOverride ?? statusKey,
     priorityGroup: options.priorityGroup,
     priorityScore: options.priorityScore,
     tone: options.tone,
-    problemSummary: summarizeCourseProblem(course, statusMeaning)
+    problemSummary: summarizeCourseProblem(course, statusMeaning),
+    discoveryProviderLabel: discoveryCopy?.providerLabel ?? null,
+    discoveryStatusLabel: discoveryCopy?.statusLabel ?? null
   };
 }
 
 function summarizeCourseProblem(course: CourseStatusInput, fallback: string) {
+  const discoveryCopy = getLatestDiscoveryOperatorCopy(course);
+  if (discoveryCopy) {
+    return discoveryCopy.problemSummary;
+  }
   const message = (course.incident?.latestMessage ?? course.latestProbe?.message ?? "")
     .replace(/\s+/gu, " ")
     .trim();
@@ -991,6 +1020,148 @@ function summarizeCourseProblem(course: CourseStatusInput, fallback: string) {
     return message.length > 240 ? `${message.slice(0, 237)}...` : message;
   }
   return fallback;
+}
+
+type LatestDiscoveryOperatorCopy = {
+  providerLabel: string;
+  statusLabel: string;
+  meaning: string;
+  problemSummary: string;
+  recommendedAction: string;
+};
+
+function getLatestDiscoveryOperatorCopy(
+  course: CourseStatusInput
+): LatestDiscoveryOperatorCopy | null {
+  const discovery = course.latestDiscovery;
+  const incident = course.incident;
+  if (
+    !discovery ||
+    !incident ||
+    incident.status === "RESOLVED" ||
+    discovery.status === "FAILED" ||
+    discovery.observedAt < incident.firstSeenAt
+  ) {
+    return null;
+  }
+
+  const accountRequired =
+    discovery.automationReason === "ACCOUNT_REQUIRED" ||
+    ["ACCOUNT_REQUIRED", "ACCOUNT_SELF_SERVICE", "ACCOUNT_STAFF_PROVISIONED"].includes(
+      discovery.bookingAccessMode
+    );
+  if (accountRequired && discovery.bookingCandidateRecorded) {
+    const staffProvisioned = discovery.bookingAccessMode === "ACCOUNT_STAFF_PROVISIONED";
+    const officialFinding = discovery.officialLinkCorroborated;
+    return {
+      providerLabel: officialFinding
+        ? "Account-required booking page"
+        : "Account-required candidate recorded",
+      statusLabel: officialFinding
+        ? staffProvisioned
+          ? "Course staff access required"
+          : "Account sign-in required"
+        : "Official link unconfirmed",
+      meaning: officialFinding
+        ? "AI corroborated the official online booking path and identified the specific access limitation; engineering only needs to confirm the final classification."
+        : "AI recorded an account-required booking candidate, but did not corroborate it as this course's official booking path.",
+      problemSummary: officialFinding
+        ? staffProvisioned
+          ? "The official course site links to an online booking page, but course staff must provision golfer access before tee times can be viewed."
+          : "The official course site links to an online booking page, but viewing tee times requires a golfer account or sign-in."
+        : "The latest investigation recorded an account-required booking candidate, but did not corroborate it as this course's official booking path.",
+      recommendedAction: officialFinding
+        ? "Confirm the account-required technical limitation, keep the official booking page available to golfers, and do not retry signed-out monitoring unless a public tee-time view appears."
+        : "Verify the candidate from the exact official course page before confirming an account-required limitation or changing the saved booking source."
+    };
+  }
+
+  const challenge =
+    discovery.automationReason === "CAPTCHA_OR_QUEUE" ||
+    discovery.bookingAccessMode === "CAPTCHA_OR_QUEUE";
+  if (challenge && discovery.bookingCandidateRecorded) {
+    const officialFinding = discovery.officialLinkCorroborated;
+    return {
+      providerLabel: officialFinding
+        ? "Official booking page found"
+        : "Challenged booking candidate recorded",
+      statusLabel: officialFinding ? "Captcha or queue confirmed" : "Official link unconfirmed",
+      meaning: officialFinding
+        ? "AI corroborated the official booking path and identified the exact signed-out technical challenge."
+        : "AI recorded a challenged booking candidate, but did not corroborate it as this course's official booking path.",
+      problemSummary: officialFinding
+        ? "The official course site links to an online booking page, but the signed-out page currently presents a CAPTCHA or waiting-room challenge."
+        : "The latest investigation recorded a booking candidate with a CAPTCHA or queue, but did not corroborate the candidate as this course's official booking path.",
+      recommendedAction: officialFinding
+        ? "Confirm the technical limitation without bypassing the challenge, keep the official booking page available to golfers, and revalidate only when the public surface changes."
+        : "Verify the candidate from the exact official course page without bypassing the challenge before confirming a technical limitation."
+    };
+  }
+
+  const platformLabel = getDiscoveryPlatformLabel(discovery.detectedPlatform);
+  if (platformLabel && discovery.bookingCandidateRecorded) {
+    const officialFinding = discovery.officialLinkCorroborated;
+    const providerScopeConfirmed = ["LEARNED", "VERIFIED"].includes(
+      discovery.status
+    );
+    const providerLandingFound = discovery.providerLandingFound;
+    if (officialFinding && !providerScopeConfirmed) {
+      return {
+        providerLabel: `${platformLabel} official link found`,
+        statusLabel: "Course scope unconfirmed",
+        meaning: `AI corroborated an official ${platformLabel} link, but did not confirm the exact course or facility selector needed for monitoring.`,
+        problemSummary: `The official course site links to ${platformLabel}, but the exact course or facility scope is still ambiguous.`,
+        recommendedAction: `Verify the exact ${platformLabel} course or facility selector before applying provider metadata or requesting a fresh monitoring check.`
+      };
+    }
+    return {
+      providerLabel: officialFinding
+        ? `${platformLabel} official link found`
+        : `${platformLabel} candidate recorded`,
+      statusLabel: officialFinding ? "Provider link corroborated" : "Course scope unconfirmed",
+      meaning: officialFinding
+        ? `AI corroborated this course's official ${platformLabel} booking link; the saved course facts or fresh monitoring proof still need to catch up.`
+        : providerLandingFound
+          ? `AI reached a ${platformLabel} provider landing, but did not corroborate that it belongs to this exact course.`
+          : `AI recorded a ${platformLabel} candidate, but did not corroborate an official link or exact course scope.`,
+      problemSummary: officialFinding
+        ? `The official course site links to ${platformLabel}, but the saved course record has not yet been confirmed by a fresh monitoring check.`
+        : providerLandingFound
+          ? `The discovery run reached a ${platformLabel} provider landing, but could not corroborate that the landing belongs to this exact course.`
+          : `The latest investigation recorded a ${platformLabel} candidate, but did not prove an official booking link or confirm the exact course scope.`,
+      recommendedAction: officialFinding
+        ? `Apply the corroborated ${platformLabel} provider facts and run one fresh monitoring check before closing the incident.`
+        : `Verify this course's identity from the exact official course page, then save the ${platformLabel} provider metadata and request one fresh monitoring check.`
+    };
+  }
+
+  if (discovery.bookingCandidateRecorded) {
+    return {
+      providerLabel: discovery.officialLinkCorroborated
+        ? "Official booking link found"
+        : "Booking candidate recorded",
+      statusLabel: "Provider identity unconfirmed",
+      meaning: discovery.officialLinkCorroborated
+        ? "AI corroborated an official booking link, but the provider identity still needs confirmation."
+        : "AI recorded a booking candidate, but did not corroborate an official link or exact provider identity.",
+      problemSummary: discovery.officialLinkCorroborated
+        ? "The latest investigation corroborated an official booking link, but its provider identity has not yet been confirmed."
+        : "The latest investigation recorded a booking candidate, but did not prove an official booking link or confirm its provider identity.",
+      recommendedAction:
+        "Verify the candidate from the exact official course page, classify its signed-out access, then save the provider facts and request one fresh monitoring check."
+    };
+  }
+
+  return null;
+}
+
+function getDiscoveryPlatformLabel(value: string) {
+  if (value === "TEEITUP") return "TeeItUp";
+  if (value === "GOLFNOW") return "GolfNow";
+  if (value === "FOREUP") return "ForeUP";
+  if (value === "CHRONOGOLF") return "Chronogolf";
+  if (value === "CLUB_CADDIE") return "Club Caddie";
+  return null;
 }
 
 function getLatestSuccessfulEvidence(course: CourseStatusInput) {

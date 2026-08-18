@@ -11,8 +11,11 @@ import {
   evaluateBrowserDiscoveryMonitoringGate,
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
+  isEvidenceOnlyOfficialBookingAccountLink,
+  isSafeManualEvidenceUrl,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
+  prioritizeBrowserDiscoveryLinks,
   sanitizeBrowserDiscoveryAccessEvidence,
   type BrowserDiscoveryEvidence,
 } from "@/lib/automation/browser-discovery";
@@ -57,6 +60,7 @@ import { prisma } from "@/lib/prisma";
 const PROMPT_VERSION = "tee-time-spot-browser-probe-v1";
 const DEFAULT_LIMIT = 5;
 const NAVIGATION_TIMEOUT_MS = 20_000;
+const MAX_RENDERED_ANCHOR_CANDIDATES = 2_000;
 
 export type BrowserProbeOptions = ReturnType<typeof parseOptions> & {
   beforePersist?: CourseSupportBrowserPersistenceGuard;
@@ -113,7 +117,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
     const browser = await chromium.launch();
     try {
       for (const target of targets) {
-        const page = await browser.newPage();
+        const page = await browser.newPage({ serviceWorkers: "block" });
         let playbookRuntime: Awaited<
           ReturnType<typeof loadCourseMonitoringPlaybookRuntime>
         > = null;
@@ -165,6 +169,8 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                 courseName: target.course.name,
                 sourceUrl: target.probeUrl,
                 officialCourseWebsite: target.course.website,
+                verifiedLayoutHoleCounts:
+                  target.course.verifiedLayoutHoleCounts,
               }),
           );
           if (!providerExecution.acquired) {
@@ -525,17 +531,113 @@ function writeDryRunTrace(
   );
 }
 
-async function collectBrowserEvidence(
+type MainFrameInteractionGuard = {
+  isBlocked: () => boolean;
+};
+
+export function isSafeRenderedBrowserInteractionDestination(
+  destinationUrl: string,
+  officialPageUrl: string,
+) {
+  if (destinationUrl === "about:blank") {
+    return true;
+  }
+  let destination: URL;
+  try {
+    destination = new URL(destinationUrl);
+  } catch {
+    return false;
+  }
+  return Boolean(
+    isSafeManualEvidenceUrl(destination) &&
+      !isEvidenceOnlyOfficialBookingAccountLink(
+        {
+          url: destination.toString(),
+          label: "Book a tee time",
+        },
+        officialPageUrl,
+      ),
+  );
+}
+
+async function createMainFrameInteractionGuard(
+  page: Page,
+  officialPageUrl: string,
+): Promise<MainFrameInteractionGuard> {
+  const mainFrame = page.mainFrame();
+  let blocked = false;
+  const observeDestination = (url: string) => {
+    if (
+      !blocked &&
+      !isSafeRenderedBrowserInteractionDestination(url, officialPageUrl)
+    ) {
+      blocked = true;
+    }
+  };
+  const isBlocked = () => {
+    observeDestination(page.url());
+    return blocked;
+  };
+
+  page.on("framenavigated", (frame) => {
+    if (frame === mainFrame) {
+      observeDestination(frame.url());
+    }
+  });
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === mainFrame) {
+      observeDestination(request.url());
+    }
+  });
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const isMainFrameNavigation =
+      request.isNavigationRequest() && request.frame() === mainFrame;
+    const isSafeRequestDestination =
+      isSafeRenderedBrowserInteractionDestination(
+        request.url(),
+        officialPageUrl,
+      );
+    if (isMainFrameNavigation && !isSafeRequestDestination) {
+      blocked = true;
+    }
+    if (
+      !isSafeRequestDestination ||
+      (blocked && isMainFrameNavigation)
+    ) {
+      await route.abort("blockedbyclient").catch(() => undefined);
+      return;
+    }
+    await route.fallback().catch(() => undefined);
+  });
+
+  return { isBlocked };
+}
+
+export async function collectBrowserEvidence(
   page: Page,
   input: Pick<
     BrowserDiscoveryEvidence,
-    "courseId" | "courseName" | "sourceUrl" | "officialCourseWebsite"
+    | "courseId"
+    | "courseName"
+    | "sourceUrl"
+    | "officialCourseWebsite"
+    | "verifiedLayoutHoleCounts"
   >,
 ): Promise<BrowserDiscoveryEvidence> {
   const observedUrls = new Set<string>();
   const successfulProviderUrls = new Set<string>();
+  const teeItUpFacilityResponses = new Map<
+    string,
+    NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
+  >();
+  const teeItUpFacilityResponseReads: Promise<void>[] = [];
   const accessBarrierUrls = new Set<string>();
   const accessBarriers = new Map<string, 401 | 403>();
+  const interactionGuard = await createMainFrameInteractionGuard(
+    page,
+    input.sourceUrl,
+  );
 
   page.on("request", (request) => {
     observedUrls.add(request.url());
@@ -549,6 +651,20 @@ async function collectBrowserEvidence(
       )
     ) {
       successfulProviderUrls.add(response.url());
+      teeItUpFacilityResponseReads.push(
+        response
+          .json()
+          .then((value) => {
+            const parsed = parseTeeItUpFacilityResponse(
+              response.url(),
+              value,
+            );
+            if (parsed) {
+              teeItUpFacilityResponses.set(parsed.url, parsed);
+            }
+          })
+          .catch(() => undefined),
+      );
     }
     if (
       [401, 403].includes(response.status()) &&
@@ -571,18 +687,24 @@ async function collectBrowserEvidence(
     .waitForLoadState("networkidle", { timeout: 5_000 })
     .catch(() => undefined);
   const landingPageUrl = page.url();
-  const landingPageEvidence = await collectPageEvidence(page, input.courseName);
+  const landingInteractionBlocked = interactionGuard.isBlocked();
+  const landingPageEvidence = await collectPageEvidence(page, input.courseName, {
+    allowStaticPageFetch: !landingInteractionBlocked,
+  });
   if (
+    landingInteractionBlocked ||
     shouldStopBrowserDiscovery({
       accessBarrierCount: accessBarriers.size,
       accessControlDetected: landingPageEvidence.accessControlDetected,
     })
   ) {
+    await Promise.allSettled(teeItUpFacilityResponseReads);
     return finalizeBrowserEvidence({
       input,
       page,
       observedUrls,
       successfulProviderUrls,
+      teeItUpFacilityResponses,
       accessBarrierUrls,
       accessBarriers,
       landingPageUrl,
@@ -597,6 +719,7 @@ async function collectBrowserEvidence(
   const selectedBookingLink = await clickLikelyBookingLink(
     page,
     input.courseName,
+    interactionGuard,
   );
   await page
     .waitForLoadState("networkidle", { timeout: 5_000 })
@@ -625,12 +748,43 @@ async function collectBrowserEvidence(
         ],
       }
     : landingPageEvidence;
-  const firstDestinationPageEvidence = await collectPageEvidence(
-    page,
-    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
-      ? input.courseName
-      : undefined,
-  );
+  const firstDestinationInteractionBlocked = interactionGuard.isBlocked();
+  const firstDestinationPageEvidence = firstDestinationInteractionBlocked
+    ? firstDestinationPageUrl === landingPageUrl
+      ? landingPageEvidence
+      : prepareBrowserPageEvidence({
+          accessControlDetected: false,
+          anchors: [],
+          linkCandidates: [],
+          scripts: [],
+          structuredActionScripts: [],
+          visibleText: "",
+        })
+    : await collectPageEvidence(
+        page,
+        haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
+          ? input.courseName
+          : undefined,
+      );
+
+  if (firstDestinationInteractionBlocked) {
+    await Promise.allSettled(teeItUpFacilityResponseReads);
+    return finalizeBrowserEvidence({
+      input,
+      page,
+      observedUrls,
+      successfulProviderUrls,
+      teeItUpFacilityResponses,
+      accessBarrierUrls,
+      accessBarriers,
+      landingPageUrl,
+      landingPageEvidence: scopedLandingPageEvidence,
+      firstDestinationPageUrl,
+      firstDestinationPageEvidence,
+      destinationPageUrl: firstDestinationPageUrl,
+      destinationPageEvidence: firstDestinationPageEvidence,
+    });
+  }
 
   if (
     (!shouldStopBrowserDiscovery({
@@ -646,41 +800,52 @@ async function collectBrowserEvidence(
       })) &&
     haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
   ) {
-    await clickLikelyBookingLink(page);
+    await clickLikelyBookingLink(page, undefined, interactionGuard);
     await page
       .waitForLoadState("networkidle", { timeout: 5_000 })
       .catch(() => undefined);
   }
+  const preDateInteractionBlocked = interactionGuard.isBlocked();
   const preDatePageEvidence = await collectPageEvidence(
     page,
     haveSamePublicWebsiteOrigin(landingPageUrl, page.url())
       ? input.courseName
       : undefined,
+    {
+      allowStaticPageFetch: !preDateInteractionBlocked,
+    },
   );
   if (
+    !preDateInteractionBlocked &&
     !shouldStopBrowserDiscovery({
       accessBarrierCount: accessBarriers.size,
       accessControlDetected: preDatePageEvidence.accessControlDetected,
     })
   ) {
-    await trySelectSearchDate(page);
+    await trySelectSearchDate(page, interactionGuard);
   }
   await page
     .waitForLoadState("networkidle", { timeout: 5_000 })
     .catch(() => undefined);
   const destinationPageUrl = page.url();
+  const destinationInteractionBlocked = interactionGuard.isBlocked();
   const destinationPageEvidence = await collectPageEvidence(
     page,
     haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
       ? input.courseName
       : undefined,
+    {
+      allowStaticPageFetch: !destinationInteractionBlocked,
+    },
   );
 
+  await Promise.allSettled(teeItUpFacilityResponseReads);
   return finalizeBrowserEvidence({
     input,
     page,
     observedUrls,
     successfulProviderUrls,
+    teeItUpFacilityResponses,
     accessBarrierUrls,
     accessBarriers,
     landingPageUrl,
@@ -695,11 +860,19 @@ async function collectBrowserEvidence(
 function finalizeBrowserEvidence(input: {
   input: Pick<
     BrowserDiscoveryEvidence,
-    "courseId" | "courseName" | "sourceUrl" | "officialCourseWebsite"
+    | "courseId"
+    | "courseName"
+    | "sourceUrl"
+    | "officialCourseWebsite"
+    | "verifiedLayoutHoleCounts"
   >;
   page: Page;
   observedUrls: Set<string>;
   successfulProviderUrls: Set<string>;
+  teeItUpFacilityResponses: Map<
+    string,
+    NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
+  >;
   accessBarrierUrls: Set<string>;
   accessBarriers: Map<string, 401 | 403>;
   landingPageUrl: string;
@@ -714,6 +887,7 @@ function finalizeBrowserEvidence(input: {
     finalUrl: input.page.url(),
     observedUrls: [...input.observedUrls],
     successfulProviderUrls: [...input.successfulProviderUrls],
+    teeItUpFacilityResponses: [...input.teeItUpFacilityResponses.values()],
     accessBarrierUrls: [...input.accessBarrierUrls],
     accessBarriers: [...input.accessBarriers].map(([url, status]) => ({
       url,
@@ -728,8 +902,60 @@ function finalizeBrowserEvidence(input: {
   });
 }
 
-async function collectPageEvidence(page: Page, officialCourseName?: string) {
-  const evidence = await page.evaluate(() => {
+function parseTeeItUpFacilityResponse(
+  responseUrl: string,
+  value: unknown,
+): NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number] | null {
+  let url: URL;
+  try {
+    url = new URL(responseUrl);
+  } catch {
+    return null;
+  }
+  const alias = url.pathname.match(/^\/alias\/([^/]+)\/facilities$/u)?.[1];
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "phx-api-be-east-1b.kenna.io" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !alias ||
+    !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iu.test(alias) ||
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 20
+  ) {
+    return null;
+  }
+  const facilityIds = value.map((facility) =>
+    facility && typeof facility === "object" && !Array.isArray(facility)
+      ? (facility as { id?: unknown }).id
+      : undefined,
+  );
+  if (
+    facilityIds.some(
+      (facilityId) =>
+        !Number.isSafeInteger(facilityId) || Number(facilityId) <= 0,
+    ) ||
+    new Set(facilityIds).size !== facilityIds.length
+  ) {
+    return null;
+  }
+  url.search = "";
+  url.hash = "";
+  return {
+    url: url.toString(),
+    alias,
+    facilityIds: facilityIds as number[],
+  };
+}
+
+async function collectPageEvidence(
+  page: Page,
+  officialCourseName?: string,
+  options: { allowStaticPageFetch?: boolean } = {},
+) {
+  const evidence = await page.evaluate((maxAnchorCandidates) => {
     const anchorCandidates = Array.from(
       document.querySelectorAll<HTMLAnchorElement>("a[href]"),
     )
@@ -738,10 +964,19 @@ async function collectPageEvidence(page: Page, officialCourseName?: string) {
         label: anchor.textContent?.replace(/\s+/g, " ").trim() ?? "",
       }))
       .filter((candidate) => Boolean(candidate.url))
-      .slice(0, 200);
-    const pageText =
-      document.body?.innerText?.replace(/\s+/g, " ").trim() ?? "";
+      .slice(0, maxAnchorCandidates);
+    const rawPageText = document.body?.innerText ?? "";
+    const pageText = rawPageText.replace(/\s+/g, " ").trim();
     const pageTitle = document.title?.replace(/\s+/g, " ").trim() ?? "";
+    const identityCandidates = [
+      pageTitle,
+      ...Array.from(document.querySelectorAll<HTMLHeadingElement>("h1"))
+        .map((heading) => heading.innerText.replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+        .slice(0, 10),
+    ].filter((identity, index, values) =>
+      Boolean(identity) && values.indexOf(identity) === index
+    );
     const accessControlDetected = Boolean(
       document.querySelector(
         [
@@ -774,7 +1009,6 @@ async function collectPageEvidence(page: Page, officialCourseName?: string) {
             .slice(0, 20)
         : [];
     const linkCandidates = [...anchorCandidates];
-    const anchors = linkCandidates.map((candidate) => candidate.url);
     const scripts = Array.from(
       document.querySelectorAll<HTMLScriptElement>("script[src]"),
     )
@@ -816,8 +1050,8 @@ async function collectPageEvidence(page: Page, officialCourseName?: string) {
       .join("\n")
       .slice(0, 8000);
     return {
-      anchors,
       accessControlDetected,
+      identityCandidates,
       frameCandidateInputs,
       structuredActionScripts,
       linkCandidates,
@@ -827,23 +1061,33 @@ async function collectPageEvidence(page: Page, officialCourseName?: string) {
         .filter(Boolean)
         .join("\n"),
     };
-  });
-  const { frameCandidateInputs, widgetConfigInputs, ...pageEvidence } =
-    evidence;
+  }, MAX_RENDERED_ANCHOR_CANDIDATES);
+  const {
+    frameCandidateInputs,
+    widgetConfigInputs,
+    linkCandidates: rawLinkCandidates,
+    ...pageEvidence
+  } = evidence;
+  const anchorCandidates = prioritizeBrowserDiscoveryLinks(
+    rawLinkCandidates,
+    200,
+  );
   const frameCandidates = buildBrowserFrameCandidates(frameCandidateInputs);
   const widgetCandidates = buildBrowserWidgetCandidates(widgetConfigInputs);
-  const staticFrameCandidates = await collectStaticPageFrameCandidates(page);
+  const staticFrameCandidates = options.allowStaticPageFetch === false
+    ? []
+    : await collectStaticPageFrameCandidates(page, page.url());
   return prepareBrowserPageEvidence(
     {
       ...pageEvidence,
       anchors: [
-        ...pageEvidence.anchors,
+        ...anchorCandidates.map((candidate) => candidate.url),
         ...frameCandidates.map((candidate) => candidate.url),
         ...widgetCandidates.map((candidate) => candidate.url),
         ...staticFrameCandidates.map((candidate) => candidate.url),
       ],
       linkCandidates: [
-        ...pageEvidence.linkCandidates,
+        ...anchorCandidates,
         ...frameCandidates,
         ...widgetCandidates,
         ...staticFrameCandidates,
@@ -853,17 +1097,25 @@ async function collectPageEvidence(page: Page, officialCourseName?: string) {
   );
 }
 
-async function clickLikelyBookingLink(page: Page, courseName?: string) {
-  const { anchorCandidates, frameCandidateInputs } = await page.evaluate(
-    () => ({
-      anchorCandidates: Array.from(
+async function clickLikelyBookingLink(
+  page: Page,
+  courseName?: string,
+  interactionGuard?: MainFrameInteractionGuard,
+) {
+  if (interactionGuard?.isBlocked()) {
+    return null;
+  }
+  const currentPageUrl = page.url();
+  const { rawAnchorCandidates, frameCandidateInputs } = await page.evaluate(
+    (maxAnchorCandidates) => ({
+      rawAnchorCandidates: Array.from(
         document.querySelectorAll<HTMLAnchorElement>("a[href]"),
       )
         .map((anchor) => ({
           href: anchor.href,
           text: anchor.textContent?.replace(/\s+/g, " ").trim() ?? "",
         }))
-        .slice(0, 200),
+        .slice(0, maxAnchorCandidates),
       frameCandidateInputs: Array.from(
         document.querySelectorAll<HTMLIFrameElement>(
           "iframe[src], iframe[data-src]",
@@ -876,14 +1128,21 @@ async function clickLikelyBookingLink(page: Page, courseName?: string) {
         baseUrl: document.baseURI,
       })),
     }),
+    MAX_RENDERED_ANCHOR_CANDIDATES,
   );
+  const anchorCandidates = prioritizeBrowserDiscoveryLinks(
+    rawAnchorCandidates.map(({ href, text }) => ({ url: href, label: text })),
+    200,
+  ).map(({ url, label }) => ({ href: url, text: label }));
   const frameCandidates = buildBrowserFrameCandidates(frameCandidateInputs).map(
     (candidate) => ({
       href: candidate.url,
       text: candidate.label,
     }),
   );
-  const staticFrameCandidates = await collectStaticPageFrameCandidates(page);
+  const staticFrameCandidates = interactionGuard?.isBlocked()
+    ? []
+    : await collectStaticPageFrameCandidates(page, currentPageUrl);
   const href = pickLikelyBookingHref(
     [
       ...anchorCandidates,
@@ -893,11 +1152,11 @@ async function clickLikelyBookingLink(page: Page, courseName?: string) {
         text: candidate.label,
       })),
     ],
-    page.url(),
+    currentPageUrl,
     courseName,
   );
 
-  if (!href) {
+  if (!href || interactionGuard?.isBlocked()) {
     return null;
   }
 
@@ -918,10 +1177,14 @@ async function clickLikelyBookingLink(page: Page, courseName?: string) {
   return selected ?? { href, text: "Book a tee time" };
 }
 
-async function collectStaticPageFrameCandidates(page: Page) {
+export async function collectStaticPageFrameCandidates(
+  page: Page,
+  pageUrl = page.url(),
+) {
   try {
-    const response = await page.request.get(page.url(), {
+    const response = await page.request.get(pageUrl, {
       timeout: NAVIGATION_TIMEOUT_MS,
+      maxRedirects: 0,
     });
     if (
       !response.ok() ||
@@ -931,16 +1194,38 @@ async function collectStaticPageFrameCandidates(page: Page) {
     }
     return buildBrowserFrameCandidatesFromHtml(
       await response.text(),
-      page.url(),
+      pageUrl,
     );
   } catch {
     return [];
   }
 }
 
-async function trySelectSearchDate(page: Page) {
-  const dateInput = page.locator("input[type='date']").first();
-  if ((await dateInput.count()) === 0) {
+async function trySelectSearchDate(
+  page: Page,
+  interactionGuard: MainFrameInteractionGuard,
+) {
+  if (interactionGuard.isBlocked()) {
+    return;
+  }
+  const expectedPageUrl = page.url();
+  const dateInputLocator = page.locator("input[type='date']").first();
+  const dateInputCount = await dateInputLocator.count().catch(() => 0);
+  if (
+    dateInputCount === 0 ||
+    interactionGuard.isBlocked() ||
+    page.url() !== expectedPageUrl
+  ) {
+    return;
+  }
+  const dateInput = await dateInputLocator
+    .elementHandle({ timeout: 2_000 })
+    .catch(() => null);
+  if (
+    !dateInput ||
+    interactionGuard.isBlocked() ||
+    page.url() !== expectedPageUrl
+  ) {
     return;
   }
 

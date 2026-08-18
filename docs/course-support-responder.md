@@ -291,6 +291,13 @@ npm run automation:course-support -- recover --batch-ref <batch-ref>
 npm run automation:course-support -- backfill
 npm run automation:course-support -- backfill --apply
 
+# Re-run fresh signed-out official-site discovery for an explicit bounded cohort.
+# Supply each public course name separately. The command accepts at most ten,
+# defaults to a read-only eligibility check, skips active owners/resolved rows,
+# and returns only ordinal plus normalized classification fields.
+npm run automation:course-discovery-recheck -- --course-name "<exact public course name>"
+npm run automation:course-discovery-recheck -- --course-name "<exact public course name>" --course-name "<another exact public course name>" --apply
+
 # Course lifecycle and operator actions are dry-run by default.
 npm run automation:course-monitoring -- inspect --course-ref <course-ref>
 npm run automation:course-monitoring -- backfill-playbook
@@ -310,6 +317,14 @@ latest failed probe. Current authentication, challenge, or queue barriers are
 reported separately as `TECHNICAL_CONSTRAINT` once verified and classified.
 
 Do not paste task ids, batch references, database ids, or workflow ids into customer-visible reports. The CLI accepts `--owner-thread` only when `CODEX_THREAD_ID` is unavailable and the real current task id is known.
+
+The bounded discovery recheck is a producer-validation and canonical-evidence
+repair tool, not a replacement scheduler. It performs ordinary signed-out HTTP
+discovery through the shared provider leases and serialized course writer. It
+never submits a login form, enters checkout, or bypasses an access control. An
+account-gated official booking CTA is retained as technical evidence but is not
+treated as a runnable tee-time reader. Courses still requiring rendered-browser
+or adapter work remain honestly unresolved for the owned responder playbook.
 
 ## Migration And Rollout
 

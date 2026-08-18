@@ -1,4 +1,5 @@
 import { normalizeTimeZone } from "@/lib/timezones";
+import { normalizeLayoutHoleCounts } from "@/lib/courses/course-layout";
 
 import { normalizeProviderFamilyKey } from "./provider-capabilities";
 
@@ -25,6 +26,8 @@ export const COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS = [
   "isPublic",
   "intelligenceConfidence",
   "bookingMetadata",
+  "layoutHoleCounts",
+  "layoutHolesVerifiedAt",
 ] as const;
 
 export type CourseProviderExecutionEvidenceField =
@@ -62,6 +65,12 @@ export function canonicalizeCourseProviderExecutionEvidence(
     isPublic: input.isPublic ?? null,
     intelligenceConfidence: input.intelligenceConfidence ?? null,
     bookingMetadata: input.bookingMetadata ?? null,
+    layoutHoleCounts: input.layoutHolesVerifiedAt
+      ? normalizeLayoutHoleCounts(
+          Array.isArray(input.layoutHoleCounts) ? input.layoutHoleCounts : []
+        )
+      : [],
+    layoutHolesVerifiedAt: Boolean(input.layoutHolesVerifiedAt),
   } satisfies Record<CourseProviderExecutionEvidenceField, unknown>;
 }
 

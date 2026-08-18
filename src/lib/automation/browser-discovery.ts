@@ -24,6 +24,12 @@ import {
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import {
   haveCompatibleCourseNames,
+  haveCompatibleOfficialPageCourseNames,
+  hasConflictingOfficialCourseIdentityDiscriminator,
+  haveSameOfficialCourseIdentityCore,
+  isConflictingOfficialPageCourseIdentity,
+  isNonSpecificOfficialCourseIdentity,
+  isOfficialOrganizationIdentityCorroboratedByUrl,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
 import { selectMonitoringStrategy } from "@/lib/automation/monitoring-strategy";
@@ -40,6 +46,8 @@ export type BrowserDiscoveryEvidence = {
   observedUrls: string[];
   linkCandidates?: Array<{ url: string; label: string }>;
   officialCourseWebsite?: string | null;
+  persistedTeeItUpBookingUrl?: string | null;
+  verifiedLayoutHoleCounts?: Array<9 | 18>;
   officialPage?: {
     url: string;
     linkCandidates: Array<{ url: string; label: string }>;
@@ -57,6 +65,7 @@ export type BrowserDiscoveryEvidence = {
   corroboratedAccessBarrier?: BrowserAccessBarrier;
   bookingCallToAction?: boolean;
   teeItUpLegacyConfigurations?: TeeItUpLegacyConfigurationEvidence[];
+  teeItUpFacilityResponses?: TeeItUpFacilityResponseEvidence[];
 };
 
 export type TeeItUpLegacyConfigurationEvidence = {
@@ -64,6 +73,12 @@ export type TeeItUpLegacyConfigurationEvidence = {
   alias: string;
   facilityIds: number[];
   courseName: string;
+};
+
+export type TeeItUpFacilityResponseEvidence = {
+  url: string;
+  alias: string;
+  facilityIds: number[];
 };
 
 export type BrowserAccessBarrier = {
@@ -128,7 +143,8 @@ export type BrowserDiscovery = {
   courseId: string;
   isPublic?: boolean;
   status: "LEARNED" | "VERIFIED" | "INSPECTED" | "BLOCKED" | "FAILED";
-  detectedPlatform: "UNKNOWN" | "FOREUP" | "GOLFNOW" | "TEEITUP" | "CHRONOGOLF" | "CLUB_CADDIE" | "CUSTOM";
+  detectedPlatform:
+    | "UNKNOWN" | "FOREUP" | "GOLFNOW" | "TEEITUP" | "CHRONOGOLF" | "CLUB_CADDIE" | "CUSTOM";
   sourceUrl: string;
   bookingUrl?: string;
   bookingMethod?: BookingMethod;
@@ -139,7 +155,8 @@ export type BrowserDiscovery = {
   policyNotes?: string;
   intelligenceReviewAt?: Date | string;
   apiEndpoint?: string;
-  apiMetadata?: {
+  apiMetadata?:
+    | {
     scheduleId: number;
     bookingClassId?: number;
     bookingBaseUrl: string;
@@ -450,7 +467,7 @@ export async function enrichTeeItUpDiscovery(
   );
   if (
     !configuration ||
-    !haveCompatibleCourseNames(courseName, configuration.courseName)
+    !haveCompatibleOfficialPageCourseNames(courseName, configuration.courseName)
   ) {
     return discovery;
   }
@@ -687,7 +704,8 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   const accountRequiredClassification = learnAccountRequiredClassification(
     providerEvidence,
-    providerObservedUrls
+    providerObservedUrls,
+    unscopedEvidence
   );
 
   if (accountRequiredClassification) {
@@ -789,7 +807,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
   );
   const bookingUrl = clubCaddieCandidates.length > 0
     ? pickSafeBrowserDiscoveryFallbackUrl([providerEvidence.sourceUrl])
-    : pickBookingLikeUrl(
+    : ( pickBookingLikeUrl(
         providerObservedUrls,
         providerEvidence.linkCandidates ?? []
       ) ??
@@ -797,7 +815,7 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
         providerEvidence.finalUrl,
         providerEvidence.sourceUrl,
         getSafeNonProviderBarrierFallback(providerEvidence.accessBarriers)
-      ]);
+      ]));
   const embeddedLegacyProphetBooking = (
     providerEvidence.linkCandidates ?? []
   ).some(
@@ -879,9 +897,10 @@ export function pickLikelyBookingHref(
     }
     return score > 0 ? [{ href: parsed.toString(), score, index }] : [];
   });
-  return scored.sort((left, right) =>
+  return ( scored.sort((left, right) =>
     right.score - left.score || left.index - right.index
-  )[0]?.href ?? null;
+  )[0]?.href ?? null
+  );
 }
 
 export function haveSamePublicWebsiteOrigin(left: string, right: string) {
@@ -906,13 +925,12 @@ export function haveSamePublicWebsiteOrigin(left: string, right: string) {
   );
 }
 
-export function prioritizeBrowserDiscoveryLinks(
-  candidates: Array<{ url: string; label: string }>,
+export function prioritizeBrowserDiscoveryLinks<
+  T extends{ url: string; label: string }>(candidates: T[],
   limit = 100
-) {
+): T[] {
   return candidates
-    .map((candidate, index) => ({
-      ...candidate,
+    .map((candidate, index) => ({candidate,
       index,
       bookingPriority: /tee.?time|book|reserve|reservation/i.test(
         `${candidate.label} ${candidate.url}`
@@ -924,7 +942,7 @@ export function prioritizeBrowserDiscoveryLinks(
         left.index - right.index
     )
     .slice(0, Math.max(1, Math.min(limit, 200)))
-    .map(({ url, label }) => ({ url, label }));
+    .map(({ candidate }) => candidate);
 }
 
 function learnGolfWithAccessDiscovery(
@@ -2283,7 +2301,7 @@ function getOfficialCourseProviderLinkCorroboration(
     !officialPage ||
     !providerUrl ||
     !evidence.officialPage?.courseName ||
-    !haveCompatibleCourseNames(
+    !haveCompatibleOfficialPageCourseNames(
       evidence.courseName,
       evidence.officialPage.courseName
     ) ||
@@ -2360,10 +2378,22 @@ function learnTenForeDiscovery(
 
 function learnAccountRequiredClassification(
   evidence: BrowserDiscoveryEvidence,
-  observedUrls: string[]
+  observedUrls: string[],
+  unscopedEvidence: BrowserDiscoveryEvidence = evidence
 ): BrowserDiscovery | null {
+  const officialAccountAccessEvidence =
+    getOfficialBookingAccountLandingEvidence(unscopedEvidence);
+  const unscopedFinalUrl = parseUrl(unscopedEvidence.finalUrl);
+  const rawBookingSurfaceText =
+    evidence.bookingSurfaceText?.replace(/\s+/g, " ").trim() ?? "";
+  const bookingSurfaceText =
+    !unscopedFinalUrl ||
+    isSafeManualEvidenceUrl(unscopedFinalUrl) ||
+    officialAccountAccessEvidence
+      ? rawBookingSurfaceText
+      : "";
   const accountGuidanceText = [
-    evidence.bookingSurfaceText,
+    bookingSurfaceText,
     evidence.officialPage?.visibleText,
     evidence.visibleText
   ]
@@ -2371,8 +2401,6 @@ function learnAccountRequiredClassification(
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
-  const bookingSurfaceText =
-    evidence.bookingSurfaceText?.replace(/\s+/g, " ").trim() ?? "";
   const whooshBookingUrl = getWhooshPublicBookingUrl(observedUrls);
   const registrationRequired =
     /\bplayers? must register(?: in whoosh)? before booking\b/i.test(bookingSurfaceText);
@@ -2410,8 +2438,15 @@ function learnAccountRequiredClassification(
       bookingSurfaceText
     ) &&
     /\b(?:tee[ -]?time|availability|book(?:ing)?)\b/i.test(bookingSurfaceText);
+  const officialAccountGate = Boolean(
+    officialAccountAccessEvidence &&
+    (officialAccountAccessEvidence.kind === "OFFICIAL_CTA_ONLY" ||
+      hasExplicitAccountGateForTeeTimeBooking(bookingSurfaceText))
+  );
   const selfServiceAccount = Boolean(
-    selfServiceRegistration && signInRequiredToViewAvailability
+    selfServiceRegistration &&
+    ( signInRequiredToViewAvailability || officialAccountGate
+  )
   );
   const whooshAccountRequired = Boolean(
     whooshBookingUrl &&
@@ -2422,19 +2457,24 @@ function learnAccountRequiredClassification(
   if (
     !staffProvisioned &&
     !selfServiceAccount &&
-    !whooshAccountRequired
+    !whooshAccountRequired &&
+    !officialAccountGate
   ) {
     return null;
   }
 
   const safeOfficialAccessUrl = [
+    officialAccountAccessEvidence?.url,
     whooshBookingUrl?.toString(),
     evidence.finalUrl,
     evidence.officialPage?.url,
     evidence.sourceUrl
   ].find((value) => {
     const url = parseUrl(value);
-    return Boolean(url && isSafeManualEvidenceUrl(url));
+    return Boolean(url &&
+      ((officialAccountAccessEvidence &&
+        haveSameExactUrl(url.toString(), officialAccountAccessEvidence.url)) || isSafeManualEvidenceUrl(url))
+    );
   });
   if (!safeOfficialAccessUrl) {
     return null;
@@ -2449,7 +2489,9 @@ function learnAccountRequiredClassification(
     ? "The official course guidance says first-time online booking access must be set up by course staff. The course is public, but Tee Time Spot does not create or use golfer accounts, so golfers must contact the course to gain access."
     : selfServiceAccount
       ? "The official booking guidance says golfers can create or use an account to view tee-time availability. Tee Time Spot does not create or use golfer accounts, so golfers must use the official booking page directly."
-      : "The official booking guidance says a golfer account is required before tee-time availability can be viewed. Tee Time Spot does not use golfer accounts or account-specific sessions, so golfers must use the official booking page directly.";
+      : officialAccountAccessEvidence?.kind === "OFFICIAL_CTA_ONLY"
+        ? "The verified official course page sends its Book Tee Time action to an account sign-in page. Tee Time Spot does not open, create, or use golfer accounts, so golfers must use the official booking page directly."
+        : "The official booking guidance says a golfer account is required before tee-time availability can be viewed. Tee Time Spot does not use golfer accounts or account-specific sessions, so golfers must use the official booking page directly.";
 
   return {
     courseId: evidence.courseId,
@@ -2464,20 +2506,164 @@ function learnAccountRequiredClassification(
     bookingAccessMode,
     policyNotes,
     intelligenceReviewAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
-    confidence: 0.98,
+    confidence:
+      officialAccountAccessEvidence?.kind === "OFFICIAL_CTA_ONLY" ? 0.94 : 0.98,
     evidence: {
-      finalUrl: evidence.finalUrl,
-      observedUrls,
+      finalUrl:
+        officialAccountAccessEvidence?.kind === "VERIFIED_ACCOUNT_LANDING"
+          ? officialAccountAccessEvidence.url
+          : evidence.finalUrl,
+      observedUrls: uniqueUrls([
+        ...observedUrls,
+        officialAccountAccessEvidence?.url
+      ]),
       visibleText: summarizeVisibleText(
-        staffProvisioned ? accountGuidanceText : bookingSurfaceText
+        staffProvisioned ? accountGuidanceText : bookingSurfaceText || evidence.officialPage?.visibleText
       ),
       learnedFrom: staffProvisioned
         ? "official-staff-provisioned-account-access"
         : selfServiceAccount
-          ? "official-self-service-account-access"
-          : "official-account-required-booking"
+          ? officialAccountAccessEvidence
+            ? "official-booking-cta-account-access"
+            : "official-self-service-account-access"
+          : officialAccountAccessEvidence?.kind === "OFFICIAL_CTA_ONLY"
+            ? "official-booking-cta-account-sign-in"
+            : "official-account-required-booking"
     }
   };
+}
+
+function getOfficialBookingAccountLandingEvidence(
+  evidence: BrowserDiscoveryEvidence
+) {
+  const officialPageUrl = evidence.officialPage?.url;
+  const officialWebsite = parseUrl(evidence.officialCourseWebsite);
+  const officialPage = parseUrl(officialPageUrl);
+  const bookingSurfaceText = evidence.bookingSurfaceText
+    ?.replace(/\s+/gu, " ")
+    .trim();
+  if (
+    !officialWebsite ||
+    !officialPage ||
+    !officialPageUrl ||
+    !evidence.officialPage?.courseName ||
+    !haveCompatibleOfficialPageCourseNames(
+      evidence.courseName,
+      evidence.officialPage.courseName
+    ) ||
+    !hasCanonicalTargetPageAuthority(evidence) ||
+    !haveSamePublicWebsiteOrigin(
+      officialWebsite.toString(),
+      officialPage.toString()
+    ) ||
+    !hasOfficialPageTargetCourseIdentity(
+      evidence.officialPage.visibleText ?? "",
+      evidence.courseName
+    )
+  ) {
+    return null;
+  }
+
+  const accountCandidates = evidence.officialPage.linkCandidates.filter(
+    (link) =>
+      isEvidenceOnlyOfficialBookingAccountLink(link, officialPageUrl) &&
+      doesOfficialBookingCandidateLabelMatchTarget(
+        link.label,
+        evidence.courseName
+      )
+  );
+  const candidatesByUrl = new Map(
+    accountCandidates.map((candidate) => [
+      new URL(candidate.url).toString(),
+      candidate
+    ])
+  );
+  let candidate =
+    candidatesByUrl.size === 1 ? [...candidatesByUrl.values()][0] : undefined;
+  if (!candidate && candidatesByUrl.size > 1) {
+    const exactTargetCandidates = accountCandidates.filter((link) => {
+      const identity = getOfficialBookingCandidateCourseIdentity(link.label);
+      return Boolean(
+        identity &&
+        haveCompatibleOfficialPageCourseNames(evidence.courseName, identity)
+      );
+    });
+    const exactTargetCandidatesByUrl = new Map(
+      exactTargetCandidates.map((link) => [new URL(link.url).toString(), link])
+    );
+    if (exactTargetCandidatesByUrl.size === 1) {
+      candidate = [...exactTargetCandidatesByUrl.values()][0];
+    }
+  }
+  if (!candidate) {
+    return null;
+  }
+
+  const followedAccountLanding = Boolean(
+    evidence.finalUrl && haveSameExactUrl(candidate.url, evidence.finalUrl)
+  );
+  if (
+    !followedAccountLanding &&
+    evidence.officialPage.linkCandidates.some((link) => {
+      const url = parseUrl(link.url);
+      return Boolean(
+        url &&
+        !haveSameExactUrl(link.url, candidate.url) &&
+        isSafeManualEvidenceUrl(url) &&
+        !isEvidenceOnlyOfficialBookingAccountLink(link, officialPageUrl) &&
+        (isProviderPublicBookingLandingUrl(url) ||
+          isBookingCallToActionCandidate(link) ||
+          isGenericOnlineBookingCallToAction(link))
+      );
+    })
+  ) {
+    return null;
+  }
+  if (
+    followedAccountLanding &&
+    (!bookingSurfaceText ||
+      !hasOfficialPageTargetCourseIdentity(
+        bookingSurfaceText,
+        evidence.courseName
+      ) ||
+      !hasExplicitAccountGateForTeeTimeBooking(bookingSurfaceText))
+  ) {
+    return null;
+  }
+
+  return {
+    url: new URL(candidate.url).toString(),
+    kind: followedAccountLanding
+      ? ("VERIFIED_ACCOUNT_LANDING" as const)
+      : ("OFFICIAL_CTA_ONLY" as const),
+    ...(bookingSurfaceText ? { bookingSurfaceText } : {})
+  };
+}
+
+function hasExplicitAccountGateForTeeTimeBooking(value: string) {
+  const normalized = normalizeTeeTimeTypography(value)
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (
+    !/\b(?:accounts?|credentials?|sign[ -]?in|log[ -]?in|login)\b/iu.test(
+      normalized
+    ) ||
+    !/\btee\s*times?\b/iu.test(normalized)
+  ) {
+    return false;
+  }
+
+  return Boolean(
+    /\b(?:sign|log)[ -]?in\b[^.]{0,220}\b(?:view|see|access|book|reserve)\b[^.]{0,100}\btee\s*times?\b/iu.test(
+      normalized
+    ) ||
+    /\b(?:accounts?|credentials?)\b[^.]{0,220}\b(?:sign|log)[ -]?in\b[^.]{0,120}\b(?:view|see|access|book|reserve)\b[^.]{0,100}\btee\s*times?\b/iu.test(
+      normalized
+    ) ||
+    /\b(?:create|register|sign up for)\b[^.]{0,100}\b(?:accounts?|profiles?)\b[^.]{0,220}\b(?:view|see|access|book|reserve)\b[^.]{0,100}\btee\s*times?\b/iu.test(
+      normalized
+    )
+  );
 }
 
 function learnWhooshBookingClassification(
@@ -2962,7 +3148,7 @@ function hasUntrustedPrimaryManualEvidenceTransition(
   if (
     officialPage &&
     evidence.officialPage?.courseName &&
-    haveCompatibleCourseNames(
+    haveCompatibleOfficialPageCourseNames(
       evidence.courseName,
       evidence.officialPage.courseName
     ) &&
@@ -3262,7 +3448,7 @@ function learnOfficialPhoneReservationClassification(
   }
   const officialPageMatchesTarget = Boolean(
     evidence.officialPage?.courseName &&
-      haveCompatibleCourseNames(
+    haveCompatibleOfficialPageCourseNames(
         evidence.courseName,
         evidence.officialPage.courseName
       ) &&
@@ -3716,11 +3902,12 @@ function hasDifferentExplicitCourseIdentity(value: string, courseName: string) {
       "nine",
       "par"
     ]);
-    return candidate
+    return ( candidate
       .normalize("NFKD")
       .toLowerCase()
       .match(/[a-z0-9]+/g)
-      ?.some((token) => !/^\d+$/.test(token) && !genericWords.has(token)) ?? false;
+      ?.some((token) => !/^\d+$/.test(token) && !genericWords.has(token)) ?? false
+    );
   });
 }
 
@@ -3741,6 +3928,36 @@ function hasTargetCourseIdentity(value: string, courseName: string) {
     normalizeCourseIdentityName(value).split(" ").filter(Boolean)
   );
   return targetTokens.every((token) => valueTokens.has(token));
+}
+
+function hasOfficialPageTargetCourseIdentity(
+  value: string,
+  courseName: string
+) {
+  if (hasTargetCourseIdentity(value, courseName)) {
+    return true;
+  }
+
+  const courseLabelPattern =
+    /^(.{1,160}?\b(?:country\s+club|golf\s+club|golf\s+course|golf\s+links)\b)(?:\s*[.!?:;\-\u2013\u2014]*\s+(?:book|reserve|tee\s*times?)\b.*)?$/iu;
+  return value
+    .split(/\r?\n|[|\u2022]/u)
+    .map((segment) =>
+      segment.replace(
+        /^[\s.!?:;\-\u2013\u2014]+|[\s.!?:;\-\u2013\u2014]+$/gu,
+        ""
+      )
+    )
+    .filter(Boolean)
+    .flatMap((segment) => {
+      const courseLabel = segment.match(courseLabelPattern)?.[1]?.trim();
+      return courseLabel && courseLabel !== segment
+        ? [segment, courseLabel]
+        : [segment];
+    })
+    .some((candidate) =>
+      haveCompatibleOfficialPageCourseNames(courseName, candidate)
+    );
 }
 
 function normalizeExactCourseNamePhrase(value: string) {
@@ -3899,7 +4116,7 @@ function isSafePhoneAssociationPart(value: string) {
   if (!isLastTeeTimeNotice && /\b(?:at|for)\b/i.test(normalized)) {
     return false;
   }
-  const hasRecognizedStructure = (
+  const hasRecognizedStructure =
     /^(?:please|rates?|pricing|green\s+fees?)$/i.test(normalized) ||
     /^(?:is|offers?|features?)\s+(?:an?\s+)?(?:\d+[- ]hole\s+)?(?:public|private|municipal)?\s*golf\s+(?:course|club|center|centre|links)$/i.test(
       normalized
@@ -3910,8 +4127,7 @@ function isSafePhoneAssociationPart(value: string) {
     isLastTeeTimeNotice ||
     /^(?:events?|outings?)(?:\s+and\s+(?:events?|outings?))?\b.{0,160}\bcall\b/i.test(
       normalized
-    )
-  );
+    );
   if (!hasRecognizedStructure) {
     return false;
   }
@@ -3939,8 +4155,9 @@ function isSafePhoneAssociationPart(value: string) {
     .normalize("NFKD")
     .toLowerCase()
     .match(/[a-z0-9]+/g) ?? [];
-  return tokens.length > 0 && tokens.every(
+  return ( tokens.length > 0 && tokens.every(
     (token) => /^\d+$/.test(token) || allowedWords.has(token)
+  )
   );
 }
 
@@ -4082,6 +4299,56 @@ function hasBookingCallToActionEvidence(evidence: BrowserDiscoveryEvidence) {
   );
 }
 
+export
+
+function isEvidenceOnlyOfficialBookingAccountLink(
+  candidate: { url: string; label: string },
+  officialPageUrl: string
+) {
+  const destination = parseUrl(candidate.url);
+  const officialPage = parseUrl(officialPageUrl);
+  if (
+    !destination ||
+    !officialPage ||
+    destination.protocol !== "https:" ||
+    destination.username ||
+    destination.password ||
+    destination.search ||
+    destination.hash ||
+    (destination.port && destination.port !== "443") ||
+    destination.hostname.endsWith(".") ||
+    isPrivateManualHostname(destination.hostname) ||
+    isForbiddenManualSurfaceHostname(destination.hostname) ||
+    haveSamePublicWebsiteOrigin(
+      destination.toString(),
+      officialPage.toString()
+    ) ||
+    isClearlyUnrelatedBookingLabel(candidate.label) ||
+    !isBookingCallToActionLabel(candidate.label)
+  ) {
+    return false;
+  }
+
+  const decodedPath = decodeUrlPath(destination.pathname);
+  if (!decodedPath) {
+    return false;
+  }
+  const pathSegments = decodedPath
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const terminalSegment = pathSegments
+    .at(-1)
+    ?.replace(/[^a-z0-9]/giu, "")
+    .toLocaleLowerCase("en-US");
+  return Boolean(
+    (terminalSegment === "signin" || terminalSegment === "login") &&
+    pathSegments
+      .slice(0, -1)
+      .every((segment) => !isForbiddenManualPathSegment(segment))
+  );
+}
+
 function isGenericOnlineBookingCallToAction(candidate: {
   url: string;
   label: string;
@@ -4105,7 +4372,7 @@ function isGenericOnlineBookingCallToAction(candidate: {
   );
 }
 
-function isBookingCallToActionCandidate(candidate: { url: string; label: string }) {
+function isBookingCallToActionCandidate(candidate: { url: string; label: string; }) {
   const parsed = parseUrl(candidate.url);
   if (!parsed) {
     return false;
@@ -4287,6 +4554,8 @@ function hasUnsafeManualEvidenceUrl(
   });
 }
 
+export
+
 function isSafeManualEvidenceUrl(url: URL) {
   const hasInvalidPort = Boolean(
     url.port &&
@@ -4389,11 +4658,12 @@ function hasRestrictedManualBookingPathSegments(segments: string[]) {
       return false;
     }
     const tailSegments = normalized.slice(index + 1);
-    return tailSegments.join("").includes("teetime") || tailSegments.some(
+    return ( tailSegments.join("").includes("teetime") || tailSegments.some(
       (tailSegment) =>
         /^(?:book|booking|reserve|reservation|schedule|checkout|cart|portal|dashboard|account)$/.test(
           tailSegment
         )
+    )
     );
   });
 }
@@ -4661,12 +4931,14 @@ function isContextualSensitiveManualUrlParameter(key: string, value: string, url
       .normalize("NFKC")
       .replace(/[^a-z0-9]/gi, "")
       .toLowerCase();
-    return normalizedCandidate !== normalizedKey && isSensitiveManualUrlKey(candidate);
+    return ( normalizedCandidate !== normalizedKey && isSensitiveManualUrlKey(candidate)
+      );
   });
   const hasSecretShapedValue = /(?:^|[^a-z0-9])(?:private|secret|token|credential|signature|session|nonce|ticket|auth)(?:[^a-z0-9]|$)/i.test(
     value
   );
-  return hasAuthenticationContext || hasSensitiveCompanion || hasSecretShapedValue;
+  return ( hasAuthenticationContext || hasSensitiveCompanion || hasSecretShapedValue
+  );
 }
 
 function isOpaqueCredentialValue(value: string) {
@@ -5377,10 +5649,11 @@ function findTargetCourseContactEvidence(courseName: string, visibleText: string
     });
   });
 
-  return candidates.sort(
+  return ( candidates.sort(
     (left, right) =>
       left.associationRank - right.associationRank || left.distance - right.distance
-  )[0] ?? null;
+  )[0] ?? null
+  );
 }
 
 export function shouldQueueBrowserProbe(course: BrowserProbeCourseInput) {
@@ -5430,11 +5703,11 @@ function learnPrivateClubClassification(
   const visibleText = rawVisibleText.replace(/\s+/g, " ").trim();
   const officialCourseProfileText =
     evidence.officialPage?.courseName &&
-    haveCompatibleCourseNames(
+    haveCompatibleOfficialPageCourseNames(
       evidence.courseName,
       evidence.officialPage.courseName
     )
-      ? evidence.officialPage.visibleText ?? ""
+      ? ( evidence.officialPage.visibleText ?? "")
       : "";
   const privateCourseProfile =
     findTargetScopedPrivateCourseProfile(
@@ -5630,11 +5903,12 @@ function isTargetOrShorterCourseProfileIdentity(
     return true;
   }
   const omittedTargetTokens = targetTokens.slice(candidateTokens.length);
-  return candidateTokens.length >= 2 &&
+  return ( candidateTokens.length >= 2 &&
     candidateTokens.length < targetTokens.length &&
     candidateTokens.every((token, index) => targetTokens[index] === token) &&
     omittedTargetTokens[0] === "at" &&
-    hasPrivateCourseProfileParentSuffix(courseName);
+    hasPrivateCourseProfileParentSuffix(courseName)
+  );
 }
 
 function getPrivateCourseProfileFacilityKind(value: string) {
@@ -6011,7 +6285,8 @@ function selectCpsTenantGroup(
         const tenant = group[0].url.hostname.split(".")[0]
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "");
-        return tenant.includes(targetIdentity) || targetIdentity.includes(tenant);
+        return ( tenant.includes(targetIdentity) || targetIdentity.includes(tenant)
+          );
       })
     : [];
   return tenantMatches.length === 1 ? tenantMatches[0] : undefined;
@@ -6637,18 +6912,24 @@ function learnTeeItUpDiscovery(
   const officialPageMatchesTarget = Boolean(
     evidence.officialPage &&
       evidence.officialPage.courseName &&
-      haveCompatibleCourseNames(
+    haveCompatibleOfficialPageCourseNames(
         evidence.courseName,
         evidence.officialPage.courseName
       )
   );
   const candidateLinks = officialPageMatchesTarget
-    ? evidence.officialPage?.linkCandidates ?? []
+    ? ( evidence.officialPage?.linkCandidates ?? [])
     : [];
-  const labeledBookingCandidates =
+  const allLabeledBookingCandidates =
     uniqueTeeItUpLinkCandidates(candidateLinks);
+  const labeledBookingCandidates = filterTargetMatchingTeeItUpCandidates(
+    allLabeledBookingCandidates,
+    evidence.courseName,
+    evidence.persistedTeeItUpBookingUrl,
+    evidence.officialPage?.url
+  );
   const hasTeeItUpEvidence =
-    labeledBookingCandidates.length > 0 ||
+    allLabeledBookingCandidates.length > 0 ||
     observedUrls.some(isTeeItUpBookingUrl);
   if (!officialPageMatchesTarget) {
     return hasTeeItUpEvidence
@@ -6661,20 +6942,10 @@ function learnTeeItUpDiscovery(
       : null;
   }
 
-  const generalPublicCandidates = labeledBookingCandidates.filter(
-    ({ label }) => isGeneralPublicTeeItUpLabel(label)
-  );
   const unrestrictedCandidates = labeledBookingCandidates.filter(
     ({ label }) => !isRestrictedTeeItUpLabel(label)
   );
-  const selectedBookingUrls = uniqueUrls(
-    generalPublicCandidates.length > 0
-      ? generalPublicCandidates.map(({ url }) => url)
-      : unrestrictedCandidates.length > 0
-        ? unrestrictedCandidates.map(({ url }) => url)
-        : labeledBookingCandidates.length > 0
-          ? []
-          : []
+  const selectedBookingUrls = uniqueUrls( unrestrictedCandidates.map(({ url }) => url)
   );
 
   if (selectedBookingUrls.length === 0) {
@@ -6683,12 +6954,15 @@ function learnTeeItUpDiscovery(
           evidence,
           observedUrls,
           officialPageMatchesTarget,
+          allLabeledBookingCandidates.length > 1
+            ? "teeitup-target-scope-ambiguous"
+            :
           "teeitup-target-scope-unconfirmed"
         )
       : null;
   }
 
-  const selectorResolution = resolveTeeItUpFacilitySelector(
+  let selectorResolution = resolveTeeItUpFacilitySelector(
     selectedBookingUrls,
     evidence.teeItUpLegacyConfigurations,
     evidence.courseName
@@ -6717,6 +6991,28 @@ function learnTeeItUpDiscovery(
       officialPageMatchesTarget,
       "teeitup-alias-invalid"
     );
+  }
+
+  if (
+    selectorResolution.facilityId === undefined &&
+    !aliases.every((alias) =>
+      isTargetSpecificTeeItUpAlias(alias, evidence.courseName)
+    )
+  ) {
+
+  const provenFacilityId = getUniqueTeeItUpFacilityResponseId(
+      evidence.teeItUpFacilityResponses,
+      aliases
+    );
+    if (!provenFacilityId) {
+      return buildRejectedTeeItUpDiscovery(
+        evidence,
+        observedUrls,
+        officialPageMatchesTarget,
+        "teeitup-target-scope-ambiguous"
+      );
+    }
+    selectorResolution = { status: "VALID", facilityId: provenFacilityId };
   }
 
   const bookingUrl = buildTeeItUpBookingUrl(
@@ -6764,7 +7060,7 @@ function getTargetScopedProviderEvidence(
   if (
     !evidence.officialPage?.courseName ||
     !hasCanonicalTargetPageAuthority(evidence) ||
-    !haveCompatibleCourseNames(
+    !haveCompatibleOfficialPageCourseNames(
       evidence.courseName,
       evidence.officialPage.courseName
     )
@@ -6847,8 +7143,13 @@ function buildRejectedTeeItUpDiscovery(
     .map((value) => parseUrl(value))
     .find((url) => url && !isTeeItUpBookingUrl(url.toString()));
   const linkedProviderUrls = uniqueUrls(
+    filterTargetMatchingTeeItUpCandidates(
     uniqueTeeItUpLinkCandidates(
-      officialPageMatchesTarget ? evidence.officialPage?.linkCandidates ?? [] : []
+      officialPageMatchesTarget ? ( evidence.officialPage?.linkCandidates ?? []) : []
+      ),
+      evidence.courseName,
+      evidence.persistedTeeItUpBookingUrl,
+      evidence.officialPage?.url
     ).map(({ url }) => url)
   );
   const courseIdentityCorroboration = linkedProviderUrls.length === 1
@@ -6901,6 +7202,207 @@ function uniqueTeeItUpLinkCandidates(
     seen.add(key);
     return [{ ...candidate, url: canonicalUrl }];
   });
+}
+
+function filterTargetMatchingTeeItUpCandidates(
+  candidates: Array<{ url: string; label: string }>,
+  courseName: string,
+  persistedTeeItUpBookingUrl?: string | null,
+  officialPageUrl?: string
+) {
+  const conflictingUrls = new Set(
+    candidates
+      .filter((candidate) =>
+        doesTeeItUpCandidateLabelConflictWithTarget(candidate.label, courseName)
+      )
+      .map((candidate) => candidate.url)
+  );
+  return candidates.filter(
+    (candidate) =>
+      !conflictingUrls.has(candidate.url) &&
+      doesTeeItUpCandidateMatchTarget(
+        candidate,
+        courseName,
+        persistedTeeItUpBookingUrl,
+        officialPageUrl
+      )
+  );
+}
+
+function doesTeeItUpCandidateLabelConflictWithTarget(
+  label: string,
+  courseName: string
+) {
+  const explicitCourseIdentity =
+    getOfficialBookingCandidateCourseIdentity(label);
+  return Boolean(
+    explicitCourseIdentity &&
+    isConflictingOfficialPageCourseIdentity(courseName, explicitCourseIdentity)
+  );
+}
+
+function doesTeeItUpCandidateMatchTarget(
+  candidate: { url: string; label: string },
+  courseName: string,
+  persistedTeeItUpBookingUrl?: string | null,
+  officialPageUrl?: string
+) {
+  const alias = getTeeItUpAlias(candidate.url)?.replace(/[-_]+/gu, " ");
+  if (
+    !doesOfficialBookingCandidateLabelMatchTarget(candidate.label, courseName)
+  ) {
+    return false;
+  }
+
+  if (!alias) {
+    return true;
+  }
+  if (
+    haveCompatibleOfficialPageCourseNames(courseName, alias) ||
+    haveSameOfficialCourseIdentityCore(courseName, alias) ||
+    isCorroboratedPersistedHostedTeeItUpAlias(
+      candidate.url,
+      courseName,
+      persistedTeeItUpBookingUrl
+    ) ||
+    isNonSpecificOfficialCourseIdentity(alias)
+  ) {
+    return true;
+  }
+  if (hasConflictingOfficialCourseIdentityDiscriminator(courseName, alias)) {
+    return false;
+  }
+  return isNeutralTeeItUpOrganizationalAlias(alias, officialPageUrl);
+}
+
+function isCorroboratedPersistedHostedTeeItUpAlias(
+  candidateUrl: string,
+  courseName: string,
+  persistedTeeItUpBookingUrl: string | null | undefined
+) {
+  if (!persistedTeeItUpBookingUrl) {
+    return false;
+  }
+  const candidateAlias = getTeeItUpAlias(candidateUrl);
+  const persistedAlias = getTeeItUpAlias(persistedTeeItUpBookingUrl);
+  if (
+    !candidateAlias ||
+    !persistedAlias ||
+    candidateAlias.toLocaleLowerCase("en-US") !==
+      persistedAlias.toLocaleLowerCase("en-US")
+  ) {
+    return false;
+  }
+  const candidate = parseUrl(candidateUrl);
+  const selector = candidate?.searchParams.get("course") ?? "";
+  if (!readPositiveBoundedTeeItUpSelector(selector)) {
+    return false;
+  }
+  const hostedFacilityName = courseName.match(
+    /\s+at\s+(?:the\s+)?(.+?)\s*$/iu
+  )?.[1];
+  if (!hostedFacilityName) {
+    return false;
+  }
+  const aliasIdentity = candidateAlias.replace(/[-_]+/gu, " ");
+  return [
+    hostedFacilityName,
+    `${hostedFacilityName} Golf Course`,
+    `${hostedFacilityName} Golf Club`
+  ].some((identity) =>
+    haveSameOfficialCourseIdentityCore(identity, aliasIdentity)
+  );
+}
+
+function isNeutralTeeItUpOrganizationalAlias(
+  alias: string,
+  officialPageUrl?: string
+) {
+  const normalized = alias
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim();
+  return Boolean(
+    /^[0-9a-f]{8}\s+[0-9a-f]{4}\s+[1-5][0-9a-f]{3}\s+[89ab][0-9a-f]{3}\s+[0-9a-f]{12}$/u.test(
+      normalized
+    ) ||
+      (officialPageUrl &&
+        isOfficialOrganizationIdentityCorroboratedByUrl(
+          normalized,
+          officialPageUrl
+        ))
+  );
+}
+
+function isTargetSpecificTeeItUpAlias(alias: string, courseName: string) {
+  const identity = alias.replace(/[-_]+/gu, " ");
+  return (
+    haveCompatibleOfficialPageCourseNames(courseName, identity) ||
+    haveSameOfficialCourseIdentityCore(courseName, identity)
+  );
+}
+
+function getUniqueTeeItUpFacilityResponseId(
+  responses: TeeItUpFacilityResponseEvidence[] | undefined,
+  aliases: string[]
+) {
+  if (aliases.length !== 1) {
+    return undefined;
+  }
+  const alias = aliases[0].toLocaleLowerCase("en-US");
+  const matchingResponses = (responses ?? []).filter(
+    (response) =>
+      response.alias.toLocaleLowerCase("en-US") === alias &&
+      getTeeItUpAlias(response.url)?.toLocaleLowerCase("en-US") === alias &&
+      isTeeItUpPublicFacilitiesResponseUrl(response.url) &&
+      response.facilityIds.length === 1 &&
+      isPositiveSafeInteger(response.facilityIds[0])
+  );
+  const facilityIds = new Set(
+    matchingResponses.map((response) => response.facilityIds[0])
+  );
+  return facilityIds.size === 1 ? [...facilityIds][0] : undefined;
+}
+
+function doesOfficialBookingCandidateLabelMatchTarget(
+  label: string,
+  courseName: string
+) {
+  const explicitCourseIdentity =
+    getOfficialBookingCandidateCourseIdentity(label);
+  if (!explicitCourseIdentity) {
+    return true;
+  }
+  return haveCompatibleOfficialPageCourseNames(
+    courseName,
+    explicitCourseIdentity
+  );
+}
+
+function getOfficialBookingCandidateCourseIdentity(label: string) {
+  const normalizedLabel = normalizeTeeTimeTypography(label)
+    .replace(/\s+/gu, " ")
+    .trim();
+  const explicitCourseIdentity = normalizedLabel
+    .replace(
+      /\b(?:book|reserve|schedule|view|see|search|find|check|make)\s+(?:(?:a|the|your)\s+)?tee\s*times?\b/giu,
+      " "
+    )
+    .replace(/\b(?:(?:general\s+)?public\s+)?tee\s*times?\b/giu, " ")
+    .replace(
+      /\b(?:book(?:ed|ing)?|check|click|embedded|find|general\s+public|here|iframe|make|now|online|public|reservations?|search|see|tee\s*times?|view|widget)\b/giu,
+      " "
+    )
+    .replace(/\s+/gu, " ")
+    .replace(/^[\s|:–—-]+|[\s|:–—-]+$/gu, "")
+    .replace(/^(?:(?:a|at|for)\s+)+/iu, "")
+    .trim();
+  if (!normalizeCourseIdentityName(explicitCourseIdentity)) {
+    return null;
+  }
+  return explicitCourseIdentity;
 }
 
 function canonicalizeTeeItUpLandingCandidate(value: string) {
@@ -6966,10 +7468,6 @@ function readPositiveBoundedTeeItUpSelector(value: string) {
     : null;
 }
 
-function isGeneralPublicTeeItUpLabel(label: string) {
-  return /\bgeneral\s+public\b|\bpublic\s+tee\s*times?\b/i.test(label);
-}
-
 function isRestrictedTeeItUpLabel(label: string) {
   return /\b(?:capital\s+club|juniors?|members?|military|seniors?)\b/i.test(
     label
@@ -6980,8 +7478,7 @@ function resolveTeeItUpFacilitySelector(
   urls: string[],
   legacyConfigurations: TeeItUpLegacyConfigurationEvidence[] | undefined,
   courseName: string
-):
-  | { status: "VALID"; facilityId?: number }
+): { status: "VALID"; facilityId?: number }
   | { status: "INVALID" } {
   const legacyUrls = urls.filter(isLegacyTeeItUpPlayUrl);
   if (legacyUrls.length > 0) {
@@ -6999,7 +7496,7 @@ function resolveTeeItUpFacilitySelector(
           alias.toLocaleLowerCase("en-US") &&
         configuration.facilityIds.length === 1 &&
         isPositiveSafeInteger(configuration.facilityIds[0]) &&
-        haveCompatibleCourseNames(courseName, configuration.courseName)
+        haveCompatibleOfficialPageCourseNames(courseName, configuration.courseName)
     );
     const uniqueFacilityIds = new Set(
       matchingConfigurations.map(
@@ -8401,9 +8898,10 @@ function isGolfBackHostname(hostname: string) {
 
 function getGolfBackCourseId(value: string) {
   const url = parseUrl(value);
-  return url?.hash.match(
+  return ( url?.hash.match(
     /^#\/course\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/i
-  )?.[1] ?? null;
+  )?.[1] ?? null
+  );
 }
 
 function canonicalizeTenForeBookingUrl(value: string) {

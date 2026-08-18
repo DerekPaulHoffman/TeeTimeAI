@@ -64,7 +64,7 @@ export function hasDurableWaitForMaterialChangeProof(
     !input.incidentId ||
     !Number.isInteger(input.incidentCycle) ||
     input.incidentStatus !== "NEEDS_HUMAN" ||
-    input.humanReviewReason !== "AUTOMATION_STALLED" ||
+    !input.humanReviewReason ||
     input.monitoringState !== "ENGINEERING_VERIFICATION_NEEDED" ||
     !input.incidentEscalatedAt
   ) {
@@ -86,11 +86,17 @@ export function hasDurableWaitForMaterialChangeProof(
         return false;
       }
       const audit = event.audit as Record<string, unknown>;
+      const automationStalledParking =
+        input.humanReviewReason === "AUTOMATION_STALLED" &&
+        audit.automationStalled === true;
+      const explicitTechnicalParking =
+        audit.humanReviewReason === input.humanReviewReason &&
+        audit.automaticRetrySuppressed === true;
       return (
         audit.cycle === input.incidentCycle &&
         audit.customerState === "NEEDS_HUMAN_REVIEW" &&
-        audit.automationStalled === true &&
-        audit.parkedUntilMaterialChange === true
+        audit.parkedUntilMaterialChange === true &&
+        (automationStalledParking || explicitTechnicalParking)
       );
     })
   );

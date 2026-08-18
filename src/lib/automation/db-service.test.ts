@@ -20,6 +20,7 @@ import {
   listSearchesNeedingScheduleRecovery,
   queueSearchCheck,
   recordCourseBookingWindowEvidence,
+  recordCoursePhysicalLayoutEvidence,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
   updateHourlyImprovementRunState
@@ -80,6 +81,7 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn()
     },
     $queryRaw: vi.fn(),
+    $queryRawUnsafe: vi.fn(),
     $transaction: vi.fn()
   }
 }));
@@ -1958,5 +1960,223 @@ describe("booking-window evidence monitoring revalidation", () => {
     });
     expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
     expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("physical-layout evidence persistence", () => {
+  const operationTime = new Date("2026-08-18T15:00:00.000Z");
+  const verifiedAt = new Date("2026-08-17T00:00:00.000Z");
+  const currentCourse = {
+    id: "aguila",
+    name: "Aguila Golf Course",
+    timeZone: "America/Phoenix",
+    website: "https://parks.example/aguila-golf-course.html",
+    detectedBookingUrl: null,
+    detectedPlatform: "UNKNOWN",
+    providerFamilyKey: "SOURCE_MISSING",
+    bookingMethod: "UNKNOWN",
+    bookingWindowDaysAhead: null,
+    bookingWindowEvidenceUrl: null,
+    bookingReleaseTimeLocal: null,
+    bookingWindowSource: null,
+    bookingWindowConfidence: null,
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "OTHER",
+    monitoringMode: "AUTOMATIC",
+    bookingAccessMode: "UNKNOWN",
+    isPublic: true,
+    intelligenceConfidence: null,
+    bookingMetadata: null,
+    layoutHoleCounts: [],
+    layoutHolesEvidenceUrl: null,
+    layoutHolesVerifiedAt: null,
+    updatedAt: new Date("2026-08-18T14:00:00.000Z")
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(operationTime);
+    vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("serializes the CAS update and revalidates at operation time", async () => {
+    const appliedCourse = {
+      ...currentCourse,
+      layoutHoleCounts: [18],
+      layoutHolesEvidenceUrl:
+        "https://parks.example/aguila-golf-course.html",
+      layoutHolesVerifiedAt: verifiedAt,
+      updatedAt: operationTime
+    };
+    mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
+    mockedPrisma.course.update.mockResolvedValue(appliedCourse as never);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-aguila",
+      cycle: 2,
+      revision: 4,
+      status: "NEEDS_HUMAN",
+      activeBatchId: null,
+      activeRealSearchCount: 1,
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: "missing-source",
+      humanReviewReason: "AUTOMATION_STALLED",
+      resolution: null,
+      activeBatch: null
+    } as never);
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "NEEDS_HUMAN",
+      revision: 3
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await recordCoursePhysicalLayoutEvidence({
+      courseId: currentCourse.id,
+      holeCounts: [18],
+      evidenceUrl: "https://parks.example/aguila-golf-course.html",
+      verifiedAt,
+      expectedUpdatedAt: currentCourse.updatedAt,
+      expectedName: currentCourse.name,
+      source: "OPERATOR_CLI"
+    });
+
+    expect(result).toBe(appliedCourse);
+    expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ isolationLevel: "ReadCommitted" })
+    );
+    expect(mockedPrisma.$queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"),
+      `course-monitoring:${currentCourse.id}`
+    );
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith({
+      where: {
+        id: currentCourse.id,
+        updatedAt: currentCourse.updatedAt,
+        name: currentCourse.name
+      },
+      data: {
+        layoutHoleCounts: [18],
+        layoutHolesEvidenceUrl:
+          "https://parks.example/aguila-golf-course.html",
+        layoutHolesVerifiedAt: verifiedAt
+      }
+    });
+    expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ nextAttemptAt: operationTime })
+      })
+    );
+    expect(mockedPrisma.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          occurredAt: operationTime,
+          audit: expect.objectContaining({
+            changedFields: expect.arrayContaining([
+              "layoutHoleCounts",
+              "layoutHolesVerifiedAt"
+            ])
+          })
+        })
+      })
+    );
+  });
+
+  it("does not continue after an updatedAt CAS write failure", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
+    mockedPrisma.course.update.mockRejectedValue(
+      new Error("Record to update not found")
+    );
+
+    await expect(
+      recordCoursePhysicalLayoutEvidence({
+        courseId: currentCourse.id,
+        holeCounts: [18],
+        evidenceUrl: "https://parks.example/aguila-golf-course.html",
+        verifiedAt,
+        expectedUpdatedAt: currentCourse.updatedAt,
+        expectedName: currentCourse.name,
+        source: "OPERATOR_CLI"
+      })
+    ).rejects.toThrow("Record to update not found");
+    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a stale pre-fetch course identity or updatedAt snapshot", async () => {
+    const write = () =>
+      recordCoursePhysicalLayoutEvidence({
+        courseId: currentCourse.id,
+        holeCounts: [18],
+        evidenceUrl: "https://parks.example/aguila-golf-course.html",
+        verifiedAt,
+        expectedUpdatedAt: currentCourse.updatedAt,
+        expectedName: currentCourse.name,
+        source: "OPERATOR_CLI"
+      });
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      ...currentCourse,
+      updatedAt: new Date("2026-08-18T14:30:00.000Z")
+    } as never);
+
+    await expect(write()).rejects.toThrow(
+      "Course identity or layout changed while physical-layout evidence was being verified"
+    );
+
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      ...currentCourse,
+      name: "Aguila 9 Golf Course"
+    } as never);
+    await expect(write()).rejects.toThrow(
+      "Course identity or layout changed while physical-layout evidence was being verified"
+    );
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a future verification date at the persistence boundary", async () => {
+    await expect(
+      recordCoursePhysicalLayoutEvidence({
+        courseId: currentCourse.id,
+        holeCounts: [18],
+        evidenceUrl: "https://parks.example/aguila-golf-course.html",
+        verifiedAt: new Date("2026-08-19T00:00:00.000Z"),
+        expectedUpdatedAt: currentCourse.updatedAt,
+        expectedName: currentCourse.name,
+        source: "OPERATOR_CLI"
+      })
+    ).rejects.toThrow("valid non-future verification date");
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects account and transaction evidence URLs at the persistence boundary", async () => {
+    await expect(
+      recordCoursePhysicalLayoutEvidence({
+        courseId: currentCourse.id,
+        holeCounts: [18],
+        evidenceUrl: "https://booking.example/sign-in?returnTo=checkout",
+        verifiedAt,
+        expectedUpdatedAt: currentCourse.updatedAt,
+        expectedName: currentCourse.name,
+        source: "OPERATOR_CLI"
+      })
+    ).rejects.toThrow(
+      "Physical layout evidence URL must be a credential-free public HTTP(S) URL"
+    );
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
   });
 });

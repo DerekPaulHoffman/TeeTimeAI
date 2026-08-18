@@ -161,6 +161,288 @@ describe("operator course inventory", () => {
     expect(result.recommendedAction).toContain("check the official course surface again");
   });
 
+  it("shows a discovered account-required booking path instead of stale source-missing copy", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-account",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "No public booking surface is currently available.",
+            nextAction: "Check the official course website again.",
+            failureClass: "UNSUPPORTED_FAMILY",
+            attemptCount: 2
+          },
+          latestDiscovery: discovery({
+            status: "VERIFIED",
+            detectedPlatform: "CUSTOM",
+            bookingMethod: "PUBLIC_ONLINE",
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+            bookingCandidateRecorded: true,
+            officialLinkCorroborated: true,
+            providerLandingFound: true
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusLabel: "Engineering verification needed",
+      discoveryProviderLabel: "Account-required booking page",
+      discoveryStatusLabel: "Account sign-in required",
+      problemSummary:
+        "The official course site links to an online booking page, but viewing tee times requires a golfer account or sign-in."
+    });
+    expect(result.recommendedAction).toContain(
+      "Confirm the account-required technical limitation"
+    );
+    expect(result.problemSummary).not.toContain("No verified public");
+  });
+
+  it("keeps text-only account guidance as an uncorroborated candidate", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-account-guidance",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "No public booking surface is currently available.",
+            nextAction: "Check the official course website again.",
+            failureClass: "UNSUPPORTED_FAMILY",
+            attemptCount: 2
+          },
+          latestDiscovery: discovery({
+            status: "VERIFIED",
+            detectedPlatform: "CUSTOM",
+            bookingMethod: "PUBLIC_ONLINE",
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            bookingAccessMode: "ACCOUNT_SELF_SERVICE",
+            bookingCandidateRecorded: true,
+            officialLinkCorroborated: false,
+            providerLandingFound: true
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      discoveryProviderLabel: "Account-required candidate recorded",
+      discoveryStatusLabel: "Official link unconfirmed",
+      problemSummary:
+        "The latest investigation recorded an account-required booking candidate, but did not corroborate it as this course's official booking path."
+    });
+    expect(result.problemSummary).not.toContain("official course site links");
+  });
+
+  it("shows a TeeItUp scope finding instead of a generic unsupported-family result", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-teeitup",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-22T01:00:00.000Z"),
+            latestMessage: "No public booking surface is currently available.",
+            nextAction: "Check the official course website again.",
+            failureClass: "UNSUPPORTED_FAMILY",
+            attemptCount: 2
+          },
+          latestDiscovery: discovery({
+            status: "INSPECTED",
+            detectedPlatform: "TEEITUP",
+            bookingCandidateRecorded: true
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      discoveryProviderLabel: "TeeItUp candidate recorded",
+      discoveryStatusLabel: "Course scope unconfirmed",
+      problemSummary:
+        "The latest investigation recorded a TeeItUp candidate, but did not prove an official booking link or confirm the exact course scope."
+    });
+    expect(result.recommendedAction).toContain("save the TeeItUp provider metadata");
+  });
+
+  it("uses corroborated provider evidence from the current incident episode", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          incident: {
+            id: "incident-corroborated",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "Provider scope still needs a fresh check.",
+            nextAction: "Review provider evidence.",
+            failureClass: "UNSUPPORTED_FAMILY"
+          },
+          latestDiscovery: discovery({
+            status: "LEARNED",
+            detectedPlatform: "TEEITUP",
+            bookingCandidateRecorded: true,
+            officialLinkCorroborated: true,
+            providerLandingFound: true
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      discoveryProviderLabel: "TeeItUp official link found",
+      discoveryStatusLabel: "Provider link corroborated",
+      problemSummary:
+        "The official course site links to TeeItUp, but the saved course record has not yet been confirmed by a fresh monitoring check."
+    });
+  });
+
+  it("does not call an ambiguous official provider link runnable", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          incident: {
+            id: "incident-ambiguous-official-link",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "Provider scope still needs a fresh check.",
+            nextAction: "Review provider evidence.",
+            failureClass: "UNSUPPORTED_FAMILY"
+          },
+          latestDiscovery: discovery({
+            status: "INSPECTED",
+            detectedPlatform: "TEEITUP",
+            bookingCandidateRecorded: true,
+            officialLinkCorroborated: true,
+            providerLandingFound: true
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      discoveryProviderLabel: "TeeItUp official link found",
+      discoveryStatusLabel: "Course scope unconfirmed",
+      problemSummary:
+        "The official course site links to TeeItUp, but the exact course or facility scope is still ambiguous."
+    });
+    expect(result.recommendedAction).toContain("before applying provider metadata");
+    expect(result.recommendedAction).not.toContain("request one fresh monitoring check before");
+  });
+
+  it("does not reuse discovery proof from before the current incident episode", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          incident: {
+            id: "incident-new-cycle",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:55:00.000Z"),
+            latestMessage: "No public booking surface is currently available.",
+            nextAction: "Check the official course website again.",
+            failureClass: "UNSUPPORTED_FAMILY"
+          },
+          latestDiscovery: discovery({
+            observedAt: new Date("2026-07-24T17:50:00.000Z"),
+            status: "LEARNED",
+            detectedPlatform: "TEEITUP",
+            bookingCandidateRecorded: true,
+            officialLinkCorroborated: true,
+            providerLandingFound: true
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      discoveryProviderLabel: null,
+      discoveryStatusLabel: null,
+      problemSummary:
+        "No verified public read-only tee-time source has been found for this booking provider."
+    });
+  });
+
+  it("lets an absolute latest failure supersede older successful discovery copy", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          providerFamilyKey: "SOURCE_MISSING",
+          detectedBookingUrl: null,
+          coverageCategory: "SOURCE_UNVERIFIED",
+          incident: {
+            id: "incident-latest-failed",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "The latest official-site discovery attempt failed.",
+            nextAction: "Retry from the official course surface.",
+            failureClass: "HTTP_5XX"
+          },
+          latestDiscovery: discovery({
+            status: "FAILED",
+            observedAt: new Date("2026-07-24T17:59:00.000Z"),
+            detectedPlatform: "TEEITUP",
+            bookingCandidateRecorded: false,
+            officialLinkCorroborated: false,
+            providerLandingFound: false
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      discoveryProviderLabel: null,
+      discoveryStatusLabel: null,
+      problemSummary:
+        "The monitoring or verification path returned a server error before it could confirm a course result."
+    });
+  });
+
   it("uses a needs-human incident over a stale auto-investigating lifecycle row", () => {
     const [result] = buildCourseInventory(
       [
@@ -994,8 +1276,28 @@ function course(overrides: Partial<CourseStatusInput> = {}): CourseStatusInput {
     selectionCount: 0,
     incident: null,
     latestProbe: null,
+    latestDiscovery: null,
     profileSlug: null,
     coverageCategory: "SUPPORTED_READY",
+    ...overrides
+  };
+}
+
+function discovery(
+  overrides: Partial<NonNullable<CourseStatusInput["latestDiscovery"]>> = {}
+) {
+  return {
+    status: "LEARNED",
+    detectedPlatform: "UNKNOWN",
+    bookingMethod: "UNKNOWN",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "NONE",
+    bookingAccessMode: "UNKNOWN",
+    bookingCandidateRecorded: false,
+    officialLinkCorroborated: false,
+    providerLandingFound: false,
+    confidence: 0.8,
+    observedAt: new Date("2026-07-24T17:50:00.000Z"),
     ...overrides
   };
 }

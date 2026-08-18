@@ -277,6 +277,35 @@ describe("customer monitoring status", () => {
     ).toBe(false);
   });
 
+  it("recognizes explicit account-required parking without treating it as automation stalled", () => {
+    const parkedAt = new Date("2026-08-18T17:30:00.000Z");
+    const input = {
+      incidentId: "incident-account",
+      incidentCycle: 2,
+      incidentStatus: "NEEDS_HUMAN" as const,
+      humanReviewReason: "ACCOUNT_REQUIRED",
+      incidentEscalatedAt: parkedAt,
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED" as const,
+      endpointEvents: [
+        {
+          incidentId: "incident-account",
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          occurredAt: parkedAt,
+          audit: {
+            cycle: 2,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            humanReviewReason: "ACCOUNT_REQUIRED",
+            automaticRetrySuppressed: true,
+            parkedUntilMaterialChange: true,
+          },
+        },
+      ],
+    };
+
+    expect(hasDurableWaitForMaterialChangeProof(input)).toBe(true);
+    expect(hasDurableAutomationStalledEndpointProof(input)).toBe(true);
+  });
+
   it("does not let an older success mask an unproven automation incident", () => {
     const stateChangedAt = new Date("2026-08-10T14:20:00.000Z");
 

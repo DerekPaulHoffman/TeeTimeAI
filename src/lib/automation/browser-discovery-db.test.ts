@@ -7,7 +7,9 @@ import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 import {
   applyBrowserDiscoveryToCourse,
   listBrowserProbeTargets,
-  recordBrowserDiscovery
+  recordAndApplyBrowserDiscoveryToCourse,
+  recordBrowserDiscovery,
+  retireLegacyPolicyOnlyCourseBlock
 } from "./db-service";
 
 vi.mock("@/lib/prisma", () => ({
@@ -224,6 +226,137 @@ describe("browser discovery persistence", () => {
         intelligenceConfidence: 0.95
       }
     });
+  });
+
+  it("does not persist failed discovery evidence after unowned incident state changes", async () => {
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 0 } as never);
+
+    await expect(
+      recordBrowserDiscovery(
+        {
+          courseId: "course-1",
+          status: "FAILED",
+          detectedPlatform: "UNKNOWN",
+          sourceUrl: "https://course.example.com",
+          confidence: 0,
+          evidence: {
+            learnedFrom: "official-site-fetch-failed",
+            observedUrls: []
+          }
+        },
+        undefined,
+        undefined,
+        {
+          id: "incident-1",
+          cycle: 2,
+          revision: 6,
+          status: "NEEDS_HUMAN"
+        }
+      )
+    ).resolves.toBeNull();
+
+    expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        courseId: "course-1",
+        cycle: 2,
+        revision: 6,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null
+      },
+      data: { revision: { increment: 0 } }
+    });
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+  });
+
+  it("does not persist evidence or change a course when responder ownership appears after cohort selection", async () => {
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 0,
+    } as never);
+
+    await expect(
+      recordAndApplyBrowserDiscoveryToCourse(
+        {
+          courseId: "course-1",
+          status: "LEARNED",
+          detectedPlatform: "FOREUP",
+          sourceUrl: "https://course.example.com",
+          bookingUrl:
+            "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+          apiMetadata: {
+            scheduleId: 11739,
+            bookingClassId: 22739,
+            bookingBaseUrl:
+              "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+          },
+          confidence: 0.95,
+          evidence: { learnedFrom: "foreup-api-request", observedUrls: [] },
+        },
+        undefined,
+        {
+          id: "incident-1",
+          cycle: 2,
+          revision: 6,
+          status: "NEEDS_HUMAN",
+        },
+      ),
+    ).resolves.toBeNull();
+
+    expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        courseId: "course-1",
+        cycle: 2,
+        revision: 6,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null,
+      },
+      data: { revision: { increment: 0 } },
+    });
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not retire a legacy policy block after responder ownership appears", async () => {
+    const updatedAt = new Date("2026-08-18T17:20:00.000Z");
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({ id: "course-1" } as never);
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 0 } as never);
+
+    await expect(
+      retireLegacyPolicyOnlyCourseBlock(
+        "course-1",
+        {
+          updatedAt,
+          detectedBookingUrl: null,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "BLOCKED"
+        },
+        {
+          preserveWebsite: false,
+          preserveDetectedBookingUrl: false,
+          preserveBookingMetadata: false
+        },
+        {
+          id: "incident-1",
+          cycle: 2,
+          revision: 6,
+          status: "NEEDS_HUMAN"
+        }
+      )
+    ).resolves.toBeNull();
+
+    expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        courseId: "course-1",
+        cycle: 2,
+        revision: 6,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null
+      },
+      data: { revision: { increment: 0 } }
+    });
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
   it("atomically opens a fresh human-review cycle when learned adapter metadata changes", async () => {

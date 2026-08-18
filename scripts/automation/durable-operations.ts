@@ -71,7 +71,9 @@ export const COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT = {
   bookingAccessMode: true,
   isPublic: true,
   intelligenceConfidence: true,
-  bookingMetadata: true
+  bookingMetadata: true,
+  layoutHoleCounts: true,
+  layoutHolesVerifiedAt: true
 } as const satisfies Prisma.CourseSelect;
 
 if (
