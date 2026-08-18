@@ -4,7 +4,7 @@ import { geocodeLocation, LocationNotFoundError } from "./geocode";
 
 const originalKey = process.env.GOOGLE_PLACES_API_KEY;
 
-describe("Google Places text geocoding", () => {
+describe("Google Geocoding API", () => {
   afterEach(() => {
     if (originalKey === undefined) {
       delete process.env.GOOGLE_PLACES_API_KEY;
@@ -24,24 +24,23 @@ describe("Google Places text geocoding", () => {
     });
   });
 
-  it("maps the first Places text-search location to coordinates", async () => {
+  it("maps the first geocoding result to coordinates", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "\uFEFF test-key ";
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        places: [
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        status: "OK",
+        results: [
           {
-            id: "places/trumbull",
-            displayName: { text: "Trumbull" },
-            formattedAddress: "Trumbull, CT 06611",
-            location: {
-              latitude: 41.2428563,
-              longitude: -73.2006639
+            geometry: {
+              location: {
+                lat: 41.2428563,
+                lng: -73.2006639
+              }
             }
           }
         ]
       })
-    }));
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(geocodeLocation("Trumbull, CT")).resolves.toEqual({
@@ -49,37 +48,40 @@ describe("Google Places text geocoding", () => {
       longitude: -73.2006639,
       demo: false
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://places.googleapis.com/v1/places:searchText",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "X-Goog-Api-Key": "test-key",
-          "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location"
-        }),
-        body: JSON.stringify({
-          textQuery: "Trumbull, CT",
-          maxResultCount: 1,
-          regionCode: "US"
-        })
-      })
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBeInstanceOf(URL);
+    expect((url as URL).origin + (url as URL).pathname).toBe(
+      "https://maps.googleapis.com/maps/api/geocode/json"
     );
+    expect((url as URL).searchParams.get("address")).toBe("Trumbull, CT");
+    expect((url as URL).searchParams.get("region")).toBe("us");
+    expect((url as URL).searchParams.get("key")).toBe("test-key");
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("rejects text-search responses without a location", async () => {
+  it("rejects zero-result geocoding responses", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({ places: [{ id: "places/empty" }] })
-      }))
+      vi.fn(async () => Response.json({ status: "ZERO_RESULTS", results: [] }))
     );
 
     const error = await geocodeLocation("not a place").catch((reason) => reason);
 
     expect(error).toBeInstanceOf(LocationNotFoundError);
     expect(error).toHaveProperty("message", "No matching location found.");
+  });
+
+  it("rejects provider-level quota errors returned with HTTP 200", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ status: "OVER_QUERY_LIMIT", results: [] }))
+    );
+
+    await expect(geocodeLocation("Seattle, WA")).rejects.toThrow(
+      "Google Geocoding request failed with OVER_QUERY_LIMIT"
+    );
   });
 
   it("retries one transient rate limit before returning coordinates", async () => {
@@ -94,11 +96,14 @@ describe("Google Places text geocoding", () => {
       )
       .mockResolvedValueOnce(
         Response.json({
-          places: [
+          status: "OK",
+          results: [
             {
-              location: {
-                latitude: 43.615,
-                longitude: -116.2023
+              geometry: {
+                location: {
+                  lat: 43.615,
+                  lng: -116.2023
+                }
               }
             }
           ]

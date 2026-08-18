@@ -18,43 +18,42 @@ export async function geocodeLocation(query: string, signal?: AbortSignal) {
     };
   }
 
+  const endpoint = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+  endpoint.searchParams.set("address", query);
+  endpoint.searchParams.set("region", "us");
+  endpoint.searchParams.set("key", apiKey);
+
   const { response, json } = await fetchGooglePlacesJsonWithRetry<{
-    places?: Array<{
-      location?: {
-        latitude?: number;
-        longitude?: number;
+    status?: string;
+    results?: Array<{
+      geometry?: {
+        location?: {
+          lat?: number;
+          lng?: number;
+        };
       };
     }>;
-  }>(
-    "https://places.googleapis.com/v1/places:searchText",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": apiKey,
-        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location"
-      },
-      body: JSON.stringify({
-        textQuery: query,
-        maxResultCount: 1,
-        regionCode: "US"
-      }),
-      signal
-    }
-  );
+  }>(endpoint, { signal });
 
   if (!response.ok) {
-    throw new Error(`Google Places text search failed with ${response.status}`);
+    throw new Error(`Google Geocoding request failed with ${response.status}`);
   }
 
-  const location = json?.places?.[0]?.location;
-  if (location?.latitude === undefined || location.longitude === undefined) {
+  if (json?.status === "ZERO_RESULTS") {
+    throw new LocationNotFoundError();
+  }
+  if (json?.status !== "OK") {
+    throw new Error(`Google Geocoding request failed with ${json?.status ?? "UNKNOWN"}`);
+  }
+
+  const location = json.results?.[0]?.geometry?.location;
+  if (location?.lat === undefined || location.lng === undefined) {
     throw new LocationNotFoundError();
   }
 
   return {
-    latitude: location.latitude,
-    longitude: location.longitude,
+    latitude: location.lat,
+    longitude: location.lng,
     demo: false
   };
 }
