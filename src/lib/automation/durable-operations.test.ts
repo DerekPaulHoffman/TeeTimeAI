@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT,
   parseCourseEvidence,
   requiresStructuredAutomationAudit
 } from "../../../scripts/automation/durable-operations";
+import { COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS } from "./course-provider-execution-evidence";
 
 const validEvidence = {
   googlePlaceId: "ChIJ-example",
@@ -27,6 +29,14 @@ describe("durable course evidence validation", () => {
       detectedPlatform: "FOREUP",
       automationEligibility: "ALLOWED"
     });
+  });
+
+  it("reads every semantic provider field before comparing operator evidence", () => {
+    expect(
+      [...COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS].filter(
+        (field) => !(field in COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT)
+      )
+    ).toEqual([]);
   });
 
   it("rejects credential-bearing and local URLs", () => {

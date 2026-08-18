@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   getCustomerMonitoringStatus,
   hasDurableAutomationStalledEndpointProof,
+  hasDurableWaitForMaterialChangeProof,
   isCustomerMonitoringStatusFinalized,
   isCustomerMonitoringStatusReportable,
   isEffectiveCustomerMonitoring,
@@ -210,6 +211,66 @@ describe("customer monitoring status", () => {
           {
             ...event,
             audit: { ...event.audit, automationStalled: false }
+          }
+        ]
+      })
+    ).toBe(false);
+  });
+
+  it("recognizes a current cycle-scoped material-change parking event", () => {
+    const escalatedAt = new Date("2026-08-10T14:00:00.000Z");
+    const parkedAt = new Date("2026-08-10T14:30:00.000Z");
+    const event = {
+      incidentId: "incident-1",
+      eventType: "HUMAN_REVIEW_REQUESTED",
+      occurredAt: parkedAt,
+      audit: {
+        cycle: 3,
+        customerState: "NEEDS_HUMAN_REVIEW",
+        automationStalled: true,
+        parkedUntilMaterialChange: true
+      }
+    };
+    const input = {
+      incidentId: "incident-1",
+      incidentCycle: 3,
+      incidentStatus: "NEEDS_HUMAN" as const,
+      humanReviewReason: "AUTOMATION_STALLED",
+      incidentEscalatedAt: escalatedAt,
+      escalationDeadlineAt: new Date("2026-08-10T20:00:00.000Z"),
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED" as const,
+      endpointEvents: [event]
+    };
+
+    expect(hasDurableWaitForMaterialChangeProof(input)).toBe(true);
+    expect(hasDurableAutomationStalledEndpointProof(input)).toBe(true);
+    expect(
+      getCustomerMonitoringStatus({
+        outcome: "NEEDS_ADAPTER",
+        monitoringState: input.monitoringState,
+        incidentStatus: input.incidentStatus,
+        humanReviewReason: input.humanReviewReason,
+        incidentEscalatedAt: input.incidentEscalatedAt,
+        escalationDeadlineAt: input.escalationDeadlineAt,
+        automationPlaybookExhausted: false,
+        automationStalledAtEndpoint:
+          hasDurableAutomationStalledEndpointProof(input),
+        now: parkedAt
+      })
+    ).toBe("NEEDS_HUMAN_REVIEW");
+    expect(
+      hasDurableWaitForMaterialChangeProof({
+        ...input,
+        incidentCycle: 4
+      })
+    ).toBe(false);
+    expect(
+      hasDurableWaitForMaterialChangeProof({
+        ...input,
+        endpointEvents: [
+          {
+            ...event,
+            audit: { ...event.audit, parkedUntilMaterialChange: false }
           }
         ]
       })

@@ -38,12 +38,18 @@ const prismaMocks = vi.hoisted(() => ({
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import {
+  getMaterialProviderEvidenceChanges,
+  recordCourseMonitoringFailure,
   recordCourseMonitoringFinalClassification,
   recordCourseMonitoringPlaybookTransition,
   recordCourseMonitoringSuccess,
   revalidateCourseMonitoringForProviderEvidenceChange,
+  revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
   revalidateHumanReviewCoursesForDeployment,
 } from "./course-monitoring";
+import { parkCourseSupportCandidatesForMaterialChange } from "./course-support-batches";
+import type { CourseSupportCandidate } from "./course-support-selection";
+import { buildProviderFailureFingerprint } from "./provider-capabilities";
 
 describe("course monitoring write serialization", () => {
   beforeEach(() => {
@@ -152,6 +158,727 @@ describe("course monitoring write serialization", () => {
     });
   });
 
+  it("closes an unclaimed parked human incident when fresh monitoring succeeds", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    const succeededAt = new Date("2026-07-27T15:46:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-parked",
+      status: "NEEDS_HUMAN",
+      activeBatchId: null,
+      revision: 9,
+    });
+
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "MATCH_FOUND",
+      now: succeededAt,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        id: "incident-parked",
+        status: "NEEDS_HUMAN",
+        activeBatchId: null,
+        revision: 9,
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolvedAt: succeededAt,
+        resolution: "MONITORING_RESTORED",
+        nextAction: null,
+        nextAttemptAt: null,
+        nextReminderAt: null,
+      }),
+    });
+  });
+
+  it("re-reads and resolves an unclaimed incident after a stale success CAS", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    const succeededAt = new Date("2026-07-27T15:47:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        id: "incident-raced",
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: null,
+        revision: 4,
+      })
+      .mockResolvedValueOnce({
+        id: "incident-raced",
+        status: "NEEDS_HUMAN",
+        activeBatchId: null,
+        revision: 5,
+      });
+    transactionMocks.courseSupportIncident.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      now: succeededAt,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenNthCalledWith(2, {
+      where: {
+        id: "incident-raced",
+        status: "NEEDS_HUMAN",
+        activeBatchId: null,
+        revision: 5,
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolution: "MONITORING_RESTORED",
+        resolvedAt: succeededAt,
+      }),
+    });
+  });
+
+  it.each([
+    "TECHNICAL_LIMITATION_CLASSIFIED",
+    "SOURCE_UNVERIFIED",
+    "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+  ] as const)(
+    "supersedes a revalidated %s final after fresh monitoring succeeds",
+    async (resolution) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const succeededAt = new Date("2026-07-27T15:47:30.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state: "REVALIDATING_FINAL",
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: succeededAt,
+        revalidationRequestedAt: succeededAt,
+        revision: 8,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-revalidating",
+        status: "RESOLVED",
+        resolution,
+        activeBatchId: null,
+        revision: 5,
+      });
+
+      await recordCourseMonitoringSuccess({
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        now: succeededAt,
+      });
+
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).toHaveBeenCalledWith({
+        where: {
+          id: "incident-revalidating",
+          status: "RESOLVED",
+          resolution,
+          activeBatchId: null,
+          revision: 5,
+        },
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolvedAt: succeededAt,
+          resolution: "MONITORING_RESTORED",
+          nextAction: null,
+          nextAttemptAt: null,
+          nextReminderAt: null,
+        }),
+      });
+    },
+  );
+
+  it.each([
+    ["DIRECT_BOOKING_CLASSIFIED", "FINAL_MANUAL", "FINAL_MANUAL"],
+    ["IDENTITY_CLASSIFIED", "FINAL_IDENTITY", "FINAL_IDENTITY"],
+    ["DIRECT_BOOKING_CLASSIFIED", "REVALIDATING_FINAL", "FINAL_MANUAL"],
+    ["IDENTITY_CLASSIFIED", "REVALIDATING_FINAL", "FINAL_IDENTITY"],
+  ] as const)(
+    "preserves a factual %s final from %s after a success report",
+    async (resolution, currentState, expectedState) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const succeededAt = new Date("2026-07-27T15:47:45.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state: currentState,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: succeededAt,
+        revalidationRequestedAt: succeededAt,
+        revision: 8,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-factual-final",
+        status: "RESOLVED",
+        resolution,
+        activeBatchId: null,
+        revision: 5,
+      });
+
+      await recordCourseMonitoringSuccess({
+        courseId: "course-1",
+        outcome: "MATCH_FOUND",
+        now: succeededAt,
+      });
+
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringStatus.update,
+      ).toHaveBeenCalledWith({
+        where: { courseId: "course-1", revision: 8 },
+        data: {
+          state: expectedState,
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+          ...(currentState !== expectedState
+            ? { stateChangedAt: succeededAt }
+            : {}),
+          revision: { increment: 1 },
+        },
+      });
+      expect(
+        transactionMocks.courseMonitoringEvent.create.mock.calls.some(
+          ([call]) => call.data.eventType === "RECOVERED",
+        ),
+      ).toBe(false);
+      expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["FINAL_MANUAL", "FINAL_IDENTITY"] as const)(
+    "does not let a stale success override %s while a responder still owns the incident",
+    async (finalState) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const succeededAt = new Date("2026-07-27T15:47:47.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state: finalState,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        revision: 8,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-owned-final",
+        status: "AUTO_INVESTIGATING",
+        resolution: null,
+        activeBatchId: "batch-1",
+        revision: 5,
+      });
+
+      await recordCourseMonitoringSuccess({
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        now: succeededAt,
+      });
+
+      expect(
+        transactionMocks.courseMonitoringStatus.update,
+      ).toHaveBeenCalledWith({
+        where: { courseId: "course-1", revision: 8 },
+        data: {
+          state: finalState,
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+          revision: { increment: 1 },
+        },
+      });
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringEvent.create.mock.calls.some(
+          ([call]) => call.data.eventType === "RECOVERED",
+        ),
+      ).toBe(false);
+      expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("preserves a legacy factual final even when no support incident exists", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    const succeededAt = new Date("2026-07-27T15:47:48.000Z");
+    transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+      courseId: "course-1",
+      state: "FINAL_MANUAL",
+      consecutiveFailures: 0,
+      failureFingerprint: null,
+      firstDegradedAt: null,
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+      revision: 8,
+    });
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      now: succeededAt,
+    });
+
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: { courseId: "course-1", revision: 8 },
+        data: {
+          state: "FINAL_MANUAL",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+          revision: { increment: 1 },
+        },
+      },
+    );
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        incidentId: null,
+        eventType: "CHECK_SUCCEEDED",
+        toState: "FINAL_MANUAL",
+      }),
+    });
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a factual final that wins a revalidation success CAS race", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    const succeededAt = new Date("2026-07-27T15:47:50.000Z");
+    transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+      courseId: "course-1",
+      state: "REVALIDATING_FINAL",
+      consecutiveFailures: 0,
+      failureFingerprint: null,
+      firstDegradedAt: null,
+      nextAutomaticAttemptAt: succeededAt,
+      revalidationRequestedAt: succeededAt,
+      revision: 8,
+    });
+    transactionMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        id: "incident-raced-final",
+        status: "RESOLVED",
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+        activeBatchId: null,
+        revision: 5,
+      })
+      .mockResolvedValueOnce({
+        id: "incident-raced-final",
+        status: "RESOLVED",
+        resolution: "IDENTITY_CLASSIFIED",
+        activeBatchId: null,
+        revision: 6,
+      });
+    transactionMocks.courseSupportIncident.updateMany.mockResolvedValueOnce({
+      count: 0,
+    });
+
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      now: succeededAt,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-raced-final",
+        status: "RESOLVED",
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+        revision: 5,
+      }),
+      data: expect.objectContaining({ resolution: "MONITORING_RESTORED" }),
+    });
+    expect(
+      transactionMocks.courseMonitoringStatus.update,
+    ).toHaveBeenNthCalledWith(2, {
+      where: { courseId: "course-1", revision: 8 },
+      data: {
+        state: "FINAL_IDENTITY",
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        stateChangedAt: succeededAt,
+        revision: { increment: 1 },
+      },
+    });
+    expect(
+      transactionMocks.courseMonitoringEvent.create.mock.calls.some(
+        ([call]) => call.data.eventType === "RECOVERED",
+      ),
+    ).toBe(false);
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("serializes success ahead of parking and preserves the authoritative recovery", async () => {
+    prismaMocks.$transaction.mockReset();
+    const startedAt = new Date("2026-07-27T15:40:00.000Z");
+    const succeededAt = new Date("2026-07-27T15:47:00.000Z");
+    const parkingAt = new Date("2026-07-27T15:48:00.000Z");
+    let monitoringStatus = {
+      courseId: "course-1",
+      state: "AUTO_INVESTIGATING",
+      stateChangedAt: startedAt,
+      lastSuccessfulAt: null as Date | null,
+      consecutiveFailures: 2,
+      failureFingerprint: "UNSUPPORTED_FAMILY:fixture" as string | null,
+      firstDegradedAt: startedAt as Date | null,
+      nextAutomaticAttemptAt: parkingAt as Date | null,
+      revalidationRequestedAt: null as Date | null,
+      revision: 7,
+    };
+    let incident = {
+      id: "incident-race",
+      courseId: "course-1",
+      cycle: 2,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: null as string | null,
+      resolution: null as string | null,
+      resolvedAt: null as Date | null,
+      revision: 4,
+      updatedAt: startedAt,
+      failureFingerprint: "UNSUPPORTED_FAMILY:fixture",
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      earliestTargetDate: null as Date | null,
+      escalatedAt: null as Date | null,
+    };
+    const createdEvents: Array<Record<string, unknown>> = [];
+    let releaseSuccess!: () => void;
+    let markSuccessPaused!: () => void;
+    const successPaused = new Promise<void>((resolve) => {
+      markSuccessPaused = resolve;
+    });
+    const resumeSuccess = new Promise<void>((resolve) => {
+      releaseSuccess = resolve;
+    });
+    let lockTail = Promise.resolve();
+
+    prismaMocks.$transaction.mockImplementation(async (worker) => {
+      let releaseLock: (() => void) | undefined;
+      let acquired = false;
+      const transaction = {
+        ...transactionMocks,
+        $queryRawUnsafe: vi.fn(async (...args: unknown[]) => {
+          const prior = lockTail;
+          lockTail = new Promise<void>((resolve) => {
+            releaseLock = resolve;
+          });
+          await prior;
+          acquired = true;
+          await transactionMocks.$queryRawUnsafe(...args);
+          return [];
+        }),
+      };
+      try {
+        return await worker(transaction);
+      } finally {
+        if (acquired) {
+          releaseLock?.();
+        }
+      }
+    });
+    transactionMocks.courseMonitoringStatus.upsert.mockImplementation(
+      async () => ({ ...monitoringStatus }),
+    );
+    transactionMocks.courseMonitoringStatus.findUnique.mockImplementation(
+      async () => ({ ...monitoringStatus }),
+    );
+    transactionMocks.courseMonitoringStatus.update.mockImplementation(
+      async () => {
+        markSuccessPaused();
+        await resumeSuccess;
+        monitoringStatus = {
+          ...monitoringStatus,
+          state: "HEALTHY",
+          stateChangedAt: succeededAt,
+          lastSuccessfulAt: succeededAt,
+          consecutiveFailures: 0,
+          failureFingerprint: null,
+          firstDegradedAt: null,
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+          revision: monitoringStatus.revision + 1,
+        };
+        return { ...monitoringStatus };
+      },
+    );
+    transactionMocks.courseMonitoringStatus.updateMany.mockImplementation(
+      async ({ where }: { where: Record<string, unknown> }) => ({
+        count:
+          where.courseId === monitoringStatus.courseId &&
+          where.state === monitoringStatus.state &&
+          where.revision === monitoringStatus.revision
+            ? 1
+            : 0,
+      }),
+    );
+    transactionMocks.courseSupportIncident.findUnique.mockImplementation(
+      async () => ({ ...incident }),
+    );
+    transactionMocks.courseSupportIncident.updateMany.mockImplementation(
+      async ({
+        where,
+        data,
+      }: {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      }) => {
+        const matches =
+          where.id === incident.id &&
+          where.status === incident.status &&
+          where.revision === incident.revision &&
+          where.activeBatchId === incident.activeBatchId;
+        if (!matches) {
+          return { count: 0 };
+        }
+        if (data.status === "RESOLVED") {
+          incident = {
+            ...incident,
+            status: "RESOLVED",
+            resolution: "MONITORING_RESTORED",
+            resolvedAt: succeededAt,
+            revision: incident.revision + 1,
+            updatedAt: succeededAt,
+          };
+        }
+        return { count: 1 };
+      },
+    );
+    transactionMocks.courseMonitoringEvent.create.mockImplementation(
+      async ({ data }: { data: Record<string, unknown> }) => {
+        createdEvents.push(data);
+        return { id: `event-${createdEvents.length}`, ...data };
+      },
+    );
+
+    const candidate = {
+      id: incident.id,
+      courseId: incident.courseId,
+      cycle: incident.cycle,
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "fixture",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: incident.failureFingerprint,
+      humanReviewReason: null,
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      earliestTargetDate: null,
+      escalationDeadlineAt: parkingAt,
+      escalatedAt: null,
+      endpointHumanReviewProven: false,
+      firstSeenAt: startedAt,
+      lastSeenAt: startedAt,
+      lastAttemptAt: startedAt,
+      nextAttemptAt: parkingAt,
+      attemptCount: 1,
+      updatedAt: startedAt,
+      remediationRoute: {
+        workMode: "WAIT_FOR_MATERIAL_CHANGE",
+        resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: false,
+        retryBudget: null,
+        reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+      },
+    } as unknown as CourseSupportCandidate;
+
+    const success = recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      now: succeededAt,
+    });
+    await successPaused;
+    const parking = parkCourseSupportCandidatesForMaterialChange(
+      [candidate],
+      parkingAt,
+    );
+    await Promise.resolve();
+    expect(
+      transactionMocks.courseSupportIncident.findUnique,
+    ).toHaveBeenCalledTimes(1);
+    releaseSuccess();
+
+    await expect(success).resolves.toMatchObject({ state: "HEALTHY" });
+    await expect(parking).resolves.toBe(0);
+    expect(monitoringStatus).toMatchObject({
+      state: "HEALTHY",
+      lastSuccessfulAt: succeededAt,
+    });
+    expect(incident).toMatchObject({
+      status: "RESOLVED",
+      resolution: "MONITORING_RESTORED",
+      resolvedAt: succeededAt,
+    });
+    expect(createdEvents).not.toContainEqual(
+      expect.objectContaining({
+        audit: expect.objectContaining({ parkedUntilMaterialChange: true }),
+      }),
+    );
+  });
+
+  it.each([
+    ["FINAL_MANUAL", "DIRECT_BOOKING_CLASSIFIED"],
+    ["FINAL_IDENTITY", "IDENTITY_CLASSIFIED"],
+  ] as const)(
+    "retains an authoritative %s incident when a stale failure reports material change",
+    async (state, resolution) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const now = new Date("2026-07-27T15:49:00.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        revision: 8,
+      });
+      transactionMocks.courseMonitoringStatus.update.mockResolvedValue({
+        courseId: "course-1",
+        state,
+        revision: 9,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-final",
+        cycle: 3,
+        status: "RESOLVED",
+        resolution,
+        failureFingerprint: "prior-fingerprint",
+        humanReviewReason: null,
+        escalatedAt: null,
+        escalationDeadlineAt: null,
+        activeBatchId: null,
+        nextAttemptAt: null,
+        revision: 6,
+        activeRealSearchCount: 1,
+      });
+
+      const result = await recordCourseMonitoringFailure({
+        courseId: "course-1",
+        outcome: "FETCH_FAILED",
+        failureFingerprint: "new-stale-report",
+        readPath: "workflow-reader",
+        activeRealSearchCount: 1,
+        materialEvidenceChanged: true,
+        now,
+      });
+
+      expect(result).toMatchObject({
+        retainedHumanFinal: true,
+        nextAttemptAt: null,
+        status: { state },
+      });
+      expect(
+        transactionMocks.courseMonitoringStatus.update,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            state,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+          }),
+        }),
+      );
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["FINAL_MANUAL", "FINAL_IDENTITY"] as const)(
+    "retains the authoritative %s monitoring state while a responder owns the unresolved incident",
+    async (state) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const now = new Date("2026-07-27T15:49:05.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        revision: 8,
+      });
+      transactionMocks.courseMonitoringStatus.update.mockResolvedValue({
+        courseId: "course-1",
+        state,
+        revision: 9,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-owned-final",
+        cycle: 3,
+        status: "AUTO_INVESTIGATING",
+        resolution: null,
+        failureFingerprint: "prior-fingerprint",
+        humanReviewReason: null,
+        escalatedAt: null,
+        escalationDeadlineAt: null,
+        activeBatchId: "batch-1",
+        nextAttemptAt: null,
+        revision: 6,
+        activeRealSearchCount: 1,
+      });
+
+      const result = await recordCourseMonitoringFailure({
+        courseId: "course-1",
+        outcome: "FETCH_FAILED",
+        failureFingerprint: "new-stale-report",
+        readPath: "workflow-reader",
+        activeRealSearchCount: 1,
+        materialEvidenceChanged: true,
+        now,
+      });
+
+      expect(result).toMatchObject({
+        retainedHumanFinal: true,
+        nextAttemptAt: null,
+        status: { state },
+      });
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+      expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not steal responder ownership while recording success", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
@@ -254,8 +981,12 @@ describe("course monitoring write serialization", () => {
         now: classifiedAt,
       });
 
-      expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
-      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringStatus.update,
+      ).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringEvent.create,
+      ).not.toHaveBeenCalled();
       expect(
         transactionMocks.courseSupportIncident.updateMany,
       ).toHaveBeenCalledWith({
@@ -275,6 +1006,141 @@ describe("course monitoring write serialization", () => {
       });
     },
   );
+
+  it.each([
+    [
+      "TECHNICAL_LIMITATION_CLASSIFIED",
+      "FINAL_MANUAL",
+      "MANUAL_DIRECT",
+      "DIRECT_BOOKING_CLASSIFIED",
+    ],
+    [
+      "SOURCE_UNVERIFIED",
+      "FINAL_IDENTITY",
+      "IDENTITY_FINAL",
+      "IDENTITY_CLASSIFIED",
+    ],
+    [
+      "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+      "FINAL_MANUAL",
+      "MANUAL_DIRECT",
+      "DIRECT_BOOKING_CLASSIFIED",
+    ],
+  ] as const)(
+    "upgrades a resolved %s incident when fresh factual evidence proves %s",
+    async (priorResolution, state, outcome, resolution) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      const classifiedAt = new Date("2026-07-27T15:50:01.000Z");
+      transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+        courseId: "course-1",
+        state: "FINAL_TECHNICAL",
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        revision: 8,
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-technical-final",
+        status: "RESOLVED",
+        resolution: priorResolution,
+        activeBatchId: null,
+        revision: 4,
+      });
+
+      await recordCourseMonitoringFinalClassification({
+        courseId: "course-1",
+        state,
+        outcome,
+        message: "Fresh official evidence confirms the factual final state.",
+        now: classifiedAt,
+      });
+
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).toHaveBeenCalledWith({
+        where: {
+          id: "incident-technical-final",
+          status: "RESOLVED",
+          activeBatchId: null,
+          revision: 4,
+          resolution: priorResolution,
+        },
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolvedAt: classifiedAt,
+          resolution,
+          nextAttemptAt: null,
+          nextReminderAt: null,
+        }),
+      });
+    },
+  );
+
+  it("retries the incident CAS when a concurrent unowned technical update wins first", async () => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) =>
+      worker(transactionMocks),
+    );
+    const classifiedAt = new Date("2026-07-27T15:50:02.000Z");
+    transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
+      courseId: "course-1",
+      state: "FINAL_TECHNICAL",
+      consecutiveFailures: 0,
+      failureFingerprint: null,
+      firstDegradedAt: null,
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+      revision: 8,
+    });
+    transactionMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        id: "incident-technical-final",
+        status: "RESOLVED",
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+        activeBatchId: null,
+        revision: 4,
+      })
+      .mockResolvedValueOnce({
+        id: "incident-technical-final",
+        status: "RESOLVED",
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+        activeBatchId: null,
+        revision: 5,
+      });
+    transactionMocks.courseSupportIncident.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+
+    await recordCourseMonitoringFinalClassification({
+      courseId: "course-1",
+      state: "FINAL_IDENTITY",
+      outcome: "IDENTITY_FINAL",
+      message: "Fresh official evidence confirms the identity final.",
+      now: classifiedAt,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenNthCalledWith(2, {
+      where: {
+        id: "incident-technical-final",
+        status: "RESOLVED",
+        activeBatchId: null,
+        revision: 5,
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolution: "IDENTITY_CLASSIFIED",
+        resolvedAt: classifiedAt,
+      }),
+    });
+  });
 
   it("preserves active responder ownership while recording a factual final", async () => {
     prismaMocks.$transaction.mockReset();
@@ -525,13 +1391,15 @@ describe("course monitoring write serialization", () => {
     expect(updateData).not.toHaveProperty("lastAttemptAt");
   });
 
-  it("opens one deployment revalidation cycle per course and deployed SHA", async () => {
+  it("records a deployment marker without reopening unchanged human-review work", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
       worker(transactionMocks),
     );
     const now = new Date("2026-07-27T16:00:00.000Z");
-    prismaMocks.automationRun.upsert.mockResolvedValue({ startedAt: now });
+    prismaMocks.automationRun.upsert.mockResolvedValue({
+      id: `cm_deploy_${"a".repeat(40)}`,
+    });
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([
       { courseId: "course-1" },
     ]);
@@ -560,69 +1428,57 @@ describe("course monitoring write serialization", () => {
     await expect(
       revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
     ).resolves.toEqual({
-      considered: 1,
-      requeued: 1,
-      retainedAuthoritativeFinals: 0,
-    });
-    await expect(
-      revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
-    ).resolves.toEqual({
-      considered: 1,
+      considered: 0,
       requeued: 0,
       retainedAuthoritativeFinals: 0,
     });
     await expect(
       revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
     ).resolves.toEqual({
-      considered: 1,
+      considered: 0,
+      requeued: 0,
+      retainedAuthoritativeFinals: 0,
+    });
+    await expect(
+      revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
+    ).resolves.toEqual({
+      considered: 0,
       requeued: 0,
       retainedAuthoritativeFinals: 0,
     });
 
-    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(
+    expect(prismaMocks.automationRun.upsert).toHaveBeenCalledTimes(3);
+    expect(prismaMocks.automationRun.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        take: 20,
-        where: expect.objectContaining({
-          monitoringEvents: {
-            none: {
-              source: "DEPLOYMENT",
-              deploymentSha,
-              eventType: {
-                in: ["REVALIDATION_REQUESTED", "DEPLOYMENT_VERIFIED"],
-              },
-            },
-          },
+        where: { id: `cm_deploy_${deploymentSha}` },
+        create: expect.objectContaining({
+          id: `cm_deploy_${deploymentSha}`,
+          runtimeVersion: deploymentSha,
+          outcome: "deployment_observed",
+          audit: { customerDataIncluded: false },
         }),
+        update: {},
       }),
     );
-    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
-    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          cycle: { increment: 1 },
-          status: "AUTO_INVESTIGATING",
-          escalationDeadlineAt: new Date("2026-07-27T16:28:00.000Z"),
-        }),
-      }),
-    );
-    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        source: "DEPLOYMENT",
-        deploymentSha,
-        idempotencyKey: expect.stringMatching(/^course-deploy-revalidate:[a-f0-9]{64}$/),
-        audit: expect.objectContaining({ customerDataIncluded: false }),
-      }),
-    });
+    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
   });
 
-  it("opens one deployment cycle for a customer-visible automation stall", async () => {
+  it("does not treat a deployment as a material trigger for an automation stall", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
       worker(transactionMocks),
     );
     const now = new Date("2026-07-27T16:00:00.000Z");
     const deploymentSha = "c".repeat(40);
-    prismaMocks.automationRun.upsert.mockResolvedValue({ startedAt: now });
+    prismaMocks.automationRun.upsert.mockResolvedValue({
+      id: `cm_deploy_${deploymentSha}`,
+    });
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([
       { courseId: "course-stalled" },
     ]);
@@ -650,71 +1506,29 @@ describe("course monitoring write serialization", () => {
     await expect(
       revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
     ).resolves.toEqual({
-      considered: 1,
-      requeued: 1,
+      considered: 0,
+      requeued: 0,
       retainedAuthoritativeFinals: 0,
     });
     await expect(
       revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
     ).resolves.toEqual({
-      considered: 1,
+      considered: 0,
       requeued: 0,
       retainedAuthoritativeFinals: 0,
     });
 
-    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          AND: expect.arrayContaining([
-            {
-              OR: [
-                { status: "NEEDS_HUMAN" },
-                {
-                  status: "AUTO_INVESTIGATING",
-                  humanReviewReason: "AUTOMATION_STALLED",
-                },
-              ],
-            },
-          ]),
-        }),
-      }),
-    );
-    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
-    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "incident-stalled",
-          cycle: 5,
-          revision: 11,
-          status: "AUTO_INVESTIGATING",
-          humanReviewReason: "AUTOMATION_STALLED",
-          activeBatchId: null,
-        }),
-        data: expect.objectContaining({
-          cycle: { increment: 1 },
-          status: "AUTO_INVESTIGATING",
-          humanReviewReason: null,
-          nextAttemptAt: now,
-          escalationDeadlineAt: new Date("2026-07-27T16:28:00.000Z"),
-        }),
-      }),
-    );
-    expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: { nextCheckAt: now, recheckRequestedAt: now },
-      }),
-    );
-    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        eventType: "REVALIDATION_REQUESTED",
-        source: "DEPLOYMENT",
-        deploymentSha,
-        audit: expect.objectContaining({ priorCycle: 5, cycle: 6 }),
-      }),
-    });
+    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
   });
 
-  it("advances beyond twenty deployment candidates without replay starvation", async () => {
+  it("does not scan or batch parked incidents after deployment", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
       worker(transactionMocks),
@@ -724,7 +1538,9 @@ describe("course monitoring write serialization", () => {
     const candidates = Array.from({ length: 25 }, (_, index) => ({
       courseId: `course-${index + 1}`,
     }));
-    prismaMocks.automationRun.upsert.mockResolvedValue({ startedAt: now });
+    prismaMocks.automationRun.upsert.mockResolvedValue({
+      id: `cm_deploy_${deploymentSha}`,
+    });
     prismaMocks.courseSupportIncident.findMany
       .mockResolvedValueOnce(candidates.slice(0, 20))
       .mockResolvedValueOnce(candidates.slice(20));
@@ -758,40 +1574,26 @@ describe("course monitoring write serialization", () => {
     await expect(
       revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
     ).resolves.toEqual({
-      considered: 20,
-      requeued: 20,
+      considered: 0,
+      requeued: 0,
       retainedAuthoritativeFinals: 0,
     });
     await expect(
       revalidateHumanReviewCoursesForDeployment({ deploymentSha, now }),
     ).resolves.toEqual({
-      considered: 5,
-      requeued: 4,
-      retainedAuthoritativeFinals: 1,
+      considered: 0,
+      requeued: 0,
+      retainedAuthoritativeFinals: 0,
     });
 
-    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        take: 20,
-        where: expect.objectContaining({
-          monitoringEvents: {
-            none: expect.objectContaining({ deploymentSha }),
-          },
-        }),
-      }),
-    );
-    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(24);
-    expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledTimes(24);
-    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(25);
-    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        eventType: "DEPLOYMENT_VERIFIED",
-        fromState: "FINAL_MANUAL",
-        toState: "FINAL_MANUAL",
-        deploymentSha,
-      }),
-    });
+    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
   });
 
   it("opens a fresh playbook cycle and queues real searches when provider metadata changes during human review", async () => {
@@ -801,6 +1603,9 @@ describe("course monitoring write serialization", () => {
       cycle: 4,
       revision: 9,
       status: "NEEDS_HUMAN",
+      kind: "FETCH_FAILED",
+      providerFamilyKey: "CPS",
+      failureClass: "CHALLENGE",
       activeBatchId: null,
       activeRealSearchCount: 2,
       failureFingerprint: "CPS:CHALLENGE",
@@ -833,7 +1638,9 @@ describe("course monitoring write serialization", () => {
       searchesQueued: 2,
     });
 
-    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           id: "incident-1",
@@ -848,7 +1655,9 @@ describe("course monitoring write serialization", () => {
         }),
       }),
     );
-    expect(transactionMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith({
+    expect(
+      transactionMocks.courseMonitoringStatus.updateMany,
+    ).toHaveBeenCalledWith({
       where: {
         courseId: "course-1",
         revision: 6,
@@ -856,6 +1665,8 @@ describe("course monitoring write serialization", () => {
       },
       data: {
         state: "AUTO_INVESTIGATING",
+        failureFingerprint: "CPS:CHALLENGE",
+        firstDegradedAt: now,
         nextAutomaticAttemptAt: now,
         revalidationRequestedAt: now,
         stateChangedAt: now,
@@ -866,7 +1677,9 @@ describe("course monitoring write serialization", () => {
       data: expect.objectContaining({
         eventType: "REVALIDATION_REQUESTED",
         source: "COURSE_SUPPORT_RESPONDER",
-        idempotencyKey: expect.stringMatching(/^course-provider-evidence-revalidate:/u),
+        idempotencyKey: expect.stringMatching(
+          /^course-provider-evidence-revalidate:/u,
+        ),
         audit: expect.objectContaining({
           priorCycle: 4,
           cycle: 5,
@@ -875,9 +1688,559 @@ describe("course monitoring write serialization", () => {
         }),
       }),
     });
-    const event = transactionMocks.courseMonitoringEvent.create.mock.calls.at(-1)?.[0];
+    const event =
+      transactionMocks.courseMonitoringEvent.create.mock.calls.at(-1)?.[0];
     expect(JSON.stringify(event)).not.toContain("tenant");
   });
+
+  it("re-reads an eligible parked incident after a stale provider-evidence CAS", async () => {
+    const now = new Date("2026-08-11T13:02:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        id: "incident-provider-race",
+        cycle: 4,
+        revision: 9,
+        status: "NEEDS_HUMAN",
+        kind: "FETCH_FAILED",
+        providerFamilyKey: "CPS",
+        failureClass: "CHALLENGE",
+        activeBatchId: null,
+        activeRealSearchCount: 2,
+        failureFingerprint: "CPS:CHALLENGE",
+        humanReviewReason: "AUTOMATION_STALLED",
+        resolution: null,
+      })
+      .mockResolvedValueOnce({
+        id: "incident-provider-race",
+        cycle: 4,
+        revision: 10,
+        status: "NEEDS_HUMAN",
+        kind: "FETCH_FAILED",
+        providerFamilyKey: "CPS",
+        failureClass: "CHALLENGE",
+        activeBatchId: null,
+        activeRealSearchCount: 2,
+        failureFingerprint: "CPS:CHALLENGE",
+        humanReviewReason: "AUTOMATION_STALLED",
+        resolution: null,
+      });
+    transactionMocks.courseSupportIncident.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "ENGINEERING_VERIFICATION_NEEDED",
+      revision: 6,
+    });
+    transactionMocks.teeSearch.updateMany.mockResolvedValue({ count: 2 });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: { bookingMetadata: { parserVersion: 1 } },
+        after: { bookingMetadata: { parserVersion: 2 } },
+        source: "OPERATOR_CLI",
+        now,
+      }),
+    ).resolves.toEqual({
+      outcome: "REQUEUED",
+      changedFields: ["bookingMetadata"],
+      searchesQueued: 2,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-provider-race",
+          cycle: 4,
+          revision: 10,
+          activeBatchId: null,
+        }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          status: "AUTO_INVESTIGATING",
+          attemptCount: 0,
+          nextAttemptAt: now,
+        }),
+      }),
+    );
+    expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it("continues the unowned reopen when batch ownership ends during a provider-evidence CAS", async () => {
+    const now = new Date("2026-08-11T13:03:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        id: "incident-owner-race",
+        cycle: 4,
+        revision: 9,
+        status: "AUTO_INVESTIGATING",
+        kind: "NEEDS_ADAPTER",
+        providerFamilyKey: "CPS",
+        failureClass: "MISSING_METADATA",
+        activeBatchId: "batch-1",
+        activeRealSearchCount: 1,
+        failureFingerprint: "CPS:MISSING_METADATA",
+        humanReviewReason: null,
+        resolution: null,
+        activeBatch: {
+          status: "IMPLEMENTING",
+          releaseSha: null,
+          deployedAt: null,
+          recheckDispatchedAt: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        id: "incident-owner-race",
+        cycle: 4,
+        revision: 10,
+        status: "NEEDS_HUMAN",
+        kind: "NEEDS_ADAPTER",
+        providerFamilyKey: "CPS",
+        failureClass: "MISSING_METADATA",
+        activeBatchId: null,
+        activeRealSearchCount: 1,
+        failureFingerprint: "CPS:MISSING_METADATA",
+        humanReviewReason: "AUTOMATION_STALLED",
+        resolution: null,
+        activeBatch: null,
+      });
+    transactionMocks.courseSupportIncident.updateMany
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "ENGINEERING_VERIFICATION_NEEDED",
+      revision: 6,
+    });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: { detectedBookingUrl: "https://old.example/booking" },
+        after: { detectedBookingUrl: "https://new.example/booking" },
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "REQUEUED",
+      changedFields: ["detectedBookingUrl"],
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenNthCalledWith(1, {
+      where: {
+        id: "incident-owner-race",
+        cycle: 4,
+        revision: 9,
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: "batch-1",
+      },
+      data: {
+        lastSeenAt: now,
+        revision: { increment: 1 },
+      },
+    });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-owner-race",
+          revision: 10,
+          activeBatchId: null,
+        }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          status: "AUTO_INVESTIGATING",
+        }),
+      }),
+    );
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  it("preserves a factual winner after a stale provider-evidence reopen CAS", async () => {
+    const now = new Date("2026-08-11T13:04:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        id: "incident-factual-race",
+        cycle: 4,
+        revision: 9,
+        status: "NEEDS_HUMAN",
+        kind: "FETCH_FAILED",
+        providerFamilyKey: "CPS",
+        failureClass: "CHALLENGE",
+        activeBatchId: null,
+        activeRealSearchCount: 1,
+        failureFingerprint: "CPS:CHALLENGE",
+        humanReviewReason: "AUTOMATION_STALLED",
+        resolution: null,
+      })
+      .mockResolvedValueOnce({
+        id: "incident-factual-race",
+        cycle: 4,
+        revision: 10,
+        status: "RESOLVED",
+        kind: "FETCH_FAILED",
+        providerFamilyKey: "CPS",
+        failureClass: "CHALLENGE",
+        activeBatchId: null,
+        activeRealSearchCount: 1,
+        failureFingerprint: "CPS:CHALLENGE",
+        humanReviewReason: null,
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+      });
+    transactionMocks.courseSupportIncident.updateMany.mockResolvedValueOnce({
+      count: 0,
+    });
+    transactionMocks.courseMonitoringStatus.findUnique
+      .mockResolvedValueOnce({
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        revision: 6,
+      })
+      .mockResolvedValueOnce({
+        state: "FINAL_MANUAL",
+        revision: 7,
+      });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: { bookingAccessMode: "UNKNOWN" },
+        after: { bookingAccessMode: "PUBLIC_SIGNED_OUT" },
+        source: "OPERATOR_CLI",
+        now,
+      }),
+    ).resolves.toEqual({
+      outcome: "AUTHORITATIVE_FINAL_PRESERVED",
+      changedFields: ["bookingAccessMode"],
+      searchesQueued: 0,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      transactionMocks.courseMonitoringStatus.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        incidentId: "incident-factual-race",
+        fromState: "FINAL_MANUAL",
+        toState: "FINAL_MANUAL",
+        audit: expect.objectContaining({ authoritativeFinalRetained: true }),
+      }),
+    });
+  });
+
+  it("aborts after repeated eligible provider-evidence CAS misses", async () => {
+    const now = new Date("2026-08-11T13:04:30.000Z");
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-provider-conflict",
+      cycle: 4,
+      revision: 9,
+      status: "NEEDS_HUMAN",
+      kind: "FETCH_FAILED",
+      providerFamilyKey: "CPS",
+      failureClass: "CHALLENGE",
+      activeBatchId: null,
+      activeRealSearchCount: 1,
+      failureFingerprint: "CPS:CHALLENGE",
+      humanReviewReason: "AUTOMATION_STALLED",
+      resolution: null,
+    });
+    transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 0,
+    });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "ENGINEERING_VERIFICATION_NEEDED",
+      revision: 6,
+    });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transactionMocks as never,
+        {
+          courseId: "course-1",
+          before: { bookingMetadata: { parserVersion: 1 } },
+          after: { bookingMetadata: { parserVersion: 2 } },
+          source: "OPERATOR_CLI",
+          now,
+        },
+      ),
+    ).rejects.toThrow(
+      "Course provider-evidence revalidation write conflict while opening a fresh cycle.",
+    );
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledTimes(3);
+    expect(
+      transactionMocks.courseMonitoringStatus.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("reopens a resolved technical final under the current provider family when material evidence changes", async () => {
+    const now = new Date("2026-08-11T13:05:00.000Z");
+    const nextFailureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "FOREUP",
+      failureClass: "UNSUPPORTED_FAMILY",
+      operation: "METADATA",
+      httpStatus: null,
+    });
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-technical-final",
+      cycle: 4,
+      revision: 9,
+      status: "RESOLVED",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "TENFORE",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: "old-family-fingerprint",
+      activeBatchId: null,
+      activeRealSearchCount: 1,
+      humanReviewReason: null,
+      resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+    });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "FINAL_TECHNICAL",
+      revision: 6,
+    });
+    transactionMocks.teeSearch.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: { providerFamilyKey: "TENFORE" },
+        after: { providerFamilyKey: "FOREUP" },
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      }),
+    ).resolves.toEqual({
+      outcome: "REQUEUED",
+      changedFields: ["providerFamilyKey"],
+      searchesQueued: 1,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        id: "incident-technical-final",
+        cycle: 4,
+        revision: 9,
+        activeBatchId: null,
+        status: "RESOLVED",
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+      },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        providerFamilyKey: "FOREUP",
+        failureFingerprint: nextFailureFingerprint,
+        occurrenceCount: 1,
+        lastAttemptAt: null,
+        attemptCount: 0,
+        firstSeenAt: now,
+        nextAttemptAt: now,
+        resolvedAt: null,
+        resolution: null,
+        decisionAt: null,
+      }),
+    });
+    expect(
+      transactionMocks.courseMonitoringStatus.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 6,
+        state: "FINAL_TECHNICAL",
+      },
+      data: {
+        state: "AUTO_INVESTIGATING",
+        failureFingerprint: nextFailureFingerprint,
+        firstDegradedAt: now,
+        nextAutomaticAttemptAt: now,
+        revalidationRequestedAt: now,
+        stateChangedAt: now,
+        revision: { increment: 1 },
+      },
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        failureFingerprint: nextFailureFingerprint,
+        audit: expect.objectContaining({
+          priorCycle: 4,
+          cycle: 5,
+          reason: "TECHNICAL_FINAL_PROVIDER_EVIDENCE_CHANGED",
+          priorProviderFamilyKey: "TENFORE",
+          providerFamilyKey: "FOREUP",
+          providerFamilyChanged: true,
+        }),
+      }),
+    });
+  });
+
+  it("uses the execution fingerprint fields as the material-change projection", () => {
+    expect(
+      getMaterialProviderEvidenceChanges(
+        {
+          timeZone: "America/New_York",
+          bookingWindowDaysAhead: 7,
+          bookingReleaseTimeLocal: "07:00",
+          bookingWindowConfidence: 0.75,
+          bookingAccessMode: "ACCOUNT_REQUIRED",
+          isPublic: false,
+          intelligenceConfidence: 0.55,
+        },
+        {
+          timeZone: "America/Chicago",
+          bookingWindowDaysAhead: 14,
+          bookingReleaseTimeLocal: "08:00",
+          bookingWindowConfidence: 0.95,
+          bookingAccessMode: "PUBLIC_SIGNED_OUT",
+          isPublic: true,
+          intelligenceConfidence: 0.95,
+        },
+      ),
+    ).toEqual([
+      "timeZone",
+      "bookingWindowDaysAhead",
+      "bookingReleaseTimeLocal",
+      "bookingWindowConfidence",
+      "bookingAccessMode",
+      "isPublic",
+      "intelligenceConfidence",
+    ]);
+  });
+
+  it.each([
+    {
+      label: "private-course confidence",
+      before: {
+        isPublic: false,
+        intelligenceVerifiedAt: new Date("2026-08-10T13:15:00.000Z"),
+        intelligenceReviewAt: new Date("2026-09-10T13:15:00.000Z"),
+        intelligenceConfidence: 0.55,
+      },
+      after: {
+        isPublic: false,
+        intelligenceVerifiedAt: new Date("2026-08-10T13:15:00.000Z"),
+        intelligenceReviewAt: new Date("2026-09-10T13:15:00.000Z"),
+        intelligenceConfidence: 0.95,
+      },
+      changedField: "intelligenceConfidence",
+    },
+    {
+      label: "public-access classification",
+      before: {
+        isPublic: false,
+        intelligenceVerifiedAt: new Date("2026-08-10T13:15:00.000Z"),
+        intelligenceReviewAt: new Date("2026-09-10T13:15:00.000Z"),
+        intelligenceConfidence: 0.95,
+      },
+      after: {
+        isPublic: true,
+        intelligenceVerifiedAt: new Date("2026-08-10T13:15:00.000Z"),
+        intelligenceReviewAt: new Date("2026-09-10T13:15:00.000Z"),
+        intelligenceConfidence: 0.95,
+      },
+      changedField: "isPublic",
+    },
+  ] as const)(
+    "reopens parked work when only $label changes",
+    async ({ before, after, changedField }) => {
+      const now = new Date("2026-08-11T13:15:00.000Z");
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-private-recheck",
+        cycle: 6,
+        revision: 11,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null,
+        activeRealSearchCount: 1,
+        failureFingerprint: "IDENTITY:RECHECK",
+        humanReviewReason: "AUTOMATION_STALLED",
+        resolution: null,
+      });
+      transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        revision: 5,
+      });
+      transactionMocks.teeSearch.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        revalidateCourseMonitoringForProviderEvidenceChange({
+          courseId: "course-1",
+          before,
+          after,
+          source: "COURSE_SUPPORT_RESPONDER",
+          now,
+        }),
+      ).resolves.toEqual({
+        outcome: "REQUEUED",
+        changedFields: [changedField],
+        searchesQueued: 1,
+      });
+
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "incident-private-recheck",
+            cycle: 6,
+            revision: 11,
+            activeBatchId: null,
+          }),
+          data: expect.objectContaining({
+            cycle: { increment: 1 },
+            status: "AUTO_INVESTIGATING",
+            nextAttemptAt: now,
+          }),
+        }),
+      );
+      expect(
+        transactionMocks.courseMonitoringStatus.updateMany,
+      ).toHaveBeenCalledWith({
+        where: {
+          courseId: "course-1",
+          revision: 5,
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+        },
+        data: {
+          state: "AUTO_INVESTIGATING",
+          failureFingerprint: "IDENTITY:RECHECK",
+          firstDegradedAt: now,
+          nextAutomaticAttemptAt: now,
+          revalidationRequestedAt: now,
+          stateChangedAt: now,
+          revision: { increment: 1 },
+        },
+      });
+      expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
+        where: {
+          status: "ACTIVE",
+          trafficClass: { notIn: ["AUTOMATION", "TEST"] },
+          preferences: { some: { courseId: "course-1" } },
+        },
+        data: { nextCheckAt: now, recheckRequestedAt: now },
+      });
+    },
+  );
 
   it("queues one fresh real-search recheck when material provider evidence changes after batch dispatch", async () => {
     const now = new Date("2026-08-11T13:30:00.000Z");
@@ -955,7 +2318,9 @@ describe("course monitoring write serialization", () => {
         recheckRequestedAt: null,
       },
     });
-    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(
+      1,
+    );
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         incidentId: "incident-1",
@@ -972,6 +2337,73 @@ describe("course monitoring write serialization", () => {
         }),
       }),
     });
+  });
+
+  it("invalidates active-batch proof when material provider evidence changes before dispatch", async () => {
+    const now = new Date("2026-08-11T13:45:00.000Z");
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-owned-material-change",
+      cycle: 3,
+      revision: 7,
+      status: "AUTO_INVESTIGATING",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "TENFORE",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: "claimed-family-fingerprint",
+      activeBatchId: "batch-1",
+      activeRealSearchCount: 1,
+      humanReviewReason: null,
+      resolution: null,
+      activeBatch: {
+        status: "CLAIMED",
+        releaseSha: null,
+        deployedAt: null,
+        recheckDispatchedAt: null,
+      },
+    });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "AUTO_INVESTIGATING",
+      revision: 5,
+    });
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: { providerFamilyKey: "TENFORE" },
+        after: { providerFamilyKey: "FOREUP" },
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      }),
+    ).resolves.toEqual({
+      outcome: "NOT_ACTIONABLE",
+      changedFields: ["providerFamilyKey"],
+      searchesQueued: 0,
+    });
+
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenCalledWith({
+      where: {
+        id: "incident-owned-material-change",
+        cycle: 3,
+        revision: 7,
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: "batch-1",
+      },
+      data: {
+        lastSeenAt: now,
+        revision: { increment: 1 },
+      },
+    });
+    const freshnessWrite =
+      transactionMocks.courseSupportIncident.updateMany.mock.calls.at(-1)?.[0]
+        ?.data;
+    expect(freshnessWrite).not.toHaveProperty("providerFamilyKey");
+    expect(freshnessWrite).not.toHaveProperty("failureFingerprint");
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
   });
 
   it("immediately restarts an automation-stalled cycle when access and monitoring evidence changes", async () => {
@@ -1008,7 +2440,7 @@ describe("course monitoring write serialization", () => {
       }),
     ).resolves.toMatchObject({
       outcome: "REQUEUED",
-      changedFields: ["bookingAccessMode", "monitoringMode"],
+      changedFields: ["monitoringMode", "bookingAccessMode"],
     });
 
     expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
@@ -1056,58 +2488,105 @@ describe("course monitoring write serialization", () => {
     });
 
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
-    expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not reopen parked work for a timestamp-only evidence refresh", async () => {
+    const now = new Date("2026-08-11T15:30:00.000Z");
+
+    await expect(
+      revalidateCourseMonitoringForProviderEvidenceChange({
+        courseId: "course-1",
+        before: {
+          intelligenceVerifiedAt: new Date("2026-08-10T00:00:00.000Z"),
+          intelligenceReviewAt: new Date("2026-09-10T00:00:00.000Z"),
+          bookingWindowCheckedAt: new Date("2026-08-10T01:00:00.000Z"),
+          bookingWindowObservedAt: new Date("2026-08-10T01:00:00.000Z"),
+        },
+        after: {
+          intelligenceVerifiedAt: now,
+          intelligenceReviewAt: new Date("2026-09-11T00:00:00.000Z"),
+          bookingWindowCheckedAt: now,
+          bookingWindowObservedAt: now,
+        },
+        source: "COURSE_SUPPORT_RESPONDER",
+        now,
+      }),
+    ).resolves.toEqual({
+      outcome: "IMMATERIAL",
+      changedFields: [],
+      searchesQueued: 0,
+    });
+
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
     expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
   });
 
   it.each([
     ["FINAL_MANUAL", "DIRECT_BOOKING_CLASSIFIED"],
     ["FINAL_IDENTITY", "IDENTITY_CLASSIFIED"],
-  ])("preserves authoritative %s when provider evidence changes", async (state, resolution) => {
-    const now = new Date("2026-08-11T16:00:00.000Z");
-    prismaMocks.$transaction.mockReset();
-    prismaMocks.$transaction.mockImplementation(async (worker) =>
-      worker(transactionMocks),
-    );
-    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
-      id: "incident-final",
-      cycle: 2,
-      revision: 5,
-      status: "RESOLVED",
-      activeBatchId: null,
-      activeRealSearchCount: 1,
-      failureFingerprint: "FACTUAL:FINAL",
-      humanReviewReason: null,
-      resolution,
-    });
-    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
-      state,
-      revision: 8,
-    });
+  ])(
+    "preserves authoritative %s when provider evidence changes",
+    async (state, resolution) => {
+      const now = new Date("2026-08-11T16:00:00.000Z");
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) =>
+        worker(transactionMocks),
+      );
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-final",
+        cycle: 2,
+        revision: 5,
+        status: "RESOLVED",
+        activeBatchId: null,
+        activeRealSearchCount: 1,
+        failureFingerprint: "FACTUAL:FINAL",
+        humanReviewReason: null,
+        resolution,
+      });
+      transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+        state,
+        revision: 8,
+      });
 
-    await expect(
-      revalidateCourseMonitoringForProviderEvidenceChange({
-        courseId: "course-1",
-        before: { detectedBookingUrl: "https://old.example/booking" },
-        after: { detectedBookingUrl: "https://new.example/booking" },
-        source: "OPERATOR_CLI",
-        now,
-      }),
-    ).resolves.toMatchObject({
-      outcome: "AUTHORITATIVE_FINAL_PRESERVED",
-      searchesQueued: 0,
-    });
+      await expect(
+        revalidateCourseMonitoringForProviderEvidenceChange({
+          courseId: "course-1",
+          before: { detectedBookingUrl: "https://old.example/booking" },
+          after: { detectedBookingUrl: "https://new.example/booking" },
+          source: "OPERATOR_CLI",
+          now,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "AUTHORITATIVE_FINAL_PRESERVED",
+        searchesQueued: 0,
+      });
 
-    expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
-    expect(transactionMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
-    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
-    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        fromState: state,
-        toState: state,
-        idempotencyKey: expect.stringMatching(/^course-provider-evidence-revalidate:/u),
-        audit: expect.objectContaining({ authoritativeFinalRetained: true }),
-      }),
-    });
-  });
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringStatus.updateMany,
+      ).not.toHaveBeenCalled();
+      expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringEvent.create,
+      ).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          fromState: state,
+          toState: state,
+          idempotencyKey: expect.stringMatching(
+            /^course-provider-evidence-revalidate:/u,
+          ),
+          audit: expect.objectContaining({ authoritativeFinalRetained: true }),
+        }),
+      });
+    },
+  );
 });

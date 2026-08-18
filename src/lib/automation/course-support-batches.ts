@@ -9,6 +9,7 @@ import type {
   CourseSupportBatchStatus,
   CourseSupportFailureClass,
   CourseSupportIncidentKind,
+  CourseSupportResolution,
   GooglePlaceAccessOverride,
   ProbeOutcome
 } from "@prisma/client";
@@ -25,11 +26,30 @@ import {
   scheduleCourseSupportVerificationRequests
 } from "./course-support-verification";
 import {
+  AUTOMATION_PLAYBOOK_STAGES,
   assessAutomationPlaybook,
   isAutomationHumanReviewProofCurrentOrPrior,
-  isAutomationPlaybookExhausted
+  isAutomationPlaybookExhausted,
+  parseAutomationPlaybookLedger,
+  type AutomationPlaybookStage
 } from "./course-monitoring-playbook";
-import { getHumanReviewRetryAt, inferHumanReviewReason } from "./course-monitoring";
+import {
+  COURSE_SUPPORT_REMEDIATION_WORK_MODES,
+  DEFAULT_COURSE_SUPPORT_TRANSIENT_RETRY_BUDGET,
+  getCourseSupportRemediationDirective,
+  routeCourseSupportRemediation,
+  type ActionableCourseSupportRemediationWorkMode,
+  type CourseSupportRemediationAttemptSignature,
+  type CourseSupportRemediationDirective,
+  type CourseSupportRemediationRetryBudget,
+  type CourseSupportRemediationRoute
+} from "./course-support-remediation-routing";
+import {
+  getCourseMonitoringEscalationDeadline,
+  getHumanReviewRetryAt,
+  inferHumanReviewReason,
+  runSerializedCourseMonitoringWrite
+} from "./course-monitoring";
 import { enqueueRemediatedCourseRechecks } from "./search-recheck-queue";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
@@ -61,6 +81,10 @@ import {
   type CourseSupportCandidate,
   type SelectedCourseSupportBatch
 } from "./course-support-selection";
+import {
+  MONITORING_STRATEGY_ACTIONS,
+  type MonitoringStrategyAction
+} from "./monitoring-strategy";
 
 export {
   selectCourseSupportBatch,
@@ -78,6 +102,7 @@ const SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT = 4;
 const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS = 3;
 const COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS = 25;
+const COURSE_SUPPORT_SERIALIZABLE_TRANSACTION_TIMEOUT_MS = 15_000;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
 // Keep long-lived Codex ownership aligned with the global provider I/O limit.
 // Additional owners cannot make provider progress and can starve unrelated
@@ -87,13 +112,22 @@ const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
   "HTTP_5XX",
   "TIMEOUT",
-  "NETWORK",
-  "SCHEMA",
-  "UNKNOWN",
+  "NETWORK"
+]);
+const COURSE_SUPPORT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "MISSING_SOURCE",
   "MISSING_METADATA",
   "UNSUPPORTED_FAMILY",
-  "READER_PARSER_MISSING"
+  "READER_PARSER_MISSING",
+  "AUTH",
+  "RATE_LIMIT",
+  "CHALLENGE",
+  "NOT_FOUND",
+  "HTTP_5XX",
+  "TIMEOUT",
+  "NETWORK",
+  "SCHEMA",
+  "UNKNOWN"
 ]);
 const SUCCESSFUL_PROBE_OUTCOMES = new Set<ProbeOutcome>(["MATCH_FOUND", "NO_MATCH"]);
 const FINAL_AUTOMATION_REASONS = new Set<AutomationReason>([
@@ -149,6 +183,7 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
   bookingWindowDaysAhead: true,
   bookingReleaseTimeLocal: true,
   bookingWindowSource: true,
+  bookingWindowConfidence: true,
   bookingWindowEvidenceUrl: true,
   automationEligibility: true,
   automationReason: true,
@@ -162,7 +197,19 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
     select: {
       state: true,
       lastSuccessfulAt: true,
+      failureFingerprint: true,
+      nextAutomaticAttemptAt: true,
       revision: true
+    }
+  },
+  monitoringEvents: {
+    where: { eventType: "CHECK_FAILED" },
+    orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+    take: 1,
+    select: {
+      failureFingerprint: true,
+      occurredAt: true,
+      audit: true
     }
   }
 } satisfies Prisma.CourseSelect;
@@ -448,7 +495,8 @@ function runCourseSupportSerializableTransactionWithRetry<T>(
 ) {
   return withCourseSupportWriteConflictRetry(() =>
     prisma.$transaction(operation, {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: COURSE_SUPPORT_SERIALIZABLE_TRANSACTION_TIMEOUT_MS
     })
   );
 }
@@ -505,7 +553,7 @@ export async function renewCourseSupportBatchOperationLease(input: {
   if (!batch) {
     return operationLeaseRenewalResult(null);
   }
-  if (courseSupportBatchOwnsCheckout(batch)) {
+  if (courseSupportBatchReservesCheckout(batch)) {
     const transition = await runWithCourseSupportWriterTransitionLease(() =>
       runCourseSupportTransactionWithRetry(async (transaction) => {
         const databaseNow = await getCourseSupportDatabaseNow(transaction);
@@ -523,7 +571,7 @@ export async function renewCourseSupportBatchOperationLease(input: {
             summary: true
           }
         });
-        if (!current || !courseSupportBatchOwnsCheckout(current)) {
+        if (!current || !courseSupportBatchReservesCheckout(current)) {
           return null;
         }
         const otherActiveBatches = await transaction.courseSupportBatch.findMany({
@@ -534,7 +582,7 @@ export async function renewCourseSupportBatchOperationLease(input: {
           },
           select: { status: true, summary: true }
         });
-        if (otherActiveBatches.some((candidate) => courseSupportBatchOwnsCheckout(candidate))) {
+        if (otherActiveBatches.some((candidate) => courseSupportBatchReservesCheckout(candidate))) {
           return null;
         }
         const leaseExpiresAt = new Date(
@@ -600,6 +648,400 @@ export async function resolveCourseSupportBatchReference(reference: string) {
   return batch.id;
 }
 
+type PersistedCourseSupportRemediationAttempt = {
+  courseRef: string;
+  providerSnapshotFingerprint: string;
+  failureFingerprint: string;
+  runtimeVersion: string;
+  activeRealSearchCount: number;
+  consumed: boolean;
+  approach: CourseSupportRemediationAttemptSignature | null;
+};
+
+const COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET = 2;
+const COURSE_SUPPORT_OPERATIONAL_RETRY_DELAY_MS = 60 * 1000;
+
+function createCourseSupportRemediationCourseRef(courseId: string) {
+  return createHash("sha256").update(courseId).digest("hex").slice(0, 24);
+}
+
+function serializeCourseSupportRemediationRoute(route: CourseSupportRemediationRoute) {
+  return {
+    schemaVersion: 1,
+    workMode: route.workMode,
+    resumeWorkMode: route.resumeWorkMode,
+    allowUnchangedRuntime: route.allowUnchangedRuntime,
+    requiresImplementationPath: route.requiresImplementationPath,
+    reason: route.reason,
+    strategyAction: route.strategy.action,
+    strategyReason: route.strategy.reason,
+    playbookStage: route.attemptSignature?.playbookStage ?? null,
+    retryBudget: route.retryBudget
+      ? {
+          maximumAttempts: route.retryBudget.maximumAttempts,
+          attemptsCompleted: route.retryBudget.attemptsCompleted,
+          attemptsRemaining: route.retryBudget.attemptsRemaining,
+          exhausted: route.retryBudget.exhausted
+        }
+      : null
+  } satisfies Prisma.InputJsonObject;
+}
+
+type PersistedCourseSupportRemediationDirective = CourseSupportRemediationDirective & {
+  allowUnchangedRuntime: boolean;
+  requiresImplementationPath: boolean;
+  reason: string | null;
+  retryBudget: CourseSupportRemediationRetryBudget | null;
+};
+
+function readCourseSupportRemediationDirective(
+  summary: unknown
+): PersistedCourseSupportRemediationDirective | null {
+  const remediation = asJsonObject(asJsonObject(summary).remediation);
+  const workMode = remediation.workMode;
+  const strategyAction = remediation.strategyAction;
+  const playbookStage = remediation.playbookStage;
+  if (
+    typeof workMode !== "string" ||
+    !COURSE_SUPPORT_REMEDIATION_WORK_MODES.includes(
+      workMode as (typeof COURSE_SUPPORT_REMEDIATION_WORK_MODES)[number]
+    ) ||
+    typeof strategyAction !== "string" ||
+    !MONITORING_STRATEGY_ACTIONS.includes(
+      strategyAction as (typeof MONITORING_STRATEGY_ACTIONS)[number]
+    ) ||
+    !(
+      playbookStage === null ||
+      (typeof playbookStage === "string" &&
+        AUTOMATION_PLAYBOOK_STAGES.includes(
+          playbookStage as (typeof AUTOMATION_PLAYBOOK_STAGES)[number]
+        ))
+    )
+  ) {
+    return null;
+  }
+  const rawRetryBudget = remediation.retryBudget;
+  const retryBudgetRecord = asJsonObject(rawRetryBudget);
+  const retryBudget =
+    rawRetryBudget !== null &&
+    Number.isInteger(retryBudgetRecord.maximumAttempts) &&
+    Number.isInteger(retryBudgetRecord.attemptsCompleted) &&
+    Number.isInteger(retryBudgetRecord.attemptsRemaining) &&
+    typeof retryBudgetRecord.exhausted === "boolean" &&
+    (retryBudgetRecord.maximumAttempts as number) > 0 &&
+    (retryBudgetRecord.attemptsCompleted as number) >= 0 &&
+    (retryBudgetRecord.attemptsRemaining as number) >= 0 &&
+    (retryBudgetRecord.attemptsRemaining as number) ===
+      Math.max(
+        0,
+        (retryBudgetRecord.maximumAttempts as number) -
+          (retryBudgetRecord.attemptsCompleted as number)
+      ) &&
+    retryBudgetRecord.exhausted ===
+      ((retryBudgetRecord.attemptsCompleted as number) >=
+        (retryBudgetRecord.maximumAttempts as number))
+      ? {
+          maximumAttempts: retryBudgetRecord.maximumAttempts as number,
+          attemptsCompleted: retryBudgetRecord.attemptsCompleted as number,
+          attemptsRemaining: retryBudgetRecord.attemptsRemaining as number,
+          exhausted: retryBudgetRecord.exhausted as boolean
+        }
+      : null;
+  return {
+    workMode: workMode as CourseSupportRemediationDirective["workMode"],
+    strategyAction: strategyAction as MonitoringStrategyAction,
+    playbookStage: playbookStage as AutomationPlaybookStage | null,
+    allowUnchangedRuntime: remediation.allowUnchangedRuntime === true,
+    requiresImplementationPath: remediation.requiresImplementationPath === true,
+    reason: typeof remediation.reason === "string" ? remediation.reason : null,
+    retryBudget
+  };
+}
+
+function assertCourseSupportImplementationVerificationReady(input: {
+  summary: Prisma.JsonValue | null;
+  baseSha: string;
+  releaseSha: string | null;
+  deployedAt: Date | null;
+}) {
+  const remediation = readCourseSupportRemediationDirective(input.summary);
+  if (!remediation?.requiresImplementationPath) {
+    return;
+  }
+  const releaseProvenance = readCourseSupportReleaseProvenance(input.summary);
+  if (
+    !hasRuntimeBearingCourseSupportPath(readBatchPlannedPaths(input.summary)) ||
+    !input.releaseSha ||
+    input.releaseSha === input.baseSha ||
+    !input.deployedAt ||
+    !releaseProvenance ||
+    releaseProvenance.toSha !== input.releaseSha ||
+    !hasRuntimeBearingCourseSupportPath(releaseProvenance.committedPaths)
+  ) {
+    throw new Error(
+      "This remediation route requires a runtime-bearing committed implementation path, a new release SHA, and deployment proof before verification."
+    );
+  }
+}
+
+function isAuthoritativeFactualCourseMonitoringState(
+  state: CourseMonitoringState | null | undefined
+) {
+  return state === "FINAL_MANUAL" || state === "FINAL_IDENTITY";
+}
+
+function getAuthoritativeMonitoringStateForResolution(
+  resolution: CourseSupportResolution | null | undefined
+): CourseMonitoringState | null {
+  switch (resolution) {
+    case "MONITORING_RESTORED":
+      return "HEALTHY";
+    case "DIRECT_BOOKING_CLASSIFIED":
+      return "FINAL_MANUAL";
+    case "IDENTITY_CLASSIFIED":
+      return "FINAL_IDENTITY";
+    case "TECHNICAL_LIMITATION_CLASSIFIED":
+    case "SOURCE_UNVERIFIED":
+    case "HUMAN_VERIFIED_TECHNICAL_LIMITATION":
+      return "FINAL_TECHNICAL";
+    default:
+      return null;
+  }
+}
+
+function parseCourseSupportRemediationApproach(
+  value: unknown
+): CourseSupportRemediationAttemptSignature | null {
+  const approach = asJsonObject(value);
+  const workMode = approach.workMode;
+  const strategyAction = approach.strategyAction;
+  const playbookStage = approach.playbookStage;
+  if (
+    typeof workMode !== "string" ||
+    workMode === "WAIT_FOR_MATERIAL_CHANGE" ||
+    !COURSE_SUPPORT_REMEDIATION_WORK_MODES.includes(
+      workMode as (typeof COURSE_SUPPORT_REMEDIATION_WORK_MODES)[number]
+    ) ||
+    typeof strategyAction !== "string" ||
+    !MONITORING_STRATEGY_ACTIONS.includes(
+      strategyAction as (typeof MONITORING_STRATEGY_ACTIONS)[number]
+    ) ||
+    !(
+      playbookStage === null ||
+      (typeof playbookStage === "string" &&
+        AUTOMATION_PLAYBOOK_STAGES.includes(
+          playbookStage as (typeof AUTOMATION_PLAYBOOK_STAGES)[number]
+        ))
+    )
+  ) {
+    return null;
+  }
+  return {
+    workMode: workMode as ActionableCourseSupportRemediationWorkMode,
+    strategyAction: strategyAction as MonitoringStrategyAction,
+    playbookStage: playbookStage as AutomationPlaybookStage | null
+  };
+}
+
+function countCourseSupportPlaybookEvents(input: {
+  attemptLedger: unknown;
+  cycle: number;
+}) {
+  return (
+    parseAutomationPlaybookLedger(input.attemptLedger)?.events.filter(
+      (event) => event.cycle === input.cycle
+    ).length ?? 0
+  );
+}
+
+function hasCourseSupportPlaybookAttemptSinceClaim(input: {
+  attemptLedger: unknown;
+  cycle: number;
+  eventCountAtClaim: unknown;
+  claimedAt: Date;
+}) {
+  const ledger = parseAutomationPlaybookLedger(input.attemptLedger);
+  if (!ledger) {
+    return false;
+  }
+  const currentCycleEvents = ledger.events.filter(
+    (event) => event.cycle === input.cycle
+  );
+  if (
+    typeof input.eventCountAtClaim === "number" &&
+    Number.isInteger(input.eventCountAtClaim) &&
+    input.eventCountAtClaim >= 0
+  ) {
+    return currentCycleEvents.length > input.eventCountAtClaim;
+  }
+  return currentCycleEvents.some(
+    (event) => new Date(event.observedAt).getTime() >= input.claimedAt.getTime()
+  );
+}
+
+function hasCurrentCourseSupportProviderExecutionProof(input: {
+  proofSnapshot: unknown;
+  baseSha: string;
+  releaseSha: string | null;
+  claimedAt: Date;
+}) {
+  const proof = asJsonObject(input.proofSnapshot);
+  const runtimeVersion =
+    typeof proof.releaseSha === "string"
+      ? proof.releaseSha
+      : typeof proof.runtimeVersion === "string"
+        ? proof.runtimeVersion
+        : null;
+  const observedAt =
+    typeof proof.observedAt === "string" ? new Date(proof.observedAt) : null;
+  return Boolean(
+    proof.providerExecution === true &&
+      runtimeVersion === (input.releaseSha ?? input.baseSha) &&
+      observedAt &&
+      Number.isFinite(observedAt.getTime()) &&
+      observedAt.getTime() >= input.claimedAt.getTime()
+  );
+}
+
+function didCourseSupportCloseoutConsumeRemediationAttempt(input: {
+  summary: unknown;
+  courseId: string;
+}) {
+  const closeout = asJsonObject(asJsonObject(input.summary).closeout);
+  const courseRef = createCourseSupportRemediationCourseRef(input.courseId);
+  const rawAttempt = Array.isArray(closeout.remediationAttempts)
+    ? closeout.remediationAttempts.find(
+        (entry) => asJsonObject(entry).courseRef === courseRef
+      )
+    : null;
+  const attempt = asJsonObject(rawAttempt);
+  if (typeof attempt.consumed === "boolean") {
+    return attempt.consumed;
+  }
+  // Backward compatibility for closeouts written before the per-course boolean
+  // was persisted. Never infer execution from an outcome label or a claimed
+  // path; only the durable technical evidence fields consume the route.
+  const executionEvidence = asJsonObject(attempt.executionEvidence);
+  return (
+    executionEvidence.deploymentRecorded === true ||
+    executionEvidence.providerAttemptRecorded === true ||
+    executionEvidence.playbookAttemptRecorded === true ||
+    executionEvidence.terminalResultRecorded === true
+  );
+}
+
+function readPersistedCourseSupportRemediationAttemptRecord(input: {
+  summary: unknown;
+  courseId: string;
+}): PersistedCourseSupportRemediationAttempt | null {
+  const closeout = asJsonObject(asJsonObject(input.summary).closeout);
+  if (!Array.isArray(closeout.remediationAttempts)) {
+    return null;
+  }
+  const courseRef = createCourseSupportRemediationCourseRef(input.courseId);
+  const raw = closeout.remediationAttempts.find(
+    (entry) => asJsonObject(entry).courseRef === courseRef
+  );
+  const record = asJsonObject(raw);
+  const providerSnapshotFingerprint = record.providerSnapshotFingerprint;
+  const failureFingerprint = record.failureFingerprint;
+  const runtimeVersion = record.runtimeVersion;
+  const activeRealSearchCount = record.activeRealSearchCount;
+  if (
+    typeof record.consumed !== "boolean" ||
+    typeof providerSnapshotFingerprint !== "string" ||
+    typeof failureFingerprint !== "string" ||
+    typeof runtimeVersion !== "string" ||
+    typeof activeRealSearchCount !== "number" ||
+    !Number.isInteger(activeRealSearchCount) ||
+    activeRealSearchCount < 0
+  ) {
+    return null;
+  }
+  return {
+    courseRef,
+    providerSnapshotFingerprint,
+    failureFingerprint,
+    runtimeVersion,
+    activeRealSearchCount,
+    consumed: record.consumed,
+    approach: parseCourseSupportRemediationApproach(record.approach)
+  };
+}
+
+function readPersistedCourseSupportRemediationAttempt(input: {
+  summary: unknown;
+  courseId: string;
+}): PersistedCourseSupportRemediationAttempt | null {
+  const attempt = readPersistedCourseSupportRemediationAttemptRecord(input);
+  return attempt &&
+    attempt.consumed &&
+    didCourseSupportCloseoutConsumeRemediationAttempt(input)
+    ? attempt
+    : null;
+}
+
+function isSameCourseSupportRemediationApproach(
+  left: CourseSupportRemediationAttemptSignature | null,
+  right: CourseSupportRemediationAttemptSignature | null
+) {
+  return Boolean(
+    left &&
+      right &&
+      left.workMode === right.workMode &&
+      left.strategyAction === right.strategyAction &&
+      left.playbookStage === right.playbookStage
+  );
+}
+
+function countCourseSupportOperationalNoProgressAttempts(input: {
+  batchIncidents: Array<{ cycle: number; batch: { summary: unknown } }>;
+  cycle: number;
+  courseId: string;
+  providerSnapshotFingerprint: string;
+  failureFingerprint: string;
+  approach: CourseSupportRemediationAttemptSignature | null;
+}) {
+  let count = 0;
+  for (const entry of input.batchIncidents.filter((candidate) => candidate.cycle === input.cycle)) {
+    const attempt = readPersistedCourseSupportRemediationAttemptRecord({
+      summary: entry.batch.summary,
+      courseId: input.courseId
+    });
+    if (
+      !attempt ||
+      attempt.consumed ||
+      attempt.providerSnapshotFingerprint !== input.providerSnapshotFingerprint ||
+      attempt.failureFingerprint !== input.failureFingerprint ||
+      !isSameCourseSupportRemediationApproach(attempt.approach, input.approach)
+    ) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function applyCourseSupportOperationalRetryBudget(input: {
+  route: CourseSupportRemediationRoute;
+  attemptsCompleted: number;
+}) {
+  if (
+    input.route.workMode === "WAIT_FOR_MATERIAL_CHANGE" ||
+    input.attemptsCompleted < COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET
+  ) {
+    return input.route;
+  }
+  return {
+    ...input.route,
+    workMode: "WAIT_FOR_MATERIAL_CHANGE" as const,
+    resumeWorkMode: input.route.workMode,
+    allowUnchangedRuntime: false,
+    requiresImplementationPath: false,
+    reason: "OPERATIONAL_RETRY_BUDGET_EXHAUSTED" as const
+  } satisfies CourseSupportRemediationRoute;
+}
+
 export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
   const batch = await prisma.courseSupportBatch.findUnique({
     where: { id: batchId },
@@ -609,6 +1051,7 @@ export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
     throw new Error("Course-support batch was not found.");
   }
   const summary = asJsonObject(batch.summary);
+  const remediationDirective = readCourseSupportRemediationDirective(summary);
   return {
     baseSha: batch.baseSha,
     releaseSha: batch.releaseSha,
@@ -617,7 +1060,8 @@ export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
       ? normalizePaths(
           summary.plannedPaths.filter((path): path is string => typeof path === "string")
         )
-      : []
+      : [],
+    remediationDirective
   };
 }
 
@@ -707,6 +1151,19 @@ export function selectCourseSupportRetryBatch(input: {
   ) {
     throw new Error("A targeted responder retry cannot bypass due critical real-demand work.");
   }
+  const remediationDirective = selectedIncidents[0]?.remediationDirective;
+  if (
+    remediationDirective &&
+    selectedIncidents.some(
+      (candidate) =>
+        JSON.stringify(candidate.remediationDirective) !==
+        JSON.stringify(remediationDirective)
+    )
+  ) {
+    throw new Error(
+      "The targeted responder retry now requires a different remediation route."
+    );
+  }
 
   return {
     providerFamilyKey: retryBatch.providerFamilyKey,
@@ -715,7 +1172,8 @@ export function selectCourseSupportRetryBatch(input: {
     fairnessReason: "TARGETED_RETRY",
     containsCriticalRealDemand: selectedIncidents.some((candidate) =>
       isCriticalRealDemand(candidate, now)
-    )
+    ),
+    ...(remediationDirective ? { remediationDirective } : {})
   };
 }
 
@@ -861,7 +1319,6 @@ export function classifyDetachedVerificationEvidence(input: {
       (evidence.disposition === "MANUAL_DIRECT" || evidence.disposition === "IDENTITY_FINAL") &&
       observedAt.getTime() >= input.deployedAt.getTime() &&
       observedAt.getTime() >= input.recheckDispatchStartedAt.getTime() &&
-      observedAt.getTime() >= input.incidentLastSeenAt.getTime() &&
       completedAt.getTime() >= observedAt.getTime()
     );
     return {
@@ -1192,6 +1649,47 @@ export type CourseSupportReleaseAdvanceProof = {
   descendantVerified: boolean;
 };
 
+type PersistedCourseSupportReleaseProvenance = CourseSupportReleaseAdvanceProof & {
+  schemaVersion: 1;
+};
+
+function normalizeCourseSupportReleaseProvenance(
+  proof: CourseSupportReleaseAdvanceProof
+): PersistedCourseSupportReleaseProvenance {
+  return {
+    schemaVersion: 1,
+    fromSha: proof.fromSha,
+    toSha: proof.toSha,
+    branch: proof.branch,
+    committedPaths: normalizeCourseSupportObservedGitPaths(proof.committedPaths),
+    descendantVerified: proof.descendantVerified
+  };
+}
+
+function readCourseSupportReleaseProvenance(
+  summary: unknown
+): PersistedCourseSupportReleaseProvenance | null {
+  const provenance = asJsonObject(asJsonObject(summary).releaseProvenance);
+  if (
+    provenance.schemaVersion !== 1 ||
+    typeof provenance.fromSha !== "string" ||
+    typeof provenance.toSha !== "string" ||
+    typeof provenance.branch !== "string" ||
+    !Array.isArray(provenance.committedPaths) ||
+    !provenance.committedPaths.every((path) => typeof path === "string") ||
+    provenance.descendantVerified !== true
+  ) {
+    return null;
+  }
+  return normalizeCourseSupportReleaseProvenance({
+    fromSha: provenance.fromSha,
+    toSha: provenance.toSha,
+    branch: provenance.branch,
+    committedPaths: provenance.committedPaths as string[],
+    descendantVerified: true
+  });
+}
+
 export function chooseCourseSupportReleaseDiffBase(input: {
   baseSha: string;
   persistedReleaseSha: string | null;
@@ -1212,6 +1710,7 @@ export function chooseCourseSupportReleaseDiffBase(input: {
 
 export function canVerifyUnchangedCourseSupportRuntime(input: {
   allowUnchangedRuntime: boolean;
+  remediationAllowsUnchangedRuntime: boolean;
   baseSha: string;
   persistedReleaseSha: string | null;
   requestedReleaseSha: string;
@@ -1219,6 +1718,7 @@ export function canVerifyUnchangedCourseSupportRuntime(input: {
 }) {
   return Boolean(
     input.allowUnchangedRuntime &&
+    input.remediationAllowsUnchangedRuntime &&
     input.persistedReleaseSha === null &&
     input.requestedReleaseSha === input.baseSha &&
     input.plannedPaths.length === 0
@@ -1706,10 +2206,10 @@ export async function claimCourseSupportBatch(input: {
         })
       };
     }
-    if (
-      plannedPaths.length > 0 &&
-      activeBatches.some((batch) => courseSupportBatchOwnsCheckout(batch))
-    ) {
+    const sharedCheckoutImplementationReserved = activeBatches.some((batch) =>
+      courseSupportBatchReservesCheckout(batch)
+    );
+    if (plannedPaths.length > 0 && sharedCheckoutImplementationReserved) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
         now,
@@ -1785,14 +2285,67 @@ export async function claimCourseSupportBatch(input: {
     const activeProviderGroups = new Set(
       activeBatches.map((batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`)
     );
-    const candidates = allCandidates.filter(
+    const providerEligibleCandidates = allCandidates.filter(
       (candidate) =>
         !activeProviderGroups.has(
           `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`
         )
     );
+    const implementationBlockedCandidates = sharedCheckoutImplementationReserved
+      ? providerEligibleCandidates.filter(
+          (candidate) => candidate.remediationRoute?.requiresImplementationPath === true
+        )
+      : [];
+    const eligibleCandidates = providerEligibleCandidates.filter(
+      (candidate) =>
+        !sharedCheckoutImplementationReserved ||
+        candidate.remediationRoute?.requiresImplementationPath !== true
+    );
     if (input.retryBatchId && !retryBatch) {
       throw new Error("The targeted responder retry batch was not found.");
+    }
+    const waitingCandidates = eligibleCandidates.filter(
+      (candidate) =>
+        candidate.remediationRoute?.workMode === "WAIT_FOR_MATERIAL_CHANGE"
+    );
+    const parkedForMaterialChangeCount = input.retryBatchId
+      ? 0
+      : await parkCourseSupportCandidatesForMaterialChange(waitingCandidates, now);
+    const candidates = eligibleCandidates.filter(
+      (candidate) =>
+        candidate.remediationRoute?.workMode !== "WAIT_FOR_MATERIAL_CHANGE"
+    );
+    const targetedRetryBlockedByCheckout = Boolean(
+      retryBatch &&
+        implementationBlockedCandidates.some((candidate) =>
+          retryBatch.incidents.some(
+            (entry) =>
+              entry.incidentId === candidate.id &&
+              entry.courseId === candidate.courseId &&
+              entry.cycle === candidate.cycle
+          )
+        )
+    );
+    if (targetedRetryBlockedByCheckout) {
+      const recorded = await recordRoutineResponderObservation({
+        outcome: "deferred_busy",
+        now,
+        summary: {
+          activeBatchCount: activeBatches.length,
+          sharedCheckoutImplementationBusy: true,
+          blockedImplementationCount: implementationBlockedCandidates.length
+        }
+      });
+      return {
+        outcome: "deferred_busy" as const,
+        durableCloseoutRecorded: recorded,
+        sharedCheckoutImplementationBusy: true,
+        parkedForMaterialChangeCount,
+        ...getResponderThreadPolicy({
+          outcome: "deferred_busy",
+          durableCloseoutRecorded: recorded
+        })
+      };
     }
     const selected = retryBatch
       ? selectCourseSupportRetryBatch({
@@ -1816,20 +2369,68 @@ export async function claimCourseSupportBatch(input: {
           now
         });
     if (!selected) {
+      const deferredForImplementation = implementationBlockedCandidates.length > 0;
+      const outcome = deferredForImplementation ? "deferred_busy" : "no_due_work";
       const recorded = await recordRoutineResponderObservation({
-        outcome: "no_due_work",
+        outcome,
         now,
-        summary: { dueIncidentCount: 0 }
+        summary: {
+          dueIncidentCount: 0,
+          parkedForMaterialChangeCount,
+          ...(deferredForImplementation
+            ? {
+                activeBatchCount: activeBatches.length,
+                sharedCheckoutImplementationBusy: true,
+                blockedImplementationCount: implementationBlockedCandidates.length
+              }
+            : {})
+        }
       });
       return {
-        outcome: "no_due_work" as const,
+        outcome,
         durableCloseoutRecorded: recorded,
+        parkedForMaterialChangeCount,
+        ...(deferredForImplementation
+          ? { sharedCheckoutImplementationBusy: true }
+          : {}),
         ...getResponderThreadPolicy({
-          outcome: "no_due_work",
+          outcome,
           durableCloseoutRecorded: recorded
         })
       };
     }
+
+    const selectedRemediationRoute = selected.incidents[0]?.remediationRoute;
+    if (!selectedRemediationRoute || !selected.remediationDirective) {
+      throw new Error(
+        "Course-support remediation routing was unavailable; no batch was claimed."
+      );
+    }
+    const playbookEventCountAtClaimByIncidentId = new Map(
+      candidates.map((candidate) => [
+        candidate.id,
+        candidate.playbookEventCountAtClaim
+      ])
+    );
+    const remediationSummary = {
+      ...serializeCourseSupportRemediationRoute(selectedRemediationRoute),
+      attempts: selected.incidents.map((incident) => ({
+        courseRef:
+          incident.remediationCourseRef ??
+          createCourseSupportRemediationCourseRef(incident.courseId),
+        providerSnapshotFingerprint: incident.providerSnapshotFingerprint ?? "unknown",
+        failureFingerprint: incident.failureFingerprint,
+        runtimeVersion: input.baseSha,
+        activeRealSearchCount: incident.activeRealSearchCount,
+        playbookEventCountAtClaim:
+          playbookEventCountAtClaimByIncidentId.get(incident.id) ?? 0,
+        reason: incident.remediationRoute?.reason ?? selectedRemediationRoute.reason,
+        approach:
+          incident.remediationRoute?.attemptSignature ??
+          selectedRemediationRoute.attemptSignature ??
+          null
+      }))
+    } satisfies Prisma.InputJsonObject;
 
     const selectedCourseIds = selected.incidents.map((incident) => incident.courseId);
     const newestProbes = await prisma.courseProbe.findMany({
@@ -1887,14 +2488,7 @@ export async function claimCourseSupportBatch(input: {
             engineeringOnly: true,
             course: {
               select: {
-                timeZone: true,
-                monitoringStatus: {
-                  select: {
-                    state: true,
-                    revision: true,
-                    lastSuccessfulAt: true
-                  }
-                },
+                ...DETACHED_VERIFICATION_COURSE_SELECT,
                 preferences: {
                   where: {
                     teeSearch: {
@@ -1919,6 +2513,15 @@ export async function claimCourseSupportBatch(input: {
           const current = currentIncidentById.get(incident.id);
           if (!current) {
             throw new Error("Course-support demand changed during claim; rerun selection.");
+          }
+          if (
+            incident.providerSnapshotFingerprint &&
+            buildCourseSupportProviderSnapshotFingerprint(current.course) !==
+              incident.providerSnapshotFingerprint
+          ) {
+            throw new Error(
+              "Course-support provider evidence changed during claim; rerun selection."
+            );
           }
           if (getAuthoritativeCourseMonitoringResolution(current.course.monitoringStatus?.state)) {
             continue;
@@ -2067,6 +2670,11 @@ export async function claimCourseSupportBatch(input: {
         const automationRun = await tx.automationRun.create({
           data: {
             promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
+            kind: "COURSE_SUPPORT",
+            status: "RUNNING",
+            runtimeVersion: input.baseSha,
+            ownerThreadId: input.ownerThreadId,
+            heartbeatAt: now,
             notes: JSON.stringify({
               schemaVersion: 1,
               lifecycle: "claimed",
@@ -2075,6 +2683,7 @@ export async function claimCourseSupportBatch(input: {
               plannedPaths,
               incidentCount: selected.incidents.length,
               fairnessReason: selected.fairnessReason,
+              remediation: remediationSummary,
               targetedRetry: Boolean(input.retryBatchId),
               ...(input.retryOrdinal !== undefined
                 ? {
@@ -2105,6 +2714,7 @@ export async function claimCourseSupportBatch(input: {
               branch: input.branch,
               plannedPaths,
               fairnessReason: selected.fairnessReason,
+              remediation: remediationSummary,
               targetedRetry: Boolean(input.retryBatchId),
               ...(input.retryOrdinal !== undefined
                 ? {
@@ -2282,6 +2892,17 @@ export async function claimCourseSupportBatch(input: {
       },
       fairnessReason: selected.fairnessReason,
       containsCriticalRealDemand: selected.containsCriticalRealDemand,
+      remediation: selected.remediationDirective
+        ? {
+            ...selected.remediationDirective,
+            allowUnchangedRuntime:
+              selected.incidents[0]?.remediationRoute?.allowUnchangedRuntime ?? false,
+            requiresImplementationPath:
+              selected.incidents[0]?.remediationRoute?.requiresImplementationPath ?? false,
+            reason: selected.incidents[0]?.remediationRoute?.reason ?? null
+          }
+        : null,
+      parkedForMaterialChangeCount,
       threadDisposition: "KEEP_VISIBLE" as const,
       archiveReason: "The claimed responder batch is still in progress."
     };
@@ -2357,7 +2978,11 @@ export async function appendCourseSupportBatchPath(input: {
         },
         select: { status: true, summary: true }
       });
-      if (otherActiveBatches.some((activeBatch) => courseSupportBatchOwnsCheckout(activeBatch))) {
+      if (
+        otherActiveBatches.some((activeBatch) =>
+          courseSupportBatchReservesCheckout(activeBatch)
+        )
+      ) {
         throw new Error(
           "Responder code changes require exclusive access to the approved checkout."
         );
@@ -2469,6 +3094,7 @@ export async function getCourseSupportBatchPacket(input: {
       providerFamilyKey: true,
       failureFingerprint: true,
       createdAt: true,
+      summary: true,
       releaseSha: true,
       deployedAt: true,
       recheckDispatchStartedAt: true,
@@ -2517,12 +3143,14 @@ export async function getCourseSupportBatchPacket(input: {
       archiveReason: "Responder batch ownership or lease freshness was lost."
     };
   }
+  const remediationDirective = readCourseSupportRemediationDirective(batch.summary);
   return {
     outcome: "ready" as const,
     batchRef: batch.reference,
     providerFamilyKey: batch.providerFamilyKey,
     failureFingerprint: batch.failureFingerprint,
     claimedAt: batch.createdAt.toISOString(),
+    remediation: remediationDirective,
     courses: orderCourseSupportBatchIncidents(batch.incidents).map((entry, index) => {
       const currentProviderSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(
         entry.course
@@ -2537,9 +3165,12 @@ export async function getCourseSupportBatchPacket(input: {
           },
           batch
         );
+      const playbook = assessAutomationPlaybook(
+        entry.incident.attemptLedger,
+        entry.cycle
+      );
       return {
         ordinal: String(index + 1).padStart(2, "0"),
-        name: entry.course.name,
         providerFamilyKey: entry.course.providerFamilyKey,
         detectedPlatform: entry.course.detectedPlatform,
         failureClass: entry.incident.failureClass,
@@ -2552,6 +3183,8 @@ export async function getCourseSupportBatchPacket(input: {
         escalationDeadlineAt: entry.incident.escalationDeadlineAt?.toISOString() ?? null,
         attemptCount: entry.incident.attemptCount,
         playbookExhausted: isAutomationPlaybookExhausted(entry.incident.attemptLedger, entry.cycle),
+        playbookConclusion: playbook.conclusion,
+        nextPlaybookStage: playbook.nextStage,
         bookingMethod: entry.course.bookingMethod,
         automationEligibility: entry.course.automationEligibility,
         automationReason: entry.course.automationReason,
@@ -2703,6 +3336,7 @@ export async function markCourseSupportBatchNeedsHuman(input: {
 }
 
 const courseSupportHeartbeatBatchSelect = {
+  baseSha: true,
   status: true,
   revision: true,
   releaseSha: true,
@@ -2764,7 +3398,7 @@ export async function heartbeatCourseSupportBatch(input: CourseSupportHeartbeatI
     };
   }
   const initialPlan = prepareCourseSupportHeartbeat(batch, input);
-  const initialWouldOwnCheckout = courseSupportBatchOwnsCheckout({
+  const initialWouldOwnCheckout = courseSupportBatchReservesCheckout({
     status: initialPlan.status,
     summary: batch.summary
   });
@@ -2786,7 +3420,7 @@ export async function heartbeatCourseSupportBatch(input: CourseSupportHeartbeatI
             return null;
           }
           const plan = prepareCourseSupportHeartbeat(current, input);
-          const wouldOwnCheckout = courseSupportBatchOwnsCheckout({
+          const wouldOwnCheckout = courseSupportBatchReservesCheckout({
             status: plan.status,
             summary: current.summary
           });
@@ -2802,7 +3436,9 @@ export async function heartbeatCourseSupportBatch(input: CourseSupportHeartbeatI
             select: { status: true, summary: true }
           });
           if (
-            otherActiveBatches.some((candidate) => courseSupportBatchOwnsCheckout(candidate))
+            otherActiveBatches.some((candidate) =>
+              courseSupportBatchReservesCheckout(candidate)
+            )
           ) {
             return null;
           }
@@ -2837,6 +3473,18 @@ function prepareCourseSupportHeartbeat(
 ) {
   const summary = asJsonObject(batch.summary);
   const plannedPaths = readBatchPlannedPaths(batch.summary);
+  const remediationDirective = readCourseSupportRemediationDirective(batch.summary);
+  if (
+    input.releaseSha &&
+    !batch.releaseSha &&
+    input.releaseSha === batch.baseSha &&
+    plannedPaths.length === 0 &&
+    remediationDirective?.allowUnchangedRuntime === false
+  ) {
+    throw new Error(
+      "This remediation route requires a reusable implementation or material change; unchanged-runtime verification is not allowed."
+    );
+  }
   const releaseTransition = assessCourseSupportReleaseTransition({
     persistedReleaseSha: batch.releaseSha,
     requestedReleaseSha: input.releaseSha,
@@ -2846,6 +3494,41 @@ function prepareCourseSupportHeartbeat(
   });
   if (releaseTransition.action === "REJECT") {
     throw new Error(releaseTransition.reasons.join(" "));
+  }
+  const releaseChanged =
+    releaseTransition.action === "INITIAL" || releaseTransition.action === "ADVANCE";
+  const releaseProvenance =
+    releaseChanged && input.releaseAdvanceProof
+      ? normalizeCourseSupportReleaseProvenance(input.releaseAdvanceProof)
+      : null;
+  if (releaseChanged && remediationDirective?.requiresImplementationPath) {
+    const expectedBranch = typeof summary.branch === "string" ? summary.branch : null;
+    const committedPaths = releaseProvenance?.committedPaths ?? [];
+    const reasons: string[] = [];
+    if (!hasRuntimeBearingCourseSupportPath(plannedPaths)) {
+      reasons.push("The implementation plan has no runtime-bearing path.");
+    }
+    if (!releaseProvenance || releaseProvenance.toSha !== input.releaseSha) {
+      reasons.push("The committed release proof does not match the requested SHA.");
+    }
+    if (!releaseProvenance?.descendantVerified) {
+      reasons.push("The committed release ancestry was not verified.");
+    }
+    if (!expectedBranch || releaseProvenance?.branch !== expectedBranch) {
+      reasons.push("The committed release branch does not match batch provenance.");
+    }
+    if (committedPaths.length === 0) {
+      reasons.push("The implementation release has no committed change.");
+    }
+    if (committedPaths.some((path) => !plannedPaths.includes(path))) {
+      reasons.push("The implementation release contains an unplanned path.");
+    }
+    if (!hasRuntimeBearingCourseSupportPath(committedPaths)) {
+      reasons.push("The implementation release has no runtime-bearing committed change.");
+    }
+    if (reasons.length > 0) {
+      throw new Error(reasons.join(" "));
+    }
   }
   const releaseAdvanced = releaseTransition.action === "ADVANCE";
   if (releaseAdvanced && input.status !== "VERIFYING") {
@@ -2858,7 +3541,8 @@ function prepareCourseSupportHeartbeat(
   }
   return {
     status: nextBatchStatus(batch.status, input.status),
-    releaseAdvanced
+    releaseAdvanced,
+    releaseProvenance
   };
 }
 
@@ -2871,6 +3555,35 @@ async function persistCourseSupportHeartbeat(
   useStrictDatabaseTime: boolean
 ) {
   const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
+  const advancedReleaseSummary =
+    plan.releaseAdvanced && batch.releaseSha && input.releaseSha
+      ? buildCourseSupportReleaseHistory({
+          summary: batch.summary,
+          previousReleaseSha: batch.releaseSha,
+          previousDeployedAt: batch.deployedAt,
+          previousRecheckDispatchKey: batch.recheckDispatchKey,
+          previousRecheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+          previousRecheckDispatchedAt: batch.recheckDispatchedAt,
+          previousIncidentVerifications: orderCourseSupportBatchIncidents(batch.incidents).map(
+            (entry, index) => ({
+              ordinal: index + 1,
+              result: entry.result,
+              message: entry.message,
+              proofSnapshot: entry.proofSnapshot,
+              verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
+              verifiedAt: entry.verifiedAt
+            })
+          ),
+          nextReleaseSha: input.releaseSha,
+          advancedAt: now
+        })
+      : null;
+  const releaseSummary = plan.releaseProvenance
+    ? {
+        ...asJsonObject(advancedReleaseSummary ?? batch.summary),
+        releaseProvenance: plan.releaseProvenance
+      }
+    : advancedReleaseSummary;
   const batchUpdated = await transaction.courseSupportBatch.updateMany({
     where: {
       id: input.batchId,
@@ -2892,29 +3605,10 @@ async function persistCourseSupportHeartbeat(
             deployedAt: null,
             recheckDispatchKey: null,
             recheckDispatchStartedAt: null,
-            recheckDispatchedAt: null,
-            summary: buildCourseSupportReleaseHistory({
-              summary: batch.summary,
-              previousReleaseSha: batch.releaseSha,
-              previousDeployedAt: batch.deployedAt,
-              previousRecheckDispatchKey: batch.recheckDispatchKey,
-              previousRecheckDispatchStartedAt: batch.recheckDispatchStartedAt,
-              previousRecheckDispatchedAt: batch.recheckDispatchedAt,
-              previousIncidentVerifications: orderCourseSupportBatchIncidents(batch.incidents).map(
-                (entry, index) => ({
-                  ordinal: index + 1,
-                  result: entry.result,
-                  message: entry.message,
-                  proofSnapshot: entry.proofSnapshot,
-                  verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
-                  verifiedAt: entry.verifiedAt
-                })
-              ),
-              nextReleaseSha: input.releaseSha,
-              advancedAt: now
-            })
+            recheckDispatchedAt: null
           }
         : {}),
+      ...(releaseSummary ? { summary: releaseSummary as Prisma.InputJsonValue } : {}),
       revision: { increment: 1 }
     }
   });
@@ -3024,10 +3718,25 @@ export async function verifyCourseSupportBatch(input: {
     };
   }
   const releaseSha = input.releaseSha ?? batch.releaseSha;
+  const deployedAt = input.deployedAt ?? batch.deployedAt;
   if (batch.releaseSha && input.releaseSha && batch.releaseSha !== input.releaseSha) {
     throw new Error("Release SHA does not match the batch's persisted release.");
   }
-  const deployedAt = input.deployedAt ?? batch.deployedAt;
+  assertCourseSupportImplementationVerificationReady({
+    summary: batch.summary,
+    baseSha: batch.baseSha,
+    releaseSha,
+    deployedAt
+  });
+  if (
+    releaseSha === batch.baseSha &&
+    readBatchPlannedPaths(batch.summary).length === 0 &&
+    readCourseSupportRemediationDirective(batch.summary)?.allowUnchangedRuntime === false
+  ) {
+    throw new Error(
+      "This remediation route requires a reusable implementation or material change; unchanged-runtime verification is not allowed."
+    );
+  }
   if (deployedAt && !releaseSha) {
     throw new Error(
       "Fresh-runtime verification requires a persisted release SHA before deployment proof."
@@ -3902,6 +4611,122 @@ type CloseoutCourseSupportBatchInput = {
   now?: Date;
 };
 
+export function shouldContinueSettledCourseSupportRemediation(input: {
+  remediationDirective: PersistedCourseSupportRemediationDirective | null;
+  failureClass: CourseSupportFailureClass;
+  attemptCount: number;
+  playbookConclusion: ReturnType<typeof assessAutomationPlaybook>["conclusion"];
+  nextPlaybookStage: AutomationPlaybookStage | null;
+}) {
+  if (TRANSIENT_FAILURE_CLASSES.has(input.failureClass)) {
+    if (input.remediationDirective?.retryBudget) {
+      // The persisted route budget was computed before this batch claimed its
+      // current attempt. Continue only when at least one attempt remains after
+      // consuming this one, including after a fresh-cycle material reopen.
+      return input.remediationDirective.retryBudget.attemptsRemaining > 1;
+    }
+    if (
+      input.remediationDirective &&
+      input.remediationDirective.strategyAction !== "RETRY_PROVIDER"
+    ) {
+      // A structural route can observe a new transient provider failure. Give
+      // that new classification one handoff so the next route can own a fresh,
+      // bounded transient budget.
+      return true;
+    }
+    return input.attemptCount < DEFAULT_COURSE_SUPPORT_TRANSIENT_RETRY_BUDGET;
+  }
+  if (input.remediationDirective?.workMode === "ADVANCE_DISCOVERY") {
+    return Boolean(
+      input.playbookConclusion === "INCOMPLETE" &&
+      input.nextPlaybookStage &&
+      input.nextPlaybookStage !== input.remediationDirective.playbookStage
+    );
+  }
+  if (input.remediationDirective) {
+    return false;
+  }
+  return false;
+}
+
+function getEffectiveCourseSupportRetryFailureClass(input: {
+  incidentFailureClass: CourseSupportFailureClass;
+  proofSnapshot: unknown;
+}) {
+  const observedFailureClass = asJsonObject(input.proofSnapshot).failureClass;
+  return typeof observedFailureClass === "string" &&
+    COURSE_SUPPORT_FAILURE_CLASSES.has(observedFailureClass as CourseSupportFailureClass)
+    ? (observedFailureClass as CourseSupportFailureClass)
+    : input.incidentFailureClass;
+}
+
+function getCurrentCourseSupportMonitoringFailureIdentity(input: {
+  incidentCycle: number;
+  incidentFailureFingerprint: string;
+  providerFamilyKey: string;
+  batchCreatedAt: Date;
+  monitoringStatus?: { failureFingerprint: string | null } | null;
+  monitoringEvents?: Array<{
+    failureFingerprint: string | null;
+    occurredAt: Date;
+    audit: Prisma.JsonValue | null;
+  }>;
+}) {
+  const failureFingerprint = input.monitoringStatus?.failureFingerprint;
+  if (
+    !failureFingerprint ||
+    failureFingerprint === input.incidentFailureFingerprint
+  ) {
+    return null;
+  }
+  const event = input.monitoringEvents?.[0];
+  const audit = asJsonObject(event?.audit);
+  const failureClass = audit.failureClass;
+  if (
+    !event ||
+    event.failureFingerprint !== failureFingerprint ||
+    event.occurredAt.getTime() < input.batchCreatedAt.getTime() ||
+    audit.cycle !== input.incidentCycle ||
+    audit.providerFamilyKey !== input.providerFamilyKey ||
+    typeof failureClass !== "string" ||
+    !COURSE_SUPPORT_FAILURE_CLASSES.has(failureClass as CourseSupportFailureClass)
+  ) {
+    return null;
+  }
+  return {
+    failureClass: failureClass as CourseSupportFailureClass,
+    failureFingerprint
+  };
+}
+
+function getEffectiveCourseSupportRetryFailureFingerprint(input: {
+  providerFamilyKey: string;
+  incidentKind: CourseSupportIncidentKind;
+  incidentFailureClass: CourseSupportFailureClass;
+  incidentFailureFingerprint: string;
+  proofSnapshot: unknown;
+}) {
+  const proof = asJsonObject(input.proofSnapshot);
+  const observedFailureClass = proof.failureClass;
+  if (
+    typeof observedFailureClass !== "string" ||
+    !COURSE_SUPPORT_FAILURE_CLASSES.has(observedFailureClass as CourseSupportFailureClass)
+  ) {
+    return input.incidentFailureFingerprint;
+  }
+  const failureClass = observedFailureClass as CourseSupportFailureClass;
+  const httpStatus =
+    typeof proof.httpStatus === "number" && Number.isInteger(proof.httpStatus)
+      ? proof.httpStatus
+      : null;
+  return buildProviderFailureFingerprint({
+    providerFamilyKey: input.providerFamilyKey,
+    failureClass,
+    operation: input.incidentKind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
+    httpStatus
+  });
+}
+
 class CourseSupportCloseoutSnapshotChangedError extends Error {
   constructor() {
     super("A course-support incident changed during closeout.");
@@ -3925,7 +4750,18 @@ async function closeoutCourseSupportBatchAttempt(
     include: {
       incidents: {
         include: {
-          incident: true,
+          incident: {
+            include: {
+              batchIncidents: {
+                where: { batch: { completedAt: { not: null } } },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                select: {
+                  cycle: true,
+                  batch: { select: { summary: true } }
+                }
+              }
+            }
+          },
           course: {
             select: DETACHED_VERIFICATION_COURSE_SELECT
           }
@@ -3945,6 +4781,23 @@ async function closeoutCourseSupportBatchAttempt(
   }
   if (batch.incidents.length === 0) {
     throw new Error("A responder batch without incident evidence cannot be closed.");
+  }
+  const remediationDirective = readCourseSupportRemediationDirective(batch.summary);
+  const changedReleaseAwaitingDeployment = Boolean(
+    batch.releaseSha && batch.releaseSha !== batch.baseSha && !batch.deployedAt
+  );
+  if (changedReleaseAwaitingDeployment) {
+    throw new Error(
+      "A changed course-support release cannot be closed before deployment; recover or adopt the active release continuation instead."
+    );
+  }
+  if (verificationWatchMode === "WATCH_SETTLED") {
+    assertCourseSupportImplementationVerificationReady({
+      summary: batch.summary,
+      baseSha: batch.baseSha,
+      releaseSha: batch.releaseSha,
+      deployedAt: batch.deployedAt
+    });
   }
 
   const currentDetachedFailureBatchIncidentIds = new Set(
@@ -3975,7 +4828,7 @@ async function closeoutCourseSupportBatchAttempt(
   const ownershipReleaseMode =
     verificationWatchMode === "EARLY_RETRY" || verificationWatchMode === "ENDPOINT";
 
-  const normalizedEntries = batch.incidents.map((entry) => {
+  const baseNormalizedEntries = batch.incidents.map((entry) => {
     const currentProviderSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(
       entry.course
     );
@@ -3987,6 +4840,10 @@ async function closeoutCourseSupportBatchAttempt(
       entry.incident.escalationDeadlineAt &&
       entry.incident.escalationDeadlineAt.getTime() <= now.getTime()
     );
+    const retryFailureClass = getEffectiveCourseSupportRetryFailureClass({
+      incidentFailureClass: entry.incident.failureClass,
+      proofSnapshot: entry.proofSnapshot
+    });
     const terminalProofIsDurable =
       entry.result === "RESTORED" || entry.result === "FINAL_DISPOSITION"
         ? isDurableTerminalProof(
@@ -4071,12 +4928,50 @@ async function closeoutCourseSupportBatchAttempt(
         entry.result === "STALE_EVIDENCE" ||
         entry.result === "RETRY_SCHEDULED")
     ) {
-      return {
-        ...entry,
-        currentProviderSnapshotFingerprint,
-        automationStalled: false,
-        normalizedResult: "RETRY_SCHEDULED" as const
-      };
+      const sourceUnverifiedFinal = shouldFinalizeSourceUnverified({
+        providerFamilyKey: entry.incident.providerFamilyKey,
+        failureClass: entry.incident.failureClass,
+        attemptCount: entry.incident.attemptCount,
+        activeRealSearchCount: entry.incident.activeRealSearchCount,
+        firstSeenAt: entry.incident.firstSeenAt,
+        verifiedAt: entry.verifiedAt,
+        result: entry.result,
+        now
+      });
+      if (sourceUnverifiedFinal) {
+        // The source-specific human-review proof is normalized by the next branch.
+      } else {
+        const playbook = assessAutomationPlaybook(
+          entry.incident.attemptLedger,
+          entry.incident.cycle
+        );
+        if (
+          shouldContinueSettledCourseSupportRemediation({
+            remediationDirective,
+            failureClass: retryFailureClass,
+            attemptCount: entry.incident.attemptCount,
+            playbookConclusion: playbook.conclusion,
+            nextPlaybookStage: playbook.nextStage
+          })
+        ) {
+          return {
+            ...entry,
+            currentProviderSnapshotFingerprint,
+            automationStalled: false,
+            normalizedResult: "RETRY_SCHEDULED" as const,
+            message:
+              "The bounded remediation advanced to a different safe stage or remains within its transient retry budget."
+          };
+        }
+        return {
+          ...entry,
+          currentProviderSnapshotFingerprint,
+          automationStalled: true,
+          normalizedResult: "NEEDS_HUMAN" as const,
+          message:
+            "The bounded remediation produced no novel stage or reusable change and was parked until a material input changes."
+        };
+      }
     }
     if (
       shouldFinalizeSourceUnverified({
@@ -4153,10 +5048,136 @@ async function closeoutCourseSupportBatchAttempt(
       normalizedResult: entry.result
     };
   });
-  for (const entry of normalizedEntries) {
+  const plannedRemediationAttempts = Array.isArray(
+    asJsonObject(asJsonObject(batch.summary).remediation).attempts
+  )
+    ? (asJsonObject(asJsonObject(batch.summary).remediation).attempts as unknown[])
+    : [];
+  const currentFailureIdentityByBatchIncidentId = new Map(
+    baseNormalizedEntries.map((entry) => {
+      const providerFamilyKey = resolveProviderCapability(entry.course).providerFamilyKey;
+      const courseRef = createCourseSupportRemediationCourseRef(entry.courseId);
+      const plannedAttempt = asJsonObject(
+        plannedRemediationAttempts.find(
+          (candidate) => asJsonObject(candidate).courseRef === courseRef
+        )
+      );
+      const proofProviderSnapshotFingerprint = asJsonObject(
+        entry.proofSnapshot
+      ).providerSnapshotFingerprint;
+      const claimedProviderSnapshotFingerprint =
+        typeof plannedAttempt.providerSnapshotFingerprint === "string"
+          ? plannedAttempt.providerSnapshotFingerprint
+          : typeof proofProviderSnapshotFingerprint === "string"
+            ? proofProviderSnapshotFingerprint
+          : entry.currentProviderSnapshotFingerprint;
+      const providerSnapshotChanged =
+        claimedProviderSnapshotFingerprint !== entry.currentProviderSnapshotFingerprint;
+      const monitoringFailure = getCurrentCourseSupportMonitoringFailureIdentity({
+        incidentCycle: entry.cycle,
+        incidentFailureFingerprint: entry.incident.failureFingerprint,
+        providerFamilyKey,
+        batchCreatedAt: batch.createdAt,
+        monitoringStatus: entry.course.monitoringStatus,
+        monitoringEvents: entry.course.monitoringEvents
+      });
+      const failureClass =
+        monitoringFailure?.failureClass ??
+        getEffectiveCourseSupportRetryFailureClass({
+          incidentFailureClass: entry.incident.failureClass,
+          proofSnapshot: entry.proofSnapshot
+        });
+      let failureFingerprint =
+        monitoringFailure?.failureFingerprint ??
+        getEffectiveCourseSupportRetryFailureFingerprint({
+          providerFamilyKey,
+          incidentKind: entry.incident.kind,
+          incidentFailureClass: entry.incident.failureClass,
+          incidentFailureFingerprint: entry.incident.failureFingerprint,
+          proofSnapshot: entry.proofSnapshot
+        });
+      if (
+        providerFamilyKey !== entry.incident.providerFamilyKey &&
+        failureFingerprint === entry.incident.failureFingerprint
+      ) {
+        failureFingerprint = buildProviderFailureFingerprint({
+          providerFamilyKey,
+          failureClass,
+          operation: entry.incident.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
+          httpStatus: null
+        });
+      }
+      const handoffRetryCandidates = [now];
+      if (monitoringFailure && entry.course.monitoringStatus?.nextAutomaticAttemptAt) {
+        handoffRetryCandidates.push(
+          entry.course.monitoringStatus.nextAutomaticAttemptAt
+        );
+      }
+      const playbookAssessment = assessAutomationPlaybook(
+        entry.incident.attemptLedger,
+        entry.incident.cycle
+      );
+      if (
+        verificationWatchMode === "WATCH_SETTLED" &&
+        playbookAssessment.conclusion === "INCOMPLETE" &&
+        (playbookAssessment.nextStage === "RENDERED_BROWSER_DISCOVERY" ||
+          playbookAssessment.nextStage === "INDEPENDENT_CONFIRMATION")
+      ) {
+        handoffRetryCandidates.push(new Date(now.getTime() + 60 * 1000));
+      }
+      const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
+        proofSnapshot: entry.proofSnapshot,
+        releaseSha: batch.releaseSha,
+        now
+      });
+      if (detachedFailureNotBefore) {
+        handoffRetryCandidates.push(detachedFailureNotBefore);
+      }
+      if (
+        failureClass === "RATE_LIMIT" &&
+        Number.isFinite(input.retryAfterSeconds) &&
+        (input.retryAfterSeconds ?? 0) > 0
+      ) {
+        handoffRetryCandidates.push(
+          computeCourseSupportNextAttemptAt({
+            failureClass,
+            failureFingerprint,
+            attemptCount: 1,
+            retryAfterSeconds: input.retryAfterSeconds,
+            now
+          })
+        );
+      }
+      return [
+        entry.id,
+        {
+          providerFamilyKey,
+          failureClass,
+          failureFingerprint,
+          claimedProviderSnapshotFingerprint,
+          observedProviderSnapshotFingerprint: entry.currentProviderSnapshotFingerprint,
+          providerSnapshotChanged,
+          nextAttemptAt: handoffRetryCandidates.reduce((latest, candidate) =>
+            candidate.getTime() > latest.getTime() ? candidate : latest
+          ),
+          materialChange:
+            providerFamilyKey !== entry.incident.providerFamilyKey ||
+            failureFingerprint !== entry.incident.failureFingerprint ||
+            providerSnapshotChanged
+        }
+      ] as const;
+    })
+  );
+  for (const entry of baseNormalizedEntries) {
+    const normalizedProof = asJsonObject(entry.proofSnapshot);
+    const sourceUnverifiedHumanReview =
+      normalizedProof.kind === "HUMAN_REVIEW_REQUIRED" &&
+      normalizedProof.disposition === "SOURCE_UNVERIFIED";
     if (
       entry.normalizedResult === "NEEDS_HUMAN" &&
       !entry.automationStalled &&
+      !sourceUnverifiedHumanReview &&
+      !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
       !isAutomationPlaybookExhausted(entry.incident.attemptLedger, entry.incident.cycle)
     ) {
       throw new Error(
@@ -4165,8 +5186,16 @@ async function closeoutCourseSupportBatchAttempt(
     }
     if (
       entry.normalizedResult === "RETRY_SCHEDULED" &&
-      verificationWatchMode === "STANDARD" &&
-      !canCloseCourseSupportRetry(entry.incident.failureClass, input.requestedOutcome)
+      (verificationWatchMode === "STANDARD" ||
+        verificationWatchMode === "WATCH_SETTLED") &&
+      !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
+      !canCloseCourseSupportRetry(
+        getEffectiveCourseSupportRetryFailureClass({
+          incidentFailureClass: entry.incident.failureClass,
+          proofSnapshot: entry.proofSnapshot
+        }),
+        input.requestedOutcome
+      )
     ) {
       throw new Error(
         "A non-transient provider restriction requires current final-disposition evidence or an explicit human escalation."
@@ -4174,27 +5203,220 @@ async function closeoutCourseSupportBatchAttempt(
     }
     if (
       ["RESTORED", "FINAL_DISPOSITION"].includes(entry.normalizedResult) &&
-      !(
-        ownershipReleaseMode &&
-        getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
+      !isAuthoritativeFactualCourseMonitoringState(
+        entry.course.monitoringStatus?.state
       ) &&
-      !isDurableTerminalProof(entry, batch)
+      !getAuthoritativeCourseMonitoringResolution(
+        entry.course.monitoringStatus?.state
+      ) &&
+      !isDurableTerminalProof(entry, batch) &&
+      !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
     ) {
       throw new Error("Terminal course-support evidence is missing or stale.");
     }
     if (
       !ownershipReleaseMode &&
       entry.verifiedIncidentUpdatedAt &&
-      entry.incident.updatedAt.getTime() !== entry.verifiedIncidentUpdatedAt.getTime()
+      entry.incident.updatedAt.getTime() !== entry.verifiedIncidentUpdatedAt.getTime() &&
+      !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
     ) {
       throw new Error("A course-support incident changed after verification.");
     }
   }
+  const rawCloseoutRemediationAttempts = baseNormalizedEntries.map((entry) => {
+    const courseRef = createCourseSupportRemediationCourseRef(entry.courseId);
+    const plannedAttempt = asJsonObject(
+      plannedRemediationAttempts.find(
+        (candidate) => asJsonObject(candidate).courseRef === courseRef
+      )
+    );
+    const claimedProviderSnapshotFingerprint =
+      typeof plannedAttempt.providerSnapshotFingerprint === "string"
+        ? plannedAttempt.providerSnapshotFingerprint
+        : (currentFailureIdentityByBatchIncidentId.get(entry.id)
+            ?.claimedProviderSnapshotFingerprint ?? entry.currentProviderSnapshotFingerprint);
+    const claimedImplementationPaths = readBatchPlannedPaths(batch.summary).length > 0;
+    const newReleaseRecorded = Boolean(
+      typeof batch.baseSha === "string" &&
+        typeof batch.releaseSha === "string" &&
+        batch.releaseSha !== batch.baseSha
+    );
+    const deploymentRecorded = Boolean(newReleaseRecorded && batch.deployedAt);
+    const postProbeRecorded = Boolean(
+      typeof entry.postProbeId === "string" && entry.postProbeId !== entry.preProbeId
+    );
+    const providerAttemptRecorded = hasCurrentCourseSupportProviderExecutionProof({
+      proofSnapshot: entry.proofSnapshot,
+      baseSha: batch.baseSha,
+      releaseSha: batch.releaseSha,
+      claimedAt: batch.createdAt
+    });
+    const playbookAttemptRecorded = hasCourseSupportPlaybookAttemptSinceClaim({
+      attemptLedger: entry.incident.attemptLedger,
+      cycle: entry.cycle,
+      eventCountAtClaim: plannedAttempt.playbookEventCountAtClaim,
+      claimedAt: batch.createdAt
+    });
+    const durableFactualBatchProofRecorded = Boolean(
+      entry.normalizedResult === "FINAL_DISPOSITION" &&
+        asJsonObject(entry.proofSnapshot).kind === "PLAYBOOK_FACTUAL_FINAL" &&
+        isDurableTerminalProof(entry, batch)
+    );
+    const terminalResultRecorded = Boolean(
+      ["RESTORED", "FINAL_DISPOSITION"].includes(entry.normalizedResult) &&
+        (isAuthoritativeFactualCourseMonitoringState(
+          entry.course.monitoringStatus?.state
+        ) ||
+          durableFactualBatchProofRecorded ||
+          (!currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
+            (getAuthoritativeCourseMonitoringResolution(
+              entry.course.monitoringStatus?.state
+            ) ||
+              isDurableTerminalProof(entry, batch))))
+    );
+    const consumed =
+      deploymentRecorded ||
+      providerAttemptRecorded ||
+      playbookAttemptRecorded ||
+      terminalResultRecorded;
+    return {
+      courseRef,
+      // Keep the fingerprint that the attempt actually claimed. If provider
+      // inputs changed while the batch was running, the next selector must see
+      // that F1 -> F2 change instead of recording F2 as already attempted.
+      providerSnapshotFingerprint: claimedProviderSnapshotFingerprint,
+      observedProviderSnapshotFingerprint: entry.currentProviderSnapshotFingerprint,
+      failureFingerprint: entry.incident.failureFingerprint,
+      observedFailureFingerprint:
+        currentFailureIdentityByBatchIncidentId.get(entry.id)?.failureFingerprint ??
+        entry.incident.failureFingerprint,
+      runtimeVersion: batch.releaseSha ?? batch.baseSha,
+      activeRealSearchCount: entry.incident.activeRealSearchCount,
+      consumed,
+      executionEvidence: {
+        claimedImplementationPaths,
+        newReleaseRecorded,
+        deploymentRecorded,
+        postProbeRecorded,
+        providerAttemptRecorded,
+        playbookAttemptRecorded,
+        terminalResultRecorded
+      },
+      approach: parseCourseSupportRemediationApproach(plannedAttempt.approach)
+    } satisfies Prisma.InputJsonObject;
+  });
+  const operationalRetryByCourseRef = new Map(
+    rawCloseoutRemediationAttempts.map((attempt, index) => {
+      const entry = baseNormalizedEntries[index];
+      if (!entry || attempt.consumed || !attempt.approach) {
+        return [attempt.courseRef, null] as const;
+      }
+      const priorAttempts = countCourseSupportOperationalNoProgressAttempts({
+        batchIncidents: entry.incident.batchIncidents ?? [],
+        cycle: entry.cycle,
+        courseId: entry.courseId,
+        providerSnapshotFingerprint: attempt.providerSnapshotFingerprint,
+        failureFingerprint: attempt.failureFingerprint,
+        approach: attempt.approach
+      });
+      const attemptsCompleted = priorAttempts + 1;
+      return [
+        attempt.courseRef,
+        {
+          maximumAttempts: COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET,
+          attemptsCompleted,
+          attemptsRemaining: Math.max(
+            0,
+            COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET - attemptsCompleted
+          ),
+          exhausted: attemptsCompleted >= COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET,
+          reason:
+            attemptsCompleted >= COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET
+              ? "OPERATIONAL_RETRY_BUDGET_EXHAUSTED"
+              : "OPERATIONAL_RETRY_AVAILABLE"
+        }
+      ] as const;
+    })
+  );
+  const closeoutRemediationAttempts = rawCloseoutRemediationAttempts.map((attempt) => ({
+    ...attempt,
+    operationalRetry: operationalRetryByCourseRef.get(attempt.courseRef) ?? null
+  }));
+  const normalizedEntries = baseNormalizedEntries.map((entry) => {
+    const currentFailureIdentity = currentFailureIdentityByBatchIncidentId.get(entry.id)!;
+    const factualMonitoringWinner =
+      isAuthoritativeFactualCourseMonitoringState(entry.course.monitoringStatus?.state) ||
+      (entry.normalizedResult === "FINAL_DISPOSITION" &&
+        asJsonObject(entry.proofSnapshot).kind === "PLAYBOOK_FACTUAL_FINAL" &&
+        isDurableTerminalProof(entry, batch));
+    const staleResultAfterMaterialChange =
+      !factualMonitoringWinner &&
+      currentFailureIdentity.materialChange &&
+      ["RESTORED", "FINAL_DISPOSITION", "RETRY_SCHEDULED", "NEEDS_HUMAN"].includes(
+        entry.normalizedResult
+      );
+    if (
+      staleResultAfterMaterialChange
+    ) {
+      return {
+        ...entry,
+        normalizedResult: "RETRY_SCHEDULED" as const,
+        automationStalled: false,
+        operationalRetryBudgetExhausted: false,
+        providerFamilyHandoff: {
+          fromProviderFamilyKey: entry.incident.providerFamilyKey,
+          toProviderFamilyKey: currentFailureIdentity.providerFamilyKey,
+          priorFailureFingerprint: entry.incident.failureFingerprint,
+          failureClass: currentFailureIdentity.failureClass,
+          failureFingerprint: currentFailureIdentity.failureFingerprint,
+          claimedProviderSnapshotFingerprint:
+            currentFailureIdentity.claimedProviderSnapshotFingerprint,
+          observedProviderSnapshotFingerprint:
+            currentFailureIdentity.observedProviderSnapshotFingerprint,
+          providerSnapshotChanged: currentFailureIdentity.providerSnapshotChanged,
+          nextAttemptAt: currentFailureIdentity.nextAttemptAt,
+          providerFamilyChanged:
+            currentFailureIdentity.providerFamilyKey !== entry.incident.providerFamilyKey
+        },
+        message:
+          "Current provider or failure evidence changed while the batch was active, so the incident was moved to a fresh remediation episode."
+      };
+    }
+    const operationalRetry = operationalRetryByCourseRef.get(
+      createCourseSupportRemediationCourseRef(entry.courseId)
+    );
+    if (
+      operationalRetry?.exhausted &&
+      entry.normalizedResult === "RETRY_SCHEDULED" &&
+      !entry.automationStalled
+    ) {
+      return {
+        ...entry,
+        normalizedResult: "NEEDS_HUMAN" as const,
+        automationStalled: true,
+        operationalRetryBudgetExhausted: true,
+        providerFamilyHandoff: null,
+        message:
+          "The unchanged operational attempt made no technical progress twice and was parked until a material input changes."
+      };
+    }
+    return {
+      ...entry,
+      operationalRetryBudgetExhausted: false,
+      providerFamilyHandoff: null
+    };
+  });
   const needsHumanCount = normalizedEntries.filter(
     (entry) => entry.normalizedResult === "NEEDS_HUMAN"
   ).length;
   const automationStalledCount = normalizedEntries.filter(
     (entry) => entry.automationStalled
+  ).length;
+  const operationalRetryBudgetExhaustedCount = normalizedEntries.filter(
+    (entry) => entry.operationalRetryBudgetExhausted
+  ).length;
+  const providerFamilyHandoffCount = normalizedEntries.filter(
+    (entry) => entry.providerFamilyHandoff
   ).length;
   const hasHuman = needsHumanCount > 0;
   const terminalCount = normalizedEntries.filter((entry) =>
@@ -4202,6 +5424,11 @@ async function closeoutCourseSupportBatchAttempt(
   ).length;
   const restoredCount = normalizedEntries.filter(
     (entry) => entry.normalizedResult === "RESTORED"
+  ).length;
+  const reusableFamilyRestoredCount = normalizedEntries.filter(
+    (entry) =>
+      entry.normalizedResult === "RESTORED" &&
+      resolveProviderCapability(entry.course).providerFamilyKey === batch.providerFamilyKey
   ).length;
   const retryCount = normalizedEntries.filter(
     (entry) => entry.normalizedResult === "RETRY_SCHEDULED"
@@ -4251,8 +5478,13 @@ async function closeoutCourseSupportBatchAttempt(
   const outcome = input.requestedOutcome ?? derivedOutcome;
   const retryTimes: Date[] = [];
   const safeSummary = sanitizeResponderCloseoutSummary(input.summary);
+  const remediationAttemptConsumed = closeoutRemediationAttempts.some(
+    (attempt) => attempt.consumed
+  );
+  let siblingWakeCount = 0;
 
   await runCourseSupportSerializableTransactionWithRetry(async (tx) => {
+    siblingWakeCount = 0;
     const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
     const persistCourseMonitoringCloseout = async (input: {
       courseId: string;
@@ -4266,6 +5498,7 @@ async function closeoutCourseSupportBatchAttempt(
         | undefined;
       targetState: CourseMonitoringState;
       data: Prisma.CourseMonitoringStatusUpdateManyMutationInput;
+      allowMaterialHandoff?: boolean;
     }) => {
       if (!courseMonitoringAvailable || !input.snapshot) {
         return false;
@@ -4275,7 +5508,11 @@ async function closeoutCourseSupportBatchAttempt(
         input.snapshot.state === "FINAL_MANUAL" ||
         input.snapshot.state === "FINAL_IDENTITY" ||
         input.snapshot.state === "FINAL_TECHNICAL";
-      if (snapshotIsAuthoritative) {
+      const materialHandoffCanSupersedeSnapshot =
+        input.allowMaterialHandoff === true &&
+        (input.snapshot.state === "HEALTHY" ||
+          input.snapshot.state === "FINAL_TECHNICAL");
+      if (snapshotIsAuthoritative && !materialHandoffCanSupersedeSnapshot) {
         if (input.snapshot.state === input.targetState) {
           // Lock and CAS the unchanged authoritative row so a newer search
           // observation cannot be hidden by the batch's stale snapshot.
@@ -4326,6 +5563,55 @@ async function closeoutCourseSupportBatchAttempt(
           select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT
         })
       : [];
+    const materialHandoffBatchIncidentIds = new Set(
+      normalizedEntries
+        .filter((entry) => entry.providerFamilyHandoff)
+        .map((entry) => entry.id)
+    );
+    const factualSucceededRequestBatchIncidentIds = new Set(
+      detachedRequestStates
+        .filter(
+          (request) =>
+            request.status === "SUCCEEDED" &&
+            asJsonObject(request.evidence).kind === "PLAYBOOK_FACTUAL_FINAL"
+        )
+        .map((request) => request.batchIncidentId)
+    );
+    const supersededBatchIncidentIds = new Set(
+      [...materialHandoffBatchIncidentIds].filter(
+        (batchIncidentId) =>
+          !factualSucceededRequestBatchIncidentIds.has(batchIncidentId)
+      )
+    );
+    const supersededDetachedRequestCount = detachedRequestStates.filter(
+      (request) =>
+        supersededBatchIncidentIds.has(request.batchIncidentId) &&
+        ["QUEUED", "CHECKING", "SUCCEEDED", "RETRYABLE_FAILED"].includes(request.status)
+    ).length;
+    if (batch.releaseSha && supersededDetachedRequestCount > 0) {
+      const supersededRequests = await tx.courseSupportVerificationRequest.updateMany({
+        where: {
+          batchIncidentId: { in: [...supersededBatchIncidentIds] },
+          releaseSha: batch.releaseSha,
+          status: { in: ["QUEUED", "CHECKING", "SUCCEEDED", "RETRYABLE_FAILED"] }
+        },
+        data: {
+          status: "STALE",
+          revision: { increment: 1 },
+          leaseToken: null,
+          leaseExpiresAt: null,
+          nextAttemptAt: null,
+          completedAt: now,
+          lastError: "material_failure_identity_superseded",
+          updatedAt: now
+        }
+      });
+      if (supersededRequests.count !== supersededDetachedRequestCount) {
+        throw new Error(
+          "Detached provider verification changed while superseding stale material evidence."
+        );
+      }
+    }
     if (verificationWatchMode === "STANDARD" || verificationWatchMode === "WATCH_SETTLED") {
       assertDetachedVerificationReadyForCloseout({
         requests: detachedRequestStates,
@@ -4340,7 +5626,8 @@ async function closeoutCourseSupportBatchAttempt(
             } satisfies BatchIncidentVerification
           ])
         ),
-        currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds
+        currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds,
+        supersededBatchIncidentIds
       });
     }
 
@@ -4372,6 +5659,71 @@ async function closeoutCourseSupportBatchAttempt(
       }
     }
 
+    const shouldWakeParkedProviderSiblings = Boolean(
+      reusableFamilyRestoredCount > 0 &&
+        remediationDirective?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+        remediationDirective.requiresImplementationPath &&
+        batch.releaseSha &&
+        batch.releaseSha !== batch.baseSha &&
+        batch.deployedAt
+    );
+    const parkedProviderSiblings = shouldWakeParkedProviderSiblings
+      ? await tx.courseSupportIncident.findMany({
+          where: {
+            providerFamilyKey: batch.providerFamilyKey,
+            status: "NEEDS_HUMAN",
+            humanReviewReason: "AUTOMATION_STALLED",
+            activeBatchId: null,
+            nextAttemptAt: null,
+            resolvedAt: null,
+            resolution: null,
+            decisionAt: null
+          },
+          select: {
+            id: true,
+            courseId: true,
+            cycle: true,
+            revision: true,
+            updatedAt: true,
+            providerFamilyKey: true,
+            failureFingerprint: true,
+            activeRealSearchCount: true,
+            course: {
+              select: {
+                timeZone: true,
+                detectedPlatform: true,
+                providerFamilyKey: true,
+                detectedBookingUrl: true,
+                website: true,
+                bookingMetadata: true,
+                monitoringStatus: {
+                  select: {
+                    state: true,
+                    revision: true,
+                    stateChangedAt: true,
+                    lastSuccessfulAt: true,
+                    nextAutomaticAttemptAt: true,
+                    revalidationRequestedAt: true
+                  }
+                }
+              }
+            }
+          }
+        })
+      : [];
+    const relevantParkedProviderSiblings = parkedProviderSiblings.filter((sibling) => {
+      const provider = resolveProviderCapability(sibling.course);
+      return (
+        sibling.providerFamilyKey === batch.providerFamilyKey &&
+        provider.providerFamilyKey === batch.providerFamilyKey &&
+        provider.isRunnable &&
+        sibling.course.monitoringStatus?.state === "ENGINEERING_VERIFICATION_NEEDED" &&
+        sibling.course.monitoringStatus.nextAutomaticAttemptAt == null &&
+        sibling.course.monitoringStatus.revalidationRequestedAt == null
+      );
+    });
+    siblingWakeCount = relevantParkedProviderSiblings.length;
+
     const ownership = await tx.courseSupportBatch.updateMany({
       where: {
         id: batch.id,
@@ -4393,10 +5745,16 @@ async function closeoutCourseSupportBatchAttempt(
             derivedOutcome,
             failureDomain: input.failureDomain ?? "NONE",
             terminalCount,
+            reusableFamilyRestoredCount,
             retryCount,
             needsHumanCount,
             automationStalledCount,
+            operationalRetryBudgetExhaustedCount,
+            providerFamilyHandoffCount,
             verificationWatchMode,
+            remediationAttemptConsumed,
+            remediationAttempts: closeoutRemediationAttempts,
+            siblingWakeCount,
             summary: safeSummary
           }
         } as Prisma.InputJsonValue,
@@ -4411,14 +5769,21 @@ async function closeoutCourseSupportBatchAttempt(
       const message = sanitizeResponderText(
         entry.message ?? "Course-support responder closeout recorded."
       );
-      const expectedIncidentUpdatedAt = ownershipReleaseMode
+      const expectedIncidentUpdatedAt =
+        ownershipReleaseMode ||
+        entry.providerFamilyHandoff ||
+        currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
         ? entry.incident.updatedAt
         : (entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt);
       let incidentUpdated: { count: number };
       const authoritativeMonitoringResolution = ownershipReleaseMode
         ? getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
         : null;
-      if (authoritativeMonitoringResolution && entry.course.monitoringStatus) {
+      if (
+        authoritativeMonitoringResolution &&
+        entry.course.monitoringStatus &&
+        !entry.providerFamilyHandoff
+      ) {
         incidentUpdated = await tx.courseSupportIncident.updateMany({
           where: {
             id: entry.incidentId,
@@ -4576,6 +5941,95 @@ async function closeoutCourseSupportBatchAttempt(
             }
           });
         }
+      } else if (entry.providerFamilyHandoff) {
+        const handoff = entry.providerFamilyHandoff;
+        retryTimes.push(handoff.nextAttemptAt);
+        incidentUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: entry.incidentId,
+            cycle: entry.cycle,
+            activeBatchId: batch.id,
+            status: "AUTO_INVESTIGATING",
+            providerFamilyKey: handoff.fromProviderFamilyKey,
+            updatedAt: expectedIncidentUpdatedAt
+          },
+          data: {
+            cycle: { increment: 1 },
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: null,
+            providerFamilyKey: handoff.toProviderFamilyKey,
+            failureClass: handoff.failureClass,
+            failureFingerprint: handoff.failureFingerprint,
+            lastAttemptAt: null,
+            attemptCount: 0,
+            occurrenceCount: 1,
+            firstSeenAt: now,
+            confirmedAt: now,
+            escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+              now,
+              entry.incident.activeRealSearchCount
+            ),
+            humanReviewReason: null,
+            nextReminderAt: null,
+            nextAttemptAt: handoff.nextAttemptAt,
+            nextAction:
+              "Run a fresh ordered playbook for the newly observed provider or failure identity.",
+            ownerNotifiedAt: null,
+            escalatedAt: null,
+            escalationNotifiedAt: null,
+            latestMessage: message,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        const monitoringUpdated = await persistCourseMonitoringCloseout({
+          courseId: entry.courseId,
+          snapshot: entry.course.monitoringStatus,
+          targetState: "AUTO_INVESTIGATING",
+          allowMaterialHandoff: true,
+          data: {
+            state: "AUTO_INVESTIGATING",
+            failureFingerprint: handoff.failureFingerprint,
+            nextAutomaticAttemptAt: handoff.nextAttemptAt,
+            revalidationRequestedAt: handoff.nextAttemptAt,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (monitoringUpdated) {
+          await tx.courseMonitoringEvent.create({
+            data: {
+              courseId: entry.courseId,
+              incidentId: entry.incidentId,
+              eventType: "REVALIDATION_REQUESTED",
+              source: "COURSE_SUPPORT_RESPONDER",
+              fromState: entry.course.monitoringStatus?.state ?? "AUTO_INVESTIGATING",
+              toState: "AUTO_INVESTIGATING",
+              failureFingerprint: handoff.failureFingerprint,
+              message:
+                "Current provider or failure evidence changed during responder ownership, so a fresh remediation cycle was queued.",
+              runtimeVersion: batch.releaseSha ?? batch.baseSha,
+              deploymentSha: batch.deployedAt ? batch.releaseSha : null,
+              occurredAt: now,
+              audit: {
+                priorCycle: entry.cycle,
+                cycle: entry.cycle + 1,
+                providerFamilyHandoff: true,
+                providerFamilyChanged: handoff.providerFamilyChanged,
+                providerSnapshotChanged: handoff.providerSnapshotChanged,
+                priorProviderFamilyKey: handoff.fromProviderFamilyKey,
+                providerFamilyKey: handoff.toProviderFamilyKey,
+                claimedProviderSnapshotFingerprint:
+                  handoff.claimedProviderSnapshotFingerprint,
+                observedProviderSnapshotFingerprint:
+                  handoff.observedProviderSnapshotFingerprint,
+                priorFailureFingerprint: handoff.priorFailureFingerprint,
+                failureFingerprint: handoff.failureFingerprint,
+                customerDataIncluded: false
+              }
+            }
+          });
+        }
       } else if (entry.normalizedResult === "NEEDS_HUMAN") {
         const humanReviewReason = entry.automationStalled
           ? ("AUTOMATION_STALLED" as const)
@@ -4594,32 +6048,23 @@ async function closeoutCourseSupportBatchAttempt(
             status: "AUTO_INVESTIGATING",
             updatedAt: expectedIncidentUpdatedAt
           },
-          data: entry.automationStalled
-            ? {
-                status: "AUTO_INVESTIGATING",
-                kind: "BLOCKED_TOOLING",
-                activeBatchId: null,
-                nextAttemptAt: humanRetryAt,
-                humanReviewReason,
-                nextReminderAt: now,
-                escalatedAt: now,
-                latestMessage: message,
-                nextAction:
-                  "Review the automation stall and restart the ordered playbook when tooling is ready.",
-                lastSeenAt: now,
-                revision: { increment: 1 }
-              }
-            : {
-                status: "NEEDS_HUMAN",
-                activeBatchId: null,
-                nextAttemptAt: humanRetryAt,
-                humanReviewReason,
-                nextReminderAt: now,
-                escalatedAt: entry.incident.escalatedAt ?? now,
-                latestMessage: message,
-                lastSeenAt: now,
-                revision: { increment: 1 }
-              }
+          data: {
+            status: "NEEDS_HUMAN",
+            activeBatchId: null,
+            nextAttemptAt: entry.automationStalled ? null : humanRetryAt,
+            humanReviewReason,
+            nextReminderAt: now,
+            escalatedAt: entry.incident.escalatedAt ?? now,
+            latestMessage: message,
+            ...(entry.automationStalled
+              ? {
+                  nextAction:
+                    "Wait for a material provider, failure, reader-capability, relevant implementation, or operator change before retrying."
+                }
+              : {}),
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
         });
         const monitoringUpdated = await persistCourseMonitoringCloseout({
           courseId: entry.courseId,
@@ -4627,7 +6072,7 @@ async function closeoutCourseSupportBatchAttempt(
           targetState: "ENGINEERING_VERIFICATION_NEEDED",
           data: {
             state: "ENGINEERING_VERIFICATION_NEEDED",
-            nextAutomaticAttemptAt: humanRetryAt,
+            nextAutomaticAttemptAt: entry.automationStalled ? null : humanRetryAt,
             revalidationRequestedAt: null,
             stateChangedAt: now,
             revision: { increment: 1 }
@@ -4650,7 +6095,13 @@ async function closeoutCourseSupportBatchAttempt(
                 cycle: entry.cycle,
                 customerState: "NEEDS_HUMAN_REVIEW",
                 automationStalled: entry.automationStalled,
+                parkedUntilMaterialChange: entry.automationStalled,
                 endpointStalled: entry.automationStalled,
+                operationalRetryBudgetExhausted:
+                  entry.operationalRetryBudgetExhausted,
+                reason: entry.operationalRetryBudgetExhausted
+                  ? "OPERATIONAL_RETRY_BUDGET_EXHAUSTED"
+                  : null,
                 escalationDeadlineAt: entry.incident.escalationDeadlineAt?.toISOString() ?? null,
                 playbookExhausted: isAutomationPlaybookExhausted(
                   entry.incident.attemptLedger,
@@ -4662,25 +6113,39 @@ async function closeoutCourseSupportBatchAttempt(
             }
           });
         }
-        await tx.teeSearch.updateMany({
-          where: {
-            status: "ACTIVE",
-            trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-            date: {
-              gte: getCourseLocalDateStorageBoundary(entry.course.timeZone, now)
+        if (!entry.automationStalled) {
+          await tx.teeSearch.updateMany({
+            where: {
+              status: "ACTIVE",
+              trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+              date: {
+                gte: getCourseLocalDateStorageBoundary(entry.course.timeZone, now)
+              },
+              preferences: { some: { courseId: entry.courseId } }
             },
-            preferences: { some: { courseId: entry.courseId } }
-          },
-          data: {
-            nextCheckAt: now,
-            recheckRequestedAt: now
-          }
-        });
+            data: {
+              nextCheckAt: now,
+              recheckRequestedAt: now
+            }
+          });
+        }
       } else {
         const playbookAssessment = assessAutomationPlaybook(
           entry.incident.attemptLedger,
           entry.incident.cycle
         );
+        const effectiveFailureClass = getEffectiveCourseSupportRetryFailureClass({
+          incidentFailureClass: entry.incident.failureClass,
+          proofSnapshot: entry.proofSnapshot
+        });
+        const effectiveFailureFingerprint =
+          getEffectiveCourseSupportRetryFailureFingerprint({
+            providerFamilyKey: entry.incident.providerFamilyKey,
+            incidentKind: entry.incident.kind,
+            incidentFailureClass: entry.incident.failureClass,
+            incidentFailureFingerprint: entry.incident.failureFingerprint,
+            proofSnapshot: entry.proofSnapshot
+          });
         const watchContinuationAt =
           verificationWatchMode === "WATCH_SETTLED" &&
           playbookAssessment.conclusion === "INCOMPLETE" &&
@@ -4688,14 +6153,23 @@ async function closeoutCourseSupportBatchAttempt(
             playbookAssessment.nextStage === "INDEPENDENT_CONFIRMATION")
             ? new Date(now.getTime() + 60 * 1000)
             : null;
+        const closeoutRemediationAttempt = closeoutRemediationAttempts.find(
+          (attempt) =>
+            attempt.courseRef === createCourseSupportRemediationCourseRef(entry.courseId)
+        );
+        const operationalRetryAt =
+          closeoutRemediationAttempt && !closeoutRemediationAttempt.consumed
+            ? new Date(now.getTime() + COURSE_SUPPORT_OPERATIONAL_RETRY_DELAY_MS)
+            : null;
         const normalNextAttemptAt =
+          operationalRetryAt ??
           watchContinuationAt ??
           computeCourseSupportNextAttemptAt({
-          failureClass: entry.incident.failureClass,
-          failureFingerprint: entry.incident.failureFingerprint,
-          attemptCount: Math.max(1, entry.incident.attemptCount),
-          retryAfterSeconds: input.retryAfterSeconds,
-          now
+            failureClass: effectiveFailureClass,
+            failureFingerprint: effectiveFailureFingerprint,
+            attemptCount: Math.max(1, entry.incident.attemptCount),
+            retryAfterSeconds: input.retryAfterSeconds,
+            now
           });
         const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
           proofSnapshot: entry.proofSnapshot,
@@ -4703,6 +6177,7 @@ async function closeoutCourseSupportBatchAttempt(
           now
         });
         const nextAttemptAt =
+          !operationalRetryAt &&
           detachedFailureNotBefore &&
           detachedFailureNotBefore.getTime() > normalNextAttemptAt.getTime()
             ? detachedFailureNotBefore
@@ -4719,6 +6194,8 @@ async function closeoutCourseSupportBatchAttempt(
           data: {
             status: "AUTO_INVESTIGATING",
             activeBatchId: null,
+            failureClass: effectiveFailureClass,
+            failureFingerprint: effectiveFailureFingerprint,
             nextAttemptAt,
             latestMessage: message,
             lastSeenAt: now,
@@ -4731,6 +6208,7 @@ async function closeoutCourseSupportBatchAttempt(
           targetState: "AUTO_INVESTIGATING",
           data: {
             state: "AUTO_INVESTIGATING",
+            failureFingerprint: effectiveFailureFingerprint,
             nextAutomaticAttemptAt: nextAttemptAt,
             stateChangedAt: now,
             revision: { increment: 1 }
@@ -4755,6 +6233,161 @@ async function closeoutCourseSupportBatchAttempt(
       }
     }
 
+    if (relevantParkedProviderSiblings.length > 0) {
+      const updateSiblingIncidentGroup = async (
+        siblings: typeof relevantParkedProviderSiblings,
+        hasActiveRealDemand: boolean
+      ) => {
+        if (siblings.length === 0) {
+          return;
+        }
+        const siblingIncidentsUpdated = await tx.courseSupportIncident.updateMany({
+          where: {
+            id: { in: siblings.map((sibling) => sibling.id) },
+            providerFamilyKey: batch.providerFamilyKey,
+            status: "NEEDS_HUMAN",
+            humanReviewReason: "AUTOMATION_STALLED",
+            activeBatchId: null,
+            nextAttemptAt: null,
+            resolvedAt: null,
+            resolution: null,
+            decisionAt: null,
+            OR: siblings.map((sibling) => ({
+              id: sibling.id,
+              courseId: sibling.courseId,
+              cycle: sibling.cycle,
+              revision: sibling.revision,
+              updatedAt: sibling.updatedAt
+            }))
+          },
+          data: {
+            cycle: { increment: 1 },
+            status: "AUTO_INVESTIGATING",
+            lastAttemptAt: null,
+            attemptCount: 0,
+            occurrenceCount: 1,
+            firstSeenAt: now,
+            confirmedAt: now,
+            escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+              now,
+              hasActiveRealDemand ? 1 : 0
+            ),
+            humanReviewReason: null,
+            nextReminderAt: null,
+            nextAttemptAt: now,
+            nextAction:
+              "Run a fresh ordered playbook because reusable support for this provider family was deployed.",
+            ownerNotifiedAt: null,
+            escalatedAt: null,
+            escalationNotifiedAt: null,
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (siblingIncidentsUpdated.count !== siblings.length) {
+          throw new Error(
+            "Course-support sibling propagation write conflict while reopening parked incidents."
+          );
+        }
+      };
+      await updateSiblingIncidentGroup(
+        relevantParkedProviderSiblings.filter(
+          (sibling) => sibling.activeRealSearchCount > 0
+        ),
+        true
+      );
+      await updateSiblingIncidentGroup(
+        relevantParkedProviderSiblings.filter(
+          (sibling) => sibling.activeRealSearchCount <= 0
+        ),
+        false
+      );
+
+      const siblingMonitoringUpdated = await tx.courseMonitoringStatus.updateMany({
+        where: {
+          courseId: {
+            in: relevantParkedProviderSiblings.map((sibling) => sibling.courseId)
+          },
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+          OR: relevantParkedProviderSiblings.map((sibling) => {
+            const monitoringStatus = sibling.course.monitoringStatus!;
+            return {
+              courseId: sibling.courseId,
+              revision: monitoringStatus.revision,
+              stateChangedAt: monitoringStatus.stateChangedAt,
+              lastSuccessfulAt: monitoringStatus.lastSuccessfulAt
+            };
+          })
+        },
+        data: {
+          state: "AUTO_INVESTIGATING",
+          nextAutomaticAttemptAt: now,
+          revalidationRequestedAt: now,
+          stateChangedAt: now,
+          revision: { increment: 1 }
+        }
+      });
+      if (siblingMonitoringUpdated.count !== relevantParkedProviderSiblings.length) {
+        throw new Error(
+          "Course-support sibling propagation write conflict while reopening monitoring."
+        );
+      }
+
+      const courseIdsByStorageBoundary = new Map<number, string[]>();
+      for (const sibling of relevantParkedProviderSiblings) {
+        const boundary = getCourseLocalDateStorageBoundary(sibling.course.timeZone, now);
+        const courseIds = courseIdsByStorageBoundary.get(boundary.getTime()) ?? [];
+        courseIds.push(sibling.courseId);
+        courseIdsByStorageBoundary.set(boundary.getTime(), courseIds);
+      }
+      await tx.teeSearch.updateMany({
+        where: {
+          status: "ACTIVE",
+          trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+          OR: [...courseIdsByStorageBoundary.entries()].map(
+            ([boundaryTimestamp, courseIds]) => ({
+              date: { gte: new Date(boundaryTimestamp) },
+              preferences: { some: { courseId: { in: courseIds } } }
+            })
+          )
+        },
+        data: {
+          nextCheckAt: now,
+          recheckRequestedAt: now
+        }
+      });
+
+      const siblingEventsCreated = await tx.courseMonitoringEvent.createMany({
+        data: relevantParkedProviderSiblings.map((sibling) => ({
+          courseId: sibling.courseId,
+          incidentId: sibling.id,
+          eventType: "REVALIDATION_REQUESTED",
+          source: "COURSE_SUPPORT_RESPONDER",
+          fromState: "ENGINEERING_VERIFICATION_NEEDED",
+          toState: "AUTO_INVESTIGATING",
+          failureFingerprint: sibling.failureFingerprint,
+          message:
+            "Reusable support for this provider family was deployed, so a fresh monitoring cycle was queued.",
+          runtimeVersion: batch.releaseSha,
+          deploymentSha: batch.releaseSha,
+          occurredAt: now,
+          audit: {
+            priorCycle: sibling.cycle,
+            cycle: sibling.cycle + 1,
+            providerFamilySupportDeployed: true,
+            customerDataIncluded: false
+          } satisfies Prisma.InputJsonObject
+        }))
+      });
+      if (siblingEventsCreated.count !== relevantParkedProviderSiblings.length) {
+        throw new Error(
+          "Course-support sibling propagation write conflict while recording audit events."
+        );
+      }
+    }
+
     await tx.courseSupportVerificationRequest.updateMany({
       where: {
         batchIncident: { batchId: batch.id },
@@ -4776,19 +6409,34 @@ async function closeoutCourseSupportBatchAttempt(
       await tx.automationRun.updateMany({
         where: { id: batch.ownerAutomationRunId, completedAt: null },
         data: {
+          kind: "COURSE_SUPPORT",
+          status: "COMPLETED",
           completedAt: now,
           outcome,
           notes: JSON.stringify({
             schemaVersion: 1,
             lifecycle: "closeout",
+            claim: {
+              branch:
+                typeof asJsonObject(batch.summary).branch === "string"
+                  ? asJsonObject(batch.summary).branch
+                  : null,
+              baseSha: batch.baseSha,
+              plannedPathCount: readBatchPlannedPaths(batch.summary).length
+            },
             status: batchStatus,
             outcome,
             derivedOutcome,
             terminalCount,
+            reusableFamilyRestoredCount,
             retryCount,
             automationStalledCount,
+            operationalRetryBudgetExhaustedCount,
+            providerFamilyHandoffCount,
             verificationWatchMode,
-            failureDomain: input.failureDomain ?? "NONE"
+            failureDomain: input.failureDomain ?? "NONE",
+            remediationAttemptConsumed,
+            siblingWakeCount
           })
         }
       });
@@ -4812,8 +6460,12 @@ async function closeoutCourseSupportBatchAttempt(
     batchStatus: finalBatchStatus,
     durableCloseoutRecorded: true,
     terminalCount,
+    reusableFamilyRestoredCount,
     retryCount,
     automationStalledCount,
+    operationalRetryBudgetExhaustedCount,
+    providerFamilyHandoffCount,
+    siblingWakeCount,
     notificationPendingCount: 0,
     leverage: {
       providerGroupResolvedCount: retryCount === 0 && needsHumanCount === 0 ? 1 : 0,
@@ -4944,7 +6596,17 @@ export async function recoverCourseSupportBatch(input: {
                 decisionAt: true,
                 cycle: true,
                 activeBatchId: true,
-                updatedAt: true
+                failureFingerprint: true,
+                activeRealSearchCount: true,
+                updatedAt: true,
+                batchIncidents: {
+                  where: { batch: { completedAt: { not: null } } },
+                  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                  select: {
+                    cycle: true,
+                    batch: { select: { summary: true } }
+                  }
+                }
               }
             }
           }
@@ -5117,6 +6779,8 @@ export async function recoverCourseSupportBatch(input: {
             await tx.automationRun.updateMany({
               where: { id: batch.ownerAutomationRunId, completedAt: null },
               data: {
+                kind: "COURSE_SUPPORT",
+                status: "COMPLETED",
                 completedAt: now,
                 outcome: derivedOutcome,
                 notes: JSON.stringify({
@@ -5163,10 +6827,10 @@ export async function recoverCourseSupportBatch(input: {
         summary: true
       }
     });
-    const recoveringWouldOwnCheckout = courseSupportBatchOwnsCheckout(batch);
+    const recoveringWouldOwnCheckout = courseSupportBatchReservesCheckout(batch);
     const sharedCheckoutConflict =
       recoveringWouldOwnCheckout &&
-      otherBatches.some((otherBatch) => courseSupportBatchOwnsCheckout(otherBatch));
+      otherBatches.some((otherBatch) => courseSupportBatchReservesCheckout(otherBatch));
     const conflictingBatch = otherBatches.find((otherBatch) =>
       courseSupportRecoveryBatchesConflict(batch, otherBatch)
     );
@@ -5290,6 +6954,66 @@ export async function recoverCourseSupportBatch(input: {
         const terminalMessage =
           "Expired responder ownership was superseded by a later durable course decision.";
         const summary = asJsonObject(batch.summary);
+        const plannedRemediationAttempts = Array.isArray(
+          asJsonObject(summary.remediation).attempts
+        )
+          ? (asJsonObject(summary.remediation).attempts as unknown[])
+          : [];
+        const safeRequeueRemediationAttempts = retryIncidents.flatMap((entry) => {
+          const courseRef = createCourseSupportRemediationCourseRef(entry.courseId);
+          const plannedAttempt = asJsonObject(
+            plannedRemediationAttempts.find(
+              (candidate) => asJsonObject(candidate).courseRef === courseRef
+            )
+          );
+          const providerSnapshotFingerprint = plannedAttempt.providerSnapshotFingerprint;
+          const approach = parseCourseSupportRemediationApproach(plannedAttempt.approach);
+          if (typeof providerSnapshotFingerprint !== "string" || !approach) {
+            return [];
+          }
+          const attemptsCompleted =
+            countCourseSupportOperationalNoProgressAttempts({
+              batchIncidents: entry.incident.batchIncidents ?? [],
+              cycle: entry.cycle,
+              courseId: entry.courseId,
+              providerSnapshotFingerprint,
+              failureFingerprint: entry.incident.failureFingerprint,
+              approach
+            }) + 1;
+          return [
+            {
+              courseRef,
+              providerSnapshotFingerprint,
+              failureFingerprint: entry.incident.failureFingerprint,
+              runtimeVersion: batch.releaseSha ?? batch.baseSha,
+              activeRealSearchCount: entry.incident.activeRealSearchCount,
+              consumed: false,
+              executionEvidence: {
+                claimedImplementationPaths: readBatchPlannedPaths(batch.summary).length > 0,
+                newReleaseRecorded: false,
+                deploymentRecorded: false,
+                postProbeRecorded: false,
+                providerAttemptRecorded: false,
+                playbookAttemptRecorded: false,
+                terminalResultRecorded: false
+              },
+              operationalRetry: {
+                maximumAttempts: COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET,
+                attemptsCompleted,
+                attemptsRemaining: Math.max(
+                  0,
+                  COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET - attemptsCompleted
+                ),
+                exhausted: attemptsCompleted >= COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET,
+                reason:
+                  attemptsCompleted >= COURSE_SUPPORT_OPERATIONAL_RETRY_BUDGET
+                    ? "OPERATIONAL_RETRY_BUDGET_EXHAUSTED"
+                    : "OPERATIONAL_RETRY_AVAILABLE"
+              },
+              approach
+            } satisfies Prisma.InputJsonObject
+          ];
+        });
         await prisma.$transaction(
           async (tx) => {
             const batchUpdated = await tx.courseSupportBatch.updateMany({
@@ -5319,6 +7043,8 @@ export async function recoverCourseSupportBatch(input: {
                     terminalCount,
                     retryCount: retryIncidents.length,
                     needsHumanCount,
+                    remediationAttemptConsumed: false,
+                    remediationAttempts: safeRequeueRemediationAttempts,
                     reason: closeoutReason
                   }
                 } as Prisma.InputJsonValue,
@@ -5454,6 +7180,8 @@ export async function recoverCourseSupportBatch(input: {
               await tx.automationRun.updateMany({
                 where: { id: batch.ownerAutomationRunId, completedAt: null },
                 data: {
+                  kind: "COURSE_SUPPORT",
+                  status: "COMPLETED",
                   completedAt: now,
                   outcome: derivedOutcome,
                   notes: JSON.stringify({
@@ -5466,6 +7194,9 @@ export async function recoverCourseSupportBatch(input: {
                     retryCount: retryIncidents.length,
                     needsHumanCount,
                     failureDomain: "GIT",
+                    remediationAttemptConsumed: false,
+                    operationalNoProgressAttemptCount:
+                      safeRequeueRemediationAttempts.length,
                     reason: closeoutReason
                   })
                 }
@@ -5953,6 +7684,245 @@ function getSafeEvidenceOrigin(value: string) {
   }
 }
 
+export async function parkCourseSupportCandidatesForMaterialChange(
+  candidates: CourseSupportCandidate[],
+  now: Date
+) {
+  if (candidates.length === 0) {
+    return 0;
+  }
+  let parkedCount = 0;
+  for (const candidate of candidates) {
+    const route = candidate.remediationRoute;
+    if (!route || route.workMode !== "WAIT_FOR_MATERIAL_CHANGE") {
+      continue;
+    }
+    const parked = await runSerializedCourseMonitoringWrite(
+      candidate.courseId,
+      async (transaction) => {
+        if (!hasCourseMonitoringPersistence(transaction)) {
+          return false;
+        }
+        const [incident, monitoringStatus] = await Promise.all([
+          transaction.courseSupportIncident.findUnique({
+            where: { id: candidate.id },
+            select: {
+              id: true,
+              courseId: true,
+              cycle: true,
+              revision: true,
+              status: true,
+              activeBatchId: true,
+              resolution: true,
+              resolvedAt: true,
+              updatedAt: true,
+              failureFingerprint: true,
+              engineeringOnly: true,
+              activeRealSearchCount: true,
+              earliestTargetDate: true,
+              escalatedAt: true
+            }
+          }),
+          transaction.courseMonitoringStatus.findUnique({
+            where: { courseId: candidate.courseId },
+            select: {
+              state: true,
+              stateChangedAt: true,
+              lastSuccessfulAt: true,
+              revision: true
+            }
+          })
+        ]);
+        if (!incident || !monitoringStatus || incident.courseId !== candidate.courseId) {
+          return false;
+        }
+
+        const authoritativeResolution = getAuthoritativeCourseMonitoringResolution(
+          monitoringStatus.state
+        );
+        if (authoritativeResolution) {
+          const monitoringFence = await transaction.courseMonitoringStatus.updateMany({
+            where: {
+              courseId: candidate.courseId,
+              state: monitoringStatus.state,
+              stateChangedAt: monitoringStatus.stateChangedAt,
+              lastSuccessfulAt: monitoringStatus.lastSuccessfulAt,
+              revision: monitoringStatus.revision
+            },
+            data: { revision: { increment: 0 } }
+          });
+          if (monitoringFence.count !== 1) {
+            throw new Error(
+              "Course-support parking write conflict while fencing authoritative monitoring."
+            );
+          }
+          if (
+            incident.status !== "RESOLVED" &&
+            !incident.activeBatchId &&
+            ["AUTO_INVESTIGATING", "NEEDS_HUMAN"].includes(incident.status)
+          ) {
+            const reconciled = await transaction.courseSupportIncident.updateMany({
+              where: {
+                id: incident.id,
+                courseId: candidate.courseId,
+                cycle: incident.cycle,
+                revision: incident.revision,
+                status: incident.status,
+                activeBatchId: null
+              },
+              data: {
+                status: "RESOLVED",
+                resolvedAt: now,
+                resolution: authoritativeResolution.resolution,
+                resolutionMessage: authoritativeResolution.message,
+                nextAction: null,
+                nextAttemptAt: null,
+                nextReminderAt: null,
+                lastSeenAt: now,
+                revision: { increment: 1 }
+              }
+            });
+            if (reconciled.count !== 1) {
+              throw new Error(
+                "Course-support parking write conflict while reconciling authoritative monitoring."
+              );
+            }
+          }
+          return false;
+        }
+
+        if (incident.status === "RESOLVED") {
+          const authoritativeState = getAuthoritativeMonitoringStateForResolution(
+            incident.resolution
+          );
+          if (authoritativeState && monitoringStatus.state !== authoritativeState) {
+            const reconciled = await transaction.courseMonitoringStatus.updateMany({
+              where: {
+                courseId: candidate.courseId,
+                state: monitoringStatus.state,
+                stateChangedAt: monitoringStatus.stateChangedAt,
+                revision: monitoringStatus.revision
+              },
+              data: {
+                state: authoritativeState,
+                nextAutomaticAttemptAt: null,
+                revalidationRequestedAt: null,
+                stateChangedAt: incident.resolvedAt ?? now,
+                ...(authoritativeState === "HEALTHY"
+                  ? { lastSuccessfulAt: incident.resolvedAt ?? now }
+                  : {}),
+                revision: { increment: 1 }
+              }
+            });
+            if (reconciled.count !== 1) {
+              throw new Error(
+                "Course-support parking write conflict while reconciling authoritative finality."
+              );
+            }
+          }
+          return false;
+        }
+
+        if (
+          incident.cycle !== candidate.cycle ||
+          incident.status !== "AUTO_INVESTIGATING" ||
+          incident.activeBatchId ||
+          incident.updatedAt.getTime() !== candidate.updatedAt.getTime()
+        ) {
+          return false;
+        }
+
+        const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+          where: {
+            id: incident.id,
+            courseId: candidate.courseId,
+            cycle: incident.cycle,
+            revision: incident.revision,
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: null,
+            updatedAt: incident.updatedAt
+          },
+          data: {
+            status: "NEEDS_HUMAN",
+            engineeringOnly: candidate.engineeringOnly,
+            activeRealSearchCount: candidate.activeRealSearchCount,
+            earliestTargetDate: candidate.earliestTargetDate,
+            nextAttemptAt: null,
+            nextReminderAt: now,
+            escalatedAt: candidate.escalatedAt ?? incident.escalatedAt ?? now,
+            humanReviewReason: "AUTOMATION_STALLED",
+            latestMessage:
+              "The prior remediation approach has no new material inputs and will not be repeated.",
+            nextAction:
+              "Wait for a material provider, failure, reader-capability, relevant implementation, or operator change before retrying.",
+            lastSeenAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (incidentUpdated.count !== 1) {
+          throw new Error(
+            "Course-support parking write conflict while updating the incident."
+          );
+        }
+        const monitoringUpdated = await transaction.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: candidate.courseId,
+            state: monitoringStatus.state,
+            stateChangedAt: monitoringStatus.stateChangedAt,
+            revision: monitoringStatus.revision
+          },
+          data: {
+            state: "ENGINEERING_VERIFICATION_NEEDED",
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+            stateChangedAt: now,
+            revision: { increment: 1 }
+          }
+        });
+        if (monitoringUpdated.count !== 1) {
+          throw new Error(
+            "Course-support parking write conflict while updating monitoring status."
+          );
+        }
+        await transaction.courseMonitoringEvent.create({
+          data: {
+            courseId: candidate.courseId,
+            incidentId: incident.id,
+            eventType: "HUMAN_REVIEW_REQUESTED",
+            source: "COURSE_SUPPORT_RESPONDER",
+            fromState: monitoringStatus.state,
+            toState: "ENGINEERING_VERIFICATION_NEEDED",
+            failureFingerprint: incident.failureFingerprint,
+            message:
+              "The unchanged remediation approach was parked until a material input changes.",
+            occurredAt: now,
+            audit: {
+              cycle: incident.cycle,
+              customerState: "NEEDS_HUMAN_REVIEW",
+              automationStalled: true,
+              parkedUntilMaterialChange: true,
+              reason: route.reason,
+              resumeWorkMode: route.resumeWorkMode,
+              repeatedApproachSuppressed:
+                route.reason === "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+              transientBudgetExhausted:
+                route.reason === "TRANSIENT_RETRY_BUDGET_EXHAUSTED",
+              operationalRetryBudgetExhausted:
+                route.reason === "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
+              customerDataIncluded: false
+            }
+          }
+        });
+        return true;
+      }
+    );
+    if (parked) {
+      parkedCount += 1;
+    }
+  }
+  return parkedCount;
+}
+
 async function listDueCourseSupportCandidates(now: Date) {
   const incidents = await prisma.courseSupportIncident.findMany({
     where: buildDueResponderIncidentWhere(now),
@@ -5979,9 +7949,21 @@ async function listDueCourseSupportCandidates(now: Date) {
       nextAttemptAt: true,
       attemptCount: true,
       updatedAt: true,
+      batchIncidents: {
+        where: { batch: { completedAt: { not: null } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: {
+          cycle: true,
+          batch: {
+            select: {
+              summary: true
+            }
+          }
+        }
+      },
       course: {
         select: {
-          timeZone: true,
+          ...DETACHED_VERIFICATION_COURSE_SELECT,
           preferences: {
             where: {
               teeSearch: {
@@ -5997,7 +7979,7 @@ async function listDueCourseSupportCandidates(now: Date) {
       }
     }
   });
-  return incidents.flatMap(({ course, ...incident }) => {
+  return incidents.flatMap(({ course, batchIncidents, ...incident }) => {
     const currentDemand = deriveCourseSupportCurrentDemand(course.preferences, {
       timeZone: course.timeZone,
       now
@@ -6012,6 +7994,98 @@ async function listDueCourseSupportCandidates(now: Date) {
     ) {
       return [];
     }
+    const playbookAssessment = assessAutomationPlaybook(
+      incident.attemptLedger,
+      incident.cycle
+    );
+    const providerSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
+    const currentCycleBatchIncidents = (batchIncidents ?? []).filter(
+      (entry) => entry.cycle === incident.cycle
+    );
+    const consumedAttempts = currentCycleBatchIncidents.flatMap((entry) => {
+      if (
+        !didCourseSupportCloseoutConsumeRemediationAttempt({
+          summary: entry.batch.summary,
+          courseId: incident.courseId
+        })
+      ) {
+        return [];
+      }
+      const attempt = readPersistedCourseSupportRemediationAttempt({
+        summary: entry.batch.summary,
+        courseId: incident.courseId
+      });
+      return attempt ? [attempt] : [];
+    });
+    const currentEpisodeAttempts: PersistedCourseSupportRemediationAttempt[] = [];
+    for (const attempt of consumedAttempts) {
+      if (
+        attempt.providerSnapshotFingerprint !== providerSnapshotFingerprint ||
+        attempt.failureFingerprint !== incident.failureFingerprint
+      ) {
+        break;
+      }
+      currentEpisodeAttempts.push(attempt);
+    }
+    const priorAttempt = currentEpisodeAttempts[0] ?? consumedAttempts[0];
+    const routingAttemptCount =
+      currentCycleBatchIncidents.length > 0
+        ? currentEpisodeAttempts.length
+        : incident.cycle > 1
+          ? 0
+          : incident.attemptCount;
+    const routedRemediation = routeCourseSupportRemediation({
+      isPublic: course.isPublic,
+      detectedPlatform: course.detectedPlatform,
+      providerFamilyKey: incident.providerFamilyKey,
+      detectedBookingUrl: course.detectedBookingUrl,
+      website: course.website,
+      bookingMetadata: course.bookingMetadata,
+      bookingMethod: course.bookingMethod,
+      automationEligibility: course.automationEligibility,
+      automationReason: course.automationReason,
+      intelligenceVerifiedAt: course.intelligenceVerifiedAt,
+      intelligenceReviewAt: course.intelligenceReviewAt,
+      intelligenceConfidence: course.intelligenceConfidence,
+      failureClass: incident.failureClass,
+      discoveryAttempt: playbookAssessment.completedStages.includes(
+        "OFFICIAL_HTTP_DISCOVERY"
+      )
+        ? "HTTP_INCONCLUSIVE"
+        : "NONE",
+      attemptCount: routingAttemptCount,
+      playbookAssessment,
+      priorUnchangedAttempt: priorAttempt?.approach ?? null,
+      materialChanges: priorAttempt
+        ? {
+            providerSnapshotChanged:
+              priorAttempt.providerSnapshotFingerprint !== providerSnapshotFingerprint,
+            failureFingerprintChanged:
+              priorAttempt.failureFingerprint !== incident.failureFingerprint,
+            // A different repository SHA is not automatically relevant. Explicit
+            // provider/reader/operator reopeners increment the incident cycle, so
+            // their prior-cycle attempts were filtered above. Demand only changes
+            // priority and must never repeat an unchanged technical approach.
+            relevantRuntimeChanged: false,
+            readerCapabilityChanged: false
+          }
+        : undefined,
+      now
+    });
+    const operationalAttemptsCompleted = routedRemediation.attemptSignature
+      ? countCourseSupportOperationalNoProgressAttempts({
+          batchIncidents: currentCycleBatchIncidents,
+          cycle: incident.cycle,
+          courseId: incident.courseId,
+          providerSnapshotFingerprint,
+          failureFingerprint: incident.failureFingerprint,
+          approach: routedRemediation.attemptSignature
+        })
+      : 0;
+    const remediationRoute = applyCourseSupportOperationalRetryBudget({
+      route: routedRemediation,
+      attemptsCompleted: operationalAttemptsCompleted
+    });
     return [
       {
         id: incident.id,
@@ -6026,6 +8100,7 @@ async function listDueCourseSupportCandidates(now: Date) {
         activeRealSearchCount: currentDemand.activeRealSearchCount,
         earliestTargetDate: currentDemand.earliestTargetDate,
         escalationDeadlineAt: incident.escalationDeadlineAt,
+        escalatedAt: incident.escalatedAt,
         endpointHumanReviewProven:
           incident.escalatedAt != null &&
           isAutomationHumanReviewProofCurrentOrPrior(incident.attemptLedger, incident.cycle),
@@ -6034,7 +8109,15 @@ async function listDueCourseSupportCandidates(now: Date) {
         lastAttemptAt: incident.lastAttemptAt,
         nextAttemptAt: incident.nextAttemptAt,
         attemptCount: incident.attemptCount,
-        updatedAt: incident.updatedAt
+        updatedAt: incident.updatedAt,
+        remediationDirective: getCourseSupportRemediationDirective(remediationRoute),
+        remediationRoute,
+        providerSnapshotFingerprint,
+        remediationCourseRef: createCourseSupportRemediationCourseRef(incident.courseId),
+        playbookEventCountAtClaim: countCourseSupportPlaybookEvents({
+          attemptLedger: incident.attemptLedger,
+          cycle: incident.cycle
+        })
       }
     ];
   });
@@ -6048,6 +8131,8 @@ async function recordRoutineResponderObservation(input: {
     await prisma.automationRun.create({
       data: {
         promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
+        kind: "COURSE_SUPPORT",
+        status: "COMPLETED",
         startedAt: input.now,
         completedAt: input.now,
         outcome: input.outcome,
@@ -6127,6 +8212,31 @@ function normalizePaths(paths: string[]) {
   ].sort();
 }
 
+export function isRuntimeBearingCourseSupportPath(value: string) {
+  const [path] = normalizePaths([value]);
+  if (!path) {
+    return false;
+  }
+  const normalized = path.toLowerCase();
+  const segments = normalized.split("/");
+  const fileName = segments.at(-1) ?? "";
+  if (
+    segments.some((segment) =>
+      ["doc", "docs", "test", "tests", "__tests__", "note", "notes"].includes(segment)
+    ) ||
+    /(?:^|\.)(?:test|spec)\.[^.]+$/u.test(fileName) ||
+    /\.(?:md|mdx|txt|rst|adoc)$/u.test(fileName) ||
+    /^(?:readme|changelog|license)(?:\.|$)/u.test(fileName)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function hasRuntimeBearingCourseSupportPath(paths: string[]) {
+  return paths.some(isRuntimeBearingCourseSupportPath);
+}
+
 function hasAuthoritativeContactEvidence(
   course: Pick<
     CourseSupportCourseEvidence,
@@ -6173,6 +8283,16 @@ function courseSupportBatchOwnsCheckout(batch: {
   summary: Prisma.JsonValue | null;
 }) {
   return batch.status === "IMPLEMENTING" || readBatchPlannedPaths(batch.summary).length > 0;
+}
+
+function courseSupportBatchReservesCheckout(batch: {
+  status: CourseSupportBatchStatus;
+  summary: Prisma.JsonValue | null;
+}) {
+  return (
+    courseSupportBatchOwnsCheckout(batch) ||
+    readCourseSupportRemediationDirective(batch.summary)?.requiresImplementationPath === true
+  );
 }
 
 export function findConflictingResponderPaths(requestedPaths: string[], ownedPaths: string[]) {
@@ -6260,7 +8380,7 @@ function sanitizeRequiredResponderText(value: string, label: string) {
   return sanitized;
 }
 
-function asJsonObject(value: Prisma.JsonValue | null): Record<string, unknown> {
+function asJsonObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
@@ -6702,8 +8822,7 @@ export function isDurableTerminalProof(
           verifiedAt: entry.verifiedAt,
           notBefore: [
             batch.deployedAt ?? batch.createdAt,
-            ...(batch.recheckDispatchStartedAt ? [batch.recheckDispatchStartedAt] : []),
-            entry.incident.lastSeenAt
+            ...(batch.recheckDispatchStartedAt ? [batch.recheckDispatchStartedAt] : [])
           ],
           now: entry.verifiedAt
         })
@@ -7041,8 +9160,12 @@ function assertDetachedVerificationReadyForCloseout(input: {
   requests: DetachedVerificationRequestState[];
   verificationByBatchIncidentId: Map<string, BatchIncidentVerification>;
   currentFailureBatchIncidentIds: Set<string>;
+  supersededBatchIncidentIds: Set<string>;
 }) {
   for (const request of input.requests) {
+    if (input.supersededBatchIncidentIds.has(request.batchIncidentId)) {
+      continue;
+    }
     const verification = input.verificationByBatchIncidentId.get(request.batchIncidentId);
     if (verification?.result === "NEEDS_HUMAN") {
       continue;

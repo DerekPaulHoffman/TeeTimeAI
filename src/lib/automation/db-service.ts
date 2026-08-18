@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type CourseMonitoringEventSource } from "@prisma/client";
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import { resolveBookingAccessMode } from "@/lib/courses/intelligence";
@@ -948,6 +948,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     const current = await transaction.course.findUnique({
       where: { id: input.courseId },
       select: {
+        timeZone: true,
         providerFamilyKey: true,
         detectedPlatform: true,
         detectedBookingUrl: true,
@@ -955,6 +956,11 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         bookingMetadata: true,
         isPublic: true,
         bookingMethod: true,
+        bookingWindowDaysAhead: true,
+        bookingWindowEvidenceUrl: true,
+        bookingReleaseTimeLocal: true,
+        bookingWindowSource: true,
+        bookingWindowConfidence: true,
         automationEligibility: true,
         automationReason: true,
         bookingAccessMode: true,
@@ -1027,6 +1033,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     where: { id: input.courseId },
     select: {
       name: true,
+      timeZone: true,
       providerFamilyKey: true,
       detectedPlatform: true,
       detectedBookingUrl: true,
@@ -1034,6 +1041,11 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       bookingMetadata: true,
       isPublic: true,
       bookingMethod: true,
+      bookingWindowDaysAhead: true,
+      bookingWindowEvidenceUrl: true,
+      bookingReleaseTimeLocal: true,
+      bookingWindowSource: true,
+      bookingWindowConfidence: true,
       automationEligibility: true,
       automationReason: true,
       bookingAccessMode: true,
@@ -2805,19 +2817,45 @@ export async function recordCourseBookingWindowEvidence(input: {
   courseId: string;
   evidence: BookingWindowEvidence;
   observedAt?: Date;
+  source?: CourseMonitoringEventSource;
 }) {
   const observedAt = input.observedAt ?? new Date();
-  return prisma.course.update({
-    where: { id: input.courseId },
-    data: {
-      bookingWindowDaysAhead: input.evidence.daysAhead,
-      bookingReleaseTimeLocal: input.evidence.releaseTimeLocal,
-      bookingWindowSource: input.evidence.source,
-      bookingWindowConfidence: input.evidence.confidence,
-      bookingWindowEvidenceUrl: input.evidence.evidenceUrl,
-      bookingWindowCheckedAt: observedAt,
-      bookingWindowObservedAt: observedAt
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await transaction.course.findUnique({
+      where: { id: input.courseId }
+    });
+    if (!current) {
+      throw new Error(`Course ${input.courseId} was not found`);
     }
+
+    const applied = await transaction.course.update({
+      where: {
+        id: input.courseId,
+        updatedAt: current.updatedAt
+      },
+      data: {
+        bookingWindowDaysAhead: input.evidence.daysAhead,
+        bookingReleaseTimeLocal: input.evidence.releaseTimeLocal,
+        bookingWindowSource: input.evidence.source,
+        bookingWindowConfidence: input.evidence.confidence,
+        bookingWindowEvidenceUrl: input.evidence.evidenceUrl,
+        bookingWindowCheckedAt: observedAt,
+        bookingWindowObservedAt: observedAt
+      }
+    });
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+      transaction,
+      {
+        courseId: input.courseId,
+        before: current,
+        after: applied,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(applied),
+        source: input.source ?? "SEARCH_WORKFLOW",
+        now: observedAt
+      }
+    );
+    return applied;
   });
 }
 

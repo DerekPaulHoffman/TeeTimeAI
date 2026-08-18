@@ -676,6 +676,14 @@ async function assertReleaseGitProvenance(
     throw new Error("--release-sha must equal the checked-out responder HEAD.");
   }
   const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+  if (
+    options?.allowUnchangedRuntime === true &&
+    provenance.remediationDirective?.allowUnchangedRuntime !== true
+  ) {
+    throw new Error(
+      "This remediation route requires a reusable implementation or material change; unchanged-runtime verification is not allowed."
+    );
+  }
   if (provenance.branch && git.branch !== provenance.branch) {
     throw new Error("Release verification branch does not match the claimed batch.");
   }
@@ -705,6 +713,8 @@ async function assertReleaseGitProvenance(
     if (
       !canVerifyUnchangedCourseSupportRuntime({
         allowUnchangedRuntime: options?.allowUnchangedRuntime === true,
+        remediationAllowsUnchangedRuntime:
+          provenance.remediationDirective?.allowUnchangedRuntime === true,
         baseSha: provenance.baseSha,
         persistedReleaseSha: provenance.releaseSha,
         requestedReleaseSha: releaseSha,
@@ -721,10 +731,7 @@ async function assertReleaseGitProvenance(
       `Release contains paths not claimed by the responder: ${unplannedPaths.join(", ")}`
     );
   }
-  if (!provenance.releaseSha) {
-    return { releaseAdvanceProof: undefined };
-  }
-  if (!isGitAncestor(provenance.releaseSha, releaseSha)) {
+  if (provenance.releaseSha && !isGitAncestor(provenance.releaseSha, releaseSha)) {
     throw new Error(
       "A follow-up responder release must descend from the persisted release."
     );
@@ -734,7 +741,7 @@ async function assertReleaseGitProvenance(
   }
   return {
     releaseAdvanceProof: {
-      fromSha: provenance.releaseSha,
+      fromSha: provenance.releaseSha ?? releaseDiffBase,
       toSha: releaseSha,
       branch: provenance.branch,
       committedPaths,

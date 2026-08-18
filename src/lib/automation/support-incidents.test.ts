@@ -30,6 +30,7 @@ function incident(overrides: Record<string, unknown> = {}) {
     courseId: "course-1",
     firstAffectedSearchId: "search-1",
     cycle: 1,
+    revision: 1,
     status: "AUTO_INVESTIGATING",
     kind: "NEEDS_ADAPTER",
     courseNameSnapshot: "Pequabuck Golf Club",
@@ -41,6 +42,7 @@ function incident(overrides: Record<string, unknown> = {}) {
     affectedSearchCount: 1,
     occurrenceCount: 1,
     engineeringOnly: false,
+    activeBatchId: null,
     firstSeenAt: now,
     lastSeenAt: now,
     ownerNotifiedAt: null,
@@ -84,6 +86,18 @@ const missingSourceFingerprint = buildProviderFailureFingerprint({
   operation: "METADATA",
   httpStatus: null
 });
+const unsupportedExampleMetadataFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "example.com",
+  failureClass: "UNSUPPORTED_FAMILY",
+  operation: "METADATA",
+  httpStatus: null
+});
+const chronogolfAuthFailureFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "CHRONOGOLF",
+  failureClass: "AUTH",
+  operation: "AVAILABILITY",
+  httpStatus: 401
+});
 
 function mockRealDemand(count: number) {
   prismaMocks.teeSearch.findUnique.mockResolvedValue({
@@ -114,6 +128,7 @@ describe("course support incidents", () => {
       trafficClass: "UNCLASSIFIED",
       syntheticMultiCycle: false
     });
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it("opens a durable incident without alerting the operator before a retry", async () => {
@@ -325,8 +340,9 @@ describe("course support incidents", () => {
       _count: { id: 1 },
       _min: { date: now }
     });
-    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(resolved);
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(reopened);
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(resolved)
+      .mockResolvedValueOnce(reopened);
 
     await reportCourseSupportIssue({
       course: {
@@ -341,8 +357,14 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-1",
+        cycle: 1,
+        revision: 1,
+        status: "RESOLVED",
+        activeBatchId: null
+      }),
       data: expect.objectContaining({
         engineeringOnly: false,
         activeRealSearchCount: 1,
@@ -351,7 +373,7 @@ describe("course support incidents", () => {
     });
   });
 
-  it("closes an unnotified synthetic-only incident without hiding real demand", async () => {
+  it("does not let a disposable synthetic check close a historical real-demand incident", async () => {
     const existing = incident();
     prismaMocks.teeSearch.findUnique.mockResolvedValue({
       trafficClass: "AUTOMATION",
@@ -363,12 +385,6 @@ describe("course support incidents", () => {
       _min: { date: null }
     });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
-    prismaMocks.courseSupportIncident.update.mockResolvedValue({
-      ...existing,
-      status: "RESOLVED",
-      resolvedAt: now
-    });
-
     await expect(
       reportCourseSupportIssue({
         course: {
@@ -388,17 +404,8 @@ describe("course support incidents", () => {
       ownerAlerted: false
     });
 
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
-      data: {
-        status: "RESOLVED",
-        resolvedAt: now,
-        resolution: null,
-        resolutionMessage: "Closed because this course has only synthetic test demand.",
-        nextAction: null,
-        lastSeenAt: now
-      }
-    });
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
   });
 
   it("leaves a shared real-demand incident open during a synthetic check", async () => {
@@ -427,7 +434,13 @@ describe("course support incidents", () => {
 
   it("keeps an old unresolved incident in autonomous remediation", async () => {
     const firstSeenAt = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const existing = incident({ firstSeenAt });
+    const existing = incident({
+      firstSeenAt,
+      kind: "FETCH_FAILED",
+      providerFamilyKey: "CHRONOGOLF",
+      failureClass: "AUTH",
+      failureFingerprint: chronogolfAuthFailureFingerprint
+    });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
     prismaMocks.courseSupportIncident.update.mockResolvedValueOnce(incident({ firstSeenAt }));
 
@@ -436,11 +449,12 @@ describe("course support incidents", () => {
         id: "course-1",
         name: "Pequabuck Golf Club",
         detectedPlatform: "CHRONOGOLF",
-        detectedBookingUrl: null,
+        detectedBookingUrl: "https://www.chronogolf.com/club/3563",
         website: "https://pequabuckgolf.com/"
       },
       searchId: "search-1",
-      kind: "NEEDS_ADAPTER",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
       now
     });
 
@@ -486,6 +500,8 @@ describe("course support incidents", () => {
       providerFamilyKey: "FOREUP",
       failureClass: "AUTH",
       failureFingerprint: authFailureFingerprint,
+      platformSnapshot: "FOREUP",
+      bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
       firstSeenAt,
       escalationDeadlineAt: null
     });
@@ -516,6 +532,8 @@ describe("course support incidents", () => {
       providerFamilyKey: "FOREUP",
       failureClass: "AUTH",
       failureFingerprint: authFailureFingerprint,
+      platformSnapshot: "FOREUP",
+      bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
       escalationDeadlineAt: persistedDeadline
     });
     mockRealDemand(1);
@@ -547,6 +565,8 @@ describe("course support incidents", () => {
       providerFamilyKey: "FOREUP",
       failureClass: "AUTH",
       failureFingerprint: authFailureFingerprint,
+      platformSnapshot: "FOREUP",
+      bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
       engineeringOnly: true,
       activeRealSearchCount: 0,
       nextAttemptAt,
@@ -635,11 +655,144 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
   });
 
+  it("reopens source-unverified evidence when real customer demand arrives", async () => {
+    const sourceUnverified = incident({
+      status: "RESOLVED",
+      resolution: "SOURCE_UNVERIFIED",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: missingSourceFingerprint,
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      resolvedAt: new Date("2026-07-20T12:00:00.000Z")
+    });
+    const reopened = incident({
+      cycle: 2,
+      status: "AUTO_INVESTIGATING",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: missingSourceFingerprint,
+      engineeringOnly: false,
+      activeRealSearchCount: 1
+    });
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(sourceUnverified)
+      .mockResolvedValueOnce(reopened);
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Customer Demand Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: null
+        },
+        searchId: "search-public",
+        kind: "NEEDS_ADAPTER",
+        now
+      })
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING"
+    });
+
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-1",
+        cycle: 1,
+        revision: 1,
+        status: "RESOLVED",
+        resolution: "SOURCE_UNVERIFIED",
+        activeBatchId: null
+      }),
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        engineeringOnly: false,
+        activeRealSearchCount: 1,
+        attemptCount: 0,
+        resolution: null
+      })
+    });
+  });
+
+  it.each([
+    "DIRECT_BOOKING_CLASSIFIED",
+    "IDENTITY_CLASSIFIED"
+  ] as const)(
+    "does not overwrite a concurrently committed %s final while reopening source evidence",
+    async (resolution) => {
+      const staleSourceSnapshot = incident({
+        status: "RESOLVED",
+        resolution: "SOURCE_UNVERIFIED",
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass: "MISSING_SOURCE",
+        failureFingerprint: missingSourceFingerprint,
+        engineeringOnly: true,
+        activeRealSearchCount: 0
+      });
+      const concurrentFinal = incident({
+        cycle: 2,
+        revision: 2,
+        status: "RESOLVED",
+        resolution,
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass: "MISSING_SOURCE",
+        failureFingerprint: missingSourceFingerprint,
+        engineeringOnly: false,
+        activeRealSearchCount: 1,
+        resolvedAt: now
+      });
+      mockRealDemand(1);
+      prismaMocks.courseSupportIncident.findUnique
+        .mockResolvedValueOnce(staleSourceSnapshot)
+        .mockResolvedValueOnce(concurrentFinal);
+      prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        reportCourseSupportIssue({
+          course: {
+            id: "course-1",
+            name: "Concurrently Classified Course",
+            detectedPlatform: "UNKNOWN",
+            detectedBookingUrl: null,
+            website: null
+          },
+          searchId: "search-public",
+          kind: "NEEDS_ADAPTER",
+          now
+        })
+      ).resolves.toEqual({
+        incidentId: "incident-1",
+        status: "UNRECORDED",
+        ownerAlerted: false
+      });
+
+      expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "incident-1",
+            cycle: 1,
+            revision: 1,
+            status: "RESOLVED",
+            resolution: "SOURCE_UNVERIFIED",
+            activeBatchId: null
+          })
+        })
+      );
+      expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    }
+  );
+
   it("keeps an unchanged contact-only decision resolved", async () => {
     const finalIncident = incident({
       status: "RESOLVED",
       resolution: "DIRECT_BOOKING_CLASSIFIED",
       providerFamilyKey: "example.com",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: unsupportedExampleMetadataFingerprint,
       platformSnapshot: "UNKNOWN",
       bookingUrlSnapshot: "https://example.com/",
       resolvedAt: new Date("2026-07-20T12:00:00.000Z")
@@ -676,14 +829,71 @@ describe("course support incidents", () => {
     );
   });
 
-  it("keeps unchanged human review terminal", async () => {
+  it.each([
+    "DIRECT_BOOKING_CLASSIFIED",
+    "IDENTITY_CLASSIFIED"
+  ] as const)(
+    "keeps an authoritative %s decision resolved when a later failure shape changes",
+    async (resolution) => {
+      const finalIncident = incident({
+        status: "RESOLVED",
+        resolution,
+        providerFamilyKey: "example.com",
+        failureClass: "UNSUPPORTED_FAMILY",
+        failureFingerprint: unsupportedExampleMetadataFingerprint,
+        platformSnapshot: "UNKNOWN",
+        bookingUrlSnapshot: "https://example.com/",
+        resolvedAt: new Date("2026-07-20T12:00:00.000Z")
+      });
+      prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(finalIncident);
+      prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        reportCourseSupportIssue({
+          course: {
+            id: "course-1",
+            name: "Authoritatively Classified Course",
+            timeZone: "America/New_York",
+            detectedPlatform: "UNKNOWN",
+            detectedBookingUrl: null,
+            website: "https://example.com/",
+            providerFamilyKey: "example.com"
+          },
+          searchId: "search-1",
+          kind: "FETCH_FAILED",
+          error: { status: 503 },
+          now
+        })
+      ).resolves.toMatchObject({
+        incidentId: "incident-1",
+        status: "UNRECORDED"
+      });
+
+      expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+      expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ status: "RESOLVED" }),
+          data: expect.not.objectContaining({ status: "AUTO_INVESTIGATING" })
+        })
+      );
+    }
+  );
+
+  it("keeps unchanged human review terminal after its retry time elapses", async () => {
+    const laterNow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    const firstSeenAt = new Date(now.getTime() - 48 * 60 * 60 * 1000);
     const humanIncident = incident({
+      cycle: 4,
       status: "NEEDS_HUMAN",
       providerFamilyKey: "example.com",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: unsupportedExampleMetadataFingerprint,
       platformSnapshot: "UNKNOWN",
       bookingUrlSnapshot: "https://example.com/",
       humanReviewReason: "SOURCE_UNVERIFIED",
-      nextAttemptAt: null
+      nextAttemptAt: now,
+      attemptCount: 3,
+      firstSeenAt
     });
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(humanIncident);
     prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
@@ -701,7 +911,7 @@ describe("course support incidents", () => {
         },
         searchId: "search-1",
         kind: "NEEDS_ADAPTER",
-        now
+        now: laterNow
       })
     ).resolves.toMatchObject({
       incidentId: "incident-1",
@@ -711,9 +921,297 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.not.objectContaining({ status: "AUTO_INVESTIGATING" })
+        data: expect.not.objectContaining({
+          cycle: expect.anything(),
+          status: "AUTO_INVESTIGATING",
+          attemptCount: 0,
+          firstSeenAt: laterNow
+        })
       })
     );
+    const updateData = prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;
+    expect(updateData).not.toHaveProperty("cycle");
+    expect(updateData).not.toHaveProperty("status");
+    expect(updateData).not.toHaveProperty("attemptCount");
+    expect(updateData).not.toHaveProperty("firstSeenAt");
+  });
+
+  it("promotes new real demand without reopening unchanged human review", async () => {
+    const nextAttemptAt = new Date(now.getTime() + 6 * 60 * 60 * 1000);
+    mockRealDemand(2);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        cycle: 4,
+        status: "NEEDS_HUMAN",
+        providerFamilyKey: "FOREUP",
+        failureClass: "AUTH",
+        failureFingerprint: authFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
+        engineeringOnly: true,
+        activeRealSearchCount: 0,
+        humanReviewReason: "ACCOUNT_REQUIRED",
+        nextAttemptAt,
+        attemptCount: 3
+      })
+    );
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: foreupCourse,
+        searchId: "search-public",
+        kind: "FETCH_FAILED",
+        error: { status: 401 },
+        now
+      })
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "NEEDS_HUMAN"
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 4,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null
+      },
+      data: expect.objectContaining({
+        engineeringOnly: false,
+        activeRealSearchCount: 2,
+        occurrenceCount: { increment: 1 }
+      })
+    });
+    const updateData = prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;
+    expect(updateData).not.toHaveProperty("cycle");
+    expect(updateData).not.toHaveProperty("status");
+    expect(updateData).not.toHaveProperty("attemptCount");
+  });
+
+  it.each([
+    {
+      change: "platform snapshot",
+      previousPlatform: "CHRONOGOLF",
+      previousBookingUrl: "https://www.chronogolf.com/club/3563",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: "https://www.chronogolf.com/club/3563"
+    },
+    {
+      change: "booking-source snapshot",
+      previousPlatform: "CHRONOGOLF",
+      previousBookingUrl: "https://www.chronogolf.com/club/old-source",
+      detectedPlatform: "CHRONOGOLF",
+      detectedBookingUrl: "https://www.chronogolf.com/club/3563"
+    }
+  ] as const)("reopens parked human review for a changed $change", async (scenario) => {
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        cycle: 4,
+        status: "NEEDS_HUMAN",
+        providerFamilyKey: "CHRONOGOLF",
+        failureClass: "AUTH",
+        failureFingerprint: chronogolfAuthFailureFingerprint,
+        platformSnapshot: scenario.previousPlatform,
+        bookingUrlSnapshot: scenario.previousBookingUrl,
+        humanReviewReason: "ACCOUNT_REQUIRED",
+        nextReminderAt: now,
+        decisionActorId: "operator-1",
+        decisionAt: now,
+        decisionNote: "Reviewed the prior source.",
+        decisionEvidenceUrl: "https://example.com/evidence",
+        decisionIdempotencyKey: "decision-1",
+        ownerNotifiedAt: now,
+        escalatedAt: now,
+        escalationNotifiedAt: now,
+        attemptCount: 3,
+        lastAttemptAt: now
+      })
+    );
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Changed Source Course",
+          timeZone: "America/New_York",
+          detectedPlatform: scenario.detectedPlatform,
+          detectedBookingUrl: scenario.detectedBookingUrl,
+          website: "https://course.example/"
+        },
+        searchId: "search-public",
+        kind: "FETCH_FAILED",
+        error: { status: 401 },
+        now
+      })
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING"
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 4,
+        revision: 1,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null
+      },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        providerFamilyKey: "CHRONOGOLF",
+        failureFingerprint: chronogolfAuthFailureFingerprint,
+        courseNameSnapshot: "Changed Source Course",
+        platformSnapshot: scenario.detectedPlatform,
+        bookingUrlSnapshot: scenario.detectedBookingUrl,
+        firstSeenAt: now,
+        attemptCount: 0,
+        lastAttemptAt: null,
+        ownerNotifiedAt: null,
+        escalatedAt: null,
+        escalationNotifiedAt: null,
+        humanReviewReason: null,
+        nextReminderAt: null,
+        decisionActorId: null,
+        decisionAt: null,
+        decisionNote: null,
+        decisionEvidenceUrl: null,
+        decisionIdempotencyKey: null
+      })
+    });
+  });
+
+  it("reopens parked human review when the provider family changes", async () => {
+    const previousFailureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "old-provider.example",
+      failureClass: "UNSUPPORTED_FAMILY",
+      operation: "METADATA",
+      httpStatus: null
+    });
+    const nextFailureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "new-provider.example",
+      failureClass: "UNSUPPORTED_FAMILY",
+      operation: "METADATA",
+      httpStatus: null
+    });
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      incident({
+        cycle: 4,
+        status: "NEEDS_HUMAN",
+        providerFamilyKey: "old-provider.example",
+        failureClass: "UNSUPPORTED_FAMILY",
+        failureFingerprint: previousFailureFingerprint,
+        platformSnapshot: "UNKNOWN",
+        bookingUrlSnapshot: null,
+        humanReviewReason: "SOURCE_UNVERIFIED",
+        nextReminderAt: now,
+        attemptCount: 3
+      })
+    );
+    await reportCourseSupportIssue({
+      course: {
+        id: "course-1",
+        name: "Changed Provider Course",
+        timeZone: "America/New_York",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: null,
+        providerFamilyKey: "new-provider.example"
+      },
+      searchId: "search-public",
+      kind: "NEEDS_ADAPTER",
+      now
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 4,
+        revision: 1,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null
+      },
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        providerFamilyKey: "new-provider.example",
+        failureFingerprint: nextFailureFingerprint,
+        humanReviewReason: null,
+        nextReminderAt: null,
+        attemptCount: 0
+      })
+    });
+  });
+
+  it("does not detach a batch claimed after material-change evidence was read", async () => {
+    const stale = incident({
+      cycle: 4,
+      revision: 7,
+      status: "NEEDS_HUMAN",
+      providerFamilyKey: "CHRONOGOLF",
+      failureClass: "AUTH",
+      failureFingerprint: chronogolfAuthFailureFingerprint,
+      platformSnapshot: "CHRONOGOLF",
+      bookingUrlSnapshot: "https://www.chronogolf.com/club/old-source",
+      humanReviewReason: "ACCOUNT_REQUIRED"
+    });
+    const claimed = incident({
+      cycle: 4,
+      revision: 8,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-claimed-concurrently",
+      providerFamilyKey: "CHRONOGOLF",
+      failureClass: "AUTH",
+      failureFingerprint: chronogolfAuthFailureFingerprint
+    });
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(claimed);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Concurrently Claimed Course",
+          timeZone: "America/New_York",
+          detectedPlatform: "CHRONOGOLF",
+          detectedBookingUrl: "https://www.chronogolf.com/club/new-source",
+          website: "https://course.example/"
+        },
+        searchId: "search-public",
+        kind: "FETCH_FAILED",
+        error: { status: 401 },
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "incident-1",
+          cycle: 4,
+          revision: 7,
+          status: "NEEDS_HUMAN",
+          activeBatchId: null
+        },
+        data: expect.objectContaining({ activeBatchId: null })
+      })
+    );
+    expect(prismaMocks.courseSupportIncident.findUnique).toHaveBeenLastCalledWith({
+      where: { id: "incident-1" }
+    });
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
   });
 
   it("promotes same-local-day western demand after UTC midnight", async () => {
@@ -729,6 +1227,8 @@ describe("course support incidents", () => {
         providerFamilyKey: "FOREUP",
         failureClass: "AUTH",
         failureFingerprint: authFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         engineeringOnly: true,
         activeRealSearchCount: 0,
         nextAttemptAt
@@ -782,6 +1282,8 @@ describe("course support incidents", () => {
         providerFamilyKey: "FOREUP",
         failureClass: "AUTH",
         failureFingerprint: authFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         engineeringOnly: false,
         activeRealSearchCount: 1,
         nextAttemptAt
@@ -814,6 +1316,8 @@ describe("course support incidents", () => {
         providerFamilyKey: "FOREUP",
         failureClass: "AUTH",
         failureFingerprint: authFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         engineeringOnly: false,
         affectedSearchCount: 2,
         activeRealSearchCount: 1,
@@ -867,6 +1371,8 @@ describe("course support incidents", () => {
         providerFamilyKey: "FOREUP",
         failureClass: "RATE_LIMIT",
         failureFingerprint: rateLimitFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         engineeringOnly: true,
         activeRealSearchCount: 0,
         nextAttemptAt
@@ -904,6 +1410,8 @@ describe("course support incidents", () => {
         providerFamilyKey: "FOREUP",
         failureClass: "RATE_LIMIT",
         failureFingerprint: rateLimitFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         engineeringOnly: true,
         activeRealSearchCount: 0,
         nextAttemptAt: expiredNextAttemptAt
@@ -915,7 +1423,6 @@ describe("course support incidents", () => {
         nextAttemptAt: expectedNextAttemptAt
       })
     );
-
     await reportCourseSupportIssue({
       course: foreupCourse,
       searchId: "search-public",
@@ -943,6 +1450,8 @@ describe("course support incidents", () => {
         providerFamilyKey: "FOREUP",
         failureClass: "AUTH",
         failureFingerprint: authFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         engineeringOnly: true,
         activeRealSearchCount: 0,
         nextAttemptAt: new Date(now.getTime() + 6 * 60 * 60 * 1000),
@@ -950,13 +1459,6 @@ describe("course support incidents", () => {
         lastAttemptAt: new Date(now.getTime() - 60 * 60 * 1000)
       })
     );
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({
-        engineeringOnly: false,
-        nextAttemptAt: expectedNextAttemptAt
-      })
-    );
-
     await reportCourseSupportIssue({
       course: foreupCourse,
       searchId: "search-public",
@@ -965,8 +1467,15 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 1,
+        revision: 1,
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: null
+      },
       data: expect.objectContaining({
         cycle: { increment: 1 },
         attemptCount: 0,
@@ -984,25 +1493,21 @@ describe("course support incidents", () => {
     mockRealDemand(1);
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
       incident({
+        status: "NEEDS_HUMAN",
         providerFamilyKey: "FOREUP",
         failureClass: "RATE_LIMIT",
         failureFingerprint: rateLimitFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
+        humanReviewReason: "ACCOUNT_REQUIRED",
+        nextReminderAt: now,
+        attemptCount: 3,
         firstSeenAt: oldEpisodeStartedAt,
         escalationDeadlineAt: new Date(
           oldEpisodeStartedAt.getTime() + 28 * 60 * 1000
         )
       })
     );
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({
-        cycle: 2,
-        providerFamilyKey: "FOREUP",
-        failureClass: "AUTH",
-        failureFingerprint: authFailureFingerprint,
-        firstSeenAt: now
-      })
-    );
-
     await reportCourseSupportIssue({
       course: foreupCourse,
       searchId: "search-public",
@@ -1012,11 +1517,22 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
+    expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 1,
+        revision: 1,
+        status: "NEEDS_HUMAN",
+        activeBatchId: null
+      },
       data: expect.objectContaining({
         cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
         firstSeenAt: now,
+        attemptCount: 0,
+        humanReviewReason: null,
+        nextReminderAt: null,
         nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000),
         escalationDeadlineAt: new Date(now.getTime() + 28 * 60 * 1000),
         failureFingerprint: authFailureFingerprint
@@ -1027,29 +1543,30 @@ describe("course support incidents", () => {
   it("starts a fresh ladder when the same failure returns after monitoring recovery", async () => {
     const oldEpisodeStartedAt = new Date(now.getTime() - 20 * 60 * 1000);
     mockRealDemand(1);
-    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
-      incident({
+    const restored = incident({
         status: "RESOLVED",
         resolution: "MONITORING_RESTORED",
         resolvedAt: new Date(now.getTime() - 60 * 1000),
         providerFamilyKey: "FOREUP",
         failureClass: "AUTH",
         failureFingerprint: authFailureFingerprint,
+        platformSnapshot: "FOREUP",
+        bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
         firstSeenAt: oldEpisodeStartedAt,
         escalationDeadlineAt: new Date(
           oldEpisodeStartedAt.getTime() + 28 * 60 * 1000
         )
-      })
-    );
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(
-      incident({
+      });
+    const reopened = incident({
         cycle: 2,
         providerFamilyKey: "FOREUP",
         failureClass: "AUTH",
         failureFingerprint: authFailureFingerprint,
         firstSeenAt: now
-      })
-    );
+      });
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(restored)
+      .mockResolvedValueOnce(reopened);
 
     await reportCourseSupportIssue({
       course: foreupCourse,
@@ -1060,8 +1577,15 @@ describe("course support incidents", () => {
       now
     });
 
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-1",
+        cycle: 1,
+        revision: 1,
+        status: "RESOLVED",
+        resolution: "MONITORING_RESTORED",
+        activeBatchId: null
+      }),
       data: expect.objectContaining({
         cycle: { increment: 1 },
         status: "AUTO_INVESTIGATING",
@@ -1159,6 +1683,51 @@ describe("course support incidents", () => {
         })
       })
     );
+  });
+
+  it("upgrades a resolved technical incident when fresh factual evidence is recorded", async () => {
+    const technical = incident({
+      status: "RESOLVED",
+      resolution: "TECHNICAL_LIMITATION_CLASSIFIED",
+      resolvedAt: new Date(now.getTime() - 60_000),
+      revision: 4
+    });
+    const factual = incident({
+      status: "RESOLVED",
+      resolution: "IDENTITY_CLASSIFIED",
+      resolutionMessage: "Fresh official evidence confirms the identity.",
+      resolvedAt: now,
+      revision: 5
+    });
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(technical)
+      .mockResolvedValueOnce(technical)
+      .mockResolvedValueOnce(factual);
+    prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      resolveCourseSupportIncident({
+        courseId: "course-1",
+        resolution: "IDENTITY_CLASSIFIED",
+        message: "Fresh official evidence confirms the identity.",
+        now
+      })
+    ).resolves.toEqual(factual);
+
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        status: "RESOLVED",
+        activeBatchId: null,
+        revision: 4,
+        resolution: "TECHNICAL_LIMITATION_CLASSIFIED"
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolution: "IDENTITY_CLASSIFIED",
+        resolvedAt: now
+      })
+    });
   });
 
   it("does not resolve or detach an incident owned by a responder batch", async () => {
@@ -1263,6 +1832,61 @@ describe("course support incidents", () => {
     expect(promotionData).not.toHaveProperty("cycle");
     expect(promotionData).not.toHaveProperty("failureFingerprint");
     expect(promotionData).not.toHaveProperty("activeBatchId");
+  });
+
+  it("invalidates owned proof when the failure fingerprint changes without demand", async () => {
+    const ownedUpdatedAt = new Date(now.getTime() - 60_000);
+    const ownedLastSeenAt = new Date(now.getTime() - 2 * 60_000);
+    const owned = incident({
+      activeBatchId: "batch-1",
+      providerFamilyKey: "FOREUP",
+      failureClass: "AUTH",
+      failureFingerprint: authFailureFingerprint,
+      platformSnapshot: "FOREUP",
+      bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
+      activeRealSearchCount: 0,
+      occurrenceCount: 3,
+      lastSeenAt: ownedLastSeenAt,
+      updatedAt: ownedUpdatedAt
+    });
+    mockRealDemand(0);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(owned);
+
+    await expect(
+      reportCourseSupportIssue({
+        course: foreupCourse,
+        searchId: "search-public",
+        kind: "FETCH_FAILED",
+        error: { status: 429 },
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false
+    });
+
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 1,
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: "batch-1",
+        updatedAt: ownedUpdatedAt
+      },
+      data: {
+        occurrenceCount: { increment: 1 },
+        lastSeenAt: now,
+        revision: { increment: 1 }
+      }
+    });
+    const freshnessData = prismaMocks.courseSupportIncident.updateMany.mock.calls[0][0].data;
+    expect(freshnessData).not.toHaveProperty("cycle");
+    expect(freshnessData).not.toHaveProperty("status");
+    expect(freshnessData).not.toHaveProperty("activeBatchId");
+    expect(freshnessData).not.toHaveProperty("providerFamilyKey");
+    expect(freshnessData).not.toHaveProperty("failureClass");
+    expect(freshnessData).not.toHaveProperty("failureFingerprint");
   });
 
   it("does not let a disposable synthetic check resolve an incident owned by a batch", async () => {

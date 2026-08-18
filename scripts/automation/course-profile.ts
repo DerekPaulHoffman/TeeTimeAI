@@ -7,6 +7,7 @@ import {
   MAX_BOOKING_WINDOW_DAYS_AHEAD,
   normalizeReleaseTime
 } from "@/lib/courses/booking-window";
+import { recordCourseBookingWindowEvidence } from "@/lib/automation/db-service";
 import { applyCourseProfileDraft, createCourseProfileSlugAlias, getCourseProfileResearchPacket, listCourseProfileQueue } from "@/lib/course-profiles/service";
 import { prisma } from "@/lib/prisma";
 
@@ -164,26 +165,32 @@ export async function executeCourseProfileCommand(command: ReturnType<typeof par
     }
 
     const observedAt = new Date();
-    const updated = await prisma.course.update({
-      where: { id: command.courseId },
-      data: {
-        ...proposed,
-        bookingWindowCheckedAt: observedAt,
-        bookingWindowObservedAt: observedAt
+    const updated = await recordCourseBookingWindowEvidence({
+      courseId: command.courseId,
+      evidence: {
+        daysAhead: command.daysAhead,
+        releaseTimeLocal: command.releaseTimeLocal,
+        source: "OFFICIAL_BOOKING_PAGE",
+        confidence: 1,
+        evidenceUrl: command.evidenceUrl
       },
-      select: {
-        id: true,
-        name: true,
-        bookingWindowDaysAhead: true,
-        bookingReleaseTimeLocal: true,
-        bookingWindowSource: true,
-        bookingWindowConfidence: true,
-        bookingWindowEvidenceUrl: true,
-        bookingWindowCheckedAt: true,
-        bookingWindowObservedAt: true
-      }
+      observedAt,
+      source: "OPERATOR_CLI"
     });
-    return { apply: true, course: updated };
+    return {
+      apply: true,
+      course: {
+        id: updated.id,
+        name: updated.name,
+        bookingWindowDaysAhead: updated.bookingWindowDaysAhead,
+        bookingReleaseTimeLocal: updated.bookingReleaseTimeLocal,
+        bookingWindowSource: updated.bookingWindowSource,
+        bookingWindowConfidence: updated.bookingWindowConfidence,
+        bookingWindowEvidenceUrl: updated.bookingWindowEvidenceUrl,
+        bookingWindowCheckedAt: updated.bookingWindowCheckedAt,
+        bookingWindowObservedAt: updated.bookingWindowObservedAt
+      }
+    };
   }
   if (command.action === "alias") return createCourseProfileSlugAlias(command.courseId, command.slug, command.apply);
   const input = command.file ? await readFile(command.file, "utf8") : await readStdin(stdin);

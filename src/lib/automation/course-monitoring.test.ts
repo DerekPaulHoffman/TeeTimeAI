@@ -66,6 +66,52 @@ describe("course monitoring lifecycle", () => {
     });
   });
 
+  it.each([
+    ["the same read path", "TYPED_PROVIDER_ADAPTER"],
+    ["an independent read path", "SIGNED_OUT_BROWSER"],
+  ])("does not cross-confirm a different failure fingerprint from %s", (_label, readPath) => {
+    expect(
+      decideMonitoringFailureState(
+        [
+          {
+            readPath,
+            failureFingerprint: "FOREUP:READ_ERROR_A",
+          },
+        ],
+        {
+          readPath: "TYPED_PROVIDER_ADAPTER",
+          failureFingerprint: "FOREUP:READ_ERROR_B",
+        },
+      ),
+    ).toMatchObject({
+      confirmed: false,
+      state: "DEGRADED_RETRYING",
+      independentPathCount: 1,
+      samePathCount: 1,
+    });
+  });
+
+  it("normalizes the current fingerprint before matching prior observations", () => {
+    expect(
+      decideMonitoringFailureState(
+        [
+          {
+            readPath: "TYPED_PROVIDER_ADAPTER",
+            failureFingerprint: " foreup:challenge ",
+          },
+        ],
+        {
+          readPath: "SIGNED_OUT_BROWSER",
+          failureFingerprint: "FOREUP:CHALLENGE",
+        },
+      ),
+    ).toMatchObject({
+      confirmed: true,
+      state: "AUTO_INVESTIGATING",
+      independentPathCount: 2,
+    });
+  });
+
   it("uses the active and inactive escalation and reminder cadences", () => {
     const now = new Date("2026-07-27T12:00:00.000Z");
     expect(getCourseMonitoringEscalationDeadline(now, 1).getTime() - now.getTime()).toBe(

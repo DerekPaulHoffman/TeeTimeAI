@@ -9,6 +9,10 @@ import {
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   clampCourseSupportBatchSize
 } from "./course-support-responder-policy";
+import type {
+  CourseSupportRemediationDirective,
+  CourseSupportRemediationRoute
+} from "./course-support-remediation-routing";
 
 const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -25,6 +29,7 @@ export type CourseSupportCandidate = {
   activeRealSearchCount: number;
   earliestTargetDate: Date | null;
   escalationDeadlineAt: Date | null;
+  escalatedAt?: Date | null;
   endpointHumanReviewProven: boolean;
   firstSeenAt: Date;
   lastSeenAt: Date;
@@ -32,6 +37,10 @@ export type CourseSupportCandidate = {
   nextAttemptAt: Date | null;
   attemptCount: number;
   updatedAt: Date;
+  remediationDirective?: CourseSupportRemediationDirective;
+  remediationRoute?: CourseSupportRemediationRoute;
+  providerSnapshotFingerprint?: string;
+  remediationCourseRef?: string;
 };
 
 export type RecentBatchFairnessEvidence = {
@@ -45,6 +54,7 @@ export type SelectedCourseSupportBatch = {
   incidents: CourseSupportCandidate[];
   fairnessReason: "PRIORITY" | "AGED_SYNTHETIC_RESERVATION" | "TARGETED_RETRY";
   containsCriticalRealDemand: boolean;
+  remediationDirective?: CourseSupportRemediationDirective;
 };
 
 export type CourseSupportGroupPriority = {
@@ -65,7 +75,7 @@ export function selectCourseSupportBatch(input: {
   const groups = new Map<string, CourseSupportCandidate[]>();
 
   for (const candidate of input.candidates) {
-    const key = `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`;
+    const key = courseSupportCandidateGroupKey(candidate);
     const group = groups.get(key) ?? [];
     group.push(candidate);
     groups.set(key, group);
@@ -128,8 +138,22 @@ export function selectCourseSupportBatch(input: {
     failureFingerprint: selectedGroup[0].failureFingerprint,
     incidents: selectedIncidents,
     fairnessReason,
-    containsCriticalRealDemand
+    containsCriticalRealDemand,
+    ...(selectedGroup[0].remediationDirective
+      ? { remediationDirective: selectedGroup[0].remediationDirective }
+      : {})
   };
+}
+
+function courseSupportCandidateGroupKey(candidate: CourseSupportCandidate) {
+  const directive = candidate.remediationDirective;
+  return [
+    candidate.providerFamilyKey,
+    candidate.failureFingerprint,
+    directive?.workMode ?? "LEGACY",
+    directive?.strategyAction ?? "LEGACY",
+    directive?.playbookStage ?? "NONE"
+  ].join("\u0000");
 }
 
 export function compareCourseSupportCandidates(

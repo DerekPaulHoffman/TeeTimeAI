@@ -44,12 +44,28 @@ The nullable, versioned `CourseSupportIncident.attemptLedger` stores the redacte
 
 `isAutomationPlaybookExhausted()` is the common proof gate for responder `mark-needs-human`, automatic technical finality, and operator approval. At the T+30 watchdog deadline it distinguishes proof-backed exhaustion from an incomplete/stalled playbook: the latter still enters human review under `AUTOMATION_STALLED`, but is never described as exhausted. A technical final additionally requires a terminal local-reader observation plus a matching independent current observation from another safe path. If no safe local-reader capability exists, the truthful endpoint is human review, not an automatic technical final.
 
+## Provider Learning Notes And Retry Novelty
+
+Postgres remains the machine source of truth. `CourseSupportIncident.attemptLedger`, append-only `CourseMonitoringEvent` rows, current provider evidence, and batch proof decide whether work is due, safe, restored, or final. Repository Markdown never changes runtime eligibility and must never be used instead of a current observation.
+
+The privacy-safe engineering memory lives in `docs/course-support-provider-notes/`:
+
+- After claim and packet, read the directory `README.md` and only the note for the selected provider family when one exists. Do not scan unrelated family notes or the historical learning log during a routine batch.
+- Create or update only the selected family note when work establishes a reusable adapter/parser strategy, disproves a reusable approach, changes a required metadata contract, or records a new material condition that permits a previously blocked approach.
+- Do not create one note per course or append a note for every retry. Routine rate-limit, provider 5xx, timeout, or network retries remain in Postgres and change Markdown only when they teach a reusable implementation fact.
+- Claim the selected note path before editing it. A note update is part of the same reviewed implementation scope as its adapter, registry, parser, tests, or responder-policy change.
+- Record both what worked and what failed, the stable approach key, the normalized scope, exact repository paths/tests, proof level, and the material trigger required before a failed approach may run again. Never record course/customer names, URLs, recipients, database/search/batch/task/workflow identifiers, tokens, cookies, provider payloads, or raw errors.
+
+An unchanged attempt is not progress. The same strategy against the same failure class, provider evidence, runtime, reader capability, and playbook stage must not create another responder implementation cycle merely because a retry time elapsed. It must instead use a genuinely different safe stage or implementation, wait for a persisted material reopen trigger, or reach the bounded human-review/final endpoint. A new exact deployed release, a material provider snapshot change, a changed failure fingerprint, a new compatible reader capability/build, or current official evidence may permit a new attempt. Time alone is a valid retry gate only for true transient classes (`RATE_LIMIT`, `HTTP_5XX`, `TIMEOUT`, and `NETWORK`) and a persisted bounded retry schedule.
+
+`MISSING_SOURCE`, `MISSING_METADATA`, `UNSUPPORTED_FAMILY`, `READER_PARSER_MISSING`, `SCHEMA`, and `UNKNOWN` are discovery or repair work, not generic transient failures. An unchanged-runtime verification can classify current evidence, but it cannot count as repairing one of those classes. A `retryable_failed` closeout must state the material condition that can make the next attempt different; otherwise the work advances to the next safe playbook stage or the truthful endpoint instead of returning to the same queue.
+
 ## Provider Registry And Consumer Outcomes
 
 Provider identity and runnable support come from `src/lib/automation/provider-capabilities.ts`, not scattered platform switches or optimistic URL guesses.
 
-- Runnable families are `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `WEBTRAC`, `CLUB_CADDIE`, and `WHOOSH` when their required metadata validates. WHOOSH reads only signed-out `GOLF_COURSE` facilities; driving-range and other activity inventory is rejected.
-- `EZLINKS` remains non-runnable from the server dispatcher because its public search is challenge-protected, but safe one-label tenant pages may run through the compatible rendered local reader. `GOLFNOW` remains recognized but non-runnable. `TENFORE` uses its rendered local reader. Recognition alone is not proof of monitoring support.
+- Runnable families are `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `GOLF_WITH_ACCESS`, `WEBTRAC`, `GOLFNOW`, `AGILYSYS`, `CLUB_CADDIE`, `WHOOSH`, and `SUPREME_GOLF` when their required metadata validates and the current course/provider shape meets that family's safety checks. WHOOSH reads only signed-out `GOLF_COURSE` facilities; driving-range and other activity inventory is rejected.
+- `EZLINKS` and `TENFORE` remain non-runnable from the server dispatcher. Compatible allowlisted rendered local-reader routes may cover narrow public shapes, but recognition or reader eligibility alone is not server-adapter coverage or monitoring proof.
 - Missing official source, missing metadata, unsupported family, authentication, rate limit, challenge, not-found, provider 5xx, timeout, network, schema, and unknown failures are classified separately.
 - Contradictory persisted provider signals resolve to `SOURCE_CONFLICT`, which is deliberately non-runnable. No provider request may run until current official-source evidence reconciles the platform, booking URL, and metadata to one family.
 - `Course.monitoringMode` is the durable per-course routing strategy. `AUTOMATIC` uses the full ordered ladder; `SERVER_ONLY` never queues a local reader; `BROWSER_ONLY` still preserves typed and official HTTP checks before its rendered-browser stage; `LOCAL_READER_ONLY` is reserved for an already proven reader-only strategy and may skip the earlier automatic paths explicitly; and `CONTACT_ONLY` is a terminal known limitation backed by current official evidence. Contact-only and explicitly local-reader-only courses avoid repeatedly rediscovering the same proven routing fact.
@@ -60,7 +76,7 @@ Customer-facing readiness is derived independently from internal engineering sta
 
 Send one setup report covering all five selected courses within 10 minutes, even while the later stages continue. At T+30, send one deduplicated consolidated update for courses that entered human review or reached a factual final. Customer copy must say “Manual review needed; your alert remains active” and offer the official site for current tee times. Do not expose adapter, probe, queue, Prisma, Codex, incident, playbook, or other engineering terminology.
 
-`NEEDS_ADAPTER` and `FETCH_FAILED` mean `RETRYING_AUTOMATICALLY` while the bounded ladder is active; they are not proof that monitoring is impossible. `CHECK_PENDING` is permitted only while a current bounded reader job is active and must not survive that reader's five-minute window. Human-review alerts remain active and are rechecked every six hours. They also recheck immediately after changed provider evidence, a new compatible reader capability or build, a deployment, operator action, or another material official-source change.
+`NEEDS_ADAPTER` and `FETCH_FAILED` mean `RETRYING_AUTOMATICALLY` while the bounded ladder is active; they are not proof that monitoring is impossible. `CHECK_PENDING` is permitted only while a current bounded reader job is active and must not survive that reader's five-minute window. Human-review alerts remain active. Their six-hour visibility timer refreshes reminder timestamps without restarting the playbook, queuing a search, or consuming a Codex responder. A changed provider family, failure fingerprint, platform, booking source, compatible reader capability/build, or explicit operator decision may open a new cycle. An unrelated deployment and elapsed time alone may not.
 
 A responder may close a course automatically without runnable monitoring for authoritative phone/contact/walk-in evidence or a verified invalid/private identity. Contact-only finalization requires an explicit `CONTACT_ONLY` strategy plus a same-origin HTTPS official source; an old manual flag or third-party URL is insufficient. Account-required and CAPTCHA/queue evidence may become a precise automatic technical final only after the complete current-cycle ledger, a terminal local-reader observation, and a matching independent observation prove the same limitation. Without that proof, the course enters human review and remains active. Source-unverified, contradictory, stale, reader-install, tooling, and official-link verification failures always remain human-review states. `AUTOMATION_PROHIBITED` and policy text are legacy evidence, never terminal monitoring dispositions. Restored runnable monitoring must supersede the newest failure with fresh exact-runtime workflow proof.
 
@@ -71,11 +87,11 @@ A responder may close a course automatically without runnable monitoring for aut
 - `HEALTHY`: the latest public signed-out read returned `MATCH_FOUND` or `NO_MATCH`.
 - `DEGRADED_RETRYING`: the first failure is recorded without erasing the last working time. The search retries within two minutes.
 - `AUTO_INVESTIGATING`: the current incident cycle is progressing through the ordered playbook. It cannot remain here past the 30-minute endpoint.
-- `ENGINEERING_VERIFICATION_NEEDED`: the bounded playbook stalled or finished without proof of recovery or a safe factual/technical final. The customer sees manual-review wording, the alert remains active, and safe revalidation runs every six hours.
+- `ENGINEERING_VERIFICATION_NEEDED`: the bounded playbook stalled or finished without proof of recovery or a safe factual/technical final. The customer sees manual-review wording, the alert remains active, and the six-hour timer preserves visibility without creating another investigation cycle.
 - `FINAL_MANUAL` and `FINAL_IDENTITY`: strong official manual-booking or identity evidence may close automatically.
 - `FINAL_TECHNICAL`: two independent current observations, including a terminal local-reader observation, prove the same precise technical limitation after every applicable playbook stage is recorded. A legacy technical final without that current-cycle proof is requeued for revalidation.
 
-If a required stage cannot run, the watchdog records an automation-stalled human-review reason at 30 minutes instead of leaving the course pending or inventing exhaustion. A successful read from any safe retry restores `HEALTHY` automatically. Material changes to the official link, provider family, access evidence, reader capability, deployment, operator action, or failure fingerprint reopen automated investigation immediately.
+If a required stage cannot run, the watchdog records an automation-stalled human-review reason at 30 minutes instead of leaving the course pending or inventing exhaustion. A successful ordinary alert read still restores `HEALTHY` automatically. Material changes to the official link, provider family, platform, access evidence, reader capability, operator decision, or failure fingerprint may reopen automated investigation. A deployment reopens only work owned and verified by its active remediation batch; unrelated releases never scan and restart parked incidents.
 
 ## Claim, Lease, And Repository Safety
 
@@ -159,7 +175,7 @@ Keep the queue payload minimal. Do not log raw message bodies, database ids, wor
 
 ## Retry And Closeout
 
-The first retry for a new or materially changed course runs by T+2 minutes. The remaining applicable stages continue inside the 30-minute playbook window. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours, but it cannot leave the customer in an indefinite pending state: the T+30 endpoint becomes human review when safe proof cannot complete. Human-review alerts persist `nextAttemptAt` for a six-hour safe recheck. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day instead of trusting a stale incident snapshot. New real demand promotes priority and triggers immediate revalidation when current proof is absent.
+The first retry for a new or materially changed course runs by T+2 minutes. The remaining applicable stages continue inside the 30-minute playbook window. A provider `Retry-After` for rate limiting is honored between 1 minute and 24 hours, but it cannot leave the customer in an indefinite pending state: the T+30 endpoint becomes human review when safe proof cannot complete. Human-review alerts retain a six-hour visibility timestamp; that timer does not requeue Codex or restart the playbook. The responder derives current real-demand count and earliest target date from live owner-scoped searches using each course's local calendar day instead of trusting a stale incident snapshot. New real demand promotes priority while preserving the parked cycle; ordinary owner-scoped search checks continue independently and may restore monitoring with fresh proof.
 
 An engineering-only incident may continue safe revalidation after its first task closes, but it may remain `AUTO_INVESTIGATING` for at most 30 minutes. At that deadline it must have working monitoring, a factual final, a fully proof-backed technical final, or a recorded `ENGINEERING_VERIFICATION_NEEDED` state containing the completed attempts and exact next action.
 
@@ -232,9 +248,10 @@ inside-transaction ownership fence.
 # Gate a classification-only release on the expected pre-mutation result.
 npm run automation:browser-probe -- --dry-run --trace-json --course-name "<exact course name>" --limit 1 --expect-disposition MANUAL_FINAL
 
-# When investigation justifies no code change, verify the shared adapter on the
-# exact production deployment of the clean claimed base SHA. This is permitted
-# only before paths or a release have been recorded.
+# Only when the packet's remediation directive explicitly allows unchanged
+# runtime, verify the shared adapter/classification on the exact production
+# deployment of the clean claimed base SHA. Adapter/parser repair routes reject
+# this command and require a claimed reusable implementation path.
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING --current-runtime
 npm run deployment:wait -- --sha <claimed-base-sha>
 npm run automation:course-support -- verify --batch-ref <batch-ref> --current-runtime --deployed-at <iso-timestamp> --watch --closeout

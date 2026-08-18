@@ -57,6 +57,45 @@ export type AutomationStalledEndpointProofInput = {
   endpointEvents?: readonly AutomationStalledEndpointEvent[] | null;
 };
 
+export function hasDurableWaitForMaterialChangeProof(
+  input: AutomationStalledEndpointProofInput
+) {
+  if (
+    !input.incidentId ||
+    !Number.isInteger(input.incidentCycle) ||
+    input.incidentStatus !== "NEEDS_HUMAN" ||
+    input.humanReviewReason !== "AUTOMATION_STALLED" ||
+    input.monitoringState !== "ENGINEERING_VERIFICATION_NEEDED" ||
+    !input.incidentEscalatedAt
+  ) {
+    return false;
+  }
+  const incidentEscalatedAt = input.incidentEscalatedAt;
+
+  return Boolean(
+    input.endpointEvents?.some((event) => {
+      if (
+        event.incidentId !== input.incidentId ||
+        event.eventType !== "HUMAN_REVIEW_REQUESTED" ||
+        !event.occurredAt ||
+        event.occurredAt < incidentEscalatedAt ||
+        !event.audit ||
+        typeof event.audit !== "object" ||
+        Array.isArray(event.audit)
+      ) {
+        return false;
+      }
+      const audit = event.audit as Record<string, unknown>;
+      return (
+        audit.cycle === input.incidentCycle &&
+        audit.customerState === "NEEDS_HUMAN_REVIEW" &&
+        audit.automationStalled === true &&
+        audit.parkedUntilMaterialChange === true
+      );
+    })
+  );
+}
+
 const FINAL_MONITORING_STATES = new Set([
   "FINAL_MANUAL",
   "FINAL_TECHNICAL",
@@ -84,10 +123,13 @@ const RETRYING_OUTCOMES = new Set([
 export function hasDurableAutomationStalledEndpointProof(
   input: AutomationStalledEndpointProofInput
 ) {
+  if (hasDurableWaitForMaterialChangeProof(input)) {
+    return true;
+  }
   if (
     !input.incidentId ||
     !Number.isInteger(input.incidentCycle) ||
-    input.incidentStatus !== "AUTO_INVESTIGATING" ||
+    !["AUTO_INVESTIGATING", "NEEDS_HUMAN"].includes(input.incidentStatus ?? "") ||
     input.humanReviewReason !== "AUTOMATION_STALLED" ||
     input.monitoringState !== "ENGINEERING_VERIFICATION_NEEDED" ||
     !input.incidentEscalatedAt ||

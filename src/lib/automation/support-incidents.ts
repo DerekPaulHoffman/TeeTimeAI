@@ -54,6 +54,20 @@ export type CourseSupportIssueState = {
   ownerAlerted: boolean;
 };
 
+function canUpgradeResolvedCourseSupportIncident(
+  currentResolution: CourseSupportResolution | null,
+  nextResolution: CourseSupportResolution
+) {
+  const factualResolution =
+    nextResolution === "DIRECT_BOOKING_CLASSIFIED" ||
+    nextResolution === "IDENTITY_CLASSIFIED";
+  const revalidatableTechnicalResolution =
+    currentResolution === "TECHNICAL_LIMITATION_CLASSIFIED" ||
+    currentResolution === "SOURCE_UNVERIFIED" ||
+    currentResolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
+  return factualResolution && revalidatableTechnicalResolution;
+}
+
 export async function reportCourseSupportIssue(
   input: CourseSupportIssueInput
 ): Promise<CourseSupportIssueState> {
@@ -85,6 +99,8 @@ export async function resolveCourseSupportIncident(input: {
       courseId: true,
       status: true,
       activeBatchId: true,
+      resolution: true,
+      revision: true,
       ownerNotifiedAt: true,
       escalationNotifiedAt: true,
       resolutionNotifiedAt: true
@@ -93,7 +109,11 @@ export async function resolveCourseSupportIncident(input: {
   if (
     !current ||
     current.activeBatchId ||
-    current.status === "RESOLVED"
+    (current.status === "RESOLVED" &&
+      !canUpgradeResolvedCourseSupportIncident(
+        current.resolution,
+        input.resolution
+      ))
   ) {
     return current;
   }
@@ -236,51 +256,53 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
     httpStatus: failure.httpStatus
   });
-  const materialAccessEvidenceChanged = Boolean(
+  const materialFailureInputChanged = Boolean(
     existing &&
       (existing.providerFamilyKey !== provider.providerFamilyKey ||
+        existing.failureFingerprint !== failureFingerprint ||
         existing.platformSnapshot !== input.course.detectedPlatform ||
         existing.bookingUrlSnapshot !== bookingUrl)
+  );
+  const authoritativeFactualFinal = Boolean(
+    existing?.status === "RESOLVED" &&
+      (existing.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+        existing.resolution === "IDENTITY_CLASSIFIED")
+  );
+  const sourceUnverifiedWithRealDemand = Boolean(
+    existing?.status === "RESOLVED" &&
+      existing.resolution === "SOURCE_UNVERIFIED" &&
+      activeRealSearchCount > 0
   );
   const resolvedFinalDecision = Boolean(
     existing?.status === "RESOLVED" &&
       existing.resolution &&
-      existing.resolution !== "MONITORING_RESTORED"
+      existing.resolution !== "MONITORING_RESTORED" &&
+      existing.resolution !== "SOURCE_UNVERIFIED"
   );
   const opensFreshFailureCycle = Boolean(
     existing &&
       !existing.activeBatchId &&
-      (existing.status === "RESOLVED" ||
-        existing.providerFamilyKey !== provider.providerFamilyKey ||
-        existing.failureFingerprint !== failureFingerprint)
+      (existing.status === "RESOLVED" || materialFailureInputChanged)
   );
   const effectiveEpisodeStartedAt = opensFreshFailureCycle
     ? now
     : requestedEpisodeStartedAt;
 
   if (disposableSyntheticSearch) {
-    if (
-      existing &&
-      !existing.activeBatchId &&
-      !existing.engineeringOnly &&
-      existing.status !== "RESOLVED" &&
-      affectedSearchCount === 0 &&
-      !existing.ownerNotifiedAt &&
-      !existing.escalationNotifiedAt
-    ) {
-      await prisma.courseSupportIncident.update({
-        where: { id: existing.id },
-        data: {
-          status: "RESOLVED",
-          resolvedAt: now,
-          resolution: null,
-          resolutionMessage: "Closed because this course has only synthetic test demand.",
-          nextAction: null,
-          lastSeenAt: now
-        }
-      });
-    }
+    return {
+      incidentId: null,
+      status: "UNRECORDED",
+      ownerAlerted: false
+    } satisfies CourseSupportIssueState;
+  }
 
+  if (
+    existing?.status === "RESOLVED" &&
+    existing.resolution === "SOURCE_UNVERIFIED" &&
+    activeRealSearchCount === 0 &&
+    existing.providerFamilyKey === provider.providerFamilyKey &&
+    existing.failureFingerprint === failureFingerprint
+  ) {
     return {
       incidentId: null,
       status: "UNRECORDED",
@@ -299,6 +321,8 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
             ? "BLOCKED_TOOLING"
             : "FETCH_FAILED",
     failureFingerprint,
+    failureClass,
+    providerFamilyKey: provider.providerFamilyKey,
     readPath:
       input.readPath ??
       (input.kind === "NEEDS_ADAPTER"
@@ -308,7 +332,9 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           : "TYPED_PROVIDER_ADAPTER"),
     message: safeMessage,
     activeRealSearchCount,
-    materialEvidenceChanged: materialAccessEvidenceChanged,
+    materialEvidenceChanged:
+      !authoritativeFactualFinal &&
+      (materialFailureInputChanged || sourceUnverifiedWithRealDemand),
     now,
     episodeStartedAt: effectiveEpisodeStartedAt
   });
@@ -329,8 +355,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
   const continuesCurrentIncidentEpisode = Boolean(
     existing &&
       existing.status !== "RESOLVED" &&
-      existing.providerFamilyKey === provider.providerFamilyKey &&
-      existing.failureFingerprint === failureFingerprint
+      !materialFailureInputChanged
   );
   const incidentEpisodeStartedAt =
     continuesCurrentIncidentEpisode && !beginsFirstRealDemandEpisode
@@ -349,16 +374,16 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
   if (
     existing &&
     !existing.activeBatchId &&
-    !materialAccessEvidenceChanged &&
-    (resolvedFinalDecision || existing.status === "NEEDS_HUMAN")
+    (authoritativeFactualFinal ||
+      (!materialFailureInputChanged &&
+        (resolvedFinalDecision || existing.status === "NEEDS_HUMAN")))
   ) {
     await prisma.courseSupportIncident.updateMany({
       where: {
         id: existing.id,
         cycle: existing.cycle,
         status: existing.status,
-        activeBatchId: null,
-        updatedAt: existing.updatedAt
+        activeBatchId: null
       },
       data: {
         affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
@@ -383,21 +408,6 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     } satisfies CourseSupportIssueState;
   }
 
-  if (
-    existing?.status === "RESOLVED" &&
-    existing.resolution === "SOURCE_UNVERIFIED" &&
-    engineeringOnlySource &&
-    activeRealSearchCount === 0 &&
-    existing.providerFamilyKey === provider.providerFamilyKey &&
-    existing.failureFingerprint === failureFingerprint
-  ) {
-    return {
-      incidentId: null,
-      status: "UNRECORDED",
-      ownerAlerted: false
-    } satisfies CourseSupportIssueState;
-  }
-
   if (existing?.activeBatchId && existing.status !== "RESOLVED") {
     const nextActiveRealSearchCount = Math.max(
       existing.activeRealSearchCount,
@@ -415,7 +425,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         nextAffectedSearchCount !== existing.affectedSearchCount ||
         nextEarliestTargetDate?.getTime() !== existing.earliestTargetDate?.getTime());
 
-    if (shouldPromoteRealDemand) {
+    if (shouldPromoteRealDemand || materialFailureInputChanged) {
       await prisma.courseSupportIncident.updateMany({
         where: {
           id: existing.id,
@@ -425,16 +435,23 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           updatedAt: existing.updatedAt
         },
         data: {
-          affectedSearchCount: nextAffectedSearchCount,
-          engineeringOnly: false,
-          activeRealSearchCount: nextActiveRealSearchCount,
-          earliestTargetDate: nextEarliestTargetDate,
+          ...(shouldPromoteRealDemand
+            ? {
+                affectedSearchCount: nextAffectedSearchCount,
+                engineeringOnly: false,
+                activeRealSearchCount: nextActiveRealSearchCount,
+                earliestTargetDate: nextEarliestTargetDate,
+                confirmedAt: existing.confirmedAt ?? (monitoringFailure.confirmed ? now : null),
+                escalationDeadlineAt:
+                  beginsFirstRealDemandEpisode
+                    ? episodeEscalationDeadlineAt
+                    : (existing.escalationDeadlineAt ?? episodeEscalationDeadlineAt)
+              }
+            : {}),
+          ...(materialFailureInputChanged
+            ? { occurrenceCount: { increment: 1 } }
+            : {}),
           lastSeenAt: now,
-          confirmedAt: existing.confirmedAt ?? (monitoringFailure.confirmed ? now : null),
-          escalationDeadlineAt:
-            beginsFirstRealDemandEpisode
-              ? episodeEscalationDeadlineAt
-              : (existing.escalationDeadlineAt ?? episodeEscalationDeadlineAt),
           revision: { increment: 1 }
         }
       });
@@ -483,8 +500,15 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       }
     });
   } else if (existing.status === "RESOLVED") {
-    incident = await prisma.courseSupportIncident.update({
-      where: { id: existing.id },
+    const reopened = await prisma.courseSupportIncident.updateMany({
+      where: {
+        id: existing.id,
+        cycle: existing.cycle,
+        revision: existing.revision,
+        status: "RESOLVED",
+        resolution: existing.resolution,
+        activeBatchId: null
+      },
       data: {
         cycle: { increment: 1 },
         status: "AUTO_INVESTIGATING",
@@ -529,58 +553,121 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         revision: { increment: 1 }
       }
     });
+    const current = await prisma.courseSupportIncident.findUnique({
+      where: { id: existing.id }
+    });
+    if (reopened.count !== 1 || !current) {
+      return {
+        incidentId: current?.id ?? null,
+        status:
+          current?.status === "NEEDS_HUMAN"
+            ? "NEEDS_HUMAN"
+            : current?.status === "AUTO_INVESTIGATING"
+              ? "AUTO_INVESTIGATING"
+              : "UNRECORDED",
+        ownerAlerted: Boolean(current?.ownerNotifiedAt || current?.escalationNotifiedAt)
+      } satisfies CourseSupportIssueState;
+    }
+    incident = current;
   } else {
-    const fingerprintChanged =
-      existing.providerFamilyKey !== provider.providerFamilyKey ||
-      existing.failureFingerprint !== failureFingerprint;
     const promotedToRealDemand = existing.engineeringOnly && activeRealSearchCount > 0;
     const promotedNextAttemptAt =
       failureClass === "RATE_LIMIT"
         ? new Date(Math.max(existing.nextAttemptAt?.getTime() ?? 0, initialNextAttemptAt.getTime()))
         : now;
+    const incidentUpdateData = {
+      ...(materialFailureInputChanged
+        ? {
+            cycle: { increment: 1 },
+            status: "AUTO_INVESTIGATING" as const,
+            firstAffectedSearchId: input.searchId,
+            initialMessage: safeMessage,
+            courseNameSnapshot: input.course.name,
+            platformSnapshot: input.course.detectedPlatform,
+            bookingUrlSnapshot: bookingUrl,
+            firstSeenAt: now,
+            lastAttemptAt: null,
+            attemptCount: 0,
+            activeBatchId: null,
+            ownerNotifiedAt: null,
+            escalatedAt: null,
+            escalationNotifiedAt: null,
+            humanReviewReason: null,
+            nextReminderAt: null,
+            decisionActorId: null,
+            decisionAt: null,
+            decisionNote: null,
+            decisionEvidenceUrl: null,
+            decisionIdempotencyKey: null
+          }
+        : {}),
+      kind: input.kind,
+      providerFamilyKey: provider.providerFamilyKey,
+      failureClass,
+      failureFingerprint,
+      latestMessage: safeMessage,
+      nextAction: safeNextAction,
+      affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
+      occurrenceCount: { increment: 1 },
+      engineeringOnly:
+        existing.engineeringOnly && engineeringOnlySource && activeRealSearchCount === 0,
+      nextAttemptAt: materialFailureInputChanged
+        ? initialNextAttemptAt
+        : promotedToRealDemand
+          ? promotedNextAttemptAt
+          : (existing.nextAttemptAt ?? initialNextAttemptAt),
+      activeRealSearchCount,
+      earliestTargetDate,
+      lastSeenAt: now,
+      confirmedAt: materialFailureInputChanged
+        ? confirmedAt
+        : (existing.confirmedAt ?? confirmedAt),
+      escalationDeadlineAt: materialFailureInputChanged
+        ? escalationDeadlineAt
+        : beginsFirstRealDemandEpisode
+          ? escalationDeadlineAt
+          : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
+      revision: { increment: 1 }
+    };
+
+    if (materialFailureInputChanged) {
+      const reopen = await prisma.courseSupportIncident.updateMany({
+        where: {
+          id: existing.id,
+          cycle: existing.cycle,
+          revision: existing.revision,
+          status: existing.status,
+          activeBatchId: null
+        },
+        data: incidentUpdateData
+      });
+
+      if (reopen.count === 0) {
+        const winner = await prisma.courseSupportIncident.findUnique({
+          where: { id: existing.id }
+        });
+        return {
+          incidentId: winner?.id ?? null,
+          status:
+            winner?.status === "NEEDS_HUMAN"
+              ? "NEEDS_HUMAN"
+              : winner && winner.status !== "RESOLVED"
+                ? "AUTO_INVESTIGATING"
+                : "UNRECORDED",
+          ownerAlerted: Boolean(winner?.ownerNotifiedAt || winner?.escalationNotifiedAt)
+        } satisfies CourseSupportIssueState;
+      }
+
+      return {
+        incidentId: existing.id,
+        status: "AUTO_INVESTIGATING",
+        ownerAlerted: false
+      } satisfies CourseSupportIssueState;
+    }
+
     incident = await prisma.courseSupportIncident.update({
       where: { id: existing.id },
-      data: {
-        ...(fingerprintChanged
-          ? {
-              cycle: { increment: 1 },
-              status: "AUTO_INVESTIGATING" as const,
-              firstAffectedSearchId: input.searchId,
-              initialMessage: safeMessage,
-              firstSeenAt: now,
-              lastAttemptAt: null,
-              attemptCount: 0,
-              activeBatchId: null,
-              escalatedAt: null,
-              escalationNotifiedAt: null
-            }
-          : {}),
-        kind: input.kind,
-        providerFamilyKey: provider.providerFamilyKey,
-        failureClass,
-        failureFingerprint,
-        latestMessage: safeMessage,
-        nextAction: safeNextAction,
-        affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
-        occurrenceCount: { increment: 1 },
-        engineeringOnly:
-          existing.engineeringOnly && engineeringOnlySource && activeRealSearchCount === 0,
-        nextAttemptAt: fingerprintChanged
-          ? initialNextAttemptAt
-          : promotedToRealDemand
-            ? promotedNextAttemptAt
-            : (existing.nextAttemptAt ?? initialNextAttemptAt),
-        activeRealSearchCount,
-        earliestTargetDate,
-        lastSeenAt: now,
-        confirmedAt: fingerprintChanged ? confirmedAt : (existing.confirmedAt ?? confirmedAt),
-        escalationDeadlineAt: fingerprintChanged
-          ? escalationDeadlineAt
-          : beginsFirstRealDemandEpisode
-            ? escalationDeadlineAt
-            : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
-        revision: { increment: 1 }
-      }
+      data: incidentUpdateData
     });
   }
 
@@ -620,12 +707,22 @@ async function resolveCourseSupportIncidentWithLease(input: {
     return null;
   }
 
-  if (existing.status !== "RESOLVED") {
+  if (
+    existing.status !== "RESOLVED" ||
+    canUpgradeResolvedCourseSupportIncident(
+      existing.resolution,
+      input.resolution
+    )
+  ) {
     const updated = await prisma.courseSupportIncident.updateMany({
       where: {
         id: existing.id,
-        status: { not: "RESOLVED" },
-        activeBatchId: null
+        status: existing.status,
+        activeBatchId: null,
+        revision: existing.revision,
+        ...(existing.status === "RESOLVED"
+          ? { resolution: existing.resolution }
+          : {})
       },
       data: {
         status: "RESOLVED",

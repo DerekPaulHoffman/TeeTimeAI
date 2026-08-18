@@ -304,11 +304,35 @@ describe("course-support verification intent and fingerprint", () => {
       course({ bookingMetadata: { provider: "CPS", facilityId: "changed" } }),
     );
     const accessChanged = fingerprint(course({ isPublic: false }));
-    const intelligenceChanged = fingerprint(
+    const timeZoneChanged = fingerprint(course({ timeZone: "America/Chicago" }));
+    const bookingWindowChanged = fingerprint(
+      course({
+        bookingWindowDaysAhead: 14,
+        bookingWindowConfidence: 0.9,
+      }),
+    );
+    const accessModeChanged = fingerprint(
+      course({ bookingAccessMode: "CAPTCHA_OR_QUEUE" }),
+    );
+    const intelligenceBaseline = fingerprint(
       course({
         intelligenceVerifiedAt: new Date("2026-07-20T12:00:00.000Z"),
         intelligenceReviewAt: new Date("2026-08-20T12:00:00.000Z"),
         intelligenceConfidence: 0.95,
+      }),
+    );
+    const intelligenceDatesRefreshed = fingerprint(
+      course({
+        intelligenceVerifiedAt: new Date("2026-07-21T12:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-08-21T12:00:00.000Z"),
+        intelligenceConfidence: 0.95,
+      }),
+    );
+    const intelligenceConfidenceChanged = fingerprint(
+      course({
+        intelligenceVerifiedAt: new Date("2026-07-21T12:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-08-21T12:00:00.000Z"),
+        intelligenceConfidence: 0.9,
       }),
     );
 
@@ -316,7 +340,11 @@ describe("course-support verification intent and fingerprint", () => {
     expect(reordered).toBe(left);
     expect(changed).not.toBe(left);
     expect(accessChanged).not.toBe(left);
-    expect(intelligenceChanged).not.toBe(left);
+    expect(timeZoneChanged).not.toBe(left);
+    expect(bookingWindowChanged).not.toBe(left);
+    expect(accessModeChanged).not.toBe(left);
+    expect(intelligenceDatesRefreshed).toBe(intelligenceBaseline);
+    expect(intelligenceConfidenceChanged).not.toBe(intelligenceBaseline);
   });
 });
 

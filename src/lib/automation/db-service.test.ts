@@ -15,9 +15,11 @@ import {
   markMatchAlertSent,
   markMatchAlertSuppressed,
   markMissingMatchesUnavailable,
+  markCourseBookingWindowChecked,
   parseAutomationRunAudit,
   listSearchesNeedingScheduleRecovery,
   queueSearchCheck,
+  recordCourseBookingWindowEvidence,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
   updateHourlyImprovementRunState
@@ -60,7 +62,22 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: vi.fn()
     },
     course: {
-      findMany: vi.fn()
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn()
+    },
+    courseSupportIncident: {
+      findUnique: vi.fn(),
+      updateMany: vi.fn()
+    },
+    courseMonitoringStatus: {
+      create: vi.fn(),
+      findUnique: vi.fn(),
+      updateMany: vi.fn()
+    },
+    courseMonitoringEvent: {
+      create: vi.fn(),
+      findUnique: vi.fn()
     },
     $queryRaw: vi.fn(),
     $transaction: vi.fn()
@@ -70,7 +87,7 @@ vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 
 import { prisma } from "@/lib/prisma";
 
-const mockedPrisma = vi.mocked(prisma);
+const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 const browserRuntimeVersion = "a".repeat(40);
 
@@ -1773,5 +1790,173 @@ describe("recordCourseProbeIfChanged", () => {
     });
     expect(parseAutomationRunAudit("not json")).toBeNull();
     expect(parseAutomationRunAudit("[1,2]")).toBeNull();
+  });
+});
+
+describe("booking-window evidence monitoring revalidation", () => {
+  const observedAt = new Date("2026-08-18T14:00:00.000Z");
+  const currentCourse = {
+    id: "course-window",
+    name: "Window Golf Course",
+    timeZone: "America/New_York",
+    website: "https://example.com",
+    detectedBookingUrl: "https://example.com/book",
+    detectedPlatform: "UNKNOWN",
+    providerFamilyKey: "SOURCE_MISSING",
+    bookingMethod: "PUBLIC_ONLINE",
+    bookingWindowDaysAhead: 7,
+    bookingWindowEvidenceUrl: "https://example.com/old-window",
+    bookingReleaseTimeLocal: "07:00",
+    bookingWindowSource: "OFFICIAL_BOOKING_PAGE",
+    bookingWindowConfidence: 0.8,
+    bookingWindowCheckedAt: new Date("2026-08-01T12:00:00.000Z"),
+    bookingWindowObservedAt: new Date("2026-08-01T12:00:00.000Z"),
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "OTHER",
+    monitoringMode: "AUTOMATIC",
+    bookingAccessMode: "UNKNOWN",
+    isPublic: true,
+    intelligenceConfidence: null,
+    bookingMetadata: null,
+    updatedAt: new Date("2026-08-01T12:00:00.000Z")
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+    );
+  });
+
+  it("wakes parked monitoring when booking-window semantics change", async () => {
+    const appliedCourse = {
+      ...currentCourse,
+      bookingWindowDaysAhead: 14,
+      bookingWindowEvidenceUrl: "https://example.com/new-window",
+      bookingReleaseTimeLocal: "06:30",
+      bookingWindowConfidence: 1,
+      bookingWindowCheckedAt: observedAt,
+      bookingWindowObservedAt: observedAt,
+      updatedAt: observedAt
+    };
+    mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
+    mockedPrisma.course.update.mockResolvedValue(appliedCourse as never);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-parked",
+      cycle: 3,
+      revision: 8,
+      status: "NEEDS_HUMAN",
+      activeBatchId: null,
+      activeRealSearchCount: 2,
+      kind: "FETCH_FAILED",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "HTTP",
+      failureFingerprint: "parked-fingerprint",
+      humanReviewReason: "AUTOMATION_STALLED",
+      resolution: null,
+      activeBatch: null
+    } as never);
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "NEEDS_HUMAN",
+      revision: 5
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 2 } as never);
+
+    await recordCourseBookingWindowEvidence({
+      courseId: currentCourse.id,
+      evidence: {
+        daysAhead: 14,
+        releaseTimeLocal: "06:30",
+        source: "OFFICIAL_BOOKING_PAGE",
+        confidence: 1,
+        evidenceUrl: "https://example.com/new-window"
+      },
+      observedAt
+    });
+
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: currentCourse.id, updatedAt: currentCourse.updatedAt }
+      })
+    );
+    expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-parked",
+          cycle: 3,
+          revision: 8,
+          status: "NEEDS_HUMAN",
+          activeBatchId: null
+        }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          status: "AUTO_INVESTIGATING",
+          nextAttemptAt: observedAt
+        })
+      })
+    );
+    expect(mockedPrisma.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: "AUTO_INVESTIGATING",
+          nextAutomaticAttemptAt: observedAt,
+          revalidationRequestedAt: observedAt
+        })
+      })
+    );
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          nextCheckAt: observedAt,
+          recheckRequestedAt: observedAt
+        }
+      })
+    );
+  });
+
+  it("does not wake parked monitoring for an observation timestamp refresh", async () => {
+    const appliedCourse = {
+      ...currentCourse,
+      bookingWindowCheckedAt: observedAt,
+      bookingWindowObservedAt: observedAt,
+      updatedAt: observedAt
+    };
+    mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
+    mockedPrisma.course.update.mockResolvedValue(appliedCourse as never);
+
+    await recordCourseBookingWindowEvidence({
+      courseId: currentCourse.id,
+      evidence: {
+        daysAhead: currentCourse.bookingWindowDaysAhead,
+        releaseTimeLocal: currentCourse.bookingReleaseTimeLocal,
+        source: currentCourse.bookingWindowSource as "OFFICIAL_BOOKING_PAGE",
+        confidence: currentCourse.bookingWindowConfidence,
+        evidenceUrl: currentCourse.bookingWindowEvidenceUrl
+      },
+      observedAt
+    });
+
+    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseMonitoringStatus.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps a checked-at-only write outside the monitoring writer lane", async () => {
+    mockedPrisma.course.update.mockResolvedValue({
+      ...currentCourse,
+      bookingWindowCheckedAt: observedAt
+    } as never);
+
+    await markCourseBookingWindowChecked(currentCourse.id, observedAt);
+
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith({
+      where: { id: currentCourse.id },
+      data: { bookingWindowCheckedAt: observedAt }
+    });
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
   });
 });

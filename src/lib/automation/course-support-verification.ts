@@ -16,6 +16,10 @@ import { normalizeTimeZone } from "@/lib/timezones";
 
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
+  canonicalizeCourseProviderExecutionEvidence,
+  stableCourseProviderExecutionEvidenceValue,
+} from "./course-provider-execution-evidence";
+import {
   AUTOMATION_PLAYBOOK_VERSION,
   assessAutomationPlaybook,
   parseAutomationPlaybookLedger,
@@ -64,9 +68,11 @@ const providerCourseSelect = {
   bookingWindowEvidenceUrl: true,
   bookingReleaseTimeLocal: true,
   bookingWindowSource: true,
+  bookingWindowConfidence: true,
   automationEligibility: true,
   automationReason: true,
   monitoringMode: true,
+  bookingAccessMode: true,
   isPublic: true,
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,
@@ -1682,9 +1688,11 @@ export function buildCourseSupportProviderSnapshotFingerprint(input: {
   bookingWindowEvidenceUrl?: string | null;
   bookingReleaseTimeLocal?: string | null;
   bookingWindowSource?: string | null;
+  bookingWindowConfidence?: number | null;
   automationEligibility: AutomationEligibility;
   automationReason: AutomationReason;
   monitoringMode?: CourseMonitoringMode;
+  bookingAccessMode?: string | null;
   isPublic?: boolean | null;
   intelligenceVerifiedAt?: Date | null;
   intelligenceReviewAt?: Date | null;
@@ -1693,42 +1701,11 @@ export function buildCourseSupportProviderSnapshotFingerprint(input: {
 }) {
   return createHash("sha256")
     .update(
-      stableJson({
-        timeZone: normalizeTimeZone(input.timeZone),
-        website: input.website ?? null,
-        detectedBookingUrl: input.detectedBookingUrl ?? null,
-        detectedPlatform: input.detectedPlatform,
-        providerFamilyKey: normalizeProviderFamilyKey(input.providerFamilyKey),
-        bookingMethod: input.bookingMethod,
-        bookingWindowDaysAhead: input.bookingWindowDaysAhead ?? null,
-        bookingWindowEvidenceUrl: input.bookingWindowEvidenceUrl ?? null,
-        bookingReleaseTimeLocal: input.bookingReleaseTimeLocal ?? null,
-        bookingWindowSource: input.bookingWindowSource ?? null,
-        automationEligibility: input.automationEligibility,
-        automationReason: input.automationReason,
-        monitoringMode: input.monitoringMode,
-        isPublic: input.isPublic ?? null,
-        intelligenceVerifiedAt: normalizeFingerprintDate(
-          input.intelligenceVerifiedAt,
-        ),
-        intelligenceReviewAt: normalizeFingerprintDate(
-          input.intelligenceReviewAt,
-        ),
-        intelligenceConfidence: input.intelligenceConfidence ?? null,
-        bookingMetadata: input.bookingMetadata ?? null,
-      }),
+      stableCourseProviderExecutionEvidenceValue(
+        canonicalizeCourseProviderExecutionEvidence(input),
+      ),
     )
     .digest("hex");
-}
-
-function normalizeFingerprintDate(value: Date | null | undefined) {
-  if (!value) {
-    return null;
-  }
-  if (!Number.isFinite(value.getTime())) {
-    throw new Error("Course-support provider intelligence date is invalid.");
-  }
-  return value.toISOString();
 }
 
 function buildProviderSnapshot(course: ProviderCourseSnapshot) {
@@ -2586,19 +2563,6 @@ function validDate(value: Date, label: string) {
     throw new Error(`Course-support verification ${label} is invalid.`);
   }
   return value;
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 
 function providerSnapshotIsCurrent(request: VerificationExecutionRow) {

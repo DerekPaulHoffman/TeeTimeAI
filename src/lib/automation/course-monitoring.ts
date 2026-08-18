@@ -2,8 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   Prisma,
+  type AutomationRunKind,
+  type AutomationRunStatus,
   type CourseSupportBatchIncidentResult,
   type CourseSupportBatchStatus,
+  type CourseSupportFailureClass,
   type CourseSupportIncidentStatus,
   type CourseSupportResolution,
   type CourseHumanReviewReason,
@@ -12,6 +15,7 @@ import {
   type ProbeOutcome,
 } from "@prisma/client";
 
+import { hasDurableWaitForMaterialChangeProof } from "@/lib/customer-monitoring-status";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
@@ -29,6 +33,17 @@ import {
   type AutomationPlaybookEventInput,
 } from "./course-monitoring-playbook";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import {
+  COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS,
+  canonicalizeCourseProviderExecutionEvidence,
+  stableCourseProviderExecutionEvidenceValue,
+  type CourseProviderExecutionEvidenceField,
+  type CourseProviderExecutionEvidenceInput,
+} from "./course-provider-execution-evidence";
+import {
+  buildProviderFailureFingerprint,
+  normalizeProviderFamilyKey,
+} from "./provider-capabilities";
 
 export const FAILURE_CONFIRMATION_WINDOW_MS = 15 * 60 * 1000;
 export const FIRST_FAILURE_RETRY_MS = 2 * 60 * 1000;
@@ -39,8 +54,6 @@ export const ACTIVE_HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
 export const INACTIVE_HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
 export const ACTIVE_REMINDER_MS = 24 * 60 * 60 * 1000;
 export const INACTIVE_REMINDER_MS = 7 * 24 * 60 * 60 * 1000;
-export const DEPLOYMENT_REVALIDATION_BATCH_SIZE = 20;
-
 const DEPLOYMENT_REVALIDATION_PROMPT_VERSION =
   "course-monitoring-deployment-revalidation-v1";
 
@@ -50,8 +63,14 @@ const AUTOMATED_STATES: CourseMonitoringState[] = [
   "ENGINEERING_VERIFICATION_NEEDED",
   "REVALIDATING_FINAL",
 ];
+const REVALIDATABLE_FINAL_RESOLUTIONS = new Set<CourseSupportResolution>([
+  "TECHNICAL_LIMITATION_CLASSIFIED",
+  "SOURCE_UNVERIFIED",
+  "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+]);
 const COURSE_MONITORING_WRITE_ATTEMPTS = 3;
 const COURSE_MONITORING_WRITE_TIMEOUT_MS = 15_000;
+const PROVIDER_EVIDENCE_REVALIDATION_CAS_ATTEMPTS = 3;
 const MAX_COURSE_SUPPORT_BATCH_INCIDENTS = 20;
 const STALE_BATCH_RELEASE_RETRY_MS = 60 * 1000;
 const ACTIVE_COURSE_SUPPORT_BATCH_STATUSES = new Set([
@@ -125,6 +144,8 @@ type DeadlineBatchSnapshot = {
   ownerAutomationRunId: string | null;
   ownerAutomationRun: {
     id: string;
+    kind: AutomationRunKind;
+    status: AutomationRunStatus;
     completedAt: Date | null;
     outcome: string | null;
     notes: string | null;
@@ -145,7 +166,18 @@ export function decideMonitoringFailureState(
   previousFailures: FailureObservation[],
   current: Required<FailureObservation>,
 ): MonitoringFailureDecision {
-  const observations = [...previousFailures, current];
+  const currentFingerprint = normalizeFingerprint(
+    current.failureFingerprint ?? "",
+  );
+  const observations = [
+    ...previousFailures.filter(
+      (observation) =>
+        observation.failureFingerprint !== null &&
+        normalizeFingerprint(observation.failureFingerprint) ===
+          currentFingerprint,
+    ),
+    { ...current, failureFingerprint: currentFingerprint },
+  ];
   const independentPathCount = new Set(
     observations.map((observation) => observation.readPath).filter(Boolean),
   ).size;
@@ -211,6 +243,8 @@ export async function recordCourseMonitoringFailure(input: {
     "FETCH_FAILED" | "NEEDS_ADAPTER" | "BLOCKED_AUTH" | "BLOCKED_TOOLING"
   >;
   failureFingerprint: string;
+  failureClass?: CourseSupportFailureClass;
+  providerFamilyKey?: string;
   readPath: string;
   message?: string;
   source?: CourseMonitoringEventSource;
@@ -252,18 +286,42 @@ export async function recordCourseMonitoringFailure(input: {
         where: { courseId: input.courseId },
         select: {
           id: true,
+          cycle: true,
           status: true,
           resolution: true,
           failureFingerprint: true,
+          humanReviewReason: true,
+          escalatedAt: true,
+          escalationDeadlineAt: true,
+          activeBatchId: true,
+          nextAttemptAt: true,
           revision: true,
           activeRealSearchCount: true,
         },
       });
+      const currentFailureIdentityAudit = {
+        cycle: incident?.cycle ?? null,
+        failureClass: input.failureClass ?? null,
+        providerFamilyKey: input.providerFamilyKey ?? null,
+      };
 
-      const retainedFinalState =
+      const incidentFactualFinalState =
+        incident?.status === "RESOLVED" &&
+        incident.resolution === "DIRECT_BOOKING_CLASSIFIED"
+          ? ("FINAL_MANUAL" as const)
+          : incident?.status === "RESOLVED" &&
+              incident.resolution === "IDENTITY_CLASSIFIED"
+            ? ("FINAL_IDENTITY" as const)
+            : null;
+      const currentFactualFinalState =
+        current.state === "FINAL_MANUAL" || current.state === "FINAL_IDENTITY"
+          ? current.state
+          : null;
+      const retainedTechnicalFinalState =
         incident?.status === "RESOLVED" &&
         incident.resolution &&
         incident.resolution !== "MONITORING_RESTORED" &&
+        !incidentFactualFinalState &&
         !input.materialEvidenceChanged &&
         [
           "FINAL_MANUAL",
@@ -271,12 +329,12 @@ export async function recordCourseMonitoringFailure(input: {
           "FINAL_IDENTITY",
           "REVALIDATING_FINAL",
         ].includes(current.state)
-          ? incident.resolution === "DIRECT_BOOKING_CLASSIFIED"
-            ? ("FINAL_MANUAL" as const)
-            : incident.resolution === "IDENTITY_CLASSIFIED"
-              ? ("FINAL_IDENTITY" as const)
-              : ("FINAL_TECHNICAL" as const)
+          ? ("FINAL_TECHNICAL" as const)
           : null;
+      const retainedFinalState =
+        incidentFactualFinalState ??
+        currentFactualFinalState ??
+        retainedTechnicalFinalState;
       if (retainedFinalState) {
         const status = await transaction.courseMonitoringStatus.update({
           where: {
@@ -310,6 +368,7 @@ export async function recordCourseMonitoringFailure(input: {
           runtimeVersion: input.runtimeVersion,
           occurredAt: now,
           audit: {
+            ...currentFailureIdentityAudit,
             retainedFinalDecision: true,
             resolution: incident?.resolution ?? null,
             customerDataIncluded: false,
@@ -329,10 +388,47 @@ export async function recordCourseMonitoringFailure(input: {
         current.state === "ENGINEERING_VERIFICATION_NEEDED" &&
         !input.materialEvidenceChanged
       ) {
+        const potentiallyParkedUntilMaterialChange =
+          incident?.status === "NEEDS_HUMAN" &&
+          incident.humanReviewReason === "AUTOMATION_STALLED" &&
+          incident.activeBatchId === null &&
+          incident.nextAttemptAt === null &&
+          incident.failureFingerprint === failureFingerprint &&
+          current.failureFingerprint === failureFingerprint &&
+          current.nextAutomaticAttemptAt === null &&
+          current.revalidationRequestedAt === null;
+        const parkedEvent = potentiallyParkedUntilMaterialChange
+          ? await transaction.courseMonitoringEvent.findFirst({
+              where: {
+                incidentId: incident.id,
+                eventType: "HUMAN_REVIEW_REQUESTED",
+              },
+              orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+              select: {
+                incidentId: true,
+                eventType: true,
+                occurredAt: true,
+                audit: true,
+              },
+            })
+          : null;
+        const parkedUntilMaterialChange =
+          potentiallyParkedUntilMaterialChange &&
+          hasDurableWaitForMaterialChangeProof({
+            incidentId: incident.id,
+            incidentCycle: incident.cycle,
+            incidentStatus: incident.status,
+            humanReviewReason: incident.humanReviewReason,
+            incidentEscalatedAt: incident.escalatedAt,
+            escalationDeadlineAt: incident.escalationDeadlineAt,
+            monitoringState: current.state,
+            endpointEvents: parkedEvent ? [parkedEvent] : [],
+          });
         const retryAt = getHumanReviewRetryAt(
           now,
           incident?.activeRealSearchCount ?? input.activeRealSearchCount,
         );
+        const nextAttemptAt = parkedUntilMaterialChange ? null : retryAt;
         const status = await transaction.courseMonitoringStatus.update({
           where: {
             courseId: input.courseId,
@@ -345,7 +441,7 @@ export async function recordCourseMonitoringFailure(input: {
                 ? { increment: 1 }
                 : 1,
             failureFingerprint,
-            nextAutomaticAttemptAt: retryAt,
+            nextAutomaticAttemptAt: nextAttemptAt,
             revision: { increment: 1 },
           },
         });
@@ -357,7 +453,7 @@ export async function recordCourseMonitoringFailure(input: {
               status: "NEEDS_HUMAN",
             },
             data: {
-              nextAttemptAt: retryAt,
+              nextAttemptAt,
               lastSeenAt: now,
               revision: { increment: 1 },
             },
@@ -379,7 +475,9 @@ export async function recordCourseMonitoringFailure(input: {
           runtimeVersion: input.runtimeVersion,
           occurredAt: now,
           audit: {
+            ...currentFailureIdentityAudit,
             retainedHumanReview: true,
+            parkedUntilMaterialChange,
             activeDemand: input.activeRealSearchCount > 0,
             customerDataIncluded: false,
           },
@@ -390,7 +488,7 @@ export async function recordCourseMonitoringFailure(input: {
           retainedHumanFinal: false,
           independentPathCount: 1,
           samePathCount: Math.max(status.consecutiveFailures, 1),
-          nextAttemptAt: retryAt,
+          nextAttemptAt,
         };
       }
 
@@ -458,6 +556,7 @@ export async function recordCourseMonitoringFailure(input: {
         runtimeVersion: input.runtimeVersion,
         occurredAt: now,
         audit: {
+          ...currentFailureIdentityAudit,
           confirmationWindowMinutes: 15,
           independentPathCount: decision.independentPathCount,
           samePathCount: decision.samePathCount,
@@ -520,11 +619,55 @@ export async function recordCourseMonitoringSuccess(input: {
         select: {
           id: true,
           status: true,
+          resolution: true,
           activeBatchId: true,
           revision: true,
         },
       });
-      const status = await transaction.courseMonitoringStatus.update({
+      const retainedFactualFinalState =
+        current.state === "FINAL_MANUAL"
+          ? ("FINAL_MANUAL" as const)
+          : current.state === "FINAL_IDENTITY"
+            ? ("FINAL_IDENTITY" as const)
+            : incident?.status === "RESOLVED" &&
+                incident.resolution === "DIRECT_BOOKING_CLASSIFIED"
+              ? ("FINAL_MANUAL" as const)
+              : incident?.status === "RESOLVED" &&
+                  incident.resolution === "IDENTITY_CLASSIFIED"
+                ? ("FINAL_IDENTITY" as const)
+                : null;
+      if (retainedFactualFinalState) {
+        const status = await transaction.courseMonitoringStatus.update({
+          where: {
+            courseId: input.courseId,
+            revision: current.revision,
+          },
+          data: {
+            state: retainedFactualFinalState,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+            ...(current.state !== retainedFactualFinalState
+              ? { stateChangedAt: now }
+              : {}),
+            revision: { increment: 1 },
+          },
+        });
+        await appendMonitoringEvent(transaction, {
+          courseId: input.courseId,
+          incidentId: incident?.id ?? null,
+          eventType: "CHECK_SUCCEEDED",
+          source,
+          fromState: current.state,
+          toState: retainedFactualFinalState,
+          outcome: input.outcome,
+          message:
+            "A successful observation was recorded without overriding the authoritative factual final.",
+          runtimeVersion: input.runtimeVersion,
+          occurredAt: now,
+        });
+        return status;
+      }
+      let status = await transaction.courseMonitoringStatus.update({
         where: {
           courseId: input.courseId,
           revision: current.revision,
@@ -542,29 +685,117 @@ export async function recordCourseMonitoringSuccess(input: {
         },
       });
       if (
-        incident?.status === "AUTO_INVESTIGATING" &&
+        incident &&
+        (incident.status === "AUTO_INVESTIGATING" ||
+          incident.status === "NEEDS_HUMAN" ||
+          (current.state === "REVALIDATING_FINAL" &&
+            incident.status === "RESOLVED" &&
+            incident.resolution !== null &&
+            REVALIDATABLE_FINAL_RESOLUTIONS.has(incident.resolution))) &&
         !incident.activeBatchId
       ) {
-        await transaction.courseSupportIncident.updateMany({
+        const resolutionData = {
+          status: "RESOLVED" as const,
+          resolvedAt: now,
+          resolution: "MONITORING_RESTORED" as const,
+          resolutionMessage:
+            "Fresh public signed-out monitoring succeeded and restored the course.",
+          nextAction: null,
+          nextAttemptAt: null,
+          nextReminderAt: null,
+          lastSeenAt: now,
+          revision: { increment: 1 },
+        };
+        const resolved = await transaction.courseSupportIncident.updateMany({
           where: {
             id: incident.id,
-            status: "AUTO_INVESTIGATING",
+            status: incident.status,
+            ...(incident.status === "RESOLVED"
+              ? { resolution: incident.resolution }
+              : {}),
             activeBatchId: null,
             revision: incident.revision,
           },
-          data: {
-            status: "RESOLVED",
-            resolvedAt: now,
-            resolution: "MONITORING_RESTORED",
-            resolutionMessage:
-              "Fresh public signed-out monitoring succeeded and restored the course.",
-            nextAction: null,
-            nextAttemptAt: null,
-            nextReminderAt: null,
-            lastSeenAt: now,
-            revision: { increment: 1 },
-          },
+          data: resolutionData,
         });
+        if (resolved.count === 0) {
+          const latestIncident =
+            await transaction.courseSupportIncident.findUnique({
+              where: { courseId: input.courseId },
+              select: {
+                id: true,
+                status: true,
+                resolution: true,
+                activeBatchId: true,
+                revision: true,
+              },
+            });
+          const racedFactualFinalState =
+            latestIncident?.status === "RESOLVED" &&
+            latestIncident.resolution === "DIRECT_BOOKING_CLASSIFIED"
+              ? ("FINAL_MANUAL" as const)
+              : latestIncident?.status === "RESOLVED" &&
+                  latestIncident.resolution === "IDENTITY_CLASSIFIED"
+                ? ("FINAL_IDENTITY" as const)
+                : null;
+          if (racedFactualFinalState && !latestIncident?.activeBatchId) {
+            status = await transaction.courseMonitoringStatus.update({
+              where: {
+                courseId: input.courseId,
+                revision: status.revision,
+              },
+              data: {
+                state: racedFactualFinalState,
+                nextAutomaticAttemptAt: null,
+                revalidationRequestedAt: null,
+                stateChangedAt: now,
+                revision: { increment: 1 },
+              },
+            });
+            await appendMonitoringEvent(transaction, {
+              courseId: input.courseId,
+              incidentId: latestIncident?.id ?? null,
+              eventType: "CHECK_SUCCEEDED",
+              source,
+              fromState: current.state,
+              toState: racedFactualFinalState,
+              outcome: input.outcome,
+              message:
+                "A successful observation lost a concurrent race to an authoritative factual final.",
+              runtimeVersion: input.runtimeVersion,
+              occurredAt: now,
+            });
+            return status;
+          }
+          if (
+            latestIncident &&
+            (latestIncident.status !== "RESOLVED" ||
+              (current.state === "REVALIDATING_FINAL" &&
+                latestIncident.resolution !== null &&
+                REVALIDATABLE_FINAL_RESOLUTIONS.has(
+                  latestIncident.resolution,
+                ))) &&
+            !latestIncident.activeBatchId
+          ) {
+            const retried = await transaction.courseSupportIncident.updateMany({
+              where: {
+                id: latestIncident.id,
+                status: latestIncident.status,
+                ...(latestIncident.status === "RESOLVED"
+                  ? { resolution: latestIncident.resolution }
+                  : {}),
+                activeBatchId: null,
+                revision: latestIncident.revision,
+              },
+              data: resolutionData,
+            });
+            if (retried.count !== 1) {
+              throw new Error(
+                "Course monitoring incident write conflict while reconciling success.",
+              );
+            }
+          }
+        }
       }
       await appendMonitoringEvent(transaction, {
         courseId: input.courseId,
@@ -633,6 +864,7 @@ export async function recordCourseMonitoringFinalClassification(input: {
         select: {
           id: true,
           status: true,
+          resolution: true,
           activeBatchId: true,
           revision: true,
         },
@@ -663,35 +895,84 @@ export async function recordCourseMonitoringFinalClassification(input: {
               },
             })
           : current;
+      const revalidatableTechnicalResolution =
+        incident?.status === "RESOLVED" &&
+        (incident.resolution === "TECHNICAL_LIMITATION_CLASSIFIED" ||
+          incident.resolution === "SOURCE_UNVERIFIED" ||
+          incident.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION");
+      const factualResolution =
+        input.state === "FINAL_IDENTITY"
+          ? ("IDENTITY_CLASSIFIED" as const)
+          : ("DIRECT_BOOKING_CLASSIFIED" as const);
+      const factualResolutionData = {
+        status: "RESOLVED" as const,
+        resolvedAt: now,
+        resolution: factualResolution,
+        resolutionMessage:
+          sanitizeMonitoringMessage(input.message) ??
+          "Current official evidence confirmed the factual final state.",
+        nextAction: null,
+        nextAttemptAt: null,
+        nextReminderAt: null,
+        lastSeenAt: now,
+        revision: { increment: 1 },
+      };
       if (
         incident &&
-        incident.status !== "RESOLVED" &&
-        !incident.activeBatchId
+        !incident.activeBatchId &&
+        (incident.status !== "RESOLVED" || revalidatableTechnicalResolution)
       ) {
-        await transaction.courseSupportIncident.updateMany({
-          where: {
-            id: incident.id,
-            status: incident.status,
-            activeBatchId: null,
-            revision: incident.revision,
-          },
-          data: {
-            status: "RESOLVED",
-            resolvedAt: now,
-            resolution:
-              input.state === "FINAL_IDENTITY"
-                ? "IDENTITY_CLASSIFIED"
-                : "DIRECT_BOOKING_CLASSIFIED",
-            resolutionMessage:
-              sanitizeMonitoringMessage(input.message) ??
-              "Current official evidence confirmed the factual final state.",
-            nextAction: null,
-            nextAttemptAt: null,
-            nextReminderAt: null,
-            lastSeenAt: now,
-            revision: { increment: 1 },
-          },
-        });
+        const resolvedIncident =
+          await transaction.courseSupportIncident.updateMany({
+            where: {
+              id: incident.id,
+              status: incident.status,
+              activeBatchId: null,
+              revision: incident.revision,
+              ...(incident.status === "RESOLVED"
+                ? { resolution: incident.resolution }
+                : {}),
+            },
+            data: factualResolutionData,
+          });
+        if (resolvedIncident.count === 0) {
+          const latestIncident =
+            await transaction.courseSupportIncident.findUnique({
+              where: { courseId: input.courseId },
+              select: {
+                id: true,
+                status: true,
+                resolution: true,
+                activeBatchId: true,
+                revision: true,
+              },
+            });
+          const latestRevalidatableTechnicalResolution =
+            latestIncident?.status === "RESOLVED" &&
+            (latestIncident.resolution === "TECHNICAL_LIMITATION_CLASSIFIED" ||
+              latestIncident.resolution === "SOURCE_UNVERIFIED" ||
+              latestIncident.resolution ===
+                "HUMAN_VERIFIED_TECHNICAL_LIMITATION");
+          if (
+            latestIncident &&
+            !latestIncident.activeBatchId &&
+            (latestIncident.status !== "RESOLVED" ||
+              latestRevalidatableTechnicalResolution)
+          ) {
+            await transaction.courseSupportIncident.updateMany({
+              where: {
+                id: latestIncident.id,
+                status: latestIncident.status,
+                activeBatchId: null,
+                revision: latestIncident.revision,
+                ...(latestIncident.status === "RESOLVED"
+                  ? { resolution: latestIncident.resolution }
+                  : {}),
+              },
+              data: factualResolutionData,
+            });
+          }
+        }
       }
       if (stateChanged) {
         await appendMonitoringEvent(transaction, {
@@ -863,26 +1144,10 @@ export async function requestTechnicalFinalRevalidationForDemand(input: {
   return { requestedCourseIds };
 }
 
-const MATERIAL_PROVIDER_EVIDENCE_FIELDS = [
-  "website",
-  "detectedBookingUrl",
-  "detectedPlatform",
-  "providerFamilyKey",
-  "bookingMethod",
-  "bookingAccessMode",
-  "automationEligibility",
-  "automationReason",
-  "monitoringMode",
-  "bookingMetadata",
-] as const;
+type MaterialProviderEvidenceField = CourseProviderExecutionEvidenceField;
 
-type MaterialProviderEvidenceField =
-  (typeof MATERIAL_PROVIDER_EVIDENCE_FIELDS)[number];
-
-export type CourseProviderEvidenceSnapshot = Partial<
-  Record<MaterialProviderEvidenceField, unknown>
-> &
-  Record<string, unknown>;
+export type CourseProviderEvidenceSnapshot =
+  CourseProviderExecutionEvidenceInput & Record<string, unknown>;
 
 export type ProviderEvidenceRevalidationOutcome =
   | "IMMATERIAL"
@@ -892,14 +1157,25 @@ export type ProviderEvidenceRevalidationOutcome =
   | "AUTHORITATIVE_FINAL_PRESERVED"
   | "REQUEUED";
 
+type ProviderEvidenceRevalidationResult = {
+  outcome: ProviderEvidenceRevalidationOutcome;
+  changedFields: MaterialProviderEvidenceField[];
+  searchesQueued: number;
+};
+
 export function shouldOpenFreshPlaybookCycleForProviderEvidence(input: {
   status: string;
   humanReviewReason?: string | null;
+  resolution?: CourseSupportResolution | null;
 }) {
   return (
     input.status === "NEEDS_HUMAN" ||
     (input.status === "AUTO_INVESTIGATING" &&
-      input.humanReviewReason === "AUTOMATION_STALLED")
+      input.humanReviewReason === "AUTOMATION_STALLED") ||
+    (input.status === "RESOLVED" &&
+      input.resolution !== null &&
+      input.resolution !== undefined &&
+      REVALIDATABLE_FINAL_RESOLUTIONS.has(input.resolution))
   );
 }
 
@@ -907,10 +1183,12 @@ export function getMaterialProviderEvidenceChanges(
   before: CourseProviderEvidenceSnapshot,
   after: CourseProviderEvidenceSnapshot,
 ) {
-  return MATERIAL_PROVIDER_EVIDENCE_FIELDS.filter(
+  const canonicalBefore = canonicalizeCourseProviderExecutionEvidence(before);
+  const canonicalAfter = canonicalizeCourseProviderExecutionEvidence(after);
+  return COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS.filter(
     (field) =>
-      stableProviderEvidenceValue(before[field]) !==
-      stableProviderEvidenceValue(after[field]),
+      stableCourseProviderExecutionEvidenceValue(canonicalBefore[field]) !==
+      stableCourseProviderExecutionEvidenceValue(canonicalAfter[field]),
   );
 }
 
@@ -968,61 +1246,44 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
     };
   }
 
-  const [incident, status] = await Promise.all([
-    transaction.courseSupportIncident.findUnique({
-      where: { courseId: input.courseId },
-      select: {
-        id: true,
-        cycle: true,
-        revision: true,
-        status: true,
-        activeBatchId: true,
-        activeRealSearchCount: true,
-        failureFingerprint: true,
-        humanReviewReason: true,
-        resolution: true,
-        activeBatch: {
-          select: {
-            status: true,
-            releaseSha: true,
-            deployedAt: true,
-            recheckDispatchedAt: true,
+  const attemptRevalidation = async (
+    attempt: number,
+  ): Promise<ProviderEvidenceRevalidationResult> => {
+    const [incident, status] = await Promise.all([
+      transaction.courseSupportIncident.findUnique({
+        where: { courseId: input.courseId },
+        select: {
+          id: true,
+          cycle: true,
+          revision: true,
+          status: true,
+          activeBatchId: true,
+          activeRealSearchCount: true,
+          kind: true,
+          providerFamilyKey: true,
+          failureClass: true,
+          failureFingerprint: true,
+          humanReviewReason: true,
+          resolution: true,
+          activeBatch: {
+            select: {
+              status: true,
+              releaseSha: true,
+              deployedAt: true,
+              recheckDispatchedAt: true,
+            },
           },
         },
-      },
-    }),
-    transaction.courseMonitoringStatus.findUnique({
-      where: { courseId: input.courseId },
-      select: {
-        state: true,
-        revision: true,
-      },
-    }),
-  ]);
-  if (!incident) {
-    return {
-      outcome: "NOT_ACTIONABLE" as const,
-      changedFields,
-      searchesQueued: 0,
-    };
-  }
-
-  if (incident.activeBatchId) {
-    const providerSnapshotFingerprint = input.providerSnapshotFingerprint;
-    const timeZone = input.after.timeZone;
-    if (
-      !incident.activeBatch ||
-      !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(
-        incident.activeBatch.status,
-      ) ||
-      !incident.activeBatch.releaseSha ||
-      !incident.activeBatch.deployedAt ||
-      !incident.activeBatch.recheckDispatchedAt ||
-      typeof providerSnapshotFingerprint !== "string" ||
-      !/^[a-f0-9]{64}$/iu.test(providerSnapshotFingerprint) ||
-      typeof timeZone !== "string" ||
-      !timeZone.trim()
-    ) {
+      }),
+      transaction.courseMonitoringStatus.findUnique({
+        where: { courseId: input.courseId },
+        select: {
+          state: true,
+          revision: true,
+        },
+      }),
+    ]);
+    if (!incident) {
       return {
         outcome: "NOT_ACTIONABLE" as const,
         changedFields,
@@ -1030,17 +1291,154 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
       };
     }
 
-    const idempotencyKey = `course-provider-evidence-recheck:${createHash(
-      "sha256",
-    )
-      .update(
-        `${input.courseId}:${incident.id}:${incident.cycle}:${providerSnapshotFingerprint}`,
+    if (incident.activeBatchId) {
+      const freshnessUpdated =
+        await transaction.courseSupportIncident.updateMany({
+          where: {
+            id: incident.id,
+            cycle: incident.cycle,
+            revision: incident.revision,
+            status: incident.status,
+            activeBatchId: incident.activeBatchId,
+          },
+          data: {
+            lastSeenAt: input.now,
+            revision: { increment: 1 },
+          },
+        });
+      if (freshnessUpdated.count !== 1) {
+        if (attempt >= PROVIDER_EVIDENCE_REVALIDATION_CAS_ATTEMPTS) {
+          throw new Error(
+            "Course provider-evidence revalidation write conflict while preserving active ownership.",
+          );
+        }
+        return attemptRevalidation(attempt + 1);
+      }
+      const providerSnapshotFingerprint = input.providerSnapshotFingerprint;
+      const timeZone = input.after.timeZone;
+      if (
+        !incident.activeBatch ||
+        !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(
+          incident.activeBatch.status,
+        ) ||
+        !incident.activeBatch.releaseSha ||
+        !incident.activeBatch.deployedAt ||
+        !incident.activeBatch.recheckDispatchedAt ||
+        typeof providerSnapshotFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/iu.test(providerSnapshotFingerprint) ||
+        typeof timeZone !== "string" ||
+        !timeZone.trim()
+      ) {
+        return {
+          outcome: "NOT_ACTIONABLE" as const,
+          changedFields,
+          searchesQueued: 0,
+        };
+      }
+
+      const idempotencyKey = `course-provider-evidence-recheck:${createHash(
+        "sha256",
       )
-      .digest("hex")}`;
-    const replay = await transaction.courseMonitoringEvent.findUnique({
-      where: { idempotencyKey },
-      select: { id: true },
-    });
+        .update(
+          `${input.courseId}:${incident.id}:${incident.cycle}:${providerSnapshotFingerprint}`,
+        )
+        .digest("hex")}`;
+      const replay = await transaction.courseMonitoringEvent.findUnique({
+        where: { idempotencyKey },
+        select: { id: true },
+      });
+      if (replay) {
+        return {
+          outcome: "REPLAYED" as const,
+          changedFields,
+          searchesQueued: 0,
+        };
+      }
+
+      const queued = await queueImmediateActiveRealSearchSchedulesForCourse(
+        transaction,
+        input.courseId,
+        input.now,
+        getCourseLocalDateStorageBoundary(timeZone, input.now),
+      );
+      await transaction.courseMonitoringEvent.create({
+        data: {
+          courseId: input.courseId,
+          incidentId: incident.id,
+          eventType: "REVALIDATION_REQUESTED",
+          source: input.source,
+          fromState: status?.state ?? null,
+          toState: status?.state ?? null,
+          failureFingerprint: incident.failureFingerprint,
+          message:
+            "Material provider evidence changed after the batch recheck dispatch, so current searches were queued again.",
+          idempotencyKey,
+          occurredAt: input.now,
+          audit: {
+            cycle: incident.cycle,
+            changedFields,
+            providerSnapshotFingerprint,
+            exactReleaseProgression: true,
+            postDispatchRecheck: true,
+            customerDataIncluded: false,
+          },
+        },
+      });
+      return {
+        outcome: "RECHECK_QUEUED" as const,
+        changedFields,
+        searchesQueued: queued.count,
+      };
+    }
+
+    const providerFamilyWasSupplied = Object.prototype.hasOwnProperty.call(
+      input.after,
+      "providerFamilyKey",
+    );
+    const nextProviderFamilyKey = providerFamilyWasSupplied
+      ? normalizeProviderFamilyKey(
+          typeof input.after.providerFamilyKey === "string"
+            ? input.after.providerFamilyKey
+            : null,
+        )
+      : incident.providerFamilyKey;
+    const providerFamilyChanged =
+      nextProviderFamilyKey !== incident.providerFamilyKey;
+    const nextFailureFingerprint = providerFamilyChanged
+      ? buildProviderFailureFingerprint({
+          providerFamilyKey: nextProviderFamilyKey,
+          failureClass: incident.failureClass,
+          operation:
+            incident.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
+          httpStatus: null,
+        })
+      : incident.failureFingerprint;
+    const evidenceFingerprint = createHash("sha256")
+      .update(
+        stableCourseProviderExecutionEvidenceValue(
+          canonicalizeCourseProviderExecutionEvidence(input.after),
+        ),
+      )
+      .digest("hex");
+    const revalidationKeyForCycle = (cycle: number) =>
+      `course-provider-evidence-revalidate:${createHash("sha256")
+        .update(
+          `${input.courseId}:${incident.id}:${cycle}:${evidenceFingerprint}`,
+        )
+        .digest("hex")}`;
+    const idempotencyKey = revalidationKeyForCycle(incident.cycle);
+    const replayKeys = [idempotencyKey];
+    if (incident.cycle > 1) {
+      replayKeys.push(revalidationKeyForCycle(incident.cycle - 1));
+    }
+    let replay: { id: string } | null = null;
+    for (const replayKey of replayKeys) {
+      replay = await transaction.courseMonitoringEvent.findUnique({
+        where: { idempotencyKey: replayKey },
+        select: { id: true },
+      });
+      if (replay) break;
+    }
     if (replay) {
       return {
         outcome: "REPLAYED" as const,
@@ -1049,11 +1447,155 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
       };
     }
 
-    const queued = await queueImmediateActiveRealSearchSchedulesForCourse(
+    const authoritativeFinal = Boolean(
+      status?.state === "FINAL_MANUAL" ||
+      status?.state === "FINAL_IDENTITY" ||
+      incident.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+      incident.resolution === "IDENTITY_CLASSIFIED",
+    );
+    if (authoritativeFinal) {
+      await transaction.courseMonitoringEvent.create({
+        data: {
+          courseId: input.courseId,
+          incidentId: incident.id,
+          eventType: "REVALIDATION_REQUESTED",
+          source: input.source,
+          fromState: status?.state ?? null,
+          toState: status?.state ?? null,
+          failureFingerprint: incident.failureFingerprint,
+          message:
+            "Changed provider evidence was recorded without reopening an authoritative factual final.",
+          idempotencyKey,
+          occurredAt: input.now,
+          audit: {
+            cycle: incident.cycle,
+            changedFields,
+            evidenceFingerprint,
+            authoritativeFinalRetained: true,
+            customerDataIncluded: false,
+          },
+        },
+      });
+      return {
+        outcome: "AUTHORITATIVE_FINAL_PRESERVED" as const,
+        changedFields,
+        searchesQueued: 0,
+      };
+    }
+
+    const automationStalled =
+      incident.humanReviewReason === "AUTOMATION_STALLED";
+    if (!shouldOpenFreshPlaybookCycleForProviderEvidence(incident)) {
+      return {
+        outcome: "NOT_ACTIONABLE" as const,
+        changedFields,
+        searchesQueued: 0,
+      };
+    }
+
+    const nextCycle = incident.cycle + 1;
+    const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+      where: {
+        id: incident.id,
+        cycle: incident.cycle,
+        revision: incident.revision,
+        activeBatchId: null,
+        status: incident.status,
+        ...(incident.status === "AUTO_INVESTIGATING"
+          ? { humanReviewReason: "AUTOMATION_STALLED" as const }
+          : {}),
+        ...(incident.status === "RESOLVED"
+          ? { resolution: incident.resolution }
+          : {}),
+      },
+      data: {
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        providerFamilyKey: nextProviderFamilyKey,
+        failureFingerprint: nextFailureFingerprint,
+        occurrenceCount: 1,
+        lastAttemptAt: null,
+        attemptCount: 0,
+        firstSeenAt: input.now,
+        confirmedAt: input.now,
+        escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+          input.now,
+          incident.activeRealSearchCount,
+        ),
+        humanReviewReason: null,
+        nextReminderAt: null,
+        nextAttemptAt: input.now,
+        nextAction:
+          "Run a fresh ordered playbook because material provider evidence changed.",
+        ownerNotifiedAt: null,
+        escalatedAt: null,
+        escalationNotifiedAt: null,
+        resolvedAt: null,
+        resolution: null,
+        resolutionMessage: null,
+        resolutionNotifiedAt: null,
+        decisionActorId: null,
+        decisionAt: null,
+        decisionNote: null,
+        decisionEvidenceUrl: null,
+        decisionIdempotencyKey: null,
+        lastSeenAt: input.now,
+        revision: { increment: 1 },
+      },
+    });
+    if (incidentUpdated.count !== 1) {
+      if (attempt >= PROVIDER_EVIDENCE_REVALIDATION_CAS_ATTEMPTS) {
+        throw new Error(
+          "Course provider-evidence revalidation write conflict while opening a fresh cycle.",
+        );
+      }
+      return attemptRevalidation(attempt + 1);
+    }
+
+    if (status) {
+      const statusUpdated = await transaction.courseMonitoringStatus.updateMany(
+        {
+          where: {
+            courseId: input.courseId,
+            revision: status.revision,
+            state: status.state,
+          },
+          data: {
+            state: "AUTO_INVESTIGATING",
+            failureFingerprint: nextFailureFingerprint,
+            firstDegradedAt: input.now,
+            nextAutomaticAttemptAt: input.now,
+            revalidationRequestedAt: input.now,
+            stateChangedAt: input.now,
+            revision: { increment: 1 },
+          },
+        },
+      );
+      if (statusUpdated.count !== 1) {
+        throw new Error(
+          "The monitoring state changed while provider-evidence revalidation was queued.",
+        );
+      }
+    } else {
+      await transaction.courseMonitoringStatus.create({
+        data: {
+          courseId: input.courseId,
+          reference: createMonitoringReference(),
+          state: "AUTO_INVESTIGATING",
+          failureFingerprint: nextFailureFingerprint,
+          firstDegradedAt: input.now,
+          nextAutomaticAttemptAt: input.now,
+          revalidationRequestedAt: input.now,
+          stateChangedAt: input.now,
+          updatedAt: input.now,
+        },
+      });
+    }
+
+    const queued = await queueActiveRealSearchesForCourse(
       transaction,
       input.courseId,
       input.now,
-      getCourseLocalDateStorageBoundary(timeZone, input.now),
     );
     await transaction.courseMonitoringEvent.create({
       data: {
@@ -1062,217 +1604,38 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
         eventType: "REVALIDATION_REQUESTED",
         source: input.source,
         fromState: status?.state ?? null,
-        toState: status?.state ?? null,
-        failureFingerprint: incident.failureFingerprint,
+        toState: "AUTO_INVESTIGATING",
+        failureFingerprint: nextFailureFingerprint,
         message:
-          "Material provider evidence changed after the batch recheck dispatch, so current searches were queued again.",
+          "Material provider evidence changed, so a fresh ordered-playbook cycle was queued.",
         idempotencyKey,
         occurredAt: input.now,
         audit: {
-          cycle: incident.cycle,
+          priorCycle: incident.cycle,
+          cycle: nextCycle,
+          reason: automationStalled
+            ? "AUTOMATION_STALLED_PROVIDER_EVIDENCE_CHANGED"
+            : incident.status === "RESOLVED"
+              ? "TECHNICAL_FINAL_PROVIDER_EVIDENCE_CHANGED"
+              : "HUMAN_REVIEW_PROVIDER_EVIDENCE_CHANGED",
+          priorProviderFamilyKey: incident.providerFamilyKey,
+          providerFamilyKey: nextProviderFamilyKey,
+          providerFamilyChanged,
           changedFields,
-          providerSnapshotFingerprint,
-          exactReleaseProgression: true,
-          postDispatchRecheck: true,
+          evidenceFingerprint,
+          preservesPriorAttemptEvents: true,
           customerDataIncluded: false,
         },
       },
     });
     return {
-      outcome: "RECHECK_QUEUED" as const,
+      outcome: "REQUEUED" as const,
       changedFields,
       searchesQueued: queued.count,
     };
-  }
-
-  const evidenceFingerprint = createHash("sha256")
-    .update(
-      stableProviderEvidenceValue(
-        Object.fromEntries(
-          MATERIAL_PROVIDER_EVIDENCE_FIELDS.map((field) => [
-            field,
-            input.after[field],
-          ]),
-        ),
-      ),
-    )
-    .digest("hex");
-  const idempotencyKey = `course-provider-evidence-revalidate:${createHash(
-    "sha256",
-  )
-    .update(
-      `${input.courseId}:${incident.id}:${incident.cycle}:${evidenceFingerprint}`,
-    )
-    .digest("hex")}`;
-  const replay = await transaction.courseMonitoringEvent.findUnique({
-    where: { idempotencyKey },
-    select: { id: true },
-  });
-  if (replay) {
-    return {
-      outcome: "REPLAYED" as const,
-      changedFields,
-      searchesQueued: 0,
-    };
-  }
-
-  const authoritativeFinal = Boolean(
-    status?.state === "FINAL_MANUAL" ||
-    status?.state === "FINAL_IDENTITY" ||
-    incident.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
-    incident.resolution === "IDENTITY_CLASSIFIED",
-  );
-  if (authoritativeFinal) {
-    await transaction.courseMonitoringEvent.create({
-      data: {
-        courseId: input.courseId,
-        incidentId: incident.id,
-        eventType: "REVALIDATION_REQUESTED",
-        source: input.source,
-        fromState: status?.state ?? null,
-        toState: status?.state ?? null,
-        failureFingerprint: incident.failureFingerprint,
-        message:
-          "Changed provider evidence was recorded without reopening an authoritative factual final.",
-        idempotencyKey,
-        occurredAt: input.now,
-        audit: {
-          cycle: incident.cycle,
-          changedFields,
-          evidenceFingerprint,
-          authoritativeFinalRetained: true,
-          customerDataIncluded: false,
-        },
-      },
-    });
-    return {
-      outcome: "AUTHORITATIVE_FINAL_PRESERVED" as const,
-      changedFields,
-      searchesQueued: 0,
-    };
-  }
-
-  const automationStalled = incident.humanReviewReason === "AUTOMATION_STALLED";
-  if (!shouldOpenFreshPlaybookCycleForProviderEvidence(incident)) {
-    return {
-      outcome: "NOT_ACTIONABLE" as const,
-      changedFields,
-      searchesQueued: 0,
-    };
-  }
-
-  const nextCycle = incident.cycle + 1;
-  const incidentUpdated = await transaction.courseSupportIncident.updateMany({
-    where: {
-      id: incident.id,
-      cycle: incident.cycle,
-      revision: incident.revision,
-      activeBatchId: null,
-      OR: [
-        { status: "NEEDS_HUMAN" },
-        {
-          status: "AUTO_INVESTIGATING",
-          humanReviewReason: "AUTOMATION_STALLED",
-        },
-      ],
-    },
-    data: {
-      cycle: { increment: 1 },
-      status: "AUTO_INVESTIGATING",
-      confirmedAt: input.now,
-      escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
-        input.now,
-        incident.activeRealSearchCount,
-      ),
-      humanReviewReason: null,
-      nextReminderAt: null,
-      nextAttemptAt: input.now,
-      nextAction:
-        "Run a fresh ordered playbook because material provider evidence changed.",
-      lastSeenAt: input.now,
-      revision: { increment: 1 },
-    },
-  });
-  if (incidentUpdated.count !== 1) {
-    return {
-      outcome: "NOT_ACTIONABLE" as const,
-      changedFields,
-      searchesQueued: 0,
-    };
-  }
-
-  if (status) {
-    const statusUpdated = await transaction.courseMonitoringStatus.updateMany({
-      where: {
-        courseId: input.courseId,
-        revision: status.revision,
-        state: status.state,
-      },
-      data: {
-        state: "AUTO_INVESTIGATING",
-        nextAutomaticAttemptAt: input.now,
-        revalidationRequestedAt: input.now,
-        stateChangedAt: input.now,
-        revision: { increment: 1 },
-      },
-    });
-    if (statusUpdated.count !== 1) {
-      throw new Error(
-        "The monitoring state changed while provider-evidence revalidation was queued.",
-      );
-    }
-  } else {
-    await transaction.courseMonitoringStatus.create({
-      data: {
-        courseId: input.courseId,
-        reference: createMonitoringReference(),
-        state: "AUTO_INVESTIGATING",
-        failureFingerprint: incident.failureFingerprint,
-        firstDegradedAt: input.now,
-        nextAutomaticAttemptAt: input.now,
-        revalidationRequestedAt: input.now,
-        stateChangedAt: input.now,
-        updatedAt: input.now,
-      },
-    });
-  }
-
-  const queued = await queueActiveRealSearchesForCourse(
-    transaction,
-    input.courseId,
-    input.now,
-  );
-  await transaction.courseMonitoringEvent.create({
-    data: {
-      courseId: input.courseId,
-      incidentId: incident.id,
-      eventType: "REVALIDATION_REQUESTED",
-      source: input.source,
-      fromState: status?.state ?? null,
-      toState: "AUTO_INVESTIGATING",
-      failureFingerprint: incident.failureFingerprint,
-      message:
-        "Material provider evidence changed, so a fresh ordered-playbook cycle was queued.",
-      idempotencyKey,
-      occurredAt: input.now,
-      audit: {
-        priorCycle: incident.cycle,
-        cycle: nextCycle,
-        reason: automationStalled
-          ? "AUTOMATION_STALLED_PROVIDER_EVIDENCE_CHANGED"
-          : "HUMAN_REVIEW_PROVIDER_EVIDENCE_CHANGED",
-        changedFields,
-        evidenceFingerprint,
-        preservesPriorAttemptEvents: true,
-        customerDataIncluded: false,
-      },
-    },
-  });
-  return {
-    outcome: "REQUEUED" as const,
-    changedFields,
-    searchesQueued: queued.count,
   };
+
+  return attemptRevalidation(1);
 }
 
 export function getNextMonitoringWakeAt(
@@ -1507,7 +1870,7 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
   }
 
   const now = input.now ?? new Date();
-  const deploymentMarker = await prisma.automationRun.upsert({
+  await prisma.automationRun.upsert({
     where: { id: `cm_deploy_${deploymentSha}` },
     create: {
       id: `cm_deploy_${deploymentSha}`,
@@ -1523,219 +1886,15 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
       completedAt: now,
       outcome: "deployment_observed",
       notes:
-        "Recorded the deployed runtime boundary for bounded course revalidation.",
+        "Recorded the deployed runtime boundary without reopening unchanged course investigations.",
     },
     update: {},
-    select: { startedAt: true },
+    select: { id: true },
   });
-  const deploymentObservedAt = deploymentMarker.startedAt;
-  const candidates = await prisma.courseSupportIncident.findMany({
-    where: {
-      activeBatchId: null,
-      AND: [
-        {
-          OR: [
-            { status: "NEEDS_HUMAN" },
-            {
-              status: "AUTO_INVESTIGATING",
-              humanReviewReason: "AUTOMATION_STALLED",
-            },
-          ],
-        },
-        {
-          OR: [
-            { escalatedAt: { lte: deploymentObservedAt } },
-            {
-              escalatedAt: null,
-              firstSeenAt: { lte: deploymentObservedAt },
-            },
-          ],
-        },
-      ],
-      monitoringEvents: {
-        none: {
-          source: "DEPLOYMENT",
-          deploymentSha,
-          eventType: {
-            in: ["REVALIDATION_REQUESTED", "DEPLOYMENT_VERIFIED"],
-          },
-        },
-      },
-    },
-    orderBy: [{ escalatedAt: "asc" }, { firstSeenAt: "asc" }],
-    take: DEPLOYMENT_REVALIDATION_BATCH_SIZE,
-    select: { courseId: true },
-  });
-  let requeued = 0;
-  let retainedAuthoritativeFinals = 0;
-  for (const candidate of candidates) {
-    const outcome = await runSerializedCourseMonitoringWrite(
-      candidate.courseId,
-      async (transaction) => {
-        const idempotencyKey = createDeploymentRevalidationIdempotencyKey(
-          candidate.courseId,
-          deploymentSha,
-        );
-        const replay = await transaction.courseMonitoringEvent.findUnique({
-          where: { idempotencyKey },
-          select: { id: true },
-        });
-        if (replay) {
-          return "REPLAYED" as const;
-        }
-
-        const incident = await transaction.courseSupportIncident.findUnique({
-          where: { courseId: candidate.courseId },
-          select: {
-            id: true,
-            courseId: true,
-            cycle: true,
-            revision: true,
-            status: true,
-            humanReviewReason: true,
-            activeBatchId: true,
-            failureFingerprint: true,
-            activeRealSearchCount: true,
-            escalatedAt: true,
-            firstSeenAt: true,
-          },
-        });
-        const deploymentRevalidationEligible = Boolean(
-          incident &&
-          (incident.status === "NEEDS_HUMAN" ||
-            (incident.status === "AUTO_INVESTIGATING" &&
-              incident.humanReviewReason === "AUTOMATION_STALLED")),
-        );
-        if (
-          !incident ||
-          !deploymentRevalidationEligible ||
-          incident.activeBatchId ||
-          (incident.escalatedAt ?? incident.firstSeenAt) > deploymentObservedAt
-        ) {
-          return "SKIPPED" as const;
-        }
-
-        const current = await ensureMonitoringStatus(
-          transaction,
-          candidate.courseId,
-          now,
-        );
-        if (
-          current.state === "FINAL_MANUAL" ||
-          current.state === "FINAL_IDENTITY"
-        ) {
-          await transaction.courseMonitoringEvent.create({
-            data: {
-              courseId: candidate.courseId,
-              incidentId: incident.id,
-              eventType: "DEPLOYMENT_VERIFIED",
-              source: "DEPLOYMENT",
-              fromState: current.state,
-              toState: current.state,
-              message:
-                "A new deployment preserved the authoritative factual final classification.",
-              deploymentSha,
-              idempotencyKey,
-              occurredAt: now,
-              audit: {
-                cycle: incident.cycle,
-                authoritativeFinalRetained: true,
-                customerDataIncluded: false,
-              },
-            },
-          });
-          return "RETAINED_FINAL" as const;
-        }
-
-        const nextCycle = incident.cycle + 1;
-        const incidentUpdated =
-          await transaction.courseSupportIncident.updateMany({
-            where: {
-              id: incident.id,
-              cycle: incident.cycle,
-              revision: incident.revision,
-              status: incident.status,
-              humanReviewReason: incident.humanReviewReason,
-              activeBatchId: null,
-            },
-            data: {
-              cycle: { increment: 1 },
-              status: "AUTO_INVESTIGATING",
-              confirmedAt: now,
-              escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
-                now,
-                incident.activeRealSearchCount,
-              ),
-              humanReviewReason: null,
-              nextReminderAt: null,
-              nextAttemptAt: now,
-              nextAction:
-                "Run a fresh current-cycle ordered playbook against the deployed runtime.",
-              lastSeenAt: now,
-              revision: { increment: 1 },
-            },
-          });
-        const statusUpdated =
-          await transaction.courseMonitoringStatus.updateMany({
-            where: {
-              courseId: candidate.courseId,
-              revision: current.revision,
-              state: current.state,
-            },
-            data: {
-              state: "AUTO_INVESTIGATING",
-              nextAutomaticAttemptAt: now,
-              revalidationRequestedAt: now,
-              stateChangedAt: now,
-              revision: { increment: 1 },
-            },
-          });
-        if (incidentUpdated.count !== 1 || statusUpdated.count !== 1) {
-          throw new Error(
-            "The course changed while deployment revalidation was queued.",
-          );
-        }
-        await queueActiveRealSearchesForCourse(
-          transaction,
-          candidate.courseId,
-          now,
-        );
-        await transaction.courseMonitoringEvent.create({
-          data: {
-            courseId: candidate.courseId,
-            incidentId: incident.id,
-            eventType: "REVALIDATION_REQUESTED",
-            source: "DEPLOYMENT",
-            fromState: current.state,
-            toState: "AUTO_INVESTIGATING",
-            failureFingerprint: incident.failureFingerprint,
-            message:
-              "A new deployed runtime opened one bounded fresh playbook cycle.",
-            deploymentSha,
-            idempotencyKey,
-            occurredAt: now,
-            audit: {
-              priorCycle: incident.cycle,
-              cycle: nextCycle,
-              escalationMinutes: 30,
-              customerDataIncluded: false,
-            },
-          },
-        });
-        return "REQUEUED" as const;
-      },
-    );
-    if (outcome === "REQUEUED") {
-      requeued += 1;
-    } else if (outcome === "RETAINED_FINAL") {
-      retainedAuthoritativeFinals += 1;
-    }
-  }
-
   return {
-    considered: candidates.length,
-    requeued,
-    retainedAuthoritativeFinals,
+    considered: 0,
+    requeued: 0,
+    retainedAuthoritativeFinals: 0,
   };
 }
 
@@ -1754,6 +1913,7 @@ export async function reconcileCourseMonitoringDeadlines(input: {
       escalated: 0,
       retrying: 0,
       humanReviewIncidentIds: [] as string[],
+      parkedIncidentIds: [] as string[],
     };
   }
   const courseIds = [...new Set(input.courseIds?.filter(Boolean) ?? [])];
@@ -1763,6 +1923,7 @@ export async function reconcileCourseMonitoringDeadlines(input: {
       escalated: 0,
       retrying: 0,
       humanReviewIncidentIds: [] as string[],
+      parkedIncidentIds: [] as string[],
     };
   }
   const candidates = await prisma.courseSupportIncident.findMany({
@@ -1816,6 +1977,7 @@ export async function reconcileCourseMonitoringDeadlines(input: {
   let escalated = 0;
   let retrying = 0;
   const humanReviewIncidentIds: string[] = [];
+  const parkedIncidentIds: string[] = [];
   for (const candidate of candidates) {
     const outcome = await reconcileCourseMonitoringDeadline({
       courseId: candidate.courseId,
@@ -1828,9 +1990,13 @@ export async function reconcileCourseMonitoringDeadlines(input: {
     if (outcome.outcome === "RETRYING") {
       retrying += 1;
     }
+    if (outcome.outcome === "RETAINED_PARKED") {
+      parkedIncidentIds.push(outcome.incidentId);
+    }
     if (
       (outcome.outcome === "NEEDS_HUMAN" ||
-        outcome.outcome === "RETAINED_HUMAN") &&
+        outcome.outcome === "RETAINED_HUMAN" ||
+        outcome.outcome === "RETAINED_PARKED") &&
       outcome.incidentId
     ) {
       humanReviewIncidentIds.push(outcome.incidentId);
@@ -1841,6 +2007,7 @@ export async function reconcileCourseMonitoringDeadlines(input: {
     escalated,
     retrying,
     humanReviewIncidentIds,
+    parkedIncidentIds,
   };
 }
 
@@ -1884,6 +2051,8 @@ async function reconcileCourseMonitoringDeadline(input: {
                 ownerAutomationRun: {
                   select: {
                     id: true,
+                    kind: true,
+                    status: true,
                     completedAt: true,
                     outcome: true,
                     notes: true,
@@ -2032,23 +2201,23 @@ async function reconcileCourseMonitoringDeadline(input: {
       );
       const escalationDeadlineReached = Boolean(
         incident.escalationDeadlineAt &&
-          incident.escalationDeadlineAt <= input.now,
+        incident.escalationDeadlineAt <= input.now,
       );
       const activeBatch = incident.activeBatch;
       const liveBatchOwner = Boolean(
         activeBatch &&
-          ACTIVE_COURSE_SUPPORT_BATCH_STATUSES.has(activeBatch.status) &&
-          activeBatch.completedAt === null &&
-          activeBatch.leaseExpiresAt >= input.now,
+        ACTIVE_COURSE_SUPPORT_BATCH_STATUSES.has(activeBatch.status) &&
+        activeBatch.completedAt === null &&
+        activeBatch.leaseExpiresAt >= input.now,
       );
       const staleBatchNeedsEndpointReconcile = Boolean(
         incident.activeBatchId &&
-          activeBatch &&
-          !liveBatchOwner &&
-          (escalationDeadlineReached ||
-            incident.status === "NEEDS_HUMAN" ||
-            incident.humanReviewReason !== null ||
-            needsImmediateAutomationRepair),
+        activeBatch &&
+        !liveBatchOwner &&
+        (escalationDeadlineReached ||
+          incident.status === "NEEDS_HUMAN" ||
+          incident.humanReviewReason !== null ||
+          needsImmediateAutomationRepair),
       );
       if (staleBatchNeedsEndpointReconcile && activeBatch) {
         return reconcileStaleBatchOwnershipAtEndpoint(transaction, {
@@ -2238,6 +2407,46 @@ async function reconcileCourseMonitoringDeadline(input: {
         };
       }
 
+      const parkedWithoutNewMaterial =
+        incident.status === "NEEDS_HUMAN" &&
+        incident.humanReviewReason === "AUTOMATION_STALLED" &&
+        incident.nextAttemptAt === null &&
+        status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
+        status.nextAutomaticAttemptAt === null &&
+        status.revalidationRequestedAt === null;
+      if (parkedWithoutNewMaterial) {
+        const parkedEvent = await transaction.courseMonitoringEvent.findFirst({
+          where: {
+            incidentId: incident.id,
+            eventType: "HUMAN_REVIEW_REQUESTED",
+          },
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+          select: {
+            incidentId: true,
+            eventType: true,
+            occurredAt: true,
+            audit: true,
+          },
+        });
+        if (
+          hasDurableWaitForMaterialChangeProof({
+            incidentId: incident.id,
+            incidentCycle: incident.cycle,
+            incidentStatus: incident.status,
+            humanReviewReason: incident.humanReviewReason,
+            incidentEscalatedAt: incident.escalatedAt,
+            escalationDeadlineAt: incident.escalationDeadlineAt,
+            monitoringState: status.state,
+            endpointEvents: parkedEvent ? [parkedEvent] : [],
+          })
+        ) {
+          return {
+            outcome: "RETAINED_PARKED" as const,
+            incidentId: incident.id,
+          };
+        }
+      }
+
       // A live responder lease owns remaining non-authoritative work. Missing
       // or not-yet-due ownership fails closed instead of being stolen.
       if (incident.activeBatchId) {
@@ -2260,13 +2469,13 @@ async function reconcileCourseMonitoringDeadline(input: {
         const stalledEndpoint = await persistAutomationStalledEndpoint(
           transaction,
           {
-          courseId: input.courseId,
-          incident,
-          monitoringStatus: status,
-          playbookAssessment,
-          expectedActiveBatchId: null,
-          endpointAt: input.now,
-          source: input.source,
+            courseId: input.courseId,
+            incident,
+            monitoringStatus: status,
+            playbookAssessment,
+            expectedActiveBatchId: null,
+            endpointAt: input.now,
+            source: input.source,
           },
         );
         return {
@@ -2512,22 +2721,21 @@ async function persistAutomationStalledEndpoint(
   const endpointAt = priorEndpoint?.occurredAt ?? input.endpointAt;
   const endpointAlreadyApplied = Boolean(
     priorEndpoint &&
-      input.expectedActiveBatchId === null &&
-      input.incident.activeBatchId === null &&
-      input.incident.status === "AUTO_INVESTIGATING" &&
-      input.incident.humanReviewReason === "AUTOMATION_STALLED" &&
-      input.incident.escalatedAt?.getTime() === endpointAt.getTime() &&
-      input.monitoringStatus.state === "ENGINEERING_VERIFICATION_NEEDED" &&
-      input.monitoringStatus.stateChangedAt?.getTime() === endpointAt.getTime(),
+    input.expectedActiveBatchId === null &&
+    input.incident.activeBatchId === null &&
+    input.incident.status === "NEEDS_HUMAN" &&
+    input.incident.humanReviewReason === "AUTOMATION_STALLED" &&
+    input.incident.nextAttemptAt === null &&
+    input.incident.escalatedAt?.getTime() === endpointAt.getTime() &&
+    input.monitoringStatus.state === "ENGINEERING_VERIFICATION_NEEDED" &&
+    input.monitoringStatus.nextAutomaticAttemptAt === null &&
+    input.monitoringStatus.revalidationRequestedAt === null &&
+    input.monitoringStatus.stateChangedAt?.getTime() === endpointAt.getTime(),
   );
   if (endpointAlreadyApplied) {
     return { endpointAt, alreadyApplied: true };
   }
 
-  const retryAt = getHumanReviewRetryAt(
-    endpointAt,
-    input.incident.activeRealSearchCount,
-  );
   const incidentUpdated = await transaction.courseSupportIncident.updateMany({
     where: {
       id: input.incident.id,
@@ -2538,14 +2746,14 @@ async function persistAutomationStalledEndpoint(
       activeBatchId: input.expectedActiveBatchId,
     },
     data: {
-      status: "AUTO_INVESTIGATING",
+      status: "NEEDS_HUMAN",
       activeBatchId: null,
       humanReviewReason: "AUTOMATION_STALLED",
       escalatedAt: endpointAt,
       nextReminderAt: endpointAt,
-      nextAttemptAt: retryAt,
+      nextAttemptAt: null,
       nextAction:
-        "Review the automation stall and restart the ordered playbook when tooling is ready.",
+        "Wait for a material provider, failure, reader-capability, relevant implementation, or operator change before retrying.",
       revision: { increment: 1 },
     },
   });
@@ -2563,7 +2771,7 @@ async function persistAutomationStalledEndpoint(
     },
     data: {
       state: "ENGINEERING_VERIFICATION_NEEDED",
-      nextAutomaticAttemptAt: retryAt,
+      nextAutomaticAttemptAt: null,
       revalidationRequestedAt: null,
       stateChangedAt: endpointAt,
       revision: { increment: 1 },
@@ -2572,13 +2780,6 @@ async function persistAutomationStalledEndpoint(
   if (statusUpdated.count !== 1) {
     throw new Error(
       "The course monitoring status changed while its automation-stalled endpoint was reconciled.",
-    );
-  }
-  if (input.incident.activeRealSearchCount > 0) {
-    await queueActiveRealSearchesForCourse(
-      transaction,
-      input.courseId,
-      endpointAt,
     );
   }
   if (!priorEndpoint) {
@@ -2602,10 +2803,10 @@ async function persistAutomationStalledEndpoint(
         playbookConclusion: input.playbookAssessment.conclusion,
         playbookExhausted: false,
         automationStalled: true,
+        parkedUntilMaterialChange: true,
         nextStage: input.playbookAssessment.nextStage,
         escalationDeadlineAt:
           input.incident.escalationDeadlineAt?.toISOString() ?? null,
-        automaticRecheckHours: 6,
         customerDataIncluded: false,
       },
     });
@@ -2852,9 +3053,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     };
   }
 
-  const batchWasActive = ACTIVE_COURSE_SUPPORT_BATCH_STATUSES.has(
-    batch.status,
-  );
+  const batchWasActive = ACTIVE_COURSE_SUPPORT_BATCH_STATUSES.has(batch.status);
   const batchLifecycleIsCoherent = batchWasActive
     ? batch.completedAt === null
     : batch.completedAt !== null;
@@ -2968,9 +3167,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     }
     const dueEndpoint = Boolean(
       incident.activeBatchId === batch.id &&
-        shouldCloseBatch &&
-        incident.escalationDeadlineAt &&
-        incident.escalationDeadlineAt <= input.now,
+      shouldCloseBatch &&
+      incident.escalationDeadlineAt &&
+      incident.escalationDeadlineAt <= input.now,
     );
     if (dueEndpoint) {
       dispositionByIncidentId.set(incident.id, {
@@ -3082,25 +3281,24 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     }
     if (batch.ownerAutomationRunId) {
       const ownerRun = batch.ownerAutomationRun;
-      const ownerRunNotes = parseMonitoringAutomationRunNotes(
-        ownerRun?.notes,
-      );
+      const ownerRunNotes = parseMonitoringAutomationRunNotes(ownerRun?.notes);
       const ownerRunIsCoherent = Boolean(
-          ownerRun &&
-          ownerRun.id === batch.ownerAutomationRunId &&
-          ownerRun.completedAt?.getTime() === batch.completedAt?.getTime() &&
-          ownerRun.outcome === closeoutOutcome &&
-          ownerRunNotes.schemaVersion === 1 &&
-          ownerRunNotes.lifecycle === "closeout" &&
-          ownerRunNotes.status === batch.status &&
-          ownerRunNotes.outcome === closeoutOutcome &&
-          ownerRunNotes.derivedOutcome === derivedOutcome &&
-          ownerRunNotes.terminalCount === terminalCount &&
-          ownerRunNotes.retryCount === retryCount &&
-          ownerRunNotes.automationStalledCount === automationStalledCount &&
-          ownerRunNotes.failureDomain === closeout.failureDomain &&
-          ownerRunNotes.verificationWatchMode ===
-            closeout.verificationWatchMode,
+        ownerRun &&
+        ownerRun.id === batch.ownerAutomationRunId &&
+        (ownerRun.kind === "COURSE_SUPPORT" || ownerRun.kind === "OTHER") &&
+        (ownerRun.status === "COMPLETED" || ownerRun.status === "RUNNING") &&
+        ownerRun.completedAt?.getTime() === batch.completedAt?.getTime() &&
+        ownerRun.outcome === closeoutOutcome &&
+        ownerRunNotes.schemaVersion === 1 &&
+        ownerRunNotes.lifecycle === "closeout" &&
+        ownerRunNotes.status === batch.status &&
+        ownerRunNotes.outcome === closeoutOutcome &&
+        ownerRunNotes.derivedOutcome === derivedOutcome &&
+        ownerRunNotes.terminalCount === terminalCount &&
+        ownerRunNotes.retryCount === retryCount &&
+        ownerRunNotes.automationStalledCount === automationStalledCount &&
+        ownerRunNotes.failureDomain === closeout.failureDomain &&
+        ownerRunNotes.verificationWatchMode === closeout.verificationWatchMode,
       );
       if (!ownerRunIsCoherent || !ownerRun) {
         return {
@@ -3111,11 +3309,17 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       const ownerRunConfirmed = await transaction.automationRun.updateMany({
         where: {
           id: ownerRun.id,
+          kind: ownerRun.kind,
+          status: ownerRun.status,
           completedAt: ownerRun.completedAt,
           outcome: ownerRun.outcome,
           notes: ownerRun.notes,
         },
-        data: { outcome: ownerRun.outcome },
+        data: {
+          kind: "COURSE_SUPPORT",
+          status: "COMPLETED",
+          outcome: ownerRun.outcome,
+        },
       });
       if (ownerRunConfirmed.count !== 1) {
         return {
@@ -3176,9 +3380,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     }
   }
 
-  const retryAt = new Date(
-    input.now.getTime() + STALE_BATCH_RELEASE_RETRY_MS,
-  );
+  const retryAt = new Date(input.now.getTime() + STALE_BATCH_RELEASE_RETRY_MS);
   for (const entry of activeEntries) {
     const incident = entry.incident;
     const monitoringStatus = entry.course.monitoringStatus;
@@ -3215,8 +3417,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         planned.disposition === "AUTHORITATIVE_PROBE") &&
       planned.resolution
     ) {
-      const resolvedAt =
-        planned.successProbe?.observedAt ?? input.now;
+      const resolvedAt = planned.successProbe?.observedAt ?? input.now;
       if (planned.disposition === "AUTHORITATIVE_PROBE" && monitoringStatus) {
         const monitoringUpdated =
           await transaction.courseMonitoringStatus.updateMany({
@@ -3252,9 +3453,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             where: {
               courseId: entry.courseId,
               state: monitoringStatus.state,
-            stateChangedAt: monitoringStatus.stateChangedAt,
-            revision: monitoringStatus.revision,
-          },
+              stateChangedAt: monitoringStatus.stateChangedAt,
+              revision: monitoringStatus.revision,
+            },
             data: { revision: { increment: 0 } },
           });
         if (monitoringConfirmed.count !== 1) {
@@ -3388,8 +3589,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           monitoringStatus.state,
         ) ||
           (repairsUnprovenHuman &&
-            monitoringStatus.state ===
-              "ENGINEERING_VERIFICATION_NEEDED"))
+            monitoringStatus.state === "ENGINEERING_VERIFICATION_NEEDED"))
       ) {
         const monitoringUpdated =
           await transaction.courseMonitoringStatus.updateMany({
@@ -3437,13 +3637,14 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         },
         data: {
           result: planned.result,
-          message: planned.disposition === "STALLED_ENDPOINT"
-            ? "The responder lease expired before the bounded automation endpoint completed."
-            : planned.disposition === "EXHAUSTED_ENDPOINT"
-              ? "The responder lease expired after the bounded automation playbook was exhausted."
-              : planned.disposition === "RETRY"
-                ? "Expired responder ownership was released for a safe automatic retry."
-                : "Expired responder ownership was superseded by authoritative course evidence.",
+          message:
+            planned.disposition === "STALLED_ENDPOINT"
+              ? "The responder lease expired before the bounded automation endpoint completed."
+              : planned.disposition === "EXHAUSTED_ENDPOINT"
+                ? "The responder lease expired after the bounded automation playbook was exhausted."
+                : planned.disposition === "RETRY"
+                  ? "Expired responder ownership was released for a safe automatic retry."
+                  : "Expired responder ownership was superseded by authoritative course evidence.",
         },
       });
     if (batchEntryUpdated.count !== 1) {
@@ -3578,6 +3779,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     const ownerRunUpdated = await transaction.automationRun.updateMany({
       where: { id: batch.ownerAutomationRunId, completedAt: null },
       data: {
+        kind: "COURSE_SUPPORT",
+        status: "COMPLETED",
         completedAt: input.now,
         outcome: derivedOutcome,
         notes: JSON.stringify({
@@ -3699,6 +3902,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
   const humanReviewIds: string[] = [
     ...deadlineReconciliation.humanReviewIncidentIds,
   ];
+  const parkedIncidentIds = new Set(deadlineReconciliation.parkedIncidentIds);
 
   for (const status of statuses) {
     let incident = status.course.supportIncident;
@@ -3724,6 +3928,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     ) {
       const promotedToRealDemand =
         incident.activeRealSearchCount === 0 && activeRealSearchCount > 0;
+      const parkedUntilMaterialChange = parkedIncidentIds.has(incident.id);
       const refreshed = await prisma.courseSupportIncident.updateMany({
         where: {
           id: incident.id,
@@ -3735,11 +3940,16 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
           engineeringOnly:
             activeRealSearchCount > 0 ? false : incident.engineeringOnly,
           ...(promotedToRealDemand
-            ? {
-                nextAttemptAt: now,
-                nextReminderAt:
-                  incident.status === "NEEDS_HUMAN" ? now : undefined,
-              }
+            ? parkedUntilMaterialChange
+              ? {
+                  nextReminderAt:
+                    incident.status === "NEEDS_HUMAN" ? now : undefined,
+                }
+              : {
+                  nextAttemptAt: now,
+                  nextReminderAt:
+                    incident.status === "NEEDS_HUMAN" ? now : undefined,
+                }
             : {}),
           revision: { increment: 1 },
         },
@@ -3751,7 +3961,10 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
           earliestTargetDate: realDemandDates[0] ?? null,
           engineeringOnly:
             activeRealSearchCount > 0 ? false : incident.engineeringOnly,
-          nextAttemptAt: promotedToRealDemand ? now : incident.nextAttemptAt,
+          nextAttemptAt:
+            promotedToRealDemand && !parkedUntilMaterialChange
+              ? now
+              : incident.nextAttemptAt,
           nextReminderAt:
             promotedToRealDemand && incident.status === "NEEDS_HUMAN"
               ? now
@@ -4059,7 +4272,11 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     }
   }
 
-  const humanReview = await advanceHumanReviewVisibility(humanReviewIds, now);
+  const humanReview = await advanceHumanReviewVisibility(
+    humanReviewIds,
+    parkedIncidentIds,
+    now,
+  );
   scheduled += humanReview.rechecksQueued;
   return {
     checked: statuses.length,
@@ -4069,7 +4286,11 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
   };
 }
 
-async function advanceHumanReviewVisibility(incidentIds: string[], now: Date) {
+async function advanceHumanReviewVisibility(
+  incidentIds: string[],
+  parkedIncidentIds: ReadonlySet<string>,
+  now: Date,
+) {
   const uniqueIds = [...new Set(incidentIds)];
   if (uniqueIds.length === 0) {
     return { rechecksQueued: 0 };
@@ -4085,11 +4306,40 @@ async function advanceHumanReviewVisibility(incidentIds: string[], now: Date) {
     return { rechecksQueued: 0 };
   }
 
-  let rechecksQueued = 0;
+  const rechecksQueued = 0;
   for (const incident of incidents) {
+    if (parkedIncidentIds.has(incident.id)) {
+      if (!incident.nextReminderAt || incident.nextReminderAt <= now) {
+        await prisma.courseSupportIncident.updateMany({
+          where: {
+            id: incident.id,
+            cycle: incident.cycle,
+            revision: incident.revision,
+            status: "NEEDS_HUMAN",
+            activeBatchId: null,
+            nextAttemptAt: null,
+          },
+          data: {
+            nextReminderAt: getHumanReviewReminderAt(
+              now,
+              incident.activeRealSearchCount,
+            ),
+            revision: { increment: 1 },
+          },
+        });
+      }
+      continue;
+    }
     if (!incident.nextAttemptAt || incident.nextAttemptAt <= now) {
-      const nextCycle = incident.cycle + 1;
-      const queued = await prisma.$transaction(
+      const nextAttemptAt = getHumanReviewRetryAt(
+        now,
+        incident.activeRealSearchCount,
+      );
+      const nextReminderAt =
+        !incident.nextReminderAt || incident.nextReminderAt <= now
+          ? getHumanReviewReminderAt(now, incident.activeRealSearchCount)
+          : incident.nextReminderAt;
+      await prisma.$transaction(
         async (transaction) => {
           const incidentUpdated =
             await transaction.courseSupportIncident.updateMany({
@@ -4101,19 +4351,8 @@ async function advanceHumanReviewVisibility(incidentIds: string[], now: Date) {
                 activeBatchId: null,
               },
               data: {
-                cycle: { increment: 1 },
-                status: "AUTO_INVESTIGATING",
-                confirmedAt: now,
-                escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
-                  now,
-                  incident.activeRealSearchCount,
-                ),
-                humanReviewReason: null,
-                nextReminderAt: null,
-                nextAttemptAt: now,
-                nextAction:
-                  "Run a fresh current-cycle ordered playbook before any new final decision.",
-                lastSeenAt: now,
+                nextAttemptAt,
+                nextReminderAt,
                 revision: { increment: 1 },
               },
             });
@@ -4127,54 +4366,19 @@ async function advanceHumanReviewVisibility(incidentIds: string[], now: Date) {
                 state: "ENGINEERING_VERIFICATION_NEEDED",
               },
               data: {
-                state: "AUTO_INVESTIGATING",
-                nextAutomaticAttemptAt: now,
-                revalidationRequestedAt: now,
-                stateChangedAt: now,
+                nextAutomaticAttemptAt: nextAttemptAt,
+                revalidationRequestedAt: null,
                 revision: { increment: 1 },
               },
             });
           if (statusUpdated.count !== 1) {
             throw new Error(
-              "The monitoring state changed while a human-review recheck was queued.",
+              "The monitoring state changed while human-review timing was advanced.",
             );
           }
-          await transaction.teeSearch.updateMany({
-            where: {
-              status: "ACTIVE",
-              trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-              preferences: { some: { courseId: incident.courseId } },
-            },
-            data: {
-              nextCheckAt: now,
-              recheckRequestedAt: now,
-            },
-          });
-          await appendMonitoringEvent(transaction, {
-            courseId: incident.courseId,
-            incidentId: incident.id,
-            eventType: "REVALIDATION_REQUESTED",
-            source: "RECOVERY_CRON",
-            fromState: "ENGINEERING_VERIFICATION_NEEDED",
-            toState: "AUTO_INVESTIGATING",
-            failureFingerprint: incident.failureFingerprint,
-            message:
-              "The six-hour safe recheck opened a fresh playbook cycle and queued affected active searches.",
-            occurredAt: now,
-            audit: {
-              priorCycle: incident.cycle,
-              cycle: nextCycle,
-              preservesPriorAttemptEvents: true,
-              customerDataIncluded: false,
-            },
-          });
-          return true;
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       );
-      if (queued) {
-        rechecksQueued += 1;
-      }
       continue;
     }
     if (!incident.nextReminderAt || incident.nextReminderAt > now) {
@@ -4434,15 +4638,6 @@ export function createCourseMonitoringSafeReference(courseId: string) {
   return `course_${createHash("sha256").update(courseId).digest("hex").slice(0, 12)}`;
 }
 
-function createDeploymentRevalidationIdempotencyKey(
-  courseId: string,
-  deploymentSha: string,
-) {
-  return `course-deploy-revalidate:${createHash("sha256")
-    .update(`${courseId}:${deploymentSha}`)
-    .digest("hex")}`;
-}
-
 function createDeadlineContinuationIdempotencyKey(input: {
   courseId: string;
   incidentId: string;
@@ -4472,29 +4667,6 @@ function createDeadlineStallIdempotencyKey(input: {
       }`,
     )
     .digest("hex")}`;
-}
-
-function stableProviderEvidenceValue(value: unknown): string {
-  const normalize = (candidate: unknown): unknown => {
-    if (candidate === undefined) {
-      return { $providerEvidenceType: "undefined" };
-    }
-    if (candidate instanceof Date) {
-      return candidate.toISOString();
-    }
-    if (Array.isArray(candidate)) {
-      return candidate.map(normalize);
-    }
-    if (candidate && typeof candidate === "object") {
-      return Object.fromEntries(
-        Object.entries(candidate as Record<string, unknown>)
-          .sort(([left], [right]) => left.localeCompare(right))
-          .map(([key, nested]) => [key, normalize(nested)]),
-      );
-    }
-    return candidate;
-  };
-  return JSON.stringify(normalize(value));
 }
 
 function asMonitoringJsonRecord(value: unknown) {

@@ -18,6 +18,7 @@ import {
   parseAutomationRunAudit
 } from "@/lib/automation/db-service";
 import { revalidateCourseMonitoringForProviderEvidenceChangeInTransaction } from "@/lib/automation/course-monitoring";
+import { COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS } from "@/lib/automation/course-provider-execution-evidence";
 import { getOperatorCourseEvidenceReviewAt } from "@/lib/automation/operator-evidence-lifecycle";
 import { bootstrapAutomationWorkers } from "@/lib/automation/worker-state";
 import { prisma } from "@/lib/prisma";
@@ -48,6 +49,37 @@ const courseEvidenceSchema = z.object({
 
 export function parseCourseEvidence(value: unknown) {
   return courseEvidenceSchema.parse(value);
+}
+
+export const COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT = {
+  id: true,
+  updatedAt: true,
+  timeZone: true,
+  website: true,
+  detectedBookingUrl: true,
+  detectedPlatform: true,
+  providerFamilyKey: true,
+  bookingMethod: true,
+  bookingWindowDaysAhead: true,
+  bookingWindowEvidenceUrl: true,
+  bookingReleaseTimeLocal: true,
+  bookingWindowSource: true,
+  bookingWindowConfidence: true,
+  automationEligibility: true,
+  automationReason: true,
+  monitoringMode: true,
+  bookingAccessMode: true,
+  isPublic: true,
+  intelligenceConfidence: true,
+  bookingMetadata: true
+} as const satisfies Prisma.CourseSelect;
+
+if (
+  COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS.some(
+    (field) => !(field in COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT)
+  )
+) {
+  throw new Error("The operator evidence snapshot omits a material provider execution field.");
 }
 
 async function main() {
@@ -210,20 +242,7 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
   const input = parseCourseEvidence(JSON.parse(raw) as unknown);
   const course = await prisma.course.findUnique({
     where: { googlePlaceId: input.googlePlaceId },
-    select: {
-      id: true,
-      website: true,
-      detectedBookingUrl: true,
-      detectedPlatform: true,
-      providerFamilyKey: true,
-      bookingMethod: true,
-      bookingAccessMode: true,
-      automationEligibility: true,
-      automationReason: true,
-      monitoringMode: true,
-      bookingMetadata: true,
-      updatedAt: true
-    }
+    select: COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT
   });
   if (!course) throw new Error("No course matched the supplied Google Place ID.");
   const observedAt = new Date();

@@ -1,5 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const monitoringMocks = vi.hoisted(() => ({
+  revalidateCourseMonitoringForProviderEvidenceChangeInTransaction: vi.fn(),
+  runSerializedCourseMonitoringWrite: vi.fn()
+}));
+
+vi.mock("@/lib/automation/course-monitoring", () => monitoringMocks);
+vi.mock("@/lib/prisma", () => ({
+  prisma: {
+    course: { findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
+    courseProfile: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      upsert: vi.fn()
+    },
+    courseProfileSlugAlias: { create: vi.fn(), findUnique: vi.fn() },
+    courseProfileSource: { createMany: vi.fn(), deleteMany: vi.fn() }
+  }
+}));
+
 import { prisma } from "@/lib/prisma";
 import {
   applyCourseProfileDraft,
@@ -13,24 +34,20 @@ import {
   queuePendingCourseProfiles
 } from "./service";
 
-vi.mock("@/lib/prisma", () => ({
-  prisma: {
-    course: { findMany: vi.fn(), findUnique: vi.fn() },
-    courseProfile: {
-      create: vi.fn(),
-      findFirst: vi.fn(),
-      findMany: vi.fn(),
-      findUnique: vi.fn(),
-      upsert: vi.fn()
-    },
-    courseProfileSlugAlias: { create: vi.fn(), findUnique: vi.fn() }
-  }
-}));
-
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 describe("course profile service", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    monitoringMocks.runSerializedCourseMonitoringWrite.mockImplementation(
+      async (_courseId, worker) => worker(mockedPrisma as never)
+    );
+    monitoringMocks.revalidateCourseMonitoringForProviderEvidenceChangeInTransaction.mockResolvedValue({
+      outcome: "IMMATERIAL",
+      changedFields: [],
+      searchesQueued: 0
+    });
+  });
 
   it("creates a stable suffixed slug when the readable slug already exists", async () => {
     mockedPrisma.course.findUnique.mockResolvedValue({
@@ -166,6 +183,86 @@ describe("course profile service", () => {
       valid: true,
       canonicalSlug: "original-course-url"
     });
+  });
+
+  it("publishes an official website change through serialized monitoring revalidation", async () => {
+    const current = {
+      id: "course-website",
+      name: "Website Golf Course",
+      website: "https://old.example.com/course",
+      timeZone: "America/New_York",
+      detectedBookingUrl: "https://booking.example.com/course",
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "PUBLIC_ONLINE",
+      bookingWindowDaysAhead: null,
+      bookingWindowEvidenceUrl: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      isPublic: true,
+      intelligenceConfidence: 1,
+      bookingMetadata: null,
+      updatedAt: new Date("2026-08-17T12:00:00.000Z")
+    };
+    const applied = {
+      ...current,
+      website: "https://example.com/course",
+      updatedAt: new Date("2026-08-18T12:00:00.000Z")
+    };
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        id: current.id,
+        name: current.name,
+        isPublic: true,
+        automationEligibility: "ALLOWED",
+        profile: null
+      } as never)
+      .mockResolvedValueOnce(current as never);
+    mockedPrisma.courseProfile.findUnique.mockResolvedValue(null);
+    mockedPrisma.course.update.mockResolvedValue(applied as never);
+    mockedPrisma.courseProfile.upsert.mockResolvedValue({
+      id: "profile-website",
+      canonicalSlug: "website-golf-course-example-ct"
+    } as never);
+
+    await expect(
+      applyCourseProfileDraft({
+        ...validDraft(current.id),
+        officialWebsiteUrl: applied.website
+      }, true)
+    ).resolves.toMatchObject({
+      mode: "applied",
+      valid: true,
+      courseId: current.id
+    });
+
+    expect(monitoringMocks.runSerializedCourseMonitoringWrite).toHaveBeenCalledWith(
+      current.id,
+      expect.any(Function)
+    );
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: current.id, updatedAt: current.updatedAt },
+        data: expect.objectContaining({ website: applied.website })
+      })
+    );
+    expect(
+      monitoringMocks.revalidateCourseMonitoringForProviderEvidenceChangeInTransaction
+    ).toHaveBeenCalledWith(
+      mockedPrisma,
+      expect.objectContaining({
+        courseId: current.id,
+        before: current,
+        after: applied,
+        source: "OPERATOR_CLI",
+        now: expect.any(Date)
+      })
+    );
   });
 
   it("never fails alert creation when post-response queueing cannot reach profile storage", async () => {

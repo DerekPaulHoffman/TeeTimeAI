@@ -1,5 +1,10 @@
 import type { CourseProfileStatus, Prisma } from "@prisma/client";
 
+import {
+  revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
+  runSerializedCourseMonitoringWrite
+} from "@/lib/automation/course-monitoring";
+import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { prisma } from "@/lib/prisma";
 import { buildCourseProfileSlug, withStableSlugSuffix } from "@/lib/course-profiles/slug";
 import {
@@ -216,9 +221,16 @@ export async function applyCourseProfileDraft(value: unknown, apply = false) {
   const reviewDueAt = new Date(verifiedAt.getTime() + COURSE_PROFILE_REVIEW_DAYS * 86_400_000);
   const now = new Date();
   const contentHash = hashCourseProfileDraft(draft);
-  const result = await prisma.$transaction(async (tx) => {
-    await tx.course.update({
-      where: { id: course.id },
+  const result = await runSerializedCourseMonitoringWrite(course.id, async (tx) => {
+    const current = await tx.course.findUnique({ where: { id: course.id } });
+    if (!current) {
+      throw new Error(`Course ${course.id} was not found`);
+    }
+    const applied = await tx.course.update({
+      where: {
+        id: course.id,
+        updatedAt: current.updatedAt
+      },
       data: {
         ...draft.location,
         ...(draft.officialWebsiteUrl ? { website: draft.officialWebsiteUrl } : {}),
@@ -238,6 +250,18 @@ export async function applyCourseProfileDraft(value: unknown, apply = false) {
           : {})
       }
     });
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+      tx,
+      {
+        courseId: course.id,
+        before: current,
+        after: applied,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(applied),
+        source: "OPERATOR_CLI",
+        now
+      }
+    );
     const profile = await tx.courseProfile.upsert({
       where: { courseId: course.id },
       create: profileCreateData(course.id, canonicalSlug, draft, contentHash, verifiedAt, reviewDueAt, now),
