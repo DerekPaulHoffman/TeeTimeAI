@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   applyBrowserDiscoveryToCourse: vi.fn(),
+  applyRecoveredOfficialWebsiteToCourse: vi.fn(),
   listRecentCourseAutomationDiscoveries: vi.fn(),
   recordAndApplyBrowserDiscoveryToCourse: vi.fn(),
   recordBrowserDiscovery: vi.fn(),
@@ -76,6 +77,31 @@ function remediationSearch(
   } as never;
 }
 
+function sourceMissingSearch() {
+  return remediationSearch(["source-missing-course"], {
+    preferences: [
+      {
+        rank: 1,
+        course: {
+          id: "source-missing-course",
+          googlePlaceId: "place-id",
+          name: "Source Missing Golf Course",
+          website: null,
+          detectedBookingUrl: null,
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "SOURCE_MISSING",
+          monitoringMode: "AUTOMATIC",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingMethod: "UNKNOWN",
+          bookingMetadata: null,
+          updatedAt: new Date("2026-07-13T19:00:00.000Z")
+        }
+      }
+    ]
+  });
+}
+
 function remediationDispatchRow(
   courseIds = ["remediated-course"],
   scheduleVersion = 7
@@ -109,6 +135,10 @@ function remediationDispatchRow(
 }
 
 describe("search monitoring discovery", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([]);
@@ -118,6 +148,13 @@ describe("search monitoring discovery", () => {
       discovery: { id: "discovery-1" }
     });
     dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue({ id: "course-1" });
+    dbMocks.applyRecoveredOfficialWebsiteToCourse.mockImplementation(
+      async ({ courseId, website }: { courseId: string; website: string }) => ({
+        id: courseId,
+        website,
+        updatedAt: new Date("2026-07-13T20:00:01.000Z")
+      })
+    );
     dbMocks.retireLegacyPolicyOnlyCourseBlock.mockResolvedValue({ id: "course-1" });
     prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([]);
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
@@ -149,27 +186,7 @@ describe("search monitoring discovery", () => {
         headers: { "content-type": "text/html" }
       });
     });
-    const search = remediationSearch(["source-missing-course"], {
-      preferences: [
-        {
-          rank: 1,
-          course: {
-            id: "source-missing-course",
-            googlePlaceId: "place-id",
-            name: "Source Missing Golf Course",
-            website: null,
-            detectedBookingUrl: null,
-            detectedPlatform: "UNKNOWN",
-            providerFamilyKey: "SOURCE_MISSING",
-            monitoringMode: "AUTOMATIC",
-            automationEligibility: "UNKNOWN",
-            automationReason: "NONE",
-            bookingMethod: "UNKNOWN",
-            bookingMetadata: null
-          }
-        }
-      ]
-    });
+    const search = sourceMissingSearch();
 
     const result = await prepareSearchMonitoring(
       search,
@@ -188,8 +205,37 @@ describe("search monitoring discovery", () => {
       }
     });
     expect(fetchImpl.mock.calls[1]?.[0]).toBe(officialWebsite);
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledWith({
+      courseId: "source-missing-course",
+      website: officialWebsite,
+      expectedUpdatedAt: new Date("2026-07-13T19:00:00.000Z"),
+      observedAt: now
+    });
     expect(result.attemptedCourseIds).toEqual(["source-missing-course"]);
     expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+  });
+
+  it("does not discover from an unpersisted recovered website after a compare-and-set loss", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(["source-missing-course"])
+    ]);
+    dbMocks.applyRecoveredOfficialWebsiteToCourse.mockResolvedValueOnce(null);
+    const fetchImpl = vi.fn(async () =>
+      Response.json({ websiteUri: "https://municipal.example/golf" })
+    );
+
+    const result = await prepareSearchMonitoring(
+      sourceMissingSearch(),
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledOnce();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
   });
 
   it("skips provider discovery for a local-reader-only course", async () => {
@@ -2735,6 +2781,8 @@ describe("search monitoring discovery", () => {
   });
 
   it("applies capped replay evidence without spending the remediation override", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-19T12:00:00.000Z"));
     const sourceUrl = "http://www.knightsplay.com";
     const finalUrl = "https://www.knightsplay.com/";
     const ratesUrl = "https://www.knightsplay.com/rates";
@@ -2796,8 +2844,8 @@ describe("search monitoring discovery", () => {
 
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(providerLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
       expect.objectContaining({
         courseId: "knights-play",
         status: "VERIFIED",
@@ -2805,23 +2853,21 @@ describe("search monitoring discovery", () => {
         bookingMethod: "CONTACT_COURSE",
         automationEligibility: "BLOCKED",
         automationReason: "NO_ONLINE_BOOKING",
+        intelligenceReviewAt: new Date("2026-08-12T19:00:00.000Z"),
         evidence: expect.objectContaining({
           learnedFrom: "official-phone-reservation-contact"
         })
-      })
-    );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
-      expect.objectContaining({
-        courseId: "knights-play",
-        status: "VERIFIED",
-        bookingMethod: "CONTACT_COURSE"
       }),
       {
         updatedAt: new Date("2026-07-13T19:50:00.000Z"),
         detectedBookingUrl: null,
         bookingMethod: "UNKNOWN",
         automationEligibility: "UNKNOWN"
-      }
+      },
+      undefined,
+      undefined,
+      undefined,
+      new Date("2026-07-13T19:00:00.000Z")
     );
     expect(result).toEqual({
       attemptedCourseIds: [],
@@ -2903,9 +2949,13 @@ describe("search monitoring discovery", () => {
         detectedBookingUrl: null,
         bookingMethod: "UNKNOWN",
         automationEligibility: "UNKNOWN"
-      }
+      },
+      undefined,
+      undefined,
+      undefined,
+      new Date("2026-07-13T19:45:00.000Z")
     );
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
     expect(result).toEqual({
       attemptedCourseIds: [],
       appliedCourseIds: ["quarry-view"],
@@ -3447,7 +3497,7 @@ describe("search monitoring discovery", () => {
 
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
     expect(result.appliedCourseIds).toEqual(["bare-booking-boolean"]);
     expect(result.retryCourseIds).toEqual([]);
   });
@@ -3499,7 +3549,7 @@ describe("search monitoring discovery", () => {
 
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
     expect(result.appliedCourseIds).toEqual(["unrelated-replay-url"]);
   });
 
@@ -3652,7 +3702,7 @@ describe("search monitoring discovery", () => {
 
       expect(fetchImpl).not.toHaveBeenCalled();
       expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
-      expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+      expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
       expect(result.appliedCourseIds).toEqual(["ambiguous-visible-copy"]);
       expect(result.retryCourseIds).toEqual([]);
     }

@@ -84,6 +84,8 @@ A responder may close a course automatically without runnable monitoring for aut
 
 `CourseMonitoringStatus` is the one-row current state for each course. `CourseMonitoringEvent` is its append-only, redacted operator history. Search-scoped probes remain on `CourseProbe`; source evidence remains on `CourseAutomationDiscovery`.
 
+Accepted course evidence is append-only. Never update or delete an existing `CourseAutomationDiscovery` or `CourseMonitoringEvent` to make a newer result look cleaner. `Course` is only the best-current projection: a fresher observation may supersede it when the source is at least as authoritative and course-specific, but a failed request, a missing field, or a replay of old evidence must not erase a previously accepted URL, provider fact, booking method, access finding, or original observation time. An automated contradiction to an operator-confirmed manual or identity final is retained as a new discovery candidate without rewriting the factual final; changing that final requires an explicit operator correction or reopen. Do not implement this as a blind field-by-field monotonic merge, because combining stale facts from different provider snapshots can create an invalid monitoring route.
+
 - `HEALTHY`: the latest public signed-out read returned `MATCH_FOUND` or `NO_MATCH`.
 - `DEGRADED_RETRYING`: the first failure is recorded without erasing the last working time. The search retries within two minutes.
 - `AUTO_INVESTIGATING`: the current incident cycle is progressing through the ordered playbook. It cannot remain here past the 30-minute endpoint.

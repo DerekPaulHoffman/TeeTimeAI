@@ -40,7 +40,9 @@ describe("operator course controls", () => {
       />
     );
 
-    const save = screen.getByRole("button", { name: "Save provider and links" });
+    const save = screen.getByRole("button", {
+      name: "Save provider and links"
+    });
     expect((save as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByLabelText("Tee-time provider")).toBeTruthy();
     expect(screen.getByLabelText("Official course site")).toBeTruthy();
@@ -52,9 +54,7 @@ describe("operator course controls", () => {
     });
 
     expect((save as HTMLButtonElement).disabled).toBe(false);
-    expect(
-      screen.getByText(/Verification and a fresh check start automatically/)
-    ).toBeTruthy();
+    expect(screen.getByText(/Verification and a fresh check start automatically/)).toBeTruthy();
     expect(screen.getByText("AI is identifying the provider")).toBeTruthy();
   });
 
@@ -76,7 +76,9 @@ describe("operator course controls", () => {
       />
     );
 
-    const save = screen.getByRole("button", { name: "Save provider and links" });
+    const save = screen.getByRole("button", {
+      name: "Save provider and links"
+    });
     fireEvent.change(screen.getByLabelText("Tee-time provider"), {
       target: { value: "FOREUP" }
     });
@@ -84,13 +86,15 @@ describe("operator course controls", () => {
     expect((save as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("offers temporary, private, local-reader, and manual outcomes without evidence fields", () => {
+  it("requires exact evidence for final outcomes but keeps retry paths one click", () => {
     render(<CourseOutcomeForm {...identity} />);
 
     const outcome = screen.getByLabelText("Course outcome or monitoring path");
     expect(screen.getByRole("option", { name: "Use the local tee-time reader" })).toBeTruthy();
     expect(
-      screen.getByRole("option", { name: "Course website temporarily unavailable" })
+      screen.getByRole("option", {
+        name: "Course website temporarily unavailable"
+      })
     ).toBeTruthy();
     expect(screen.getByRole("option", { name: "This is a private course" })).toBeTruthy();
     expect(screen.getByRole("option", { name: "Phone or manual booking only" })).toBeTruthy();
@@ -100,12 +104,34 @@ describe("operator course controls", () => {
       target: { value: "PRIVATE_COURSE" }
     });
 
+    expect(screen.getByText(/Close monitoring because this is a private course/)).toBeTruthy();
+    expect(screen.getByLabelText("Official evidence")).toBeTruthy();
+    expect(screen.getByLabelText("Decision note")).toBeTruthy();
     expect(
-      screen.getByText(/Close monitoring because this is a private course/)
-    ).toBeTruthy();
+      (
+        screen.getByRole("button", {
+          name: "Set final outcome"
+        }) as HTMLButtonElement
+      ).disabled
+    ).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Official evidence"), {
+      target: { value: "https://course.example/private-membership" }
+    });
+    fireEvent.change(screen.getByLabelText("Decision note"), {
+      target: {
+        value: "The official course page confirms this classification."
+      }
+    });
+
     expect(
-      (screen.getByRole("button", { name: "Set final outcome" }) as HTMLButtonElement).disabled
+      (
+        screen.getByRole("button", {
+          name: "Set final outcome"
+        }) as HTMLButtonElement
+      ).disabled
     ).toBe(false);
+    expect(screen.getByText(/Existing provider links and metadata remain/)).toBeTruthy();
 
     fireEvent.change(outcome, {
       target: { value: "WEBSITE_TEMPORARILY_UNAVAILABLE" }
@@ -113,21 +139,22 @@ describe("operator course controls", () => {
 
     expect(screen.getByText(/Keep the alert active/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Set temporary status" })).toBeTruthy();
+    expect(screen.queryByLabelText("Official evidence")).toBeNull();
   });
 
   it("preselects the one-click local-reader action for compatible EZLinks courses", () => {
     render(<CourseOutcomeForm {...identity} recommendLocalReader />);
 
-    expect(
-      screen.getByText(/This booking page is compatible with the local reader/)
-    ).toBeTruthy();
+    expect(screen.getByText(/This booking page is compatible with the local reader/)).toBeTruthy();
     expect(
       (screen.getByLabelText("Course outcome or monitoring path") as HTMLSelectElement).value
     ).toBe("LOCAL_READER");
     expect(
-      (screen.getByRole("button", {
-        name: "Use local reader and recheck"
-      }) as HTMLButtonElement).disabled
+      (
+        screen.getByRole("button", {
+          name: "Use local reader and recheck"
+        }) as HTMLButtonElement
+      ).disabled
     ).toBe(false);
   });
 });

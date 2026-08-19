@@ -1,8 +1,12 @@
+import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const transactionMocks = vi.hoisted(() => ({
   course: {
     update: vi.fn()
+  },
+  courseAutomationDiscovery: {
+    create: vi.fn()
   },
   courseMonitoringEvent: {
     create: vi.fn(),
@@ -59,6 +63,8 @@ import {
 } from "./course-monitoring";
 
 const reference = "cm_123456789012345678901234";
+const cabqFaqUrl =
+  "https://www.cabq.gov/parksandrecreation/recreation/golf/faq#autotoc-item-autotoc-1";
 
 function status() {
   return {
@@ -74,6 +80,8 @@ function status() {
       website: "https://course.example",
       providerFamilyKey: "SOURCE_MISSING",
       timeZone: "America/New_York",
+      bookingPhone: "555-0100",
+      bookingMethod: "PUBLIC_ONLINE",
       bookingAccessMode: "UNKNOWN",
       automationReason: "OTHER",
       supportIncident: {
@@ -150,7 +158,9 @@ describe("operator course monitoring mutations", () => {
     schedulerMocks.startSearchSchedule.mockResolvedValue(undefined);
     localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue(null);
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
-    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({ revision: 4 });
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      revision: 4
+    });
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
       cycle: 2,
       revision: 7
@@ -254,8 +264,7 @@ describe("operator course monitoring mutations", () => {
           statusRevision: 4,
           incidentCycle: 2,
           incidentRevision: 7,
-          note:
-            "Verify https://course.example/book?id=customer-1 and reply to golfer@example.com.",
+          note: "Verify https://course.example/book?id=customer-1 and reply to golfer@example.com.",
           idempotencyKey: "operator-recheck-123456"
         },
         context
@@ -514,7 +523,7 @@ describe("operator course monitoring mutations", () => {
   });
 
   it.each(["FINAL_MANUAL", "FINAL_IDENTITY"] as const)(
-    "preserves authoritative %s while recording an operator recheck request",
+    "rejects a generic recheck for authoritative %s",
     async (state) => {
       prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
         ...status(),
@@ -528,27 +537,24 @@ describe("operator course monitoring mutations", () => {
         }
       });
 
-      await requestOperatorCourseRecheck(
-        {
-          reference,
-          statusRevision: 4,
-          incidentCycle: 2,
-          incidentRevision: 7,
-          note: "Retain the authoritative factual classification.",
-          idempotencyKey: `operator-recheck-${state.toLowerCase()}`
-        },
-        context
-      );
+      await expect(
+        requestOperatorCourseRecheck(
+          {
+            reference,
+            statusRevision: 4,
+            incidentCycle: 2,
+            incidentRevision: 7,
+            note: "Retain the authoritative factual classification.",
+            idempotencyKey: `operator-recheck-${state.toLowerCase()}`
+          },
+          context
+        )
+      ).rejects.toThrow("factual final");
 
+      expect(prismaMocks.$transaction).not.toHaveBeenCalled();
       expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
       expect(transactionMocks.courseSupportIncident.update).not.toHaveBeenCalled();
-      expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          fromState: state,
-          toState: state,
-          audit: expect.objectContaining({ authoritativeFinalRetained: true })
-        })
-      });
+      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
       expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
     }
   );
@@ -659,6 +665,8 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           decision: "PRIVATE_COURSE",
+          evidenceUrl: "https://course.example/private-membership",
+          note: "The official course page confirms that public play is not available.",
           idempotencyKey: "operator-private-123456"
         },
         context
@@ -699,6 +707,281 @@ describe("operator course monitoring mutations", () => {
         humanReviewReason: null
       })
     });
+    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "VERIFIED",
+        sourceUrl: "https://course.example/private-membership",
+        bookingUrl: null,
+        bookingMethod: "UNKNOWN",
+        bookingPhone: null,
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+        evidence: expect.objectContaining({
+          action: "set_course_outcome",
+          classification: "PRIVATE_COURSE",
+          note: "The official course page confirms that public play is not available."
+        })
+      })
+    });
+  });
+
+  it("rejects a final outcome without a safe official evidence URL", async () => {
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "PHONE_OR_MANUAL",
+          evidenceUrl: "https://user:secret@course.example/tee-time-faq",
+          note: "The official FAQ confirms the manual reservation process.",
+          idempotencyKey: "operator-manual-unsafe"
+        },
+        context
+      )
+    ).rejects.toThrow("without credentials");
+    expect(prismaMocks.courseMonitoringStatus.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("rejects sensitive fragment data in an otherwise public final evidence URL", async () => {
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "PHONE_OR_MANUAL",
+          evidenceUrl: "https://course.example/tee-time-faq#access_token=secret",
+          note: "The official FAQ confirms the manual reservation process.",
+          idempotencyKey: "operator-manual-fragment"
+        },
+        context
+      )
+    ).rejects.toThrow("sensitive fragment data");
+    expect(prismaMocks.courseMonitoringStatus.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("records a manual course with exact evidence without discarding known provider data", async () => {
+    const publicBookingMetadata = {
+      bookingBaseUrl: "https://booking.course.example/",
+      facilityId: "public-facility-17"
+    };
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "DRIVERPOS",
+        bookingMetadata: publicBookingMetadata,
+        policyNotes: "Prior public provider evidence."
+      }
+    });
+
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "PHONE_OR_MANUAL",
+          evidenceUrl: cabqFaqUrl,
+          note: "The official FAQ says reservations alternate between in-person and phone requests.",
+          idempotencyKey: "operator-manual-1234567"
+        },
+        context
+      )
+    ).resolves.toMatchObject({
+      action: "set_course_outcome",
+      decision: "PHONE_OR_MANUAL",
+      applied: true
+    });
+
+    const courseUpdate = transactionMocks.course.update.mock.calls.at(-1)?.[0];
+    expect(courseUpdate).toEqual({
+      where: { id: "course-1" },
+      data: expect.objectContaining({
+        bookingMethod: "CONTACT_COURSE",
+        bookingAccessMode: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        monitoringMode: "CONTACT_ONLY"
+      })
+    });
+    expect(courseUpdate.data).toMatchObject({
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING"
+    });
+    expect(courseUpdate.data.bookingMetadata).toBe(Prisma.DbNull);
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
+      where: {
+        id: "incident-1",
+        cycle: 2,
+        revision: 7
+      },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        resolution: "DIRECT_BOOKING_CLASSIFIED",
+        decisionEvidenceUrl: cabqFaqUrl,
+        decisionNote:
+          "The official FAQ says reservations alternate between in-person and phone requests."
+      })
+    });
+    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "VERIFIED",
+        sourceUrl: cabqFaqUrl,
+        bookingUrl: null,
+        bookingPhone: "555-0100",
+        detectedPlatform: "UNKNOWN",
+        bookingMethod: "CONTACT_COURSE",
+        bookingAccessMode: "CONTACT_COURSE",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        evidence: expect.objectContaining({
+          learnedFrom: "operator-final-decision",
+          classification: "PHONE_OR_MANUAL",
+          priorCourseSnapshot: expect.objectContaining({
+            bookingMethod: "PUBLIC_ONLINE",
+            detectedBookingUrl: "https://course.example/book",
+            providerFamilyKey: "DRIVERPOS",
+            bookingMetadata: publicBookingMetadata,
+            bookingMetadataDisposition: "PRESERVED_PUBLIC"
+          }),
+          currentProjection: expect.objectContaining({
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingUrl: null,
+            bookingMetadata: "CLEARED"
+          })
+        })
+      })
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        toState: "FINAL_MANUAL",
+        outcome: "MANUAL_DIRECT",
+        evidenceUrl: cabqFaqUrl,
+        message:
+          "The official FAQ says reservations alternate between in-person and phone requests."
+      })
+    });
+  });
+
+  it("retains an exact manual action page while clearing active provider metadata", async () => {
+    const manualActionUrl = "https://course.example/manual-request#tee-times";
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        detectedPlatform: "CUSTOM",
+        detectedBookingUrl: manualActionUrl,
+        providerFamilyKey: "COURSE_EXAMPLE",
+        bookingMetadata: {
+          bookingBaseUrl: "https://course.example/manual-request",
+          facilityId: "public-facility-17"
+        }
+      }
+    });
+
+    await applyOperatorCourseDecision(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        decision: "PHONE_OR_MANUAL",
+        evidenceUrl: manualActionUrl,
+        note: "The official request page confirms that the course handles reservations directly.",
+        idempotencyKey: "operator-manual-action-page"
+      },
+      context
+    );
+
+    const courseUpdate = transactionMocks.course.update.mock.calls.at(-1)?.[0];
+    expect(courseUpdate.data).toMatchObject({
+      detectedBookingUrl: manualActionUrl,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "COURSE_EXAMPLE",
+      bookingMethod: "CONTACT_COURSE",
+      bookingAccessMode: "CONTACT_COURSE"
+    });
+    expect(courseUpdate.data.bookingMetadata).toBe(Prisma.DbNull);
+    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        detectedPlatform: "CUSTOM",
+        bookingUrl: manualActionUrl,
+        bookingPhone: "555-0100",
+        bookingMethod: "CONTACT_COURSE",
+        bookingAccessMode: "CONTACT_COURSE"
+      })
+    });
+  });
+
+  it("omits non-public provider metadata from the historical snapshot", async () => {
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...status(),
+      course: {
+        ...status().course,
+        bookingMetadata: {
+          bookingBaseUrl: "https://course.example/manual-request",
+          accessToken: "must-not-be-retained"
+        }
+      }
+    });
+
+    await applyOperatorCourseDecision(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        decision: "PHONE_OR_MANUAL",
+        evidenceUrl: cabqFaqUrl,
+        note: "The official FAQ confirms the manual reservation process.",
+        idempotencyKey: "operator-manual-private-metadata"
+      },
+      context
+    );
+
+    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        evidence: expect.objectContaining({
+          priorCourseSnapshot: expect.objectContaining({
+            bookingMetadata: null,
+            bookingMetadataDisposition: "OMITTED_NON_PUBLIC"
+          })
+        })
+      })
+    });
+  });
+
+  it("does not append duplicate final evidence for an idempotent replay", async () => {
+    prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue({
+      courseId: "course-1"
+    });
+
+    await expect(
+      applyOperatorCourseDecision(
+        {
+          reference,
+          statusRevision: 4,
+          incidentCycle: 2,
+          incidentRevision: 7,
+          decision: "PHONE_OR_MANUAL",
+          evidenceUrl: cabqFaqUrl,
+          note: "The official FAQ confirms the manual reservation process.",
+          idempotencyKey: "operator-manual-idempotent"
+        },
+        context
+      )
+    ).resolves.toMatchObject({ applied: false, replayed: true });
+
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
+    expect(transactionMocks.courseAutomationDiscovery.create).not.toHaveBeenCalled();
   });
 
   it("rejects a technical final when the current incident cycle lacks playbook proof", async () => {
@@ -763,6 +1046,21 @@ describe("operator course monitoring mutations", () => {
         })
       })
     );
+    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "VERIFIED",
+        sourceUrl: "https://course.example/evidence",
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingAccessMode: "CAPTCHA_OR_QUEUE",
+        automationEligibility: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        evidence: expect.objectContaining({
+          action: "approve_technical_final",
+          classification: "CAPTCHA_OR_QUEUE",
+          note: "Confirmed the current signed-out technical limitation."
+        })
+      })
+    });
   });
 
   it("marks a broken course website as temporary and schedules a retry", async () => {
@@ -806,11 +1104,9 @@ describe("operator course monitoring mutations", () => {
         revalidationRequestedAt: null
       })
     });
-    const retryAt = transactionMocks.courseMonitoringStatus.update.mock.calls.at(-1)?.[0]
-      .data.nextAutomaticAttemptAt as Date;
-    expect(retryAt.getTime()).toBeGreaterThanOrEqual(
-      retryStartedAt + 6 * 60 * 60 * 1000
-    );
+    const retryAt = transactionMocks.courseMonitoringStatus.update.mock.calls.at(-1)?.[0].data
+      .nextAutomaticAttemptAt as Date;
+    expect(retryAt.getTime()).toBeGreaterThanOrEqual(retryStartedAt + 6 * 60 * 60 * 1000);
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",

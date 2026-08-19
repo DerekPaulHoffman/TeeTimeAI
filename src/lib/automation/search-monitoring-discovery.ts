@@ -1,5 +1,6 @@
 import {
   applyBrowserDiscoveryToCourse,
+  applyRecoveredOfficialWebsiteToCourse,
   listRecentCourseAutomationDiscoveries,
   recordAndApplyBrowserDiscoveryToCourse,
   recordBrowserDiscovery,
@@ -56,6 +57,7 @@ import { prisma } from "@/lib/prisma";
 const DISCOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_RETRY_DELAY_MS = 30 * 60 * 1000;
 const MAX_DISCOVERY_ATTEMPTS_PER_DAY = 2;
+const MAX_REPLAY_REVIEW_WINDOW_MS = 181 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 4;
 const MAX_BOOKING_LINK_FOLLOWUPS = 2;
@@ -335,21 +337,24 @@ type MissingOfficialWebsiteCourse = {
   googlePlaceId: string | null;
   website: string | null;
   detectedBookingUrl: string | null;
+  updatedAt: Date;
 };
 
 function applyMonitoringDiscovery(
   discovery: BrowserDiscovery,
   expectedCourse: Parameters<typeof applyBrowserDiscoveryToCourse>[1],
   expectedUnownedIncident:
-    BrowserDiscoveryUnownedIncidentExpectation | undefined
+    BrowserDiscoveryUnownedIncidentExpectation | undefined,
+  observedAt?: Date
 ) {
-  if (expectedUnownedIncident) {
+  if (expectedUnownedIncident || observedAt) {
     return applyBrowserDiscoveryToCourse(
       discovery,
       expectedCourse,
       undefined,
       undefined,
-      expectedUnownedIncident
+      expectedUnownedIncident,
+      observedAt
     );
   }
   return expectedCourse
@@ -377,7 +382,10 @@ function retireMonitoringLegacyPolicyBlock(
 
 async function refreshMissingOfficialWebsites(
   courses: MissingOfficialWebsiteCourse[],
-  publicFetch: typeof fetch
+  publicFetch: typeof fetch,
+  observedAt: Date,
+  expectedUnownedIncidentsByCourseId:
+    SearchMonitoringDiscoveryOptions["expectedUnownedIncidentsByCourseId"]
 ) {
   const apiKey = getGooglePlacesApiKey();
   if (!apiKey) {
@@ -412,7 +420,19 @@ async function refreshMissingOfficialWebsites(
       }
     );
     if (execution.acquired && execution.value) {
-      course.website = execution.value;
+      const expectedUnownedIncident =
+        expectedUnownedIncidentsByCourseId?.get(course.id);
+      const applied = await applyRecoveredOfficialWebsiteToCourse({
+        courseId: course.id,
+        website: execution.value,
+        expectedUpdatedAt: course.updatedAt,
+        ...(expectedUnownedIncident ? { expectedUnownedIncident } : {}),
+        observedAt
+      });
+      if (applied?.website === execution.value) {
+        course.website = applied.website;
+        course.updatedAt = applied.updatedAt;
+      }
     }
   }
 }
@@ -436,7 +456,9 @@ export async function prepareSearchMonitoring(
     search.preferences
       .map((preference) => preference.course)
       .filter((course) => sourceRefreshCourseIds.has(course.id)),
-    publicFetch
+    publicFetch,
+    now,
+    options.expectedUnownedIncidentsByCourseId
   );
   const repeatedFailureEvidenceByCourse = await listRepeatedMonitoringFailureEvidence(
     search.preferences.map((preference) => preference.course.id)
@@ -578,25 +600,23 @@ export async function prepareSearchMonitoring(
     const expectedCourse = getMonitoringCourseExpectation(candidate.course);
     const expectedUnownedIncident =
       options.expectedUnownedIncidentsByCourseId?.get(candidate.course.id);
-    const fencedReplay = expectedUnownedIncident
-      ? await recordAndApplyBrowserDiscoveryToCourse(replayed, expectedCourse,
-          expectedUnownedIncident,
-          { recordIfNotApplied: false })
-      : null;
-    if (expectedUnownedIncident && !fencedReplay) {
+    const applied = await applyMonitoringDiscovery(
+      replayed.discovery,
+      expectedCourse,
+      expectedUnownedIncident,
+      replayed.observedAt
+    );
+    if (expectedUnownedIncident && !applied) {
       deferredCourseIds.push(candidate.course.id);
       continue;
     }
-    const applied = expectedUnownedIncident
-      ? fencedReplay?.applied
-      : await applyMonitoringDiscovery(replayed, expectedCourse, undefined);
     if (applied) {
-      if (!expectedUnownedIncident) {
-      await recordBrowserDiscovery(replayed);
-      }
       appliedCourseIds.push(candidate.course.id);
       replayAppliedCourseIds.add(candidate.course.id);
-      if (isLegacyPolicyOnlyBlock(candidate.course) && replacesLegacyPolicyOnlyBlock(replayed)) {
+      if (
+        isLegacyPolicyOnlyBlock(candidate.course) &&
+        replacesLegacyPolicyOnlyBlock(replayed.discovery)
+      ) {
         resolvedLegacyPolicyCourseIds.add(candidate.course.id);
       }
     }
@@ -1392,12 +1412,21 @@ function replayRecentInspectedDiscovery(
       if (!evidence) {
         return null;
       }
+      const rebuiltAt = new Date();
       const rebuilt = buildBrowserDiscovery(evidence);
       if (hasNewerOnlineBookingContradiction(rebuilt, evidence)) {
         return null;
       }
       if (isTrustedReplayClassification(rebuilt)) {
-        return rebuilt;
+        const replay = preserveReplayFreshness(
+          rebuilt,
+          discovery.createdAt,
+          rebuiltAt,
+          now
+        );
+        return replay
+          ? { discovery: replay, observedAt: discovery.createdAt }
+          : null;
       }
     } catch {
       // A corrupt durable snapshot is not proof and must not fail the live search check.
@@ -1405,6 +1434,31 @@ function replayRecentInspectedDiscovery(
     }
   }
   return null;
+}
+
+function preserveReplayFreshness(
+  discovery: BrowserDiscovery,
+  observedAt: Date,
+  rebuiltAt: Date,
+  now: Date
+): BrowserDiscovery | null {
+  if (!discovery.intelligenceReviewAt) {
+    return discovery;
+  }
+  const generatedReviewAt = new Date(discovery.intelligenceReviewAt);
+  const reviewWindowMs = generatedReviewAt.getTime() - rebuiltAt.getTime();
+  if (
+    !Number.isFinite(reviewWindowMs) ||
+    reviewWindowMs <= 0 ||
+    reviewWindowMs > MAX_REPLAY_REVIEW_WINDOW_MS
+  ) {
+    return null;
+  }
+  const intelligenceReviewAt = new Date(observedAt.getTime() + reviewWindowMs);
+  if (intelligenceReviewAt.getTime() <= now.getTime()) {
+    return null;
+  }
+  return { ...discovery, intelligenceReviewAt };
 }
 
 function isRejectedManualReplayEvidence(discovery: RecentCourseAutomationDiscovery) {

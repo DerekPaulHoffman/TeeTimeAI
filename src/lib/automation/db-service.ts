@@ -69,6 +69,7 @@ export { recordCourseBookingFacts };
 const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 const REOPEN_ALERT_MINIMUM_ABSENCE_MS = 30 * 60 * 1000;
 const SEARCH_CHECK_LEASE_MS = 15 * 60 * 1000;
+const TRUSTED_DISCOVERY_FUTURE_TOLERANCE_MS = 60_000;
 
 const activeSearchCourseInclude = {
   bookingFacts: {
@@ -882,6 +883,128 @@ export type BrowserDiscoveryUnownedIncidentExpectation = {
   status: CourseSupportIncidentStatus;
 };
 
+function hasAuthoritativeFactualCourseFinal(input: {
+  monitoringStatus?: { state: string } | null;
+  supportIncident?: { resolution: string | null } | null;
+}) {
+  return Boolean(
+    input.monitoringStatus?.state === "FINAL_MANUAL" ||
+      input.monitoringStatus?.state === "FINAL_IDENTITY" ||
+      input.supportIncident?.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+      input.supportIncident?.resolution === "IDENTITY_CLASSIFIED"
+  );
+}
+
+function resolveTrustedDiscoveryObservedAt(value?: Date) {
+  const now = new Date();
+  if (value === undefined) {
+    return now;
+  }
+  if (
+    !(value instanceof Date) ||
+    !Number.isFinite(value.getTime()) ||
+    value.getTime() > now.getTime() + TRUSTED_DISCOVERY_FUTURE_TOLERANCE_MS
+  ) {
+    throw new Error("Browser discovery observedAt must be a valid non-future date");
+  }
+  return new Date(value.getTime());
+}
+
+export async function applyRecoveredOfficialWebsiteToCourse(input: {
+  courseId: string;
+  website: string;
+  expectedUpdatedAt: Date;
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation;
+  observedAt?: Date;
+}) {
+  const website = parseSafePublicUrl(input.website);
+  if (!website || !isSafeManualEvidenceUrl(website)) {
+    throw new Error("Recovered official website must be a credential-free public HTTP(S) URL");
+  }
+  if (
+    !(input.expectedUpdatedAt instanceof Date) ||
+    !Number.isFinite(input.expectedUpdatedAt.getTime())
+  ) {
+    throw new Error("Recovered official website requires a valid pre-fetch course snapshot");
+  }
+  const observedAt = resolveTrustedDiscoveryObservedAt(input.observedAt);
+
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    const current = await transaction.course.findUnique({
+      where: { id: input.courseId },
+      include: {
+        monitoringStatus: { select: { state: true } },
+        supportIncident: { select: { resolution: true } }
+      }
+    });
+    if (
+      !current ||
+      current.website !== null ||
+      current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+      hasAuthoritativeFactualCourseFinal(current)
+    ) {
+      return null;
+    }
+    if (
+      !(await reserveUnownedIncidentForBrowserDiscovery(
+        transaction,
+        input.courseId,
+        input.expectedUnownedIncident
+      ))
+    ) {
+      return null;
+    }
+
+    const updated = await transaction.course.updateMany({
+      where: {
+        id: input.courseId,
+        updatedAt: input.expectedUpdatedAt,
+        website: null
+      },
+      data: { website: website.toString() }
+    });
+    if (updated.count !== 1) {
+      return null;
+    }
+    const applied = await transaction.course.findUnique({
+      where: { id: input.courseId }
+    });
+    if (!applied) {
+      return null;
+    }
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+      courseId: input.courseId,
+      before: current,
+      after: applied,
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+      source: "SEARCH_WORKFLOW",
+      now: observedAt
+    });
+    await transaction.courseAutomationDiscovery.create({
+      data: {
+        courseId: input.courseId,
+        status: "INSPECTED",
+        detectedPlatform: "UNKNOWN",
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        bookingAccessMode: "UNKNOWN",
+        sourceUrl: website.toString(),
+        bookingUrl: null,
+        confidence: 0.9,
+        createdAt: observedAt,
+        evidence: {
+          learnedFrom: "google-places-official-website",
+          observedUrls: [website.toString()],
+          courseProjectionApplied: true,
+          customerDataIncluded: false
+        }
+      }
+    });
+    return applied;
+  });
+}
+
 export async function retireLegacyPolicyOnlyCourseBlock(
   courseId: string,
   expectedCourse: BrowserDiscoveryCourseExpectation,
@@ -894,9 +1017,13 @@ export async function retireLegacyPolicyOnlyCourseBlock(
 ) {
   return runSerializedCourseMonitoringWrite(courseId, async (transaction) => {
     const current = await transaction.course.findUnique({
-      where: { id: courseId }
+      where: { id: courseId },
+      include: {
+        monitoringStatus: { select: { state: true } },
+        supportIncident: { select: { resolution: true } }
+      }
     });
-    if (!current) {
+    if (!current || hasAuthoritativeFactualCourseFinal(current)) {
       return null;
     }
     const preserveProviderAccess =
@@ -966,8 +1093,10 @@ export async function applyBrowserDiscoveryToCourse(
   expectedCourse?: BrowserDiscoveryCourseExpectation,
   persistenceFence?: CourseSupportBrowserPersistenceFence,
   runtimeVersion?: string | null,
-  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation,
+  observedAtInput?: Date
 ) {
+  const observedAt = resolveTrustedDiscoveryObservedAt(observedAtInput);
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
     persistenceFence
       ? runCourseSupportBrowserPersistenceWrite({
@@ -979,14 +1108,16 @@ export async function applyBrowserDiscoveryToCourse(
               input,
               expectedCourse,
               ownedTransaction,
-              expectedUnownedIncident
+              expectedUnownedIncident,
+              observedAt
             )
         })
       : applyBrowserDiscoveryToCourseInTransaction(
           input,
           expectedCourse,
           transaction,
-          expectedUnownedIncident
+          expectedUnownedIncident,
+          observedAt
         )
   );
 }
@@ -995,9 +1126,13 @@ export async function recordAndApplyBrowserDiscoveryToCourse(
   input: BrowserDiscovery,
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
   expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation,
-  options: { recordIfNotApplied?: boolean } = {}
+  options: { recordIfNotApplied?: boolean; observedAt?: Date } = {}
 ) {
-  const data = buildBrowserDiscoveryPersistenceData(input);
+  const observedAt = resolveTrustedDiscoveryObservedAt(options.observedAt);
+  const data = {
+    ...buildBrowserDiscoveryPersistenceData(input),
+    ...(options.observedAt ? { createdAt: observedAt } : {})
+  };
   return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
     if (
       !(await reserveUnownedIncidentForBrowserDiscovery(
@@ -1012,7 +1147,8 @@ export async function recordAndApplyBrowserDiscoveryToCourse(
       input,
       expectedCourse,
       transaction,
-      undefined
+      undefined,
+      observedAt
     );
     if (!applied && options.recordIfNotApplied === false) {
       return { applied: null, discovery: null };
@@ -1026,7 +1162,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
   input: BrowserDiscovery,
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
   transaction: Prisma.TransactionClient,
-  expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation | undefined
+  expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation | undefined,
+  observedAt: Date
 ) {
   input = normalizeAutomatedTechnicalDiscovery(normalizeBrowserDiscoveryForMonitoring(input));
   const provider = resolveProviderCapability({
@@ -1089,10 +1226,16 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         intelligenceVerifiedAt: true,
         intelligenceReviewAt: true,
         intelligenceConfidence: true,
+        monitoringStatus: { select: { state: true } },
+        supportIncident: { select: { resolution: true } },
         updatedAt: true
       }
     });
-    if (!current || !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)) {
+    if (
+      !current ||
+      hasAuthoritativeFactualCourseFinal(current) ||
+      !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)
+    ) {
       return null;
     }
 
@@ -1141,7 +1284,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
           providerSnapshotFingerprint:
             buildCourseSupportProviderSnapshotFingerprint(applied),
           source: "COURSE_SUPPORT_RESPONDER",
-          now: new Date()
+          now: observedAt
         }
       );
     }
@@ -1186,10 +1329,16 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       intelligenceVerifiedAt: true,
       intelligenceReviewAt: true,
       intelligenceConfidence: true,
+      monitoringStatus: { select: { state: true } },
+      supportIncident: { select: { resolution: true } },
       updatedAt: true
     }
   });
-  if (!current || !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)) {
+  if (
+    !current ||
+    hasAuthoritativeFactualCourseFinal(current) ||
+    !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)
+  ) {
     return null;
   }
   const persistedProvider = resolveProviderCapability(current);
@@ -1273,7 +1422,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
           bookingMethod,
           automationReason: input.automationReason ?? "NONE",
           policyNotes: input.policyNotes,
-          intelligenceVerifiedAt: new Date(),
+          intelligenceVerifiedAt: observedAt,
           intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
           intelligenceConfidence: input.confidence
         }
@@ -1285,7 +1434,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
             automationReason: "OTHER",
             bookingAccessMode: "UNKNOWN",
             policyNotes: input.policyNotes,
-            intelligenceVerifiedAt: new Date(),
+            intelligenceVerifiedAt: observedAt,
             intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
             intelligenceConfidence: input.confidence
           }
@@ -1311,7 +1460,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
               ? (input.bookingPhone ?? null)
               : input.bookingPhone,
             automationReason: input.automationReason ?? "NONE",
-            intelligenceVerifiedAt: new Date(),
+            intelligenceVerifiedAt: observedAt,
             intelligenceReviewAt: input.intelligenceReviewAt
               ? new Date(input.intelligenceReviewAt)
               : null,
@@ -1335,7 +1484,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         providerSnapshotFingerprint:
           buildCourseSupportProviderSnapshotFingerprint(applied),
         source: "COURSE_SUPPORT_RESPONDER",
-        now: new Date()
+        now: observedAt
       }
     );
   }

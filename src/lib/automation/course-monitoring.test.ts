@@ -15,6 +15,7 @@ import {
   getHumanReviewReminderAt,
   getHumanReviewRetryAt,
   inferHumanReviewReason,
+  sanitizeExactEvidenceUrl,
   sanitizeEvidenceUrl,
   selectSearchWorkflowMonitoringRetryAt,
   shouldSleepTechnicalFinalSearch
@@ -287,6 +288,22 @@ describe("course monitoring lifecycle", () => {
     );
     expect(sanitizeEvidenceUrl("https://user:secret@course.example/book")).toBeNull();
     expect(sanitizeEvidenceUrl("http://course.example/book")).toBeNull();
+  });
+
+  it("retains a bounded exact-page anchor without weakening ordinary URL sanitization", () => {
+    const exactFaqUrl =
+      "https://www.cabq.gov/parksandrecreation/recreation/golf/faq#autotoc-item-autotoc-1";
+
+    expect(sanitizeExactEvidenceUrl(exactFaqUrl)).toBe(exactFaqUrl);
+    expect(sanitizeEvidenceUrl(exactFaqUrl)).toBe(
+      "https://www.cabq.gov/parksandrecreation/recreation/golf/faq",
+    );
+    expect(
+      sanitizeExactEvidenceUrl("https://course.example/faq#access-token-secret"),
+    ).toBeNull();
+    expect(
+      sanitizeExactEvidenceUrl("https://course.example/faq#access_token=secret"),
+    ).toBeNull();
   });
 
   it("maps precise human review reasons without policy classifications", () => {

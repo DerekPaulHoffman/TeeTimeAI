@@ -107,3 +107,41 @@ Legacy automation-stalled incidents had durable, cycle-scoped endpoint proof but
 - Strong legacy endpoint proof is upgraded once with a distinct idempotent parking marker; incident and monitoring automatic schedules are cleared atomically.
 - Repeated watchdog passes may advance `nextReminderAt` only. They must not queue searches, create responder work, increment the playbook cycle, or restore automatic attempt timestamps without a material provider, failure, reader, implementation, or operator change.
 - Operator inventory keeps proof-backed, zero-demand stalled work in a separate **Waiting for new evidence** bucket. It must not inflate **Needs attention**, imply that automated work is active, or say an AI recheck is scheduled. Explicit account, CAPTCHA, reader, and active-demand decisions remain developer-action items.
+
+## 2026-08-19 - Preserve Evidence While Superseding Current Truth
+
+### Observed Pattern
+
+Course-support improvements can correctly change the best current provider or booking classification while accidentally making an earlier source-backed fact disappear from the mutable course snapshot. An omitted metadata field can also be mistaken for an instruction to erase it, and replaying a stored discovery can make old evidence look newly observed. Shared facility pages add another risk: one page can truthfully describe different booking rules for sibling courses or layouts.
+
+### What Helped
+
+- Append-only discovery and monitoring-event records already separate historical observations from the one-row current course and monitoring projections.
+- Course-snapshot compare-and-set writes prevent a stale investigation from silently winning over a concurrent correction.
+- Exact course identity and official-source corroboration keep many facility-level statements from leaking onto a sibling course.
+- Explicit evidence review dates let an old fact remain in history without remaining authoritative forever.
+
+### What Did Not Work
+
+- Treating an omitted URL, phone, or provider-metadata field as proof that the previously verified value is false.
+- Re-inserting or applying stored evidence with a new timestamp and thereby extending its freshness without a new source read.
+- Keeping every old value in the current snapshot forever. That can combine metadata from different providers, retain a dead booking destination or phone number, preserve an obsolete access barrier, or keep a manual disposition after public online booking becomes available.
+- Treating a facility-wide page as one undifferentiated course fact when its named sections describe different courses, layouts, days, or reservation methods.
+
+### Process Decision
+
+- Never update or delete an accepted discovery or monitoring event. Append a correction or conflicting observation with its own source, scope, provenance, confidence, and original observation time.
+- The mutable `Course` row is the best current projection, not the historical ledger. A new observation may supersede that projection only when it is fresh and at least as course-specific and authoritative as the fact it replaces.
+- A failed fetch, missing link, absent optional field, or inconclusive discovery does not negate an earlier explicit fact. Clearing a projected value requires fresh contradictory or revocation evidence and an explicit clear operation.
+- Replaying persisted evidence may reuse the original observation, but it must retain the original observation time and review deadline. Replay is not a new verification and must not renew freshness.
+- Resolve current truth by course scope, source authority, observation time, and confidence. Equal-strength contradictions remain visible in history and move the current projection to review instead of being merged or guessed.
+- On shared pages, bind a rule only to the exact named course or verified layout section. Facility-level facts may guide discovery but cannot silently override a more specific course fact.
+
+### Success Measures
+
+- Every accepted correction leaves the prior discovery queryable.
+- Zero snapshot fields are cleared because an optional input was omitted.
+- Zero replay-only operations extend `intelligenceVerifiedAt` or `intelligenceReviewAt`.
+- Source-missing and transient failures never erase a previously verified booking route or direct-action fact.
+- Provider changes never combine a booking URL from one family with execution metadata from another.
+- Mixed facility evidence remains scoped to the correct course or is escalated as a visible conflict.

@@ -19,6 +19,7 @@ import {
 } from "@/lib/automation/db-service";
 import { revalidateCourseMonitoringForProviderEvidenceChangeInTransaction } from "@/lib/automation/course-monitoring";
 import { COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS } from "@/lib/automation/course-provider-execution-evidence";
+import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { getOperatorCourseEvidenceReviewAt } from "@/lib/automation/operator-evidence-lifecycle";
 import { bootstrapAutomationWorkers } from "@/lib/automation/worker-state";
 import { prisma } from "@/lib/prisma";
@@ -43,12 +44,100 @@ const courseEvidenceSchema = z.object({
   automationEligibility: z.nativeEnum(AutomationEligibility),
   automationReason: z.nativeEnum(AutomationReason).default("NONE"),
   bookingMetadata: z.record(z.string(), z.unknown()).optional(),
+  clearBookingMetadata: z.literal(true).optional(),
   policyNotes: z.string().trim().min(10).max(2000),
   confidence: z.number().min(0).max(1)
+}).superRefine((input, context) => {
+  if (input.bookingMetadata !== undefined && input.clearBookingMetadata) {
+    context.addIssue({
+      code: "custom",
+      message: "Choose bookingMetadata replacement or clearBookingMetadata, not both."
+    });
+  }
 });
 
 export function parseCourseEvidence(value: unknown) {
   return courseEvidenceSchema.parse(value);
+}
+
+type ParsedCourseEvidence = z.infer<typeof courseEvidenceSchema>;
+
+export function getCourseEvidenceBookingMetadataUpdate(
+  input: Pick<ParsedCourseEvidence, "bookingMetadata" | "clearBookingMetadata">
+) {
+  if (input.bookingMetadata !== undefined) {
+    return {
+      bookingMetadata: input.bookingMetadata as Prisma.InputJsonValue
+    };
+  }
+  if (input.clearBookingMetadata) {
+    return { bookingMetadata: Prisma.DbNull };
+  }
+  return {};
+}
+
+export function getCourseEvidenceDiscoveryBookingMetadata(
+  input: Pick<ParsedCourseEvidence, "bookingMetadata" | "clearBookingMetadata">,
+  currentBookingMetadata: Prisma.JsonValue | null
+) {
+  if (input.bookingMetadata !== undefined) {
+    return input.bookingMetadata as Prisma.InputJsonValue;
+  }
+  if (input.clearBookingMetadata || currentBookingMetadata === null) {
+    return Prisma.DbNull;
+  }
+  return currentBookingMetadata as Prisma.InputJsonValue;
+}
+
+export function getCourseEvidencePolicyNoteHistory(
+  priorPolicyNotes: string | null,
+  acceptedPolicyNotes: string
+) {
+  return {
+    priorPolicyNotes: priorPolicyNotes
+      ? sanitizeResponderText(priorPolicyNotes).trim().slice(0, 1_000)
+      : null,
+    acceptedPolicyNotes:
+      sanitizeResponderText(acceptedPolicyNotes).trim().slice(0, 1_000)
+  };
+}
+
+export function assertSafeCourseEvidenceMetadataTransition(
+  course: Pick<
+    Prisma.CourseGetPayload<{
+      select: typeof COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT;
+    }>,
+    | "bookingMetadata"
+    | "detectedPlatform"
+    | "providerFamilyKey"
+    | "bookingMethod"
+    | "detectedBookingUrl"
+  >,
+  input: Pick<
+    ParsedCourseEvidence,
+    | "bookingMetadata"
+    | "clearBookingMetadata"
+    | "detectedPlatform"
+    | "providerFamilyKey"
+    | "bookingMethod"
+    | "bookingUrl"
+  >
+) {
+  if (
+    course.bookingMetadata !== null &&
+    input.bookingMetadata === undefined &&
+    !input.clearBookingMetadata &&
+    (
+      course.detectedPlatform !== input.detectedPlatform ||
+      course.providerFamilyKey !== input.providerFamilyKey ||
+      course.bookingMethod !== input.bookingMethod ||
+      course.detectedBookingUrl !== input.bookingUrl
+    )
+  ) {
+    throw new Error(
+      "Provider identity changed while booking metadata was omitted; replace or explicitly clear it."
+    );
+  }
 }
 
 export const COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT = {
@@ -69,6 +158,7 @@ export const COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT = {
   automationReason: true,
   monitoringMode: true,
   bookingAccessMode: true,
+  policyNotes: true,
   isPublic: true,
   intelligenceConfidence: true,
   bookingMetadata: true,
@@ -247,6 +337,7 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
     select: COURSE_EVIDENCE_MATERIAL_SNAPSHOT_SELECT
   });
   if (!course) throw new Error("No course matched the supplied Google Place ID.");
+  assertSafeCourseEvidenceMetadataTransition(course, input);
   const observedAt = new Date();
   const reviewAt = getOperatorCourseEvidenceReviewAt(observedAt);
 
@@ -262,9 +353,7 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
           automationEligibility: input.automationEligibility,
           automationReason: input.automationReason,
           detectedBookingUrl: input.bookingUrl,
-          bookingMetadata:
-            (input.bookingMetadata as Prisma.InputJsonValue | undefined) ??
-            Prisma.DbNull,
+          ...getCourseEvidenceBookingMetadataUpdate(input),
           policyNotes: input.policyNotes,
           intelligenceVerifiedAt: observedAt,
           intelligenceReviewAt: reviewAt,
@@ -299,12 +388,23 @@ async function upsertCourseEvidence(args: string[], apply: boolean) {
           sourceUrl: input.sourceUrl,
           bookingUrl: input.bookingUrl,
           apiEndpoint: input.apiEndpoint,
-          apiMetadata:
-            (input.bookingMetadata as Prisma.InputJsonValue | undefined) ??
-            Prisma.DbNull,
+          apiMetadata: getCourseEvidenceDiscoveryBookingMetadata(
+            input,
+            course.bookingMetadata
+          ),
           confidence: input.confidence,
           evidence: {
             learnedFrom: "validated-operator-course-evidence",
+            bookingMetadataDisposition:
+              input.bookingMetadata !== undefined
+                ? "REPLACED"
+                : input.clearBookingMetadata
+                  ? "CLEARED"
+                  : "PRESERVED",
+            ...getCourseEvidencePolicyNoteHistory(
+              course.policyNotes,
+              input.policyNotes
+            ),
             reviewAt: reviewAt.toISOString()
           }
         }

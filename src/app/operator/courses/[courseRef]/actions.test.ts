@@ -5,6 +5,10 @@ const mocks = vi.hoisted(() => ({
   getCurrentOperator: vi.fn(),
   revalidatePath: vi.fn(),
   applyOperatorCourseDecision: vi.fn(),
+  operatorCourseDecisionRequiresEvidence: vi.fn(
+    (decision: string) =>
+      decision !== "LOCAL_READER" && decision !== "WEBSITE_TEMPORARILY_UNAVAILABLE"
+  ),
   requestOperatorCourseRecheck: vi.fn(),
   updateOperatorCourseOfficialLinks: vi.fn()
 }));
@@ -29,17 +33,14 @@ vi.mock("@/lib/operator/course-monitoring", () => ({
   approveOperatorCourseTechnicalFinal: vi.fn(),
   correctOperatorCourseBookingLink: vi.fn(),
   humanReviewReasonSchema: { parse: vi.fn((value: string) => value) },
+  operatorCourseDecisionRequiresEvidence: mocks.operatorCourseDecisionRequiresEvidence,
   operatorCourseDecisionSchema: { parse: vi.fn((value: string) => value) },
   reopenOperatorCourseTechnicalFinal: vi.fn(),
   requestOperatorCourseRecheck: mocks.requestOperatorCourseRecheck,
   updateOperatorCourseOfficialLinks: mocks.updateOperatorCourseOfficialLinks
 }));
 
-import {
-  requestRecheckAction,
-  setCourseOutcomeAction,
-  updateOfficialLinksAction
-} from "./actions";
+import { requestRecheckAction, setCourseOutcomeAction, updateOfficialLinksAction } from "./actions";
 
 const idleState = {
   status: "idle" as const,
@@ -88,6 +89,21 @@ function localReaderOutcomeFormData() {
   return formData;
 }
 
+function finalOutcomeFormData() {
+  const formData = temporaryOutcomeFormData();
+  formData.set("decision", "PHONE_OR_MANUAL");
+  formData.set(
+    "evidenceUrl",
+    "https://www.cabq.gov/parksandrecreation/recreation/golf/faq#autotoc-item-autotoc-1"
+  );
+  formData.set(
+    "note",
+    "The official FAQ confirms that reservations use an in-person and phone process."
+  );
+  formData.set("idempotencyKey", "operator-manual-1234567");
+  return formData;
+}
+
 describe("requestRecheckAction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -126,6 +142,21 @@ describe("requestRecheckAction", () => {
     });
     expect(mocks.revalidatePath).not.toHaveBeenCalled();
   });
+
+  it("explains why a factual final needs stronger evidence instead of claiming a recheck", async () => {
+    mocks.requestOperatorCourseRecheck.mockRejectedValue(
+      new Error(
+        "A factual final cannot use a generic AI recheck. Submit a new evidence-backed outcome or correct the official provider or links."
+      )
+    );
+
+    await expect(requestRecheckAction(idleState, recheckFormData())).resolves.toEqual({
+      status: "error",
+      message:
+        "A factual final cannot use a generic AI recheck. Submit a new evidence-backed outcome or correct the official provider or links."
+    });
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
 });
 
 describe("updateOfficialLinksAction", () => {
@@ -142,9 +173,7 @@ describe("updateOfficialLinksAction", () => {
       applied: true
     });
 
-    await expect(
-      updateOfficialLinksAction(idleState, officialLinksFormData())
-    ).resolves.toEqual({
+    await expect(updateOfficialLinksAction(idleState, officialLinksFormData())).resolves.toEqual({
       status: "success",
       message:
         "Provider and official links saved. Verification and a fresh monitoring check are queued."
@@ -177,9 +206,7 @@ describe("setCourseOutcomeAction", () => {
       applied: true
     });
 
-    await expect(
-      setCourseOutcomeAction(idleState, temporaryOutcomeFormData())
-    ).resolves.toEqual({
+    await expect(setCourseOutcomeAction(idleState, temporaryOutcomeFormData())).resolves.toEqual({
       status: "success",
       message:
         "The course website is marked temporarily unavailable. Golfers will see that their alert remains active while Tee Time Spot checks back."
@@ -202,13 +229,35 @@ describe("setCourseOutcomeAction", () => {
       )
     );
 
-    await expect(
-      setCourseOutcomeAction(idleState, localReaderOutcomeFormData())
-    ).resolves.toEqual({
+    await expect(setCourseOutcomeAction(idleState, localReaderOutcomeFormData())).resolves.toEqual({
       status: "error",
       message:
         "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed."
     });
     expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("passes the exact official evidence and note for a final outcome", async () => {
+    mocks.applyOperatorCourseDecision.mockResolvedValue({
+      action: "set_course_outcome",
+      applied: true
+    });
+
+    await expect(setCourseOutcomeAction(idleState, finalOutcomeFormData())).resolves.toEqual({
+      status: "success",
+      message: "The final course outcome was saved."
+    });
+    expect(mocks.applyOperatorCourseDecision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decision: "PHONE_OR_MANUAL",
+        evidenceUrl:
+          "https://www.cabq.gov/parksandrecreation/recreation/golf/faq#autotoc-item-autotoc-1",
+        note: "The official FAQ confirms that reservations use an in-person and phone process."
+      }),
+      expect.objectContaining({
+        apply: true,
+        dispatchSearches: false
+      })
+    );
   });
 });

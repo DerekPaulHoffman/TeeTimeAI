@@ -5,6 +5,7 @@ import {
   createIncidentReference,
   getHumanReviewRetryAt,
   getCourseMonitoringEscalationDeadline,
+  sanitizeExactEvidenceUrl,
   sanitizeEvidenceUrl,
   shouldOpenFreshPlaybookCycleForProviderEvidence
 } from "@/lib/automation/course-monitoring";
@@ -34,9 +35,7 @@ const idempotencyKeySchema = z
   .max(100)
   .regex(/^[a-zA-Z0-9:_-]+$/u);
 const boundedNoteSchema = z.string().trim().min(3).max(500);
-const safeOperatorNoteSchema = boundedNoteSchema.transform((value) =>
-  sanitizeResponderText(value)
-);
+const safeOperatorNoteSchema = boundedNoteSchema.transform((value) => sanitizeResponderText(value));
 const revisionSchema = z.number().int().nonnegative();
 const cycleSchema = z.number().int().positive().nullable();
 
@@ -61,6 +60,10 @@ export const operatorCourseDecisionSchema = z.enum([
 ]);
 
 export type OperatorCourseDecision = z.infer<typeof operatorCourseDecisionSchema>;
+
+export function operatorCourseDecisionRequiresEvidence(decision: OperatorCourseDecision) {
+  return decision !== "LOCAL_READER" && decision !== "WEBSITE_TEMPORARILY_UNAVAILABLE";
+}
 
 export type OperatorMutationContext = {
   actorId: string;
@@ -190,12 +193,14 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
           resolutionMessage: sanitizeOperatorText(status.course.supportIncident.resolutionMessage),
           decisionAt: status.course.supportIncident.decisionAt,
           decisionNote: sanitizeOperatorText(status.course.supportIncident.decisionNote),
-          decisionEvidenceUrl: safeOperatorUrl(status.course.supportIncident.decisionEvidenceUrl)
+          decisionEvidenceUrl: safeOperatorEvidenceUrl(
+            status.course.supportIncident.decisionEvidenceUrl,
+          )
         }
       : null,
     timeline: status.course.monitoringEvents.map((event) => ({
       ...event,
-      evidenceUrl: safeOperatorUrl(event.evidenceUrl),
+      evidenceUrl: safeOperatorEvidenceUrl(event.evidenceUrl),
       operatorActorId: event.operatorActorId ? "[operator]" : null,
       audit: sanitizeTimelineAudit(event.audit)
     }))
@@ -228,7 +233,7 @@ export async function correctOperatorCourseBookingLink(
     })
     .parse(rawInput);
   const bookingUrl = requireSafeHttpsUrl(input.bookingUrl, "booking link");
-  const evidenceUrl = requireSafeHttpsUrl(input.evidenceUrl, "official evidence link");
+  const evidenceUrl = requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link");
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
@@ -526,6 +531,13 @@ export async function requestOperatorCourseRecheck(
     input.incidentRevision,
     input.idempotencyKey
   );
+  const authoritativeFinalRetained =
+    current.status.state === "FINAL_MANUAL" || current.status.state === "FINAL_IDENTITY";
+  if (authoritativeFinalRetained) {
+    throw new Error(
+      "A factual final cannot use a generic AI recheck. Submit a new evidence-backed outcome or correct the official provider or links.",
+    );
+  }
   const preview = {
     action: "request_recheck" as const,
     courseRef: current.status.reference,
@@ -536,13 +548,10 @@ export async function requestOperatorCourseRecheck(
   }
 
   const now = new Date();
-  const authoritativeFinalRetained =
-    current.status.state === "FINAL_MANUAL" ||
-    current.status.state === "FINAL_IDENTITY";
   const opensFreshPlaybookCycle = Boolean(
     current.incident &&
-      !authoritativeFinalRetained &&
-      shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident)
+    !authoritativeFinalRetained &&
+    shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident)
   );
   const targetState = authoritativeFinalRetained
     ? current.status.state
@@ -593,9 +602,7 @@ export async function requestOperatorCourseRecheck(
                   )
                 }
               : {}),
-            ...(hasClosedResponderBatch(current.incident)
-              ? { activeBatchId: null }
-              : {}),
+            ...(hasClosedResponderBatch(current.incident) ? { activeBatchId: null } : {}),
             lastSeenAt: now,
             nextAction: input.note,
             revision: { increment: 1 }
@@ -648,6 +655,8 @@ export async function applyOperatorCourseDecision(
     incidentCycle: number | null;
     incidentRevision: number | null;
     decision: OperatorCourseDecision;
+    evidenceUrl?: string | null;
+    note?: string | null;
     idempotencyKey: string;
   },
   context: OperatorMutationContext
@@ -659,9 +668,18 @@ export async function applyOperatorCourseDecision(
       incidentCycle: cycleSchema,
       incidentRevision: revisionSchema.nullable(),
       decision: operatorCourseDecisionSchema,
+      evidenceUrl: z.string().trim().url().max(1000).nullish(),
+      note: safeOperatorNoteSchema.nullish(),
       idempotencyKey: idempotencyKeySchema
     })
     .parse(rawInput);
+  const finalDecisionRequiresEvidence = operatorCourseDecisionRequiresEvidence(input.decision);
+  if (finalDecisionRequiresEvidence && (!input.evidenceUrl || !input.note)) {
+    throw new Error("Final outcomes require an official evidence link and decision note.");
+  }
+  const finalEvidenceUrl = input.evidenceUrl
+    ? requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link")
+    : null;
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
@@ -686,10 +704,7 @@ export async function applyOperatorCourseDecision(
   if (input.decision === "WEBSITE_TEMPORARILY_UNAVAILABLE") {
     const message =
       "The course website is currently not working correctly. Tee Time Spot will check again and let golfers know when tee times can be viewed.";
-    const retryAt = getHumanReviewRetryAt(
-      now,
-      incident.activeRealSearchCount
-    );
+    const retryAt = getHumanReviewRetryAt(now, incident.activeRealSearchCount);
     const failureFingerprint = buildProviderFailureFingerprint({
       providerFamilyKey: current.status.course.providerFamilyKey,
       failureClass: "UNKNOWN",
@@ -769,8 +784,7 @@ export async function applyOperatorCourseDecision(
             outcome: "FETCH_FAILED",
             failureFingerprint,
             message,
-            evidenceUrl:
-              current.status.course.detectedBookingUrl ?? current.status.course.website,
+            evidenceUrl: current.status.course.detectedBookingUrl ?? current.status.course.website,
             operatorActorId: normalizeActorId(context.actorId),
             idempotencyKey: input.idempotencyKey,
             occurredAt: now,
@@ -885,8 +899,7 @@ export async function applyOperatorCourseDecision(
             toState: "AUTO_INVESTIGATING",
             failureFingerprint,
             message,
-            evidenceUrl:
-              current.status.course.detectedBookingUrl ?? current.status.course.website,
+            evidenceUrl: current.status.course.detectedBookingUrl ?? current.status.course.website,
             operatorActorId: normalizeActorId(context.actorId),
             idempotencyKey: input.idempotencyKey,
             occurredAt: now,
@@ -919,13 +932,33 @@ export async function applyOperatorCourseDecision(
   }
 
   const finalDecision = getFinalDecision(input.decision);
+  const decisionNote = input.note!;
+  const decisionEvidenceUrl = finalEvidenceUrl!;
+  const currentActionUrl = safeOperatorEvidenceUrl(current.status.course.detectedBookingUrl);
+  const preserveManualActionSurface = Boolean(
+    input.decision === "PHONE_OR_MANUAL" && currentActionUrl === decisionEvidenceUrl,
+  );
+  const finalCourseUpdate: Prisma.CourseUpdateInput =
+    input.decision === "PHONE_OR_MANUAL"
+      ? {
+          ...finalDecision.course,
+          detectedBookingUrl: preserveManualActionSurface ? currentActionUrl : null,
+          detectedPlatform: preserveManualActionSurface
+            ? current.status.course.detectedPlatform
+            : "UNKNOWN",
+          providerFamilyKey: preserveManualActionSurface
+            ? current.status.course.providerFamilyKey
+            : "SOURCE_MISSING",
+          bookingMetadata: Prisma.DbNull,
+        }
+      : finalDecision.course;
   await prisma.$transaction(
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       await transaction.course.update({
         where: { id: current.status.courseId },
         data: {
-          ...finalDecision.course,
+          ...finalCourseUpdate,
           policyNotes: finalDecision.message,
           intelligenceVerifiedAt: now,
           intelligenceReviewAt: null,
@@ -961,13 +994,26 @@ export async function applyOperatorCourseDecision(
           resolutionMessage: finalDecision.message,
           decisionActorId: normalizeActorId(context.actorId),
           decisionAt: now,
-          decisionNote: finalDecision.message,
-          decisionEvidenceUrl:
-            current.status.course.detectedBookingUrl ?? current.status.course.website,
+          decisionNote,
+          decisionEvidenceUrl,
           decisionIdempotencyKey: input.idempotencyKey,
           lastSeenAt: now,
           revision: { increment: 1 }
         }
+      });
+      await appendOperatorFinalDiscovery(transaction, {
+        current,
+        action: "set_course_outcome",
+        classification: input.decision,
+        evidenceUrl: decisionEvidenceUrl,
+        note: decisionNote,
+        bookingMethod: finalDecision.discovery.bookingMethod,
+        bookingAccessMode: finalDecision.discovery.bookingAccessMode,
+        automationReason: finalDecision.discovery.automationReason,
+        preserveExistingBookingSurface:
+          finalDecision.discovery.preserveExistingBookingSurface ||
+          preserveManualActionSurface,
+        manualProjectionApplied: input.decision === "PHONE_OR_MANUAL",
       });
       await transaction.courseMonitoringEvent.create({
         data: {
@@ -979,15 +1025,15 @@ export async function applyOperatorCourseDecision(
           toState: finalDecision.state,
           outcome: finalDecision.outcome,
           failureFingerprint: current.incident!.failureFingerprint,
-          message: finalDecision.message,
-          evidenceUrl:
-            current.status.course.detectedBookingUrl ?? current.status.course.website,
+          message: decisionNote,
+          evidenceUrl: decisionEvidenceUrl,
           operatorActorId: normalizeActorId(context.actorId),
           idempotencyKey: input.idempotencyKey,
           occurredAt: now,
           audit: {
             action: "set_course_outcome",
             decision: input.decision,
+            officialEvidenceCaptured: true,
             timerBasedRevalidation: false,
             customerDataIncluded: false
           }
@@ -1024,7 +1070,7 @@ export async function approveOperatorCourseTechnicalFinal(
       idempotencyKey: idempotencyKeySchema
     })
     .parse(rawInput);
-  const evidenceUrl = requireSafeHttpsUrl(input.evidenceUrl, "official evidence link");
+  const evidenceUrl = requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link");
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
@@ -1035,15 +1081,9 @@ export async function approveOperatorCourseTechnicalFinal(
   if (!current.incident) {
     throw new Error("A durable course incident is required before approving a final limitation.");
   }
-  const playbook = assessAutomationPlaybook(
-    current.incident.attemptLedger,
-    current.incident.cycle
-  );
+  const playbook = assessAutomationPlaybook(current.incident.attemptLedger, current.incident.cycle);
   if (
-    !isAutomationPlaybookExhausted(
-      current.incident.attemptLedger,
-      current.incident.cycle
-    ) ||
+    !isAutomationPlaybookExhausted(current.incident.attemptLedger, current.incident.cycle) ||
     playbook.conclusion !== "TECHNICAL_FINAL" ||
     playbook.technicalReason !== input.reason
   ) {
@@ -1112,6 +1152,18 @@ export async function approveOperatorCourseTechnicalFinal(
           revision: { increment: 1 }
         }
       });
+      await appendOperatorFinalDiscovery(transaction, {
+        current,
+        action: "approve_technical_final",
+        classification: input.reason,
+        evidenceUrl,
+        note: input.note,
+        bookingMethod: null,
+        bookingAccessMode: technicalFields.bookingAccessMode,
+        automationReason: technicalFields.automationReason,
+        preserveExistingBookingSurface: true,
+        manualProjectionApplied: false
+      });
       await transaction.courseMonitoringEvent.create({
         data: {
           courseId: current.status.courseId,
@@ -1163,7 +1215,7 @@ export async function reopenOperatorCourseTechnicalFinal(
       idempotencyKey: idempotencyKeySchema
     })
     .parse(rawInput);
-  const evidenceUrl = requireSafeHttpsUrl(input.evidenceUrl, "official evidence link");
+  const evidenceUrl = requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link");
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
@@ -1298,8 +1350,11 @@ async function requireMutationTarget(
           website: true,
           providerFamilyKey: true,
           timeZone: true,
+          bookingPhone: true,
           bookingAccessMode: true,
           automationReason: true,
+          bookingMetadata: true,
+          policyNotes: true,
           isPublic: true,
           monitoringMode: true,
           bookingMethod: true,
@@ -1361,10 +1416,7 @@ async function queueExplicitOperatorLocalReaderRecheck(
   const bookingUrl = current.status.course.detectedBookingUrl;
   if (!bookingUrl) return null;
   const activeSearch = current.activeSearches[0];
-  const fallbackDate = getCourseLocalDateStorageBoundary(
-    current.status.course.timeZone,
-    now
-  );
+  const fallbackDate = getCourseLocalDateStorageBoundary(current.status.course.timeZone, now);
   fallbackDate.setUTCDate(fallbackDate.getUTCDate() + 1);
   try {
     return await queueLocalReaderCourseVerification({
@@ -1543,20 +1595,27 @@ function technicalCourseFieldsForReason(reason: CourseHumanReviewReason): {
 }
 
 function getFinalDecision(
-  decision: Exclude<
-    OperatorCourseDecision,
-    "LOCAL_READER" | "WEBSITE_TEMPORARILY_UNAVAILABLE"
-  >
+  decision: Exclude<OperatorCourseDecision, "LOCAL_READER" | "WEBSITE_TEMPORARILY_UNAVAILABLE">
 ): {
   state: "FINAL_IDENTITY" | "FINAL_MANUAL" | "FINAL_TECHNICAL";
   resolution:
-    | "IDENTITY_CLASSIFIED"
-    | "DIRECT_BOOKING_CLASSIFIED"
-    | "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
+    "IDENTITY_CLASSIFIED" | "DIRECT_BOOKING_CLASSIFIED" | "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
   humanReviewReason: CourseHumanReviewReason | null;
   outcome: "IDENTITY_FINAL" | "MANUAL_DIRECT" | "BLOCKED_AUTH" | "BLOCKED_TOOLING";
   message: string;
   course: Prisma.CourseUpdateInput;
+  discovery: {
+    bookingMethod: "UNKNOWN" | "CONTACT_COURSE" | null;
+    bookingAccessMode:
+      "CONTACT_COURSE" | "ACCOUNT_REQUIRED" | "CAPTCHA_OR_QUEUE" | "UNKNOWN" | null;
+    automationReason:
+      | "NO_ONLINE_BOOKING"
+      | "ACCOUNT_REQUIRED"
+      | "CAPTCHA_OR_QUEUE"
+      | "TEMPORARILY_UNAVAILABLE"
+      | "OTHER";
+    preserveExistingBookingSurface: boolean;
+  };
 } {
   if (decision === "PRIVATE_COURSE") {
     return {
@@ -1570,6 +1629,12 @@ function getFinalDecision(
         automationEligibility: "BLOCKED",
         automationReason: "OTHER",
         monitoringMode: "CONTACT_ONLY"
+      },
+      discovery: {
+        bookingMethod: "UNKNOWN",
+        bookingAccessMode: "UNKNOWN",
+        automationReason: "OTHER",
+        preserveExistingBookingSurface: false
       }
     };
   }
@@ -1579,14 +1644,20 @@ function getFinalDecision(
       resolution: "DIRECT_BOOKING_CLASSIFIED",
       humanReviewReason: null,
       outcome: "MANUAL_DIRECT",
-      message: "Tee times are available only by phone or another manual course process.",
+      message: "Tee times use the course's phone, in-person, or another manual process.",
       course: {
         isPublic: true,
-        bookingMethod: "PHONE_ONLY",
-        bookingAccessMode: "PHONE_ONLY",
+        bookingMethod: "CONTACT_COURSE",
+        bookingAccessMode: "CONTACT_COURSE",
         automationEligibility: "BLOCKED",
         automationReason: "NO_ONLINE_BOOKING",
         monitoringMode: "CONTACT_ONLY"
+      },
+      discovery: {
+        bookingMethod: "CONTACT_COURSE",
+        bookingAccessMode: "CONTACT_COURSE",
+        automationReason: "NO_ONLINE_BOOKING",
+        preserveExistingBookingSurface: false
       }
     };
   }
@@ -1606,14 +1677,181 @@ function getFinalDecision(
     course: {
       automationEligibility: "BLOCKED",
       ...technicalFields
+    },
+    discovery: {
+      bookingMethod: null,
+      bookingAccessMode: technicalFields.bookingAccessMode,
+      automationReason: technicalFields.automationReason,
+      preserveExistingBookingSurface: true
     }
   };
+}
+
+async function appendOperatorFinalDiscovery(
+  transaction: Prisma.TransactionClient,
+  input: {
+    current: Awaited<ReturnType<typeof requireMutationTarget>>;
+    action: "set_course_outcome" | "approve_technical_final";
+    classification: string;
+    evidenceUrl: string;
+    note: string;
+    bookingMethod: NonNullable<
+      Prisma.CourseAutomationDiscoveryUncheckedCreateInput["bookingMethod"]
+    > | null;
+    bookingAccessMode: NonNullable<
+      Prisma.CourseAutomationDiscoveryUncheckedCreateInput["bookingAccessMode"]
+    > | null;
+    automationReason: NonNullable<
+      Prisma.CourseAutomationDiscoveryUncheckedCreateInput["automationReason"]
+    >;
+    preserveExistingBookingSurface: boolean;
+    manualProjectionApplied: boolean;
+  }
+) {
+  const course = input.current.status.course;
+  const priorBookingMetadata = getHistoricalPublicBookingMetadata(course.bookingMetadata);
+  const retainedBookingUrl = input.preserveExistingBookingSurface
+    ? safeOperatorEvidenceUrl(course.detectedBookingUrl)
+    : null;
+  const projectedDetectedPlatform = input.preserveExistingBookingSurface
+    ? course.detectedPlatform
+    : "UNKNOWN";
+  const priorCourseSnapshot = {
+    detectedPlatform: course.detectedPlatform,
+    providerFamilyKey: course.providerFamilyKey,
+    bookingMethod: course.bookingMethod,
+    bookingAccessMode: course.bookingAccessMode,
+    automationReason: course.automationReason,
+    website: safeOperatorUrl(course.website),
+    detectedBookingUrl: safeOperatorEvidenceUrl(course.detectedBookingUrl),
+    bookingPhone: course.bookingPhone,
+    bookingMetadata: priorBookingMetadata.value,
+    bookingMetadataDisposition: priorBookingMetadata.disposition,
+    policyNotes: sanitizeOperatorText(course.policyNotes)
+  };
+  await transaction.courseAutomationDiscovery.create({
+    data: {
+      courseId: input.current.status.courseId,
+      status: "VERIFIED",
+      detectedPlatform: projectedDetectedPlatform,
+      bookingMethod: input.bookingMethod ?? course.bookingMethod,
+      bookingPhone:
+        input.bookingMethod === "CONTACT_COURSE" || input.preserveExistingBookingSurface
+          ? course.bookingPhone
+          : null,
+      automationEligibility: "BLOCKED",
+      automationReason: input.automationReason,
+      bookingAccessMode: input.bookingAccessMode ?? course.bookingAccessMode,
+      sourceUrl: input.evidenceUrl,
+      bookingUrl: retainedBookingUrl,
+      confidence: 1,
+      evidence: {
+        learnedFrom: "operator-final-decision",
+        action: input.action,
+        classification: input.classification,
+        note: input.note,
+        officialEvidenceUrl: input.evidenceUrl,
+        priorCourseSnapshot,
+        ...(input.manualProjectionApplied
+          ? {
+              currentProjection: {
+                detectedPlatform: projectedDetectedPlatform,
+                providerFamilyKey: input.preserveExistingBookingSurface
+                  ? course.providerFamilyKey
+                  : "SOURCE_MISSING",
+                bookingUrl: retainedBookingUrl,
+                bookingMetadata: "CLEARED",
+                bookingMethod: input.bookingMethod ?? course.bookingMethod,
+                bookingAccessMode: input.bookingAccessMode ?? course.bookingAccessMode,
+                automationReason: input.automationReason,
+              },
+            }
+          : {}),
+        customerDataIncluded: false
+      } as Prisma.InputJsonValue
+    }
+  });
+}
+
+function getHistoricalPublicBookingMetadata(value: unknown): {
+  value: Prisma.JsonValue | null;
+  disposition: "ABSENT" | "PRESERVED_PUBLIC" | "OMITTED_NON_PUBLIC";
+} {
+  if (value === null || value === undefined) {
+    return { value: null, disposition: "ABSENT" };
+  }
+  if (!isPublicBookingMetadata(value)) {
+    return { value: null, disposition: "OMITTED_NON_PUBLIC" };
+  }
+  return {
+    value: value as Prisma.JsonValue,
+    disposition: "PRESERVED_PUBLIC",
+  };
+}
+
+function isPublicBookingMetadata(
+  value: unknown,
+  depth = 0,
+  seen = new Set<object>(),
+): boolean {
+  if (value === null) return true;
+  if (typeof value === "boolean" || typeof value === "number") return true;
+  if (typeof value === "string") {
+    if (value.length > 4_000 || /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu.test(value)) {
+      return false;
+    }
+    if (/^https?:\/\//iu.test(value.trim())) {
+      return sanitizeExactEvidenceUrl(value) !== null;
+    }
+    return !(
+      /(?:authorization:\s*\S+|bearer\s+[a-z0-9._~-]{8,})/iu.test(value) ||
+      /(?:^|[?&])(?:api[_-]?key|credential|password|secret|session|signature|token)=[^&\s]+/iu.test(
+        value,
+      ) ||
+      /\beyJ[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+\b/iu.test(value) ||
+      /\b(?:sk|rk|re)[_-][a-z0-9_-]{16,}\b/iu.test(value) ||
+      /\bAIza[a-z0-9_-]{20,}\b/u.test(value)
+    );
+  }
+  if (typeof value !== "object" || depth > 6 || seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return (
+      value.length <= 100 &&
+      value.every((item) => isPublicBookingMetadata(item, depth + 1, seen))
+    );
+  }
+  const entries = Object.entries(value);
+  if (entries.length > 100) return false;
+  return entries.every(([key, item]) => {
+    const normalizedKey = key.replace(/[^a-z0-9]/giu, "").toLowerCase();
+    if (
+      /(?:token|secret|password|credential|authorization|cookie|session|signature|apikey)/u.test(
+        normalizedKey,
+      )
+    ) {
+      return item === null || item === "";
+    }
+    return isPublicBookingMetadata(item, depth + 1, seen);
+  });
 }
 
 function requireSafeHttpsUrl(value: string, label: string) {
   const sanitized = sanitizeEvidenceUrl(value);
   if (!sanitized) {
     throw new Error(`${label} must be a public HTTPS URL without credentials.`);
+  }
+  return sanitized;
+}
+
+function requireSafeExactEvidenceUrl(value: string, label: string) {
+  const sanitized = sanitizeExactEvidenceUrl(value);
+  if (!sanitized) {
+    throw new Error(
+      `${label} must be a public HTTPS URL without credentials or sensitive fragment data.`,
+    );
   }
   return sanitized;
 }
@@ -1627,6 +1865,10 @@ function optionalSafeHttpsUrl(value: string | null, label: string) {
 
 function safeOperatorUrl(value: string | null | undefined) {
   return sanitizeEvidenceUrl(value);
+}
+
+function safeOperatorEvidenceUrl(value: string | null | undefined) {
+  return sanitizeExactEvidenceUrl(value);
 }
 
 function sanitizeOperatorText(value: string | null | undefined) {

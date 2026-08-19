@@ -162,21 +162,28 @@ const outcomeHelp: Record<OperatorCourseDecision, string> = {
     "Close monitoring because this is a private course, not a public tee-time source.",
   PHONE_OR_MANUAL:
     "Close automatic monitoring and direct golfers to the course’s manual booking process.",
-  ACCOUNT_REQUIRED:
-    "Close monitoring because tee times cannot be viewed without a course account.",
-  CAPTCHA_OR_QUEUE:
-    "Close monitoring because a captcha or waiting room blocks signed-out access.",
+  ACCOUNT_REQUIRED: "Close monitoring because tee times cannot be viewed without a course account.",
+  CAPTCHA_OR_QUEUE: "Close monitoring because a captcha or waiting room blocks signed-out access.",
   OTHER_TECHNICAL_LIMITATION:
     "Close monitoring with a confirmed technical limitation that does not fit another choice."
 };
 
-export function CourseOutcomeForm({ recommendLocalReader = false, ...props }: CourseOutcomeFormProps) {
+export function CourseOutcomeForm({
+  recommendLocalReader = false,
+  ...props
+}: CourseOutcomeFormProps) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState(setCourseOutcomeAction, initialState);
   const [decision, setDecision] = useState<OperatorCourseDecision | "">(
     recommendLocalReader ? "LOCAL_READER" : ""
   );
+  const [evidenceUrl, setEvidenceUrl] = useState("");
+  const [note, setNote] = useState("");
   const help = useMemo(() => (decision ? outcomeHelp[decision] : null), [decision]);
+  const requiresEvidence = Boolean(
+    decision && decision !== "LOCAL_READER" && decision !== "WEBSITE_TEMPORARILY_UNAVAILABLE"
+  );
+  const finalEvidenceReady = evidenceUrl.trim().length > 0 && note.trim().length >= 3;
 
   useEffect(() => {
     if (state.status === "success") {
@@ -191,13 +198,13 @@ export function CourseOutcomeForm({ recommendLocalReader = false, ...props }: Co
         Set the course outcome
       </h2>
       <p className="operator-form-help">
-        Choose what this course actually is or which monitoring path it needs. No separate evidence
-        link or decision note is required.
+        Choose what this course actually is or which monitoring path it needs. Final outcomes retain
+        the exact official evidence and your decision note in the course history.
       </p>
       {recommendLocalReader ? (
         <p className="operator-outcome-help">
-          This booking page is compatible with the local reader. Use the recommended action below
-          to queue a fresh signed verification automatically.
+          This booking page is compatible with the local reader. Use the recommended action below to
+          queue a fresh signed verification automatically.
         </p>
       ) : null}
       <MutationFields {...props} />
@@ -205,9 +212,7 @@ export function CourseOutcomeForm({ recommendLocalReader = false, ...props }: Co
         Course outcome or monitoring path
         <select
           name="decision"
-          onChange={(event) =>
-            setDecision(event.target.value as OperatorCourseDecision | "")
-          }
+          onChange={(event) => setDecision(event.target.value as OperatorCourseDecision | "")}
           required
           value={decision}
         >
@@ -226,19 +231,55 @@ export function CourseOutcomeForm({ recommendLocalReader = false, ...props }: Co
         </select>
       </label>
       {help ? <p className="operator-outcome-help">{help}</p> : null}
+      {requiresEvidence ? (
+        <>
+          <label>
+            Official evidence
+            <input
+              autoComplete="url"
+              name="evidenceUrl"
+              onChange={(event) => setEvidenceUrl(event.target.value)}
+              placeholder="https://course.example/tee-time-policy"
+              required
+              type="url"
+              value={evidenceUrl}
+            />
+          </label>
+          <label>
+            Decision note
+            <textarea
+              maxLength={500}
+              minLength={3}
+              name="note"
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="Summarize what the official source confirms for this course."
+              required
+              rows={4}
+              value={note}
+            />
+          </label>
+          <small>
+            Use the exact public page that supports this outcome. Existing provider links and
+            metadata remain in the course history.
+          </small>
+        </>
+      ) : null}
       <FormMessage state={state} />
-      <button disabled={pending || !decision} type="submit">
+      <button
+        disabled={pending || !decision || (requiresEvidence && !finalEvidenceReady)}
+        type="submit"
+      >
         {pending
           ? decision === "LOCAL_READER"
             ? "Routing to reader…"
             : decision === "WEBSITE_TEMPORARILY_UNAVAILABLE"
               ? "Saving temporary status…"
-            : "Saving final outcome…"
+              : "Saving final outcome…"
           : decision === "LOCAL_READER"
             ? "Use local reader and recheck"
             : decision === "WEBSITE_TEMPORARILY_UNAVAILABLE"
               ? "Set temporary status"
-            : "Set final outcome"}
+              : "Set final outcome"}
       </button>
     </form>
   );

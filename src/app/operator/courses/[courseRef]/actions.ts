@@ -11,6 +11,7 @@ import {
   approveOperatorCourseTechnicalFinal,
   correctOperatorCourseBookingLink,
   humanReviewReasonSchema,
+  operatorCourseDecisionRequiresEvidence,
   operatorCourseDecisionSchema,
   reopenOperatorCourseTechnicalFinal,
   requestOperatorCourseRecheck,
@@ -101,6 +102,7 @@ export async function setCourseOutcomeAction(
     const operator = await requireOperatorMutation();
     const reference = readField(formData, "reference");
     const decision = operatorCourseDecisionSchema.parse(readField(formData, "decision"));
+    const requiresEvidence = operatorCourseDecisionRequiresEvidence(decision);
     await applyOperatorCourseDecision(
       {
         reference,
@@ -108,6 +110,10 @@ export async function setCourseOutcomeAction(
         incidentCycle: readOptionalInteger(formData, "incidentCycle"),
         incidentRevision: readOptionalRevision(formData, "incidentRevision"),
         decision,
+        evidenceUrl: requiresEvidence
+          ? readField(formData, "evidenceUrl")
+          : readOptionalField(formData, "evidenceUrl"),
+        note: requiresEvidence ? readField(formData, "note") : readOptionalField(formData, "note"),
         idempotencyKey: readField(formData, "idempotencyKey")
       },
       {
@@ -125,7 +131,7 @@ export async function setCourseOutcomeAction(
           ? "This course now uses the local tee-time reader. A fresh check is queued."
           : decision === "WEBSITE_TEMPORARILY_UNAVAILABLE"
             ? "The course website is marked temporarily unavailable. Golfers will see that their alert remains active while Tee Time Spot checks back."
-          : "The final course outcome was saved."
+            : "The final course outcome was saved."
     };
   } catch (error) {
     console.error("[operator:set-course-outcome]", {
@@ -308,6 +314,9 @@ function getOperatorActionErrorMessage(error: unknown) {
     (error.message.includes("official course site") ||
       error.message.includes("official booking page") ||
       error.message.includes("official link") ||
+      error.message.includes("official evidence") ||
+      error.message.includes("Final outcomes require") ||
+      error.message.includes("factual final") ||
       error.message.includes("local tee-time reader") ||
       error.message.includes("provider") ||
       error.message.includes("Change at least one"))

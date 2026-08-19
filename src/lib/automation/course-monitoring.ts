@@ -4923,7 +4923,22 @@ function sanitizeMonitoringMessage(value: string | null | undefined) {
   return sanitizeResponderText(value).slice(0, 500);
 }
 
+const SAFE_EXACT_EVIDENCE_FRAGMENT = /^#[a-z][a-z0-9_.:-]{0,199}$/iu;
+const SENSITIVE_EXACT_EVIDENCE_FRAGMENT =
+  /(?:^|[#_.:-])(?:access[-_]?token|api[-_]?key|auth(?:orization)?[-_]?code|credential|id[-_]?token|password|recipient|secret|session|signature)(?:$|[#_.:-])/iu;
+
 export function sanitizeEvidenceUrl(value: string | null | undefined) {
+  return sanitizeEvidenceUrlWithFragmentPolicy(value, false);
+}
+
+export function sanitizeExactEvidenceUrl(value: string | null | undefined) {
+  return sanitizeEvidenceUrlWithFragmentPolicy(value, true);
+}
+
+function sanitizeEvidenceUrlWithFragmentPolicy(
+  value: string | null | undefined,
+  preserveSafeFragment: boolean,
+) {
   if (!value) return null;
   try {
     const url = new URL(value);
@@ -4939,8 +4954,18 @@ export function sanitizeEvidenceUrl(value: string | null | undefined) {
     ) {
       return null;
     }
-    url.hash = "";
-    return url.toString().slice(0, 1000);
+    if (preserveSafeFragment && url.hash) {
+      if (
+        !SAFE_EXACT_EVIDENCE_FRAGMENT.test(url.hash) ||
+        SENSITIVE_EXACT_EVIDENCE_FRAGMENT.test(url.hash)
+      ) {
+        return null;
+      }
+    } else {
+      url.hash = "";
+    }
+    const serialized = url.toString();
+    return serialized.length <= 1000 ? serialized : null;
   } catch {
     return null;
   }

@@ -61,6 +61,8 @@ export default async function OperatorCoursePage({
   }
   const stateLabel = getCourseStateLabel(detail);
   const isFinal = detail.state.startsWith("FINAL_");
+  const isAuthoritativeFactualFinal =
+    detail.state === "FINAL_MANUAL" || detail.state === "FINAL_IDENTITY";
   const recommendLocalReader =
     detail.course.providerFamilyKey === "EZLINKS" &&
     Boolean(getLocalReaderCourseKey(detail.course.detectedBookingUrl));
@@ -199,13 +201,24 @@ export default async function OperatorCoursePage({
 
       <section className="operator-section">
         <div className="operator-action-grid">
-          <OperatorRecheckForm
-            idempotencyKey={`recheck:${randomUUID()}`}
-            incidentCycle={detail.incident?.cycle ?? null}
-            incidentRevision={detail.incident?.revision ?? null}
-            reference={detail.reference}
-            statusRevision={detail.revision}
-          />
+          {isAuthoritativeFactualFinal ? (
+            <article className="operator-action-card">
+              <h2>New evidence required</h2>
+              <p className="operator-form-help">
+                A generic AI recheck cannot change this factual final. Update the official provider
+                or links, or submit a new evidence-backed course outcome when stronger official
+                evidence changes the classification.
+              </p>
+            </article>
+          ) : (
+            <OperatorRecheckForm
+              idempotencyKey={`recheck:${randomUUID()}`}
+              incidentCycle={detail.incident?.cycle ?? null}
+              incidentRevision={detail.incident?.revision ?? null}
+              reference={detail.reference}
+              statusRevision={detail.revision}
+            />
+          )}
 
           {detail.incident ? (
             <CourseOutcomeForm
