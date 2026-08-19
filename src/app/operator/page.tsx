@@ -356,7 +356,7 @@ function OperatorDashboard({
           eyebrow="Course coverage"
           id="incidents-heading"
           title="Open incidents"
-          supporting="Ordered by active real demand, nearest requested date, and oldest unresolved evidence."
+          supporting="Active work is ordered by real demand, nearest date, and oldest evidence. Courses waiting for new evidence remain visible in the complete inventory and course history without appearing as queued work."
         />
         {overview.incidents.length > 0 ? (
           <div className="operator-incident-list">
@@ -629,6 +629,13 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
           label="Investigation backlog"
           detail="Includes due, active, and scheduled work"
           tone="warning"
+        />
+        <CourseFleetCount
+          count={counts.parked}
+          icon={<Clock3 size={17} />}
+          label="Waiting for new evidence"
+          detail="No AI recheck is queued"
+          tone="neutral"
         />
         <CourseFleetCount
           count={counts.limitations}
@@ -933,6 +940,9 @@ function CourseFilters({
           <option value="investigate">{`Investigation backlog (${
             diagnostics.find((group) => group.key === "WATCH")?.count ?? 0
           })`}</option>
+          <option value="parked">{`Waiting for new evidence (${
+            diagnostics.find((group) => group.key === "PARKED")?.count ?? 0
+          })`}</option>
           <option value="limitations">{`Known limitations (${
             diagnostics.find((group) => group.key === "LIMITATION")?.count ?? 0
           })`}</option>
@@ -1167,6 +1177,7 @@ function CourseDeepLinks({
 function formatPriority(value: CourseInventoryItem["priorityGroup"]) {
   if (value === "ACTION") return "Needs attention";
   if (value === "WATCH") return "Investigation backlog";
+  if (value === "PARKED") return "Waiting for new evidence";
   if (value === "LIMITATION") return "Known limitation";
   if (value === "UNCHECKED") return "Verify when needed";
   return "Monitoring works";
@@ -1187,6 +1198,7 @@ function viewForPriorityGroup(
 ): ReturnType<typeof parseCourseInventoryView> {
   if (value === "ACTION") return "fix-now";
   if (value === "WATCH") return "investigate";
+  if (value === "PARKED") return "parked";
   if (value === "LIMITATION") return "limitations";
   if (value === "UNCHECKED") return "unchecked";
   return "working";

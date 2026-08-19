@@ -4,7 +4,8 @@ import {
   buildCourseSupportResponderAlert,
   buildOperatorDiscoverySummary,
   buildTopCourses,
-  countEvents
+  countEvents,
+  filterOperatorWorkIncidents
 } from "./overview";
 
 describe("operator overview aggregation", () => {
@@ -105,6 +106,20 @@ describe("operator overview aggregation", () => {
         openIncidentCount: 0
       })
     ).toBeNull();
+  });
+
+  it("excludes courses waiting for material change from responder work metrics", () => {
+    const incidents = [
+      { id: "incident-active", courseId: "course-active" },
+      { id: "incident-waiting", courseId: "course-waiting" }
+    ];
+
+    expect(
+      filterOperatorWorkIncidents(incidents, [
+        { id: "course-active", priorityGroup: "WATCH" },
+        { id: "course-waiting", priorityGroup: "PARKED" }
+      ])
+    ).toEqual([{ id: "incident-active", courseId: "course-active" }]);
   });
 
   it("reduces discovery evidence to structured operator facts without returning its URL", () => {

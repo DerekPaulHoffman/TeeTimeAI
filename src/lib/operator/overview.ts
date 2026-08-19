@@ -456,6 +456,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
             status: true,
             kind: true,
             activeRealSearchCount: true,
+            cycle: true,
             firstSeenAt: true,
             resolvedAt: true,
             resolution: true,
@@ -463,6 +464,9 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
             latestMessage: true,
             nextAction: true,
             failureClass: true,
+            humanReviewReason: true,
+            escalatedAt: true,
+            escalationDeadlineAt: true,
             nextAttemptAt: true,
             activeBatchId: true,
             activeBatch: {
@@ -471,7 +475,18 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
                 leaseExpiresAt: true
               }
             },
-            attemptCount: true
+            attemptCount: true,
+            monitoringEvents: {
+              where: { eventType: "HUMAN_REVIEW_REQUESTED" },
+              orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+              take: 5,
+              select: {
+                incidentId: true,
+                eventType: true,
+                occurredAt: true,
+                audit: true
+              }
+            }
           }
         },
         monitoringStatus: {
@@ -668,6 +683,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
     }),
     now
   );
+  const operatorWorkIncidents = filterOperatorWorkIncidents(openIncidents, courseInventory);
 
   const dailyActivity = buildDailyActivity({
     range,
@@ -730,7 +746,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
   );
   const courseSupportAlert = buildCourseSupportResponderAlert({
     now,
-    openIncidentCount: openIncidents.length,
+    openIncidentCount: operatorWorkIncidents.length,
     worker: courseSupportWorker
   });
 
@@ -744,7 +760,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
       pageViews: todayActivity?.pageViews ?? 0,
       matchesFound: matchesFoundToday,
       matchEmailsSent: matchEmailsSentToday,
-      openIssues: openIncidents.length,
+      openIssues: operatorWorkIncidents.length,
       brokenFeedback: brokenFeedbackCount
     },
     funnel: {
@@ -780,7 +796,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
       courses: courseInventory,
       counts: summarizeCourseInventory(courseInventory)
     },
-    incidents: openIncidents,
+    incidents: operatorWorkIncidents,
     resolvedIncidents: recentResolvedIncidents,
     recentUsers: recentUsers.map((user) => ({
       id: user.id,
@@ -893,6 +909,20 @@ export function buildOperatorDiscoverySummary(
     confidence: discovery.confidence,
     observedAt: discovery.createdAt
   };
+}
+
+export function filterOperatorWorkIncidents<
+  TIncident extends { courseId: string },
+  TCourse extends { id: string; priorityGroup: string }
+>(incidents: TIncident[], courses: TCourse[]) {
+  const waitingForEvidenceCourseIds = new Set(
+    courses
+      .filter((course) => course.priorityGroup === "PARKED")
+      .map((course) => course.id)
+  );
+  return incidents.filter(
+    (incident) => !waitingForEvidenceCourseIds.has(incident.courseId)
+  );
 }
 
 function readOperatorEvidenceRecord(value: unknown): Record<string, unknown> | null {

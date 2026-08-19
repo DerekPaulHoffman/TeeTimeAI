@@ -1,4 +1,5 @@
 import type { ProviderCoverageCategory } from "@/lib/automation/provider-coverage";
+import { hasDurableWaitForMaterialChangeProof } from "@/lib/customer-monitoring-status";
 
 export const COURSE_STATUS_GUIDE = [
   {
@@ -127,9 +128,22 @@ export const COURSE_STATUS_GUIDE = [
 ] as const;
 
 export type CourseStatusKey = (typeof COURSE_STATUS_GUIDE)[number]["key"];
-export type CoursePriorityGroup = "ACTION" | "WATCH" | "LIMITATION" | "UNCHECKED" | "WORKING";
+export type CoursePriorityGroup =
+  | "ACTION"
+  | "WATCH"
+  | "PARKED"
+  | "LIMITATION"
+  | "UNCHECKED"
+  | "WORKING";
 export type CourseInventoryView =
-  "all" | "attention" | "fix-now" | "investigate" | "limitations" | "unchecked" | "working";
+  | "all"
+  | "attention"
+  | "fix-now"
+  | "investigate"
+  | "parked"
+  | "limitations"
+  | "unchecked"
+  | "working";
 export type CourseDiagnosticKey =
   CourseStatusKey | "TECHNICAL_ACCESS" | "NO_PUBLIC_ONLINE" | "PRIVATE_OR_INVALID";
 export type CourseStatusTone = "critical" | "warning" | "neutral" | "positive";
@@ -182,6 +196,16 @@ export type CourseStatusInput = {
     failureClass: string | null;
     nextAttemptAt?: Date | null;
     activeBatchId?: string | null;
+    cycle?: number;
+    humanReviewReason?: string | null;
+    escalatedAt?: Date | null;
+    escalationDeadlineAt?: Date | null;
+    monitoringEvents?: Array<{
+      incidentId: string | null;
+      eventType: string;
+      occurredAt: Date;
+      audit: unknown;
+    }>;
     activeBatch?: {
       status: string;
       leaseExpiresAt: Date;
@@ -279,6 +303,7 @@ export function filterCourseInventory(
         (course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH")) ||
       (view === "fix-now" && course.priorityGroup === "ACTION") ||
       (view === "investigate" && course.priorityGroup === "WATCH") ||
+      (view === "parked" && course.priorityGroup === "PARKED") ||
       (view === "limitations" && course.priorityGroup === "LIMITATION") ||
       (view === "unchecked" && course.priorityGroup === "UNCHECKED") ||
       (view === "working" && course.priorityGroup === "WORKING");
@@ -309,6 +334,7 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
   return {
     action: courses.filter((course) => course.priorityGroup === "ACTION").length,
     watch: courses.filter((course) => course.priorityGroup === "WATCH").length,
+    parked: courses.filter((course) => course.priorityGroup === "PARKED").length,
     limitations: courses.filter((course) => course.priorityGroup === "LIMITATION").length,
     unchecked: courses.filter((course) => course.priorityGroup === "UNCHECKED").length,
     working: courses.filter((course) => course.priorityGroup === "WORKING").length,
@@ -329,18 +355,24 @@ export function summarizeCourseInventory(courses: CourseInventoryItem[]) {
 export function getCourseSummaryCopy(counts: {
   action: number;
   watch: number;
+  parked: number;
   limitations: number;
   unchecked: number;
   working: number;
 }) {
   const totalCount =
-    counts.action + counts.watch + counts.limitations + counts.unchecked + counts.working;
+    counts.action +
+    counts.watch +
+    counts.parked +
+    counts.limitations +
+    counts.unchecked +
+    counts.working;
   const attentionCount = counts.action + counts.watch;
 
   return {
     lifecycle:
       `${totalCount} courses appear once by current state. ` +
-      "Known limitations are finished decisions, not active failures.",
+      "Courses waiting for new evidence have no AI recheck queued, and known limitations are finished decisions.",
     execution:
       `The same ${attentionCount} attention ${attentionCount === 1 ? "course appears" : "courses appear"} ` +
       "again here exactly once under automation or a person. These are not additional issues."
@@ -351,6 +383,7 @@ export function summarizeCourseDiagnostics(courses: CourseInventoryItem[]) {
   const groups = [
     { key: "ACTION", label: "Needs attention" },
     { key: "WATCH", label: "Investigation backlog" },
+    { key: "PARKED", label: "Waiting for new evidence" },
     { key: "LIMITATION", label: "Known limitations" },
     { key: "UNCHECKED", label: "Verify when needed" },
     { key: "WORKING", label: "Monitoring works" }
@@ -393,6 +426,7 @@ export function parseCourseInventoryView(value: string | undefined): CourseInven
     value === "attention" ||
     value === "fix-now" ||
     value === "investigate" ||
+    value === "parked" ||
     value === "limitations" ||
     value === "unchecked" ||
     value === "working"
@@ -426,6 +460,18 @@ function classifyCourseStatus(
   course: CourseStatusInput,
   now: Date
 ): Omit<CourseInventoryItem, "automationQueueState"> {
+  if (isCourseWaitingForMaterialChange(course)) {
+    return withStatus(course, "REVIEW_REQUIRED", {
+      priorityGroup: "PARKED",
+      priorityScore: 3,
+      tone: "neutral",
+      labelOverride: "Waiting for new evidence",
+      meaningOverride:
+        "AI reached its bounded stop and no recheck is queued. It will reopen only when course or provider evidence, reader support, a relevant deployment, or an operator request materially changes.",
+      actionOverride:
+        "No immediate action is required. Open the history only if you have new information or want to request a fresh AI recheck."
+    });
+  }
   if (course.incident?.status === "NEEDS_HUMAN") {
     const discoveryCopy = getLatestDiscoveryOperatorCopy(course);
     return withStatus(course, "REVIEW_REQUIRED", {
@@ -976,6 +1022,36 @@ function withStatus(
   };
 }
 
+function isCourseWaitingForMaterialChange(course: CourseStatusInput) {
+  const incident = course.incident;
+  const monitoringStatus = course.monitoringStatus;
+  if (
+    !incident ||
+    incident.status !== "NEEDS_HUMAN" ||
+    incident.humanReviewReason !== "AUTOMATION_STALLED" ||
+    incident.activeRealSearchCount !== 0 ||
+    course.activeAlertCount !== 0 ||
+    incident.activeBatchId !== null ||
+    incident.nextAttemptAt !== null ||
+    monitoringStatus?.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+    monitoringStatus.nextAutomaticAttemptAt !== null ||
+    monitoringStatus.revalidationRequestedAt !== null
+  ) {
+    return false;
+  }
+
+  return hasDurableWaitForMaterialChangeProof({
+    incidentId: incident.id,
+    incidentCycle: incident.cycle,
+    incidentStatus: "NEEDS_HUMAN",
+    humanReviewReason: incident.humanReviewReason,
+    incidentEscalatedAt: incident.escalatedAt,
+    escalationDeadlineAt: incident.escalationDeadlineAt,
+    monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+    endpointEvents: incident.monitoringEvents
+  });
+}
+
 function summarizeCourseProblem(course: CourseStatusInput, fallback: string) {
   const discoveryCopy = getLatestDiscoveryOperatorCopy(course);
   if (discoveryCopy) {
@@ -1215,6 +1291,7 @@ function deriveAutomationQueueState(
 ): CourseAutomationQueueState | null {
   if (
     course.priorityGroup === "WORKING" ||
+    course.priorityGroup === "PARKED" ||
     course.priorityGroup === "LIMITATION" ||
     course.priorityGroup === "UNCHECKED"
   ) {

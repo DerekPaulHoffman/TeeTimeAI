@@ -6,6 +6,7 @@ import {
   getCourseSummaryCopy,
   listCourseStates,
   parseCourseDiagnosticFilter,
+  parseCourseInventoryView,
   parseCourseStateFilter,
   summarizeCourseDiagnostics,
   summarizeCourseInventory,
@@ -207,6 +208,121 @@ describe("operator course inventory", () => {
       "Confirm the account-required technical limitation"
     );
     expect(result.problemSummary).not.toContain("No verified public");
+  });
+
+  it("shows a durable automation-stalled endpoint as waiting without queued AI work", () => {
+    const escalatedAt = new Date("2026-07-24T17:45:00.000Z");
+    const [result] = buildCourseInventory(
+      [
+        course({
+          id: "waiting-for-evidence",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: automationStalledIncident({ escalatedAt })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      priorityGroup: "PARKED",
+      statusLabel: "Waiting for new evidence",
+      automationQueueState: null
+    });
+    expect(result.statusMeaning).toContain("no recheck is queued");
+    expect(result.statusMeaning).toContain("relevant deployment");
+    expect(result.recommendedAction).toContain("new information");
+    expect(
+      filterCourseInventory([result], { view: "parked" }).map((item) => item.id)
+    ).toEqual(["waiting-for-evidence"]);
+    expect(filterCourseInventory([result], { view: "attention" })).toEqual([]);
+    expect(summarizeCourseInventory([result])).toMatchObject({
+      parked: 1,
+      action: 0,
+      watch: 0,
+      needsHuman: 0
+    });
+    expect(parseCourseInventoryView("parked")).toBe("parked");
+  });
+
+  it("keeps stalled rows in human action until demand, ownership, and schedules are cleared", () => {
+    const escalatedAt = new Date("2026-07-24T17:45:00.000Z");
+    const variants = buildCourseInventory(
+      [
+        course({
+          id: "real-demand",
+          activeAlertCount: 1,
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: automationStalledIncident({
+            escalatedAt,
+            activeRealSearchCount: 1
+          })
+        }),
+        course({
+          id: "incident-scheduled",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: automationStalledIncident({
+            escalatedAt,
+            nextAttemptAt: new Date("2026-07-24T19:00:00.000Z")
+          })
+        }),
+        course({
+          id: "status-scheduled",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED", {
+            nextAutomaticAttemptAt: new Date("2026-07-24T19:00:00.000Z")
+          }),
+          incident: automationStalledIncident({ escalatedAt })
+        }),
+        course({
+          id: "recheck-requested",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED", {
+            revalidationRequestedAt: new Date("2026-07-24T17:55:00.000Z")
+          }),
+          incident: automationStalledIncident({ escalatedAt })
+        }),
+        course({
+          id: "owned",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: automationStalledIncident({
+            escalatedAt,
+            activeBatchId: "batch-active"
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(variants).toHaveLength(5);
+    expect(variants.every((item) => item.priorityGroup === "ACTION")).toBe(true);
+    expect(variants.every((item) => item.automationQueueState === "NEEDS_HUMAN")).toBe(true);
+  });
+
+  it("does not park account-required or unproven human decisions", () => {
+    const escalatedAt = new Date("2026-07-24T17:45:00.000Z");
+    const [accountRequired, wrongCycle] = buildCourseInventory(
+      [
+        course({
+          id: "account-required",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            ...automationStalledIncident({ escalatedAt }),
+            humanReviewReason: "ACCOUNT_REQUIRED"
+          }
+        }),
+        course({
+          id: "wrong-cycle",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            ...automationStalledIncident({ escalatedAt }),
+            cycle: 4
+          }
+        })
+      ],
+      NOW
+    );
+
+    expect(accountRequired.priorityGroup).toBe("ACTION");
+    expect(accountRequired.statusLabel).toBe("Engineering verification needed");
+    expect(wrongCycle.priorityGroup).toBe("ACTION");
   });
 
   it("keeps text-only account guidance as an uncorroborated candidate", () => {
@@ -1222,13 +1338,14 @@ describe("operator course inventory", () => {
       getCourseSummaryCopy({
         action: 17,
         watch: 5,
+        parked: 11,
         limitations: 66,
         unchecked: 2,
         working: 127
       })
     ).toEqual({
       lifecycle:
-        "217 courses appear once by current state. Known limitations are finished decisions, not active failures.",
+        "228 courses appear once by current state. Courses waiting for new evidence have no AI recheck queued, and known limitations are finished decisions.",
       execution:
         "The same 22 attention courses appear again here exactly once under automation or a person. " +
         "These are not additional issues."
@@ -1323,5 +1440,44 @@ function monitoringStatus(
     nextAutomaticAttemptAt: null,
     revalidationRequestedAt: null,
     ...overrides
+  };
+}
+
+function automationStalledIncident(
+  overrides: Partial<NonNullable<CourseStatusInput["incident"]>> & { escalatedAt: Date }
+): NonNullable<CourseStatusInput["incident"]> {
+  const { escalatedAt, ...incidentOverrides } = overrides;
+  const escalationDeadlineAt = new Date(escalatedAt.getTime() - 15 * 60 * 1000);
+  return {
+    id: "incident-stalled",
+    status: "NEEDS_HUMAN",
+    kind: "NEEDS_ADAPTER",
+    activeRealSearchCount: 0,
+    cycle: 3,
+    firstSeenAt: new Date("2026-07-24T16:00:00.000Z"),
+    latestMessage: "The bounded automation playbook reached its endpoint.",
+    nextAction: "Wait for material evidence.",
+    failureClass: "UNSUPPORTED_FAMILY",
+    humanReviewReason: "AUTOMATION_STALLED",
+    escalatedAt,
+    escalationDeadlineAt,
+    nextAttemptAt: null,
+    activeBatchId: null,
+    monitoringEvents: [
+      {
+        incidentId: "incident-stalled",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        occurredAt: escalatedAt,
+        audit: {
+          cycle: 3,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          automationStalled: true,
+          playbookExhausted: false,
+          parkedUntilMaterialChange: true,
+          escalationDeadlineAt: escalationDeadlineAt.toISOString()
+        }
+      }
+    ],
+    ...incidentOverrides
   };
 }

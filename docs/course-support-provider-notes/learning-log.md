@@ -82,3 +82,28 @@ The official-site reader could observe a useful booking link and still leave the
 - Keep production validation bounded to explicit ordinals, record sanitized normalized outcomes, and leave unresolved browser/adapter work with the owned responder instead of auto-retrying everything.
 - Operator text must summarize the newest structured discovery reason so a developer sees what was actually found and what concrete step remains.
 - When an official page qualifies an otherwise exact stored course name with 9 or 18, record the singleton physical layout through `automation:course-profile -- physical-layout` before retrying discovery. The command safety-checks redirects, never follows account routes, and rejects a source whose title/H1 contains a conflicting course identity.
+
+## 2026-08-18 - Do Not Turn Parked Visibility Into Automatic Work
+
+### Observed Pattern
+
+Legacy automation-stalled incidents had durable, cycle-scoped endpoint proof but predated the explicit `parkedUntilMaterialChange` marker. Deadline reconciliation cleared their automatic schedules, then the human-review visibility step treated them as ordinary retryable rows and restored a six-hour attempt timestamp in the same watchdog pass. The responder could not claim those `NEEDS_HUMAN` rows, but the persisted timestamps made the operator surface look queued and were renewed indefinitely.
+
+### What Helped
+
+- The responder claim query already excluded `NEEDS_HUMAN`, preventing the misleading timestamps from consuming Codex worker slots.
+- Existing endpoint events carried exact incident, cycle, escalation, and automation-stalled proof, so legacy rows could be upgraded without repeating provider discovery.
+- Separate reminder timing allowed human-review visibility to continue without scheduling automatic remediation.
+
+### What Did Not Work
+
+- Clearing `nextAttemptAt` in deadline reconciliation without carrying the parked classification into the later visibility step.
+- Treating a six-hour human-review timestamp as harmless when the operator UI could reasonably interpret it as queued AI work.
+- Requiring only the new marker and leaving older, otherwise authoritative endpoint evidence on a perpetual compatibility retry.
+
+### Process Decision
+
+- A newly persisted automation-stalled endpoint is parked for the remainder of the same watchdog pass.
+- Strong legacy endpoint proof is upgraded once with a distinct idempotent parking marker; incident and monitoring automatic schedules are cleared atomically.
+- Repeated watchdog passes may advance `nextReminderAt` only. They must not queue searches, create responder work, increment the playbook cycle, or restore automatic attempt timestamps without a material provider, failure, reader, implementation, or operator change.
+- Operator inventory keeps proof-backed, zero-demand stalled work in a separate **Waiting for new evidence** bucket. It must not inflate **Needs attention**, imply that automated work is active, or say an AI recheck is scheduled. Explicit account, CAPTCHA, reader, and active-demand decisions remain developer-action items.

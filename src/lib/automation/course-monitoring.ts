@@ -15,7 +15,10 @@ import {
   type ProbeOutcome,
 } from "@prisma/client";
 
-import { hasDurableWaitForMaterialChangeProof } from "@/lib/customer-monitoring-status";
+import {
+  hasDurableAutomationStalledEndpointProof,
+  hasDurableWaitForMaterialChangeProof,
+} from "@/lib/customer-monitoring-status";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
@@ -2119,7 +2122,11 @@ export async function reconcileCourseMonitoringDeadlines(input: {
     if (outcome.outcome === "RETRYING") {
       retrying += 1;
     }
-    if (outcome.outcome === "RETAINED_PARKED") {
+    if (
+      outcome.outcome === "RETAINED_PARKED" ||
+      ("parkedUntilMaterialChange" in outcome &&
+        outcome.parkedUntilMaterialChange === true)
+    ) {
       parkedIncidentIds.push(outcome.incidentId);
     }
     if (
@@ -2536,6 +2543,38 @@ async function reconcileCourseMonitoringDeadline(input: {
         };
       }
 
+      const humanReviewEndpointEvent =
+        incident.status === "NEEDS_HUMAN" && incident.humanReviewReason
+          ? await transaction.courseMonitoringEvent.findFirst({
+              where: {
+                incidentId: incident.id,
+                eventType: "HUMAN_REVIEW_REQUESTED",
+              },
+              orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+              select: {
+                incidentId: true,
+                eventType: true,
+                occurredAt: true,
+                audit: true,
+              },
+            })
+          : null;
+      const endpointProofInput = {
+        incidentId: incident.id,
+        incidentCycle: incident.cycle,
+        incidentStatus: incident.status,
+        humanReviewReason: incident.humanReviewReason,
+        incidentEscalatedAt: incident.escalatedAt,
+        escalationDeadlineAt: incident.escalationDeadlineAt,
+        monitoringState: status.state,
+        endpointEvents: humanReviewEndpointEvent
+          ? [humanReviewEndpointEvent]
+          : [],
+      } as const;
+      const durableMaterialChangeParking =
+        hasDurableWaitForMaterialChangeProof(endpointProofInput);
+      const durableAutomationStalledEndpoint =
+        hasDurableAutomationStalledEndpointProof(endpointProofInput);
       const parkedWithoutNewMaterial =
         incident.status === "NEEDS_HUMAN" &&
         Boolean(incident.humanReviewReason) &&
@@ -2543,37 +2582,42 @@ async function reconcileCourseMonitoringDeadline(input: {
         status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
         status.nextAutomaticAttemptAt === null &&
         status.revalidationRequestedAt === null;
-      if (parkedWithoutNewMaterial) {
-        const parkedEvent = await transaction.courseMonitoringEvent.findFirst({
-          where: {
-            incidentId: incident.id,
-            eventType: "HUMAN_REVIEW_REQUESTED",
+      if (parkedWithoutNewMaterial && durableMaterialChangeParking) {
+        return {
+          outcome: "RETAINED_PARKED" as const,
+          incidentId: incident.id,
+        };
+      }
+
+      /*
+       * Older endpoint events predate the explicit material-change marker.
+       * Their deadline/cycle/timestamp proof is still strong enough to retain
+       * the factual human-review endpoint, but the row must first be upgraded
+       * atomically so the watchdog cannot turn it back into six-hour work.
+       */
+      if (
+        !incident.activeBatchId &&
+        durableAutomationStalledEndpoint &&
+        (!parkedWithoutNewMaterial || !durableMaterialChangeParking)
+      ) {
+        await persistAutomationStalledEndpoint(
+          transaction,
+          {
+            courseId: input.courseId,
+            incident,
+            monitoringStatus: status,
+            playbookAssessment,
+            expectedActiveBatchId: null,
+            endpointAt: incident.escalatedAt!,
+            existingDurableParkingProof: durableMaterialChangeParking,
+            source: input.source,
           },
-          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-          select: {
-            incidentId: true,
-            eventType: true,
-            occurredAt: true,
-            audit: true,
-          },
-        });
-        if (
-          hasDurableWaitForMaterialChangeProof({
-            incidentId: incident.id,
-            incidentCycle: incident.cycle,
-            incidentStatus: incident.status,
-            humanReviewReason: incident.humanReviewReason,
-            incidentEscalatedAt: incident.escalatedAt,
-            escalationDeadlineAt: incident.escalationDeadlineAt,
-            monitoringState: status.state,
-            endpointEvents: parkedEvent ? [parkedEvent] : [],
-          })
-        ) {
-          return {
-            outcome: "RETAINED_PARKED" as const,
-            incidentId: incident.id,
-          };
-        }
+        );
+        return {
+          outcome: "RETAINED_PARKED" as const,
+          incidentId: incident.id,
+          parkedUntilMaterialChange: true as const,
+        };
       }
 
       // A live responder lease owns remaining non-authoritative work. Missing
@@ -2612,6 +2656,7 @@ async function reconcileCourseMonitoringDeadline(input: {
             ? ("RETAINED_HUMAN" as const)
             : ("NEEDS_HUMAN" as const),
           incidentId: incident.id,
+          parkedUntilMaterialChange: true as const,
         };
       }
 
@@ -2831,6 +2876,7 @@ async function persistAutomationStalledEndpoint(
     playbookAssessment: ReturnType<typeof assessAutomationPlaybook>;
     expectedActiveBatchId: string | null;
     endpointAt: Date;
+    existingDurableParkingProof?: boolean;
     source: Extract<
       CourseMonitoringEventSource,
       "SEARCH_WORKFLOW" | "RECOVERY_CRON"
@@ -2843,13 +2889,46 @@ async function persistAutomationStalledEndpoint(
     cycle: input.incident.cycle,
     escalationDeadlineAt: input.incident.escalationDeadlineAt,
   });
-  const priorEndpoint = await transaction.courseMonitoringEvent.findUnique({
-    where: { idempotencyKey },
-    select: { id: true, occurredAt: true },
-  });
-  const endpointAt = priorEndpoint?.occurredAt ?? input.endpointAt;
+  const parkingIdempotencyKey = `${idempotencyKey}:parked`;
+  const endpointEventSelect = {
+    id: true,
+    incidentId: true,
+    eventType: true,
+    occurredAt: true,
+    audit: true,
+  } as const;
+  const [priorEndpoint, priorParkingUpgrade] = await Promise.all([
+    transaction.courseMonitoringEvent.findUnique({
+      where: { idempotencyKey },
+      select: endpointEventSelect,
+    }),
+    transaction.courseMonitoringEvent.findUnique({
+      where: { idempotencyKey: parkingIdempotencyKey },
+      select: endpointEventSelect,
+    }),
+  ]);
+  const endpointAt =
+    priorEndpoint?.occurredAt ??
+    priorParkingUpgrade?.occurredAt ??
+    input.endpointAt;
+  const priorEndpointHasDurableParking =
+    hasDurableWaitForMaterialChangeProof({
+      incidentId: input.incident.id,
+      incidentCycle: input.incident.cycle,
+      incidentStatus: input.incident.status,
+      humanReviewReason: input.incident.humanReviewReason,
+      incidentEscalatedAt: input.incident.escalatedAt,
+      escalationDeadlineAt: input.incident.escalationDeadlineAt,
+      monitoringState: input.monitoringStatus.state,
+      endpointEvents: [priorEndpoint, priorParkingUpgrade].filter(
+        (event) => event !== null,
+      ),
+    });
+  const durableParkingProofExists = Boolean(
+    input.existingDurableParkingProof || priorEndpointHasDurableParking,
+  );
   const endpointAlreadyApplied = Boolean(
-    priorEndpoint &&
+    durableParkingProofExists &&
     input.expectedActiveBatchId === null &&
     input.incident.activeBatchId === null &&
     input.incident.status === "NEEDS_HUMAN" &&
@@ -2911,7 +2990,7 @@ async function persistAutomationStalledEndpoint(
       "The course monitoring status changed while its automation-stalled endpoint was reconciled.",
     );
   }
-  if (!priorEndpoint) {
+  if (!durableParkingProofExists) {
     await appendMonitoringEvent(transaction, {
       courseId: input.courseId,
       incidentId: input.incident.id,
@@ -2922,7 +3001,7 @@ async function persistAutomationStalledEndpoint(
       failureFingerprint: input.incident.failureFingerprint,
       message:
         "The endpoint deadline arrived before the bounded automated playbook could finish.",
-      idempotencyKey,
+      idempotencyKey: priorEndpoint ? parkingIdempotencyKey : idempotencyKey,
       occurredAt: endpointAt,
       audit: {
         cycle: input.incident.cycle,
@@ -3942,10 +4021,14 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
   const currentDisposition = dispositionByIncidentId.get(
     input.currentIncidentId,
   )?.disposition;
-  if (
-    currentDisposition === "STALLED_ENDPOINT" ||
-    currentDisposition === "EXHAUSTED_ENDPOINT"
-  ) {
+  if (currentDisposition === "STALLED_ENDPOINT") {
+    return {
+      outcome: "NEEDS_HUMAN" as const,
+      incidentId: input.currentIncidentId,
+      parkedUntilMaterialChange: true as const,
+    };
+  }
+  if (currentDisposition === "EXHAUSTED_ENDPOINT") {
     return {
       outcome: "NEEDS_HUMAN" as const,
       incidentId: input.currentIncidentId,
